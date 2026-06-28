@@ -18,6 +18,13 @@ HANDOFF_ROOT = REPO_ROOT / ".agents" / "skills" / "quant-research-platform-maint
 HANDOFF_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "build_handoff_package.py"
 VERIFY_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "verify_handoff_package.py"
 TEST_BRANCH = "feature/synthetic-handoff-review"
+MANDATORY_VALIDATION_CHECKS = (
+    "tests",
+    "smoke",
+    "compare",
+    "governance",
+    "code_map",
+)
 BUILDER_MODULE = None
 GOVERNANCE_MODULE = None
 
@@ -90,13 +97,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                 },
                 "validation_evidence": {
                     "schema_id": "qrp-handoff-validation-evidence",
-                    "checks": [
-                        {
-                            "name": "handoff_external_access",
-                            "status": "BLOCKED",
-                            "evidence": "external access unavailable",
-                        }
-                    ],
+                    "checks": _validation_checks("PASS"),
                 },
             },
             indent=2,
@@ -259,7 +260,8 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         for row in validation_evidence["checks"]
         if isinstance(row, dict) and "name" in row
     }
-    assert checks["handoff_external_access"]["status"] == "BLOCKED"
+    for check_name in MANDATORY_VALIDATION_CHECKS:
+        assert checks[check_name]["status"] == "PASS"
     assert checks["handoff_verify"]["status"] == "PASS"
     assert checks["handoff_safety_scan"] == {
         "name": "handoff_safety_scan",
@@ -483,13 +485,7 @@ def _run_builder_with_handoff_evidence(
                 "handoff_evidence": handoff_evidence,
                 "validation_evidence": {
                     "schema_id": "qrp-handoff-validation-evidence",
-                    "checks": [
-                        {
-                            "name": "handoff_builder_contract",
-                            "status": "PASS",
-                            "evidence": "negative input should fail before staging",
-                        }
-                    ],
+                    "checks": _validation_checks("PASS"),
                 },
             },
             indent=2,
@@ -516,6 +512,17 @@ def _run_builder_with_handoff_evidence(
         text=True,
     )
     return result, out_dir
+
+
+def _validation_checks(status: str) -> list[dict[str, str]]:
+    return [
+        {
+            "name": name,
+            "status": status,
+            "evidence": f"{name} {status}",
+        }
+        for name in MANDATORY_VALIDATION_CHECKS
+    ]
 
 
 def _git(repo: Path, *args: str) -> str:

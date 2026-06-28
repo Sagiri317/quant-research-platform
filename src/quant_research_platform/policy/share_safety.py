@@ -15,7 +15,7 @@ LOCAL_ONLY_ROOTS: tuple[str, ...] = (
     "data/research",
     "outputs",
 )
-LEGACY_LOCAL_OUTPUT_PATH_NAMES: tuple[str, ...] = (
+_RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES: tuple[str, ...] = (
     "private_real",
     "private_data",
     "private_research",
@@ -45,22 +45,22 @@ _POSIX_LOCAL_PATH_RE = re.compile(
     r"(?i)(?<!\w)/(?:mnt/data|home|Users|workspace|workspaces|tmp|var/tmp|private/tmp)"
     r"/[^\r\n\t\"'<>|]+"
 )
-_LEGACY_LOCAL_OUTPUT_PATH_PATTERN = "|".join(
-    re.escape(path_name) for path_name in LEGACY_LOCAL_OUTPUT_PATH_NAMES
+_RETIRED_LOCAL_ONLY_REPORT_PATH_PATTERN = "|".join(
+    re.escape(path_name) for path_name in _RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES
 )
 _ABSOLUTE_REPO_LOCAL_ONLY_PATH_RE = re.compile(
     r"(?i)(?<!\w)(?:[a-z]:[\\/]|/)(?:[^\s,;\"'<>|]+[/\\])*"
     r"(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
     r"(?:[/\\][^\s,;\"'<>|]+)?|outputs"
     r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\](?:"
-    + _LEGACY_LOCAL_OUTPUT_PATH_PATTERN
+    + _RETIRED_LOCAL_ONLY_REPORT_PATH_PATTERN
     + r")"
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _REPO_LOCAL_ONLY_PATH_RE = re.compile(
     r"(?i)\b(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
     r"(?:[/\\][^\s,;\"'<>|]+)?|outputs[/\\][^\s,;\"'<>|]*|reports[/\\](?:"
-    + _LEGACY_LOCAL_OUTPUT_PATH_PATTERN
+    + _RETIRED_LOCAL_ONLY_REPORT_PATH_PATTERN
     + r")"
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
@@ -164,7 +164,8 @@ def is_local_only_path(path: Path) -> bool:
         ):
             return True
     return any(
-        parts[index] == "reports" and parts[index + 1] in LEGACY_LOCAL_OUTPUT_PATH_NAMES
+        parts[index] == "reports"
+        and parts[index + 1] in _RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES
         for index in range(max(len(parts) - 1, 0))
     )
 
@@ -478,7 +479,6 @@ def internal_artifact_metadata_unsafe_reason(
 
 
 __all__ = [
-    "LEGACY_LOCAL_OUTPUT_PATH_NAMES",
     "LOCAL_ONLY_DATA_LAYERS",
     "LOCAL_ONLY_ROOTS",
     "PACKAGE_FORBIDDEN_SUFFIXES",

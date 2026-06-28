@@ -18,6 +18,15 @@ HANDOFF_TOOL_ROOT = (
     / "handoff"
 )
 TEST_BRANCH = "feature/synthetic-handoff-review"
+MANDATORY_VALIDATION_CHECKS = (
+    "tests",
+    "smoke",
+    "compare",
+    "handoff_verify",
+    "handoff_safety_scan",
+    "governance",
+    "code_map",
+)
 
 
 def _load_handoff_module(name: str):
@@ -89,13 +98,7 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
         "final_head": final_head,
         "validation_evidence": {
             "schema_id": "qrp-handoff-validation-evidence",
-            "checks": [
-                {
-                    "name": "handoff_external_access",
-                    "status": "BLOCKED",
-                    "evidence": "blocked",
-                }
-            ],
+            "checks": _validation_checks("NOT_RUN"),
         },
     }
     result = builder.build_handoff_package(
@@ -173,14 +176,113 @@ def _smoke_compare_status_payload(
         "evidence schema, tests, and docs; they do not touch research numeric "
         "output paths"
     )
+    results = []
+    for index, (name, status) in enumerate(rows):
+        row: dict[str, object] = {"name": name, "status": status, "reason": reason}
+        if status == "PASS":
+            row.update(_portable_smoke_compare_result_fields(index))
+        results.append(row)
     return {
         "schema_id": "qrp-status-result",
         "record_status": "PASS",
         "overall_smoke_compare_status": overall,
-        "results": [
-            {"name": name, "status": status, "reason": reason} for name, status in rows
-        ],
+        "results": results,
     }
+
+
+def _portable_smoke_compare_result_fields(index: int) -> dict[str, object]:
+    return {
+        "command": f"python -m qrp.local_verification --case {index}",
+        "scope": "self-compare" if index == 2 else f"{index + 3}y",
+        "source_artifact_path": f".run/local-verification-{index}/run.json",
+        "source_artifact_sha256": hashlib.sha256(
+            f"artifact-{index}".encode()
+        ).hexdigest(),
+        "included_in_handoff": False,
+        "portable_summary": {
+            "schema_id": "qrp-portable-status-summary",
+            "status": "PASS",
+            "record_count": index + 1,
+        },
+        "raw_artifact_policy": (
+            "raw .run artifact not included; review-safe summary and sha256 included"
+        ),
+    }
+
+
+def _portable_smoke_compare_status_payload() -> dict[str, object]:
+    payload = _smoke_compare_status_payload(
+        ("3-year smoke", "PASS"),
+        ("6-year smoke", "PASS"),
+        ("generic run compare", "PASS"),
+        overall="PASS",
+    )
+    return payload
+
+
+def _validation_checks(status: str = "PASS") -> list[dict[str, str]]:
+    return [
+        {
+            "name": name,
+            "status": status,
+            "evidence": f"{name} {status}",
+        }
+        for name in MANDATORY_VALIDATION_CHECKS
+    ]
+
+
+def _validation_payload(
+    checks: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_id": "qrp-handoff-validation-evidence",
+        "checks": checks if checks is not None else _validation_checks("PASS"),
+    }
+
+
+def _replace_validation_evidence(
+    package: Path,
+    sidecar: Path,
+    payload: dict[str, object],
+) -> None:
+    _rewrite_package_member(
+        package,
+        "validation_evidence.json",
+        (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _refresh_manifest_and_sidecar(package, sidecar)
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    status_map = {
+        str(row["name"]): str(row["status"]).strip().upper()
+        for row in payload.get("checks", [])
+        if isinstance(row, dict) and "name" in row and "status" in row
+    }
+    mandatory_statuses = [
+        status_map[name] for name in MANDATORY_VALIDATION_CHECKS if name in status_map
+    ]
+    if "FAIL" in mandatory_statuses:
+        validation_status = "FAIL"
+    elif "BLOCKED" in mandatory_statuses:
+        validation_status = "BLOCKED"
+    elif "NOT_RUN" in mandatory_statuses:
+        validation_status = "NOT_RUN"
+    elif len(mandatory_statuses) == len(MANDATORY_VALIDATION_CHECKS):
+        validation_status = "PASS"
+    else:
+        validation_status = "FAIL"
+    sidecar_payload["status_summary"] = {
+        "validation": validation_status,
+        "handoff_verify": status_map.get("handoff_verify", "NOT_RUN"),
+        "handoff_safety": status_map.get("handoff_safety_scan", "NOT_RUN"),
+        "blocked_count": sum(
+            1 for status in mandatory_statuses if status == "BLOCKED"
+        ),
+        "fail_count": sum(1 for status in mandatory_statuses if status == "FAIL"),
+    }
+    sidecar.write_text(
+        json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def test_tracked_handoff_tool_source_of_truth_exists() -> None:
@@ -1100,6 +1202,164 @@ def test_verify_rejects_validation_row_extra_fields() -> None:
     failures = verifier.verify_validation_evidence_schema(validation_payload)
 
     assert "validation_evidence_row_forbidden_field: 0:command" in failures
+
+
+@pytest.mark.parametrize("missing_check", MANDATORY_VALIDATION_CHECKS)
+def test_verify_handoff_package_rejects_missing_mandatory_validation_check(
+    tmp_path: Path,
+    missing_check: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    checks = [
+        row for row in _validation_checks("PASS") if row["name"] != missing_check
+    ]
+    _replace_validation_evidence(package, sidecar, _validation_payload(checks))
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert f"validation_evidence_mandatory_check_missing: {missing_check}" in failures
+
+
+def test_verify_handoff_package_rejects_duplicate_validation_check_override(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    checks = [
+        *_validation_checks("PASS"),
+        {"name": "tests", "status": "FAIL", "evidence": "first failure"},
+        {"name": "tests", "status": "PASS", "evidence": "forged later pass"},
+    ]
+    _replace_validation_evidence(package, sidecar, _validation_payload(checks))
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "validation_evidence_duplicate_check: tests" in failures
+
+
+def test_verify_handoff_package_rejects_invalid_validation_status(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    checks = _validation_checks("PASS")
+    checks[0]["status"] = "BROKEN"
+    _replace_validation_evidence(package, sidecar, _validation_payload(checks))
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "validation_evidence_status_invalid: 0:BROKEN" in failures
+
+
+def test_verify_handoff_package_rejects_validation_summary_mismatch(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    checks = _validation_checks("PASS")
+    checks[0]["status"] = "BLOCKED"
+    _replace_validation_evidence(package, sidecar, _validation_payload(checks))
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_payload["status_summary"]["validation"] = "PASS"
+    sidecar.write_text(
+        json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "validation_status_summary_mismatch" in failures
+
+
+def test_verify_handoff_package_accepts_all_mandatory_validation_checks_pass(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    _replace_validation_evidence(
+        package,
+        sidecar,
+        _validation_payload(_validation_checks("PASS")),
+    )
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert not [
+        failure for failure in failures if failure.startswith("validation_evidence_")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "failure"),
+    (
+        (
+            "source_artifact_sha256",
+            "smoke_compare_status_result_missing: 0:source_artifact_sha256",
+        ),
+        (
+            "portable_summary",
+            "smoke_compare_status_result_missing: 0:portable_summary",
+        ),
+    ),
+)
+def test_verify_smoke_compare_pass_requires_portable_artifact_evidence(
+    field: str,
+    failure: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _portable_smoke_compare_status_payload()
+    result = payload["results"][0]
+    assert isinstance(result, dict)
+    result.pop(field)
+
+    failures = verifier.verify_smoke_compare_status(payload)
+
+    assert failure in failures
+
+
+@pytest.mark.parametrize(
+    ("summary", "failure"),
+    (
+        (
+            {"status": "PASS", "source": "csmar"},
+            "smoke_compare_status_portable_summary_unsafe: 0:vendor_marker",
+        ),
+        (
+            {"status": "PASS", "path": "E:/repo/data/raw/vendor.csv"},
+            "smoke_compare_status_portable_summary_unsafe: 0:absolute_path",
+        ),
+        (
+            {"status": "PASS", "sample_id": "000001"},
+            "smoke_compare_status_portable_summary_unsafe: 0:stock_sample",
+        ),
+        (
+            {"status": "PASS", "row_sample": [{"asset_id": "demo"}]},
+            "smoke_compare_status_portable_summary_unsafe: 0:row_sample",
+        ),
+    ),
+)
+def test_verify_smoke_compare_rejects_unsafe_portable_summary(
+    summary: dict[str, object],
+    failure: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _portable_smoke_compare_status_payload()
+    result = payload["results"][0]
+    assert isinstance(result, dict)
+    result["portable_summary"] = summary
+
+    failures = verifier.verify_smoke_compare_status(payload)
+
+    assert failure in failures
+
+
+def test_verify_smoke_compare_accepts_pass_with_portable_summary_and_hash() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    assert verifier.verify_smoke_compare_status(
+        _portable_smoke_compare_status_payload()
+    ) == []
 
 
 def test_handoff_evidence_requires_schema_id() -> None:

@@ -34,9 +34,13 @@ from governance_contract import (  # noqa: E402
     RESULT_ARCHITECTURE_RETIRED_TEXT_RULES,
     VALID_STATUS_TOKENS,
     VALIDATION_ROW_KEYS,
+    aggregate_mandatory_validation_status,
     handoff_evidence_blocked_key_failures,
     is_reserved_handoff_evidence_path,
+    mandatory_validation_status_map,
     source_tree_scan_from_clone,
+    validation_evidence_contract_failures,
+    validation_status_map,
 )
 from governance_contract import (  # noqa: E402
     is_scanner_definition_line as is_shared_scanner_definition_line,
@@ -46,11 +50,11 @@ from governance_contract import (  # noqa: E402
 )
 
 from quant_research_platform.policy.check_status import (  # noqa: E402
-    aggregate_component_status,
     aggregate_validation_matrix_status,
 )
 from quant_research_platform.policy.share_safety import (  # noqa: E402
     evidence_json_unsafe_reason,
+    evidence_json_value_unsafe_reason,
     qrp_json_identity_reason,
     unsafe_for_share_reason,
 )
@@ -67,15 +71,6 @@ GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
 SMOKE_COMPARE_STATUS_EVIDENCE = "handoff_evidence/smoke-compare-status.json"
-MANDATORY_VALIDATION_CHECKS = {
-    "tests",
-    "smoke",
-    "compare",
-    "handoff_verify",
-    "handoff_safety_scan",
-    "governance",
-    "code_map",
-}
 ADVISORY_REVIEW_CHECKS = {"review_subagent"}
 TRACKED_HANDOFF_SOURCE_PATHS = (
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
@@ -796,6 +791,16 @@ def verify_validation_evidence_schema(payload: dict[str, object]) -> list[str]:
         for key in ("name", "status", "evidence"):
             if key not in row:
                 failures.append(f"validation_evidence_row_missing: {index}:{key}")
+    governance_failures = validation_evidence_contract_failures(payload)
+    for failure in governance_failures:
+        if failure == "validation_evidence_schema_id_invalid":
+            continue
+        normalized = failure.replace(
+            "validation_evidence_row_unapproved_field:",
+            "validation_evidence_row_forbidden_field:",
+        )
+        if normalized not in failures:
+            failures.append(normalized)
     return failures
 
 
@@ -847,13 +852,14 @@ def validation_sidecar_status_failures(
     status_summary = sidecar.get("status_summary")
     if not isinstance(status_summary, dict):
         return failures
-    row_status = validation_status_map(validation_payload)
-    mandatory_statuses = {
-        name: status
-        for name, status in row_status.items()
-        if name in MANDATORY_VALIDATION_CHECKS
-    }
-    validation_status = aggregate_component_status(mandatory_statuses.values())
+    try:
+        row_status = validation_status_map(validation_payload)
+        mandatory_statuses = mandatory_validation_status_map(validation_payload)
+        validation_status = aggregate_mandatory_validation_status(validation_payload)
+    except SystemExit:
+        row_status = {}
+        mandatory_statuses = {}
+        validation_status = "FAIL"
     if status_summary.get("validation") != validation_status:
         failures.append("validation_status_summary_mismatch")
     pairs = {
@@ -887,21 +893,6 @@ def validation_sidecar_status_failures(
             if advisory_reviews != expected_advisory:
                 failures.append("advisory_reviews_mismatch")
     return failures
-
-
-def validation_status_map(payload: dict[str, object]) -> dict[str, str]:
-    rows = payload["checks"]
-    if not isinstance(rows, list):
-        return {}
-    result: dict[str, str] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = row.get("name")
-        status = str(row.get("status") or "").strip().upper()
-        if isinstance(name, str) and status in VALID_STATUS_TOKENS:
-            result[name] = status
-    return result
 
 
 def verify_handoff_evidence_json(
@@ -1028,9 +1019,45 @@ def verify_smoke_compare_status(payload: dict[str, object]) -> list[str]:
         for key in ("name", "reason"):
             if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
                 failures.append(f"smoke_compare_status_result_missing: {index}:{key}")
+        if status == "PASS":
+            failures.extend(verify_pass_smoke_compare_result(row, index))
     expected_overall = aggregate_validation_matrix_status(result_statuses)
     if payload.get("overall_smoke_compare_status") != expected_overall:
         failures.append(f"smoke_compare_status_overall_mismatch: {expected_overall}")
+    return failures
+
+
+def verify_pass_smoke_compare_result(
+    row: dict[str, object],
+    index: int,
+) -> list[str]:
+    failures: list[str] = []
+    required_strings = (
+        "command",
+        "scope",
+        "source_artifact_path",
+        "source_artifact_sha256",
+        "raw_artifact_policy",
+    )
+    for key in required_strings:
+        if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
+            failures.append(f"smoke_compare_status_result_missing: {index}:{key}")
+    sha = row.get("source_artifact_sha256")
+    if isinstance(sha, str) and not re.fullmatch(r"[0-9a-f]{64}", sha):
+        failures.append(f"smoke_compare_status_source_artifact_sha256_invalid: {index}")
+    if row.get("included_in_handoff") is not False:
+        failures.append(f"smoke_compare_status_included_in_handoff_invalid: {index}")
+    if "portable_summary" not in row:
+        failures.append(
+            f"smoke_compare_status_result_missing: {index}:portable_summary"
+        )
+    else:
+        summary_reason = evidence_json_value_unsafe_reason(row["portable_summary"])
+        if summary_reason is not None:
+            failures.append(
+                f"smoke_compare_status_portable_summary_unsafe: "
+                f"{index}:{summary_reason}"
+            )
     return failures
 
 

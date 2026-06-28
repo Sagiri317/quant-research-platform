@@ -123,6 +123,12 @@ def _write_run(
     (root / "outputs" / output_id / "prediction.parquet").write_bytes(file_content)
 
 
+def _write_run_without_outputs(root: Path, run_id: str) -> None:
+    payload = _run_payload(run_id)
+    payload["outputs"] = []
+    _write_json(root / "run.json", payload)
+
+
 def test_compare_pairs_same_output_id_without_historical_path_assumptions(
     tmp_path: Path,
 ) -> None:
@@ -152,6 +158,41 @@ def test_compare_pairs_same_output_id_without_historical_path_assumptions(
     assert (compare_root / "compare.json").is_file()
     assert (compare_root / "summary.md").is_file()
     assert not list(compare_root.glob("*baseline-final*"))
+
+
+def test_compare_empty_output_pairs_are_blocked(tmp_path: Path) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    _write_run_without_outputs(baseline, "baseline_run")
+    _write_run_without_outputs(current, "current_run")
+
+    payload = module.compare_runs(
+        baseline_root=baseline,
+        current_root=current,
+        compare_root=tmp_path / "compare",
+    )
+
+    assert payload["overall_status"] == "BLOCKED"
+    assert payload["blocked_reason"] == "compare_output_pairs_empty"
+    assert payload["pairing"]["pairs"] == []
+
+
+def test_compare_identical_data_without_outputs_does_not_pass(tmp_path: Path) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    _write_run_without_outputs(baseline, "baseline_run")
+    _write_run_without_outputs(current, "current_run")
+
+    payload = module.compare_runs(
+        baseline_root=baseline,
+        current_root=current,
+        compare_root=tmp_path / "compare",
+    )
+
+    assert payload["overall_status"] != "PASS"
+    assert payload["overall_status"] == "BLOCKED"
 
 
 @pytest.mark.parametrize(
@@ -382,6 +423,7 @@ def test_compare_pairs_file_maps_output_ids_only(tmp_path: Path) -> None:
     "payload",
     (
         {"pairs": []},
+        {"schema_id": "qrp-compare-pairs", "pairs": []},
         {"schema_id": "qrp-compare-pairs/0.1", "pairs": []},
         {
             "schema_id": "qrp-compare-pairs",
@@ -415,6 +457,34 @@ def test_compare_invalid_pairs_file_is_blocked(
     )
 
     assert result["overall_status"] == "BLOCKED"
+
+
+def test_compare_cli_not_run_status_returns_nonzero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+
+    def fake_compare_runs(**_kwargs: object) -> dict[str, object]:
+        return {"schema_id": "qrp-compare", "overall_status": "NOT_RUN"}
+
+    monkeypatch.setattr(module, "compare_runs", fake_compare_runs)
+
+    exit_code = module.main(
+        [
+            "--baseline-root",
+            str(tmp_path / "baseline"),
+            "--current-root",
+            str(tmp_path / "current"),
+            "--compare-root",
+            str(tmp_path / "compare"),
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["overall_status"] == "NOT_RUN"
+    assert exit_code == 1
 
 
 def test_compare_data_summary_mismatch_is_fail(tmp_path: Path) -> None:

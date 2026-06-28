@@ -184,10 +184,14 @@ def _resolve_pairs(
         if not isinstance(raw_pairs, list):
             raise CompareBlockedError("pairs_file_pairs_invalid")
         pairs = [_validate_pair(item) for item in raw_pairs]
+        if not pairs:
+            raise CompareBlockedError("compare_output_pairs_empty")
         return pairs, "pairs_file"
 
     baseline_ids = _output_ids(baseline_run)
     current_ids = _output_ids(current_run)
+    if not baseline_ids and not current_ids:
+        raise CompareBlockedError("compare_output_pairs_empty")
     return (
         [
             {
@@ -463,7 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         pairs_file=args.pairs_file,
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0 if payload["overall_status"] in {"PASS", "NOT_RUN"} else 1
+    return 0 if payload["overall_status"] == "PASS" else 1
 
 
 if __name__ == "__main__":

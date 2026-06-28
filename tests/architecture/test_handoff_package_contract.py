@@ -14,6 +14,7 @@ from tests.helpers.governance_fixtures import (
     joined_string_assignment,
     rule_form,
     structured_key_document,
+    text_rule_example,
 )
 
 HANDOFF_ROOT = Path(
@@ -132,6 +133,146 @@ def test_source_tree_scan_rule_allowlist_is_definition_scoped() -> None:
         scan_group="retired_text",
         rule=rule,
         line_text='"rule-definition-example"',
+        line_number=10,
+        rule_definition_lines={10},
+    )
+
+
+def test_source_tree_allowlist_entries_have_owner_metadata_and_coverage() -> None:
+    contract = _load_governance_contract()
+
+    entries = contract.SOURCE_TREE_ALLOWLIST_ENTRIES
+
+    assert entries
+    for entry in entries:
+        assert str(entry.owner).strip()
+        assert str(entry.rationale).strip()
+        assert str(entry.lifecycle).strip()
+        assert entry.covered_by
+        for covered_by in entry.covered_by:
+            test_path, _separator, test_name = covered_by.partition("::")
+            assert Path(test_path).is_file(), covered_by
+            assert test_path.startswith("tests/")
+            if test_name:
+                text = Path(test_path).read_text(encoding="utf-8")
+                assert f"def {test_name}" in text
+
+
+def test_source_tree_allowlist_facts_are_structured_not_bare_dicts() -> None:
+    source = GOVERNANCE_CONTRACT.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(GOVERNANCE_CONTRACT))
+    bare_fact_sources: list[str] = []
+    target_names = {
+        "SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST",
+        "SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST",
+        "SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST",
+    }
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets = [
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            ]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target.id]
+        else:
+            continue
+        for target in targets:
+            if target in target_names and isinstance(node.value, ast.Dict | ast.Set):
+                bare_fact_sources.append(target)
+
+    assert bare_fact_sources == []
+
+
+def test_structured_source_tree_allowlist_coverage_points_to_current_tests() -> None:
+    contract = _load_governance_contract()
+    covered = {
+        coverage
+        for entry in contract.SOURCE_TREE_ALLOWLIST_ENTRIES
+        for coverage in entry.covered_by
+    }
+
+    assert any(
+        item.startswith("tests/architecture/test_retired_surface_absent.py::")
+        for item in covered
+    )
+    assert any(
+        item.startswith("tests/agents/handoff/test_handoff_tools.py::")
+        for item in covered
+    )
+
+
+def test_unregistered_retired_negative_test_location_is_not_allowlisted() -> None:
+    contract = _load_governance_contract()
+
+    assert not contract.source_tree_path_allowed(
+        Path("tests/architecture/test_retired_new_surface.py"),
+        scan_group="retired_text",
+        rule="forbidden_pr_body",
+        line_text=repr(
+            text_rule_example(
+                contract.RETIRED_PUBLIC_SURFACE_RULES,
+                "forbidden_pr_body",
+            )
+        ),
+        line_number=10,
+        rule_definition_lines={10},
+    )
+
+
+def test_source_tree_scan_rejects_retired_literal_in_ordinary_test(
+    tmp_path: Path,
+) -> None:
+    contract = _load_governance_contract()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "governance-contract@example.invalid")
+    _git(repo, "config", "user.name", "Governance Contract Test")
+    bad_test = repo / "tests" / "workflows" / "test_accidental_retired_literal.py"
+    bad_test.parent.mkdir(parents=True)
+    retired_literal = text_rule_example(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "forbidden_pr_body",
+    )
+    bad_test.write_text(f"VALUE = {retired_literal!r}\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add accidental retired literal")
+
+    groups = contract.source_tree_scan_groups(repo)
+
+    assert {
+        (finding["path"], finding["rule"])
+        for finding in groups["retired_text"]["findings"]
+    } == {
+        (
+            "tests/workflows/test_accidental_retired_literal.py",
+            "forbidden_pr_body",
+        )
+    }
+
+
+def test_owner_approved_negative_fixture_uses_structured_allowlist() -> None:
+    contract = _load_governance_contract()
+    relative = Path("tests/architecture/test_retired_surface_absent.py")
+
+    entry = next(
+        item
+        for item in contract.SOURCE_TREE_ALLOWLIST_ENTRIES
+        if item.path == relative and item.rule_name == "forbidden_render_pr_body"
+    )
+
+    assert entry.owner == "architecture-governance-negative-tests"
+    assert contract.source_tree_path_allowed(
+        relative,
+        scan_group="retired_text",
+        rule="forbidden_render_pr_body",
+        line_text=repr(
+            text_rule_example(
+                contract.RETIRED_PUBLIC_SURFACE_RULES,
+                "forbidden_render_pr_body",
+            )
+        ),
         line_number=10,
         rule_definition_lines={10},
     )

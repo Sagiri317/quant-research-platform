@@ -27,11 +27,13 @@ if str(SCRIPT_REPO_SRC) not in sys.path:
 from governance_contract import (  # noqa: E402
     GENERATION_EVIDENCE,
     HANDOFF_TOOL_SOURCE_PATHS,
+    MANDATORY_VALIDATION_CHECKS,
     SOURCE_TREE_SCAN_EVIDENCE,
     TASK_INPUT_KEYS,
     TASK_METADATA_KEYS,
     TASK_REJECTED_KEYS,
     VERIFICATION_MATRIX_EVIDENCE,
+    aggregate_mandatory_validation_status,
     enrich_validation_evidence,
     handoff_evidence_blocked_key_failures,
     is_task_provided_handoff_evidence_blocked_path,
@@ -45,22 +47,13 @@ from governance_contract import (  # noqa: E402
 )
 
 from quant_research_platform.policy.check_status import (  # noqa: E402
-    aggregate_component_status,
+    aggregate_validation_matrix_status,
 )
 from quant_research_platform.policy.share_safety import (  # noqa: E402
     qrp_json_identity_reason,
 )
 
 PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
-MANDATORY_VALIDATION_CHECKS = {
-    "tests",
-    "smoke",
-    "compare",
-    "handoff_verify",
-    "handoff_safety_scan",
-    "governance",
-    "code_map",
-}
 ADVISORY_REVIEW_CHECKS = {"review_subagent"}
 
 
@@ -326,7 +319,7 @@ def task_validation_evidence(task: dict[str, object]) -> dict[str, object]:
     payload = task.get("validation_evidence")
     if isinstance(payload, dict):
         result = share_safe_json_clean(payload)
-        validate_validation_evidence_contract(result)
+        validate_validation_evidence_contract(result, require_mandatory=False)
         return result
     if payload is not None:
         raise SystemExit("validation_evidence_must_be_object")
@@ -443,13 +436,7 @@ def generation_payload(
 
 
 def validation_status(validation_evidence: dict[str, object]) -> str:
-    status_map = validation_status_map(validation_evidence)
-    statuses = [
-        status
-        for name, status in status_map.items()
-        if name in MANDATORY_VALIDATION_CHECKS
-    ]
-    return aggregate_component_status(statuses)
+    return aggregate_mandatory_validation_status(validation_evidence)
 
 
 def sidecar_payload(
@@ -517,7 +504,7 @@ def status_summary_from_validation(
     }
     statuses["handoff_safety_scan"] = safety_status
     return {
-        "validation": aggregate_component_status(statuses.values()),
+        "validation": aggregate_validation_matrix_status(statuses.values()),
         "handoff_verify": statuses.get("handoff_verify", "NOT_RUN"),
         "handoff_safety": safety_status,
         "blocked_count": sum(1 for status in statuses.values() if status == "BLOCKED"),

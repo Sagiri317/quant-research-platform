@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 try:
-    from quant_research_platform.policy.check_status import VALID_STATUS_TOKENS
+    from quant_research_platform.policy.check_status import (
+        VALID_STATUS_TOKENS,
+        aggregate_validation_matrix_status,
+    )
 except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit src.
     _policy_path = (
         Path(__file__).resolve().parents[4]
@@ -39,6 +42,9 @@ except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit 
         _policy_module = importlib.util.module_from_spec(_policy_spec)
         _policy_spec.loader.exec_module(_policy_module)
         VALID_STATUS_TOKENS = _policy_module.VALID_STATUS_TOKENS
+        aggregate_validation_matrix_status = (
+            _policy_module.aggregate_validation_matrix_status
+        )
     else:
         raise
 
@@ -65,6 +71,19 @@ class SourceTreeSensitiveNegativeRule:
 
     def compile(self) -> re.Pattern[str]:
         return re.compile(self.pattern, self.flags)
+
+
+@dataclass(frozen=True)
+class SourceTreeAllowlistEntry:
+    path: Path
+    scan_group: str
+    rule_name: str
+    literal: str = ""
+    pattern_name: str = ""
+    owner: str = ""
+    rationale: str = ""
+    lifecycle: str = ""
+    covered_by: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -938,21 +957,124 @@ VERIFY_GOVERNANCE_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py"
 )
 
-SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
-    VERIFY_HANDOFF_PACKAGE_SCRIPT: {
-        "forbidden_final_head_full": {'"final_head_full",'},
-    },
-    Path("src/quant_research_platform/runtime/privacy.py"): {
-        "forbidden_private_real": {'"private_real",'},
-        "forbidden_private_data": {'"private_data",'},
-    },
-    Path("tests/architecture/test_retired_surface_absent.py"): {
-        "retired_a_share_market_definition": {'"a_share_market_definition",'},
-        "retired_a_share_field_catalog": {'"a_share_field_catalog",'},
-        "retired_a_share_processed_catalog": {'"a_share_processed_catalog",'},
-        "retired_a_share_factor_catalog": {'"a_share_factor_catalog",'},
-        "retired_a_share_label_catalog": {'"a_share_label_catalog",'},
-        "retired_build_a_share": {
+def _source_tree_allowlist_entry(
+    *,
+    path: Path,
+    scan_group: str,
+    rule_name: str,
+    owner: str,
+    rationale: str,
+    lifecycle: str,
+    covered_by: tuple[str, ...],
+    literal: str = "",
+    pattern_name: str = "",
+) -> SourceTreeAllowlistEntry:
+    return SourceTreeAllowlistEntry(
+        path=path,
+        scan_group=scan_group,
+        rule_name=rule_name,
+        literal=literal,
+        pattern_name=pattern_name or rule_name,
+        owner=owner,
+        rationale=rationale,
+        lifecycle=lifecycle,
+        covered_by=covered_by,
+    )
+
+
+SOURCE_TREE_ALLOWLIST_ENTRIES = (
+    _source_tree_allowlist_entry(
+        path=VERIFY_HANDOFF_PACKAGE_SCRIPT,
+        scan_group="retired_occurrence",
+        rule_name="forbidden_final_head_full",
+        literal='"final_head_full",',
+        owner="handoff-package-verifier",
+        rationale="verifier rejects the retired validation metadata field",
+        lifecycle="current negative contract; remove when field rule is retired",
+        covered_by=(
+            "tests/agents/handoff/test_handoff_tools.py::"
+            "test_verify_rejects_validation_row_extra_fields",
+        ),
+    ),
+    _source_tree_allowlist_entry(
+        path=Path("src/quant_research_platform/runtime/privacy.py"),
+        scan_group="retired_occurrence",
+        rule_name="forbidden_private_real",
+        literal='"private_real",',
+        owner="share-safety-runtime-policy",
+        rationale="runtime privacy inventory rejects retired local-only report paths",
+        lifecycle="current safety inventory; private to policy/runtime safety",
+        covered_by=(
+            "tests/architecture/test_retired_surface_absent.py::"
+            "test_retired_local_only_report_paths_remain_share_unsafe",
+        ),
+    ),
+    _source_tree_allowlist_entry(
+        path=Path("src/quant_research_platform/runtime/privacy.py"),
+        scan_group="retired_occurrence",
+        rule_name="forbidden_private_data",
+        literal='"private_data",',
+        owner="share-safety-runtime-policy",
+        rationale="runtime privacy inventory rejects retired local-only report paths",
+        lifecycle="current safety inventory; private to policy/runtime safety",
+        covered_by=(
+            "tests/architecture/test_retired_surface_absent.py::"
+            "test_retired_local_only_report_paths_remain_share_unsafe",
+        ),
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=Path("tests/architecture/test_retired_surface_absent.py"),
+            scan_group="retired_occurrence",
+            rule_name=rule_name,
+            literal=literal,
+            owner="architecture-governance-negative-tests",
+            rationale="owner-approved retired public surface absence assertion",
+            lifecycle="current negative test fixture; update with governance rule",
+            covered_by=(
+                "tests/architecture/test_retired_surface_absent.py::"
+                "test_retired_constant_fixtures_are_derived_from_governance_contract",
+            ),
+        )
+        for rule_name, literal in (
+            ("retired_a_share_market_definition", '"a_share_market_definition",'),
+            ("retired_a_share_field_catalog", '"a_share_field_catalog",'),
+            ("retired_a_share_processed_catalog", '"a_share_processed_catalog",'),
+            ("retired_a_share_factor_catalog", '"a_share_factor_catalog",'),
+            ("retired_a_share_label_catalog", '"a_share_label_catalog",'),
+            (
+                "retired_workflow_module",
+                'importlib.util.find_spec("quant_research_platform.contracts.workflow_run")',
+            ),
+            (
+                "retired_model_algorithm_collection",
+                'assert not hasattr(contracts_models, "MODEL_ALGORITHMS")',
+            ),
+            (
+                "retired_csmar_source_alias",
+                'assert not hasattr(source_ids, "CSMAR_SOURCE_ID")',
+            ),
+            (
+                "retired_a_share_market_alias",
+                'assert not hasattr(market_ids, "A_SHARE_MARKET_ID")',
+            ),
+        )
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=Path("tests/architecture/test_retired_surface_absent.py"),
+            scan_group="retired_occurrence",
+            rule_name="retired_build_a_share",
+            literal=literal,
+            owner="architecture-governance-negative-tests",
+            rationale="owner-approved retired A-share builder surface assertion",
+            lifecycle="current negative test fixture; update with governance rule",
+            covered_by=(
+                "tests/architecture/test_retired_surface_absent.py::"
+                "test_retired_owner_local_function_names_are_absent",
+            ),
+        )
+        for literal in (
             '"build_a_share_research_dataset_catalog",',
             '"build_a_share_research_dataset_specs",',
             '"build_a_share_model_catalog",',
@@ -961,42 +1083,174 @@ SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
             '"build_a_share_prediction_specs",',
             '"build_a_share_portfolio_catalog",',
             '"build_a_share_portfolio_specs",',
-        },
-        "retired_default_a_share": {
+        )
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=Path("tests/architecture/test_retired_surface_absent.py"),
+            scan_group="retired_occurrence",
+            rule_name="retired_default_a_share",
+            literal=literal,
+            owner="architecture-governance-negative-tests",
+            rationale="owner-approved retired A-share default surface assertion",
+            lifecycle="current negative test fixture; update with governance rule",
+            covered_by=(
+                "tests/architecture/test_retired_surface_absent.py::"
+                "test_retired_owner_local_function_names_are_absent",
+            ),
+        )
+        for literal in (
             '"default_a_share_prediction_smoke_id",',
             '"default_a_share_prediction_oos_period",',
-        },
-        "retired_workflow_module": {
-            'importlib.util.find_spec("quant_research_platform.contracts.workflow_run")',
-        },
-        "retired_model_algorithm_collection": {
-            'assert not hasattr(contracts_models, "MODEL_ALGORITHMS")',
-        },
-        "retired_csmar_source_alias": {
-            'assert not hasattr(source_ids, "CSMAR_SOURCE_ID")',
-        },
-        "retired_a_share_market_alias": {
-            'assert not hasattr(market_ids, "A_SHARE_MARKET_ID")',
-        },
-        "forbidden_render_pr_body": {
+        )
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=Path("tests/architecture/test_retired_surface_absent.py"),
+            scan_group="retired_occurrence",
+            rule_name="forbidden_render_pr_body",
+            literal=literal,
+            owner="architecture-governance-negative-tests",
+            rationale="owner-approved handoff retired renderer absence assertion",
+            lifecycle="current negative test fixture; update with governance rule",
+            covered_by=(
+                "tests/architecture/test_retired_surface_absent.py::"
+                "test_retired_pr_body_renderer_is_absent",
+            ),
+        )
+        for literal in (
             '".agents/skills/quant-research-platform-maintenance/scripts/render_pr_body_from_validation_evidence.py"',
             '"render_pr_body_from_validation_evidence.py"',
-        },
-    },
-    Path("tests/agents/handoff/test_handoff_tools.py"): {
-        "forbidden_private_data": {
-            '"reports/private_data/a_share/run/summary.json",',
-        },
-        "forbidden_private_real": {
+        )
+    ),
+    _source_tree_allowlist_entry(
+        path=Path("tests/agents/handoff/test_handoff_tools.py"),
+        scan_group="retired_occurrence",
+        rule_name="forbidden_private_data",
+        literal='"reports/private_data/a_share/run/summary.json",',
+        owner="handoff-package-safety-tests",
+        rationale="malicious handoff path payload must remain rejected",
+        lifecycle="current negative test fixture; update with package path rules",
+        covered_by=(
+            "tests/agents/handoff/test_handoff_tools.py::"
+            "test_handoff_package_verifier_rejects_retired_local_output_paths",
+        ),
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=Path("tests/agents/handoff/test_handoff_tools.py"),
+            scan_group="retired_occurrence",
+            rule_name="forbidden_private_real",
+            literal=literal,
+            owner="handoff-package-safety-tests",
+            rationale="malicious handoff path payload must remain rejected",
+            lifecycle="current negative test fixture; update with package path rules",
+            covered_by=(
+                "tests/agents/handoff/test_handoff_tools.py::"
+                "test_handoff_package_verifier_rejects_retired_local_output_path_text",
+            ),
+        )
+        for literal in (
             '"reports/private_real/a_share/run/summary.json",',
             '"retired path reports/private_real/a_share/run\\n",',
-        },
-    },
-}
+        )
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=BUILD_HANDOFF_PACKAGE_SCRIPT,
+            scan_group="active_test_literals",
+            rule_name=rule_name,
+            owner="handoff-builder-active-fixtures",
+            rationale="builder fixture uses current market data identifiers",
+            lifecycle="current active literal; remove if fixture changes",
+            covered_by=(
+                "tests/architecture/test_handoff_package_contract.py::"
+                "test_handoff_source_tree_rules_import_governance_contract",
+            ),
+        )
+        for rule_name in (
+            "active_market_bars_data_id",
+            "active_market_panel_data_id",
+            "active_market_context_data_id",
+            "active_frequency_slug",
+        )
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
+            scan_group="active_test_literal_path",
+            rule_name=rule_name,
+            owner="architecture-active-vocabulary-tests",
+            rationale="owner-approved active data-frequency vocabulary assertions",
+            lifecycle="current active test fixture; update with frequency contract",
+            covered_by=(
+                "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+            ),
+        )
+        for rule_name in (
+            "active_market_bars_data_id",
+            "active_market_panel_data_id",
+            "active_market_context_data_id",
+            "active_frequency_slug",
+        )
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
+            scan_group="active_test_literal_path",
+            rule_name=rule_name,
+            owner="architecture-governance-negative-tests",
+            rationale="owner-approved retired/current vocabulary gate fixture",
+            lifecycle="current governance test fixture; update with rule owner",
+            covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+        )
+        for rule_name in (
+            "retired_local_verification_evidence_range_surface",
+            "retired_local_verification_output_surface",
+            "retired_result_evidence_root_text",
+        )
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=GOVERNANCE_CONTRACT_SCRIPT,
+            scan_group="retired_rule_definition",
+            rule_name=rule.name,
+            owner="governance-contract-rule-source",
+            rationale="rule names are defined only in the governance contract",
+            lifecycle="current rule definition; remove with retired rule",
+            covered_by=(
+                "tests/architecture/test_handoff_package_contract.py::"
+                "test_source_tree_scan_rule_allowlist_is_definition_scoped",
+            ),
+        )
+        for rule in RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=Path("tests/architecture/test_retired_surface_absent.py"),
+            scan_group="retired_rule_definition",
+            rule_name=rule_name,
+            owner="architecture-governance-negative-tests",
+            rationale="test derives retired rule names from governance contract",
+            lifecycle="current negative test fixture; update with governance rule",
+            covered_by=(
+                "tests/architecture/test_handoff_package_contract.py::"
+                "test_source_tree_scan_rule_allowlist_is_definition_scoped",
+            ),
+        )
+        for rule_name in (
+            "retired_csmar_source_alias",
+            "retired_a_share_market_alias",
+            "retired_model_algorithm_collection",
+            "forbidden_render_pr_body",
+        )
+    ),
+)
 
 SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS = {
-    Path("tests/architecture/test_governance_contract_rg_gate.py"),
-    Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
+    entry.path
+    for entry in SOURCE_TREE_ALLOWLIST_ENTRIES
+    if entry.scan_group == "active_test_literal_path"
 }
 
 SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS = tuple(
@@ -1007,42 +1261,51 @@ SOURCE_TREE_RETIRED_TERM_ROOTS = SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS + (
     Path("src/quant_research_platform/interfaces"),
     Path("src/quant_research_platform/agents"),
     Path("src/quant_research_platform/reports"),
+    Path("tests/workflows"),
     Path(".agents/skills/quant-research-platform-maintenance/scripts/handoff"),
 )
 
 SOURCE_TREE_RETIRED_PATH_POLICY_MARKERS = RETIRED_PATH_POLICY_MARKERS
 
-SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST = {
-    BUILD_HANDOFF_PACKAGE_SCRIPT: {
-        "active_market_bars_data_id",
-        "active_market_panel_data_id",
-        "active_market_context_data_id",
-        "active_frequency_slug",
-    },
-    Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"): {
-        "active_market_bars_data_id",
-        "active_market_panel_data_id",
-        "active_market_context_data_id",
-        "active_frequency_slug",
-    },
-    Path("tests/architecture/test_governance_contract_rg_gate.py"): {
-        "retired_local_verification_evidence_range_surface",
-        "retired_local_verification_output_surface",
-        "retired_result_evidence_root_text",
-    },
-}
+def _source_tree_grouped_rule_allowlist(
+    scan_group: str,
+) -> dict[Path, set[str]]:
+    result: dict[Path, set[str]] = {}
+    for entry in SOURCE_TREE_ALLOWLIST_ENTRIES:
+        if entry.scan_group != scan_group:
+            continue
+        result.setdefault(entry.path, set()).add(entry.rule_name)
+    return result
 
-SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
-    GOVERNANCE_CONTRACT_SCRIPT: {
-        rule.name for rule in RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
-    },
-    Path("tests/architecture/test_retired_surface_absent.py"): {
-        "retired_csmar_source_alias",
-        "retired_a_share_market_alias",
-        "retired_model_algorithm_collection",
-        "forbidden_render_pr_body",
-    },
+
+def _source_tree_retired_occurrence_allowlist() -> dict[Path, dict[str, set[str]]]:
+    result: dict[Path, dict[str, set[str]]] = {}
+    for entry in SOURCE_TREE_ALLOWLIST_ENTRIES:
+        if entry.scan_group != "retired_occurrence":
+            continue
+        result.setdefault(entry.path, {}).setdefault(entry.rule_name, set()).add(
+            entry.literal
+        )
+    return result
+
+
+SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = (
+    _source_tree_retired_occurrence_allowlist()
+)
+SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST = {
+    path: rules
+    for path, rules in _source_tree_grouped_rule_allowlist(
+        "active_test_literals"
+    ).items()
+} | {
+    path: rules
+    for path, rules in _source_tree_grouped_rule_allowlist(
+        "active_test_literal_path"
+    ).items()
 }
+SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = (
+    _source_tree_grouped_rule_allowlist("retired_rule_definition")
+)
 
 SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
     SourceTreeSensitiveNegativeRule(
@@ -1164,53 +1427,138 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
     },
 }
 
-SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST = {
-    GOVERNANCE_CONTRACT_SCRIPT: {
-        "sensitive_local_only_path",
-        "sensitive_secret",
-        "sensitive_provider_marker",
-        "sensitive_stock_code_sample",
-    },
-    VERIFY_GOVERNANCE_SCRIPT: {
-        "sensitive_local_only_path",
-        "sensitive_secret",
-        "sensitive_provider_marker",
-    },
-    VERIFY_HANDOFF_PACKAGE_SCRIPT: {
-        "sensitive_local_only_path",
-        "sensitive_secret",
-        "sensitive_provider_marker",
-    },
-    HANDOFF_SELF_TEST_SCRIPT: {
-        "sensitive_local_only_path",
-        "sensitive_secret",
-        "sensitive_provider_marker",
-    },
-    Path("tests/agents/handoff/test_handoff_tools.py"): {
-        "sensitive_local_only_path",
-        "sensitive_secret",
-        "sensitive_provider_marker",
-    },
-    Path("tests/agents/handoff/test_handoff_package_verifier.py"): {
-        "sensitive_local_only_path",
-        "sensitive_secret",
-        "sensitive_provider_marker",
-    },
-    # Intentional policy negative test fixtures for share-safety detection.
-    Path("tests/policy/test_share_safety.py"): {
-        "sensitive_local_only_path",
-    },
-    Path("tests/policy/test_share_safety_runtime_edges.py"): {
-        "sensitive_local_only_path",
-        "sensitive_secret",
-        "sensitive_provider_marker",
-        "sensitive_stock_code_sample",
-    },
-    Path("tests/storage/test_manifest_helper_edges.py"): {
-        "sensitive_local_only_path",
-        "sensitive_provider_marker",
-    },
-}
+SOURCE_TREE_ALLOWLIST_ENTRIES += tuple(
+    _source_tree_allowlist_entry(
+        path=path,
+        scan_group="sensitive_negative_literals",
+        rule_name=rule_name,
+        owner=owner,
+        rationale=rationale,
+        lifecycle="current safety negative fixture; update with share-safety rules",
+        covered_by=covered_by,
+    )
+    for path, owner, rationale, covered_by, rule_names in (
+        (
+            GOVERNANCE_CONTRACT_SCRIPT,
+            "governance-contract-rule-source",
+            "sensitive negative rules are defined only in governance contract",
+            (
+                "tests/architecture/test_handoff_package_contract.py::"
+                "test_source_tree_allowlist_entries_have_owner_metadata_and_coverage",
+            ),
+            (
+                "sensitive_local_only_path",
+                "sensitive_secret",
+                "sensitive_provider_marker",
+                "sensitive_stock_code_sample",
+            ),
+        ),
+        (
+            VERIFY_GOVERNANCE_SCRIPT,
+            "governance-verifier",
+            "verifier consumes sensitive fixtures from governance contract",
+            (
+                "tests/agents/test_verify_governance.py::"
+                "test_active_doc_scan_fails_retired_public_surface_terms",
+            ),
+            (
+                "sensitive_local_only_path",
+                "sensitive_secret",
+                "sensitive_provider_marker",
+            ),
+        ),
+        (
+            VERIFY_HANDOFF_PACKAGE_SCRIPT,
+            "handoff-package-verifier",
+            "handoff verifier consumes sensitive fixtures from share-safety policy",
+            (
+                "tests/agents/handoff/test_handoff_package_verifier.py::"
+                "test_handoff_package_verifier_still_rejects_regular_evidence_paths",
+            ),
+            (
+                "sensitive_local_only_path",
+                "sensitive_secret",
+                "sensitive_provider_marker",
+            ),
+        ),
+        (
+            HANDOFF_SELF_TEST_SCRIPT,
+            "handoff-self-test",
+            "self-test carries intentional sensitive negative fixtures",
+            (
+                "tests/agents/handoff/test_handoff_package_verifier.py::"
+                "test_handoff_package_verifier_still_rejects_regular_evidence_paths",
+            ),
+            (
+                "sensitive_local_only_path",
+                "sensitive_secret",
+                "sensitive_provider_marker",
+            ),
+        ),
+        (
+            Path("tests/agents/handoff/test_handoff_tools.py"),
+            "handoff-package-safety-tests",
+            "handoff tests carry malicious package payload fixtures",
+            (
+                "tests/agents/handoff/test_handoff_tools.py::"
+                "test_handoff_package_verifier_delegates_text_privacy_semantics",
+            ),
+            (
+                "sensitive_local_only_path",
+                "sensitive_secret",
+                "sensitive_provider_marker",
+            ),
+        ),
+        (
+            Path("tests/agents/handoff/test_handoff_package_verifier.py"),
+            "handoff-package-safety-tests",
+            "handoff verifier tests carry malicious package payload fixtures",
+            (
+                "tests/agents/handoff/test_handoff_package_verifier.py::"
+                "test_handoff_package_verifier_still_rejects_regular_evidence_paths",
+            ),
+            (
+                "sensitive_local_only_path",
+                "sensitive_secret",
+                "sensitive_provider_marker",
+            ),
+        ),
+        (
+            Path("tests/policy/test_share_safety.py"),
+            "share-safety-policy-tests",
+            "policy test carries intentional local-only path negative fixture",
+            ("tests/policy/test_share_safety.py",),
+            ("sensitive_local_only_path",),
+        ),
+        (
+            Path("tests/policy/test_share_safety_runtime_edges.py"),
+            "share-safety-policy-tests",
+            "policy runtime edge tests carry intentional sensitive fixtures",
+            ("tests/policy/test_share_safety_runtime_edges.py",),
+            (
+                "sensitive_local_only_path",
+                "sensitive_secret",
+                "sensitive_provider_marker",
+                "sensitive_stock_code_sample",
+            ),
+        ),
+        (
+            Path("tests/storage/test_manifest_helper_edges.py"),
+            "storage-manifest-safety-tests",
+            "manifest tests carry local-only path and provider marker fixtures",
+            ("tests/storage/test_manifest_helper_edges.py",),
+            (
+                "sensitive_local_only_path",
+                "sensitive_provider_marker",
+            ),
+        ),
+    )
+    for rule_name in rule_names
+)
+
+SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST = (
+    _source_tree_grouped_rule_allowlist("sensitive_negative_literals")
+)
 
 
 def normalize_repo_path(path: str | Path) -> str:
@@ -2116,6 +2464,20 @@ BLOCKED_HANDOFF_EVIDENCE_KEYS = (
     | set(HANDOFF_EVIDENCE_BLOCKED_KEY_COVERAGE_CASES)
 )
 VALIDATION_ROW_KEYS = {"name", "status", "evidence"}
+MANDATORY_VALIDATION_CHECKS = frozenset(
+    {
+        "tests",
+        "smoke",
+        "compare",
+        "handoff_verify",
+        "handoff_safety_scan",
+        "governance",
+        "code_map",
+    }
+)
+BUILDER_OWNED_VALIDATION_CHECKS = frozenset(
+    {"handoff_verify", "handoff_safety_scan"}
+)
 
 
 def source_tree_scan_payload(
@@ -2904,9 +3266,12 @@ def validation_with_status_overrides(
     rows = payload.get("checks")
     if not isinstance(rows, list):
         raise SystemExit("validation_evidence_checks_must_be_list")
-    validate_validation_evidence_contract(payload)
+    validate_validation_evidence_contract(payload, require_mandatory=False)
+    for check_name in BUILDER_OWNED_VALIDATION_CHECKS:
+        set_check_status(rows, check_name, overrides.get(check_name, "NOT_RUN"))
     for check_name, status in overrides.items():
         set_check_status(rows, check_name, status)
+    validate_validation_evidence_contract(payload)
     return payload
 
 
@@ -2926,25 +3291,74 @@ def enrich_validation_evidence(
     return payload
 
 
-def validate_validation_evidence_contract(payload: dict[str, object]) -> None:
+def validate_validation_evidence_contract(
+    payload: dict[str, object],
+    *,
+    require_mandatory: bool = True,
+) -> None:
+    failures = validation_evidence_contract_failures(
+        payload,
+        require_mandatory=require_mandatory,
+    )
+    if failures:
+        raise SystemExit(";".join(failures))
+
+
+def validation_evidence_contract_failures(
+    payload: dict[str, object],
+    *,
+    require_mandatory: bool = True,
+) -> list[str]:
+    failures: list[str] = []
     if payload.get("schema_id") != "qrp-handoff-validation-evidence":
-        raise SystemExit("validation_evidence_schema_id_invalid")
+        failures.append("validation_evidence_schema_id_invalid")
     blocked = sorted(set(payload) & BLOCKED_VALIDATION_KEYS)
-    if blocked:
-        raise SystemExit("validation_evidence_forbidden_field: " + ",".join(blocked))
+    failures.extend(f"validation_evidence_forbidden_field: {key}" for key in blocked)
     rows = payload.get("checks")
     if not isinstance(rows, list):
-        raise SystemExit("validation_evidence_checks_must_be_list")
+        failures.append("validation_evidence_checks_must_be_list")
+        return failures
+    seen: set[str] = set()
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
-            raise SystemExit(f"validation_evidence_check_not_object: {index}")
+            failures.append(f"validation_evidence_check_not_object: {index}")
+            continue
         if "check" in row:
-            raise SystemExit(f"validation_evidence_row_forbidden_field: {index}:check")
+            failures.append(f"validation_evidence_row_forbidden_field: {index}:check")
         extra = sorted(set(row) - VALIDATION_ROW_KEYS)
         if extra:
-            raise SystemExit(
-                f"validation_evidence_row_unapproved_field: {index}:" + ",".join(extra)
+            failures.append(
+                f"validation_evidence_row_unapproved_field: {index}:"
+                + ",".join(extra)
             )
+        for key in ("name", "status", "evidence"):
+            if key not in row:
+                failures.append(f"validation_evidence_row_missing: {index}:{key}")
+        name = row.get("name")
+        if not isinstance(name, str) or not name.strip():
+            failures.append(f"validation_evidence_name_invalid: {index}")
+        else:
+            normalized_name = name.strip()
+            if normalized_name in seen:
+                failures.append(
+                    f"validation_evidence_duplicate_check: {normalized_name}"
+                )
+            seen.add(normalized_name)
+        if "status" in row:
+            status = str(row.get("status") or "").strip().upper()
+            if status not in VALID_STATUSES:
+                failures.append(
+                    f"validation_evidence_status_invalid: {index}:{row.get('status')}"
+                )
+        if "evidence" in row and row.get("evidence") is None:
+            failures.append(f"validation_evidence_evidence_invalid: {index}")
+    if require_mandatory:
+        missing = sorted(MANDATORY_VALIDATION_CHECKS - seen)
+        failures.extend(
+            f"validation_evidence_mandatory_check_missing: {name}"
+            for name in missing
+        )
+    return failures
 
 
 def set_check_status(
@@ -3003,18 +3417,26 @@ def verification_matrix_payload(
 
 
 def validation_status_map(payload: dict[str, object]) -> dict[str, str]:
+    validate_validation_evidence_contract(payload)
     rows = payload["checks"]
     if not isinstance(rows, list):
         raise SystemExit("validation_evidence_checks_must_be_list")
     result: dict[str, str] = {}
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = row.get("name")
+        name = str(row["name"]).strip()
         status = str(row.get("status") or "").strip().upper()
-        if isinstance(name, str) and status in VALID_STATUSES:
-            result[name] = status
+        result[name] = status
     return result
+
+
+def mandatory_validation_status_map(payload: dict[str, object]) -> dict[str, str]:
+    status_map = validation_status_map(payload)
+    return {name: status_map[name] for name in sorted(MANDATORY_VALIDATION_CHECKS)}
+
+
+def aggregate_mandatory_validation_status(payload: dict[str, object]) -> str:
+    statuses = mandatory_validation_status_map(payload).values()
+    return aggregate_validation_matrix_status(statuses)
 
 
 def _stable_governance_json(payload: object) -> str:

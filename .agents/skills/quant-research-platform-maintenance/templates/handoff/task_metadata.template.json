@@ -12,7 +12,43 @@
   "commit_list": [],
   "validation_evidence": {
     "schema_id": "qrp-handoff-validation-evidence",
-    "checks": []
+    "checks": [
+      {
+        "name": "tests",
+        "status": "NOT_RUN",
+        "evidence": "tests not run"
+      },
+      {
+        "name": "smoke",
+        "status": "NOT_RUN",
+        "evidence": "smoke not run"
+      },
+      {
+        "name": "compare",
+        "status": "NOT_RUN",
+        "evidence": "compare not run"
+      },
+      {
+        "name": "handoff_verify",
+        "status": "NOT_RUN",
+        "evidence": "handoff verifier not run"
+      },
+      {
+        "name": "handoff_safety_scan",
+        "status": "NOT_RUN",
+        "evidence": "handoff safety scan not run"
+      },
+      {
+        "name": "governance",
+        "status": "NOT_RUN",
+        "evidence": "governance not run"
+      },
+      {
+        "name": "code_map",
+        "status": "NOT_RUN",
+        "evidence": "code map not run"
+      }
+    ]
   },
   "handoff_evidence": {
     "smoke-compare-status": {

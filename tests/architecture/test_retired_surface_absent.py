@@ -149,6 +149,45 @@ def test_retired_handoff_evidence_input_fields_fail_fast(
         assert not (out_dir / "synthetic-handoff-negative.json").exists()
 
 
+def test_share_safety_does_not_export_retired_local_output_path_inventory() -> None:
+    import quant_research_platform.policy.share_safety as share_safety
+
+    assert "LEGACY_LOCAL_OUTPUT_PATH_NAMES" not in share_safety.__all__
+    assert not hasattr(share_safety, "LEGACY_LOCAL_OUTPUT_PATH_NAMES")
+
+
+def test_active_source_has_no_retired_local_output_inventory_name() -> None:
+    source = Path("src/quant_research_platform/policy/share_safety.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "LEGACY_LOCAL_OUTPUT_PATH_NAMES" not in source
+
+
+def test_retired_local_only_report_paths_remain_share_unsafe() -> None:
+    contract = _load_governance_contract()
+    from quant_research_platform.policy.share_safety import (
+        is_local_only_path,
+        unsafe_for_share_reason,
+    )
+
+    private_real = rule_form(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "forbidden_private_real",
+    )
+    private_data = rule_form(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "forbidden_private_data",
+    )
+    for path in (
+        Path("reports") / private_real / "a_share" / "run" / "summary.json",
+        Path("reports") / private_data / "a_share" / "run" / "summary.json",
+        Path("reports/private_research/a_share/run/summary.json"),
+    ):
+        assert is_local_only_path(path)
+        assert unsafe_for_share_reason(path.as_posix()) == "local_only_path"
+
+
 def _load_handoff_builder():
     script = (
         Path(".agents")
