@@ -20,6 +20,7 @@ class Profile:
     name: str
     scopes: tuple[str, ...]
     marker: str | None = None
+    pytest_options: tuple[str, ...] = ()
 
 
 FAST_EXCLUDES = (
@@ -54,6 +55,11 @@ PROFILES: dict[str, Profile] = {
         scopes=("tests/architecture",),
         marker=FAST_EXCLUDES,
     ),
+    "data-contract": Profile(
+        name="data-contract",
+        scopes=("tests/architecture/test_share_safe_evidence_data_contract.py",),
+        marker="data_dependency or requires_local_data",
+    ),
     "integration": Profile(
         name="integration",
         scopes=("tests",),
@@ -68,6 +74,27 @@ PROFILES: dict[str, Profile] = {
         name="all-non-slow",
         scopes=("tests",),
         marker=FAST_EXCLUDES,
+    ),
+    "local-data": Profile(
+        name="local-data",
+        scopes=("tests",),
+        marker="requires_local_data or data_dependency",
+    ),
+    "performance": Profile(
+        name="performance",
+        scopes=("tests",),
+        marker="performance",
+    ),
+    "private-slow": Profile(
+        name="private-slow",
+        scopes=("tests",),
+        marker="private_slow",
+        pytest_options=("-o", "addopts=--import-mode=importlib"),
+    ),
+    "slow": Profile(
+        name="slow",
+        scopes=("tests",),
+        marker="slow or slow_integration",
     ),
 }
 
@@ -125,6 +152,7 @@ def run_profile(
         sys.executable,
         "-m",
         "pytest",
+        *profile.pytest_options,
         *profile.scopes,
         "-q",
         "--basetemp",
@@ -170,8 +198,6 @@ def run_profile(
         encoding="utf-8",
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
-    if result.returncode == NO_TESTS_COLLECTED:
-        return 0
     return result.returncode
 
 
@@ -211,9 +237,14 @@ def _profile_tmp_name(profile_name: str) -> str:
         "all-non-slow": "a",
         "architecture": "r",
         "contract": "c",
+        "data-contract": "d",
         "fast": "f",
         "integration": "i",
+        "local-data": "l",
         "mutation": "m",
+        "performance": "p",
+        "private-slow": "ps",
+        "slow": "s",
     }
     return short_names.get(profile_name, profile_name[:1] or "p")
 

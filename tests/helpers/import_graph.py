@@ -7,6 +7,11 @@ from pathlib import Path
 import pytest
 
 PROJECT_SRC = Path("src/quant_research_platform")
+ARCHITECTURE_IMPORT_GRAPH_ROOTS = (
+    Path("src"),
+    Path("tests/runtime"),
+    Path("tests/workflows"),
+)
 
 
 @dataclass(frozen=True)
@@ -18,9 +23,8 @@ class ImportEdge:
 
 @pytest.fixture(scope="session")
 def repo_python_files() -> tuple[Path, ...]:
-    roots = (Path("src"), Path("tests"), Path(".agents"))
     files: list[Path] = []
-    for root in roots:
+    for root in ARCHITECTURE_IMPORT_GRAPH_ROOTS:
         if root.exists():
             files.extend(path for path in root.rglob("*.py") if path.is_file())
     return tuple(sorted(files))

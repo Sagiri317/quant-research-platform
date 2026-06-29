@@ -38,10 +38,8 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 普通 tests 保护当前合同。owner-layer negative tests 覆盖边界回归。
 
 测试分层由 `pyproject.toml` 的 pytest markers 和
-`tests/tools/run_profile.py` 的 profile 定义共同约束。文档不复制完整
-pytest expression。fast profile 只包含合同、架构和 REVIEW_SAFE owner tests；
-integration、mutation、slow、performance 和 local-data 测试由对应 profile
-显式选择。
+`tests/tools/run_profile.py` 的 profile 定义共同约束。profile 清单和选择逻辑
+以 runner 输出为准，文档不复制完整 pytest expression。
 
 正式 profile runner 位于 `tests/tools/run_profile.py`。执行示例：
 `python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>`。
@@ -69,4 +67,4 @@ python tests/tools/run_profile.py --list-profiles
 python tests/tools/run_profile.py --profile <profile> --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
 ```
 
-handoff tests 分为 fast contract、integration 和 mutation profiles；具体执行入口统一使用 `tests/tools/run_profile.py`。
+handoff tests 的具体执行入口统一使用 `tests/tools/run_profile.py`。

@@ -101,9 +101,8 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 所有验证结果必须使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。`PASS` 必须对应实际命令或可检查 artifact。未运行、阻塞或超时的检查不能写成 PASS。
 
 测试分层由 `pyproject.toml` 的 pytest markers 和
-`tests/tools/run_profile.py` 的 profile 定义共同约束。文档只说明原则：
-fast profile 只包含合同、架构和 REVIEW_SAFE owner tests；integration、
-mutation、slow、performance 和 local-data 测试由对应 profile 显式选择。
+`tests/tools/run_profile.py` 的 profile 定义共同约束。profile 清单和选择逻辑
+以 runner 输出为准，文档不复制 marker expression。
 
 常用治理验证：
 

@@ -4,9 +4,11 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 RUNNER_PATH = Path(__file__).with_name("run_profile.py")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_runner():
@@ -27,14 +29,57 @@ def test_list_profiles_includes_required_profiles(capsys) -> None:
     assert exit_code == 0
     output = capsys.readouterr().out
     for profile in (
+        "all-non-slow",
         "fast",
         "contract",
         "architecture",
+        "data-contract",
         "integration",
+        "local-data",
         "mutation",
-        "all-non-slow",
+        "performance",
+        "private-slow",
+        "slow",
     ):
         assert profile in output
+
+
+def test_profile_markers_are_declared_and_excluded_markers_have_profiles() -> None:
+    runner = _load_runner()
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    marker_lines = pyproject["tool"]["pytest"]["ini_options"]["markers"]
+    declared_markers = {line.split(":", 1)[0] for line in marker_lines}
+
+    profile_markers = {
+        marker
+        for profile in runner.PROFILES.values()
+        if profile.marker is not None
+        for marker in _marker_names(profile.marker)
+    }
+    assert profile_markers <= declared_markers
+
+    fast_excluded_markers = _marker_names(runner.FAST_EXCLUDES)
+    marker_owners = {
+        marker: sorted(
+            name
+            for name, profile in runner.PROFILES.items()
+            if profile.marker is not None
+            and profile.marker != runner.FAST_EXCLUDES
+            and marker in _marker_names(profile.marker)
+        )
+        for marker in fast_excluded_markers
+    }
+
+    assert marker_owners == {
+        "data_dependency": ["data-contract", "integration", "local-data"],
+        "integration": ["integration"],
+        "mutation": ["mutation"],
+        "performance": ["performance"],
+        "private_slow": ["private-slow"],
+        "requires_local_data": ["data-contract", "local-data"],
+        "slow": ["slow"],
+        "slow_integration": ["integration", "slow"],
+    }
 
 
 def test_fast_profile_runs_pytest_with_repo_relative_paths_and_shell_false(
@@ -122,3 +167,46 @@ def test_unknown_profile_fails_before_running_pytest(
 
     assert exit_code == 2
     assert not (tmp_path / "out").exists()
+
+
+def test_profile_with_no_collected_tests_returns_non_zero_not_run_summary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner()
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=runner.NO_TESTS_COLLECTED,
+            stdout="no tests collected\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    exit_code = runner.main(
+        [
+            "--profile",
+            "performance",
+            "--repo-root",
+            str(tmp_path),
+            "--output-dir",
+            "out",
+            "--tmp-dir",
+            "tmp",
+        ]
+    )
+
+    summary = json.loads((tmp_path / "out" / "performance-summary.json").read_text())
+    assert exit_code == runner.NO_TESTS_COLLECTED
+    assert summary["status"] == "NOT_RUN"
+
+
+def _marker_names(expression: str) -> set[str]:
+    operators = {"and", "or", "not"}
+    return {
+        token
+        for token in expression.replace("(", " ").replace(")", " ").split()
+        if token not in operators
+    }

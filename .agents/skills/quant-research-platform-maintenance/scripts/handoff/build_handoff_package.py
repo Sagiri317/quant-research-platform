@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
-    out_dir = Path(args.out_dir)
+    out_dir = resolve_output_dir(repo_root, args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     task = load_json_object(Path(args.task), "task")
     result = build_handoff_package(
@@ -85,6 +85,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"handoff_package_verify_status={result['handoff_verify_status']}")
     print(f"handoff_safety_scan_status={result['handoff_safety_status']}")
     return 0 if result["ok"] else 1
+
+
+def resolve_output_dir(repo_root: Path, value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return repo_root / path
 
 
 def build_handoff_package(

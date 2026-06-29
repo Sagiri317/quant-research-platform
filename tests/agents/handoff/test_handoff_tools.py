@@ -10,8 +10,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.mutation
-
 HANDOFF_TOOL_ROOT = (
     Path(".agents")
     / "skills"
@@ -107,6 +105,57 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
     )
     assert result["zip_path"]
     return repo, Path(result["zip_path"]), Path(result["json_path"]), base, final_head
+
+
+def test_builder_main_resolves_relative_out_dir_under_repo_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    builder = _load_handoff_module("build_handoff_package")
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    task_path = tmp_path / "task.json"
+    task_path.write_text("{}", encoding="utf-8")
+    captured: dict[str, Path] = {}
+
+    def fake_load_json_object(path: Path, _label: str) -> dict[str, object]:
+        assert path == task_path
+        return {}
+
+    def fake_build_handoff_package(**kwargs) -> dict[str, object]:
+        captured["repo_root"] = kwargs["repo_root"]
+        captured["out_dir"] = kwargs["out_dir"]
+        return {
+            "ok": True,
+            "zip_path": str(kwargs["out_dir"] / "handoff.zip"),
+            "json_path": str(kwargs["out_dir"] / "handoff.json"),
+            "zip_sha256": "abc123",
+            "handoff_verify_status": "PASS",
+            "handoff_safety_status": "PASS",
+        }
+
+    monkeypatch.chdir(outside)
+    monkeypatch.setattr(builder, "load_json_object", fake_load_json_object)
+    monkeypatch.setattr(builder, "build_handoff_package", fake_build_handoff_package)
+
+    exit_code = builder.main(
+        [
+            "--task",
+            str(task_path),
+            "--repo-root",
+            str(repo_root),
+            "--out-dir",
+            "relative-out",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured == {
+        "repo_root": repo_root.resolve(),
+        "out_dir": repo_root.resolve() / "relative-out",
+    }
 
 
 def _rewrite_package_member(package: Path, member: str, data: bytes) -> None:
@@ -333,6 +382,7 @@ def test_tracked_handoff_tool_source_of_truth_exists() -> None:
     assert missing == []
 
 
+@pytest.mark.integration
 def test_builder_writes_final_branch_bundle_without_patch_member(
     tmp_path: Path,
 ) -> None:
@@ -348,6 +398,7 @@ def test_builder_writes_final_branch_bundle_without_patch_member(
     assert bundle_entry["sha256"] == hashlib.sha256(bundle).hexdigest()
 
 
+@pytest.mark.integration
 def test_builder_does_not_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None:
     _repo, package, _sidecar, _base, _final_head = _build_test_package(tmp_path)
 
@@ -357,6 +408,7 @@ def test_builder_does_not_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None
     assert not any(name.startswith("run_tools/") for name in names)
 
 
+@pytest.mark.mutation
 def test_verifier_rejects_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
@@ -369,6 +421,7 @@ def test_verifier_rejects_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None
     assert "duplicate_tracked_source_in_zip: run_tools/self_test.py" in failures
 
 
+@pytest.mark.mutation
 def test_verifier_rejects_duplicate_required_zip_member(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
@@ -388,6 +441,7 @@ def test_verifier_rejects_duplicate_required_zip_member(tmp_path: Path) -> None:
         "handoff_evidence/generation.json",
     ),
 )
+@pytest.mark.mutation
 def test_verifier_rejects_duplicate_package_members(
     tmp_path: Path,
     member: str,
@@ -403,6 +457,7 @@ def test_verifier_rejects_duplicate_package_members(
     assert f"duplicate_zip_member: {member}" in failures
 
 
+@pytest.mark.mutation
 def test_verifier_rejects_duplicate_artifact_manifest_entries(
     tmp_path: Path,
 ) -> None:
@@ -445,6 +500,7 @@ def test_verifier_rejects_duplicate_artifact_manifest_entries(
         ),
     ),
 )
+@pytest.mark.mutation
 def test_verifier_rejects_handoff_json_identity_violations(
     tmp_path: Path,
     target: str,
@@ -484,6 +540,7 @@ def test_verifier_rejects_handoff_json_identity_violations(
     assert expected_failure in failures
 
 
+@pytest.mark.mutation
 def test_verifier_rejects_tracked_repo_path_copies_in_zip(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
@@ -500,6 +557,7 @@ def test_verifier_rejects_tracked_repo_path_copies_in_zip(tmp_path: Path) -> Non
     assert "duplicate_tracked_source_in_zip: src/copied.py" in failures
 
 
+@pytest.mark.mutation
 def test_verifier_rejects_generation_bundle_hash_mismatch(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
@@ -1203,6 +1261,7 @@ def test_verify_smoke_compare_status_enforces_overall_semantics(
         assert f"smoke_compare_status_overall_mismatch: {overall}" in failures
 
 
+@pytest.mark.mutation
 def test_verify_handoff_package_rejects_old_smoke_compare_status_shape(
     tmp_path: Path,
 ) -> None:
@@ -1280,6 +1339,7 @@ def test_verify_rejects_validation_row_extra_fields() -> None:
 
 
 @pytest.mark.parametrize("missing_check", MANDATORY_VALIDATION_CHECKS)
+@pytest.mark.mutation
 def test_verify_handoff_package_rejects_missing_mandatory_validation_check(
     tmp_path: Path,
     missing_check: str,
@@ -1296,6 +1356,7 @@ def test_verify_handoff_package_rejects_missing_mandatory_validation_check(
     assert f"validation_evidence_mandatory_check_missing: {missing_check}" in failures
 
 
+@pytest.mark.mutation
 def test_verify_handoff_package_rejects_duplicate_validation_check_override(
     tmp_path: Path,
 ) -> None:
@@ -1314,6 +1375,7 @@ def test_verify_handoff_package_rejects_duplicate_validation_check_override(
 
 
 @pytest.mark.parametrize("status", ("BROKEN", "pass", "Pass", " PASS ", "PASS "))
+@pytest.mark.mutation
 def test_verify_handoff_package_rejects_invalid_validation_status(
     tmp_path: Path,
     status: str,
@@ -1329,6 +1391,7 @@ def test_verify_handoff_package_rejects_invalid_validation_status(
     assert f"validation_evidence_status_invalid: 0:{status}" in failures
 
 
+@pytest.mark.mutation
 def test_verify_handoff_package_rejects_validation_summary_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -1349,6 +1412,7 @@ def test_verify_handoff_package_rejects_validation_summary_mismatch(
     assert "validation_status_summary_mismatch" in failures
 
 
+@pytest.mark.mutation
 def test_verify_handoff_package_rejects_generation_validation_status_sidecar_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -1363,6 +1427,7 @@ def test_verify_handoff_package_rejects_generation_validation_status_sidecar_mis
     assert "generation_validation_status_sidecar_mismatch" in failures
 
 
+@pytest.mark.mutation
 def test_verify_handoff_package_rejects_generation_validation_status_aggregate_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -1378,6 +1443,7 @@ def test_verify_handoff_package_rejects_generation_validation_status_aggregate_m
     assert "generation_validation_status_validation_evidence_mismatch" in failures
 
 
+@pytest.mark.mutation
 def test_verify_handoff_package_rejects_sidecar_validation_status_aggregate_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -1390,6 +1456,7 @@ def test_verify_handoff_package_rejects_sidecar_validation_status_aggregate_mism
     assert "validation_status_summary_mismatch" in failures
 
 
+@pytest.mark.integration
 def test_verify_handoff_package_accepts_consistent_generation_validation_status(
     tmp_path: Path,
 ) -> None:
@@ -1402,6 +1469,7 @@ def test_verify_handoff_package_accepts_consistent_generation_validation_status(
     assert "generation_validation_status_validation_evidence_mismatch" not in failures
 
 
+@pytest.mark.mutation
 def test_verify_handoff_package_rejects_missing_generation_validation_status(
     tmp_path: Path,
 ) -> None:
@@ -1416,6 +1484,7 @@ def test_verify_handoff_package_rejects_missing_generation_validation_status(
     assert "generation_evidence_missing: validation_status" in failures
 
 
+@pytest.mark.mutation
 def test_verify_handoff_package_rejects_invalid_generation_validation_status(
     tmp_path: Path,
 ) -> None:
@@ -1430,6 +1499,7 @@ def test_verify_handoff_package_rejects_invalid_generation_validation_status(
     assert "generation_evidence_validation_status_invalid" in failures
 
 
+@pytest.mark.integration
 def test_verify_handoff_package_accepts_all_mandatory_validation_checks_pass(
     tmp_path: Path,
 ) -> None:
