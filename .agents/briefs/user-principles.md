@@ -9,9 +9,9 @@ QRP 是本地量化研究平台，不是生产交易系统，不是 live trading
 ## 架构偏好
 
 - semantic closure：数据、factor、feature、model、prediction、signal、evaluation、portfolio、report 的命名和合同必须闭合。
-- replace over parallel：语义相同的新实现应替代旧实现，不保留双轨。
+- replace over parallel：语义相同的新实现应替代被替换实现，不保留双轨。
 - naming first-class：命名应稳定、清晰、长期可维护，不使用 v2 这类临时后缀。
-- current-contract-only：不为旧字段和旧路径保留兼容读取，除非用户明确批准兼容期。
+- current-contract-only：兼容期需要用户明确批准。
 - fail fast：builder 应在写出非法 artifact 前失败，verifier 和 source-tree scan 是独立后续门。
 
 ## 验证偏好

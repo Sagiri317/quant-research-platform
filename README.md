@@ -93,13 +93,17 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 - open issues 只保存当前 open 或 deferred 问题。
 - `.agents` 是 tracked tooling source。
 - `.run` 是 output layer 和 evidence layer。
-- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、single handoff verifier safety scan 和 tests 的 retired/stale/naming/allowlist 规则只能从这里读取或派生；路径名、Python symbol、JSON/YAML/TOML key 和静态字符串合成都由同一规则派生。
-- retired governance paths 只要复活即 `FAIL`，不靠文本关键词绕过。
-- retired stage naming 不得通过文件名、路径名、Python symbol 或静态字符串拼接复活；合法版本面使用 `QRP 0.1`、`0.1`、`0.1.0` 和 `/api/0.1`，不使用带 `v` 前缀的 `0.1` API 版本路径。
+- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、single handoff verifier safety scan 和 tests 的 current-contract-only 规则只从这里读取或派生。
+- 边界回归由 owner-layer negative tests 和治理 gate 记录为 `FAIL`，不靠文本关键词绕过。
 
 ## 验证原则
 
 所有验证结果必须使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。`PASS` 必须对应实际命令或可检查 artifact。未运行、阻塞或超时的检查不能写成 PASS。
+
+测试分层由 `pyproject.toml` 的 pytest markers 和
+`tests/tools/run_profile.py` 的 profile 定义共同约束。文档只说明原则：
+fast profile 只包含合同、架构和 REVIEW_SAFE owner tests；integration、
+mutation、slow、performance 和 local-data 测试由对应 profile 显式选择。
 
 常用治理验证：
 
@@ -107,17 +111,23 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 git diff --check
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
-python -m pytest tests/agents tests/architecture -q
+python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
 ```
 
-分层测试入口：
+可用 profile 由 runner 输出：
 
 ```bash
-python -m pytest tests/architecture/test_share_safe_evidence.py -q
-python -m pytest tests/architecture/test_share_safe_evidence_data_contract.py -q -m data_dependency
-python -m pytest tests/agents/handoff tests/architecture/test_handoff_package_contract.py -q -m "not slow_integration"
-python -m pytest tests/agents/handoff/test_build_handoff_package_integration.py -q -m slow_integration
+python tests/tools/run_profile.py --list-profiles
 ```
+
+日常 profile 入口：
+
+```bash
+python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
+```
+
+`.run/` 只保存输出、profile、临时文件和 handoff/review artifacts，不保存正式脚本。
+普通 `python -m pytest` 保持完整 pytest 语义；fast profile 由 runner 提供。
 
 ## 数据安全
 

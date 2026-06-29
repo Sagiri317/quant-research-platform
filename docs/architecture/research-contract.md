@@ -18,7 +18,7 @@ QRP 支持本地量化研究流程，包括 data、factor、feature、label、mo
 
 ## 当前合同唯一
 
-同一语义只能有一个当前入口。旧字段和旧命名不应通过 fallback 或 alias 保留。
+同一语义只能有一个当前入口。兼容期需要用户批准，并由对应 contract tests 覆盖。
 
 ## 层边界
 

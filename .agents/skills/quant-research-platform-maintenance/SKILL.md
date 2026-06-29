@@ -11,7 +11,7 @@ description: QRP 仓库维护 skill。用于 governance、handoff、contracts、
 
 - governance docs、agent instructions、prompt templates、handoff workflow
 - `verify_governance.py`、`verify_code_map_flow.py`、handoff builder/verifier
-- `tests/agents/**`、`tests/architecture/**`、retired-surface negative tests
+- `tests/agents/**`、`tests/architecture/**`、current-contract negative tests
 - docs hard cutover、open issues、REVIEW_SAFE evidence
 - current-contract-only、private data safety、PASS taxonomy
 
@@ -50,7 +50,7 @@ references/tooling-and-portability.md
 references/prompt-patterns.md
 ```
 
-只读相关文件，不要为了“全面”把所有 docs、old reports 或 `.run/` 全量读入上下文。
+只读相关文件，不要为了“全面”把所有 docs、archived reports 或 `.run/` 全量读入上下文。
 
 ## 3. 当前分层事实
 
@@ -58,7 +58,7 @@ references/prompt-patterns.md
 
 运行结果合同是 `<run_root>/run.json`、`data/`、`outputs/<output_id>/`、`logs/` 和 `summary.md`。QRP-owned JSON 必须是 object，并使用不带版本后缀的 `schema_id`。compare 默认按 `output_id` 配对。状态聚合只由 `policy/check_status.py` 定义；`governance_contract.py` 只拥有扫描规则。
 
-`.agents` 是 tracked tooling source。`.run` 是 output/evidence layer。禁止把 `.run` 作为官方工具入口。
+`.agents` 是 tracked tooling source。`.run` 是 output/evidence layer；官方工具入口留在 tracked source 中。
 
 ## 4. 验证纪律
 
@@ -72,7 +72,7 @@ references/prompt-patterns.md
 .agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
 ```
 
-`verify_governance.py`、handoff source-tree scan、handoff verifier 和相关 tests 必须引用该事实源或由它派生规则。retired governance paths 存在即 `FAIL`。retired public surface、retired naming、path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、negative-test allowlist、source-tree scan allowlist 和 package forbidden path parts 不得在 builder、verifier 或 tests 中复制平行表。
+`verify_governance.py`、handoff source-tree scan、handoff verifier 和相关 tests 必须引用该事实源或由它派生规则。current-contract-only 规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 只从该事实源读取或派生。
 
 建议命令：
 
@@ -80,17 +80,15 @@ references/prompt-patterns.md
 git diff --check
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
-python -m pytest tests/agents tests/architecture -q
+python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
 ```
 
-需要区分 fast 与依赖慢集成测试时，使用：
-
-```bash
-python -m pytest tests/architecture/test_share_safe_evidence.py -q
-python -m pytest tests/architecture/test_share_safe_evidence_data_contract.py -q -m data_dependency
-python -m pytest tests/agents/handoff tests/architecture/test_handoff_package_contract.py -q -m "not slow_integration"
-python -m pytest tests/agents/handoff/test_build_handoff_package_integration.py -q -m slow_integration
-```
+需要区分 fast、contract、architecture、integration 和 mutation 时，使用
+`tests/tools/run_profile.py` 的 profile，不要在 skill 中复制 pytest marker
+expression。fast/contract 用于日常收口；integration 和 mutation 必须显式选择，
+并由对应 profile 承载。负向测试放在 owner layer：handoff 与 validation
+evidence 放 `tests/agents/handoff/`，governance current-contract surface 放
+`tests/agents/` 或 `tests/architecture/`，import boundary 放 `tests/architecture/`。
 
 ## 5. Handoff 纪律
 
@@ -100,15 +98,15 @@ handoff scripts 位于：
 .agents/skills/quant-research-platform-maintenance/scripts/handoff/
 ```
 
-`verify_handoff_package.py` 是唯一 handoff/package verifier。builder 只 build 并调用 verifier，不定义 sanitizer、forbidden member、private regex 或状态聚合规则。handoff artifact 输出到 `.run/` 或用户指定输出目录，不得把 `.run/` 中的历史产物当当前合同。
+`verify_handoff_package.py` 是唯一 handoff/package verifier。builder 只 build 并调用 verifier，不定义 sanitizer、package member safety、private regex 或状态聚合规则。handoff artifact 输出到 `.run/` 或用户指定输出目录，当前合同来自本轮实际生成和验证的 artifact。
 
 `.agents/` 只承载 governance、handoff 和 prompt tooling；runtime 业务逻辑必须留在 `src/quant_research_platform/` 的 owner layer。
 
 ## 6. 修改边界
 
-修改 docs 时，如果删除或改名 active docs，必须同步修治理脚本和测试。不要为了让测试继续通过而恢复过期事实源。
+修改 docs 时，如果删除或改名 active docs，必须同步修治理脚本和测试。测试修复不能通过恢复被替换事实源完成。
 
-修脚本时，优先修 state-based scan 和测试覆盖。业务逻辑文件默认禁止修改，除非用户明确授权或当前任务本身要求迁移业务层边界。
+修脚本时，优先修 state-based scan 和测试覆盖。业务逻辑文件默认留在任务范围外，除非用户明确授权或当前任务本身要求迁移业务层边界。
 
 ## 7. 结束报告
 

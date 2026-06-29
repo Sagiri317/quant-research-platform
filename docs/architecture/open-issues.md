@@ -19,7 +19,7 @@ Status: open / deferred
 Evidence:
 Next action:
 Acceptance gate:
-Forbidden scope:
+Scope boundary:
 ```
 
 ## P0 Current Blockers
@@ -32,7 +32,23 @@ Forbidden scope:
 
 ## P2 Deferred
 
-暂无。
+ID: reports-storage-dataset-boundary
+Severity: P2
+Owner layer: reports / workflows
+Status: deferred
+Evidence: `src/quant_research_platform/reports/verification_summary.py` and `src/quant_research_platform/reports/schema_inventory.py` currently import `quant_research_platform.storage.datasets`.
+Next action: move dataset inspection to workflow or diagnostics owner, then pass only prepared payloads into reports rendering.
+Acceptance gate: enable reports -> storage.datasets import boundary in owner-layer architecture tests without changing public report schema or workflow semantics.
+Scope boundary: do not change report schema or workflow semantics without explicit approval.
+
+ID: ml-validation-and-trial-contract-owner
+Severity: P2
+Owner layer: research / architecture
+Status: deferred
+Evidence: current model helpers own supervised fitting metadata and deterministic estimator dispatch, but no validation split or trial selection contract owner exists yet.
+Next action: when validation and trial selection primitives are introduced, add owner-layer tests for train/validation/test date ordering, asset-date disjointness, test-metric exclusion from best-trial selection, and seeded trial sequence determinism.
+Acceptance gate: contract tests derive expected behavior from the selected owner primitives without adding a tuning framework in tests.
+Scope boundary: do not introduce a tuning framework, DL dependency, public registry, or model registry as part of a test-speed guardrail goal.
 
 ## P3 Watchlist
 

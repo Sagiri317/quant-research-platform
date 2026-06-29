@@ -8,7 +8,7 @@
 2. 读取 `AGENTS.md`、`repo-map.md`、`user-principles.md`。
 3. 判断任务 owner layer。
 4. 只读取相关 references 和 docs。
-5. 生成 plan，列出 allowed scope 和 forbidden scope。
+5. 生成 plan，列出 allowed scope 和 scope boundary。
 6. 执行最小修改和最小充分验证。
 
 ## 2. Owner Layer
@@ -16,7 +16,7 @@
 ```text
 docs-governance     AGENTS、README、docs、references、open issues
 agent-tooling       .agents scripts、handoff、governance checks
-architecture-tests  tests/agents、tests/architecture、retired-surface tests
+architecture-tests  tests/agents、tests/architecture、current-contract tests
 research-contract   contracts、schemas、catalog、research docs
 business-runtime    src 中 factor/model/evaluate/portfolio/storage 等业务逻辑
 ```
@@ -31,7 +31,7 @@ business-runtime    src 中 factor/model/evaluate/portfolio/storage 等业务逻
 
 ### docs-cutover
 
-删除过期文档，合并重复事实源，重写当前合同文档。若测试或脚本引用旧文档，后续必须修脚本和测试，不得恢复旧文档。
+合并重复事实源，重写当前合同文档。若测试或脚本引用被替换文档，后续必须修脚本和测试。
 
 ### governance-script-fix
 
@@ -54,7 +54,7 @@ business-runtime    src 中 factor/model/evaluate/portfolio/storage 等业务逻
 遇到以下情况应停止并报告：
 
 - 用户指令与仓库合同冲突。
-- patch 触碰 forbidden scope。
+- patch 越过 scope boundary。
 - 需要 private data 才能继续。
 - 验证命令无法运行且没有可接受替代。
 - 文档要求恢复已删除的状态事实源。

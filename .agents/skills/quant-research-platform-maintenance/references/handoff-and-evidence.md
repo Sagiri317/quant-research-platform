@@ -18,7 +18,7 @@ handoff 至少包含：
 
 1. builder：构建 bundle，写入必要 manifest、sidecar、metadata 和 evidence，并调用 verifier。
 2. verifier：唯一 handoff/package verifier，验证 bundle、manifest/hash、zip member、sidecar、source-tree scan 和 share-safety。
-3. source-tree scan：扫描当前源码树是否含 retired surface 或 forbidden current-contract surface；规则来自 `governance_contract.py`。
+3. source-tree scan：扫描当前源码树是否符合 current-contract-only 规则；规则来自 `governance_contract.py`。
 4. policy share safety：文本、JSON、路径和 zip member 的共享安全规则来自 `policy/share_safety.py`。
 
 这些结果不能互相替代。builder 应 fail fast，不能先写出非法 artifact 再依赖 verifier 补救。handoff gate 只依据本轮实际运行的独立检查。

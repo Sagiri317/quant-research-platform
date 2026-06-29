@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import ast
 import inspect
 from pathlib import Path
+
+from tests.helpers.import_graph import ImportEdge, import_edges_under
 
 PROJECT_SRC = Path("src/quant_research_platform")
 
@@ -77,51 +78,59 @@ KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS = {
 KNOWN_IMPORT_BOUNDARY_ALLOWLIST = set(KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS)
 
 
-def test_contracts_do_not_import_upper_layers() -> None:
+def test_contracts_do_not_import_upper_layers(
+    import_edges: tuple[ImportEdge, ...],
+) -> None:
     hits = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(PROJECT_SRC / "contracts")
-        if module.startswith(FORBIDDEN_CONTRACT_IMPORT_PREFIXES)
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_under(import_edges, PROJECT_SRC / "contracts")
+        if edge.module.startswith(FORBIDDEN_CONTRACT_IMPORT_PREFIXES)
     ]
 
     assert not hits, "contracts_import_boundary_violation: " + "; ".join(hits)
 
 
-def test_reports_do_not_import_compute_research_workflows_or_interfaces() -> None:
+def test_reports_do_not_import_compute_research_workflows_or_interfaces(
+    import_edges: tuple[ImportEdge, ...],
+) -> None:
     hits = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(PROJECT_SRC / "reports")
-        if module.startswith(FORBIDDEN_REPORT_IMPORT_PREFIXES)
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_under(import_edges, PROJECT_SRC / "reports")
+        if edge.module.startswith(FORBIDDEN_REPORT_IMPORT_PREFIXES)
     ]
 
     assert not hits, "reports_import_boundary_violation: " + "; ".join(hits)
 
 
-def test_research_only_imports_generic_market_session_windows() -> None:
+def test_research_only_imports_generic_market_session_windows(
+    import_edges: tuple[ImportEdge, ...],
+) -> None:
     hits = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(PROJECT_SRC / "research")
-        if module.startswith(FORBIDDEN_RESEARCH_IMPORT_PREFIXES)
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_under(import_edges, PROJECT_SRC / "research")
+        if edge.module.startswith(FORBIDDEN_RESEARCH_IMPORT_PREFIXES)
     ]
 
     assert not hits, "research_import_boundary_violation: " + "; ".join(hits)
 
 
-def test_runtime_does_not_import_reports() -> None:
+def test_runtime_does_not_import_reports(import_edges: tuple[ImportEdge, ...]) -> None:
     hits = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(PROJECT_SRC / "runtime")
-        if module.startswith(FORBIDDEN_RUNTIME_IMPORT_PREFIXES)
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_under(import_edges, PROJECT_SRC / "runtime")
+        if edge.module.startswith(FORBIDDEN_RUNTIME_IMPORT_PREFIXES)
     ]
 
     assert not hits, "runtime_report_import_boundary_violation: " + "; ".join(hits)
 
 
-def test_runtime_tests_do_not_import_reports() -> None:
+def test_runtime_tests_do_not_import_reports(
+    import_edges: tuple[ImportEdge, ...],
+) -> None:
     hits = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(Path("tests/runtime"))
-        if module.startswith(FORBIDDEN_RUNTIME_IMPORT_PREFIXES)
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_under(import_edges, Path("tests/runtime"))
+        if edge.module.startswith(FORBIDDEN_RUNTIME_IMPORT_PREFIXES)
     ]
 
     assert not hits, "runtime_test_report_import_boundary_violation: " + "; ".join(hits)
@@ -145,7 +154,7 @@ def test_runtime_recorders_do_not_expose_artifact_writers() -> None:
     assert "quant_research_platform.storage.atomic" not in source
 
 
-def test_session_window_owner_is_unique() -> None:
+def test_session_window_owner_is_unique(import_edges: tuple[ImportEdge, ...]) -> None:
     owner = PROJECT_SRC / "markets" / "session_windows.py"
     retired = PROJECT_SRC / "markets" / "calendars.py"
 
@@ -153,17 +162,22 @@ def test_session_window_owner_is_unique() -> None:
     assert not retired.exists()
     imports = [
         f"{path}:{lineno}"
-        for path, lineno, module in _iter_imports(PROJECT_SRC)
+        for path, lineno, module in (
+            (edge.path, edge.lineno, edge.module)
+            for edge in import_edges_under(import_edges, PROJECT_SRC)
+        )
         if module == "quant_research_platform.markets.calendars"
     ]
     assert not imports, "retired_markets_calendars_import: " + "; ".join(imports)
 
 
-def test_known_cross_layer_imports_are_explicitly_allowlisted() -> None:
+def test_known_cross_layer_imports_are_explicitly_allowlisted(
+    import_edges: tuple[ImportEdge, ...],
+) -> None:
     found = {
-        (path.as_posix(), module)
-        for path, _lineno, module in _iter_imports(PROJECT_SRC)
-        if _is_selected_boundary(path, module)
+        (edge.path.as_posix(), edge.module)
+        for edge in import_edges_under(import_edges, PROJECT_SRC)
+        if _is_selected_boundary(edge.path, edge.module)
     }
     unclassified = sorted(found - KNOWN_IMPORT_BOUNDARY_ALLOWLIST)
     stale = sorted(KNOWN_IMPORT_BOUNDARY_ALLOWLIST - found)
@@ -184,13 +198,15 @@ def test_known_cross_layer_import_allowlist_entries_have_reasons() -> None:
     )
 
 
-def test_profiles_research_is_the_only_interface_composition_root() -> None:
+def test_profiles_research_is_the_only_interface_composition_root(
+    import_edges: tuple[ImportEdge, ...],
+) -> None:
     profiles_path = PROJECT_SRC / "profiles" / "research.py"
     services_path = PROJECT_SRC / "interfaces" / "services.py"
 
     assert profiles_path.exists(), "catalog_profiles_missing"
     assert {
-        module for _path, _lineno, module in _iter_imports(profiles_path)
+        edge.module for edge in import_edges_under(import_edges, profiles_path)
     }.issuperset(
         {
             "quant_research_platform.markets.implementations.a_share.processed",
@@ -202,9 +218,9 @@ def test_profiles_research_is_the_only_interface_composition_root() -> None:
     assert "research_profile" in profiles_source
     assert "local_a_share_csmar_catalogs" not in profiles_source
     interface_market_imports = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(PROJECT_SRC / "interfaces")
-        if module.startswith("quant_research_platform.markets.implementations")
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_under(import_edges, PROJECT_SRC / "interfaces")
+        if edge.module.startswith("quant_research_platform.markets.implementations")
     ]
 
     assert services_path.exists()
@@ -212,19 +228,6 @@ def test_profiles_research_is_the_only_interface_composition_root() -> None:
         "interfaces_market_implementation_import: "
         + "; ".join(interface_market_imports)
     )
-
-
-def _iter_imports(root: Path) -> tuple[tuple[Path, int, str], ...]:
-    imports: list[tuple[Path, int, str]] = []
-    paths = (root,) if root.is_file() else tuple(sorted(root.rglob("*.py")))
-    for path in paths:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module is not None:
-                imports.append((path, node.lineno, node.module))
-            elif isinstance(node, ast.Import):
-                imports.extend((path, node.lineno, alias.name) for alias in node.names)
-    return tuple(imports)
 
 
 def _is_selected_boundary(path: Path, module: str) -> bool:

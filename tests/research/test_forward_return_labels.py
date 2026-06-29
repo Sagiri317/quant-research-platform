@@ -4,6 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.markets.implementations.a_share.labels import (
+    calculations as a_share_label_calculations,
+)
 from quant_research_platform.markets.implementations.a_share.labels.definitions import (
     label_catalog,
 )
@@ -106,3 +109,55 @@ def test_label_catalog_horizons_mask_invalid_entry() -> None:
     assert pd.isna(result.loc[0, one_step_label])
     assert result.loc[1, one_step_label] == pytest.approx(expected)
     assert not np.isinf(result.loc[:, label_columns].to_numpy(dtype="float64")).any()
+
+
+@pytest.mark.parametrize(
+    "definition",
+    sorted(label_catalog().list(), key=lambda item: item.horizon),
+    ids=lambda definition: definition.output_column,
+)
+def test_label_definition_window_uses_future_rows_without_later_leakage(
+    definition,
+) -> None:
+    sessions = definition.lookahead + 4
+    decision_index = 2
+    entry_index = decision_index + 1
+    exit_index = decision_index + definition.lookahead
+    after_exit_index = exit_index + 1
+    panel = make_synthetic_market_panel(sessions=sessions, assets=("asset_a",))
+    ordered = panel.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
+    label_column = definition.output_column
+
+    baseline = a_share_label_calculations.calculate_labels_for_panel(
+        ordered,
+        definitions=(definition,),
+    )
+    after_exit_noise = ordered.copy()
+    after_exit_noise.loc[after_exit_index:, "adj_open"] = (
+        after_exit_noise.loc[after_exit_index:, "adj_open"] * 11.0
+    )
+    exit_noise = ordered.copy()
+    exit_noise.loc[exit_index, "adj_open"] = (
+        exit_noise.loc[exit_index, "adj_open"] * 3.0
+    )
+    later = a_share_label_calculations.calculate_labels_for_panel(
+        after_exit_noise,
+        definitions=(definition,),
+    )
+    changed = a_share_label_calculations.calculate_labels_for_panel(
+        exit_noise,
+        definitions=(definition,),
+    )
+
+    decision_timestamp = ordered.loc[decision_index, "timestamp"]
+    entry_timestamp = ordered.loc[entry_index, "timestamp"]
+    exit_timestamp = ordered.loc[exit_index, "timestamp"]
+    assert entry_timestamp > decision_timestamp
+    assert exit_timestamp > decision_timestamp
+    assert baseline.loc[decision_index, "timestamp"] == decision_timestamp
+    assert later.loc[decision_index, label_column] == pytest.approx(
+        baseline.loc[decision_index, label_column]
+    )
+    assert changed.loc[decision_index, label_column] != pytest.approx(
+        baseline.loc[decision_index, label_column]
+    )

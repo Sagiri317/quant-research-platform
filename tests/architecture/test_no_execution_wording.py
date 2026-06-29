@@ -13,7 +13,9 @@ def test_workflow_run_policy_replaces_retired_action_contract() -> None:
     assert not Path("src/quant_research_platform/contracts/workflow_run.py").exists()
 
 
-def test_runtime_workflow_outputs_do_not_use_action_wording() -> None:
+def test_runtime_workflow_outputs_do_not_use_action_wording(
+    repo_python_files: tuple[Path, ...],
+) -> None:
     action_word = "exec" + "ute"
     dry_run = "dry" + "-run"
     forbidden = re.compile(
@@ -27,17 +29,19 @@ def test_runtime_workflow_outputs_do_not_use_action_wording() -> None:
         Path("tests/architecture/test_no_execution_wording.py"),
     }
     hits: list[str] = []
-    for root in (
-        Path("src/quant_research_platform/workflows"),
-        Path("src/quant_research_platform/contracts"),
-        Path("tests/workflows"),
-    ):
-        for path in root.rglob("*.py"):
-            if path in allowed_paths:
-                continue
-            text = path.read_text(encoding="utf-8")
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                if forbidden.search(line) or "WorkflowRun" + "Mode" in line:
-                    hits.append(f"{path}:{line_number}: {line.strip()}")
+    roots = (
+        "src/quant_research_platform/workflows/",
+        "src/quant_research_platform/contracts/",
+        "tests/workflows/",
+    )
+    for path in repo_python_files:
+        if path in allowed_paths:
+            continue
+        if not path.as_posix().startswith(roots):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if forbidden.search(line) or "WorkflowRun" + "Mode" in line:
+                hits.append(f"{path}:{line_number}: {line.strip()}")
 
     assert hits == []

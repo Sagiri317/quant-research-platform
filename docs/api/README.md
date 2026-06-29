@@ -20,7 +20,7 @@ GET  /api/0.1/catalog/labels
 GET  /api/0.1/research-datasets/{dataset_id}/requirements
 ```
 
-`/api/0.1` 是当前合法 API 版本面。带 `v` 前缀的 `0.1` API 版本路径不是当前 API 形式，只允许出现在治理规则定义或 negative tests 中。
+`/api/0.1` 是当前合法 API 版本面。版本面边界由治理规则和对应 tests 控制。
 
 当前 public CLI 只有：
 
@@ -63,6 +63,6 @@ API 相关变更必须至少说明：
 - error contract
 - privacy impact
 - tests
-- backward compatibility decision
+- compatibility decision
 
-默认不保留旧字段兼容，除非用户批准兼容期。
+兼容期需要用户批准，并由对应 contract tests 覆盖。

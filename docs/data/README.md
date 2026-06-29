@@ -1,6 +1,6 @@
 # Data Contract
 
-本目录描述数据目录和数据安全规则。
+本目录描述数据目录和数据安全边界。
 
 ## 基本规则
 
@@ -37,11 +37,11 @@ data/<layer>/<dataset>/_manifest/manifest.json
 - artifact path structure
 - summary statistics without private rows
 
-相关测试分层：
+可用测试 profile 由 runner 输出，执行时传入 profile 名称：
 
 ```bash
-python -m pytest tests/architecture/test_share_safe_evidence.py -q
-python -m pytest tests/architecture/test_share_safe_evidence_data_contract.py -q -m data_dependency
+python tests/tools/run_profile.py --list-profiles
+python tests/tools/run_profile.py --profile <profile> --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
 ```
 
 ## Agent 规则

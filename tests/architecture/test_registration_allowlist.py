@@ -15,10 +15,12 @@ GENERIC_CATALOG_BOOTSTRAP_FORBIDDEN_FILES = {
 }
 
 
-def test_generic_catalogs_do_not_define_bootstrap_defaults() -> None:
+def test_generic_catalogs_do_not_define_bootstrap_defaults(
+    ast_trees: dict[Path, ast.AST],
+) -> None:
     hits = [
         f"{path}:{lineno}"
-        for path, lineno in _iter_bootstrap_default_definitions()
+        for path, lineno in _iter_bootstrap_default_definitions(ast_trees)
         if path.as_posix() in GENERIC_CATALOG_BOOTSTRAP_FORBIDDEN_FILES
     ]
 
@@ -27,7 +29,9 @@ def test_generic_catalogs_do_not_define_bootstrap_defaults() -> None:
     )
 
 
-def test_workflow_registry_uses_run_policy_factory() -> None:
+def test_workflow_registry_uses_run_policy_factory(
+    ast_trees: dict[Path, ast.AST],
+) -> None:
     """validate_only is official; write_artifacts fails closed until it lands.
 
     Future artifact writing support must use workflow_node_registry(run_policy=...)
@@ -35,7 +39,7 @@ def test_workflow_registry_uses_run_policy_factory() -> None:
     validate-only factories.
     """
 
-    tree = ast.parse(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    tree = ast_trees[WORKFLOW_REGISTRY]
     top_level_functions = {
         node.name for node in tree.body if isinstance(node, ast.FunctionDef)
     }
@@ -67,10 +71,13 @@ def test_active_workflow_code_avoids_public_fixture_factory_names() -> None:
     assert not hits, "workflow_public_fixture_name_found: " + "; ".join(hits)
 
 
-def _iter_bootstrap_default_definitions() -> tuple[tuple[Path, int], ...]:
+def _iter_bootstrap_default_definitions(
+    ast_trees: dict[Path, ast.AST],
+) -> tuple[tuple[Path, int], ...]:
     found: list[tuple[Path, int]] = []
-    for path in sorted(PROJECT_SRC.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for path, tree in ast_trees.items():
+        if not path.as_posix().startswith(PROJECT_SRC.as_posix() + "/"):
+            continue
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "bootstrap_default":
                 found.append((path, node.lineno))

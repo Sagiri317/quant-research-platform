@@ -224,7 +224,7 @@ def test_price_volume_qrp_moment_contract_edge_windows() -> None:
     assert pd.isna(asset_a_rows.loc[19, "skew_20d"])
     assert pd.isna(asset_a_rows.loc[19, "kurt_20d"])
     assert asset_a_rows.loc[24:44, "vol_20d"].notna().all()
-    assert asset_a_rows.loc[24:44, ("skew_20d", "kurt_20d")].isna().all().all()
+    assert asset_a_rows.loc[24:44, ["skew_20d", "kurt_20d"]].isna().all().all()
 
 
 def test_price_volume_moments_apply_qrp_near_zero_policy() -> None:
@@ -265,9 +265,9 @@ def test_price_volume_moments_apply_qrp_near_zero_policy() -> None:
     asset_a_rows = ordered[ordered["asset_id"].eq("asset_a")].reset_index(drop=True)
     asset_b_rows = ordered[ordered["asset_id"].eq("asset_b")].reset_index(drop=True)
     assert pd.notna(asset_a_rows.loc[4, "vol_5d"])
-    assert asset_a_rows.loc[4, ("skew_5d", "kurt_5d")].isna().all()
+    assert asset_a_rows.loc[4, ["skew_5d", "kurt_5d"]].isna().all()
     assert asset_b_rows.loc[4, "vol_5d"] > 0.0
-    assert asset_b_rows.loc[4, ("skew_5d", "kurt_5d")].isna().all()
+    assert asset_b_rows.loc[4, ["skew_5d", "kurt_5d"]].isna().all()
 
 
 def test_price_volume_moments_use_qrp_formula_above_near_zero_threshold() -> None:
@@ -291,7 +291,7 @@ def test_price_volume_moments_use_qrp_formula_above_near_zero_threshold() -> Non
         reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
     )
     ordered = result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
-    assert ordered.loc[4, ("skew_5d", "kurt_5d")].notna().all()
+    assert ordered.loc[4, ["skew_5d", "kurt_5d"]].notna().all()
 
 
 def test_price_volume_well_conditioned_moments_cross_check_pandas() -> None:

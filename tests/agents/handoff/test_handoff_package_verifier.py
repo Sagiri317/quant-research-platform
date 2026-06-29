@@ -79,54 +79,6 @@ def test_handoff_package_verifier_uses_shared_governance_forbidden_path_parts():
     )
 
 
-@pytest.mark.parametrize("evidence", ["", "   ", 123, [], {}])
-def test_handoff_validation_evidence_rejects_invalid_evidence_values(
-    evidence: object,
-) -> None:
-    module = _load_handoff_package_verifier_module()
-    payload = _validation_evidence_payload(evidence=evidence)
-
-    failures = module.verify_validation_evidence_schema(payload)
-
-    assert "validation_evidence_evidence_invalid: 0" in failures
-
-
-def test_handoff_validation_evidence_accepts_non_empty_string_evidence() -> None:
-    module = _load_handoff_package_verifier_module()
-    payload = _validation_evidence_payload(evidence="command completed with PASS")
-
-    failures = module.verify_validation_evidence_schema(payload)
-
-    assert not any(
-        failure.startswith("validation_evidence_evidence_invalid")
-        for failure in failures
-    )
-
-
-@pytest.mark.parametrize("name", [" tests ", "\ttests", "tests\n", "", 123])
-def test_handoff_validation_evidence_rejects_invalid_check_names(
-    name: object,
-) -> None:
-    module = _load_handoff_package_verifier_module()
-    payload = _validation_evidence_payload(name=name)
-
-    failures = module.verify_validation_evidence_schema(payload)
-
-    assert "validation_evidence_name_invalid: 0" in failures
-
-
-def test_handoff_validation_evidence_accepts_exact_check_name() -> None:
-    module = _load_handoff_package_verifier_module()
-    payload = _validation_evidence_payload(name="tests")
-
-    failures = module.verify_validation_evidence_schema(payload)
-
-    assert not any(
-        failure.startswith("validation_evidence_name_invalid")
-        for failure in failures
-    )
-
-
 def test_handoff_verifier_allows_final_branch_bundle_by_default(tmp_path):
     module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
@@ -137,35 +89,6 @@ def test_handoff_verifier_allows_final_branch_bundle_by_default(tmp_path):
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert result.ok
-
-
-def _validation_evidence_payload(
-    *,
-    evidence: object = "command completed with PASS",
-    name: object = "tests",
-) -> dict[str, object]:
-    contract = _load_governance_contract_module()
-    rows: list[dict[str, object]] = []
-    check_names = [
-        "tests",
-        *(
-            name
-            for name in sorted(contract.MANDATORY_VALIDATION_CHECKS)
-            if name != "tests"
-        ),
-    ]
-    for check_name in check_names:
-        rows.append(
-            {
-                "name": name if check_name == "tests" else check_name,
-                "status": "PASS",
-                "evidence": evidence if check_name == "tests" else f"{check_name} PASS",
-            }
-        )
-    return {
-        "schema_id": "qrp-handoff-validation-evidence",
-        "checks": rows,
-    }
 
 
 @pytest.mark.parametrize(

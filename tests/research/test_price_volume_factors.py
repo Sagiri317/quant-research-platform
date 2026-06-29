@@ -8,6 +8,12 @@ import pytest
 
 from quant_research_platform.contracts.factors import FactorSet
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.markets.implementations.a_share.factors import (
+    calculations as a_share_factor_calculations,
+)
+from quant_research_platform.markets.implementations.a_share.factors import (
+    definitions as a_share_factor_definitions,
+)
 from quant_research_platform.markets.implementations.a_share.ids import (
     market_panel_data_id,
 )
@@ -365,6 +371,65 @@ def test_price_volume_standard_formula_matches_reference() -> None:
     )
 
 
+def test_a_share_factor_outputs_are_past_only_and_key_stable_from_registry() -> None:
+    panel = make_synthetic_factor_panel(
+        sessions=280,
+        assets=("asset_b", "asset_a"),
+    )
+    definitions = tuple(a_share_factor_definitions.factor_catalog().list())
+    output_columns = tuple(definition.output_column for definition in definitions)
+    required_inputs = tuple(
+        dict.fromkeys(
+            column
+            for definition in definitions
+            for column in definition.input_columns
+            if column not in {"market_id", "asset_id", "timestamp"}
+        )
+    )
+    baseline = a_share_factor_calculations.calculate_factors_for_panel(
+        panel,
+        definitions=definitions,
+    )
+    cutoff = panel["timestamp"].sort_values().unique()[260]
+
+    perturbed_future = panel.copy()
+    future_mask = perturbed_future["timestamp"].gt(cutoff)
+    for column in required_inputs:
+        perturbed_future.loc[future_mask, column] = (
+            pd.to_numeric(perturbed_future.loc[future_mask, column], errors="coerce")
+            * 7.0
+            + 3.0
+        )
+    with_future_noise = a_share_factor_calculations.calculate_factors_for_panel(
+        perturbed_future,
+        definitions=definitions,
+    )
+    shuffled_with_unrelated = panel.sample(frac=1.0, random_state=19).assign(
+        unrelated_context="ignored"
+    )
+    reshuffled = a_share_factor_calculations.calculate_factors_for_panel(
+        shuffled_with_unrelated,
+        definitions=definitions,
+    )
+
+    compare_columns = ["market_id", "asset_id", "timestamp", *output_columns]
+    baseline_past = _sorted_factor_output(
+        baseline.loc[baseline["timestamp"].le(cutoff), compare_columns]
+    )
+    future_noise_past = _sorted_factor_output(
+        with_future_noise.loc[
+            with_future_noise["timestamp"].le(cutoff),
+            compare_columns,
+        ]
+    )
+    pd.testing.assert_frame_equal(baseline_past, future_noise_past)
+    pd.testing.assert_frame_equal(
+        _sorted_factor_output(baseline.loc[:, compare_columns]),
+        _sorted_factor_output(reshuffled.loc[:, compare_columns]),
+    )
+    assert _key_set(baseline) == _key_set(panel)
+
+
 def test_price_volume_rolling_moments_are_chunk_start_invariant() -> None:
     panel = make_synthetic_factor_panel(
         sessions=260,
@@ -699,3 +764,14 @@ def _factor_panel_for_dates(dates) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _sorted_factor_output(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
+        drop=True
+    )
+
+
+def _key_set(frame: pd.DataFrame) -> set[tuple[object, object, object]]:
+    keys = frame.loc[:, ["market_id", "asset_id", "timestamp"]]
+    return set(keys.itertuples(index=False, name=None))

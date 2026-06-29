@@ -130,6 +130,28 @@ def test_factories_return_only_share_safe_unapproved_proposals() -> None:
     assert not workflow.approved
 
 
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        r"C:\private\dataset.csv",
+        "source_id=csmar",
+        "row sample: asset_id=000001 value=1.2",
+        "stock code 600519 has a high score",
+    ],
+)
+def test_factor_factory_rejects_share_unsafe_proposal_text(
+    unsafe_text: str,
+) -> None:
+    with pytest.raises(ProposalSafetyError):
+        propose_factor(
+            profile=research_profile(),
+            proposal_id="factor-proposal-unsafe-factory",
+            factor_id="unsafe_candidate",
+            rationale=unsafe_text,
+            input_columns=("close",),
+        )
+
+
 def test_factor_factory_rejects_unknown_input_columns() -> None:
     with pytest.raises(ValueError, match="unknown_factor_input_columns"):
         propose_factor(
@@ -218,18 +240,26 @@ def test_unregistered_factor_proposal_has_no_execution_or_persistence_surface() 
     assert not hasattr(proposal, "exec" + "ute")
     assert not hasattr(proposal, "persist")
     assert not hasattr(proposal, "to_workflow_node")
+    assert not hasattr(proposal, "output_scope")
+    assert not hasattr(proposal, "artifact_id")
 
 
-def test_factor_catalog_registers_valid_factor_proposal() -> None:
-    proposal = propose_factor(
-        profile=research_profile(),
-        proposal_id="factor-proposal-register",
-        factor_id="candidate_factor",
-        rationale="Candidate based on registered close field.",
-        input_columns=("close",),
-        output_columns=("candidate_factor",),
-        required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
+def test_human_approved_factor_proposal_can_be_registered_by_catalog_owner() -> None:
+    proposal = replace(
+        propose_factor(
+            profile=research_profile(),
+            proposal_id="factor-proposal-register",
+            factor_id="candidate_factor",
+            rationale="Candidate based on registered close field.",
+            input_columns=("close",),
+            output_columns=("candidate_factor",),
+            required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
+        ),
+        approved=True,
     )
+    require_human_approval(proposal)
+    assert proposal.approved
+
     catalog = FactorCatalog()
 
     definition = factor_definition_from_proposal(

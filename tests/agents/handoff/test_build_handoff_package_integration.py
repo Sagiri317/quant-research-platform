@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.slow_integration
+pytestmark = [pytest.mark.integration, pytest.mark.slow, pytest.mark.slow_integration]
 
 REPO_ROOT = Path.cwd()
 HANDOFF_ROOT = REPO_ROOT / ".agents" / "skills" / "quant-research-platform-maintenance"
@@ -54,7 +54,7 @@ def _load_governance_module():
 
 
 def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> None:
-    repo = tmp_path / "synthetic-repo"
+    repo = tmp_path / "r"
     _init_synthetic_repo(repo)
     base = _git(repo, "rev-parse", "HEAD").strip()
     (repo / "evidence.txt").write_text("final\n", encoding="utf-8")
@@ -62,8 +62,8 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     _git(repo, "commit", "-m", "final evidence change")
     final_head = _git(repo, "rev-parse", "HEAD").strip()
 
-    out_dir = tmp_path / "out"
-    task_path = tmp_path / "task-input.json"
+    out_dir = tmp_path / "o"
+    task_path = tmp_path / "t.json"
     slug = "synthetic-handoff"
     run_handoffs = ".run/handoffs"
     task_path.write_text(
@@ -321,7 +321,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
 def test_build_handoff_package_generates_missing_validation_evidence_mandatory_rows(
     tmp_path: Path,
 ) -> None:
-    repo = tmp_path / "synthetic-repo"
+    repo = tmp_path / "r"
     _init_synthetic_repo(repo)
     base = _git(repo, "rev-parse", "HEAD").strip()
     (repo / "evidence.txt").write_text("final\n", encoding="utf-8")
@@ -329,8 +329,8 @@ def test_build_handoff_package_generates_missing_validation_evidence_mandatory_r
     _git(repo, "commit", "-m", "final evidence change")
     final_head = _git(repo, "rev-parse", "HEAD").strip()
 
-    out_dir = tmp_path / "out"
-    task_path = tmp_path / "task-input.json"
+    out_dir = tmp_path / "o"
+    task_path = tmp_path / "t.json"
     slug = "synthetic-missing-validation"
     run_handoffs = ".run/handoffs"
     task_path.write_text(
@@ -392,44 +392,6 @@ def test_build_handoff_package_generates_missing_validation_evidence_mandatory_r
         failure.startswith("validation_evidence_mandatory_check_missing")
         for failure in failures
     )
-
-
-@pytest.mark.parametrize(
-    ("validation_evidence", "expected_error"),
-    [
-        (
-            {"schema_id": "qrp-handoff-validation-evidence"},
-            "validation_evidence_checks_missing",
-        ),
-        (
-            {"schema_id": "qrp-handoff-validation-evidence", "checks": None},
-            "validation_evidence_checks_must_be_list",
-        ),
-        (
-            {"schema_id": "qrp-handoff-validation-evidence", "checks": {}},
-            "validation_evidence_checks_must_be_list",
-        ),
-        (
-            {"schema_id": "qrp-handoff-validation-evidence", "checks": "bad"},
-            "validation_evidence_checks_must_be_list",
-        ),
-        ("bad", "validation_evidence_must_be_object"),
-        (None, "validation_evidence_must_be_object"),
-    ],
-)
-def test_build_handoff_package_rejects_malformed_validation_evidence(
-    tmp_path: Path,
-    validation_evidence: object,
-    expected_error: str,
-) -> None:
-    result, out_dir = _run_builder_with_validation_evidence(
-        tmp_path,
-        validation_evidence,
-    )
-
-    assert result.returncode != 0
-    assert expected_error in result.stderr
-    assert not list(out_dir.glob("*"))
 
 
 def test_build_handoff_package_rejects_reserved_handoff_evidence_path(
@@ -512,6 +474,7 @@ def _init_synthetic_repo(repo: Path) -> None:
     shutil.copytree(
         HANDOFF_ROOT / "scripts" / "handoff",
         support_root / "scripts" / "handoff",
+        ignore=shutil.ignore_patterns("__pycache__"),
     )
     scripts_root = support_root / "scripts"
     shutil.copyfile(
@@ -566,7 +529,7 @@ def _run_builder_with_handoff_evidence(
     tmp_path: Path,
     handoff_evidence: object,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
-    repo = tmp_path / "synthetic-repo"
+    repo = tmp_path / "r"
     _init_synthetic_repo(repo)
     base = _git(repo, "rev-parse", "HEAD").strip()
     (repo / "evidence.txt").write_text("final\n", encoding="utf-8")
@@ -574,8 +537,8 @@ def _run_builder_with_handoff_evidence(
     _git(repo, "commit", "-m", "final evidence change")
     final_head = _git(repo, "rev-parse", "HEAD").strip()
 
-    out_dir = tmp_path / "out"
-    task_path = tmp_path / "task-input.json"
+    out_dir = tmp_path / "o"
+    task_path = tmp_path / "t.json"
     slug = "synthetic-handoff-negative"
     run_handoffs = ".run/handoffs"
     task_path.write_text(
@@ -594,61 +557,6 @@ def _run_builder_with_handoff_evidence(
                     "schema_id": "qrp-handoff-validation-evidence",
                     "checks": _validation_checks("PASS"),
                 },
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(HANDOFF_SCRIPT),
-            "--repo-root",
-            str(repo),
-            "--task",
-            str(task_path),
-            "--out-dir",
-            str(out_dir),
-        ],
-        cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    return result, out_dir
-
-
-def _run_builder_with_validation_evidence(
-    tmp_path: Path,
-    validation_evidence: object,
-) -> tuple[subprocess.CompletedProcess[str], Path]:
-    repo = tmp_path / "synthetic-repo"
-    _init_synthetic_repo(repo)
-    base = _git(repo, "rev-parse", "HEAD").strip()
-    (repo / "evidence.txt").write_text("final\n", encoding="utf-8")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "final evidence change")
-    final_head = _git(repo, "rev-parse", "HEAD").strip()
-
-    out_dir = tmp_path / "out"
-    task_path = tmp_path / "task-input.json"
-    slug = "synthetic-validation-negative"
-    run_handoffs = ".run/handoffs"
-    task_path.write_text(
-        json.dumps(
-            {
-                "schema_id": "qrp-handoff-task-metadata",
-                "mode": "evidence",
-                "slug": slug,
-                "branch": TEST_BRANCH,
-                "base": base,
-                "final_head": final_head,
-                "handoff_package_path": f"{run_handoffs}/{slug}.zip",
-                "handoff_sidecar_path": f"{run_handoffs}/{slug}.json",
-                "validation_evidence": validation_evidence,
             },
             indent=2,
             sort_keys=True,

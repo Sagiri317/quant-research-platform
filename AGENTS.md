@@ -39,9 +39,11 @@ git branch -a
 
 `.agents/skills/quant-research-platform-maintenance/scripts/` 是 tracked governance tooling。handoff builder、verifier、single handoff verifier safety scan、governance check 等工具必须从这里读取。
 
-`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、retired governance paths、retired naming、retired path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
+`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
 
 `.run/` 只是 output layer 和 evidence layer。它可以保存运行产物、handoff zip、manifest、logs、reports、temporary evidence，但不能反向定义架构、合同、工具入口或当前状态。
+
+正式 pytest profile runner 位于 `tests/tools/run_profile.py`。`.run/` 只保存输出、临时文件、profile 和 handoff/review artifacts。测试入口保持 Python-only；`.ps1` 和 `.sh` 不属于官方测试入口层。测试 profile 的输出路径和临时路径必须通过参数指定，未运行项状态为 `NOT_RUN`。
 
 ## 5. 验证状态语义
 
@@ -68,13 +70,13 @@ pytest PASS、governance PASS、handoff verifier PASS、single handoff verifier 
 
 ## 7. current-contract-only
 
-QRP 采用 current-contract-only。普通 tests 只保护当前合同。retired 字段、路径、artifact 字段、执行模式、命名和兼容 alias 只能出现在 retired-surface negative tests 或明确 allowlist 中。除非用户批准兼容期，禁止 fallback read、silent drop、compatibility field 和 alias field。
+QRP 采用 current-contract-only。普通 tests 只保护当前合同；边界回归由对应 owner-layer negative tests 和治理 gate 控制。未经用户批准，禁止新增兼容读取、兼容字段、alias 字段或 silent drop。
 
-新实现应替代旧实现，不应并行保留两个语义相同的入口。确需并行时，必须说明语义差异、生命周期、owner layer 和未来收敛方式。
+新实现应替代被替换实现，不应并行保留两个语义相同的入口。确需并行时，必须说明语义差异、生命周期、owner layer 和未来收敛方式。
 
-Retired governance path rules are owned by `governance_contract.py` and enforced by `verify_governance`.
+Current-contract path rules are owned by `governance_contract.py` and enforced by `verify_governance`.
 
-Retired stage naming 不得以文件名、路径名、Python function/class/fixture/常量名、JSON/YAML/TOML key 或静态字符串拼接形式复活。合法版本面包括 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1`、`definition_version`、`workflow_version` 和 handoff `0.1` schema；带 `v` 前缀的 `0.1` API 版本路径不是当前 API 形式，只能出现在规则定义或 negative tests 中。QRP-owned generated JSON 顶层身份只使用 `schema_id`；Python internal model version 字段不能作为 generated JSON identity。
+版本面和命名规则由 `governance_contract.py`、owner-layer negative tests 和治理 gate 控制。QRP-owned generated JSON 顶层身份只使用 `schema_id`；Python internal model version 字段不能作为 generated JSON identity。
 
 ## 8. private safety
 
@@ -84,7 +86,7 @@ Retired stage naming 不得以文件名、路径名、Python function/class/fixt
 
 默认允许修改与任务直接相关的最小文件集合。修改 docs、governance scripts、handoff scripts、tests 时，必须同步更新相关验证。修改业务逻辑时，必须有用户明确授权。
 
-禁止为了让测试通过而恢复过期文档事实。遇到脚本引用 retired governance path 时，应修脚本和测试。
+禁止为了让测试通过而恢复被替换的文档事实。遇到脚本引用被替换的 governance path 时，应修脚本和测试。
 
 ## 10. 推荐验证命令
 
@@ -94,7 +96,7 @@ Retired stage naming 不得以文件名、路径名、Python function/class/fixt
 git diff --check
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
-python -m pytest tests/agents tests/architecture -q
+python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
 ```
 
 如果完整测试因环境或超时不可行，必须分段运行并明确写 `BLOCKED` 或 `NOT_RUN`。

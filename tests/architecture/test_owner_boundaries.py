@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from tests.helpers.import_graph import ImportEdge, import_edges_under
+
 PROJECT_SRC = Path("src/quant_research_platform")
 AGENTS_SRC = PROJECT_SRC / "agents"
 PROVIDER_BINDINGS = PROJECT_SRC / "catalog" / "provider_bindings.py"
@@ -28,14 +30,21 @@ FORBIDDEN_PROVIDER_BINDING_HELPERS = {
 }
 
 
-def test_agents_do_not_import_market_implementations() -> None:
+def test_agents_do_not_import_data_or_market_implementation_layers(
+    import_edges: tuple[ImportEdge, ...],
+) -> None:
+    blocked_prefixes = (
+        "quant_research_platform.storage",
+        "quant_research_platform.sources",
+        "quant_research_platform.markets.implementations",
+    )
     hits = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(AGENTS_SRC)
-        if module.startswith("quant_research_platform.markets.implementations")
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_under(import_edges, AGENTS_SRC)
+        if edge.module.startswith(blocked_prefixes)
     ]
 
-    assert not hits, "agent_market_implementation_import: " + "; ".join(hits)
+    assert not hits, "agent_data_layer_import: " + "; ".join(hits)
 
 
 def test_provider_bindings_catalog_remains_pure_container() -> None:
@@ -89,18 +98,6 @@ def test_workflow_and_interface_public_names_use_validate_only_wording() -> None
                         hits.append(f"{path}:{lineno}: {term}")
 
     assert not hits, "workflow_public_fixture_wording_found: " + "; ".join(hits)
-
-
-def _iter_imports(root: Path) -> tuple[tuple[Path, int, str], ...]:
-    imports: list[tuple[Path, int, str]] = []
-    for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module is not None:
-                imports.append((path, node.lineno, node.module))
-            elif isinstance(node, ast.Import):
-                imports.extend((path, node.lineno, alias.name) for alias in node.names)
-    return tuple(imports)
 
 
 def _referenced_names(tree: ast.Module) -> set[str]:

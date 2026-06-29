@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.mutation
+
 HANDOFF_TOOL_ROOT = (
     Path(".agents")
     / "skills"

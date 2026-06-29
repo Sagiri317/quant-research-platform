@@ -12,7 +12,7 @@
 
 ```bash
 git diff --check
-python -m pytest tests/agents tests/architecture -q
+python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 ```
@@ -23,39 +23,50 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 
 ## 文件路径
 
-公开文档和 evidence 使用 repo-relative path。禁止写入用户本地绝对路径、临时私有目录或供应商私有路径。
+公开文档和 evidence 使用 repo-relative path。用户本地绝对路径、临时私有目录和供应商私有路径留在 LOCAL_ONLY 边界内。
 
 ## 代码修改原则
 
 - 最小修改。
 - 同步测试。
-- 删除旧实现优先于并行保留。
+- 被替换实现优先收敛，不并行保留。
 - 不新增 public surface，除非用户批准。
-- 不为 retired artifact 字段提供隐式兼容。
+- artifact 字段兼容期需要用户批准。
 
 ## 测试职责
 
-普通 tests 保护当前合同。retired-surface negative tests 阻止禁用表面复活。
+普通 tests 保护当前合同。owner-layer negative tests 覆盖边界回归。
+
+测试分层由 `pyproject.toml` 的 pytest markers 和
+`tests/tools/run_profile.py` 的 profile 定义共同约束。文档不复制完整
+pytest expression。fast profile 只包含合同、架构和 REVIEW_SAFE owner tests；
+integration、mutation、slow、performance 和 local-data 测试由对应 profile
+显式选择。
+
+正式 profile runner 位于 `tests/tools/run_profile.py`。执行示例：
+`python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>`。
+
+`.run/` 只保存输出、profile、临时文件和 handoff/review artifacts，不作为
+tracked tool source。普通 `python -m pytest` 保持完整 pytest 语义；fast
+profile 由 runner 提供。
 
 ## 治理规则事实源
 
-`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。`verify_governance.py`、handoff source-tree scan、handoff verifier safety scan、single handoff verifier safety scan 和相关 tests 只能从这里读取或派生 active docs、retired paths、retired naming、path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token。
+`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。`verify_governance.py`、handoff source-tree scan、handoff verifier safety scan、single handoff verifier safety scan 和相关 tests 只从这里读取或派生 current-contract-only 规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token。
 
-Retired governance paths 不能复活；路径本身存在即 `FAIL`，不依赖文案关键词。
-
-Retired stage naming 不能通过文件名、路径名、Python symbol、JSON/YAML/TOML key 或静态字符串拼接复活。合法版本面使用 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1`、`definition_version` 和 `workflow_version`；QRP-owned JSON 使用不带版本后缀的 `schema_id`。带 `v` 前缀的 `0.1` API 版本路径只允许出现在规则定义或 negative tests。
+边界回归由 owner-layer negative tests 和治理 gate 记录为 `FAIL`，不依赖文案关键词。
 
 ## 运行结果与 JSON
 
-`<run_root>/run.json` 是运行级机器事实源，`<run_root>/summary.md` 是运行级人读摘要，实例结果位于 `<run_root>/outputs/<output_id>/`。QRP-owned JSON 必须是顶层 object，必须有 `schema_id`，不得把版本编码进 `schema_id`。
+`<run_root>/run.json` 是运行级机器事实源，`<run_root>/summary.md` 是运行级人读摘要，实例结果位于 `<run_root>/outputs/<output_id>/`。QRP-owned JSON 必须是顶层 object，必须有 `schema_id`，版本不编码进 `schema_id`。
 
 compare 按 `output_id` 配对，并使用 `output_definition_id` 与 metadata 做类型和语义校验。状态聚合只由 `policy/check_status.py` 定义。
 
 REVIEW_SAFE evidence tests 分为纯 synthetic fast gate 和 data/parquet contract gate：
 
 ```bash
-python -m pytest tests/architecture/test_share_safe_evidence.py -q
-python -m pytest tests/architecture/test_share_safe_evidence_data_contract.py -q -m data_dependency
+python tests/tools/run_profile.py --list-profiles
+python tests/tools/run_profile.py --profile <profile> --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
 ```
 
-handoff tests 分为 fast contract gate 和 slow integration gate；具体命令记录在 `README.md`、maintenance skill 和 verification reference 中。
+handoff tests 分为 fast contract、integration 和 mutation profiles；具体执行入口统一使用 `tests/tools/run_profile.py`。

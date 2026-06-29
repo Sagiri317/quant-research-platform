@@ -31,12 +31,12 @@ PY
 
 ## 4. Subagent 和 review-fix loop
 
-可以用 subagent 做只读扫描或分工 review，但最终责任在主 agent。subagent 结果必须被主 agent 复核，不得原样当事实。结束前必须汇总并关闭 subagent。
+可以用 subagent 做只读扫描或分工 review，但最终责任在主 agent。subagent 结果必须被主 agent 复核，不能原样当事实。结束前必须汇总并关闭 subagent。
 
 review-fix loop 应小步执行：scan → classify → patch → validate → rescan。不要在未确认 scope 前做大范围重构。
 
 ## 5. 禁止配置扩张
 
-未经用户批准，禁止新增 repo-local `.codex/`、global `.codex/`、hooks、MCP config、plugin runtime config、custom subagent runtime config。文档可以说明未来方向，但不能让当前任务默认启用这些机制。
+未经用户批准，禁止新增 repo-local `.codex/`、global `.codex/`、hooks、MCP config、plugin runtime config、custom subagent runtime config。文档可以说明未来方向，但当前任务默认不启用这些机制。
 
 `.agents/` 只承载治理、handoff 和 prompt tooling，不得承载 runtime 业务逻辑。

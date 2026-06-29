@@ -745,6 +745,81 @@ def test_simulation_uses_detailed_cost_config_when_provided() -> None:
     assert returns["net_portfolio_return"].round(6).tolist() == [0.0164, 0.0128]
 
 
+def test_cost_bps_monotonic_and_zero_cost_identity() -> None:
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+    zero_cost = simulate_long_short_returns(
+        _ranking_panel(),
+        spec,
+        top_quantile=1 / 3,
+        bottom_quantile=1 / 3,
+        cost_config=CostConfig(slippage_bps=0),
+        return_source_column="forward_return",
+    )
+    lower_cost = simulate_long_short_returns(
+        _ranking_panel(),
+        spec,
+        top_quantile=1 / 3,
+        bottom_quantile=1 / 3,
+        cost_config=CostConfig(slippage_bps=10),
+        return_source_column="forward_return",
+    )
+    higher_cost = simulate_long_short_returns(
+        _ranking_panel(),
+        spec,
+        top_quantile=1 / 3,
+        bottom_quantile=1 / 3,
+        cost_config=CostConfig(slippage_bps=20),
+        return_source_column="forward_return",
+    )
+
+    assert zero_cost["cost"].eq(0.0).all()
+    pd.testing.assert_series_equal(
+        zero_cost["net_portfolio_return"],
+        zero_cost["gross_portfolio_return"],
+        check_names=False,
+    )
+    assert (
+        higher_cost["net_portfolio_return"] <= lower_cost["net_portfolio_return"]
+    ).all()
+    assert (
+        lower_cost["net_portfolio_return"] <= zero_cost["net_portfolio_return"]
+    ).all()
+    assert (higher_cost["cost"] >= lower_cost["cost"]).all()
+
+
+def test_zero_turnover_rows_have_zero_cost() -> None:
+    positions = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-01", "2026-01-02"],
+            "asset": ["A", "A"],
+            "signal": ["factor", "factor"],
+            "position": [1.0, 1.0],
+        }
+    )
+
+    costs = calculate_cost_breakdown(
+        positions,
+        WeightConfig(),
+        CostConfig(slippage_bps=10, spread_bps=5),
+    )
+
+    second = costs.loc[costs["timestamp"].eq(pd.Timestamp("2026-01-02"))].iloc[0]
+    assert second["turnover"] == 0.0
+    assert second["total_cost"] == 0.0
+
+
+def test_long_short_positions_are_market_neutral_by_timestamp() -> None:
+    positions, _diagnostics = build_weighted_positions(
+        _ranking_panel(),
+        ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
+        WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+    )
+
+    net_weights = positions.groupby(["timestamp", "signal"])["position"].sum()
+
+    assert net_weights.abs().max() == pytest.approx(0.0)
+
+
 def test_simulation_does_not_build_timestamp_asset_label_lookup(monkeypatch) -> None:
     set_index_calls = 0
     original_set_index = pd.DataFrame.set_index
@@ -908,6 +983,8 @@ def test_summarize_performance_reports_common_portfolio_diagnostics() -> None:
     assert row["win_rate"] == pytest.approx(2 / 3)
     assert row["loss_rate"] == pytest.approx(1 / 3)
     assert row["sortino_like"] != 0
+    assert row["volatility_net_portfolio_return"] >= 0.0
+    assert row["downside_volatility"] >= 0.0
     assert row["profit_factor"] > 1
     assert row["average_win"] == pytest.approx((0.029 + 0.0385) / 2)
     assert row["average_loss"] == pytest.approx(-0.022)

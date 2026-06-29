@@ -42,14 +42,14 @@ from ._helpers import (
             "factor",
             "2014-08-29",
             TimeWindow("2014-01-02", "2014-02-28"),
-            marks=pytest.mark.private_slow,
+            marks=[pytest.mark.private_slow, pytest.mark.slow],
         ),
         pytest.param(
             "forward_returns",
             "label",
             "2014-08-29",
             TimeWindow("2014-01-02", "2014-02-28"),
-            marks=pytest.mark.private_slow,
+            marks=[pytest.mark.private_slow, pytest.mark.slow],
         ),
     ],
 )

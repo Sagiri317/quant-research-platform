@@ -58,7 +58,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_governa
 .agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
 ```
 
-active doc roots、retired governance paths、retired naming、retired path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token 必须从这里读取或派生。
+active doc roots、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 必须从这里读取或派生。
 
 ### Code-map gate
 
@@ -71,7 +71,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 ### Agent and architecture tests
 
 ```bash
-python -m pytest tests/agents tests/architecture -q
+python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
 ```
 
 如果完整运行超时，必须写 `BLOCKED` 并记录超时，可以补充分段运行结果。
@@ -82,9 +82,9 @@ active docs 的唯一可执行路径清单是 `governance_contract.ACTIVE_GOVERN
 
 active docs 只描述当前规则、职责、路径和命名。
 
-Retired governance paths 存在即 `FAIL`；完整路径规则只由 `governance_contract.py` 定义。
+current-contract-only 边界回归由 gate 记录为 `FAIL`；完整路径规则只由 `governance_contract.py` 定义。
 
-Retired stage naming 不能通过以下表面复活：
+命名边界扫描表面包括：
 
 ```text
 file/path names
@@ -94,18 +94,13 @@ static string concatenation or simple join synthesis
 active docs current-truth wording
 ```
 
-版本面规则：
-
-```text
-允许：QRP 0.1、0.1、0.1.0、/api/0.1、definition_version、workflow_version、无版本后缀的 schema_id
-禁止：带 `v` 前缀的 `0.1` API 版本路径，除非位于规则定义或 negative tests
-```
+版本面规则由 `governance_contract.py` 和对应 tests 控制。
 
 QRP-owned JSON 必须是顶层 object，必须包含 `schema_id`，且 `schema_id` 不编码版本。
 
-## 5. Retired surface
+## 5. Current-Contract Surface
 
-retired 字段、路径、artifact key 和 execution mode 只允许在 retired-surface negative tests 或明确 allowlist 中出现。allowlist 必须说明目的和移除条件。
+current-contract-only 边界由 owner-layer negative tests 或明确 allowlist 控制。allowlist 必须说明目的和移除条件。
 
 关键测试入口：
 
@@ -121,8 +116,8 @@ tests/contracts/test_platform_contracts.py
 handoff 测试分层入口：
 
 ```bash
-python -m pytest tests/agents/handoff tests/architecture/test_handoff_package_contract.py -q -m "not slow_integration"
-python -m pytest tests/agents/handoff/test_build_handoff_package_integration.py -q -m slow_integration
+python tests/tools/run_profile.py --list-profiles
+python tests/tools/run_profile.py --profile <profile> --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
 ```
 
 ## 6. Final report schema

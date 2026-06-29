@@ -403,13 +403,17 @@ LAYER_BOUNDARY_IMPORT_RULES = (
         "forbidden_prefixes": (
             "quant_research_platform.reports",
             "quant_research_platform.artifacts",
+            "quant_research_platform.sources",
         ),
     },
     {
         "root": "reports",
         "forbidden_prefixes": (
+            "quant_research_platform.compute",
             "quant_research_platform.research",
             "quant_research_platform.artifacts",
+            "quant_research_platform.workflows",
+            "quant_research_platform.interfaces",
             "quant_research_platform.markets.implementations",
             "quant_research_platform.storage.atomic",
         ),
@@ -419,6 +423,30 @@ LAYER_BOUNDARY_IMPORT_RULES = (
         "forbidden_prefixes": (
             "quant_research_platform.research",
             "quant_research_platform.reports",
+            "quant_research_platform.markets.implementations",
+        ),
+    },
+    {
+        "root": "agents",
+        "forbidden_prefixes": (
+            "quant_research_platform.storage",
+            "quant_research_platform.sources",
+            "quant_research_platform.markets.implementations",
+        ),
+    },
+    {
+        "root": "compute",
+        "forbidden_prefixes": (
+            "quant_research_platform.reports",
+            "quant_research_platform.artifacts",
+            "quant_research_platform.workflows",
+            "quant_research_platform.interfaces",
+        ),
+    },
+    {
+        "root": "interfaces",
+        "forbidden_prefixes": (
+            "quant_research_platform.sources",
             "quant_research_platform.markets.implementations",
         ),
     },

@@ -77,6 +77,25 @@ def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
     assert np.isfinite(predictions["prediction_score"]).any()
 
 
+def test_training_controls_leave_future_rows_out_of_fit_metadata() -> None:
+    frame = _model_frame()
+    spec = ModelSpec(
+        model_id="linear_regression_demo",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        input_feature_columns=("feature",),
+        label_column="label",
+        max_train_rows=4,
+        purge_gap_steps=1,
+    )
+
+    result = fit_model_result(frame, spec)
+
+    assert pd.Timestamp(result.metadata["train_end"]) < frame["timestamp"].max()
+    assert result.metadata["test_start"] is None
+    assert result.metadata["test_end"] is None
+
+
 def test_prediction_output_helpers_do_not_export_bundle_semantics() -> None:
     frame = _model_frame()
     spec = PredictionSpec(

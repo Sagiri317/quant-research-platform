@@ -29,10 +29,10 @@ QRP 是本地量化研究平台。它支持 research workflow，不支持 live e
 - 不保留 fallback read。
 - 不保留 alias field。
 - 不保留 compatibility field。
-- 不 silent drop 旧字段。
-- 普通 tests 不保护旧结构。
+- 不 silent drop 被替换字段。
+- 普通 tests 只保护当前合同。
 
-旧名和旧字段只允许出现在 retired-surface negative tests 或明确 allowlist 中。
+边界回归由 owner-layer negative tests 和治理 gate 控制。
 
 ## 5. `.agents` 与 `.run`
 

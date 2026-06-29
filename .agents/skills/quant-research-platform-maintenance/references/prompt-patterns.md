@@ -6,10 +6,10 @@
 
 ```text
 你是 QRP 的 Codex 执行者。
-先运行 live git baseline，不继承旧状态。
+先运行 live git baseline，只使用当前现场事实。
 任务目标：<目标>
 允许范围：<paths>
-禁止范围：<paths/actions>
+范围边界：<paths/actions>
 必须验证：<commands>
 最终报告：branch、HEAD、changed files、commands、status、remaining issues。
 ```
@@ -18,9 +18,9 @@
 
 ```text
 执行 QRP governance docs cutover。
-目标是删除过期状态文档、合并重复事实源、保留 current contract。
-不得恢复单独的状态文档或状态简报。
-应用 patch 后必须修仍引用旧文档的治理脚本和测试。
+目标是合并重复事实源、保留 current contract。
+单独的状态文档或状态简报不属于当前合同。
+应用 patch 后必须修仍引用被替换文档的治理脚本和测试。
 ```
 
 ## 3. Governance script fix
@@ -50,5 +50,5 @@ checked_files 为空不能 PASS。
 ## 6. Stop rule prompt
 
 ```text
-如果任务需要访问 private data、修改 forbidden scope、恢复过期状态文档、或把 NOT_RUN/BLOCKED 写成 PASS，立即停止并报告。
+如果任务需要访问 private data、越过范围边界、或把 NOT_RUN/BLOCKED 写成 PASS，立即停止并报告。
 ```
