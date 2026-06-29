@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 from tests.helpers.governance_fixtures import rule_form, text_rule_example
 
 
@@ -120,6 +122,8 @@ def test_handoff_source_tree_scan_rejects_retired_pr_body_renderer() -> None:
     assert "forbidden_render_pr_body" in patterns
 
 
+@pytest.mark.integration
+@pytest.mark.slow
 def test_retired_handoff_evidence_input_fields_fail_fast(
     tmp_path: Path,
 ) -> None:

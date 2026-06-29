@@ -31,7 +31,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 - 同步测试。
 - 被替换实现优先收敛，不并行保留。
 - 不新增 public surface，除非用户批准。
-- artifact 字段兼容期需要用户批准。
+- artifact 字段过渡期需要用户批准。
 
 ## 测试职责
 
@@ -49,8 +49,8 @@ before/after 对比，不写硬编码秒数阈值，不新增独立性能门禁�
 `python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>`。
 
 `.run/` 只保存输出、profile、临时文件和 handoff/review artifacts，不作为
-tracked tool source。普通 `python -m pytest` 保持完整 pytest 语义；fast
-profile 由 runner 提供。
+tracked tool source。普通 `python -m pytest` 默认排除 `slow` 和
+`requires_local_data`；完整收口使用 runner 的 `all` profile 显式选择。
 
 ## 治理规则事实源
 

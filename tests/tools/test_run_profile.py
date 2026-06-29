@@ -81,6 +81,19 @@ def test_profile_markers_are_declared_and_excluded_markers_have_profiles() -> No
     }
 
 
+def test_default_pytest_excludes_slow_and_local_data() -> None:
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    addopts = pyproject["tool"]["pytest"]["ini_options"]["addopts"]
+    marker_expression = " ".join(
+        option
+        for index, option in enumerate(addopts)
+        if option != "-m" and (index == 0 or addopts[index - 1] == "-m")
+    )
+
+    assert "not slow" in marker_expression
+    assert "not requires_local_data" in marker_expression
+
+
 def test_fast_profile_runs_pytest_with_repo_relative_paths_and_shell_false(
     tmp_path: Path,
     monkeypatch,

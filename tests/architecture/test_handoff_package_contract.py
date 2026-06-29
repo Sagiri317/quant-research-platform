@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from tests.helpers.governance_fixtures import (
     adjacent_string_assignment,
     derived_identifier,
@@ -191,6 +193,7 @@ def test_share_safety_retired_inventory_is_owner_allowlisted() -> None:
     ) in entries
 
 
+@pytest.mark.integration
 def test_source_tree_scan_rejects_retired_literal_in_ordinary_src_file(
     tmp_path: Path,
 ) -> None:
@@ -285,6 +288,7 @@ def test_unregistered_retired_negative_test_location_is_not_allowlisted() -> Non
     )
 
 
+@pytest.mark.integration
 def test_source_tree_scan_rejects_retired_literal_in_ordinary_test(
     tmp_path: Path,
 ) -> None:
@@ -343,6 +347,7 @@ def test_owner_approved_negative_fixture_uses_structured_allowlist() -> None:
     )
 
 
+@pytest.mark.integration
 def test_source_tree_scan_rejects_retired_governance_path_resurrection(
     tmp_path: Path,
 ) -> None:
@@ -365,6 +370,7 @@ def test_source_tree_scan_rejects_retired_governance_path_resurrection(
     ]
 
 
+@pytest.mark.integration
 def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> None:
     contract = _load_governance_contract()
     repo = tmp_path / "repo"
@@ -391,6 +397,7 @@ def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> No
     ]
 
 
+@pytest.mark.integration
 def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> None:
     contract = _load_governance_contract()
     repo = tmp_path / "repo"
@@ -423,6 +430,7 @@ def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> Non
     ]
 
 
+@pytest.mark.integration
 def test_source_tree_scan_independently_rejects_synthesized_strings(
     tmp_path: Path,
 ) -> None:
@@ -469,6 +477,7 @@ def test_source_tree_scan_independently_rejects_synthesized_strings(
     ) in observed
 
 
+@pytest.mark.integration
 def test_source_tree_scan_independently_rejects_python_symbols(
     tmp_path: Path,
 ) -> None:
@@ -545,6 +554,66 @@ def test_handoff_builder_does_not_own_sensitive_negative_rules() -> None:
     assert "source_tree_sensitive_negative_patterns" not in source
     assert "source_tree_scan_payload" in source
     assert "from governance_contract import" in source
+
+
+def test_advisory_review_checks_are_governance_contract_owned() -> None:
+    contract = _load_governance_contract()
+    builder = _load_handoff_builder()
+    verifier = _load_handoff_verifier()
+
+    assert builder.ADVISORY_REVIEW_CHECKS == contract.ADVISORY_VALIDATION_CHECKS
+    assert verifier.ADVISORY_REVIEW_CHECKS == contract.ADVISORY_VALIDATION_CHECKS
+
+    local_defs: list[str] = []
+    for path in (
+        HANDOFF_ROOT / "build_handoff_package.py",
+        HANDOFF_ROOT / "verify_handoff_package.py",
+    ):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (
+                        isinstance(target, ast.Name)
+                        and target.id == "ADVISORY_REVIEW_CHECKS"
+                    ):
+                        local_defs.append(f"{path}:{node.lineno}")
+
+    assert local_defs == []
+
+
+def test_handoff_mutation_package_helpers_are_shared_in_conftest() -> None:
+    shared = Path("tests/agents/handoff/conftest.py")
+    assert shared.is_file()
+    shared_source = shared.read_text(encoding="utf-8")
+    for helper_name in (
+        "valid_handoff_package",
+        "_copy_valid_package",
+        "_build_test_package",
+        "_init_handoff_repo",
+        "_replace_validation_evidence",
+        "_refresh_manifest_and_sidecar",
+    ):
+        assert f"def {helper_name}" in shared_source
+
+    duplicate_defs: list[str] = []
+    for path in (
+        Path("tests/agents/handoff/test_handoff_tools.py"),
+        Path("tests/agents/handoff/test_handoff_package_mutations.py"),
+    ):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in {
+                "valid_handoff_package",
+                "_copy_valid_package",
+                "_build_test_package",
+                "_init_handoff_repo",
+                "_replace_validation_evidence",
+                "_refresh_manifest_and_sidecar",
+            }:
+                duplicate_defs.append(f"{path}:{node.lineno}:{node.name}")
+
+    assert duplicate_defs == []
 
 
 def test_share_safe_text_checks_use_policy_share_safety_single_source() -> None:

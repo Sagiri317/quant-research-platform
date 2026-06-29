@@ -26,6 +26,9 @@ if str(SCRIPT_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPT_REPO_SRC))
 
 from governance_contract import (  # noqa: E402
+    ADVISORY_VALIDATION_CHECKS as ADVISORY_REVIEW_CHECKS,
+)
+from governance_contract import (  # noqa: E402
     BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES,
     BLOCKED_PACKAGE_ENTRY_PARTS,
     BLOCKED_TASK_KEYS,
@@ -88,7 +91,6 @@ WINDOWS_RESERVED_PATH_PARTS = frozenset(
         *(f"LPT{index}" for index in range(1, 10)),
     }
 )
-ADVISORY_REVIEW_CHECKS = {"review_subagent"}
 TRACKED_HANDOFF_SOURCE_PATHS = (
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",

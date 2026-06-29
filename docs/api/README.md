@@ -63,6 +63,6 @@ API 相关变更必须至少说明：
 - error contract
 - privacy impact
 - tests
-- compatibility decision
+- transition decision
 
-兼容期需要用户批准，并由对应 contract tests 覆盖。
+过渡期需要用户批准，并由对应 contract tests 覆盖。

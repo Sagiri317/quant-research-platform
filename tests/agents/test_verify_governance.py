@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from tests.helpers.governance_fixtures import (
     forms_matching_pattern,
     python_symbol_fixture,
@@ -111,6 +113,8 @@ def test_active_doc_scan_collects_non_empty_clean_tree_file_set() -> None:
     assert "data/README.md" in paths
 
 
+@pytest.mark.integration
+@pytest.mark.slow
 def test_active_doc_scan_cli_collects_non_empty_clean_tree_file_set() -> None:
     result = subprocess.run(
         [
@@ -135,6 +139,7 @@ def test_active_doc_scan_cli_collects_non_empty_clean_tree_file_set() -> None:
     assert payload["checked_files"]
 
 
+@pytest.mark.integration
 def test_governance_only_requires_explicit_scan_scope() -> None:
     result = subprocess.run(
         [
@@ -153,6 +158,7 @@ def test_governance_only_requires_explicit_scan_scope() -> None:
     assert "--scan-scope" in result.stderr
 
 
+@pytest.mark.integration
 def test_removed_active_doc_flags_are_not_accepted() -> None:
     for flag in ("--allow-active-docs", "--scan-active-docs"):
         result = subprocess.run(
@@ -329,6 +335,7 @@ def test_changed_files_only_and_active_doc_scan_use_distinct_inputs() -> None:
     assert len(active_docs) > len(changed_only)
 
 
+@pytest.mark.integration
 def test_changed_files_with_base_ref_includes_untracked_files(tmp_path: Path) -> None:
     module = _load_governance_module()
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)

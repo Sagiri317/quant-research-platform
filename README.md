@@ -130,7 +130,8 @@ python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-out
 ```
 
 `.run/` 只保存输出、profile、临时文件和 handoff/review artifacts，不保存正式脚本。
-普通 `python -m pytest` 保持完整 pytest 语义；fast profile 由 runner 提供。
+普通 `python -m pytest` 默认排除 `slow` 和 `requires_local_data`；
+完整收口使用 runner 的 `all` profile 显式选择。
 
 ## 数据安全
 

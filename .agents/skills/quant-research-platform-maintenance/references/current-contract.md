@@ -28,7 +28,7 @@ QRP 是本地量化研究平台。它支持 research workflow，不支持 live e
 
 - 不保留 fallback read。
 - 不保留 alias field。
-- 不保留 compatibility field。
+- 不保留兼容字段。
 - 不 silent drop 被替换字段。
 - 普通 tests 只保护当前合同。
 

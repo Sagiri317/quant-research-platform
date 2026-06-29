@@ -35,7 +35,12 @@ qrp-private = "quant_research_platform.interfaces.private_cli:main"
 pythonpath = ["src"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = ["--import-mode=importlib", "-m", "not requires_local_data"]
+addopts = [
+  "--import-mode=importlib",
+  "--strict-markers",
+  "-m",
+  "not slow and not requires_local_data",
+]
 markers = [
   "contract: tests that lock current data, report, handoff, and API contracts",
   "architecture: tests that enforce owner-layer and import-boundary rules",

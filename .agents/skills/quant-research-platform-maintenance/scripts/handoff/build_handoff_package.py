@@ -25,6 +25,9 @@ if str(SCRIPT_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPT_REPO_SRC))
 
 from governance_contract import (  # noqa: E402
+    ADVISORY_VALIDATION_CHECKS as ADVISORY_REVIEW_CHECKS,
+)
+from governance_contract import (  # noqa: E402
     GENERATION_EVIDENCE,
     HANDOFF_TOOL_SOURCE_PATHS,
     MANDATORY_VALIDATION_CHECKS,
@@ -55,7 +58,6 @@ from quant_research_platform.policy.share_safety import (  # noqa: E402
 )
 
 PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
-ADVISORY_REVIEW_CHECKS = {"review_subagent"}
 
 
 def main(argv: list[str] | None = None) -> int:
