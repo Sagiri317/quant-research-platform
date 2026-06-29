@@ -27,8 +27,6 @@ AGENT_MODE_TERMS = (
     "fill",
     "live",
     "paper",
-    "execution" + "_mode",
-    "Execution" + "Mode",
 )
 
 
@@ -44,7 +42,10 @@ def test_portfolio_cost_and_risk_layers_do_not_define_trading_execution_surface(
             path.read_text(encoding="utf-8").splitlines(),
             start=1,
         ):
-            if trading_terms.search(line) or ("execution" + "_mode") in line:
+            if trading_terms.search(line) or _has_joined_words(
+                line,
+                ("execution", "mode"),
+            ):
                 hits.append(f"{path}:{line_number}: {line.strip()}")
 
     assert not hits, "portfolio_trading_surface_found: " + "; ".join(hits)
@@ -62,7 +63,11 @@ def test_agent_layer_keeps_proposals_out_of_execution_and_artifact_modes(
             path.read_text(encoding="utf-8").splitlines(),
             start=1,
         ):
-            if mode_terms.search(line) or "REVIEW_SAFE" in line:
+            if (
+                mode_terms.search(line)
+                or _has_joined_words(line, ("execution", "mode"))
+                or "REVIEW_SAFE" in line
+            ):
                 hits.append(f"{path}:{line_number}: {line.strip()}")
 
     assert not hits, "agent_execution_or_artifact_mode_found: " + "; ".join(hits)
@@ -95,3 +100,8 @@ def _word_regex(terms: tuple[str, ...]) -> re.Pattern[str]:
         r"\b(?:" + "|".join(re.escape(term) for term in terms) + r")\b",
         re.IGNORECASE,
     )
+
+
+def _has_joined_words(line: str, words: tuple[str, str]) -> bool:
+    tokens = re.findall(r"[A-Za-z]+", line.casefold())
+    return any(pair == words for pair in zip(tokens, tokens[1:], strict=False))

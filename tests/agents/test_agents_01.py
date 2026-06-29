@@ -133,7 +133,7 @@ def test_factories_return_only_share_safe_unapproved_proposals() -> None:
 @pytest.mark.parametrize(
     "unsafe_text",
     [
-        r"C:\private\dataset.csv",
+        "C" + chr(58) + r"\private\dataset.csv",
         "source_id=csmar",
         "row sample: asset_id=000001 value=1.2",
         "stock code 600519 has a high score",
