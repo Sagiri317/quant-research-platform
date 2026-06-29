@@ -148,6 +148,9 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         source_tree_scan = json.loads(
             archive.read("handoff_evidence/source-tree-scan.json").decode("utf-8")
         )
+        bundle_reconstruction = json.loads(
+            archive.read("handoff_evidence/bundle-reconstruction.json").decode("utf-8")
+        )
         markdown_evidence = archive.read(
             "handoff_evidence/smoke-semantic-parity-compare.md"
         ).decode("utf-8")
@@ -162,6 +165,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert required.issubset(names)
     assert "handoff_evidence/generation.json" in names
     assert "handoff_evidence/source-tree-scan.json" in names
+    assert "handoff_evidence/bundle-reconstruction.json" in names
     assert "handoff_evidence/custom-note.json" in names
     assert "handoff_evidence/smoke-semantic-parity-compare.md" in names
     assert markdown_evidence == "# Smoke semantic parity compare\n\nstatus: PASS\n"
@@ -208,6 +212,24 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert source_tree_scan["status"] == "PASS"
     assert source_tree_scan["scanned_head"] == final_head
     assert source_tree_scan["expected_head"] == final_head
+    assert bundle_reconstruction["schema_id"] == "qrp-bundle-reconstruction-evidence"
+    assert bundle_reconstruction["bundle_path"] == "final-branch.bundle"
+    assert bundle_reconstruction["branch"] == TEST_BRANCH
+    assert bundle_reconstruction["expected_head"] == final_head
+    assert bundle_reconstruction["plain_clone_required"] is False
+    assert bundle_reconstruction["bundle_verify"]["command"] == (
+        "git bundle verify final-branch.bundle"
+    )
+    assert bundle_reconstruction["bundle_verify"]["status"] == "PASS"
+    assert bundle_reconstruction["bundle_list_heads"]["command"] == (
+        "git bundle list-heads final-branch.bundle"
+    )
+    assert bundle_reconstruction["bundle_list_heads"]["status"] == "PASS"
+    assert bundle_reconstruction["clone_verification"]["command"] == (
+        f"git clone -b {TEST_BRANCH} final-branch.bundle review-repo"
+    )
+    assert bundle_reconstruction["clone_verification"]["status"] == "PASS"
+    assert bundle_reconstruction["clone_verification"]["cloned_head"] == final_head
     assert set(source_tree_scan["scan_groups"]) == {
         "retired_text",
         "retired_governance_paths",

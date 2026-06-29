@@ -128,7 +128,7 @@ def main() -> int:
         return fail("builder_forbidden_terms=" + ",".join(found_forbidden))
     if '"cat-file", "-t"' in verifier or '"cat-file", "-p"' in verifier:
         return fail("handoff_bundle_scan_uses_per_blob_cat_file")
-    clone_command = "git clone --branch <branch-from-sidecar> final-branch.bundle repo"
+    clone_command = "git clone -b <branch-from-sidecar> final-branch.bundle review-repo"
     if clone_command not in readme:
         return fail("readme_missing_branch_clone_command")
     if "handoff 合同只由本目录" not in readme:

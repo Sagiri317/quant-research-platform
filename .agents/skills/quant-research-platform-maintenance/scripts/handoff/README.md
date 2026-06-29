@@ -26,8 +26,13 @@ handoff 输出应写到 `.run/` 或用户指定目录。`.run/` 是 output layer
 handoff package 内的 `final-branch.bundle` 应可用以下形式重建分支：
 
 ```text
-git clone --branch <branch-from-sidecar> final-branch.bundle repo
+git clone -b <branch-from-sidecar> final-branch.bundle review-repo
 ```
+
+When `final-branch.bundle` is present, the builder records bundle verify,
+list-heads, and the exact branch clone evidence in
+`handoff_evidence/bundle-reconstruction.json`; the verifier checks that
+evidence and still runs its own bundle reconstruction checks.
 
 handoff 合同只由本目录 tracked scripts、schemas 和 templates 定义。
 

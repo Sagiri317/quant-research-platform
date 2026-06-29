@@ -99,6 +99,38 @@ def _update_sidecar_hashes(
     )
 
 
+def _bundle_reconstruction_evidence(package: Path) -> dict[str, object]:
+    with zipfile.ZipFile(package) as archive:
+        payload = json.loads(
+            archive.read("handoff_evidence/bundle-reconstruction.json").decode("utf-8")
+        )
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _replace_bundle_reconstruction_evidence(
+    package: Path,
+    sidecar: Path,
+    payload: dict[str, object],
+) -> None:
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/bundle-reconstruction.json",
+        (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+
+def _remove_package_members(package: Path, members: set[str]) -> None:
+    temp = package.with_suffix(".remove.zip")
+    with zipfile.ZipFile(package, "r") as src, zipfile.ZipFile(temp, "w") as dst:
+        for info in src.infolist():
+            if info.filename in members:
+                continue
+            dst.writestr(info, src.read(info.filename))
+    temp.replace(package)
+
+
 def _smoke_compare_status_payload(
     *rows: tuple[str, str],
     overall: str = "NOT_RUN",
@@ -502,6 +534,117 @@ def test_verifier_rejects_generation_bundle_hash_mismatch(
     failures = verifier.verify_handoff_package(package, sidecar)
 
     assert "generation_bundle_sha256_mismatch" in failures
+
+
+@pytest.mark.mutation
+def test_verifier_accepts_valid_bundle_reconstruction_evidence(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert not any("bundle_reconstruction" in item for item in failures)
+
+
+@pytest.mark.mutation
+def test_verifier_rejects_missing_bundle_reconstruction_evidence(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _remove_package_members(package, {"handoff_evidence/bundle-reconstruction.json"})
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "bundle_reconstruction_evidence_missing" in failures
+
+
+@pytest.mark.mutation
+def test_verifier_rejects_bundle_reconstruction_branch_mismatch(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    evidence = _bundle_reconstruction_evidence(package)
+    evidence["branch"] = "feature/wrong-branch"
+    _replace_bundle_reconstruction_evidence(package, sidecar, evidence)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "bundle_reconstruction_branch_mismatch" in failures
+
+
+@pytest.mark.mutation
+def test_verifier_rejects_bundle_reconstruction_expected_head_mismatch(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    evidence = _bundle_reconstruction_evidence(package)
+    evidence["expected_head"] = "0" * 40
+    _replace_bundle_reconstruction_evidence(package, sidecar, evidence)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "bundle_reconstruction_expected_head_mismatch" in failures
+
+
+@pytest.mark.mutation
+def test_verifier_rejects_bundle_reconstruction_cloned_head_mismatch(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    evidence = _bundle_reconstruction_evidence(package)
+    clone = evidence["clone_verification"]
+    assert isinstance(clone, dict)
+    clone["cloned_head"] = "0" * 40
+    _replace_bundle_reconstruction_evidence(package, sidecar, evidence)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "bundle_reconstruction_cloned_head_mismatch" in failures
+
+
+@pytest.mark.mutation
+def test_verifier_rejects_plain_clone_bundle_reconstruction_command(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    evidence = _bundle_reconstruction_evidence(package)
+    clone = evidence["clone_verification"]
+    assert isinstance(clone, dict)
+    clone["command"] = "git clone final-branch.bundle review-repo"
+    _replace_bundle_reconstruction_evidence(package, sidecar, evidence)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "bundle_reconstruction_clone_command_invalid" in failures
+
+
+def test_bundle_reconstruction_evidence_not_required_without_bundle(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("task_metadata.json", "{}\n")
+    sidecar = {"branch": TEST_BRANCH, "final_head": "1" * 40}
+
+    with zipfile.ZipFile(package) as archive:
+        failures = verifier.verify_bundle_reconstruction_evidence(archive, sidecar)
+
+    assert failures == []
 
 
 def test_verify_source_tree_scan_rejects_extra_groups_and_count_mismatch() -> None:

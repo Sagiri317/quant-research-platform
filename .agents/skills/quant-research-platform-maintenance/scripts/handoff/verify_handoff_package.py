@@ -75,6 +75,8 @@ GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
 SMOKE_COMPARE_STATUS_EVIDENCE = "handoff_evidence/smoke-compare-status.json"
+BUNDLE_RECONSTRUCTION_EVIDENCE = "handoff_evidence/bundle-reconstruction.json"
+BUNDLE_RECONSTRUCTION_SCHEMA_ID = "qrp-bundle-reconstruction-evidence"
 PORTABLE_STATUS_SUMMARY_SCHEMA_ID = "qrp-portable-status-summary"
 PORTABLE_STATUS_SUMMARY_TYPES = frozenset(
     {"smoke", "compare", "local_verification", "run_compare"}
@@ -596,6 +598,7 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
             failures.extend(verify_artifact_manifest(archive, sidecar))
             failures.extend(verify_metadata_entries(archive, sidecar))
             failures.extend(verify_handoff_evidence_json(archive, sidecar))
+            failures.extend(verify_bundle_reconstruction_evidence(archive, sidecar))
             failures.extend(review_advisory_consistency_failures(archive, sidecar))
             failures.extend(verify_final_branch_bundle(archive, sidecar))
             failures.extend(verify_git_status(archive))
@@ -971,6 +974,77 @@ def handoff_evidence_forbidden_field_failures(
     payload: dict[str, object],
 ) -> list[str]:
     return handoff_evidence_blocked_key_failures(name, payload)
+
+
+def verify_bundle_reconstruction_evidence(
+    archive: ZipFile,
+    sidecar: dict[str, object],
+) -> list[str]:
+    names = set(archive.namelist())
+    if "final-branch.bundle" not in names:
+        return []
+    if BUNDLE_RECONSTRUCTION_EVIDENCE not in names:
+        return ["bundle_reconstruction_evidence_missing"]
+    try:
+        raw_payload = archive.read(BUNDLE_RECONSTRUCTION_EVIDENCE)
+        payload = json.loads(raw_payload.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return ["bundle_reconstruction_evidence_json_invalid"]
+    if not isinstance(payload, dict):
+        return ["bundle_reconstruction_evidence_must_be_object"]
+
+    failures: list[str] = []
+    branch = str(sidecar.get("branch", ""))
+    final_head = str(sidecar.get("final_head", ""))
+    if payload.get("schema_id") != BUNDLE_RECONSTRUCTION_SCHEMA_ID:
+        failures.append("bundle_reconstruction_schema_id_mismatch")
+    if payload.get("bundle_path") != "final-branch.bundle":
+        failures.append("bundle_reconstruction_bundle_path_mismatch")
+    if payload.get("branch") != branch:
+        failures.append("bundle_reconstruction_branch_mismatch")
+    if payload.get("expected_head") != final_head:
+        failures.append("bundle_reconstruction_expected_head_mismatch")
+    if payload.get("plain_clone_required") is not False:
+        failures.append("bundle_reconstruction_plain_clone_required_invalid")
+
+    bundle_verify = nested_mapping(payload, "bundle_verify", failures)
+    if bundle_verify is not None:
+        if bundle_verify.get("command") != "git bundle verify final-branch.bundle":
+            failures.append("bundle_reconstruction_bundle_verify_command_invalid")
+        if bundle_verify.get("status") != "PASS":
+            failures.append("bundle_reconstruction_bundle_verify_not_pass")
+
+    list_heads = nested_mapping(payload, "bundle_list_heads", failures)
+    if list_heads is not None:
+        if list_heads.get("command") != "git bundle list-heads final-branch.bundle":
+            failures.append("bundle_reconstruction_list_heads_command_invalid")
+        if list_heads.get("status") != "PASS":
+            failures.append("bundle_reconstruction_list_heads_not_pass")
+
+    clone = nested_mapping(payload, "clone_verification", failures)
+    if clone is not None:
+        expected_clone = f"git clone -b {branch} final-branch.bundle review-repo"
+        if clone.get("command") != expected_clone:
+            failures.append("bundle_reconstruction_clone_command_invalid")
+        if clone.get("status") != "PASS":
+            failures.append("bundle_reconstruction_clone_not_pass")
+        if clone.get("cloned_head") != final_head:
+            failures.append("bundle_reconstruction_cloned_head_mismatch")
+        if not isinstance(clone.get("working_tree_status"), str):
+            failures.append("bundle_reconstruction_working_tree_status_missing")
+    return failures
+
+
+def nested_mapping(
+    payload: dict[str, object],
+    key: str,
+    failures: list[str],
+) -> dict[str, object] | None:
+    value = payload.get(key)
+    if isinstance(value, dict):
+        return value
+    failures.append(f"bundle_reconstruction_{key}_missing")
+    return None
 
 
 def verify_generation_evidence(

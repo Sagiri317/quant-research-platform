@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,6 +59,9 @@ from quant_research_platform.policy.share_safety import (  # noqa: E402
 )
 
 PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
+BUNDLE_MEMBER = "final-branch.bundle"
+BUNDLE_RECONSTRUCTION_EVIDENCE = "handoff_evidence/bundle-reconstruction.json"
+BUNDLE_RECONSTRUCTION_SCHEMA_ID = "qrp-bundle-reconstruction-evidence"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -201,9 +205,9 @@ def build_once(
     assert_branch_head(repo_root, branch, final_head)
     with tempfile.TemporaryDirectory(prefix="qrp-handoff-stage-") as temp:
         stage_root = Path(temp)
-        write_bundle(
+        bundle_reconstruction = write_bundle(
             repo_root,
-            stage_root / "final-branch.bundle",
+            stage_root / BUNDLE_MEMBER,
             branch,
             final_head,
         )
@@ -232,7 +236,8 @@ def build_once(
             stage_root,
             task,
             validation_evidence,
-            bundle_path=stage_root / "final-branch.bundle",
+            bundle_path=stage_root / BUNDLE_MEMBER,
+            bundle_reconstruction=bundle_reconstruction,
             branch=branch,
             base=base,
             final_head=final_head,
@@ -361,6 +366,7 @@ def stage_handoff_evidence(
     validation_evidence: dict[str, object],
     *,
     bundle_path: Path,
+    bundle_reconstruction: dict[str, object] | None = None,
     branch: str,
     base: str,
     final_head: str,
@@ -437,6 +443,11 @@ def stage_handoff_evidence(
             )
         ),
     )
+    if bundle_reconstruction is not None:
+        write_text(
+            stage_root / BUNDLE_RECONSTRUCTION_EVIDENCE,
+            stable_json(bundle_reconstruction),
+        )
 
 
 def generation_payload(
@@ -582,22 +593,122 @@ def write_bundle(
     bundle_path: Path,
     branch: str,
     final_head: str,
-) -> None:
+) -> dict[str, object]:
     run_git(repo_root, "bundle", "create", str(bundle_path), branch)
+    evidence = bundle_reconstruction_payload(bundle_path, branch, final_head)
+    bundle_verify = evidence.get("bundle_verify")
+    bundle_list_heads = evidence.get("bundle_list_heads")
+    clone_verification = evidence.get("clone_verification")
+    if not isinstance(bundle_verify, dict) or bundle_verify.get("status") != "PASS":
+        raise SystemExit("bundle_verify_failed")
+    if (
+        not isinstance(bundle_list_heads, dict)
+        or bundle_list_heads.get("status") != "PASS"
+    ):
+        raise SystemExit("bundle_list_heads_failed")
+    if (
+        not isinstance(clone_verification, dict)
+        or clone_verification.get("status") != "PASS"
+    ):
+        raise SystemExit("bundle_clone_failed")
+    if clone_verification.get("cloned_head") != final_head:
+        cloned_head = clone_verification.get("cloned_head")
+        raise SystemExit(
+            f"bundle_head_mismatch: {cloned_head} != {final_head}"
+        )
+    return evidence
+
+
+def bundle_reconstruction_payload(
+    bundle_path: Path,
+    branch: str,
+    final_head: str,
+) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="handoff-bundle-check-") as temp:
-        clone_dir = Path(temp) / "clone"
+        root = Path(temp)
+        local_bundle = root / BUNDLE_MEMBER
+        shutil.copyfile(bundle_path, local_bundle)
         subprocess.run(
-            ["git", "clone", "--branch", branch, str(bundle_path), str(clone_dir)],
+            ["git", "init", "-q"],
+            cwd=root,
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            shell=False,
         )
-        cloned_head = git_text(clone_dir, "rev-parse", "HEAD").strip()
-        if cloned_head != final_head:
-            raise SystemExit(f"bundle_head_mismatch: {cloned_head} != {final_head}")
-        subject = git_text(clone_dir, "show", "-s", "--format=%s", "HEAD").strip()
+        bundle_verify = command_evidence(
+            ["git", "bundle", "verify", BUNDLE_MEMBER],
+            cwd=root,
+        )
+        bundle_list_heads = command_evidence(
+            ["git", "bundle", "list-heads", BUNDLE_MEMBER],
+            cwd=root,
+        )
+        clone_dir = root / "review-repo"
+        clone_verification = command_evidence(
+            ["git", "clone", "-b", branch, BUNDLE_MEMBER, "review-repo"],
+            cwd=root,
+        )
+        cloned_head = ""
+        working_tree_status = ""
+        subject = ""
+        if clone_verification["exit_code"] == 0:
+            cloned_head = git_text(clone_dir, "rev-parse", "HEAD").strip()
+            working_tree_status = git_text(
+                clone_dir,
+                "status",
+                "--short",
+                "--branch",
+            ).strip()
+            subject = git_text(clone_dir, "show", "-s", "--format=%s", "HEAD").strip()
+            if cloned_head != final_head or not working_tree_is_clean(
+                working_tree_status
+            ):
+                clone_verification["status"] = "FAIL"
+        clone_verification["cloned_head"] = cloned_head
+        clone_verification["working_tree_status"] = working_tree_status
         if "synthetic" in subject.lower():
             raise SystemExit("bundle_head_synthetic_marker")
+        return {
+            "schema_id": BUNDLE_RECONSTRUCTION_SCHEMA_ID,
+            "bundle_path": BUNDLE_MEMBER,
+            "branch": branch,
+            "expected_head": final_head,
+            "bundle_verify": bundle_verify,
+            "bundle_list_heads": bundle_list_heads,
+            "clone_verification": clone_verification,
+            "plain_clone_required": False,
+        }
+
+
+def command_evidence(args: list[str], *, cwd: Path) -> dict[str, object]:
+    result = subprocess.run(
+        args,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        shell=False,
+    )
+    return {
+        "command": " ".join(args),
+        "status": "PASS" if result.returncode == 0 else "FAIL",
+        "exit_code": result.returncode,
+        "stdout_excerpt": text_excerpt(result.stdout),
+        "stderr_excerpt": text_excerpt(result.stderr),
+    }
+
+
+def text_excerpt(text: str, *, limit: int = 4000) -> str:
+    normalized = normalize_lf(text).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit]
+
+
+def working_tree_is_clean(status: str) -> bool:
+    return all(line.startswith("## ") for line in status.splitlines())
 
 
 def assert_branch_head(repo_root: Path, branch: str, final_head: str) -> None:
