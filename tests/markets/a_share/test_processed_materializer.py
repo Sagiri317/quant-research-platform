@@ -730,14 +730,14 @@ def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(
             "factor",
             "2014-08-29",
             TimeWindow("2014-01-02", "2014-02-28"),
-            marks=[pytest.mark.private_slow, pytest.mark.slow],
+            marks=[pytest.mark.slow, pytest.mark.requires_local_data],
         ),
         pytest.param(
             "forward_returns",
             "label",
             "2014-08-29",
             TimeWindow("2014-01-02", "2014-02-28"),
-            marks=[pytest.mark.private_slow, pytest.mark.slow],
+            marks=[pytest.mark.slow, pytest.mark.requires_local_data],
         ),
     ],
 )

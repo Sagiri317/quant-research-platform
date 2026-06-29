@@ -29,16 +29,16 @@ def test_list_profiles_includes_required_profiles(capsys) -> None:
     assert exit_code == 0
     output = capsys.readouterr().out
     for profile in (
-        "all-non-slow",
+        "all",
+        "all-non-local",
         "fast",
         "contract",
         "architecture",
-        "data-contract",
+        "guardrails",
         "integration",
-        "local-data",
         "mutation",
         "performance",
-        "private-slow",
+        "requires-local-data",
         "slow",
     ):
         assert profile in output
@@ -57,28 +57,27 @@ def test_profile_markers_are_declared_and_excluded_markers_have_profiles() -> No
         for marker in _marker_names(profile.marker)
     }
     assert profile_markers <= declared_markers
+    assert "guardrails" in profile_markers
 
     fast_excluded_markers = _marker_names(runner.FAST_EXCLUDES)
     marker_owners = {
         marker: sorted(
-            name
-            for name, profile in runner.PROFILES.items()
-            if profile.marker is not None
-            and profile.marker != runner.FAST_EXCLUDES
-            and marker in _marker_names(profile.marker)
+                name
+                for name, profile in runner.PROFILES.items()
+                if name != "all-non-local"
+                if profile.marker is not None
+                and profile.marker != runner.FAST_EXCLUDES
+                and marker in _marker_names(profile.marker)
         )
         for marker in fast_excluded_markers
     }
 
     assert marker_owners == {
-        "data_dependency": ["data-contract", "integration", "local-data"],
         "integration": ["integration"],
         "mutation": ["mutation"],
         "performance": ["performance"],
-        "private_slow": ["private-slow"],
-        "requires_local_data": ["data-contract", "local-data"],
+        "requires_local_data": ["requires-local-data"],
         "slow": ["slow"],
-        "slow_integration": ["integration", "slow"],
     }
 
 

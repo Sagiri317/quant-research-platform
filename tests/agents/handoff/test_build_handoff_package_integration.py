@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow, pytest.mark.slow_integration]
+pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 REPO_ROOT = Path.cwd()
 HANDOFF_ROOT = REPO_ROOT / ".agents" / "skills" / "quant-research-platform-maintenance"

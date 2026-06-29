@@ -35,19 +35,17 @@ qrp-private = "quant_research_platform.interfaces.private_cli:main"
 pythonpath = ["src"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = ["--import-mode=importlib", "-m", "not private_slow"]
+addopts = ["--import-mode=importlib", "-m", "not requires_local_data"]
 markers = [
-  "contract: fast tests that lock current data, report, handoff, and API contracts",
-  "architecture: fast tests that enforce owner-layer and import-boundary rules",
-  "privacy: fast tests that enforce REVIEW_SAFE safety contracts",
-  "integration: tests that exercise multi-layer or subprocess integration paths",
-  "mutation: tests that mutate package, manifest, sidecar, or source-tree artifacts and are excluded from the fast suite",
-  "slow: tests that are materially slower than the fast path and require explicit selection",
-  "performance: profiling, benchmark, or runtime-budget tests excluded from the fast suite",
-  "requires_local_data: tests that require local-only data and must not run in REVIEW_SAFE default gates",
-  "private_slow: compatibility marker for private or slow verification cases; exclude from fast gates",
-  "data_dependency: tests that require data/parquet stack dependencies",
-  "slow_integration: compatibility marker for slow end-to-end integration tests",
+  "contract: tests that lock current data, report, handoff, and API contracts",
+  "architecture: tests that enforce owner-layer and import-boundary rules",
+  "privacy: tests that enforce REVIEW_SAFE safety contracts",
+  "guardrails: tests that enforce approved safety and scope boundaries",
+  "integration: tests that exercise real IO, subprocess, git, or package-build paths",
+  "mutation: tests that mutate package, manifest, sidecar, source-tree, or hostile-input artifacts",
+  "slow: tests that are materially slower than the fast path",
+  "performance: profiling, benchmark, or runtime/memory tests",
+  "requires_local_data: tests that require local-only data or local/private environment state",
 ]
 
 [tool.ruff]

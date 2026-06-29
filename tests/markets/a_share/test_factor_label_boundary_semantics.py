@@ -16,6 +16,8 @@ from quant_research_platform.markets.implementations.a_share.labels.definitions 
     label_catalog,
 )
 
+pytestmark = pytest.mark.guardrails
+
 
 def test_factor_boundary_nan_is_allowed_without_pre_window_history() -> None:
     panel = _factor_label_panel(pd.bdate_range("2014-01-01", periods=280))

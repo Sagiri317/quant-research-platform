@@ -29,7 +29,9 @@ GOVERNANCE_CONTRACT = (
 )
 
 
-def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
+def test_handoff_package_contract_uses_evidence_mode_outputs(
+    live_source_tree_scan: dict[str, dict[str, object]],
+) -> None:
     builder = (HANDOFF_ROOT / "build_handoff_package.py").read_text(encoding="utf-8")
     verifier = (HANDOFF_ROOT / "verify_handoff_package.py").read_text(encoding="utf-8")
 
@@ -47,7 +49,7 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
     assert "handoff_evidence/source-tree-scan.json" in verifier
     assert "handoff_generation.json" not in builder
     assert "handoff_generation.json" not in verifier
-    source_tree_scan = contract.source_tree_scan_groups(Path("."))
+    source_tree_scan = live_source_tree_scan
     assert source_tree_scan["retired_text"]["findings"] == []
     assert source_tree_scan["retired_governance_paths"]["findings"] == []
     assert source_tree_scan["retired_path_names"]["findings"] == []

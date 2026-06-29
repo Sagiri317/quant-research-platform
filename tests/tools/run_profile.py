@@ -25,8 +25,7 @@ class Profile:
 
 FAST_EXCLUDES = (
     "not integration and not mutation and not slow and not performance "
-    "and not requires_local_data and not private_slow and not data_dependency "
-    "and not slow_integration"
+    "and not requires_local_data"
 )
 
 PROFILES: dict[str, Profile] = {
@@ -55,46 +54,45 @@ PROFILES: dict[str, Profile] = {
         scopes=("tests/architecture",),
         marker=FAST_EXCLUDES,
     ),
-    "data-contract": Profile(
-        name="data-contract",
-        scopes=("tests/architecture/test_share_safe_evidence_data_contract.py",),
-        marker="data_dependency or requires_local_data",
+    "guardrails": Profile(
+        name="guardrails",
+        scopes=("tests",),
+        marker="guardrails",
     ),
     "integration": Profile(
         name="integration",
         scopes=("tests",),
-        marker="integration or slow_integration or data_dependency",
+        marker="integration",
     ),
     "mutation": Profile(
         name="mutation",
         scopes=("tests",),
         marker="mutation",
     ),
-    "all-non-slow": Profile(
-        name="all-non-slow",
+    "all-non-local": Profile(
+        name="all-non-local",
         scopes=("tests",),
-        marker=FAST_EXCLUDES,
+        marker="not requires_local_data",
     ),
-    "local-data": Profile(
-        name="local-data",
+    "requires-local-data": Profile(
+        name="requires-local-data",
         scopes=("tests",),
-        marker="requires_local_data or data_dependency",
+        marker="requires_local_data",
     ),
     "performance": Profile(
         name="performance",
         scopes=("tests",),
         marker="performance",
     ),
-    "private-slow": Profile(
-        name="private-slow",
-        scopes=("tests",),
-        marker="private_slow",
-        pytest_options=("-o", "addopts=--import-mode=importlib"),
-    ),
     "slow": Profile(
         name="slow",
         scopes=("tests",),
-        marker="slow or slow_integration",
+        marker="slow",
+    ),
+    "all": Profile(
+        name="all",
+        scopes=("tests",),
+        pytest_options=("-o", "addopts=--import-mode=importlib"),
     ),
 }
 
@@ -234,16 +232,16 @@ def _repo_relative(repo_root: Path, path: Path) -> str:
 
 def _profile_tmp_name(profile_name: str) -> str:
     short_names = {
-        "all-non-slow": "a",
+        "all": "a",
+        "all-non-local": "an",
         "architecture": "r",
         "contract": "c",
-        "data-contract": "d",
         "fast": "f",
+        "guardrails": "g",
         "integration": "i",
-        "local-data": "l",
         "mutation": "m",
         "performance": "p",
-        "private-slow": "ps",
+        "requires-local-data": "l",
         "slow": "s",
     }
     return short_names.get(profile_name, profile_name[:1] or "p")

@@ -50,6 +50,24 @@ Next action: when validation and trial selection primitives are introduced, add 
 Acceptance gate: contract tests derive expected behavior from the selected owner primitives without adding a tuning framework in tests.
 Scope boundary: do not introduce a tuning framework, DL dependency, public registry, or model registry as part of a test-speed guardrail goal.
 
+ID: handoff-integration-subprocess-cost
+Severity: P2
+Owner layer: tests / handoff tooling
+Status: deferred
+Evidence: `tests/agents/handoff/test_build_handoff_package_integration.py` still keeps real builder subprocess coverage for handoff package contract and custom evidence negative cases.
+Next action: split lower-cost contract coverage from real package-build subprocess coverage only if the same malicious package and evidence rejection semantics remain covered.
+Acceptance gate: handoff integration and mutation profiles keep package-build, verifier, and malicious-input coverage with fewer repeated subprocess/package-build operations.
+Scope boundary: do not delete tests, skip tests, move tests out of their semantic profile, or change the public handoff schema to reduce runtime.
+
+ID: windows-pytest-tmp-path-length
+Severity: P3
+Owner layer: tests / profile runner
+Status: deferred
+Evidence: Windows pytest runs can fail tests that create deeply nested data paths when an explicit `--tmp-dir` is long; the same tests pass with a shorter repo-relative tmp directory.
+Next action: keep profile evidence tmp roots short on Windows, and if this recurs, add a runner or documentation guardrail that preserves explicit repo-relative tmp paths without shell wrappers or absolute-path assumptions.
+Acceptance gate: full pytest profile passes on Windows with a path-length-safe tmp strategy while preserving all tests and profile coverage.
+Scope boundary: do not add `.ps1` or shell wrappers, do not skip tests, do not change business `src/**`, and do not hardcode machine-specific paths.
+
 ## P3 Watchlist
 
 暂无。

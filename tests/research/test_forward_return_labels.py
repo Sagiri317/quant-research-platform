@@ -16,6 +16,8 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 from tests.helpers.synthetic_a_share import make_synthetic_market_panel
 
+pytestmark = pytest.mark.guardrails
+
 
 def test_forward_return_labels_group_sort_horizons_and_invalid_entry_price() -> None:
     panel = make_synthetic_market_panel(sessions=130)

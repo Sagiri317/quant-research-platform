@@ -2601,20 +2601,45 @@ def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
 
 
 def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
-    retired_text_findings = source_tree_retired_text_findings(clone_dir)
+    tracked_paths = source_tree_tracked_paths(clone_dir)
+    tracked_text_files = source_tree_tracked_text_files_from_paths(tracked_paths)
+    retired_text_findings = source_tree_retired_text_findings(
+        clone_dir,
+        tracked_text_files=tracked_text_files,
+    )
     retired_governance_path_findings_ = source_tree_retired_governance_path_findings(
-        clone_dir
+        clone_dir,
+        tracked_paths=tracked_paths,
     )
-    retired_path_name_findings = source_tree_retired_path_name_findings(clone_dir)
-    python_symbol_findings = source_tree_python_symbol_findings(clone_dir)
+    retired_path_name_findings = source_tree_retired_path_name_findings(
+        clone_dir,
+        tracked_paths=tracked_paths,
+    )
+    python_symbol_findings = source_tree_python_symbol_findings(
+        clone_dir,
+        tracked_text_files=tracked_text_files,
+    )
     synthesized_string_findings = source_tree_synthesized_string_scan_findings(
-        clone_dir
+        clone_dir,
+        tracked_text_files=tracked_text_files,
     )
-    active_test_literal_findings = source_tree_active_test_literal_findings(clone_dir)
-    structured_key_findings = source_tree_structured_key_findings(clone_dir)
-    governance_truth_findings = source_tree_governance_truth_findings(clone_dir)
+    active_test_literal_findings = source_tree_active_test_literal_findings(
+        clone_dir,
+        tracked_text_files=tracked_text_files,
+    )
+    structured_key_findings = source_tree_structured_key_findings(
+        clone_dir,
+        tracked_text_files=tracked_text_files,
+    )
+    governance_truth_findings = source_tree_governance_truth_findings(
+        clone_dir,
+        tracked_text_files=tracked_text_files,
+    )
     sensitive_negative_literal_findings = (
-        source_tree_sensitive_negative_literal_findings(clone_dir)
+        source_tree_sensitive_negative_literal_findings(
+            clone_dir,
+            tracked_text_files=tracked_text_files,
+        )
     )
     return {
         "retired_text": {
@@ -2667,22 +2692,41 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
 
 def source_tree_retired_governance_path_findings(
     clone_dir: Path,
+    *,
+    tracked_paths: tuple[Path, ...] | None = None,
 ) -> list[dict[str, object]]:
-    tracked = tuple(path.as_posix() for path in source_tree_tracked_paths(clone_dir))
+    paths = tracked_paths if tracked_paths is not None else source_tree_tracked_paths(
+        clone_dir
+    )
+    tracked = tuple(path.as_posix() for path in paths)
     return retired_governance_path_findings(clone_dir, tracked_paths=tracked)
 
 
 def source_tree_retired_path_name_findings(
     clone_dir: Path,
+    *,
+    tracked_paths: tuple[Path, ...] | None = None,
 ) -> list[dict[str, object]]:
+    paths = tracked_paths if tracked_paths is not None else source_tree_tracked_paths(
+        clone_dir
+    )
     return iter_path_name_findings(
-        relative.as_posix() for relative in source_tree_tracked_paths(clone_dir)
+        relative.as_posix() for relative in paths
     )
 
 
-def source_tree_python_symbol_findings(clone_dir: Path) -> list[dict[str, object]]:
+def source_tree_python_symbol_findings(
+    clone_dir: Path,
+    *,
+    tracked_text_files: tuple[Path, ...] | None = None,
+) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    for relative in source_tree_tracked_text_files(clone_dir):
+    files = (
+        tracked_text_files
+        if tracked_text_files is not None
+        else source_tree_tracked_text_files(clone_dir)
+    )
+    for relative in files:
         if relative.suffix.lower() != ".py":
             continue
         path = clone_dir / relative
@@ -2693,9 +2737,18 @@ def source_tree_python_symbol_findings(clone_dir: Path) -> list[dict[str, object
     return findings
 
 
-def source_tree_structured_key_findings(clone_dir: Path) -> list[dict[str, object]]:
+def source_tree_structured_key_findings(
+    clone_dir: Path,
+    *,
+    tracked_text_files: tuple[Path, ...] | None = None,
+) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    for relative in source_tree_tracked_text_files(clone_dir):
+    files = (
+        tracked_text_files
+        if tracked_text_files is not None
+        else source_tree_tracked_text_files(clone_dir)
+    )
+    for relative in files:
         if relative.suffix.lower() not in {".json", ".toml", ".yaml", ".yml"}:
             continue
         path = clone_dir / relative
@@ -2706,9 +2759,18 @@ def source_tree_structured_key_findings(clone_dir: Path) -> list[dict[str, objec
     return findings
 
 
-def source_tree_retired_text_findings(clone_dir: Path) -> list[dict[str, object]]:
+def source_tree_retired_text_findings(
+    clone_dir: Path,
+    *,
+    tracked_text_files: tuple[Path, ...] | None = None,
+) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    for relative in source_tree_tracked_text_files(clone_dir):
+    files = (
+        tracked_text_files
+        if tracked_text_files is not None
+        else source_tree_tracked_text_files(clone_dir)
+    )
+    for relative in files:
         if not source_tree_should_scan_retired_text(relative):
             continue
         path = clone_dir / relative
@@ -2756,9 +2818,16 @@ def source_tree_should_scan_retired_text(relative: Path) -> bool:
 
 def source_tree_synthesized_string_scan_findings(
     clone_dir: Path,
+    *,
+    tracked_text_files: tuple[Path, ...] | None = None,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    for relative in source_tree_tracked_text_files(clone_dir):
+    files = (
+        tracked_text_files
+        if tracked_text_files is not None
+        else source_tree_tracked_text_files(clone_dir)
+    )
+    for relative in files:
         if relative.suffix.lower() != ".py":
             continue
         if is_negative_test_allowlisted(
@@ -2915,9 +2984,16 @@ def source_tree_allowlist_definition_lines(
 
 def source_tree_active_test_literal_findings(
     clone_dir: Path,
+    *,
+    tracked_text_files: tuple[Path, ...] | None = None,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    for relative in source_tree_tracked_text_files(clone_dir):
+    files = (
+        tracked_text_files
+        if tracked_text_files is not None
+        else source_tree_tracked_text_files(clone_dir)
+    )
+    for relative in files:
         if relative.parts[:1] != ("tests",) and relative != Path(
             ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
             "build_handoff_package.py"
@@ -2976,9 +3052,14 @@ def source_tree_active_test_literal_path_allowed(relative: Path) -> bool:
 
 def source_tree_governance_truth_findings(
     clone_dir: Path,
+    *,
+    tracked_text_files: tuple[Path, ...] | None = None,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    for relative in source_tree_active_governance_doc_files(clone_dir):
+    for relative in source_tree_active_governance_doc_files(
+        clone_dir,
+        tracked_text_files=tracked_text_files,
+    ):
         path = clone_dir / relative
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
         for rule, pattern in source_tree_governance_truth_patterns().items():
@@ -3001,8 +3082,17 @@ def source_tree_retired_path_policy_line(relative: Path, line: str) -> bool:
     return is_retired_path_policy_line(relative.as_posix(), line)
 
 
-def source_tree_active_governance_doc_files(clone_dir: Path) -> tuple[Path, ...]:
-    tracked = set(source_tree_tracked_text_files(clone_dir))
+def source_tree_active_governance_doc_files(
+    clone_dir: Path,
+    *,
+    tracked_text_files: tuple[Path, ...] | None = None,
+) -> tuple[Path, ...]:
+    files = (
+        tracked_text_files
+        if tracked_text_files is not None
+        else source_tree_tracked_text_files(clone_dir)
+    )
+    tracked = set(files)
     result: list[Path] = []
     for root in SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS:
         path = clone_dir / root
@@ -3104,9 +3194,16 @@ def ensure_runtime_src_path(repo_root: Path | None = None) -> Path:
 
 def source_tree_sensitive_negative_literal_findings(
     clone_dir: Path,
+    *,
+    tracked_text_files: tuple[Path, ...] | None = None,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    for relative in source_tree_tracked_text_files(clone_dir):
+    files = (
+        tracked_text_files
+        if tracked_text_files is not None
+        else source_tree_tracked_text_files(clone_dir)
+    )
+    for relative in files:
         if relative.parts[:1] not in {(".agents",), ("tests",)}:
             continue
         path = clone_dir / relative
@@ -3155,8 +3252,16 @@ def source_tree_sensitive_negative_literal_findings(
 
 
 def source_tree_tracked_text_files(clone_dir: Path) -> tuple[Path, ...]:
+    return source_tree_tracked_text_files_from_paths(
+        source_tree_tracked_paths(clone_dir)
+    )
+
+
+def source_tree_tracked_text_files_from_paths(
+    tracked_paths: tuple[Path, ...],
+) -> tuple[Path, ...]:
     result: list[Path] = []
-    for relative in source_tree_tracked_paths(clone_dir):
+    for relative in tracked_paths:
         text_suffixes = {".py", ".md", ".json", ".toml", ".yaml", ".yml"}
         if relative.suffix.lower() not in text_suffixes:
             continue

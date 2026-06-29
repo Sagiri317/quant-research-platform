@@ -3,6 +3,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.guardrails
+
 PROJECT_SRC = Path("src/quant_research_platform")
 PORTFOLIO_GUARDRAIL_ROOTS = (
     PROJECT_SRC / "compute",

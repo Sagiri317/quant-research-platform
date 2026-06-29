@@ -104,6 +104,10 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 `tests/tools/run_profile.py` 的 profile 定义共同约束。profile 清单和选择逻辑
 以 runner 输出为准，文档不复制 marker expression。
 
+`slow` 只表示运行慢，`requires_local_data` 只表示需要本地数据或本地环境；
+两者彼此正交。性能收口依据实际耗时画像、slowest tests/files 和
+before/after 对比，不使用硬编码秒数阈值或独立性能门禁文件。
+
 常用治理验证：
 
 ```bash

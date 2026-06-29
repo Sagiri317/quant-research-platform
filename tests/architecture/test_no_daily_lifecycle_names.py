@@ -22,9 +22,10 @@ SHARED_TEST_HELPER_ROOTS = (
 )
 
 
-def test_daily_lifecycle_names_are_replaced() -> None:
-    contract = _load_governance_contract()
-    scan_groups = contract.source_tree_scan_groups(Path("."))
+def test_daily_lifecycle_names_are_replaced(
+    live_source_tree_scan: dict[str, dict[str, object]],
+) -> None:
+    scan_groups = live_source_tree_scan
 
     assert scan_groups["retired_text"]["findings"] == []
     assert scan_groups["python_symbols"]["findings"] == []

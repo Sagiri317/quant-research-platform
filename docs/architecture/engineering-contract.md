@@ -41,6 +41,10 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 `tests/tools/run_profile.py` 的 profile 定义共同约束。profile 清单和选择逻辑
 以 runner 输出为准，文档不复制完整 pytest expression。
 
+`slow` 只表示运行慢，`requires_local_data` 只表示需要本地数据或本地环境；
+两者彼此正交。性能优化依据实际耗时画像、slowest tests/files 和
+before/after 对比，不写硬编码秒数阈值，不新增独立性能门禁文件。
+
 正式 profile runner 位于 `tests/tools/run_profile.py`。执行示例：
 `python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>`。
 

@@ -29,6 +29,8 @@ from quant_research_platform.markets.implementations.a_share.fields import (
 from quant_research_platform.profiles.research import research_profile
 from tests.helpers import frequency_ids
 
+pytestmark = pytest.mark.guardrails
+
 
 def test_agent_proposals_start_unapproved() -> None:
     proposals = [

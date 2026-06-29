@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-pytestmark = [pytest.mark.integration, pytest.mark.data_dependency]
+pytestmark = [pytest.mark.integration, pytest.mark.requires_local_data]
 from tests.architecture.test_share_safe_evidence import (  # noqa: E402
     DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA,
     HASH_RE,

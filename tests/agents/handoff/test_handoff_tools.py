@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -105,6 +106,24 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
     )
     assert result["zip_path"]
     return repo, Path(result["zip_path"]), Path(result["json_path"]), base, final_head
+
+
+@pytest.fixture(scope="session")
+def valid_handoff_package(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, Path]:
+    root = tmp_path_factory.mktemp("valid-handoff-package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(root)
+    return package, sidecar
+
+
+def _copy_valid_package(source: tuple[Path, Path], target: Path) -> tuple[Path, Path]:
+    source_package, source_sidecar = source
+    package = target / source_package.name
+    sidecar = target / source_sidecar.name
+    shutil.copyfile(source_package, package)
+    shutil.copyfile(source_sidecar, sidecar)
+    return package, sidecar
 
 
 def test_builder_main_resolves_relative_out_dir_under_repo_root(
@@ -409,9 +428,12 @@ def test_builder_does_not_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None
 
 
 @pytest.mark.mutation
-def test_verifier_rejects_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None:
+def test_verifier_rejects_duplicate_tracked_tools_in_zip(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     with zipfile.ZipFile(package, "a") as archive:
         archive.writestr("run_tools/self_test.py", "# duplicate tracked source\n")
     _refresh_manifest_and_sidecar(package, sidecar)
@@ -422,9 +444,12 @@ def test_verifier_rejects_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None
 
 
 @pytest.mark.mutation
-def test_verifier_rejects_duplicate_required_zip_member(tmp_path: Path) -> None:
+def test_verifier_rejects_duplicate_required_zip_member(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     with pytest.warns(UserWarning, match="Duplicate name"):
         with zipfile.ZipFile(package, "a") as archive:
             archive.writestr("task_metadata.json", "{}\n")
@@ -445,9 +470,10 @@ def test_verifier_rejects_duplicate_required_zip_member(tmp_path: Path) -> None:
 def test_verifier_rejects_duplicate_package_members(
     tmp_path: Path,
     member: str,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     with pytest.warns(UserWarning, match="Duplicate name"):
         with zipfile.ZipFile(package, "a") as archive:
             archive.writestr(member, archive.read(member))
@@ -460,9 +486,10 @@ def test_verifier_rejects_duplicate_package_members(
 @pytest.mark.mutation
 def test_verifier_rejects_duplicate_artifact_manifest_entries(
     tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     with zipfile.ZipFile(package) as archive:
         manifest = json.loads(archive.read("artifact_manifest.json").decode("utf-8"))
     manifest["entries"].append(dict(manifest["entries"][0]))
@@ -505,9 +532,10 @@ def test_verifier_rejects_handoff_json_identity_violations(
     tmp_path: Path,
     target: str,
     expected_failure: str,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     if target == "sidecar":
         payload = json.loads(sidecar.read_text(encoding="utf-8"))
         payload["contract_version"] = "0.1"
@@ -541,9 +569,12 @@ def test_verifier_rejects_handoff_json_identity_violations(
 
 
 @pytest.mark.mutation
-def test_verifier_rejects_tracked_repo_path_copies_in_zip(tmp_path: Path) -> None:
+def test_verifier_rejects_tracked_repo_path_copies_in_zip(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     with zipfile.ZipFile(package, "a") as archive:
         archive.writestr("src/copied.py", "# tracked source copy\n")
         archive.writestr(".agents/copied.py", "# tracked agent source copy\n")
@@ -558,9 +589,12 @@ def test_verifier_rejects_tracked_repo_path_copies_in_zip(tmp_path: Path) -> Non
 
 
 @pytest.mark.mutation
-def test_verifier_rejects_generation_bundle_hash_mismatch(tmp_path: Path) -> None:
+def test_verifier_rejects_generation_bundle_hash_mismatch(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     with zipfile.ZipFile(package) as archive:
         generation = json.loads(
             archive.read("handoff_evidence/generation.json").decode("utf-8")
@@ -1264,9 +1298,10 @@ def test_verify_smoke_compare_status_enforces_overall_semantics(
 @pytest.mark.mutation
 def test_verify_handoff_package_rejects_old_smoke_compare_status_shape(
     tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     old_payload = {
         "schema_id": "qrp-status-result",
         "status": "PASS",
@@ -1343,9 +1378,10 @@ def test_verify_rejects_validation_row_extra_fields() -> None:
 def test_verify_handoff_package_rejects_missing_mandatory_validation_check(
     tmp_path: Path,
     missing_check: str,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     checks = [
         row for row in _validation_checks("PASS") if row["name"] != missing_check
     ]
@@ -1359,9 +1395,10 @@ def test_verify_handoff_package_rejects_missing_mandatory_validation_check(
 @pytest.mark.mutation
 def test_verify_handoff_package_rejects_duplicate_validation_check_override(
     tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     checks = [
         *_validation_checks("PASS"),
         {"name": "tests", "status": "FAIL", "evidence": "first failure"},
@@ -1379,9 +1416,10 @@ def test_verify_handoff_package_rejects_duplicate_validation_check_override(
 def test_verify_handoff_package_rejects_invalid_validation_status(
     tmp_path: Path,
     status: str,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     checks = _validation_checks("PASS")
     checks[0]["status"] = status
     _replace_validation_evidence(package, sidecar, _validation_payload(checks))
@@ -1394,9 +1432,10 @@ def test_verify_handoff_package_rejects_invalid_validation_status(
 @pytest.mark.mutation
 def test_verify_handoff_package_rejects_validation_summary_mismatch(
     tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     checks = _validation_checks("PASS")
     checks[0]["status"] = "BLOCKED"
     _replace_validation_evidence(package, sidecar, _validation_payload(checks))
@@ -1415,9 +1454,10 @@ def test_verify_handoff_package_rejects_validation_summary_mismatch(
 @pytest.mark.mutation
 def test_verify_handoff_package_rejects_generation_validation_status_sidecar_mismatch(
     tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     generation = _generation_evidence(package)
     generation["validation_status"] = "PASS"
     _replace_generation_evidence(package, sidecar, generation)
@@ -1430,9 +1470,10 @@ def test_verify_handoff_package_rejects_generation_validation_status_sidecar_mis
 @pytest.mark.mutation
 def test_verify_handoff_package_rejects_generation_validation_status_aggregate_mismatch(
     tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     generation = _generation_evidence(package)
     generation["validation_status"] = "PASS"
     _replace_generation_evidence(package, sidecar, generation)
@@ -1446,9 +1487,10 @@ def test_verify_handoff_package_rejects_generation_validation_status_aggregate_m
 @pytest.mark.mutation
 def test_verify_handoff_package_rejects_sidecar_validation_status_aggregate_mismatch(
     tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     _set_sidecar_validation_status(sidecar, "PASS")
 
     failures = verifier.verify_handoff_package(package, sidecar)
@@ -1472,9 +1514,10 @@ def test_verify_handoff_package_accepts_consistent_generation_validation_status(
 @pytest.mark.mutation
 def test_verify_handoff_package_rejects_missing_generation_validation_status(
     tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     generation = _generation_evidence(package)
     generation.pop("validation_status")
     _replace_generation_evidence(package, sidecar, generation)
@@ -1487,9 +1530,10 @@ def test_verify_handoff_package_rejects_missing_generation_validation_status(
 @pytest.mark.mutation
 def test_verify_handoff_package_rejects_invalid_generation_validation_status(
     tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     generation = _generation_evidence(package)
     generation["validation_status"] = "BROKEN"
     _replace_generation_evidence(package, sidecar, generation)
