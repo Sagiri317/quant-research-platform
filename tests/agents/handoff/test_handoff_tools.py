@@ -1714,6 +1714,20 @@ def test_verify_smoke_compare_rejects_weak_portable_summary_shape(
         ".run/foo/ru:n.json",
         ".run/foo/run.json/",
         ".run//run.json",
+        ".run/foo./run.json",
+        ".run/foo/run..json",
+        ".run/foo/run..bad.json",
+        ".run/con/run.json",
+        ".run/CON/run.json",
+        ".run/prn/run.json",
+        ".run/foo/AUX.json",
+        ".run/foo/aux.json",
+        ".run/foo/COM1.json",
+        ".run/foo/com9.json",
+        ".run/foo/LPT1.json",
+        ".run/foo/lpt9.json",
+        ".run/com1.safe/run.json",
+        ".run/foo/safe.aux.json",
     ),
 )
 def test_verify_smoke_compare_rejects_invalid_source_artifact_path_shapes(
@@ -1818,8 +1832,10 @@ def test_verify_smoke_compare_rejects_unsafe_portable_result_fields(
     (
         ".run/foo/run.json",
         ".run/local-verification-3y/run.json",
+        ".run/local.verification-3y/run.json",
         ".run/compare-3y-self/run.json",
         ".run/smoke-20260628/run.json",
+        ".run/foo/run.v1.json",
     ),
 )
 def test_verify_smoke_compare_accepts_concrete_run_source_artifact_path(

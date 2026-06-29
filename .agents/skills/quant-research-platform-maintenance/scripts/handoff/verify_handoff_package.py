@@ -77,6 +77,16 @@ PORTABLE_STATUS_SUMMARY_TYPES = frozenset(
 )
 PORTABLE_SOURCE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 PORTABLE_SOURCE_ARTIFACT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.json$")
+WINDOWS_RESERVED_PATH_PARTS = frozenset(
+    {
+        "AUX",
+        "CON",
+        "NUL",
+        "PRN",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    }
+)
 ADVISORY_REVIEW_CHECKS = {"review_subagent"}
 TRACKED_HANDOFF_SOURCE_PATHS = (
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
@@ -1138,6 +1148,19 @@ def valid_source_artifact_path(value: str) -> bool:
     return (
         PORTABLE_SOURCE_RUN_ID_RE.fullmatch(run_id) is not None
         and PORTABLE_SOURCE_ARTIFACT_RE.fullmatch(artifact_file) is not None
+        and portable_source_segment_is_windows_safe(run_id)
+        and portable_source_segment_is_windows_safe(
+            artifact_file.removesuffix(".json")
+        )
+    )
+
+
+def portable_source_segment_is_windows_safe(value: str) -> bool:
+    if value.endswith(".") or ".." in value:
+        return False
+    return all(
+        part.upper() not in WINDOWS_RESERVED_PATH_PARTS
+        for part in value.split(".")
     )
 
 
