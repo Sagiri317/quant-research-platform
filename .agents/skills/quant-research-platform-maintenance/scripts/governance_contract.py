@@ -2535,6 +2535,9 @@ MANDATORY_VALIDATION_CHECKS = frozenset(
 )
 ADVISORY_VALIDATION_CHECKS = frozenset({"review_subagent"})
 ALLOWED_VALIDATION_CHECKS = MANDATORY_VALIDATION_CHECKS | ADVISORY_VALIDATION_CHECKS
+REVIEW_HANDOFF_EVIDENCE_NAME_TOKENS = frozenset(
+    {"review", "subagent", "reconciliation"}
+)
 BUILDER_OWNED_VALIDATION_CHECKS = frozenset(
     {"handoff_verify", "handoff_safety_scan"}
 )
@@ -3605,6 +3608,34 @@ def validation_status_map(payload: dict[str, object]) -> dict[str, str]:
         status = str(row["status"])
         result[name] = status
     return result
+
+
+def is_review_handoff_evidence_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    if not normalized.startswith("handoff_evidence/"):
+        return False
+    name = normalized.rsplit("/", 1)[-1]
+    return any(token in name for token in REVIEW_HANDOFF_EVIDENCE_NAME_TOKENS)
+
+
+def advisory_review_consistency_failures(
+    evidence_paths: object,
+    advisory_reviews: object,
+) -> list[str]:
+    if not isinstance(advisory_reviews, dict):
+        return ["advisory_reviews_invalid"]
+    if not isinstance(evidence_paths, (list, tuple, set, frozenset)):
+        return ["handoff_evidence_paths_invalid"]
+    review_paths = [
+        path
+        for path in evidence_paths
+        if isinstance(path, str) and is_review_handoff_evidence_path(path)
+    ]
+    if review_paths and not advisory_reviews:
+        return ["advisory_reviews_missing_for_review_evidence"]
+    if advisory_reviews and not review_paths:
+        return ["advisory_reviews_without_review_evidence"]
+    return []
 
 
 def mandatory_validation_status_map(payload: dict[str, object]) -> dict[str, str]:

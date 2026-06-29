@@ -33,6 +33,7 @@ from governance_contract import (  # noqa: E402
     TASK_METADATA_KEYS,
     TASK_REJECTED_KEYS,
     VERIFICATION_MATRIX_EVIDENCE,
+    advisory_review_consistency_failures,
     aggregate_mandatory_validation_status,
     enrich_validation_evidence,
     handoff_evidence_blocked_key_failures,
@@ -365,11 +366,13 @@ def stage_handoff_evidence(
     zip_filename: str,
 ) -> None:
     handoff_evidence = task.get("handoff_evidence")
+    evidence_paths: list[str] = []
     if handoff_evidence is not None and not isinstance(handoff_evidence, Mapping):
         raise SystemExit("handoff_evidence_must_be_object")
     if isinstance(handoff_evidence, Mapping):
         for raw_name, payload in sorted(handoff_evidence.items()):
             name = normalized_handoff_evidence_path(str(raw_name))
+            evidence_paths.append(name)
             if is_task_provided_handoff_evidence_blocked_path(name):
                 raise SystemExit(f"handoff_evidence_forbidden_path: {name}")
             if not isinstance(payload, Mapping):
@@ -389,6 +392,7 @@ def stage_handoff_evidence(
     if isinstance(markdown_evidence, Mapping):
         for raw_name, payload in sorted(markdown_evidence.items()):
             name = normalized_handoff_markdown_evidence_path(str(raw_name))
+            evidence_paths.append(name)
             if is_task_provided_handoff_evidence_blocked_path(name):
                 raise SystemExit(f"handoff_evidence_forbidden_path: {name}")
             if not isinstance(payload, str):
@@ -396,6 +400,12 @@ def stage_handoff_evidence(
                     f"handoff_markdown_evidence_entry_must_be_string: {name}"
                 )
             write_text(stage_root / name, share_safe_text_clean(payload))
+    review_failures = advisory_review_consistency_failures(
+        evidence_paths,
+        advisory_reviews_from_validation(validation_status_map(validation_evidence)),
+    )
+    if review_failures:
+        raise SystemExit(";".join(review_failures))
     write_text(
         stage_root / VERIFICATION_MATRIX_EVIDENCE,
         stable_json(verification_matrix_payload(validation_evidence)),

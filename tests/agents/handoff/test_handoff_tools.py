@@ -308,6 +308,55 @@ def _validation_payload(
     }
 
 
+def _review_reconciliation_payload() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-subagent-review-reconciliation",
+        "status": "PASS",
+        "rows": [
+            {
+                "finding_id": "review-1",
+                "classification": "NO_FINDINGS",
+                "action": "none",
+            }
+        ],
+    }
+
+
+def _review_validation_checks(status: str = "PASS") -> list[dict[str, object]]:
+    return [
+        *_validation_checks(status),
+        {
+            "name": "review_subagent",
+            "status": status,
+            "evidence": f"review_subagent {status}",
+        },
+    ]
+
+
+def _write_review_reconciliation_evidence(package: Path, sidecar: Path) -> None:
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/subagent-review-reconciliation.json",
+        (
+            json.dumps(_review_reconciliation_payload(), indent=2, sort_keys=True)
+            + "\n"
+        ).encode(),
+    )
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+
+def _set_sidecar_advisory_reviews(
+    sidecar: Path,
+    advisory_reviews: dict[str, str],
+) -> None:
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    payload["advisory_reviews"] = advisory_reviews
+    sidecar.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _replace_validation_evidence(
     package: Path,
     sidecar: Path,
@@ -384,6 +433,71 @@ def _set_sidecar_validation_status(sidecar: Path, status: str) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def test_verify_allows_empty_advisory_reviews_without_review_evidence(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert sidecar_payload["advisory_reviews"] == {}
+    assert "advisory_reviews_without_review_evidence" not in failures
+    assert "advisory_reviews_missing_for_review_evidence" not in failures
+
+
+@pytest.mark.mutation
+def test_verify_allows_review_evidence_with_advisory_reviews(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _write_review_reconciliation_evidence(package, sidecar)
+    _replace_validation_evidence(
+        package,
+        sidecar,
+        _validation_payload(_review_validation_checks("PASS")),
+    )
+    _set_sidecar_advisory_reviews(sidecar, {"review_subagent": "PASS"})
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert sidecar_payload["advisory_reviews"] == {"review_subagent": "PASS"}
+    assert "advisory_reviews_without_review_evidence" not in failures
+    assert "advisory_reviews_missing_for_review_evidence" not in failures
+
+
+@pytest.mark.mutation
+def test_verify_rejects_review_evidence_without_advisory_reviews(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _write_review_reconciliation_evidence(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "advisory_reviews_missing_for_review_evidence" in failures
+
+
+@pytest.mark.mutation
+def test_verify_rejects_advisory_reviews_without_review_evidence(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _set_sidecar_advisory_reviews(sidecar, {"review_subagent": "PASS"})
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "advisory_reviews_without_review_evidence" in failures
 
 
 def test_tracked_handoff_tool_source_of_truth_exists() -> None:

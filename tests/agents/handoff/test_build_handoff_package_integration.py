@@ -468,6 +468,58 @@ def test_build_handoff_package_rejects_one_forbidden_custom_evidence_key(
     assert not list(out_dir.glob("*"))
 
 
+def test_build_handoff_package_allows_empty_advisory_without_review_evidence(
+    tmp_path: Path,
+) -> None:
+    result, out_dir = _run_builder_with_handoff_evidence(tmp_path, {}, verify=True)
+
+    assert result.returncode == 0
+    sidecar = json.loads((out_dir / "synthetic-handoff-negative.json").read_text())
+    assert sidecar["advisory_reviews"] == {}
+
+
+def test_build_handoff_package_allows_review_evidence_with_advisory(
+    tmp_path: Path,
+) -> None:
+    result, out_dir = _run_builder_with_handoff_evidence(
+        tmp_path,
+        {"subagent-review-reconciliation": _review_reconciliation_payload()},
+        validation_checks=_review_validation_checks("PASS"),
+        verify=True,
+    )
+
+    assert result.returncode == 0
+    sidecar = json.loads((out_dir / "synthetic-handoff-negative.json").read_text())
+    assert sidecar["advisory_reviews"] == {"review_subagent": "PASS"}
+
+
+def test_build_handoff_package_rejects_review_evidence_without_advisory(
+    tmp_path: Path,
+) -> None:
+    result, out_dir = _run_builder_with_handoff_evidence(
+        tmp_path,
+        {"subagent-review-reconciliation": _review_reconciliation_payload()},
+    )
+
+    assert result.returncode != 0
+    assert "advisory_reviews_missing_for_review_evidence" in result.stderr
+    assert not list(out_dir.glob("*"))
+
+
+def test_build_handoff_package_rejects_advisory_without_review_evidence(
+    tmp_path: Path,
+) -> None:
+    result, out_dir = _run_builder_with_handoff_evidence(
+        tmp_path,
+        {},
+        validation_checks=_review_validation_checks("PASS"),
+    )
+
+    assert result.returncode != 0
+    assert "advisory_reviews_without_review_evidence" in result.stderr
+    assert not list(out_dir.glob("*"))
+
+
 def _init_synthetic_repo(repo: Path) -> None:
     repo.mkdir()
     support_root = repo / ".agents" / "skills" / "quant-research-platform-maintenance"
@@ -528,6 +580,9 @@ def _init_synthetic_repo(repo: Path) -> None:
 def _run_builder_with_handoff_evidence(
     tmp_path: Path,
     handoff_evidence: object,
+    *,
+    validation_checks: list[dict[str, str]] | None = None,
+    verify: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     repo = tmp_path / "r"
     _init_synthetic_repo(repo)
@@ -555,7 +610,11 @@ def _run_builder_with_handoff_evidence(
                 "handoff_evidence": handoff_evidence,
                 "validation_evidence": {
                     "schema_id": "qrp-handoff-validation-evidence",
-                    "checks": _validation_checks("PASS"),
+                    "checks": (
+                        validation_checks
+                        if validation_checks is not None
+                        else _validation_checks("PASS")
+                    ),
                 },
             },
             indent=2,
@@ -565,17 +624,21 @@ def _run_builder_with_handoff_evidence(
         encoding="utf-8",
     )
 
+    command = [
+        sys.executable,
+        str(HANDOFF_SCRIPT),
+        "--repo-root",
+        str(repo),
+        "--task",
+        str(task_path),
+        "--out-dir",
+        str(out_dir),
+    ]
+    if verify:
+        command.append("--verify")
+
     result = subprocess.run(
-        [
-            sys.executable,
-            str(HANDOFF_SCRIPT),
-            "--repo-root",
-            str(repo),
-            "--task",
-            str(task_path),
-            "--out-dir",
-            str(out_dir),
-        ],
+        command,
         cwd=REPO_ROOT,
         check=False,
         capture_output=True,
@@ -593,6 +656,31 @@ def _validation_checks(status: str) -> list[dict[str, str]]:
         }
         for name in _mandatory_validation_checks()
     ]
+
+
+def _review_validation_checks(status: str) -> list[dict[str, str]]:
+    return [
+        *_validation_checks(status),
+        {
+            "name": "review_subagent",
+            "status": status,
+            "evidence": f"review_subagent {status}",
+        },
+    ]
+
+
+def _review_reconciliation_payload() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-subagent-review-reconciliation",
+        "status": "PASS",
+        "rows": [
+            {
+                "finding_id": "review-1",
+                "classification": "NO_FINDINGS",
+                "action": "none",
+            }
+        ],
+    }
 
 
 def _mandatory_validation_checks() -> tuple[str, ...]:

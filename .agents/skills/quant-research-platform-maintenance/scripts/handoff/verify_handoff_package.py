@@ -34,6 +34,7 @@ from governance_contract import (  # noqa: E402
     RESULT_ARCHITECTURE_RETIRED_TEXT_RULES,
     VALID_STATUS_TOKENS,
     VALIDATION_ROW_KEYS,
+    advisory_review_consistency_failures,
     aggregate_mandatory_validation_status,
     handoff_evidence_blocked_key_failures,
     is_reserved_handoff_evidence_path,
@@ -593,6 +594,7 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
             failures.extend(verify_artifact_manifest(archive, sidecar))
             failures.extend(verify_metadata_entries(archive, sidecar))
             failures.extend(verify_handoff_evidence_json(archive, sidecar))
+            failures.extend(review_advisory_consistency_failures(archive, sidecar))
             failures.extend(verify_final_branch_bundle(archive, sidecar))
             failures.extend(verify_git_status(archive))
     except Exception as exc:
@@ -950,6 +952,16 @@ def verify_handoff_evidence_json(
     if VERIFICATION_MATRIX_EVIDENCE not in archive.namelist():
         failures.append("verification_matrix_missing")
     return failures
+
+
+def review_advisory_consistency_failures(
+    archive: ZipFile,
+    sidecar: dict[str, object],
+) -> list[str]:
+    return advisory_review_consistency_failures(
+        tuple(archive.namelist()),
+        sidecar.get("advisory_reviews", {}),
+    )
 
 
 def handoff_evidence_forbidden_field_failures(
