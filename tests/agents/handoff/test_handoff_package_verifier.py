@@ -79,6 +79,30 @@ def test_handoff_package_verifier_uses_shared_governance_forbidden_path_parts():
     )
 
 
+@pytest.mark.parametrize("evidence", ["", "   ", 123, [], {}])
+def test_handoff_validation_evidence_rejects_invalid_evidence_values(
+    evidence: object,
+) -> None:
+    module = _load_handoff_package_verifier_module()
+    payload = _validation_evidence_payload(evidence=evidence)
+
+    failures = module.verify_validation_evidence_schema(payload)
+
+    assert "validation_evidence_evidence_invalid: 0" in failures
+
+
+def test_handoff_validation_evidence_accepts_non_empty_string_evidence() -> None:
+    module = _load_handoff_package_verifier_module()
+    payload = _validation_evidence_payload(evidence="command completed with PASS")
+
+    failures = module.verify_validation_evidence_schema(payload)
+
+    assert not any(
+        failure.startswith("validation_evidence_evidence_invalid")
+        for failure in failures
+    )
+
+
 def test_handoff_verifier_allows_final_branch_bundle_by_default(tmp_path):
     module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
@@ -89,6 +113,23 @@ def test_handoff_verifier_allows_final_branch_bundle_by_default(tmp_path):
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert result.ok
+
+
+def _validation_evidence_payload(*, evidence: object) -> dict[str, object]:
+    contract = _load_governance_contract_module()
+    rows: list[dict[str, object]] = []
+    for index, name in enumerate(sorted(contract.MANDATORY_VALIDATION_CHECKS)):
+        rows.append(
+            {
+                "name": name,
+                "status": "PASS",
+                "evidence": evidence if index == 0 else f"{name} PASS",
+            }
+        )
+    return {
+        "schema_id": "qrp-handoff-validation-evidence",
+        "checks": rows,
+    }
 
 
 @pytest.mark.parametrize(

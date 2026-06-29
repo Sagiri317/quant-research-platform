@@ -3380,8 +3380,10 @@ def validation_evidence_contract_failures(
                 failures.append(
                     f"validation_evidence_status_invalid: {index}:{row.get('status')}"
                 )
-        if "evidence" in row and row.get("evidence") is None:
-            failures.append(f"validation_evidence_evidence_invalid: {index}")
+        if "evidence" in row:
+            evidence = row.get("evidence")
+            if not isinstance(evidence, str) or not evidence.strip():
+                failures.append(f"validation_evidence_evidence_invalid: {index}")
     if require_mandatory:
         missing = sorted(MANDATORY_VALIDATION_CHECKS - seen)
         failures.extend(

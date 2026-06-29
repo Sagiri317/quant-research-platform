@@ -316,16 +316,16 @@ def handoff_sidecar_path_value(task: dict[str, object], json_path: Path) -> str:
 
 
 def task_validation_evidence(task: dict[str, object]) -> dict[str, object]:
-    payload = task.get("validation_evidence")
-    if isinstance(payload, dict):
-        if "checks" not in payload:
-            return missing_validation_evidence_payload()
-        result = share_safe_json_clean(payload)
-        validate_validation_evidence_contract(result, require_mandatory=False)
-        return result
-    if payload is not None:
+    if "validation_evidence" not in task:
+        return missing_validation_evidence_payload()
+    payload = task["validation_evidence"]
+    if not isinstance(payload, dict):
         raise SystemExit("validation_evidence_must_be_object")
-    return missing_validation_evidence_payload()
+    if "checks" not in payload:
+        raise SystemExit("validation_evidence_checks_missing")
+    result = share_safe_json_clean(payload)
+    validate_validation_evidence_contract(result, require_mandatory=False)
+    return result
 
 
 def missing_validation_evidence_payload() -> dict[str, object]:
