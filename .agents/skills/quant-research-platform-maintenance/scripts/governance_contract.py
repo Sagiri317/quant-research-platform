@@ -2505,6 +2505,8 @@ MANDATORY_VALIDATION_CHECKS = frozenset(
         "code_map",
     }
 )
+ADVISORY_VALIDATION_CHECKS = frozenset({"review_subagent"})
+ALLOWED_VALIDATION_CHECKS = MANDATORY_VALIDATION_CHECKS | ADVISORY_VALIDATION_CHECKS
 BUILDER_OWNED_VALIDATION_CHECKS = frozenset(
     {"handoff_verify", "handoff_safety_scan"}
 )
@@ -3365,15 +3367,19 @@ def validation_evidence_contract_failures(
             if key not in row:
                 failures.append(f"validation_evidence_row_missing: {index}:{key}")
         name = row.get("name")
-        if not isinstance(name, str) or not name.strip():
+        if (
+            not isinstance(name, str)
+            or not name
+            or name != name.strip()
+            or name not in ALLOWED_VALIDATION_CHECKS
+        ):
             failures.append(f"validation_evidence_name_invalid: {index}")
         else:
-            normalized_name = name.strip()
-            if normalized_name in seen:
+            if name in seen:
                 failures.append(
-                    f"validation_evidence_duplicate_check: {normalized_name}"
+                    f"validation_evidence_duplicate_check: {name}"
                 )
-            seen.add(normalized_name)
+            seen.add(name)
         if "status" in row:
             status = row.get("status")
             if not isinstance(status, str) or status not in VALID_STATUSES:

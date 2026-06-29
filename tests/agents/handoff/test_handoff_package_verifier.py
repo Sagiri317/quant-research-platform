@@ -103,6 +103,30 @@ def test_handoff_validation_evidence_accepts_non_empty_string_evidence() -> None
     )
 
 
+@pytest.mark.parametrize("name", [" tests ", "\ttests", "tests\n", "", 123])
+def test_handoff_validation_evidence_rejects_invalid_check_names(
+    name: object,
+) -> None:
+    module = _load_handoff_package_verifier_module()
+    payload = _validation_evidence_payload(name=name)
+
+    failures = module.verify_validation_evidence_schema(payload)
+
+    assert "validation_evidence_name_invalid: 0" in failures
+
+
+def test_handoff_validation_evidence_accepts_exact_check_name() -> None:
+    module = _load_handoff_package_verifier_module()
+    payload = _validation_evidence_payload(name="tests")
+
+    failures = module.verify_validation_evidence_schema(payload)
+
+    assert not any(
+        failure.startswith("validation_evidence_name_invalid")
+        for failure in failures
+    )
+
+
 def test_handoff_verifier_allows_final_branch_bundle_by_default(tmp_path):
     module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
@@ -115,15 +139,27 @@ def test_handoff_verifier_allows_final_branch_bundle_by_default(tmp_path):
     assert result.ok
 
 
-def _validation_evidence_payload(*, evidence: object) -> dict[str, object]:
+def _validation_evidence_payload(
+    *,
+    evidence: object = "command completed with PASS",
+    name: object = "tests",
+) -> dict[str, object]:
     contract = _load_governance_contract_module()
     rows: list[dict[str, object]] = []
-    for index, name in enumerate(sorted(contract.MANDATORY_VALIDATION_CHECKS)):
+    check_names = [
+        "tests",
+        *(
+            name
+            for name in sorted(contract.MANDATORY_VALIDATION_CHECKS)
+            if name != "tests"
+        ),
+    ]
+    for check_name in check_names:
         rows.append(
             {
-                "name": name,
+                "name": name if check_name == "tests" else check_name,
                 "status": "PASS",
-                "evidence": evidence if index == 0 else f"{name} PASS",
+                "evidence": evidence if check_name == "tests" else f"{check_name} PASS",
             }
         )
     return {
