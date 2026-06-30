@@ -116,6 +116,26 @@ BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "log_float_market_cap": ("float_market_cap",),
     "log_total_market_cap": ("total_market_cap",),
 }
+_WINDOWED_PRICE_VOLUME_FACTOR_PREFIXES: tuple[str, ...] = (
+    "mom",
+    "rev",
+    "vol",
+    "downside_vol",
+    "upside_vol",
+    "max_return",
+    "min_return",
+    "drawdown",
+    "skew",
+    "kurt",
+    "avg_amount",
+    "turnover",
+    "turnover_chg",
+    "turnover_vol",
+    "amihud",
+    "zero_volume_ratio",
+    "amplitude",
+    "intraday_range",
+)
 
 
 def price_volume_factor_columns_for_windows(
@@ -244,9 +264,9 @@ def _lookback_window(factor_id: str) -> int | None:
 def _required_fields_for_factor(factor: str) -> tuple[str, ...]:
     if factor in BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS:
         return BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS[factor]
-    for prefix, required in BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS.items():
-        if factor.startswith(f"{prefix}_"):
-            return required
+    for prefix in _WINDOWED_PRICE_VOLUME_FACTOR_PREFIXES:
+        if re.fullmatch(rf"{re.escape(prefix)}_\d+d", factor):
+            return BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS[prefix]
     return ()
 
 

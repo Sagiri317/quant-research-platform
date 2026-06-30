@@ -32,6 +32,7 @@ from quant_research_platform.research.factors.price_volume import (
     price_volume_factor_input_columns,
     price_volume_window_column,
     select_price_volume_feature_columns_from_schema,
+    unsupported_price_volume_factors,
 )
 from quant_research_platform.research.factors.price_volume import (
     rolling as price_volume_rolling,
@@ -475,6 +476,26 @@ def test_price_volume_compute_fails_closed_when_required_input_missing() -> None
 
     with pytest.raises(ValueError, match="missing_price_volume_input_columns: amount"):
         calculate_price_volume_factors(panel, factor_columns=("amihud_20d",))
+
+
+def test_price_volume_compute_fails_closed_for_non_daily_factor_suffix() -> None:
+    panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5))
+
+    assert unsupported_price_volume_factors(("mom_2m",)) == ("mom_2m",)
+    with pytest.raises(ValueError, match="unsupported_price_volume_factors: mom_2m"):
+        calculate_price_volume_factors(panel, factor_columns=("mom_2m",))
+
+
+def test_price_volume_compute_fails_closed_for_malformed_daily_factor_names() -> None:
+    panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5))
+    malformed = ("log_float_market_cap_20d", "rev_1d_2d")
+
+    assert unsupported_price_volume_factors(malformed) == malformed
+    with pytest.raises(
+        ValueError,
+        match="unsupported_price_volume_factors: log_float_market_cap_20d, rev_1d_2d",
+    ):
+        calculate_price_volume_factors(panel, factor_columns=malformed)
 
 
 def test_price_volume_largest_lookback_is_derived_from_requested_columns() -> None:

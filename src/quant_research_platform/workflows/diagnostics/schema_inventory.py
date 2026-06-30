@@ -10,23 +10,15 @@ from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.contracts.data import (
-    DataFrequency,
-    horizon_unit_suffix,
+from quant_research_platform.contracts.data import DataFrequency
+from quant_research_platform.research.labels.forward_returns import (
+    forward_return_label_column,
 )
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
     read_dataset,
 )
-
-
-def _forward_return_label_column(
-    horizon: int,
-    frequency: DataFrequency | str = DataFrequency.DAILY,
-) -> str:
-    return f"forward_return_{horizon}{horizon_unit_suffix(frequency)}"
-
 
 IMPORTANT_NULL_COUNT_COLUMNS = frozenset(
     {
@@ -37,7 +29,7 @@ IMPORTANT_NULL_COUNT_COLUMNS = frozenset(
         "is_pt",
         "limit_status",
         *(
-            _forward_return_label_column(horizon, DataFrequency.DAILY)
+            forward_return_label_column(horizon, DataFrequency.DAILY)
             for horizon in (1, 5, 10, 20, 60, 120)
         ),
     }
