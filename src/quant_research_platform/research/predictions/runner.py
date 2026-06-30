@@ -14,8 +14,9 @@ from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import validate_prediction_input
 from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
+from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.supervised import (
-    _fit_model_result_from_frames,
+    build_estimator_from_model_spec,
 )
 from quant_research_platform.research.predictions.outputs import (
     PredictionResult,
@@ -90,12 +91,13 @@ def build_prediction_result_from_research_dataset(
     _validate_prediction_window_order(prediction_spec)
     train_end = pd.Timestamp(prediction_spec.train_end)
     try:
-        model_result = _fit_model_result_from_frames(
+        model_result = fitting.fit_model_result_from_frames(
             _prediction_train_chunks(
                 _chunks(train_read_columns),
                 train_end=train_end,
             ),
             model_spec,
+            estimator=build_estimator_from_model_spec(model_spec),
         )
     except ValueError as exc:
         if str(exc) == "model_training_sample_empty":

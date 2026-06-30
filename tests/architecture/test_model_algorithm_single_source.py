@@ -140,27 +140,47 @@ def test_supervised_model_root_delegates_algorithm_facts_and_dependencies() -> N
     assert "def _dependency_status" not in root_source
 
 
+def test_supervised_model_root_delegates_fitting_owner() -> None:
+    import quant_research_platform.research.models.supervised as supervised
+
+    root_source = Path(supervised.__file__).read_text(encoding="utf-8")
+    owner_path = MODELS_ROOT / "fitting.py"
+    owner_source = owner_path.read_text(encoding="utf-8")
+    owner_names = (
+        "class ModelFitResult",
+        "def fit_model_result_from_frames",
+        "def fit_linear_model_result_from_frames",
+        "def collect_training_frame",
+        "def fit_predictor",
+    )
+    root_owned_names = (
+        "class ModelFitResult",
+        "def _fit_model_result_from_frames",
+        "def _fit_linear_model_result_from_frames",
+        "def _collect_training_frame",
+        "def _fit_predictor",
+    )
+
+    assert owner_path.is_file()
+    assert [name for name in owner_names if name not in owner_source] == []
+    assert [name for name in root_owned_names if name in root_source] == []
+
+
 def test_model_estimator_dispatch_uses_algorithm_facts_only() -> None:
+    import quant_research_platform.research.models.fitting as fitting
     import quant_research_platform.research.models.supervised as supervised
 
     source = inspect.getsource(supervised)
+    fitting_source = inspect.getsource(fitting)
 
     assert "def _build_regression_estimator" not in source
     assert "if spec.model_algorithm ==" not in inspect.getsource(
         supervised.build_estimator_from_model_spec
     )
-    assert 'spec.model_algorithm != "linear_regression"' not in inspect.getsource(
-        supervised._fit_model_result_from_frames
-    )
-    assert "_LinearRegressionEstimator" not in inspect.getsource(
-        supervised._fit_model_result_from_frames
-    )
-    assert "isinstance(estimator," not in inspect.getsource(
-        supervised._fit_model_result_from_frames
-    )
-    assert "_ICWeightedRankEnsembleFactory" not in inspect.getsource(
-        supervised._fit_predictor
-    )
+    assert 'spec.model_algorithm != "linear_regression"' not in fitting_source
+    assert "_LinearRegressionEstimator" not in fitting_source
+    assert "isinstance(estimator," not in fitting_source
+    assert "_ICWeightedRankEnsembleFactory" not in fitting_source
 
 
 def test_model_algorithm_ids_is_the_only_collection_helper() -> None:

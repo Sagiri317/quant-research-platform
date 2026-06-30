@@ -571,6 +571,7 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
 def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from quant_research_platform.research.models import fitting as model_fitting
     from quant_research_platform.research.models import supervised as model_supervised
 
     frame = _filter_frame()
@@ -581,18 +582,23 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
         label_column="label",
         max_train_rows=len(frame),
     )
-    expected = model_supervised._fit_model_result_from_frames((frame,), spec)
-    original_filter = model_supervised.apply_filter_mode
+    expected = model_fitting.fit_model_result_from_frames(
+        (frame,),
+        spec,
+        estimator=model_supervised.build_estimator_from_model_spec(spec),
+    )
+    original_filter = model_fitting.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
     def wrapped_filter(frame, *, mode, metadata_key):
         filtered_chunk_rows.append(len(frame))
         return original_filter(frame, mode=mode, metadata_key=metadata_key)
 
-    monkeypatch.setattr(model_supervised, "apply_filter_mode", wrapped_filter)
-    result = model_supervised._fit_model_result_from_frames(
+    monkeypatch.setattr(model_fitting, "apply_filter_mode", wrapped_filter)
+    result = model_fitting.fit_model_result_from_frames(
         (frame.iloc[:3], frame.iloc[3:]),
         spec,
+        estimator=model_supervised.build_estimator_from_model_spec(spec),
     )
 
     assert filtered_chunk_rows == [len(frame)]
@@ -1066,7 +1072,7 @@ def test_model_training_controls_apply_to_linear_and_estimators(
 def test_model_max_train_rows_trims_streaming_training_buffer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.research.models import supervised as model_supervised
+    from quant_research_platform.research.models import fitting as model_fitting
     from quant_research_platform.research.models import validation_split
 
     frame = pd.concat(
@@ -1105,7 +1111,7 @@ def test_model_max_train_rows_trims_streaming_training_buffer(
 
     monkeypatch.setattr(validation_split, "trim_training_buffer", wrapped_trim)
 
-    training, row_counts, _metadata = model_supervised._collect_training_frame(
+    training, row_counts, _metadata = model_fitting.collect_training_frame(
         (chunk for _, chunk in frame.groupby(frame.index // 5)),
         spec,
     )
@@ -1116,7 +1122,7 @@ def test_model_max_train_rows_trims_streaming_training_buffer(
 
 
 def test_model_training_collection_rejects_unbounded_collection() -> None:
-    from quant_research_platform.research.models import supervised as model_supervised
+    from quant_research_platform.research.models import fitting as model_fitting
 
     frame = pd.concat(
         [
@@ -1134,13 +1140,13 @@ def test_model_training_collection_rejects_unbounded_collection() -> None:
     )
 
     with pytest.raises(ValueError, match="unbounded_model_training_collection"):
-        model_supervised._collect_training_frame(
+        model_fitting.collect_training_frame(
             (frame,),
             spec,
         )
 
     with pytest.raises(ValueError, match="unbounded_model_training_collection"):
-        model_supervised._collect_training_frame(
+        model_fitting.collect_training_frame(
             (chunk for _, chunk in frame.groupby("timestamp")),
             spec,
         )
@@ -1275,7 +1281,7 @@ def _model_hyperparameters(model_algorithm: str) -> dict[str, object]:
 def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.research.models import supervised as model_supervised
+    from quant_research_platform.research.models import fitting as model_fitting
 
     frame = pd.concat(
         [
@@ -1300,7 +1306,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         max_train_rows=len(frame),
     )
     expected = fit_model_result(frame, spec)
-    original_filter = model_supervised.apply_filter_mode
+    original_filter = model_fitting.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
     def wrapped_filter(frame, *, mode, metadata_key):
@@ -1310,7 +1316,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     def fail_column_stack(*args, **kwargs):
         raise AssertionError("model fit must not allocate a full intercept matrix")
 
-    monkeypatch.setattr(model_supervised, "apply_filter_mode", wrapped_filter)
+    monkeypatch.setattr(model_fitting, "apply_filter_mode", wrapped_filter)
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
 

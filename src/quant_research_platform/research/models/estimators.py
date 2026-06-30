@@ -25,9 +25,9 @@ class _LinearRegressionEstimator:
         spec: ModelSpec,
     ):
         del self
-        from quant_research_platform.research.models import supervised
+        from quant_research_platform.research.models import fitting
 
-        return supervised._fit_linear_model_result_from_frames(frames, spec)
+        return fitting.fit_linear_model_result_from_frames(frames, spec)
 
 
 @dataclass(frozen=True)

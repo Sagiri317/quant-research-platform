@@ -817,7 +817,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
 
     original_iter = prediction_runner_module._iter_research_dataset_chunks
-    original_fit = prediction_runner_module._fit_model_result_from_frames
+    original_fit = prediction_runner_module.fitting.fit_model_result_from_frames
     original_write = prediction_runner_module.build_prediction_result_from_frames
     read_chunk_rows: list[int] = []
     fit_chunk_rows: list[int] = []
@@ -830,10 +830,10 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
             read_chunk_rows.append(len(chunk))
             yield chunk
 
-    def wrapped_fit(frames, spec):
+    def wrapped_fit(frames, spec, *, estimator):
         chunks = list(frames)
         fit_chunk_rows.extend(len(chunk) for chunk in chunks)
-        return original_fit(iter(chunks), spec)
+        return original_fit(iter(chunks), spec, estimator=estimator)
 
     def wrapped_write(frames, spec, coefficients, input_columns, **kwargs):
         def counted_frames():
@@ -855,8 +855,8 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         wrapped_iter,
     )
     monkeypatch.setattr(
-        prediction_runner_module,
-        "_fit_model_result_from_frames",
+        prediction_runner_module.fitting,
+        "fit_model_result_from_frames",
         wrapped_fit,
     )
     monkeypatch.setattr(
