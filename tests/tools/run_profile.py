@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -232,13 +233,15 @@ def _resolve_repo_relative(repo_root: Path, value: str, flag: str) -> Path:
 
 
 def _resolve_run_dir(repo_root: Path, value: str | None, *, profile_name: str) -> Path:
-    raw = value or _default_run_dir(profile_name)
+    if value is None:
+        return _create_default_run_dir(repo_root, profile_name)
+    raw = value
     run_dir = _resolve_repo_relative(repo_root, raw, "--run-dir")
     relative = PurePosixPath(run_dir.relative_to(repo_root).as_posix())
     if relative.parts[:1] != (".run",) or len(relative.parts) == 1:
         raise ValueError(f"--run-dir must be repo-relative under .run/: {raw}")
-    if run_dir.exists() and any(run_dir.iterdir()):
-        raise ValueError(f"--run-dir already exists and is non-empty: {raw}")
+    if run_dir.exists():
+        raise ValueError(f"--run-dir already exists: {raw}")
     return run_dir
 
 
@@ -246,9 +249,16 @@ def _repo_relative(repo_root: Path, path: Path) -> str:
     return PurePosixPath(path.resolve().relative_to(repo_root)).as_posix()
 
 
-def _default_run_dir(profile_name: str) -> str:
+def _create_default_run_dir(repo_root: Path, profile_name: str) -> Path:
     timestamp = datetime.now(UTC).strftime("%y%m%d%H%M%S")
-    return f".run/test-profiles/{timestamp}-{profile_name}"
+    parent = repo_root / ".run" / "test-profiles"
+    parent.mkdir(parents=True, exist_ok=True)
+    return Path(
+        tempfile.mkdtemp(
+            prefix=f"{timestamp}-{profile_name}-",
+            dir=parent,
+        )
+    )
 
 
 def _retired_profile_runner_env_name() -> str:

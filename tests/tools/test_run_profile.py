@@ -5,7 +5,8 @@ import json
 import subprocess
 import sys
 import tomllib
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path, PurePosixPath
 
 RUNNER_PATH = Path(__file__).with_name("run_profile.py")
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -137,7 +138,9 @@ def test_default_run_dir_is_profile_scoped_under_run_root(
     assert "--basetemp" in command
     basetemp = command[command.index("--basetemp") + 1]
     assert basetemp.startswith(".run/test-profiles/")
-    assert basetemp.endswith("-fast/tmp")
+    basetemp_parts = PurePosixPath(basetemp).parts
+    assert basetemp_parts[-1] == "tmp"
+    assert basetemp_parts[-2].split("-")[1] == "fast"
     assert "--durations=3" in command
     assert kwargs["cwd"] == tmp_path.resolve()
     assert kwargs["shell"] is False
@@ -145,8 +148,10 @@ def test_default_run_dir_is_profile_scoped_under_run_root(
     profile_dirs = list((tmp_path / ".run" / "test-profiles").iterdir())
     assert len(profile_dirs) == 1
     run_dir = profile_dirs[0]
-    assert run_dir.name.endswith("-fast")
-    assert len(run_dir.name.removesuffix("-fast")) <= 12
+    name_parts = run_dir.name.split("-")
+    assert len(name_parts) >= 3
+    assert name_parts[1] == "fast"
+    assert len(name_parts[0]) == 12
     assert (run_dir / "stdout.log").read_text() == "pytest ok\n"
     assert (run_dir / "stderr.log").read_text() == ""
     assert (run_dir / "tmp").is_dir()
@@ -183,6 +188,71 @@ def test_default_run_dir_is_profile_scoped_under_run_root(
     }
 
 
+def test_default_run_dir_creations_are_unique_with_same_timestamp(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner()
+    real_datetime = runner.datetime
+
+    class FixedDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            del tz
+            return real_datetime(2026, 6, 30, 8, 9, 10, tzinfo=runner.UTC)
+
+    monkeypatch.setattr(runner, "datetime", FixedDatetime)
+
+    first = runner._resolve_run_dir(tmp_path, None, profile_name="fast")
+    second = runner._resolve_run_dir(tmp_path, None, profile_name="fast")
+
+    assert first != second
+    assert first.parent == tmp_path / ".run" / "test-profiles"
+    assert second.parent == first.parent
+    assert first.name.startswith("260630080910-fast-")
+    assert second.name.startswith("260630080910-fast-")
+    assert first.is_dir()
+    assert second.is_dir()
+
+
+def test_default_run_dir_creation_is_concurrent_safe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner()
+    real_datetime = runner.datetime
+
+    class FixedDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            del tz
+            return real_datetime(2026, 6, 30, 8, 9, 10, tzinfo=runner.UTC)
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="pytest ok\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(runner, "datetime", FixedDatetime)
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    def run_once() -> int:
+        return runner.main(["--profile", "fast", "--repo-root", str(tmp_path)])
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        exit_codes = list(pool.map(lambda _index: run_once(), range(4)))
+
+    assert exit_codes == [0, 0, 0, 0]
+    profile_dirs = sorted((tmp_path / ".run" / "test-profiles").iterdir())
+    assert len(profile_dirs) == 4
+    assert len({path.name for path in profile_dirs}) == 4
+    assert all(path.name.startswith("260630080910-fast-") for path in profile_dirs)
+    assert all((path / "summary.json").is_file() for path in profile_dirs)
+
+
 def test_explicit_run_dir_must_be_under_run_root(
     tmp_path: Path,
     monkeypatch,
@@ -217,6 +287,33 @@ def test_explicit_run_dir_existing_non_empty_fails_before_pytest(
     run_dir = tmp_path / ".run" / "manual" / "fast"
     run_dir.mkdir(parents=True)
     (run_dir / "existing.txt").write_text("occupied\n", encoding="utf-8")
+
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("pytest should not be called")
+
+    monkeypatch.setattr(runner.subprocess, "run", fail_run)
+
+    exit_code = runner.main(
+        [
+            "--profile",
+            "fast",
+            "--repo-root",
+            str(tmp_path),
+            "--run-dir",
+            ".run/manual/fast",
+        ]
+    )
+
+    assert exit_code == 2
+
+
+def test_explicit_run_dir_existing_empty_fails_before_pytest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner()
+    run_dir = tmp_path / ".run" / "manual" / "fast"
+    run_dir.mkdir(parents=True)
 
     def fail_run(*_args, **_kwargs):
         raise AssertionError("pytest should not be called")
