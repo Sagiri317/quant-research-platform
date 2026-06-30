@@ -146,10 +146,7 @@ def _compute_evaluation_frames(
                 *compute_spec.signal_columns,
                 compute_spec.label_column,
             )
-            usable = filtered.dropna(subset=[label_column]).loc[
-                :,
-                list(compute_columns),
-            ].copy()
+            usable = filtered.loc[:, list(compute_columns)].copy()
             metrics, grouped_label_values = compute_ic_and_grouped_label_values(
                 usable,
                 compute_spec,

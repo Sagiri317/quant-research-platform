@@ -65,6 +65,13 @@ def _signal(column: str, *, source_kind: str = "factor") -> SignalSpec:
     )
 
 
+def _sort_evaluation_frame(
+    frame: pd.DataFrame,
+    columns: tuple[str, ...],
+) -> pd.DataFrame:
+    return frame.sort_values(list(columns)).reset_index(drop=True)
+
+
 def _filter_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -272,6 +279,89 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
     assert unfiltered.grouped_label_values[
         "mean_label_value"
     ].tolist() == pytest.approx([0.02, 0.045])
+
+
+def test_evaluation_all_nan_signal_label_reports_empty_diagnostics() -> None:
+    frame = _filter_frame()
+    frame["factor"] = np.nan
+    frame["label"] = np.nan
+    spec = EvaluationSpec(
+        run_id="eval_all_nan",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        signals=(_signal("factor"),),
+        label_columns=("label",),
+        filter_mode="unfiltered",
+    )
+
+    result = evaluate_signal_frame(frame, spec, n_groups=2)
+
+    assert result.metrics["n_obs"].tolist() == [0]
+    assert result.metrics["ic"].isna().all()
+    assert result.metrics["rankic"].isna().all()
+    assert result.grouped_label_values.empty
+    assert result.group_spread_summary.empty
+    assert result.diagnostics.rows_input == 6
+    assert result.diagnostics.rows_after_filter_mode == 6
+    assert result.diagnostics.rows_after_signal_label_dropna == 0
+    assert result.diagnostics.metric_rows == 1
+    assert result.diagnostics.grouped_label_value_rows == 0
+    assert result.diagnostics.group_spread_summary_rows == 0
+    assert result.diagnostics.skipped_timestamp_count == 1
+
+
+def test_evaluation_group_spread_is_deterministic_for_shuffled_assets() -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 12,
+            "asset_id": [f"asset_{idx:02d}" for idx in range(12)],
+            "timestamp": [pd.Timestamp("2024-01-02")] * 6
+            + [pd.Timestamp("2024-01-03")] * 6,
+            "factor": [1.0, 4.0, 2.0, 6.0, 3.0, 5.0] * 2,
+            "label": [0.01, 0.04, 0.02, 0.06, 0.03, 0.05] * 2,
+            "eligible": [True] * 12,
+        }
+    )
+    spec = EvaluationSpec(
+        run_id="eval_shuffle_stable",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        signals=(_signal("factor"),),
+        label_columns=("label",),
+    )
+
+    baseline = evaluate_signal_frame(frame, spec, n_groups=3)
+    shuffled = evaluate_signal_frame(
+        frame.sample(frac=1.0, random_state=31).reset_index(drop=True),
+        spec,
+        n_groups=3,
+    )
+
+    pd.testing.assert_frame_equal(
+        _sort_evaluation_frame(baseline.metrics, ("timestamp", "signal", "label")),
+        _sort_evaluation_frame(shuffled.metrics, ("timestamp", "signal", "label")),
+    )
+    pd.testing.assert_frame_equal(
+        _sort_evaluation_frame(
+            baseline.grouped_label_values,
+            ("timestamp", "signal", "label", "group"),
+        ),
+        _sort_evaluation_frame(
+            shuffled.grouped_label_values,
+            ("timestamp", "signal", "label", "group"),
+        ),
+    )
+    pd.testing.assert_frame_equal(
+        _sort_evaluation_frame(
+            baseline.group_spread_summary,
+            ("signal", "label"),
+        ),
+        _sort_evaluation_frame(
+            shuffled.group_spread_summary,
+            ("signal", "label"),
+        ),
+    )
+    assert shuffled.diagnostics == baseline.diagnostics
 
 
 def test_evaluation_normalizes_lower_rank_signal_before_compute_output() -> None:
