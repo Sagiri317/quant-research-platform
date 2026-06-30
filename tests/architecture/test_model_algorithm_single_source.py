@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
+
+PROJECT_SRC = Path("src/quant_research_platform")
+MODELS_ROOT = PROJECT_SRC / "research" / "models"
 
 
 def test_model_algorithm_ids_live_only_in_supervised_model_facts() -> None:
@@ -23,6 +27,33 @@ def test_model_algorithm_ids_live_only_in_supervised_model_facts() -> None:
         }
         status = supervised.model_dependency_status(name)
         assert status["status"] in {"available", "missing"}
+
+
+def test_supervised_model_root_delegates_prediction_and_rank_ensemble_owners() -> None:
+    import quant_research_platform.research.models.supervised as supervised
+
+    root_source = Path(supervised.__file__).read_text(encoding="utf-8")
+    missing_modules = [
+        path.as_posix()
+        for path in (
+            MODELS_ROOT / "prediction.py",
+            MODELS_ROOT / "rank_ensemble.py",
+        )
+        if not path.is_file()
+    ]
+    root_owned_names = (
+        "class _RankEnsemblePredictor",
+        "class _ICWeightedRankEnsembleFactory",
+        "class _ICWeightedRankEnsemble",
+        "def _rank_ensemble_scores",
+        "def _rank_frame_columns",
+        "def _rank_series",
+        "def _predict_scores",
+        "def _prediction_model_input_frame",
+    )
+
+    assert missing_modules == []
+    assert not [name for name in root_owned_names if name in root_source]
 
 
 def test_model_estimator_dispatch_uses_algorithm_facts_only() -> None:

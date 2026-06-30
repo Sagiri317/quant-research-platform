@@ -13,6 +13,12 @@ from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.research.models.prediction import predict_model_frame
+from quant_research_platform.research.models.rank_ensemble import (
+    _ICWeightedRankEnsemble,
+    _ICWeightedRankEnsembleFactory,
+    _RankEnsemblePredictor,
+)
 from quant_research_platform.runtime.resources import ChunkAxis
 
 
@@ -313,25 +319,6 @@ def fit_model_result(frame: pd.DataFrame, spec: ModelSpec) -> ModelFitResult:
     return _fit_model_result_from_frames((frame,), spec)
 
 
-def predict_model_frame(
-    frame: pd.DataFrame,
-    spec: ModelSpec,
-    result: ModelFitResult,
-) -> pd.DataFrame:
-    required = set(spec.input_columns)
-    missing = sorted(required.difference(frame.columns))
-    if missing:
-        raise ValueError(f"missing_model_columns: {', '.join(missing)}")
-    output = frame.copy()
-    output["prediction_score"] = _predict_scores(
-        frame,
-        coefficients=result.coefficients,
-        input_columns=spec.input_columns,
-        prediction_model=result.prediction_model,
-    )
-    return output
-
-
 def _fit_model_result_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
@@ -496,38 +483,6 @@ def _estimator_feature_importance(
             for column, value in zip(spec.input_columns, values, strict=True)
         }
     return None
-
-
-def _predict_scores(
-    frame: pd.DataFrame,
-    *,
-    coefficients: np.ndarray,
-    input_columns: tuple[str, ...],
-    prediction_model: object | None,
-) -> np.ndarray:
-    if prediction_model is not None:
-        predicted = prediction_model.predict(
-            _prediction_model_input_frame(
-                frame,
-                input_columns=input_columns,
-                prediction_model=prediction_model,
-            )
-        )
-        return np.asarray(predicted, dtype="float64")
-    x = frame.loc[:, input_columns].to_numpy(dtype="float64", copy=False)
-    return np.asarray(float(coefficients[0]) + x @ coefficients[1:])
-
-
-def _prediction_model_input_frame(
-    frame: pd.DataFrame,
-    *,
-    input_columns: tuple[str, ...],
-    prediction_model: object,
-) -> pd.DataFrame:
-    columns = input_columns
-    if isinstance(prediction_model, (_RankEnsemblePredictor, _ICWeightedRankEnsemble)):
-        columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
-    return frame.loc[:, list(columns)]
 
 
 def _fit_controlled_linear_model_result_from_frames(
@@ -819,86 +774,6 @@ class _SingleFactorBaseline:
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         return frame.loc[:, self.column].to_numpy(dtype="float64", copy=False)
-
-
-@dataclass(frozen=True)
-class _RankEnsemblePredictor:
-    columns: tuple[str, ...]
-    coefficient_count: int = 1
-
-    def predict(self, frame: pd.DataFrame) -> np.ndarray:
-        return _rank_ensemble_scores(frame, self.columns)
-
-
-@dataclass(frozen=True)
-class _ICWeightedRankEnsembleFactory:
-    columns: tuple[str, ...]
-    label_column: str
-
-    def fit_training_frame(self, frame: pd.DataFrame) -> _ICWeightedRankEnsemble:
-        return _ICWeightedRankEnsemble.fit(
-            frame,
-            input_columns=self.columns,
-            label_column=self.label_column,
-        )
-
-
-@dataclass(frozen=True)
-class _ICWeightedRankEnsemble:
-    columns: tuple[str, ...]
-    weights: np.ndarray
-    coefficient_count: int
-
-    @classmethod
-    def fit(
-        cls,
-        frame: pd.DataFrame,
-        *,
-        input_columns: tuple[str, ...],
-        label_column: str,
-    ) -> _ICWeightedRankEnsemble:
-        weights = []
-        label = _rank_series(frame, label_column)
-        for column in input_columns:
-            corr = _rank_series(frame, column).corr(label, method="pearson")
-            weights.append(0.0 if pd.isna(corr) else float(corr))
-        values = np.asarray(weights, dtype="float64")
-        if np.allclose(values, 0.0):
-            values = np.ones(len(input_columns), dtype="float64")
-        return cls(
-            columns=input_columns,
-            weights=values / np.sum(np.abs(values)),
-            coefficient_count=len(input_columns),
-        )
-
-    def predict(self, frame: pd.DataFrame) -> np.ndarray:
-        ranks = _rank_frame_columns(frame, self.columns)
-        return ranks @ self.weights
-
-
-def _rank_ensemble_scores(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:
-    ranks = _rank_frame_columns(frame, columns)
-    return ranks.mean(axis=1)
-
-
-def _rank_frame_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:
-    if "timestamp" in frame:
-        ranked = frame.groupby("timestamp", sort=False)[list(columns)].rank(
-            method="average",
-            pct=True,
-        )
-    else:
-        ranked = frame.loc[:, columns].rank(method="average", pct=True)
-    return ranked.to_numpy(dtype="float64", copy=False)
-
-
-def _rank_series(frame: pd.DataFrame, column: str) -> pd.Series:
-    if "timestamp" in frame:
-        return frame.groupby("timestamp", sort=False)[column].rank(
-            method="average",
-            pct=True,
-        )
-    return frame[column].rank(method="average", pct=True)
 
 
 def _fit_linear_coefficients_exact(

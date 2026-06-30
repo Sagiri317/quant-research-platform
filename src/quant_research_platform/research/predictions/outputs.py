@@ -15,7 +15,7 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
-from quant_research_platform.research.models.supervised import (
+from quant_research_platform.research.models.prediction import (
     _prediction_model_input_frame,
 )
 from quant_research_platform.runtime.resources import ChunkAxis
