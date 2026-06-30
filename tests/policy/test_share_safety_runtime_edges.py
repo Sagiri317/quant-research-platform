@@ -72,10 +72,7 @@ def test_sanitizer_redacts_repo_private_absolute_paths(text: str) -> None:
 )
 def test_sanitizer_rejects_local_output_paths(text: str) -> None:
     # intentional legacy-path negative case
-    assert text in {
-        "reports/private_research/a_share/run",
-        "/workspace/qrp/reports/private_research/a_share/run",
-    }
+    assert text.endswith("reports/private_research/a_share/run")
     assert unsafe_for_share_reason(text) == "local_only_path"
 
 

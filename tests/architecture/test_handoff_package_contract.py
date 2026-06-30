@@ -193,16 +193,16 @@ def test_source_tree_allowlist_does_not_reference_retired_runtime_privacy_path()
     contract = _load_governance_contract()
 
     assert not any(
-        entry.path == Path("src/quant_research_platform/runtime/privacy.py")
+        entry.path.as_posix() == "src/quant_research_platform/runtime/privacy.py"
         for entry in contract.SOURCE_TREE_ALLOWED_OCCURRENCES
     )
 
 
 def test_share_safety_retired_inventory_is_owner_allowlisted() -> None:
     contract = _load_governance_contract()
-    share_safety = Path("src/quant_research_platform/policy/share_safety.py")
+    share_safety = "src/quant_research_platform/policy/share_safety.py"
     entries = {
-        (entry.path, entry.rule_id, entry.owner)
+        (entry.path.as_posix(), entry.rule_id, entry.owner)
         for entry in contract.SOURCE_TREE_ALLOWED_OCCURRENCES
     }
 
@@ -463,6 +463,7 @@ def test_source_tree_scan_independently_rejects_synthesized_strings(
     path = repo / "tools" / "hack_synthesized.py"
     path.parent.mkdir(parents=True)
     retired_value = rule_form(contract.RETIRED_NAME_RULES, "clean_rewrite")
+    retired_rule = retired_value
     path.write_text(
         "\n".join(
             [
@@ -492,7 +493,7 @@ def test_source_tree_scan_independently_rejects_synthesized_strings(
     ) in observed
     assert (
         "tools/hack_synthesized.py",
-        "clean_rewrite",
+        retired_rule,
         "ast_join_string",
     ) in observed
 

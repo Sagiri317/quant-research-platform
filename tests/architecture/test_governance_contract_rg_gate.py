@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 from dataclasses import fields
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -31,7 +31,7 @@ from governance_contract import (  # noqa: E402
     ACTIVE_GOVERNANCE_DOC_ROOTS as CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS,
 )
 from governance_contract import (  # noqa: E402
-    PRIVACY_NEGATIVE_TEST_PATHS,
+    PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES,
     RETIRED_NAME_RULES,
     active_doc_forbidden_patterns,
     is_retired_path_policy_line,
@@ -60,7 +60,7 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/tools/test_run_profile.py"),
     Path("tests/workflows/test_local_verification.py"),
     Path("tests/workflows/test_local_verification_contract.py"),
-} | {Path(path) for path in PRIVACY_NEGATIVE_TEST_PATHS}
+} | {Path(path) for path in PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES}
 RUNTIME_WORKSPACE_SOURCE_ALLOWLIST_REASONS = {
     Path("src/quant_research_platform/workflows/local_verification.py"): (
         "Owner: workflows. Rationale: local verification run layout. "
@@ -286,14 +286,14 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
     ]
 
     assert entries
-    assert {entry.path for entry in entries} <= {
-        GOVERNANCE_CONTRACT_SCRIPT,
-        Path("docs/architecture/governance.md"),
-        Path("tests/agents/test_verify_governance.py"),
-        Path("tests/architecture/test_governance_contract_rg_gate.py"),
+    assert {entry.path.as_posix() for entry in entries} <= {
+        GOVERNANCE_CONTRACT_SCRIPT.as_posix(),
+        "docs/architecture/governance.md",
+        "tests/agents/test_verify_governance.py",
+        "tests/architecture/test_governance_contract_rg_gate.py",
     }
-    assert Path("tests/tools/test_run_profile.py") not in {
-        entry.path for entry in entries
+    assert "tests/tools/test_run_profile.py" not in {
+        entry.path.as_posix() for entry in entries
     }
     assert all(entry.owner for entry in entries)
     assert all(entry.rationale for entry in entries)
@@ -307,7 +307,7 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
     agent_entries = [
         entry
         for entry in entries
-        if entry.path == Path("tests/agents/test_verify_governance.py")
+        if entry.path.as_posix() == "tests/agents/test_verify_governance.py"
     ]
     assert {
         entry.rule_id.split(":", 1)[1] for entry in agent_entries
@@ -317,7 +317,8 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
     architecture_entries = [
         entry
         for entry in entries
-        if entry.path == Path("tests/architecture/test_governance_contract_rg_gate.py")
+        if entry.path.as_posix()
+        == "tests/architecture/test_governance_contract_rg_gate.py"
     ]
     assert architecture_entries
     assert {
@@ -468,6 +469,54 @@ def test_source_tree_allowlist_rejects_invalid_path_and_rule() -> None:
         assert any(expected in item for item in failures), (expected, failures)
 
 
+def test_source_tree_allowed_occurrence_normalizes_string_path() -> None:
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SourceTreeAllowedOccurrence,
+    )
+
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+
+    entry = SourceTreeAllowedOccurrence(
+        path="tests/agents/test_verify_governance.py",
+        rule_id=f"retired_text:{rule.name}",
+        exact_line=f'x = "{rule.example}"',
+        owner="architecture-governance-negative-tests",
+        rationale="test-only string path normalization contract",
+        lifecycle="test-only",
+        covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+        py_owner="def:test_func",
+    )
+
+    assert entry.path == PurePosixPath("tests/agents/test_verify_governance.py")
+
+
+def test_source_tree_allowlist_rejects_retired_terms_namespace() -> None:
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SourceTreeAllowedOccurrence,
+        validate_source_tree_allowed_occurrences,
+    )
+
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    entry = SourceTreeAllowedOccurrence(
+        path=Path("tests/agents/test_verify_governance.py"),
+        rule_id=f"retired_terms:{rule.name}",
+        exact_line=f'x = "{rule.example}"',
+        owner="architecture-governance-negative-tests",
+        rationale="retired_terms is not a real source-tree scan group",
+        lifecycle="test-only",
+        covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+        py_owner="def:test_func",
+    )
+
+    failures = validate_source_tree_allowed_occurrences((entry,))
+
+    assert any(
+        "source_tree_allowed_occurrence_unknown_rule" in item for item in failures
+    )
+
+
 def test_source_tree_allowlist_rejects_old_retired_occurrence_dsl() -> None:
     from governance_contract import (
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
@@ -508,7 +557,7 @@ def test_source_tree_path_allowed_does_not_consume_literal_occurrences() -> None
     for scan_group in (
         "retired_text",
         "synthesized_strings",
-        "retired_terms",
+        "active_test_literals",
         "sensitive_negative_literals",
     ):
         assert not source_tree_path_allowed(
@@ -519,6 +568,15 @@ def test_source_tree_path_allowed_does_not_consume_literal_occurrences() -> None
             line_number=1,
             rule_definition_lines={1},
             definition_contexts={"def:test_func": {1}},
+        )
+    with pytest.raises(ValueError):
+        source_tree_path_allowed(
+            Path("tests/agents/test_verify_governance.py"),
+            scan_group="retired_terms",
+            rule="profile_runner_retired_qrp_managed_repo_roots",
+            line_text='x = "not_a_literal_occurrence"',
+            line_number=1,
+            rule_definition_lines={1},
         )
 
 
@@ -759,6 +817,57 @@ def test_retired_profile_allowlist_rejects_stale_exact_occurrence(
         finding["path"] == "tests/agents/test_verify_governance.py"
         and finding["rule"] == stale.rule_id
         and finding.get("reason") == "source_tree_allowed_occurrence_stale"
+        for finding in findings
+    ), findings
+
+
+def test_allowance_contract_rejects_unreachable_synthesized_occurrence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import governance_contract
+    from governance_contract import (
+        SourceTreeAllowedOccurrence,
+        source_tree_allowance_contract_findings,
+    )
+
+    repo = tmp_path / "repo"
+    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                "def test_func():",
+                '    _BAD = "public_" "path"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    entry = SourceTreeAllowedOccurrence(
+        path=Path("tests/agents/test_verify_governance.py"),
+        rule_id="synthesized_strings:retired_private_summary_symbol",
+        exact_line='_BAD = "public_" "path"',
+        owner="architecture-governance-negative-tests",
+        rationale="synthesized allowances must be scanner-reachable",
+        lifecycle="test-only",
+        covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+        py_owner="def:test_func",
+    )
+    monkeypatch.setattr(
+        governance_contract,
+        "SOURCE_TREE_ALLOWED_OCCURRENCES",
+        (entry,),
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = source_tree_allowance_contract_findings(repo)
+
+    assert any(
+        finding["path"] == "tests/agents/test_verify_governance.py"
+        and finding["rule"] == entry.rule_id
+        and finding.get("reason") == "source_tree_allowed_occurrence_unreachable"
         for finding in findings
     ), findings
 
@@ -1240,8 +1349,8 @@ def test_source_tree_rejects_retired_local_verification_surface_terms(
     }.issubset({str(finding["rule"]) for finding in findings})
 
 
-def test_retired_result_allowlist_does_not_cover_active_docs() -> None:
-    from governance_contract import NEGATIVE_TEST_LITERAL_ALLOWLIST
+def test_stale_governance_truth_sources_do_not_cover_active_docs() -> None:
+    from governance_contract import STALE_GOVERNANCE_TRUTH_TEST_SOURCES
 
     active_doc_prefixes = (
         "AGENTS.md",
@@ -1253,8 +1362,7 @@ def test_retired_result_allowlist_does_not_cover_active_docs() -> None:
     )
     allowlisted = {
         path
-        for paths in NEGATIVE_TEST_LITERAL_ALLOWLIST.values()
-        for path in paths
+        for path in STALE_GOVERNANCE_TRUTH_TEST_SOURCES
         if path == ".agents/" or path.startswith(active_doc_prefixes)
     }
 
@@ -1349,7 +1457,7 @@ def test_source_tree_sensitive_negative_rules_are_contract_owned() -> None:
     assert {item[0] for item in summary} == set(patterns)
     assert {rule.scan_group for rule in rules} == {"sensitive_negative_literals"}
     assert all(rule.category for rule in rules)
-    assert all(rule.allowed_sources for rule in rules)
+    assert all(rule.definition_sources for rule in rules)
 
 
 def test_business_chunk_consumers_do_not_concat_unbounded_research_chunks() -> None:

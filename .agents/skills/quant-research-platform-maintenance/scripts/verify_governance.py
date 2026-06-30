@@ -17,23 +17,24 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from governance_contract import (  # noqa: E402
     ACTIVE_GOVERNANCE_DOC_ROOTS,
-    PRIVACY_NEGATIVE_TEST_PATHS,
+    PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES,
     RETIRED_GOVERNANCE_EXACT_PATHS,
     RETIRED_GOVERNANCE_PREFIXES,
-    STALE_NEGATIVE_TEST_PATHS,
+    STALE_GOVERNANCE_TRUTH_TEST_SOURCES,
     active_doc_forbidden_patterns,
     git_tracked_paths,
     is_allowed_stale_or_retired_fixture,
     is_governance_rule_definition_path,
-    is_negative_test_allowlisted,
     is_retired_governance_path,
     is_scanner_definition_line,
     iter_path_name_findings,
     iter_python_symbol_findings,
     iter_structured_key_findings,
-    iter_synthesized_string_findings,
     retired_governance_path_findings,
-    synthesized_string_forbidden_patterns,
+    source_tree_allowlist_definition_lines,
+    source_tree_forbidden_patterns,
+    source_tree_governance_rule_definition_lines,
+    source_tree_synthesized_string_findings,
 )
 
 BASE_GOVERNANCE_PREFIXES = (
@@ -394,7 +395,7 @@ def check_synthesized_strings(
     repo: Path,
     paths: list[str],
 ) -> None:
-    patterns = synthesized_string_forbidden_patterns()
+    patterns = source_tree_forbidden_patterns()
     for rel in sorted({normalize(path) for path in paths}):
         if Path(rel).suffix.lower() != ".py":
             continue
@@ -403,14 +404,27 @@ def check_synthesized_strings(
             continue
         if is_governance_rule_definition_path(rel):
             continue
-        if is_negative_test_allowlisted(rel, "stale_governance_truth"):
-            continue
         try:
             source = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             result.warnings.append(f"cannot decode python for string scan: {rel}")
             continue
-        for finding in iter_synthesized_string_findings(rel, source, patterns=patterns):
+        lines = source.splitlines()
+        relative = Path(rel)
+        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
+        rule_definition_lines = source_tree_governance_rule_definition_lines(
+            relative,
+            path,
+        )
+        for finding in source_tree_synthesized_string_findings(
+            relative,
+            path,
+            lines,
+            skip_lines,
+            rule_definition_lines,
+            scan_group="synthesized_strings",
+            patterns=patterns,
+        ):
             result.errors.append(
                 "retired_synthesized_string: "
                 f"{finding['path']}:{finding['line']}:"
@@ -456,7 +470,7 @@ def _skip_regex_definition_line(rel: str, line: str) -> bool:
 
 
 def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
-    if rel in PRIVACY_NEGATIVE_TEST_PATHS and LOCAL_PATH_PATTERN.search(line):
+    if rel in PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES and LOCAL_PATH_PATTERN.search(line):
         return True
     if (
         rel == "tests/architecture/test_share_safe_evidence.py"
@@ -472,7 +486,7 @@ def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
 
 
 def _is_allowed_secret_fixture(rel: str, line: str) -> bool:
-    if rel in PRIVACY_NEGATIVE_TEST_PATHS and SECRET_PATTERN.search(line):
+    if rel in PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES and SECRET_PATTERN.search(line):
         return True
     if rel == "tests/architecture/test_share_safe_evidence.py" and '"token="' in line:
         return True
@@ -495,10 +509,7 @@ def _is_allowed_stale_fixture(rel: str, line: str) -> bool:
 
 def _should_scan_stale_governance_truth(rel: str) -> bool:
     if rel.startswith(("src/", "tests/")):
-        return rel in STALE_NEGATIVE_TEST_PATHS or is_negative_test_allowlisted(
-            rel,
-            "stale_governance_truth",
-        )
+        return rel in STALE_GOVERNANCE_TRUTH_TEST_SOURCES
     if rel.startswith(".agents/skills/quant-research-platform-maintenance/scripts/"):
         return False
     return True

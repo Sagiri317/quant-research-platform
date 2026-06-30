@@ -362,7 +362,8 @@ def test_governance_contract_exposes_fixed_rule_helpers() -> None:
         "RETIRED_PUBLIC_SURFACE_RULES",
         "VERSION_SURFACE_POLICY",
         "LEGITIMATE_RUNTIME_SYMBOL_ALLOWLIST",
-        "NEGATIVE_TEST_LITERAL_ALLOWLIST",
+        "STALE_GOVERNANCE_TRUTH_TEST_SOURCES",
+        "PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES",
         "RULE_DEFINITION_ALLOWLIST",
         "PACKAGE_FORBIDDEN_PATH_PARTS",
         "VALID_STATUS_TOKENS",
@@ -375,7 +376,6 @@ def test_governance_contract_exposes_fixed_rule_helpers() -> None:
         "structured_key_forbidden_patterns",
         "synthesized_string_forbidden_patterns",
         "is_allowed_rule_definition",
-        "is_allowed_negative_test_literal",
         "is_allowed_runtime_symbol",
         "is_allowed_version_surface",
     ):
@@ -600,6 +600,62 @@ def test_retired_occurrence_stale_exact_line_is_reported(
         and finding.get("reason") == "source_tree_allowed_occurrence_stale"
         for finding in findings
     ), findings
+
+
+def test_source_tree_retired_text_negative_sources_scan_all_retired_rules(
+    tmp_path: Path,
+) -> None:
+    contract = _load_contract_module()
+    repo = tmp_path / "repo"
+    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path.parent.mkdir(parents=True)
+    direct_literals = {
+        "retired_public_path_symbol": "public_path",
+        "retired_private_summary_symbol": "private_summary",
+        "clean_rewrite": rule_form(contract.RETIRED_NAME_RULES, "clean_rewrite"),
+    }
+    path.write_text(
+        "\n".join(f"# {literal}" for literal in direct_literals.values()) + "\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = contract.source_tree_retired_text_findings(repo)
+
+    observed = {(finding["path"], finding["rule"]) for finding in findings}
+    assert {
+        ("tests/agents/test_verify_governance.py", rule)
+        for rule in direct_literals
+    } <= observed
+
+
+def test_verify_governance_synthesized_strings_scan_negative_test_sources(
+    tmp_path: Path,
+) -> None:
+    module = _load_governance_module()
+    path = tmp_path / "tests" / "agents" / "test_verify_governance.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                '_BAD = "public_" "path"',
+                '_BAD2 = "private_" "summary"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = module.Result()
+
+    module.check_synthesized_strings(
+        result,
+        tmp_path,
+        ["tests/agents/test_verify_governance.py"],
+    )
+
+    assert any("retired_public_path_symbol" in error for error in result.errors)
+    assert any("retired_private_summary_symbol" in error for error in result.errors)
 
 
 def test_python_symbol_gate_fails_retired_stage_and_surface_names(

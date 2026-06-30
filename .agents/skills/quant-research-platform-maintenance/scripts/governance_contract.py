@@ -67,7 +67,7 @@ class SourceTreeSensitiveNegativeRule:
     scan_group: str
     pattern: str
     flags: int = 0
-    allowed_sources: tuple[Path, ...] = ()
+    definition_sources: tuple[Path, ...] = ()
 
     def compile(self) -> re.Pattern[str]:
         return re.compile(self.pattern, self.flags)
@@ -75,7 +75,7 @@ class SourceTreeSensitiveNegativeRule:
 
 @dataclass(frozen=True, eq=False)
 class SourceTreeAllowedOccurrence:
-    path: Path
+    path: PurePosixPath
     rule_id: str
     exact_line: str
     owner: str = ""
@@ -83,6 +83,19 @@ class SourceTreeAllowedOccurrence:
     lifecycle: str = ""
     covered_by: tuple[str, ...] = ()
     py_owner: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "path", _source_tree_posix_path(self.path))
+
+
+def _source_tree_posix_path(path: str | Path | PurePosixPath) -> PurePosixPath:
+    if isinstance(path, Path):
+        raw = path.as_posix()
+    elif isinstance(path, PurePosixPath):
+        raw = path.as_posix()
+    else:
+        raw = str(path)
+    return PurePosixPath(raw)
 
 
 @dataclass(frozen=True)
@@ -429,14 +442,6 @@ SOURCE_TREE_RETIRED_TEXT_NEGATIVE_TEST_SOURCES = {
     Path("tests/architecture/test_governance_contract_rg_gate.py"),
     Path("tests/architecture/test_handoff_package_contract.py"),
 }
-SOURCE_TREE_NEGATIVE_TEST_RETIRED_TEXT_RULES = frozenset(
-    {
-        "public_path",
-        "private_summary",
-        "clean_rewrite",
-    }
-)
-
 RUN_OUTPUT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = (
     ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
     "tests/architecture/test_no_legacy_names.py",
@@ -832,12 +837,10 @@ LEGITIMATE_RUNTIME_SYMBOL_ALLOWLIST = {
 
 NEGATIVE_TEST_SYMBOL_ALLOWLIST: dict[Path, dict[str, set[str]]] = {}
 
-NEGATIVE_TEST_LITERAL_ALLOWLIST = {
-    "stale_governance_truth": (
-        "tests/agents/test_verify_governance.py",
-        "tests/architecture/test_governance_contract_rg_gate.py",
-    ),
-}
+STALE_GOVERNANCE_TRUTH_TEST_SOURCES = (
+    "tests/agents/test_verify_governance.py",
+    "tests/architecture/test_governance_contract_rg_gate.py",
+)
 
 RULE_DEFINITION_ALLOWLIST = (
     ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
@@ -893,17 +896,12 @@ RETIRED_PATH_POLICY_MARKERS = tuple(RETIRED_GOVERNANCE_EXACT_PATHS) + (
     "docs/reports/clean-rewrite",
 )
 
-PRIVACY_NEGATIVE_TEST_PATHS = (
+PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES = (
     "tests/policy/test_share_safety.py",
     "tests/policy/test_share_safety_runtime_edges.py",
     "tests/storage/test_manifest_helper_edges.py",
     "tests/agents/handoff/test_handoff_tools.py",
     "tests/agents/handoff/test_handoff_package_verifier.py",
-)
-
-STALE_NEGATIVE_TEST_PATHS = (
-    "tests/agents/test_verify_governance.py",
-    "tests/architecture/test_governance_contract_rg_gate.py",
 )
 
 SCANNER_DEFINITION_MARKERS = (
@@ -1269,12 +1267,6 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
             (
                 PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
                 PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
-                "test_source_tree_path_allowed_does_not_consume_literal_occurrences",
-                "line_text='x = \"QRP_MANAGED_REPO_ROOTS\"',",
-            ),
-            (
-                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
                 "test_profile_runner_env_is_not_forwarded_to_pytest_subprocess",
                 (
                     "monkeypatch.setenv("
@@ -1296,6 +1288,22 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
 )
 
 _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "synthesized_strings:profile_runner_retired_qrp_managed_repo_roots",
+        '"\\n".join(',
+        "def:test_retired_profile_literal_allowlist_is_context_scoped_in_python_file",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "synthesized_strings:profile_runner_retired_qrp_managed_repo_roots",
+        (
+            "'    monkeypatch.setenv("
+            '"QRP_MANAGED_REPO_ROOTS", '
+            + "'"
+        ),
+        "def:test_retired_profile_literal_allowlist_is_context_scoped_in_python_file",
+    ),
     (
         "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
         "active_test_literals:active_market_bars_data_id",
@@ -1369,49 +1377,10 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
         "tests/agents/test_verify_governance.py",
         "retired_text:clean_rewrite",
         _exact_line(
-            "f\"{rule_form(contract.RETIRED_NAME_RULES, 'clean_",
-            "rewrite')} is current.\",",
-        ),
-        "def:test_active_doc_scan_fails_stale_current_truth",
-    ),
-    (
-        "tests/agents/test_verify_governance.py",
-        "retired_text:clean_rewrite",
-        _exact_line('"clean_', 'rewrite",'),
-        "def:test_retired_naming_rules_cover_required_derived_forms",
-    ),
-    (
-        "tests/agents/test_verify_governance.py",
-        "retired_text:clean_rewrite",
-        _exact_line('assert not patterns["clean_', 'rewrite"].search("clean")'),
-        "def:test_retired_naming_rules_cover_required_derived_forms",
-    ),
-    (
-        "tests/agents/test_verify_governance.py",
-        "retired_text:clean_rewrite",
-        _exact_line(
             'retired_component = rule_form(contract.RETIRED_NAME_RULES, "clean_',
             'rewrite")',
         ),
         "def:test_path_name_gate_fails_retired_stage_paths",
-    ),
-    (
-        "tests/agents/test_verify_governance.py",
-        "retired_text:clean_rewrite",
-        _exact_line('"clean_', 'rewrite",'),
-        "def:test_python_symbol_gate_fails_retired_stage_and_surface_names",
-    ),
-    (
-        "tests/agents/test_verify_governance.py",
-        "retired_text:clean_rewrite",
-        _exact_line('"clean_', 'rewrite": rule_form('),
-        "def:test_synthesized_string_gate_fails_retired_stage_names",
-    ),
-    (
-        "tests/agents/test_verify_governance.py",
-        "retired_text:clean_rewrite",
-        _exact_line('"clean_', 'rewrite",'),
-        "def:test_synthesized_string_gate_fails_retired_stage_names",
     ),
     (
         "tests/agents/test_verify_governance.py",
@@ -1469,12 +1438,6 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
             'retired_value = rule_form(contract.RETIRED_NAME_RULES, "clean_',
             'rewrite")',
         ),
-        "def:test_source_tree_scan_independently_rejects_synthesized_strings",
-    ),
-    (
-        "tests/architecture/test_handoff_package_contract.py",
-        "retired_text:clean_rewrite",
-        _exact_line('"clean_', 'rewrite",'),
         "def:test_source_tree_scan_independently_rejects_synthesized_strings",
     ),
     (
@@ -1895,12 +1858,6 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
     (
         "tests/policy/test_share_safety_runtime_edges.py",
         "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"/work', "space/qrp/reports/priv", 'ate_research/a_share/run",'),
-        "def:test_sanitizer_rejects_local_output_paths",
-    ),
-    (
-        "tests/policy/test_share_safety_runtime_edges.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
         _exact_line(
             '"path": r"D:',
             "\\quant-workspace\\data\\processed\\a_",
@@ -2036,10 +1993,31 @@ SOURCE_TREE_ALLOWED_OCCURRENCES += tuple(
     ) in _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS
 )
 
+_SOURCE_TREE_RETIRED_RULE_DEFINITION_RULES = {
+    rule.name
+    for rule in (
+        *STALE_GOVERNANCE_TRUTH_RULES,
+        *RETIRED_NAME_RULES,
+        *RETIRED_PUBLIC_SURFACE_RULES,
+        *VERSION_SURFACE_FORBIDDEN_RULES,
+        *RESULT_ARCHITECTURE_RETIRED_TEXT_RULES,
+        *PROFILE_RUNNER_RETIRED_TEXT_RULES,
+    )
+}
+
 SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
     GOVERNANCE_CONTRACT_SCRIPT: {
         rule.name for rule in RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
     },
+    Path("tests/agents/test_verify_governance.py"): (
+        _SOURCE_TREE_RETIRED_RULE_DEFINITION_RULES
+    ),
+    Path("tests/architecture/test_governance_contract_rg_gate.py"): (
+        _SOURCE_TREE_RETIRED_RULE_DEFINITION_RULES
+    ),
+    Path("tests/architecture/test_handoff_package_contract.py"): (
+        _SOURCE_TREE_RETIRED_RULE_DEFINITION_RULES
+    ),
     Path("tests/architecture/test_retired_surface_absent.py"): {
         "retired_csmar_source_alias",
         "retired_a_share_market_alias",
@@ -2081,7 +2059,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
             r"|/(?:Users|home)[^\n]*(?:private|data)"
             r"|\\\\[^\n]*(?:server|share|private))"
         ),
-        allowed_sources=(
+        definition_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
@@ -2096,7 +2074,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
             r"(?i)(?:api[_-]?key|secret|token|password|cookie)"
             r"\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}"
         ),
-        allowed_sources=(
+        definition_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
@@ -2112,7 +2090,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
             r"|provider_name=raw-provider|source_name=raw-source"
             r"|data_provider=raw-provider|vendor_name=raw-provider)\b"
         ),
-        allowed_sources=(
+        definition_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
@@ -2124,7 +2102,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
         category="stock_code_sample_text",
         scan_group="sensitive_negative_literals",
         pattern=r"\b[03468]\d{5}\.(?:SZ|SH|BJ)\b",
-        allowed_sources=(GOVERNANCE_CONTRACT_SCRIPT,),
+        definition_sources=(GOVERNANCE_CONTRACT_SCRIPT,),
     ),
 )
 
@@ -2139,7 +2117,8 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "RETIRED_PUBLIC_SYMBOL_RULE_NAMES",
         "LEGITIMATE_RUNTIME_SYMBOL_ALLOWLIST",
         "NEGATIVE_TEST_SYMBOL_ALLOWLIST",
-        "NEGATIVE_TEST_LITERAL_ALLOWLIST",
+        "STALE_GOVERNANCE_TRUTH_TEST_SOURCES",
+        "PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES",
         "RULE_DEFINITION_ALLOWLIST",
         "PACKAGE_FORBIDDEN_PATH_PARTS",
         "RETIRED_PATH_POLICY_MARKERS",
@@ -2147,6 +2126,7 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "SCANNER_SCRIPT_DEFINITION_MARKERS",
         "CODE_MAP_FORBIDDEN_TERMS",
         "SOURCE_TREE_ALLOWED_OCCURRENCES",
+        "_MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS",
         "SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST",
         "SOURCE_TREE_SENSITIVE_NEGATIVE_RULES",
         "active_doc_forbidden_patterns",
@@ -2160,7 +2140,6 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "stale_fixture_markers",
         "is_allowed_stale_or_retired_fixture",
         "is_allowed_rule_definition",
-        "is_allowed_negative_test_literal",
         "is_allowed_runtime_symbol",
         "is_allowed_version_surface",
     },
@@ -2178,6 +2157,32 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "_is_allowed_secret_fixture",
         "check_text_safety",
         "check_markdown_paths",
+    },
+    Path("tests/agents/test_verify_governance.py"): {
+        "test_active_doc_scan_fails_stale_current_truth",
+        "test_retired_naming_rules_cover_required_derived_forms",
+        "test_python_symbol_gate_fails_retired_stage_and_surface_names",
+        "test_synthesized_string_gate_fails_retired_stage_names",
+        "test_source_tree_retired_text_negative_sources_scan_all_retired_rules",
+        "test_version_surface_policy_keeps_legal_tokens_out_of_retired_gate",
+        "test_version_surface_policy_rejects_legacy_v_api_prefix",
+    },
+    Path("tests/architecture/test_governance_contract_rg_gate.py"): {
+        "ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST",
+        "test_source_tree_path_allowed_does_not_consume_literal_occurrences",
+        "test_active_tree_has_no_retired_terms",
+        "test_active_tree_has_no_stale_qrp_owned_version_tokens",
+        "test_result_architecture_rules_cover_hard_cut_examples",
+        "test_active_docs_reject_retired_review_safety_names",
+        "test_verify_governance_uses_current_local_only_roots",
+        "test_gitignore_is_active_doc_scanned_for_retired_result_paths",
+        "test_gitignore_rejects_outputs_local_layout",
+        "test_source_tree_rejects_retired_local_verification_surface_terms",
+        "test_research_foundation_semantic_closure_terms_are_retired",
+        "test_approved_writer_signatures_do_not_accept_arbitrary_physical_roots",
+    },
+    Path("tests/architecture/test_handoff_package_contract.py"): {
+        "test_handoff_package_contract_uses_evidence_mode_outputs",
     },
 }
 
@@ -2203,7 +2208,10 @@ def validate_source_tree_allowed_occurrences(
             failures.append(f"{prefix}:source_tree_allowed_occurrence_missing_rule_id")
         elif entry.rule_id not in patterns:
             failures.append(f"{prefix}:source_tree_allowed_occurrence_unknown_rule")
-        elif str(entry.exact_line).strip():
+        elif (
+            not entry.rule_id.startswith("synthesized_strings:")
+            and str(entry.exact_line).strip()
+        ):
             match_count = len(patterns[entry.rule_id].findall(entry.exact_line))
             if match_count == 0:
                 failures.append(
@@ -2217,9 +2225,7 @@ def validate_source_tree_allowed_occurrences(
             failures.append(
                 f"{prefix}:source_tree_allowed_occurrence_missing_exact_line"
             )
-        path_suffix = PurePosixPath(
-            entry.path if isinstance(entry.path, str) else entry.path.as_posix()
-        ).suffix
+        path_suffix = entry.path.suffix
         if path_suffix == ".py":
             if not str(entry.py_owner).strip():
                 failures.append(
@@ -2246,8 +2252,15 @@ def validate_source_tree_allowed_occurrences(
     return failures
 
 
-def source_tree_allowed_occurrence_path_failures(path: Path) -> list[str]:
-    raw = path if isinstance(path, str) else path.as_posix()
+def source_tree_allowed_occurrence_path_failures(
+    path: str | Path | PurePosixPath,
+) -> list[str]:
+    if isinstance(path, Path):
+        raw = path.as_posix()
+    elif isinstance(path, PurePosixPath):
+        raw = path.as_posix()
+    else:
+        raw = str(path)
     failures: list[str] = []
     if not raw or raw == ".":
         failures.append("source_tree_allowed_occurrence_missing_path")
@@ -2270,7 +2283,7 @@ def source_tree_allowed_occurrence_patterns(
     repo_root: Path | None = None,
 ) -> dict[str, re.Pattern[str]]:
     patterns: dict[str, re.Pattern[str]] = {}
-    for namespace in ("retired_text", "retired_terms", "synthesized_strings"):
+    for namespace in ("retired_text", "synthesized_strings"):
         patterns.update(
             {
                 f"{namespace}:{rule}": pattern
@@ -2302,10 +2315,11 @@ def _source_tree_allowed_occurrence_entries(
     rule: str,
 ) -> tuple[SourceTreeAllowedOccurrence, ...]:
     rule_id = f"{scan_group}:{rule}"
+    relative_key = _source_tree_posix_path(relative)
     return tuple(
         entry
         for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
-        if entry.path == relative and entry.rule_id == rule_id
+        if entry.path == relative_key and entry.rule_id == rule_id
     )
 
 
@@ -2318,11 +2332,12 @@ def _source_tree_allowed_occurrence_match_status(
     line_number: int | None,
     owner_ranges: dict[str, tuple[frozenset[int], ...]],
 ) -> str:
-    if entry.path != relative or entry.rule_id != rule_id:
+    relative_key = _source_tree_posix_path(relative)
+    if entry.path != relative_key or entry.rule_id != rule_id:
         return "no_match"
     if line_text.strip() != entry.exact_line:
         return "no_match"
-    if relative.suffix != ".py":
+    if relative_key.suffix != ".py":
         return "match"
     ranges = owner_ranges.get(entry.py_owner, ())
     if len(ranges) > 1:
@@ -2591,9 +2606,7 @@ def python_symbol_forbidden_patterns() -> dict[str, re.Pattern[str]]:
 
 
 def synthesized_string_forbidden_patterns() -> dict[str, re.Pattern[str]]:
-    patterns = stale_governance_truth_patterns()
-    patterns.update(version_surface_forbidden_patterns())
-    return patterns
+    return source_tree_forbidden_patterns()
 
 
 def structured_key_forbidden_patterns() -> dict[str, re.Pattern[str]]:
@@ -2668,10 +2681,8 @@ def is_allowed_stale_or_retired_fixture(path: str | Path, line: str) -> bool:
         return True
     if is_retired_path_policy_line(path, line):
         return True
-    allowlisted_negative_test = normalize_repo_path(
-        path
-    ) in STALE_NEGATIVE_TEST_PATHS or is_negative_test_allowlisted(
-        path, "stale_governance_truth"
+    allowlisted_negative_test = (
+        normalize_repo_path(path) in STALE_GOVERNANCE_TRUTH_TEST_SOURCES
     )
     if not allowlisted_negative_test:
         return False
@@ -2735,28 +2746,12 @@ def is_negative_test_allowlisted(path: str | Path, category: str) -> bool:
     normalized = normalize_repo_path(path)
     if category == "governance_rule_definition":
         return normalized in RULE_DEFINITION_ALLOWLIST
-    return normalized in NEGATIVE_TEST_LITERAL_ALLOWLIST.get(category, ())
+    return False
 
 
 def is_allowed_rule_definition(path: str | Path, rule_id: str | None = None) -> bool:
     del rule_id
     return normalize_repo_path(path) in RULE_DEFINITION_ALLOWLIST
-
-
-def is_allowed_negative_test_literal(
-    path: str | Path,
-    rule_id: str | None = None,
-) -> bool:
-    if rule_id is None:
-        return any(
-            normalize_repo_path(path) in paths
-            for paths in NEGATIVE_TEST_LITERAL_ALLOWLIST.values()
-        )
-    return any(
-        normalize_repo_path(path) in paths
-        for category, paths in NEGATIVE_TEST_LITERAL_ALLOWLIST.items()
-        if category == rule_id or rule_id.startswith(category)
-    )
 
 
 def is_governance_rule_definition_path(path: str | Path) -> bool:
@@ -2932,14 +2927,11 @@ def iter_synthesized_string_findings(
     source: str,
     *,
     patterns: dict[str, re.Pattern[str]] | None = None,
-    allow_negative_tests: bool = True,
+    allow_negative_tests: bool = False,
     skip_rule_definition: bool = True,
 ) -> list[dict[str, object]]:
+    del allow_negative_tests
     if skip_rule_definition and is_governance_rule_definition_path(path):
-        return []
-    if allow_negative_tests and (
-        is_negative_test_allowlisted(path, "stale_governance_truth")
-    ):
         return []
     active_patterns = patterns or synthesized_string_forbidden_patterns()
     findings: list[dict[str, object]] = []
@@ -3489,7 +3481,9 @@ def source_tree_allowance_contract_findings(
     clone_dir: Path,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    tracked_paths = set(source_tree_tracked_paths(clone_dir))
+    tracked_paths = {
+        _source_tree_posix_path(path) for path in source_tree_tracked_paths(clone_dir)
+    }
     patterns = source_tree_allowed_occurrence_patterns(repo_root=clone_dir)
     for failure in validate_source_tree_allowed_occurrences(
         SOURCE_TREE_ALLOWED_OCCURRENCES,
@@ -3504,7 +3498,7 @@ def source_tree_allowance_contract_findings(
             }
         )
     for entry in SOURCE_TREE_ALLOWED_OCCURRENCES:
-        path = clone_dir / entry.path
+        path = clone_dir / Path(entry.path.as_posix())
         if entry.path not in tracked_paths or not path.exists():
             findings.append(
                 {
@@ -3555,7 +3549,102 @@ def source_tree_allowance_contract_findings(
                     "reason": "source_tree_allowed_occurrence_stale",
                 }
             )
+            continue
+        if len(exact_lines) > 1:
+            findings.append(
+                {
+                    "path": entry.path.as_posix(),
+                    "line": min(exact_lines),
+                    "rule": entry.rule_id,
+                    "reason": "source_tree_allowed_occurrence_overmatched",
+                }
+            )
+            continue
+        unreachable_reason = source_tree_allowed_occurrence_unreachable_reason(
+            clone_dir,
+            entry,
+            path,
+            lines,
+            next(iter(exact_lines)),
+            owner_ranges,
+        )
+        if unreachable_reason:
+            findings.append(
+                {
+                    "path": entry.path.as_posix(),
+                    "line": next(iter(exact_lines)),
+                    "rule": entry.rule_id,
+                    "reason": unreachable_reason,
+                }
+            )
     return findings
+
+
+def source_tree_allowed_occurrence_unreachable_reason(
+    clone_dir: Path,
+    entry: SourceTreeAllowedOccurrence,
+    path: Path,
+    lines: list[str],
+    line_number: int,
+    owner_ranges: dict[str, tuple[frozenset[int], ...]],
+) -> str:
+    if ":" not in entry.rule_id:
+        return "source_tree_allowed_occurrence_unreachable"
+    scan_group, rule = entry.rule_id.split(":", 1)
+    relative = Path(entry.path.as_posix())
+    line_text = lines[line_number - 1].strip()
+    if scan_group == "retired_text":
+        if rule not in source_tree_retired_text_patterns_for(relative):
+            return "source_tree_allowed_occurrence_unreachable"
+        return ""
+    if scan_group == "synthesized_strings":
+        if entry.path.suffix != ".py":
+            return "source_tree_allowed_occurrence_unreachable"
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        pattern = source_tree_forbidden_patterns().get(rule)
+        if pattern is None:
+            return "source_tree_allowed_occurrence_unreachable"
+        candidates = iter_synthesized_string_findings(
+            relative,
+            source,
+            patterns={rule: pattern},
+            skip_rule_definition=False,
+        )
+        if not any(
+            int(candidate.get("line", 0)) == line_number
+            and candidate.get("rule") == rule
+            for candidate in candidates
+        ):
+            return "source_tree_allowed_occurrence_unreachable"
+        matched_entries, ambiguous_entries, stale_owner_entries = (
+            _source_tree_matching_allowed_occurrence_entries(
+                relative,
+                scan_group=scan_group,
+                rule=rule,
+                line_text=line_text,
+                line_number=line_number,
+                owner_ranges=owner_ranges,
+            )
+        )
+        if ambiguous_entries or stale_owner_entries or not matched_entries:
+            return "source_tree_allowed_occurrence_unreachable"
+        return ""
+    if scan_group == "active_test_literals":
+        if relative.parts[:1] != ("tests",) and relative != Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+            "build_handoff_package.py"
+        ):
+            return "source_tree_allowed_occurrence_unreachable"
+        if rule not in source_tree_active_test_literal_patterns(clone_dir):
+            return "source_tree_allowed_occurrence_unreachable"
+        return ""
+    if scan_group == "sensitive_negative_literals":
+        if relative.parts[:1] not in {(".agents",), ("tests",)}:
+            return "source_tree_allowed_occurrence_unreachable"
+        if rule not in source_tree_sensitive_negative_patterns():
+            return "source_tree_allowed_occurrence_unreachable"
+        return ""
+    return "source_tree_allowed_occurrence_unreachable"
 
 
 def source_tree_retired_governance_path_findings(
@@ -3641,7 +3730,7 @@ def source_tree_retired_text_findings(
         else source_tree_tracked_text_files(clone_dir)
     )
     known_patterns = source_tree_forbidden_patterns()
-    scanned_files = set(files)
+    scanned_files = {_source_tree_posix_path(path) for path in files}
     occurrence_entries = {
         entry: 0
         for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
@@ -3765,14 +3854,7 @@ def source_tree_retired_text_patterns_for(
         return source_tree_forbidden_patterns()
     patterns = dict(profile_runner_retired_patterns())
     if relative in SOURCE_TREE_RETIRED_TEXT_NEGATIVE_TEST_SOURCES:
-        source_tree_patterns = source_tree_forbidden_patterns()
-        patterns.update(
-            {
-                rule: pattern
-                for rule, pattern in source_tree_patterns.items()
-                if rule in SOURCE_TREE_NEGATIVE_TEST_RETIRED_TEXT_RULES
-            }
-        )
+        patterns.update(source_tree_forbidden_patterns())
     return patterns
 
 
@@ -3789,11 +3871,6 @@ def source_tree_synthesized_string_scan_findings(
     )
     for relative in files:
         if relative.suffix.lower() != ".py":
-            continue
-        if is_negative_test_allowlisted(
-            relative.as_posix(),
-            "stale_governance_truth",
-        ):
             continue
         path = clone_dir / relative
         if not path.exists():
@@ -3858,10 +3935,11 @@ def source_tree_synthesized_string_findings(
     findings: list[dict[str, object]] = []
     owner_ranges = source_tree_python_owner_ranges(path)
     if occurrence_entries is None:
+        relative_key = _source_tree_posix_path(relative)
         occurrence_entries = {
             entry: 0
             for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
-            if entry.path == relative and entry.rule_id.startswith(f"{scan_group}:")
+            if entry.path == relative_key and entry.rule_id.startswith(f"{scan_group}:")
         }
     for item in iter_synthesized_string_findings(
         relative,
@@ -4120,10 +4198,11 @@ def source_tree_active_test_literal_findings(
             path,
         )
         owner_ranges = source_tree_python_owner_ranges(path)
+        relative_key = _source_tree_posix_path(relative)
         occurrence_entries = {
             entry: 0
             for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
-            if entry.path == relative
+            if entry.path == relative_key
             and entry.rule_id.startswith("active_test_literals:")
         }
         active_patterns = source_tree_active_test_literal_patterns(clone_dir)
@@ -4395,10 +4474,11 @@ def source_tree_sensitive_negative_literal_findings(
             path,
         )
         owner_ranges = source_tree_python_owner_ranges(path)
+        relative_key = _source_tree_posix_path(relative)
         occurrence_entries = {
             entry: 0
             for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
-            if entry.path == relative
+            if entry.path == relative_key
             and entry.rule_id.startswith("sensitive_negative_literals:")
         }
         sensitive_patterns = source_tree_sensitive_negative_patterns()
@@ -4537,17 +4617,25 @@ def source_tree_path_allowed(
     rule_definition_lines: set[int] | None = None,
     definition_contexts: dict[str, set[int]] | None = None,
 ) -> bool:
-    del definition_contexts
     in_governance_rule_definition = (
         line_number is not None
         and rule_definition_lines is not None
         and line_number in rule_definition_lines
     )
+    if in_governance_rule_definition and definition_contexts is not None:
+        allowed_blocks = SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES.get(relative, set())
+        in_allowed_definition_owner = False
+        for owner, lines in definition_contexts.items():
+            owner_name = owner.split(":", 1)[1] if ":" in owner else owner
+            if owner_name in allowed_blocks and line_number in lines:
+                in_allowed_definition_owner = True
+                break
+        in_governance_rule_definition = in_allowed_definition_owner
     if scan_group == "sensitive_negative_literals":
         return False
     if scan_group in {"synthesized_strings", "active_test_literals"}:
         return False
-    if scan_group in {"retired_text", "retired_terms"}:
+    if scan_group == "retired_text":
         if rule is None or line_text is None:
             return False
         for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", line_text):
