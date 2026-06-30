@@ -18,13 +18,17 @@ QRP 支持本地量化研究流程，包括 data、factor、feature、label、mo
 
 ## 当前合同唯一
 
-同一语义只能有一个当前入口。兼容期需要用户批准，并由对应 contract tests 覆盖。
+同一语义只能有一个当前入口。并行入口需要用户批准，并由对应 contract tests 覆盖 owner、生命周期和收敛条件。
 
 ## 层边界
 
 research 是通用研究算法层，可以依赖 contracts、storage、runtime resources 和 `markets.session_windows`。research 不得依赖 `markets/implementations/` 或 `sources/`。A 股 factor/label binding、profile 和 scenario 由 `markets/implementations/a_share/` 持有。
 
-compute 只提供数值计算核心，不持有 market session domain 工具，也不写 report/storage 产物。模型算法事实源位于 `research/models/supervised.py`，单个算法字段使用 `model_algorithm`，算法 ID 集合使用 `model_algorithm_ids`。
+compute 只提供数值计算核心，不持有 market session domain 工具，也不写 report/storage 产物。
+
+`research/factors/price_volume/` 是量价因子的当前 owner。`columns.py` 负责列名、窗口集合和输入列合同，`calculations.py` 负责因子计算，`rolling.py` 和 `safety.py` 负责滚动数值与安全计算，`definitions.py` 和 `selection.py` 负责定义与特征选择，`windows.py` 负责 valid bar 读取窗口。package `__init__.py` 只导出当前 public names，不承载实现。
+
+`research/models/algorithm_facts.py` 是模型算法事实源。`estimators.py` 负责 estimator factories，`fitting.py` 负责 fit result、训练 frame 收集、线性拟合与 estimator fitting，`prediction.py` 负责预测输出 frame，`feature_importance.py` 负责特征重要性 payload，`rank_ensemble.py` 负责 rank ensemble predictor，`dependencies.py` 负责可选依赖状态，`validation_split.py` 负责训练 buffer 与 purge controls。`research/models/supervised.py` 保留当前 public boundary 并委派到这些 owner modules。单个算法字段使用 `model_algorithm`，算法 ID 集合使用 `model_algorithm_ids`。
 
 ## 数据安全
 
@@ -32,4 +36,4 @@ compute 只提供数值计算核心，不持有 market session domain 工具，�
 
 ## 业务扩展边界
 
-新增模型、因子、执行模式、artifact type 或 report contract 必须有明确 owner layer、输入输出合同、测试和 verification plan。未经批准，不新增 live trading 或 external connector 能力。
+新增模型、因子、执行模式、artifact type 或 report contract 必须有明确 owner layer、输入输出合同、测试和 verification plan。未经批准，不新增交易执行或 external connector 能力。

@@ -5,13 +5,13 @@
 ## 总体链路
 
 ```text
-sources -> markets implementation -> storage -> research -> reports -> artifacts
+sources -> markets implementation -> storage -> research -> workflows diagnostics -> reports -> artifacts
 ```
 
 研究链路：
 
 ```text
-dataset -> factor -> feature -> label -> model -> prediction -> signal -> evaluation -> portfolio -> result -> evidence/report payload -> files
+dataset -> factor -> feature -> label -> model -> prediction -> signal -> evaluation -> portfolio -> result -> diagnostics payload -> evidence/report payload -> files
 ```
 
 长期合同锚点：
@@ -47,7 +47,7 @@ src/quant_research_platform/agents
 
 `policy/` owns share safety, identifier safety, and check status aggregation. `contracts/` owns structure only. `catalog/` owns generic registry classes. `profiles/` is the composition root used by API, CLI, agents, and workflows.
 
-`research/` builds results only and does not write files. `reports/` builds and renders evidence/report content only. `artifacts/` writes LOCAL_ONLY outputs and REVIEW_SAFE evidence files. `workflows/` only orchestrates research -> reports -> artifacts. `storage/` only owns dataset IO and data layout.
+`research/` builds results only and does not write files. `workflows/diagnostics/` reads storage datasets when a report needs schema or validation payloads. `reports/` builds and renders prepared evidence/report content only; it does not read storage datasets. `artifacts/` writes LOCAL_ONLY outputs and REVIEW_SAFE evidence files. `workflows/` only orchestrates research -> diagnostics payload -> reports -> artifacts. `storage/` only owns dataset IO and data layout.
 
 ## Interfaces
 

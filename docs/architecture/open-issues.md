@@ -32,21 +32,12 @@ Scope boundary:
 
 ## P2 Deferred
 
-ID: reports-storage-dataset-boundary
-Severity: P2
-Owner layer: reports / workflows
-Status: deferred
-Evidence: `src/quant_research_platform/reports/verification_summary.py` and `src/quant_research_platform/reports/schema_inventory.py` currently import `quant_research_platform.storage.datasets`.
-Next action: move dataset inspection to workflow or diagnostics owner, then pass only prepared payloads into reports rendering.
-Acceptance gate: enable reports -> storage.datasets import boundary in owner-layer architecture tests without changing public report schema or workflow semantics.
-Scope boundary: do not change report schema or workflow semantics without explicit approval.
-
 ID: ml-validation-and-trial-contract-owner
 Severity: P2
 Owner layer: research / architecture
 Status: deferred
-Evidence: current model helpers own supervised fitting metadata and deterministic estimator dispatch, but no validation split or trial selection contract owner exists yet.
-Next action: when validation and trial selection primitives are introduced, add owner-layer tests for train/validation/test date ordering, asset-date disjointness, test-metric exclusion from best-trial selection, and seeded trial sequence determinism.
+Evidence: `research/models/validation_split.py` owns training buffer and purge controls, but no trial selection contract owner exists yet.
+Next action: when trial selection primitives are introduced, add owner-layer tests for train/validation/test date ordering, asset-date disjointness, test-metric exclusion from best-trial selection, and seeded trial sequence determinism.
 Acceptance gate: contract tests derive expected behavior from the selected owner primitives without adding a tuning framework in tests.
 Scope boundary: do not introduce a tuning framework, DL dependency, public registry, or model registry as part of a test-speed guardrail goal.
 
@@ -64,9 +55,9 @@ Severity: P3
 Owner layer: tests / profile runner
 Status: deferred
 Evidence: Windows pytest runs can fail tests that create deeply nested data paths when the profile directory is long; the same tests pass with a shorter repo-relative run directory.
-Next action: keep profile directories short on Windows, and if this recurs, add a runner or documentation guardrail that preserves explicit repo-relative run paths without shell wrappers or absolute-path assumptions.
+Next action: keep profile directories short on Windows, and if this recurs, add a runner or documentation guardrail that preserves explicit repo-relative run paths without shell packaging scripts or absolute-path assumptions.
 Acceptance gate: full pytest profile passes on Windows with a path-length-safe tmp strategy while preserving all tests and profile coverage.
-Scope boundary: do not add `.ps1` or shell wrappers, do not skip tests, do not change business `src/**`, and do not hardcode machine-specific paths.
+Scope boundary: do not add `.ps1` or shell packaging scripts, do not skip tests, do not change business `src/**`, and do not hardcode machine-specific paths.
 
 ## P3 Watchlist
 

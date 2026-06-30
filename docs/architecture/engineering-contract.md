@@ -21,9 +21,13 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 
 只使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。超时属于 `BLOCKED`。不要写 “looks good”“probably pass” 这类不可验证语义。
 
+每个 `PASS` 只覆盖实际运行的 command、scope 和 artifact。profile runner、governance verifier、handoff verifier、source-tree scan、package safety scan 和 reviewer evidence 不能互相替代。top-level summary 不得掩盖子项的 `FAIL`、`NOT_RUN` 或 `BLOCKED`。
+
 ## 文件路径
 
 公开文档和 evidence 使用 repo-relative path。用户本地绝对路径、临时私有目录和供应商私有路径留在 LOCAL_ONLY 边界内。
+
+package evidence 描述 handoff package 的成员、hash、manifest、sidecar 和 Git bundle。reviewer evidence 描述 review role、scope、files inspected、commands run、findings、fixes 和 limitations。二者必须分开记录；如果 reviewer/subagent review 写 `PASS`，handoff evidence 中必须有可检查的 reviewer evidence。
 
 ## 代码修改原则
 
