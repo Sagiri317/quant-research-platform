@@ -162,12 +162,18 @@ def test_prediction_outputs_report_writer_use_specific_metadata_attrs() -> None:
     outputs_text = (PROJECT_SRC / "research/predictions/outputs.py").read_text(
         encoding="utf-8"
     )
-    report_text = (PROJECT_SRC / "artifacts/outputs.py").read_text(encoding="utf-8")
+    artifact_writer_text = (
+        (PROJECT_SRC / "artifacts/outputs.py").read_text(encoding="utf-8")
+        + (PROJECT_SRC / "artifacts/_prediction_outputs.py").read_text(
+            encoding="utf-8"
+        )
+        + (PROJECT_SRC / "artifacts/_output_manifest.py").read_text(encoding="utf-8")
+    )
 
     assert 'attrs["metadata"]' not in outputs_text
-    assert 'attrs.get("metadata"' not in report_text
+    assert 'attrs.get("metadata"' not in artifact_writer_text
     assert "prediction_metadata_factory" in outputs_text
-    assert '"prediction_metadata"' in report_text
+    assert '"prediction_metadata"' in artifact_writer_text
 
 
 def test_tensor_modules_do_not_import_dataframe_private_helpers() -> None:

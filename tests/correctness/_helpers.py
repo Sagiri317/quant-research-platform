@@ -74,6 +74,7 @@ def synthetic_price_volume_panel(
                     "low": close * 0.99,
                     "close": close,
                     "prev_close": close / (1.0 + 0.001 * asset_index + wave),
+                    "volume": 8_000.0 + date_index * 3 + asset_index,
                     "amount": 100_000.0 + date_index * 10 + asset_index,
                     "turnover": 0.01 + asset_index * 0.001 + date_index / 1_000_000,
                     "float_market_cap": 1_000_000.0 + date_index,
@@ -99,6 +100,7 @@ def _reference_price_volume_factors(
     price = pd.to_numeric(result["adj_close"], errors="coerce")
     returns = pd.to_numeric(result["period_return"], errors="coerce")
     amount = pd.to_numeric(result["amount"], errors="coerce")
+    volume = pd.to_numeric(result["volume"], errors="coerce")
     turnover = pd.to_numeric(result["turnover"], errors="coerce")
     requested = tuple(dict.fromkeys(factor_columns))
     requested_set = set(requested)
@@ -199,6 +201,82 @@ def _reference_price_volume_factors(
             result[column] = zero_volume.groupby(group_keys, sort=False).transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).mean()
             )
+        elif f"amount_chg_{window}d" == column:
+            shifted_amount = amount.groupby(group_keys, sort=False).shift(window)
+            result[column] = amount / reference_valid_denominator(shifted_amount) - 1.0
+        elif f"amount_shock_{window}d" == column:
+            mean_amount = amount.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            result[column] = amount / reference_valid_denominator(mean_amount) - 1.0
+        elif f"amount_vol_{window}d" == column:
+            result[column] = reference_qrp_window_moment_by_asset(
+                amount,
+                group_keys,
+                window,
+                "std",
+            )
+        elif f"volume_chg_{window}d" == column:
+            shifted_volume = volume.groupby(group_keys, sort=False).shift(window)
+            result[column] = volume / reference_valid_denominator(shifted_volume) - 1.0
+        elif f"volume_shock_{window}d" == column:
+            mean_volume = volume.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            result[column] = volume / reference_valid_denominator(mean_volume) - 1.0
+        elif f"ret_amount_corr_{window}d" == column:
+            result[column] = reference_rolling_corr(
+                returns,
+                amount,
+                group_keys,
+                window,
+            )
+        elif f"ret_volume_corr_{window}d" == column:
+            result[column] = reference_rolling_corr(
+                returns,
+                volume,
+                group_keys,
+                window,
+            )
+        elif f"ret_turnover_corr_{window}d" == column:
+            result[column] = reference_rolling_corr(
+                returns,
+                turnover,
+                group_keys,
+                window,
+            )
+        elif f"trend_efficiency_{window}d" == column:
+            return_mean = returns.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            abs_return_mean = returns.abs().groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            result[column] = (
+                return_mean.abs() / reference_valid_denominator(abs_return_mean)
+            )
+        elif f"signed_amount_flow_{window}d" == column:
+            signed_amount = np.sign(returns) * amount
+            numerator = signed_amount.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            denominator = amount.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            result[column] = numerator / reference_valid_denominator(denominator)
+        elif f"ret_amount_imbalance_{window}d" == column:
+            weighted_return = returns * amount
+            weighted_abs_return = returns.abs() * amount
+            numerator = weighted_return.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            denominator = weighted_abs_return.groupby(
+                group_keys,
+                sort=False,
+            ).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            result[column] = numerator / reference_valid_denominator(denominator)
 
     denominator = reference_valid_denominator(amount)
     illiquidity = (returns.abs() / denominator).replace([np.inf, -np.inf], np.nan)
@@ -384,6 +462,21 @@ def reference_rolling_drawdown(
             raw=False,
         )
     )
+
+
+def reference_rolling_corr(
+    left: pd.Series,
+    right: pd.Series,
+    group_keys: pd.Series,
+    window: int,
+) -> pd.Series:
+    pairs = pd.DataFrame({"left": left, "right": right, "asset_id": group_keys})
+    parts = []
+    for _, group in pairs.groupby("asset_id", sort=False):
+        parts.append(
+            group["left"].rolling(window, min_periods=window).corr(group["right"])
+        )
+    return pd.concat(parts).sort_index()
 
 
 def reference_safe_log(values: pd.Series) -> pd.Series:

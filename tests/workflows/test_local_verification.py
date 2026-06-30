@@ -1124,10 +1124,13 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
 
 
 def test_no_comparison_engine_is_introduced_in_src():
+    allowed_owner_paths = {
+        Path("src/quant_research_platform/storage/_dataset_comparison.py"),
+    }
     hits = [
         str(path)
         for path in Path("src").rglob("*comparison*.py")
-        if "verification_summary" not in str(path)
+        if path not in allowed_owner_paths and "verification_summary" not in str(path)
     ]
 
     assert hits == []

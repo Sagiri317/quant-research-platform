@@ -54,6 +54,7 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/architecture/test_environment_contract.py"),
     Path("tests/architecture/test_factor_contract_terms.py"),
     Path("tests/architecture/test_handoff_package_contract.py"),
+    Path("tests/architecture/test_package_scan_coverage.py"),
     Path("tests/policy/test_share_safety.py"),
     Path("tests/policy/test_share_safety_runtime_edges.py"),
     Path("tests/tools/run_profile.py"),
@@ -1602,10 +1603,12 @@ APPROVED_WRITER_MODULES = {
         "compare_run_results.py"
     ),
     Path("src/quant_research_platform/storage/atomic.py"),
+    Path("src/quant_research_platform/storage/_dataset_writing.py"),
     Path("src/quant_research_platform/storage/datasets.py"),
     Path("src/quant_research_platform/storage/manifests.py"),
     Path("src/quant_research_platform/artifacts/evidence.py"),
     Path("src/quant_research_platform/artifacts/execution_metrics.py"),
+    Path("src/quant_research_platform/artifacts/_parquet_writers.py"),
     Path("src/quant_research_platform/artifacts/outputs.py"),
     Path("src/quant_research_platform/runtime/execution_metrics.py"),
 }
