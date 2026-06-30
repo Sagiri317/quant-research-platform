@@ -220,12 +220,17 @@ def largest_price_volume_lookback_days(
     for column in factor_columns:
         if column == price_volume_window_column("rev", 1):
             windows.append(1)
-        windows.extend(int(value) for value in re.findall(r"_(\d+)d(?:_|$)", column))
+        windows.extend(
+            int(value)
+            for value in re.findall(r"_(\d+)(?:d|m|tick)(?:_|$)", column)
+        )
     return max(windows, default=0)
 
 
 def _required_windows(factor_id: str) -> tuple[int, ...]:
-    windows = tuple(int(match) for match in re.findall(r"_(\d+)d\b", factor_id))
+    windows = tuple(
+        int(match) for match in re.findall(r"_(\d+)(?:d|m|tick)\b", factor_id)
+    )
     return windows
 
 

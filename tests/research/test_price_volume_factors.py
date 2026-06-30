@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.factors import FactorSet
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.markets.implementations.a_share.factors import (
@@ -480,12 +481,27 @@ def test_price_volume_largest_lookback_is_derived_from_requested_columns() -> No
     columns = price_volume_factor_columns()
 
     assert largest_price_volume_lookback_days(("mom_3d",)) == 3
+    assert (
+        largest_price_volume_lookback_days(
+            ("mom_3d", "amount_shock_15m", "ret_volume_corr_20tick")
+        )
+        == 20
+    )
     assert largest_price_volume_lookback_days(()) == 0
     assert largest_price_volume_lookback_days(columns) == max(
         int(token[:-1])
         for column in columns
         for token in column.split("_")
         if token.endswith("d") and token[:-1].isdigit()
+    )
+
+
+def test_price_volume_window_column_uses_frequency_suffix_contract() -> None:
+    assert price_volume_window_column("mom", 7, DataFrequency.DAILY) == "mom_7d"
+    assert price_volume_window_column("mom", 7, DataFrequency.MINUTE) == "mom_7m"
+    assert (
+        price_volume_window_column("ret_volume_corr", 7, DataFrequency.TICK)
+        == "ret_volume_corr_7tick"
     )
 
 

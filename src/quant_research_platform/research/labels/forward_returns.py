@@ -1,6 +1,6 @@
 """Generic forward-return label helpers.
 
-Forward-return horizons use per-asset valid daily bars. They do not imply
+Forward-return horizons use per-asset valid bars. They do not imply
 calendar/session windows and do not fill missing or suspended rows.
 """
 
@@ -27,7 +27,7 @@ def add_forward_return_labels(
     date_column: str = "timestamp",
     execution_price_column: str = "adj_open",
 ) -> pd.DataFrame:
-    """Add per-asset valid daily bar next-open to horizon-open labels."""
+    """Add per-asset valid-bar next-open to horizon-open labels."""
 
     result = frame.sort_values([asset_column, date_column]).copy()
     price = pd.to_numeric(result[execution_price_column], errors="coerce")

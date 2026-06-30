@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as a_share_label_calculations,
 )
@@ -17,6 +18,15 @@ from quant_research_platform.research.labels.forward_returns import (
 from tests.helpers.synthetic_a_share import make_synthetic_market_panel
 
 pytestmark = pytest.mark.guardrails
+
+
+def test_forward_return_label_column_uses_frequency_suffix_contract() -> None:
+    assert forward_return_label_column(5, DataFrequency.DAILY) == "forward_return_5d"
+    assert forward_return_label_column(5, DataFrequency.MINUTE) == "forward_return_5m"
+    assert (
+        forward_return_label_column(5, DataFrequency.TICK)
+        == "forward_return_5tick"
+    )
 
 
 def test_forward_return_labels_group_sort_horizons_and_invalid_entry_price() -> None:
