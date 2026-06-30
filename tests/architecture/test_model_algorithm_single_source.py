@@ -101,6 +101,23 @@ def test_supervised_model_root_delegates_estimator_owner() -> None:
     assert [name for name in owner_names if name in root_source] == []
 
 
+def test_supervised_model_root_delegates_feature_importance_owner() -> None:
+    import quant_research_platform.research.models.supervised as supervised
+
+    root_source = Path(supervised.__file__).read_text(encoding="utf-8")
+    owner_path = MODELS_ROOT / "feature_importance.py"
+    owner_source = owner_path.read_text(encoding="utf-8")
+    owner_names = (
+        "def linear_feature_importance",
+        "def estimator_feature_importance",
+    )
+
+    assert owner_path.is_file()
+    assert [name for name in owner_names if name not in owner_source] == []
+    assert "def _linear_feature_importance" not in root_source
+    assert "def _estimator_feature_importance" not in root_source
+
+
 def test_model_estimator_dispatch_uses_algorithm_facts_only() -> None:
     import quant_research_platform.research.models.supervised as supervised
 

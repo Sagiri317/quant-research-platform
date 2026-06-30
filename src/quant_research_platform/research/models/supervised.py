@@ -13,12 +13,12 @@ from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
-from quant_research_platform.research.models import estimators, validation_split
-from quant_research_platform.research.models.prediction import predict_model_frame
-from quant_research_platform.research.models.rank_ensemble import (
-    _ICWeightedRankEnsemble,
-    _RankEnsemblePredictor,
+from quant_research_platform.research.models import (
+    estimators,
+    feature_importance,
+    validation_split,
 )
+from quant_research_platform.research.models.prediction import predict_model_frame
 from quant_research_platform.runtime.resources import ChunkAxis
 
 
@@ -255,7 +255,7 @@ def _fit_linear_model_result_from_frames(
         filter_metadata=filter_metadata,
         row_counts=row_counts,
         coefficient_count=int(len(beta)),
-        feature_importance=_linear_feature_importance(spec, beta),
+        feature_importance=feature_importance.linear_feature_importance(spec, beta),
     )
     return ModelFitResult(coefficients=beta, metadata=metadata)
 
@@ -321,46 +321,6 @@ def _algorithm_facts(algorithm: str) -> _AlgorithmFacts:
         raise ValueError("unsupported_model_algorithm") from exc
 
 
-def _linear_feature_importance(
-    spec: ModelSpec,
-    coefficients: np.ndarray,
-) -> dict[str, float]:
-    values = coefficients[1 : len(spec.input_columns) + 1]
-    return {
-        column: float(abs(value))
-        for column, value in zip(spec.input_columns, values, strict=True)
-    }
-
-
-def _estimator_feature_importance(
-    spec: ModelSpec,
-    predictor: object,
-) -> dict[str, float] | None:
-    if isinstance(predictor, estimators._SingleFactorBaseline):
-        return {predictor.column: 1.0}
-    if isinstance(predictor, _RankEnsemblePredictor):
-        weight = 1.0 / len(predictor.columns)
-        return {column: weight for column in predictor.columns}
-    if isinstance(predictor, _ICWeightedRankEnsemble):
-        return {
-            column: float(abs(weight))
-            for column, weight in zip(predictor.columns, predictor.weights, strict=True)
-        }
-    if hasattr(predictor, "feature_importances_"):
-        values = np.asarray(predictor.feature_importances_, dtype="float64")
-        return {
-            column: float(value)
-            for column, value in zip(spec.input_columns, values, strict=True)
-        }
-    if hasattr(predictor, "coef_"):
-        values = np.ravel(np.asarray(predictor.coef_, dtype="float64"))
-        return {
-            column: float(abs(value))
-            for column, value in zip(spec.input_columns, values, strict=True)
-        }
-    return None
-
-
 def _fit_controlled_linear_model_result_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
@@ -374,7 +334,7 @@ def _fit_controlled_linear_model_result_from_frames(
         filter_metadata=filter_metadata,
         row_counts=row_counts,
         coefficient_count=int(len(beta)),
-        feature_importance=_linear_feature_importance(spec, beta),
+        feature_importance=feature_importance.linear_feature_importance(spec, beta),
     )
     return ModelFitResult(coefficients=beta, metadata=metadata)
 
@@ -497,7 +457,10 @@ def _fit_estimator_model_result_from_frames(
         filter_metadata=filter_metadata,
         row_counts=row_counts,
         coefficient_count=coefficient_count,
-        feature_importance=_estimator_feature_importance(spec, predictor),
+        feature_importance=feature_importance.estimator_feature_importance(
+            spec,
+            predictor,
+        ),
     )
     coefficients = np.asarray(
         getattr(predictor, "coefficients", np.full(coefficient_count, np.nan)),
