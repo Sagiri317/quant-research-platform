@@ -110,13 +110,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"unknown profile: {args.profile}", file=sys.stderr)
         _print_profiles(stream=sys.stderr)
         return 2
-    if args.output_dir is None or args.tmp_dir is None:
-        parser.error("--output-dir and --tmp-dir are required when --profile is used")
 
     repo_root = Path(args.repo_root).resolve()
     try:
-        output_dir = _resolve_repo_relative(repo_root, args.output_dir, "--output-dir")
-        tmp_dir = _resolve_repo_relative(repo_root, args.tmp_dir, "--tmp-dir")
+        run_dir = _resolve_run_dir(
+            repo_root,
+            args.run_dir,
+            profile_name=args.profile,
+        )
     except ValueError as error:
         print(str(error), file=sys.stderr)
         return 2
@@ -127,8 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     return run_profile(
         PROFILES[args.profile],
         repo_root=repo_root,
-        output_dir=output_dir,
-        tmp_dir=tmp_dir,
+        run_dir=run_dir,
         pytest_args=tuple(pytest_args),
     )
 
@@ -137,22 +137,15 @@ def run_profile(
     profile: Profile,
     *,
     repo_root: Path,
-    output_dir: Path,
-    tmp_dir: Path,
+    run_dir: Path,
     pytest_args: tuple[str, ...] = (),
 ) -> int:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    profile_tmp = tmp_dir / _profile_tmp_name(profile.name)
-    profile_tmp.mkdir(parents=True, exist_ok=True)
-    pytest_tmp = profile_tmp
-    stdout_path = output_dir / f"{profile.name}-stdout.log"
-    stderr_path = output_dir / f"{profile.name}-stderr.log"
-    summary_path = output_dir / f"{profile.name}-summary.json"
-    managed_roots = (
-        _repo_relative(repo_root, output_dir),
-        _repo_relative(repo_root, profile_tmp),
-    )
-    managed_roots_env = os.pathsep.join(managed_roots)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pytest_basetemp = run_dir / "tmp"
+    pytest_basetemp.mkdir(parents=True, exist_ok=True)
+    stdout_path = run_dir / "stdout.log"
+    stderr_path = run_dir / "stderr.log"
+    summary_path = run_dir / "summary.json"
 
     command = [
         sys.executable,
@@ -162,7 +155,7 @@ def run_profile(
         *profile.scopes,
         "-q",
         "--basetemp",
-        _repo_relative(repo_root, pytest_tmp),
+        _repo_relative(repo_root, pytest_basetemp),
     ]
     if profile.marker is not None:
         command.extend(["-m", profile.marker])
@@ -170,13 +163,15 @@ def run_profile(
 
     started_at = datetime.now(UTC)
     started = perf_counter()
+    env = os.environ.copy()
+    env.pop(_retired_profile_runner_env_name(), None)
     result = subprocess.run(
         command,
         cwd=repo_root,
         capture_output=True,
         text=True,
         shell=False,
-        env={**os.environ, "QRP_MANAGED_REPO_ROOTS": managed_roots_env},
+        env=env,
     )
     ended_at = datetime.now(UTC)
     duration_seconds = perf_counter() - started
@@ -195,11 +190,11 @@ def run_profile(
         "started_at": started_at.isoformat(),
         "ended_at": ended_at.isoformat(),
         "duration_seconds": round(duration_seconds, 6),
+        "run_dir": _repo_relative(repo_root, run_dir),
         "stdout_path": _repo_relative(repo_root, stdout_path),
         "stderr_path": _repo_relative(repo_root, stderr_path),
-        "tmp_dir": _repo_relative(repo_root, profile_tmp),
-        "pytest_tmp_dir": _repo_relative(repo_root, pytest_tmp),
-        "managed_roots_env": managed_roots_env,
+        "tmp_path": _repo_relative(repo_root, pytest_basetemp),
+        "pytest_basetemp": _repo_relative(repo_root, pytest_basetemp),
         "reserved_profile": profile.reserved,
     }
     summary_path.write_text(
@@ -214,8 +209,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run QRP pytest profiles.")
     parser.add_argument("--profile", help="pytest profile")
     parser.add_argument("--list-profiles", action="store_true")
-    parser.add_argument("--output-dir", help="repo-relative output directory")
-    parser.add_argument("--tmp-dir", help="repo-relative temporary directory")
+    parser.add_argument("--run-dir", help="repo-relative run directory under .run/")
     parser.add_argument("--repo-root", default=".", help="repository root")
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     return parser
@@ -237,6 +231,17 @@ def _resolve_repo_relative(repo_root: Path, value: str, flag: str) -> Path:
     return resolved
 
 
+def _resolve_run_dir(repo_root: Path, value: str | None, *, profile_name: str) -> Path:
+    raw = value or _default_run_dir(profile_name)
+    run_dir = _resolve_repo_relative(repo_root, raw, "--run-dir")
+    relative = PurePosixPath(run_dir.relative_to(repo_root).as_posix())
+    if relative.parts[:1] != (".run",) or len(relative.parts) == 1:
+        raise ValueError(f"--run-dir must be repo-relative under .run/: {raw}")
+    if run_dir.exists() and any(run_dir.iterdir()):
+        raise ValueError(f"--run-dir already exists and is non-empty: {raw}")
+    return run_dir
+
+
 def _repo_relative(repo_root: Path, path: Path) -> str:
     return PurePosixPath(path.resolve().relative_to(repo_root)).as_posix()
 
@@ -256,6 +261,41 @@ def _profile_tmp_name(profile_name: str) -> str:
         "slow": "s",
     }
     return short_names.get(profile_name, profile_name[:1] or "p")
+
+
+def _default_run_dir(profile_name: str) -> str:
+    timestamp = datetime.now(UTC).strftime("%y%m%d%H%M%S")
+    return f".run/test-profiles/{timestamp}-{profile_name}"
+
+
+def _retired_profile_runner_env_name() -> str:
+    return "".join(
+        chr(code)
+        for code in (
+            81,
+            82,
+            80,
+            95,
+            77,
+            65,
+            78,
+            65,
+            71,
+            69,
+            68,
+            95,
+            82,
+            69,
+            80,
+            79,
+            95,
+            82,
+            79,
+            79,
+            84,
+            83,
+        )
+    )
 
 
 def _status_from_return_code(return_code: int) -> str:

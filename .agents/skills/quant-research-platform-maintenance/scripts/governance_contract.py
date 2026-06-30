@@ -352,6 +352,66 @@ RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
     ),
 )
 
+PROFILE_RUNNER_RETIRED_LITERALS = (
+    "QRP_MANAGED_REPO_ROOTS",
+    "MANAGED_ROOTS_ENV",
+    "managed_roots_env",
+    "managed_repo_roots",
+    "filter_managed_repo_paths",
+    "_is_managed_repo_path",
+    "--output-dir",
+    "--tmp-dir",
+    "profile-output",
+)
+
+PROFILE_RUNNER_RETIRED_TEXT_RULES = (
+    TextRule(
+        "profile_runner_retired_qrp_managed_repo_roots",
+        r"(?<![A-Za-z0-9_])QRP_MANAGED_REPO_ROOTS(?![A-Za-z0-9_])",
+        example="QRP_MANAGED_REPO_ROOTS",
+    ),
+    TextRule(
+        "profile_runner_retired_managed_roots_env_symbol",
+        r"(?<![A-Za-z0-9_])MANAGED_ROOTS_ENV(?![A-Za-z0-9_])",
+        example="MANAGED_ROOTS_ENV",
+    ),
+    TextRule(
+        "profile_runner_retired_managed_roots_env_field",
+        r"(?<![A-Za-z0-9_])managed_roots_env(?![A-Za-z0-9_])",
+        example="managed_roots_env",
+    ),
+    TextRule(
+        "profile_runner_retired_managed_repo_roots",
+        r"(?<![A-Za-z0-9_])managed_repo_roots(?![A-Za-z0-9_])",
+        example="managed_repo_roots",
+    ),
+    TextRule(
+        "profile_runner_retired_filter_managed_repo_paths",
+        r"(?<![A-Za-z0-9_])filter_managed_repo_paths(?![A-Za-z0-9_])",
+        example="filter_managed_repo_paths",
+    ),
+    TextRule(
+        "profile_runner_retired_is_managed_repo_path",
+        r"(?<![A-Za-z0-9_])_is_managed_repo_path(?![A-Za-z0-9_])",
+        example="_is_managed_repo_path",
+    ),
+    TextRule(
+        "profile_runner_retired_output_dir_flag",
+        r"(?<![A-Za-z0-9_-])--output-dir(?![A-Za-z0-9_-])",
+        example="--output-dir",
+    ),
+    TextRule(
+        "profile_runner_retired_tmp_dir_flag",
+        r"(?<![A-Za-z0-9_-])--tmp-dir(?![A-Za-z0-9_-])",
+        example="--tmp-dir",
+    ),
+    TextRule(
+        "profile_runner_retired_profile_output_text",
+        r"(?<![A-Za-z0-9_-])profile-output(?![A-Za-z0-9_-])",
+        example="profile-output",
+    ),
+)
+
 RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {
     Path("tests/agents/test_compare_run_results.py"),
     Path("tests/agents/test_verify_governance.py"),
@@ -1269,6 +1329,68 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
     *(
         _source_tree_allowlist_entry(
             path=GOVERNANCE_CONTRACT_SCRIPT,
+            scan_group="retired_occurrence",
+            rule_name=rule.name,
+            literal=rule.example,
+            owner="governance-contract-rule-source",
+            rationale="profile runner retired surface literals are defined only here",
+            lifecycle="current hard-cutover rule; remove only if rule is retired",
+            covered_by=(
+                "tests/architecture/test_governance_contract_rg_gate.py::"
+                "test_profile_runner_retired_text_rules_are_contract_owned",
+            ),
+        )
+        for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=GOVERNANCE_CONTRACT_SCRIPT,
+            scan_group="retired_rule_definition",
+            rule_name=rule.name,
+            owner="governance-contract-rule-source",
+            rationale="profile runner retired surface rule names are contract-owned",
+            lifecycle="current hard-cutover rule; remove only if rule is retired",
+            covered_by=(
+                "tests/architecture/test_governance_contract_rg_gate.py::"
+                "test_profile_runner_retired_text_rules_are_contract_owned",
+            ),
+        )
+        for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=Path("tests/agents/test_verify_governance.py"),
+            scan_group="retired_occurrence",
+            rule_name=rule.name,
+            literal=rule.example,
+            owner="governance-negative-tests",
+            rationale="forged environment negative test proves the env is ignored",
+            lifecycle="current negative fixture; update with profile runner rule",
+            covered_by=(
+                "tests/agents/test_verify_governance.py::"
+                "test_forged_managed_roots_env_does_not_skip_repo_file_negative_payload",
+            ),
+        )
+        for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
+            scan_group="retired_occurrence",
+            rule_name=rule.name,
+            literal=rule.example,
+            owner="architecture-governance-negative-tests",
+            rationale=(
+                "existing architecture gate owns retired profile runner surface checks"
+            ),
+            lifecycle="current negative fixture; update with profile runner rule",
+            covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+        )
+        for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=GOVERNANCE_CONTRACT_SCRIPT,
             scan_group="retired_rule_definition",
             rule_name=rule.name,
             owner="governance-contract-rule-source",
@@ -1798,6 +1920,7 @@ def active_doc_forbidden_patterns() -> dict[str, re.Pattern[str]]:
     patterns.update(version_surface_forbidden_patterns())
     patterns.update(compile_text_rules(ACTIVE_DOC_HISTORY_NARRATIVE_RULES))
     patterns.update(compile_text_rules(RESULT_ARCHITECTURE_RETIRED_TEXT_RULES))
+    patterns.update(compile_text_rules(PROFILE_RUNNER_RETIRED_TEXT_RULES))
     return patterns
 
 
@@ -1838,7 +1961,12 @@ def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
     patterns.update(retired_public_surface_patterns())
     patterns.update(version_surface_forbidden_patterns())
     patterns.update(compile_text_rules(RESULT_ARCHITECTURE_RETIRED_TEXT_RULES))
+    patterns.update(profile_runner_retired_patterns())
     return patterns
+
+
+def profile_runner_retired_patterns() -> dict[str, re.Pattern[str]]:
+    return compile_text_rules(PROFILE_RUNNER_RETIRED_TEXT_RULES)
 
 
 def source_tree_sensitive_negative_rules() -> tuple[
@@ -1889,11 +2017,19 @@ def is_allowed_stale_or_retired_fixture(path: str | Path, line: str) -> bool:
         return True
     if is_retired_path_policy_line(path, line):
         return True
-    return (
+    allowlisted_negative_test = (
         normalize_repo_path(path) in STALE_NEGATIVE_TEST_PATHS
         or is_negative_test_allowlisted(path, "stale_governance_truth")
         or is_negative_test_allowlisted(path, "retired_name")
-    ) and any(marker in line for marker in stale_fixture_markers())
+    )
+    if not allowlisted_negative_test:
+        return False
+    if any(marker in line for marker in stale_fixture_markers()):
+        return True
+    return any(
+        pattern.search(line)
+        for pattern in active_doc_forbidden_patterns().values()
+    )
 
 
 def is_scanner_definition_line(path: str | Path, line: str) -> bool:
@@ -2774,8 +2910,10 @@ def source_tree_retired_text_findings(
         else source_tree_tracked_text_files(clone_dir)
     )
     for relative in files:
-        if not source_tree_should_scan_retired_text(relative):
-            continue
+        if source_tree_should_scan_retired_text(relative):
+            patterns = source_tree_forbidden_patterns()
+        else:
+            patterns = profile_runner_retired_patterns()
         path = clone_dir / relative
         if not path.exists():
             continue
@@ -2785,7 +2923,7 @@ def source_tree_retired_text_findings(
             relative,
             path,
         )
-        for rule, pattern in source_tree_forbidden_patterns().items():
+        for rule, pattern in patterns.items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
                     continue
@@ -3306,7 +3444,7 @@ def source_tree_path_allowed(
                 return True
         if is_retired_path_policy_line(relative, line_text):
             return True
-        if line_text in allowed_by_rule.get(rule, set()):
+        if any(literal in line_text for literal in allowed_by_rule.get(rule, set())):
             return True
         allowed_rules = SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST.get(
             relative,

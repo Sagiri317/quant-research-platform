@@ -41,7 +41,7 @@ data/<layer>/<dataset>/_manifest/manifest.json
 
 ```bash
 python tests/tools/run_profile.py --list-profiles
-python tests/tools/run_profile.py --profile <profile> --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
+python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<profile>
 ```
 
 ## Agent 规则

@@ -80,7 +80,7 @@ references/prompt-patterns.md
 git diff --check
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
-python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
+python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 
 需要区分 fast、contract、architecture、integration 和 mutation 时，使用

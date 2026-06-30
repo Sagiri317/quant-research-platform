@@ -71,7 +71,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 ### Agent and architecture tests
 
 ```bash
-python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
+python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 
 如果完整运行超时，必须写 `BLOCKED` 并记录超时，可以补充分段运行结果。
@@ -117,7 +117,7 @@ handoff 测试分层入口：
 
 ```bash
 python tests/tools/run_profile.py --list-profiles
-python tests/tools/run_profile.py --profile <profile> --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
+python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<profile>
 ```
 
 ## 6. Final report schema

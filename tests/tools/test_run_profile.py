@@ -62,12 +62,12 @@ def test_profile_markers_are_declared_and_excluded_markers_have_profiles() -> No
     fast_excluded_markers = _marker_names(runner.FAST_EXCLUDES)
     marker_owners = {
         marker: sorted(
-                name
-                for name, profile in runner.PROFILES.items()
-                if name != "all-non-local"
-                if profile.marker is not None
-                and profile.marker != runner.FAST_EXCLUDES
-                and marker in _marker_names(profile.marker)
+            name
+            for name, profile in runner.PROFILES.items()
+            if name != "all-non-local"
+            if profile.marker is not None
+            and profile.marker != runner.FAST_EXCLUDES
+            and marker in _marker_names(profile.marker)
         )
         for marker in fast_excluded_markers
     }
@@ -97,7 +97,7 @@ def test_default_pytest_excludes_non_default_profiles_and_local_data() -> None:
     assert "not requires_local_data" in marker_expression
 
 
-def test_fast_profile_runs_pytest_with_repo_relative_paths_and_shell_false(
+def test_default_run_dir_is_profile_scoped_under_run_root(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -121,10 +121,6 @@ def test_fast_profile_runs_pytest_with_repo_relative_paths_and_shell_false(
             "fast",
             "--repo-root",
             str(tmp_path),
-            "--output-dir",
-            "out",
-            "--tmp-dir",
-            "tmp",
             "--",
             "--durations=3",
         ]
@@ -139,24 +135,106 @@ def test_fast_profile_runs_pytest_with_repo_relative_paths_and_shell_false(
     assert "tests/policy" in command
     assert "tests/agents" in command
     assert "--basetemp" in command
-    assert "tmp/f" in command
+    basetemp = command[command.index("--basetemp") + 1]
+    assert basetemp.startswith(".run/test-profiles/")
+    assert basetemp.endswith("-fast/tmp")
     assert "--durations=3" in command
     assert kwargs["cwd"] == tmp_path.resolve()
     assert kwargs["shell"] is False
 
-    summary = json.loads((tmp_path / "out" / "fast-summary.json").read_text())
+    profile_dirs = list((tmp_path / ".run" / "test-profiles").iterdir())
+    assert len(profile_dirs) == 1
+    run_dir = profile_dirs[0]
+    assert run_dir.name.endswith("-fast")
+    assert len(run_dir.name.removesuffix("-fast")) <= 12
+    assert (run_dir / "stdout.log").read_text() == "pytest ok\n"
+    assert (run_dir / "stderr.log").read_text() == ""
+    assert (run_dir / "tmp").is_dir()
+
+    summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["schema_id"] == "qrp-test-profile-run"
     assert summary["profile"] == "fast"
     assert summary["status"] == "PASS"
     assert summary["return_code"] == 0
-    assert summary["stdout_path"] == "out/fast-stdout.log"
-    assert summary["stderr_path"] == "out/fast-stderr.log"
-    assert summary["tmp_dir"] == "tmp/f"
-    assert summary["pytest_tmp_dir"] == "tmp/f"
-    expected_managed_roots = runner.os.pathsep.join(("out", "tmp/f"))
-    assert summary["managed_roots_env"] == expected_managed_roots
-    assert kwargs["env"]["QRP_MANAGED_REPO_ROOTS"] == expected_managed_roots
-    assert (tmp_path / "out" / "fast-stdout.log").read_text() == "pytest ok\n"
+    assert summary["run_dir"] == run_dir.relative_to(tmp_path).as_posix()
+    assert summary["stdout_path"] == f"{summary['run_dir']}/stdout.log"
+    assert summary["stderr_path"] == f"{summary['run_dir']}/stderr.log"
+    assert summary["tmp_path"] == f"{summary['run_dir']}/tmp"
+    assert summary["pytest_basetemp"] == f"{summary['run_dir']}/tmp"
+    assert "reserved_profile" in summary
+
+    assert set(summary) == {
+        "schema_id",
+        "profile",
+        "status",
+        "return_code",
+        "command",
+        "cwd",
+        "repo_root",
+        "started_at",
+        "ended_at",
+        "duration_seconds",
+        "run_dir",
+        "stdout_path",
+        "stderr_path",
+        "tmp_path",
+        "pytest_basetemp",
+        "reserved_profile",
+    }
+
+
+def test_explicit_run_dir_must_be_under_run_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner()
+
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("pytest should not be called")
+
+    monkeypatch.setattr(runner.subprocess, "run", fail_run)
+
+    exit_code = runner.main(
+        [
+            "--profile",
+            "fast",
+            "--repo-root",
+            str(tmp_path),
+            "--run-dir",
+            "profile-runs/fast",
+        ]
+    )
+
+    assert exit_code == 2
+    assert not (tmp_path / "profile-runs").exists()
+
+
+def test_explicit_run_dir_existing_non_empty_fails_before_pytest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner()
+    run_dir = tmp_path / ".run" / "manual" / "fast"
+    run_dir.mkdir(parents=True)
+    (run_dir / "existing.txt").write_text("occupied\n", encoding="utf-8")
+
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("pytest should not be called")
+
+    monkeypatch.setattr(runner.subprocess, "run", fail_run)
+
+    exit_code = runner.main(
+        [
+            "--profile",
+            "fast",
+            "--repo-root",
+            str(tmp_path),
+            "--run-dir",
+            ".run/manual/fast",
+        ]
+    )
+
+    assert exit_code == 2
 
 
 def test_unknown_profile_fails_before_running_pytest(
@@ -176,15 +254,10 @@ def test_unknown_profile_fails_before_running_pytest(
             "missing",
             "--repo-root",
             str(tmp_path),
-            "--output-dir",
-            "out",
-            "--tmp-dir",
-            "tmp",
         ]
     )
 
     assert exit_code == 2
-    assert not (tmp_path / "out").exists()
 
 
 def test_profile_with_no_collected_tests_returns_non_zero_not_run_summary(
@@ -209,14 +282,14 @@ def test_profile_with_no_collected_tests_returns_non_zero_not_run_summary(
             "performance",
             "--repo-root",
             str(tmp_path),
-            "--output-dir",
-            "out",
-            "--tmp-dir",
-            "tmp",
+            "--run-dir",
+            ".run/manual/performance",
         ]
     )
 
-    summary = json.loads((tmp_path / "out" / "performance-summary.json").read_text())
+    summary = json.loads(
+        (tmp_path / ".run" / "manual" / "performance" / "summary.json").read_text()
+    )
     assert exit_code == runner.NO_TESTS_COLLECTED
     assert summary["status"] == "NOT_RUN"
     assert summary["reserved_profile"] is True

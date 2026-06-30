@@ -63,8 +63,8 @@ ID: windows-pytest-tmp-path-length
 Severity: P3
 Owner layer: tests / profile runner
 Status: deferred
-Evidence: Windows pytest runs can fail tests that create deeply nested data paths when an explicit `--tmp-dir` is long; the same tests pass with a shorter repo-relative tmp directory.
-Next action: keep profile evidence tmp roots short on Windows, and if this recurs, add a runner or documentation guardrail that preserves explicit repo-relative tmp paths without shell wrappers or absolute-path assumptions.
+Evidence: Windows pytest runs can fail tests that create deeply nested data paths when the profile directory is long; the same tests pass with a shorter repo-relative run directory.
+Next action: keep profile directories short on Windows, and if this recurs, add a runner or documentation guardrail that preserves explicit repo-relative run paths without shell wrappers or absolute-path assumptions.
 Acceptance gate: full pytest profile passes on Windows with a path-length-safe tmp strategy while preserving all tests and profile coverage.
 Scope boundary: do not add `.ps1` or shell wrappers, do not skip tests, do not change business `src/**`, and do not hardcode machine-specific paths.
 

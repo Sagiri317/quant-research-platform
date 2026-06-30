@@ -12,7 +12,7 @@
 
 ```bash
 git diff --check
-python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
+python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 ```
@@ -49,7 +49,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 slowest tests/files 和 before/after 对比，不写硬编码秒数阈值，不新增独立性能门禁文件。
 
 正式 profile runner 位于 `tests/tools/run_profile.py`。执行示例：
-`python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>`。
+`python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast`。
 
 `.run/` 只保存输出、profile、临时文件和 handoff/review artifacts，不作为
 tracked tool source。普通 `python -m pytest` 是开发者默认非重型 suite，
@@ -73,7 +73,7 @@ REVIEW_SAFE evidence tests 分为纯 synthetic fast gate 和 data/parquet contra
 
 ```bash
 python tests/tools/run_profile.py --list-profiles
-python tests/tools/run_profile.py --profile <profile> --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
+python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<profile>
 ```
 
 handoff tests 的具体执行入口统一使用 `tests/tools/run_profile.py`。

@@ -118,25 +118,25 @@ def _unsafe_assignment_text() -> str:
     return f'credential = "{key}=unsafe"\n'
 
 
-def test_managed_roots_skip_current_profile_output_negative_payload(
+def test_forged_managed_roots_env_does_not_skip_repo_file_negative_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_governance_module()
     repo = tmp_path
-    managed = repo / "profile-output" / "goal" / "profiles" / "fast"
-    managed.mkdir(parents=True)
-    payload = managed / "private-negative.py"
+    forged = repo / "forge-managed-root"
+    forged.mkdir(parents=True)
+    payload = forged / "private-negative.py"
     payload.write_text(_unsafe_assignment_text(), encoding="utf-8")
-    monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", "profile-output/goal/profiles/fast")
+    monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", "forge-managed-root")
 
     result = module.Result()
-    paths = ["profile-output/goal/profiles/fast/private-negative.py"]
+    paths = ["forge-managed-root/private-negative.py"]
 
     module.check_text_safety(result, repo, paths)
 
-    assert result.checked_files == []
-    assert result.errors == []
+    assert result.checked_files == ["forge-managed-root/private-negative.py"]
+    assert any("possible secret-like assignment" in error for error in result.errors)
 
 
 def test_unmanaged_repo_file_negative_payload_is_still_detected(tmp_path: Path) -> None:
@@ -153,91 +153,6 @@ def test_unmanaged_repo_file_negative_payload_is_still_detected(tmp_path: Path) 
     )
 
     assert result.checked_files == ["docs/architecture/private-negative.md"]
-    assert any("possible secret-like assignment" in error for error in result.errors)
-
-
-@pytest.mark.parametrize(
-    "root",
-    (
-        ".",
-        "src",
-        "src/quant_research_platform",
-        "tests",
-        "docs",
-        ".agents",
-    ),
-)
-def test_managed_roots_reject_formal_roots(
-    root: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_governance_module()
-    (tmp_path / root).mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", root)
-
-    result = module.Result()
-
-    assert module.managed_repo_roots(result, tmp_path) == ()
-    assert result.errors
-
-
-def test_managed_roots_reject_root_containing_tracked_files(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_governance_module()
-    managed = tmp_path / "profile-output" / "goal"
-    managed.mkdir(parents=True)
-    (managed / "tracked.txt").write_text("tracked\n", encoding="utf-8")
-    monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", "profile-output/goal")
-    monkeypatch.setattr(
-        module,
-        "git_tracked_paths",
-        lambda _repo: ("AGENTS.md", "profile-output/goal/tracked.txt"),
-    )
-    result = module.Result()
-
-    assert module.managed_repo_roots(result, tmp_path) == ()
-    assert (
-        "managed_root_contains_tracked_file: profile-output/goal/tracked.txt"
-        in result.errors
-    )
-
-
-@pytest.mark.parametrize("root", ("../outside",))
-def test_managed_roots_reject_repo_escape(
-    root: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_governance_module()
-    monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", root)
-    result = module.Result()
-
-    assert module.managed_repo_roots(result, tmp_path) == ()
-    assert any("managed_root_escapes_repo" in error for error in result.errors)
-
-
-def test_managed_roots_require_current_profile_declaration(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_governance_module()
-    managed = tmp_path / "profile-output"
-    managed.mkdir(parents=True)
-    (managed / "private-negative.py").write_text(
-        _unsafe_assignment_text(),
-        encoding="utf-8",
-    )
-    stale = tmp_path / "managed-roots.json"
-    stale.write_text('{"roots":["profile-output"]}\n', encoding="utf-8")
-    monkeypatch.delenv("QRP_MANAGED_REPO_ROOTS", raising=False)
-    result = module.Result()
-
-    module.check_text_safety(result, tmp_path, ["profile-output/private-negative.py"])
-
-    assert result.checked_files == ["profile-output/private-negative.py"]
     assert any("possible secret-like assignment" in error for error in result.errors)
 
 

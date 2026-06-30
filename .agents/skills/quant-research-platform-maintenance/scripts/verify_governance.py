@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -74,6 +73,11 @@ GOVERNANCE_CONFIG_EXCEPTIONS = {
     "pyproject.toml",
 }
 
+GOVERNANCE_TOOLING_EXCEPTIONS = {
+    "tests/tools/run_profile.py",
+    "tests/tools/test_run_profile.py",
+}
+
 REPORTS_EVIDENCE_RENDERER_EXCEPTIONS = {
     "src/quant_research_platform/reports/verification_summary.py",
 }
@@ -138,22 +142,6 @@ IGNORED_STATE_PATH_PARTS = {
     ".ruff_cache",
     "__pycache__",
 }
-
-MANAGED_ROOTS_ENV = "QRP_MANAGED_REPO_ROOTS"
-
-FORMAL_ROOTS = (
-    "src",
-    "tests",
-    "docs",
-    ".agents",
-)
-
-FORMAL_FILES = (
-    "AGENTS.md",
-    "README.md",
-    "pyproject.toml",
-)
-
 
 @dataclass
 class Result:
@@ -300,6 +288,8 @@ def is_governance_only_allowed_path(
         return True
     if path in GOVERNANCE_CONFIG_EXCEPTIONS:
         return True
+    if path in GOVERNANCE_TOOLING_EXCEPTIONS:
+        return True
     if path in REPORTS_EVIDENCE_RENDERER_EXCEPTIONS:
         return True
     if path in GOVERNANCE_ONLY_SOURCE_TEXT_EXCEPTIONS:
@@ -327,10 +317,7 @@ def repo_state_file_paths(
     result: Result | None = None,
 ) -> list[str]:
     found: set[str] = set()
-    managed_roots = managed_repo_roots(result, repo)
     for path in git_tracked_paths(repo):
-        if _is_managed_repo_path(path, managed_roots):
-            continue
         if _should_include_state_path(path, suffixes=suffixes):
             found.add(path)
     if repo.exists():
@@ -338,81 +325,9 @@ def repo_state_file_paths(
             if not path.is_file():
                 continue
             rel = normalize(str(path.relative_to(repo)))
-            if _is_managed_repo_path(rel, managed_roots):
-                continue
             if _should_include_state_path(rel, suffixes=suffixes):
                 found.add(rel)
     return sorted(found)
-
-
-def managed_repo_roots(result: Result | None, repo: Path) -> tuple[str, ...]:
-    raw = os.environ.get(MANAGED_ROOTS_ENV, "")
-    if not raw.strip():
-        return ()
-    roots: list[str] = []
-    for value in raw.split(os.pathsep):
-        if not value.strip():
-            continue
-        rel = normalize(value.strip())
-        reason = _managed_root_invalid_reason(repo, rel)
-        if reason is not None:
-            if result is not None:
-                result.errors.append(reason)
-            continue
-        roots.append(rel.rstrip("/"))
-    return tuple(dict.fromkeys(roots))
-
-
-def filter_managed_repo_paths(
-    result: Result,
-    repo: Path,
-    paths: list[str],
-) -> list[str]:
-    managed_roots = managed_repo_roots(result, repo)
-    if not managed_roots:
-        return paths
-    return [
-        path
-        for path in paths
-        if not _is_managed_repo_path(path, managed_roots)
-    ]
-
-
-def _managed_root_invalid_reason(repo: Path, rel: str) -> str | None:
-    path = Path(rel)
-    if path.is_absolute():
-        return f"managed_root_must_be_repo_relative: {rel}"
-    if rel in {"", "."}:
-        return "managed_root_must_not_be_repo_root"
-    root = (repo / path).resolve(strict=False)
-    repo_root = repo.resolve(strict=False)
-    if root == repo_root:
-        return "managed_root_must_not_be_repo_root"
-    if not root.is_relative_to(repo_root):
-        return f"managed_root_escapes_repo: {rel}"
-    normalized = normalize(str(root.relative_to(repo_root)))
-    for formal in FORMAL_ROOTS:
-        formal_path = (repo_root / formal).resolve(strict=False)
-        if root == formal_path or root.is_relative_to(formal_path):
-            return f"managed_root_overlaps_formal_root: {normalized}"
-        if formal_path.is_relative_to(root):
-            return f"managed_root_contains_formal_root: {formal}"
-    for formal in FORMAL_FILES:
-        formal_path = (repo_root / formal).resolve(strict=False)
-        if root == formal_path or formal_path.is_relative_to(root):
-            return f"managed_root_contains_formal_file: {formal}"
-    for tracked in git_tracked_paths(repo_root):
-        if _is_managed_repo_path(tracked, (normalized,)):
-            return f"managed_root_contains_tracked_file: {tracked}"
-    return None
-
-
-def _is_managed_repo_path(path: str, managed_roots: tuple[str, ...]) -> bool:
-    normalized = normalize(path)
-    return any(
-        normalized == root or normalized.startswith(f"{root}/")
-        for root in managed_roots
-    )
 
 
 def _should_include_state_path(
@@ -524,10 +439,7 @@ def check_structured_key_names(
 
 def iter_text_files(repo: Path, paths: list[str]) -> list[Path]:
     out: list[Path] = []
-    managed_roots = managed_repo_roots(None, repo)
     for name in paths:
-        if _is_managed_repo_path(name, managed_roots):
-            continue
         p = repo / name
         if p.is_file() and p.suffix.lower() in TEXT_SUFFIXES:
             out.append(p)
@@ -774,7 +686,6 @@ def main(argv: list[str] | None = None) -> int:
         paths = changed
     else:
         paths = active_doc_files(repo)
-    paths = filter_managed_repo_paths(result, repo, paths)
     check_scan_non_empty(result, paths, scan_scope=scan_scope)
 
     if args.governance_only:

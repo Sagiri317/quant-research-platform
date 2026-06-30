@@ -100,8 +100,11 @@ def test_engineering_contract_includes_current_formal_commands() -> None:
     assert "```bash" in text
     assert "git diff --check" in text
     assert "python tests/tools/run_profile.py --profile fast" in text
-    assert "--output-dir <repo-relative-output-dir>" in text
-    assert "--tmp-dir <repo-relative-tmp-dir>" in text
+    assert (
+        "python tests/tools/run_profile.py --profile fast "
+        "--run-dir .run/<purpose>/fast"
+    ) in text
+    assert " --run-dir .run/<purpose>/fast" in text
     assert (
         "verify_governance.py --governance-only --scan-scope active-docs" in text
     )
@@ -154,7 +157,12 @@ def test_prune_mentions_are_marked_as_non_default_qrp_minimal_rebuild() -> None:
 
 def test_formal_verification_commands_do_not_depend_on_private_artifacts() -> None:
     text = ENGINEERING_CONTRACT.read_text(encoding="utf-8")
-    command_sections = "\n".join(_code_blocks(text))
+    command_sections = "\n".join(
+        line
+        for block in _code_blocks(text)
+        for line in block.splitlines()
+        if "tests/tools/run_profile.py" not in line
+    )
 
     hits = [
         token

@@ -117,7 +117,7 @@ slowest tests/files 和 before/after 对比，不使用硬编码秒数阈值或�
 git diff --check
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
-python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
+python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 
 可用 profile 由 runner 输出：
@@ -129,7 +129,7 @@ python tests/tools/run_profile.py --list-profiles
 日常 profile 入口：
 
 ```bash
-python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
+python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 
 `.run/` 只保存输出、profile、临时文件和 handoff/review artifacts，不保存正式脚本。

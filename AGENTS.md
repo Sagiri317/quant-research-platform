@@ -96,7 +96,7 @@ Current-contract path rules are owned by `governance_contract.py` and enforced b
 git diff --check
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
-python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>
+python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 
 如果完整测试因环境或超时不可行，必须分段运行并明确写 `BLOCKED` 或 `NOT_RUN`。

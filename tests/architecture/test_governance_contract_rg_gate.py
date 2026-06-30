@@ -53,6 +53,8 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/architecture/test_handoff_package_contract.py"),
     Path("tests/policy/test_share_safety.py"),
     Path("tests/policy/test_share_safety_runtime_edges.py"),
+    Path("tests/tools/run_profile.py"),
+    Path("tests/tools/test_run_profile.py"),
     Path("tests/workflows/test_local_verification.py"),
     Path("tests/workflows/test_local_verification_contract.py"),
 } | {Path(path) for path in PRIVACY_NEGATIVE_TEST_PATHS}
@@ -244,6 +246,146 @@ def test_result_architecture_rules_cover_hard_cut_examples() -> None:
     assert set(examples) == set(patterns)
     for name, example in examples.items():
         assert patterns[name].search(example)
+
+
+def test_profile_runner_retired_text_rules_are_contract_owned() -> None:
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_LITERALS,
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        active_doc_forbidden_patterns,
+        source_tree_forbidden_patterns,
+    )
+
+    assert PROFILE_RUNNER_RETIRED_TEXT_RULES
+    examples = {rule.example for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES}
+    assert examples == set(PROFILE_RUNNER_RETIRED_LITERALS)
+
+    active_doc_patterns = active_doc_forbidden_patterns()
+    source_tree_patterns = source_tree_forbidden_patterns()
+    for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES:
+        assert rule.name in active_doc_patterns
+        assert rule.name in source_tree_patterns
+        assert active_doc_patterns[rule.name].search(rule.example)
+        assert source_tree_patterns[rule.name].search(rule.example)
+
+
+def test_profile_runner_retired_text_allowlist_is_precise() -> None:
+    from governance_contract import (
+        GOVERNANCE_CONTRACT_SCRIPT,
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SOURCE_TREE_ALLOWLIST_ENTRIES,
+    )
+
+    retired_rule_names = {rule.name for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES}
+    entries = [
+        entry
+        for entry in SOURCE_TREE_ALLOWLIST_ENTRIES
+        if entry.rule_name in retired_rule_names
+    ]
+
+    assert entries
+    assert {entry.path for entry in entries} <= {
+        GOVERNANCE_CONTRACT_SCRIPT,
+        Path("tests/agents/test_verify_governance.py"),
+        Path("tests/architecture/test_governance_contract_rg_gate.py"),
+    }
+    assert Path("tests/tools/test_run_profile.py") not in {
+        entry.path for entry in entries
+    }
+    assert all(entry.owner for entry in entries)
+    assert all(entry.rationale for entry in entries)
+    assert all(entry.covered_by for entry in entries)
+
+
+def test_profile_runner_retired_cli_flags_are_rejected() -> None:
+    runner = Path("tests/tools/run_profile.py")
+
+    for flag in ("--output-dir", "--tmp-dir"):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(runner),
+                "--profile",
+                "fast",
+                flag,
+                ".run/retired-profile-runner-surface",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 2
+        assert "unrecognized arguments" in result.stderr
+        assert flag in result.stderr
+
+
+def test_profile_runner_env_is_not_forwarded_to_pytest_subprocess(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import importlib.util
+
+    runner_path = Path("tests/tools/run_profile.py")
+    spec = importlib.util.spec_from_file_location("run_profile_contract", runner_path)
+    assert spec is not None
+    assert spec.loader is not None
+    runner = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = runner
+    spec.loader.exec_module(runner)
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+
+    monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", "forge-managed-root")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    exit_code = runner.main(
+        [
+            "--profile",
+            "fast",
+            "--repo-root",
+            str(tmp_path),
+            "--run-dir",
+            ".run/test-profile-env-contract",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "QRP_MANAGED_REPO_ROOTS" not in captured["env"]
+
+
+def test_source_tree_scan_rejects_unregistered_profile_runner_retired_text(
+    tmp_path: Path,
+) -> None:
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        source_tree_retired_text_findings,
+    )
+
+    repo = tmp_path / "repo"
+    path = repo / "tests" / "tools" / "test_run_profile.py"
+    path.parent.mkdir(parents=True)
+    retired_text = PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
+    path.write_text(f"{retired_text}\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = source_tree_retired_text_findings(repo)
+
+    assert any(
+        finding["path"] == "tests/tools/test_run_profile.py"
+        and finding["rule"] == PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name
+        for finding in findings
+    )
 
 
 def test_verify_governance_uses_current_local_only_roots() -> None:
