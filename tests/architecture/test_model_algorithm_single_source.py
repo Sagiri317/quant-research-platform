@@ -118,6 +118,28 @@ def test_supervised_model_root_delegates_feature_importance_owner() -> None:
     assert "def _estimator_feature_importance" not in root_source
 
 
+def test_supervised_model_root_delegates_algorithm_facts_and_dependencies() -> None:
+    import quant_research_platform.research.models.supervised as supervised
+
+    root_source = Path(supervised.__file__).read_text(encoding="utf-8")
+    facts_path = MODELS_ROOT / "algorithm_facts.py"
+    dependencies_path = MODELS_ROOT / "dependencies.py"
+    facts_source = facts_path.read_text(encoding="utf-8")
+    dependencies_source = dependencies_path.read_text(encoding="utf-8")
+
+    assert facts_path.is_file()
+    assert dependencies_path.is_file()
+    assert "class AlgorithmFacts" in facts_source
+    assert "def algorithm_facts" in facts_source
+    assert "def model_algorithm_ids" in facts_source
+    assert "def model_dependency_status" in dependencies_source
+    assert "def require_model_dependency" in dependencies_source
+    assert "class _AlgorithmFacts" not in root_source
+    assert "_MODEL_ALGORITHM_FACTS =" not in root_source
+    assert "def _algorithm_facts" not in root_source
+    assert "def _dependency_status" not in root_source
+
+
 def test_model_estimator_dispatch_uses_algorithm_facts_only() -> None:
     import quant_research_platform.research.models.supervised as supervised
 

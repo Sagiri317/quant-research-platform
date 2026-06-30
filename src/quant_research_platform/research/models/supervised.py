@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from importlib import import_module
 
 import numpy as np
 import pandas as pd
@@ -14,7 +13,8 @@ from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models import (
-    estimators,
+    algorithm_facts,
+    dependencies,
     feature_importance,
     validation_split,
 )
@@ -29,161 +29,29 @@ class ModelFitResult:
     prediction_model: object | None = field(default=None, compare=False, repr=False)
 
 
-@dataclass(frozen=True)
-class _AlgorithmFacts:
-    algorithm: str
-    dependency_package: str | None = None
-    estimator_factory: Callable[[ModelSpec, dict[str, object]], object] | None = None
-    default_hyperparameters: Mapping[str, object] = field(default_factory=dict)
-    smoke_hyperparameters: Mapping[str, object] = field(default_factory=dict)
-    input_kind: str = "feature_inputs"
-
-
-_MODEL_ALGORITHM_FACTS = {
-    "linear_regression": _AlgorithmFacts(
-        "linear_regression",
-        "sklearn",
-        estimator_factory=estimators._linear_regression_estimator,
-    ),
-    "ridge_regression": _AlgorithmFacts(
-        "ridge_regression",
-        "sklearn",
-        estimator_factory=estimators._ridge_regression_estimator,
-        default_hyperparameters={"alpha": 1.0},
-    ),
-    "lasso_regression": _AlgorithmFacts(
-        "lasso_regression",
-        "sklearn",
-        estimator_factory=estimators._lasso_regression_estimator,
-        default_hyperparameters={"alpha": 0.001, "max_iter": 10_000},
-    ),
-    "elastic_net": _AlgorithmFacts(
-        "elastic_net",
-        "sklearn",
-        estimator_factory=estimators._elastic_net_estimator,
-        default_hyperparameters={
-            "alpha": 0.001,
-            "l1_ratio": 0.5,
-            "max_iter": 10_000,
-        },
-    ),
-    "huber_regression": _AlgorithmFacts(
-        "huber_regression",
-        "sklearn",
-        estimator_factory=estimators._huber_regression_estimator,
-        default_hyperparameters={"max_iter": 1_000},
-    ),
-    "decision_tree_regressor": _AlgorithmFacts(
-        "decision_tree_regressor",
-        "sklearn",
-        estimator_factory=estimators._decision_tree_regressor,
-    ),
-    "random_forest_regressor": _AlgorithmFacts(
-        "random_forest_regressor",
-        "sklearn",
-        estimator_factory=estimators._random_forest_regressor,
-        default_hyperparameters={"n_estimators": 20, "n_jobs": 1},
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": 1},
-    ),
-    "extra_trees_regressor": _AlgorithmFacts(
-        "extra_trees_regressor",
-        "sklearn",
-        estimator_factory=estimators._extra_trees_regressor,
-        default_hyperparameters={"n_estimators": 20, "n_jobs": 1},
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": 1},
-    ),
-    "gradient_boosting_regressor": _AlgorithmFacts(
-        "gradient_boosting_regressor",
-        "sklearn",
-        estimator_factory=estimators._gradient_boosting_regressor,
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 2},
-    ),
-    "hist_gradient_boosting_regressor": _AlgorithmFacts(
-        "hist_gradient_boosting_regressor",
-        "sklearn",
-        estimator_factory=estimators._hist_gradient_boosting_regressor,
-        smoke_hyperparameters={"max_iter": 5, "max_leaf_nodes": 7},
-    ),
-    "xgboost_regressor": _AlgorithmFacts(
-        "xgboost_regressor",
-        "xgboost",
-        estimator_factory=estimators._xgboost_regressor,
-        default_hyperparameters={
-            "n_estimators": 20,
-            "max_depth": 3,
-            "learning_rate": 0.1,
-            "objective": "reg:squarederror",
-            "device": "cpu",
-            "n_jobs": 1,
-        },
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 2, "n_jobs": 1},
-    ),
-    "lightgbm_regressor": _AlgorithmFacts(
-        "lightgbm_regressor",
-        "lightgbm",
-        estimator_factory=estimators._lightgbm_regressor,
-        default_hyperparameters={
-            "n_estimators": 20,
-            "learning_rate": 0.1,
-            "verbosity": -1,
-            "n_jobs": 1,
-        },
-        smoke_hyperparameters={
-            "n_estimators": 5,
-            "num_leaves": 7,
-            "n_jobs": 1,
-            "verbosity": -1,
-        },
-    ),
-    "single_factor_baseline": _AlgorithmFacts(
-        "single_factor_baseline",
-        estimator_factory=estimators._single_factor_baseline,
-        input_kind="single_factor_input",
-    ),
-    "equal_weight_rank_ensemble": _AlgorithmFacts(
-        "equal_weight_rank_ensemble",
-        estimator_factory=estimators._equal_weight_rank_ensemble,
-        input_kind="rank_ensemble_inputs",
-    ),
-    "ic_weighted_rank_ensemble": _AlgorithmFacts(
-        "ic_weighted_rank_ensemble",
-        estimator_factory=estimators._ic_weighted_rank_ensemble,
-        input_kind="rank_ensemble_inputs",
-    ),
-}
-
-
 def model_algorithm_ids() -> tuple[str, ...]:
-    return tuple(sorted(_MODEL_ALGORITHM_FACTS))
+    return algorithm_facts.model_algorithm_ids()
 
 
-def model_algorithm_definition(algorithm: str) -> _AlgorithmFacts:
-    return _algorithm_facts(algorithm)
+def model_algorithm_definition(algorithm: str) -> algorithm_facts.AlgorithmFacts:
+    return algorithm_facts.algorithm_facts(algorithm)
 
 
 def model_default_hyperparameters(algorithm: str) -> dict[str, object]:
-    return dict(_algorithm_facts(algorithm).default_hyperparameters)
+    return algorithm_facts.model_default_hyperparameters(algorithm)
 
 
 def model_smoke_hyperparameters(algorithm: str) -> dict[str, object]:
-    return dict(_algorithm_facts(algorithm).smoke_hyperparameters)
+    return algorithm_facts.model_smoke_hyperparameters(algorithm)
 
 
 def model_dependency_status(algorithm: str) -> dict[str, str]:
-    facts = _algorithm_facts(algorithm)
-    package = facts.dependency_package
-    if package is None:
-        return {"status": "available", "package": "internal"}
-    try:
-        import_module(package)
-    except ImportError:
-        return {"status": "missing", "package": package}
-    return {"status": "available", "package": package}
+    return dependencies.model_dependency_status(algorithm)
 
 
 def build_estimator_from_model_spec(spec: ModelSpec) -> object:
-    facts = _algorithm_facts(spec.model_algorithm)
-    _dependency_status(facts.algorithm)
+    facts = algorithm_facts.algorithm_facts(spec.model_algorithm)
+    dependencies.require_model_dependency(facts.algorithm)
     if facts.estimator_factory is None:
         raise ValueError("unsupported_model_algorithm")
     params = dict(facts.default_hyperparameters)
@@ -295,7 +163,9 @@ def _model_metadata(
         "random_seed": spec.random_seed,
         "max_train_rows": spec.max_train_rows,
         "purge_gap_steps": spec.purge_gap_steps,
-        "dependency_status": _dependency_status(spec.model_algorithm),
+        "dependency_status": dependencies.require_model_dependency(
+            spec.model_algorithm,
+        ),
         "coefficient_count": coefficient_count,
     }
     if feature_importance is not None:
@@ -305,20 +175,6 @@ def _model_metadata(
             feature_importance_status or "not_available_for_model_algorithm"
         )
     return metadata
-
-
-def _dependency_status(algorithm: str) -> dict[str, str]:
-    status = model_dependency_status(algorithm)
-    if status["status"] == "missing":
-        raise ImportError(f"model_dependency_unavailable: {status['package']}")
-    return status
-
-
-def _algorithm_facts(algorithm: str) -> _AlgorithmFacts:
-    try:
-        return _MODEL_ALGORITHM_FACTS[algorithm]
-    except KeyError as exc:
-        raise ValueError("unsupported_model_algorithm") from exc
 
 
 def _fit_controlled_linear_model_result_from_frames(
