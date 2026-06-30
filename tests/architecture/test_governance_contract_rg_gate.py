@@ -5,7 +5,10 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import fields
 from pathlib import Path
+
+import pytest
 
 from tests.helpers import frequency_ids
 from tests.helpers.governance_fixtures import (
@@ -317,147 +320,178 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
     ]
     assert architecture_entries
     assert {entry.rule_name for entry in architecture_entries} <= retired_rule_names
-    assert all("python_ast:" in entry.allowed_context for entry in architecture_entries)
-    assert all(
-        ";line_regex:^" in entry.allowed_context for entry in architecture_entries
-    )
-    assert all(entry.allowed_context.endswith("$") for entry in architecture_entries)
+    assert {entry.context_kind for entry in architecture_entries} == {
+        "python_exact_line"
+    }
+    assert all(entry.ast_owner for entry in architecture_entries)
+    assert all(entry.exact_line for entry in architecture_entries)
+    assert all(entry.literal in entry.exact_line for entry in architecture_entries)
 
 
-def test_source_tree_allowlist_entries_have_strict_context_metadata() -> None:
+def test_source_tree_allowlist_retired_occurrences_are_exact_inventory() -> None:
     from governance_contract import (
-        PROFILE_RUNNER_RETIRED_TEXT_RULES,
         SOURCE_TREE_ALLOWLIST_ENTRIES,
         validate_source_tree_allowlist_entries,
     )
 
     assert validate_source_tree_allowlist_entries(SOURCE_TREE_ALLOWLIST_ENTRIES) == []
+    field_names = {field.name for field in fields(SOURCE_TREE_ALLOWLIST_ENTRIES[0])}
+    assert "allowed_context" not in field_names
+    assert "line_regex" not in field_names
+    assert "pattern_name" not in field_names
 
-    sample = SOURCE_TREE_ALLOWLIST_ENTRIES[0]
-    malformed = (
-        sample.__class__(
-            path=sample.path,
-            scan_group=sample.scan_group,
-            rule_name=sample.rule_name,
-            literal=sample.literal,
-            pattern_name=sample.pattern_name,
-            allowed_context=sample.allowed_context,
-            owner="",
-            rationale=sample.rationale,
-            lifecycle=sample.lifecycle,
-            covered_by=sample.covered_by,
+    entries = [
+        entry
+        for entry in SOURCE_TREE_ALLOWLIST_ENTRIES
+        if entry.scan_group == "retired_occurrence"
+    ]
+    assert entries
+    assert all(
+        entry.context_kind in {"python_exact_line", "text_exact_line"}
+        for entry in entries
+    )
+    assert all(entry.max_occurrences == 1 for entry in entries)
+    assert all(entry.literal and entry.literal in entry.exact_line for entry in entries)
+    assert all(entry.owner and entry.rationale and entry.lifecycle for entry in entries)
+    assert all(entry.covered_by for entry in entries)
+    assert all(
+        entry.context_kind == "python_exact_line" and entry.ast_owner
+        if entry.path.suffix == ".py"
+        else entry.context_kind == "text_exact_line" and not entry.ast_owner
+        for entry in entries
+    )
+
+
+def test_source_tree_allowlist_rejects_invalid_exact_inventory_shape() -> None:
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SourceTreeAllowlistEntry,
+        validate_source_tree_allowlist_entries,
+    )
+
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    valid_kwargs = {
+        "path": Path("tests/agents/test_verify_governance.py"),
+        "scan_group": "retired_occurrence",
+        "rule_name": rule.name,
+        "literal": rule.example,
+        "context_kind": "python_exact_line",
+        "ast_owner": "test_func",
+        "exact_line": f'x = "{rule.example}"',
+        "owner": "architecture-governance-negative-tests",
+        "rationale": "test-only exact occurrence inventory",
+        "lifecycle": "test-only",
+        "covered_by": ("tests/architecture/test_governance_contract_rg_gate.py",),
+    }
+
+    cases = [
+        ("source_tree_allowlist_missing_exact_line", {"exact_line": ""}),
+        ("source_tree_allowlist_missing_literal", {"literal": ""}),
+        (
+            "source_tree_allowlist_exact_line_missing_literal",
+            {"exact_line": "x = 'other'"},
         ),
+        ("source_tree_allowlist_missing_owner", {"owner": ""}),
+        ("source_tree_allowlist_missing_rationale", {"rationale": ""}),
+        ("source_tree_allowlist_missing_lifecycle", {"lifecycle": ""}),
+        ("source_tree_allowlist_missing_covered_by", {"covered_by": ()}),
+        (
+            "source_tree_allowlist_max_occurrences_not_strict",
+            {"max_occurrences": 2},
+        ),
+        ("source_tree_allowlist_invalid_context_kind", {"context_kind": "line_regex"}),
+        ("source_tree_allowlist_missing_python_ast_owner", {"ast_owner": ""}),
+        (
+            "source_tree_allowlist_python_requires_python_exact_line",
+            {"context_kind": "text_exact_line", "ast_owner": ""},
+        ),
+        (
+            "source_tree_allowlist_non_python_rejects_python_exact_line",
+            {
+                "path": Path("docs/architecture/governance.md"),
+                "context_kind": "python_exact_line",
+                "ast_owner": "test_func",
+            },
+        ),
+    ]
+
+    for expected, overrides in cases:
+        entry = SourceTreeAllowlistEntry(**(valid_kwargs | overrides))
+        failures = validate_source_tree_allowlist_entries((entry,))
+        assert any(expected in item for item in failures), (expected, failures)
+
+
+def test_source_tree_allowlist_rejects_invalid_path_and_rule() -> None:
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SourceTreeAllowlistEntry,
+        validate_source_tree_allowlist_entries,
     )
 
-    assert "source_tree_allowlist_missing_owner" in (
-        validate_source_tree_allowlist_entries(malformed)[0]
-    )
-    for field in ("rationale", "covered_by"):
-        broken = sample.__class__(
-            path=sample.path,
-            scan_group=sample.scan_group,
-            rule_name=sample.rule_name,
-            literal=sample.literal,
-            pattern_name=sample.pattern_name,
-            allowed_context=sample.allowed_context,
-            owner=sample.owner,
-            rationale="" if field == "rationale" else sample.rationale,
-            lifecycle=sample.lifecycle,
-            covered_by=() if field == "covered_by" else sample.covered_by,
-        )
-        failures = validate_source_tree_allowlist_entries((broken,))
-        assert any(
-            f"source_tree_allowlist_missing_{field}" in item
-            for item in failures
-        )
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    valid_kwargs = {
+        "path": Path("tests/agents/test_verify_governance.py"),
+        "scan_group": "retired_occurrence",
+        "rule_name": rule.name,
+        "literal": rule.example,
+        "context_kind": "python_exact_line",
+        "ast_owner": "test_func",
+        "exact_line": f'x = "{rule.example}"',
+        "owner": "architecture-governance-negative-tests",
+        "rationale": "test-only exact occurrence inventory",
+        "lifecycle": "test-only",
+        "covered_by": ("tests/architecture/test_governance_contract_rg_gate.py",),
+    }
 
-    broad = sample.__class__(
-        path=sample.path,
-        scan_group="retired_occurrence",
-        rule_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-        literal=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
-        pattern_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-        allowed_context=f"line_regex:{PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example}",
-        owner=sample.owner,
-        rationale=sample.rationale,
-        lifecycle=sample.lifecycle,
-        covered_by=sample.covered_by,
-    )
-    assert any(
-        "source_tree_allowlist_broad_allowed_context" in item
-        for item in validate_source_tree_allowlist_entries((broad,))
+    cases = [
+        ("source_tree_allowlist_absolute_path", {"path": Path("/tmp/fixture.py")}),
+        ("source_tree_allowlist_parent_path", {"path": Path("../fixture.py")}),
+        ("source_tree_allowlist_windows_backslash_path", {"path": "tests\\bad.py"}),
+        ("source_tree_allowlist_unknown_rule", {"rule_name": "unknown_retired_rule"}),
+    ]
+
+    for expected, overrides in cases:
+        entry = SourceTreeAllowlistEntry(**(valid_kwargs | overrides))
+        failures = validate_source_tree_allowlist_entries((entry,))
+        assert any(expected in item for item in failures), (expected, failures)
+
+
+def test_source_tree_allowlist_rejects_old_retired_occurrence_dsl() -> None:
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SourceTreeAllowlistEntry,
     )
 
-    literal = PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
-    strict_context = (
-        "python_ast:test_func;"
-        + f"line_regex:^exact source line with {literal}$"
-    )
-    malformed_contexts = (
-        f"line_regex:^{literal}$",
-        f"line_regex:^.*{literal}.*$",
-        f"python_ast:test_func;line_regex:^.+{literal}.+$",
-        f"python_ast:test_func;line_regex:^.{{0,200}}{literal}.{{0,200}}$",
-        f"python_ast:test_func;line_regex:^(?:.+)?{literal}(?:.+)?$",
-        f"python_ast:test_func;line_regex:^[\\s\\S]*{literal}[\\s\\S]*$",
-        f".*{literal}.*",
-        "python_ast:test_func",
-        f"python_ast:test_func;line_regex:^.*{literal}.*$",
-    )
-    for context in malformed_contexts:
-        broken = sample.__class__(
-            path=Path("tests/agents/test_verify_governance.py"),
-            scan_group="retired_occurrence",
-            rule_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-            literal=literal,
-            pattern_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-            allowed_context=context,
-            owner=sample.owner,
-            rationale=sample.rationale,
-            lifecycle=sample.lifecycle,
-            covered_by=sample.covered_by,
-        )
-        failures = validate_source_tree_allowlist_entries((broken,))
-        assert any(
-            "source_tree_allowlist_broad_allowed_context" in item
-            or "source_tree_allowlist_missing_python_ast_owner" in item
-            or "source_tree_allowlist_missing_exact_line" in item
-            for item in failures
-        ), (context, failures)
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    literal = rule.example
+    common = {
+        "path": Path("tests/agents/test_verify_governance.py"),
+        "scan_group": "retired_occurrence",
+        "rule_name": rule.name,
+        "literal": rule.example,
+        "owner": "architecture-governance-negative-tests",
+        "rationale": "test-only exact occurrence inventory",
+        "lifecycle": "test-only",
+        "covered_by": ("tests/architecture/test_governance_contract_rg_gate.py",),
+    }
 
-    exact_line = f'x = "prefix {literal} suffix"'
-    exact = sample.__class__(
-        path=Path("tests/agents/test_verify_governance.py"),
-        scan_group="retired_occurrence",
-        rule_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-        literal=literal,
-        pattern_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-        allowed_context=f"python_ast:test_func;line_regex:^{re.escape(exact_line)}$",
-        owner=sample.owner,
-        rationale=sample.rationale,
-        lifecycle=sample.lifecycle,
-        covered_by=sample.covered_by,
-    )
-    assert validate_source_tree_allowlist_entries((exact,)) == []
+    for old_field in (
+        {"allowed_context": f"line_regex:^{literal}$"},
+        {"allowed_context": "python_ast:test_func"},
+        {
+            "allowed_context": (
+                f"python_ast:test_func;line_regex:^{literal}$"
+            )
+        },
+        {"line_regex": f"^{literal}$"},
+        {"pattern_name": rule.name},
+    ):
+        with pytest.raises(TypeError):
+            SourceTreeAllowlistEntry(**(common | old_field))
 
-    assert getattr(sample, "max_occurrences", None) == 1
-    overbroad_count = sample.__class__(
-        path=Path("tests/agents/test_verify_governance.py"),
-        scan_group="retired_occurrence",
-        rule_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-        literal=literal,
-        pattern_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-        allowed_context=strict_context,
-        owner=sample.owner,
-        rationale=sample.rationale,
-        lifecycle=sample.lifecycle,
-        covered_by=sample.covered_by,
-        max_occurrences=2,
-    )
-    assert any(
-        "source_tree_allowlist_max_occurrences_not_strict" in item
-        for item in validate_source_tree_allowlist_entries((overbroad_count,))
-    )
+    assert getattr(SourceTreeAllowlistEntry, "allowed_context", None) is None
+    assert getattr(SourceTreeAllowlistEntry, "line_regex", None) is None
+    assert getattr(SourceTreeAllowlistEntry, "pattern_name", None) is None
 
 
 def test_profile_runner_retired_literals_are_not_allowed_by_unrelated_context(
@@ -607,6 +641,39 @@ def test_retired_profile_allowlist_rejects_duplicate_exact_occurrence(
     ), findings
 
 
+def test_retired_profile_rule_source_duplicate_exact_occurrence_overmatches(
+    tmp_path: Path,
+) -> None:
+    from governance_contract import (
+        GOVERNANCE_CONTRACT_SCRIPT,
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        source_tree_retired_text_findings,
+    )
+
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    exact_line = f'    "{rule.example}",'
+    source = GOVERNANCE_CONTRACT_SCRIPT.read_text(encoding="utf-8")
+    assert exact_line in source
+    repo = tmp_path / "repo"
+    path = repo / GOVERNANCE_CONTRACT_SCRIPT
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        source.replace(exact_line, f"{exact_line}\n{exact_line}", 1),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = source_tree_retired_text_findings(repo)
+
+    assert any(
+        finding["path"] == GOVERNANCE_CONTRACT_SCRIPT.as_posix()
+        and finding["rule"] == rule.name
+        and finding.get("reason") == "source_tree_allowlist_overmatched"
+        for finding in findings
+    ), findings
+
+
 def test_retired_profile_allowlist_rejects_stale_exact_occurrence(
     tmp_path: Path,
     monkeypatch,
@@ -643,13 +710,12 @@ def test_retired_profile_allowlist_rejects_stale_exact_occurrence(
         scan_group="retired_occurrence",
         rule_name=rule.name,
         literal=rule.example,
-        pattern_name=rule.name,
-        allowed_context=(
-            "python_ast:"
+        context_kind="python_exact_line",
+        ast_owner=(
             "test_forged_retired_profile_env_does_not_skip_repo_file_"
-            "negative_payload;"
-            f"line_regex:^{re.escape(missing_env_line)}$"
+            "negative_payload"
         ),
+        exact_line=missing_env_line,
         owner="architecture-governance-negative-tests",
         rationale="proves stale exact retired occurrence allowlists fail",
         lifecycle="test-only",
@@ -702,15 +768,11 @@ def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
 
     findings = source_tree_retired_text_findings(repo)
 
-    assert {
+    finding_keys = {
         (finding["path"], finding["line"], finding["rule"])
         for finding in findings
-    } == {
-        (
-            "tests/agents/test_verify_governance.py",
-            0,
-            "profile_runner_retired_qrp_managed_repo_roots",
-        ),
+    }
+    assert {
         (
             "tests/agents/test_verify_governance.py",
             2,
@@ -721,7 +783,7 @@ def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
             5,
             "profile_runner_retired_qrp_managed_repo_roots",
         ),
-    }
+    } <= finding_keys
 
 
 def test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context(
@@ -755,8 +817,8 @@ def test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context(
         scan_group="retired_occurrence",
         rule_name=rule.name,
         literal=rule.example,
-        pattern_name=rule.name,
-        allowed_context=f"line_regex:^{re.escape(allowed_line)}$",
+        context_kind="text_exact_line",
+        exact_line=allowed_line,
         owner="architecture-governance-docs",
         rationale="test-only exact docs line retired literal allowance",
         lifecycle="test-only",
@@ -772,14 +834,166 @@ def test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context(
 
     findings = source_tree_retired_text_findings(repo)
 
-    assert {
+    assert ("docs/architecture/open-issues.md", rule.name) in {
         (finding["path"], finding["rule"]) for finding in findings
-    } == {
-        (
-            "docs/architecture/open-issues.md",
-            rule.name,
-        )
     }
+    assert ("docs/architecture/governance.md", rule.name) not in {
+        (finding["path"], finding["rule"]) for finding in findings
+        if finding.get("line") == 1
+    }
+
+
+def test_retired_profile_allowlist_rejects_ambiguous_python_owner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import governance_contract
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SourceTreeAllowlistEntry,
+        source_tree_retired_text_findings,
+    )
+
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    cases = (
+        (
+            "duplicate-def",
+            "def test_func():\n"
+            f'    x = "{rule.example}"\n'
+            "\n"
+            "def test_func():\n"
+            "    pass\n",
+            "test_func",
+            f'x = "{rule.example}"',
+        ),
+        (
+            "duplicate-class",
+            "class TestOwner:\n"
+            f'    x = "{rule.example}"\n'
+            "\n"
+            "class TestOwner:\n"
+            "    pass\n",
+            "TestOwner",
+            f'x = "{rule.example}"',
+        ),
+        (
+            "duplicate-assignment",
+            f'OWNER = "{rule.example}"\n'
+            "OWNER = 'other'\n",
+            "OWNER",
+            f'OWNER = "{rule.example}"',
+        ),
+    )
+
+    for name, source, ast_owner, exact_line in cases:
+        repo = tmp_path / name
+        path = repo / "tests" / "agents" / "test_verify_governance.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(source, encoding="utf-8")
+        entry = SourceTreeAllowlistEntry(
+            path=Path("tests/agents/test_verify_governance.py"),
+            scan_group="retired_occurrence",
+            rule_name=rule.name,
+            literal=rule.example,
+            context_kind="python_exact_line",
+            ast_owner=ast_owner,
+            exact_line=exact_line,
+            owner="architecture-governance-negative-tests",
+            rationale="test-only ambiguous owner fixture",
+            lifecycle="test-only",
+            covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+        )
+        monkeypatch.setattr(
+            governance_contract,
+            "SOURCE_TREE_ALLOWLIST_ENTRIES",
+            (entry,),
+        )
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+        findings = source_tree_retired_text_findings(repo)
+
+        assert any(
+            finding["path"] == "tests/agents/test_verify_governance.py"
+            and finding["rule"] == rule.name
+            and finding.get("reason") == "source_tree_allowlist_ambiguous_owner"
+            for finding in findings
+        ), (name, findings)
+
+
+def test_retired_profile_allowlist_rejects_global_stale_entries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import governance_contract
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SourceTreeAllowlistEntry,
+        source_tree_retired_text_findings,
+    )
+
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    base = {
+        "path": Path("tests/agents/test_verify_governance.py"),
+        "scan_group": "retired_occurrence",
+        "rule_name": rule.name,
+        "literal": rule.example,
+        "context_kind": "python_exact_line",
+        "ast_owner": "test_func",
+        "exact_line": f'x = "{rule.example}"',
+        "owner": "architecture-governance-negative-tests",
+        "rationale": "test-only global stale fixture",
+        "lifecycle": "test-only",
+        "covered_by": ("tests/architecture/test_governance_contract_rg_gate.py",),
+    }
+    cases = (
+        ("missing-path", {}, ()),
+        ("not-tracked", {}, ("write",)),
+        (
+            "missing-line",
+            {"exact_line": f'y = "{rule.example}"'},
+            ("write", "add"),
+        ),
+        (
+            "missing-owner",
+            {"ast_owner": "missing_owner"},
+            ("write", "add"),
+        ),
+    )
+
+    for name, overrides, actions in cases:
+        repo = tmp_path / name
+        path = repo / "tests" / "agents" / "test_verify_governance.py"
+        repo.mkdir(parents=True, exist_ok=True)
+        if "write" in actions:
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "\n".join(["def test_func():", f'    x = "{rule.example}"']) + "\n",
+                encoding="utf-8",
+            )
+        entry = SourceTreeAllowlistEntry(**(base | overrides))
+        monkeypatch.setattr(
+            governance_contract,
+            "SOURCE_TREE_ALLOWLIST_ENTRIES",
+            (entry,),
+        )
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        if "add" in actions:
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+
+        findings = source_tree_retired_text_findings(repo)
+
+        assert any(
+            finding["path"] == entry.path.as_posix()
+            and finding["rule"] == entry.rule_name
+            and finding.get("reason") == "source_tree_allowlist_stale"
+            for finding in findings
+        ), (name, findings)
 
 
 def test_profile_runner_retired_cli_flags_are_rejected() -> None:

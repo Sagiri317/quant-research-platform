@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -463,7 +462,6 @@ def test_source_tree_retired_scan_is_clean_for_current_worktree() -> None:
 
 def test_broad_retired_occurrence_allowlist_cannot_hide_literal(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     contract = _load_contract_module()
     rule = contract.PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
@@ -480,25 +478,20 @@ def test_broad_retired_occurrence_allowlist_cannot_hide_literal(
         + "\n",
         encoding="utf-8",
     )
-    broad = contract.SourceTreeAllowlistEntry(
-        path=Path("tests/agents/test_verify_governance.py"),
-        scan_group="retired_occurrence",
-        rule_name=rule.name,
-        literal=rule.example,
-        pattern_name=rule.name,
-        allowed_context=(
-            f"python_ast:test_func;line_regex:^.+{rule.example}.+$"
-        ),
-        owner="governance-negative-tests",
-        rationale="proves broad regex retired occurrence allowlist is ignored",
-        lifecycle="test-only",
-        covered_by=("tests/agents/test_verify_governance.py",),
-    )
-    monkeypatch.setattr(
-        contract,
-        "SOURCE_TREE_ALLOWLIST_ENTRIES",
-        contract.SOURCE_TREE_ALLOWLIST_ENTRIES + (broad,),
-    )
+    with pytest.raises(TypeError):
+        contract.SourceTreeAllowlistEntry(
+            path=Path("tests/agents/test_verify_governance.py"),
+            scan_group="retired_occurrence",
+            rule_name=rule.name,
+            literal=rule.example,
+            allowed_context=(
+                f"python_ast:test_func;line_regex:^.+{rule.example}.+$"
+            ),
+            owner="governance-negative-tests",
+            rationale="old DSL must not be constructible",
+            lifecycle="test-only",
+            covered_by=("tests/agents/test_verify_governance.py",),
+        )
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
 
@@ -532,8 +525,9 @@ def test_retired_occurrence_duplicate_exact_line_overmatches(
         scan_group="retired_occurrence",
         rule_name=rule.name,
         literal=rule.example,
-        pattern_name=rule.name,
-        allowed_context=f"python_ast:test_func;line_regex:^{re.escape(exact_line)}$",
+        context_kind="python_exact_line",
+        ast_owner="test_func",
+        exact_line=exact_line,
         owner="governance-negative-tests",
         rationale="proves duplicate exact retired occurrence is overmatched",
         lifecycle="test-only",
@@ -578,8 +572,9 @@ def test_retired_occurrence_stale_exact_line_is_reported(
         scan_group="retired_occurrence",
         rule_name=rule.name,
         literal=rule.example,
-        pattern_name=rule.name,
-        allowed_context=f"python_ast:test_func;line_regex:^{re.escape(stale_line)}$",
+        context_kind="python_exact_line",
+        ast_owner="test_func",
+        exact_line=stale_line,
         owner="governance-negative-tests",
         rationale="proves stale exact retired occurrence allowlist is reported",
         lifecycle="test-only",

@@ -231,7 +231,6 @@ def test_source_tree_allowlist_facts_are_structured_not_bare_dicts() -> None:
     tree = ast.parse(source, filename=str(GOVERNANCE_CONTRACT))
     bare_fact_sources: list[str] = []
     target_names = {
-        "SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST",
         "SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST",
         "SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST",
     }
