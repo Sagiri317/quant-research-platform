@@ -47,10 +47,7 @@ from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
 )
 from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
-from quant_research_platform.runtime.logical_paths import (
-    RUN_RESULT_LOGICAL_PATH_MARKERS,
-    logical_path,
-)
+from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
@@ -330,10 +327,7 @@ def _run_local_verification_with_policy(
     return LocalVerificationRunResult(
         status=status_payload["overall"],
         run_id=run_id,
-        run_root=logical_path(
-            run_root,
-            markers=RUN_RESULT_LOGICAL_PATH_MARKERS,
-        ),
+        run_root=_logical_run_root(run_root),
         summary=run_payload,
     )
 
@@ -383,6 +377,10 @@ def resolve_local_verification_run_id(
 ) -> str:
     run_id = config_run_id if config_run_id is not None else Path(run_root).name
     return validate_run_id(run_id)
+
+
+def _logical_run_root(run_root: Path) -> str:
+    return Path(run_root).name
 
 
 def _resolve_local_output_repo_root(

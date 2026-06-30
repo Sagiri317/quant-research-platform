@@ -41,16 +41,21 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 `tests/tools/run_profile.py` 的 profile 定义共同约束。profile 清单和选择逻辑
 以 runner 输出为准，文档不复制完整 pytest expression。
 
+`integration`、`mutation`、`slow`、`performance` 和
+`requires_local_data` 必须由对应 profile 或 `all` profile 显式选择。
 `slow` 只表示运行慢，`requires_local_data` 只表示需要本地数据或本地环境；
-两者彼此正交。性能优化依据实际耗时画像、slowest tests/files 和
-before/after 对比，不写硬编码秒数阈值，不新增独立性能门禁文件。
+两者彼此正交。`performance` 是预留 profile；没有 performance tests 时
+0 collected 记为 `NOT_RUN`，不能记为 `PASS`。性能优化依据实际耗时画像、
+slowest tests/files 和 before/after 对比，不写硬编码秒数阈值，不新增独立性能门禁文件。
 
 正式 profile runner 位于 `tests/tools/run_profile.py`。执行示例：
 `python tests/tools/run_profile.py --profile fast --output-dir <repo-relative-output-dir> --tmp-dir <repo-relative-tmp-dir>`。
 
 `.run/` 只保存输出、profile、临时文件和 handoff/review artifacts，不作为
-tracked tool source。普通 `python -m pytest` 默认排除 `slow` 和
-`requires_local_data`；完整收口使用 runner 的 `all` profile 显式选择。
+tracked tool source。普通 `python -m pytest` 是开发者默认非重型 suite，
+默认排除 `integration`、`mutation`、`slow`、`performance` 和
+`requires_local_data`；正式 evidence 使用 `tests/tools/run_profile.py`，
+完整收口使用 runner 的 `all` profile 显式选择。
 
 ## 治理规则事实源
 

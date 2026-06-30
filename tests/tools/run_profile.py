@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ class Profile:
     scopes: tuple[str, ...]
     marker: str | None = None
     pytest_options: tuple[str, ...] = ()
+    reserved: bool = False
 
 
 FAST_EXCLUDES = (
@@ -83,6 +85,7 @@ PROFILES: dict[str, Profile] = {
         name="performance",
         scopes=("tests",),
         marker="performance",
+        reserved=True,
     ),
     "slow": Profile(
         name="slow",
@@ -145,6 +148,11 @@ def run_profile(
     stdout_path = output_dir / f"{profile.name}-stdout.log"
     stderr_path = output_dir / f"{profile.name}-stderr.log"
     summary_path = output_dir / f"{profile.name}-summary.json"
+    managed_roots = (
+        _repo_relative(repo_root, output_dir),
+        _repo_relative(repo_root, profile_tmp),
+    )
+    managed_roots_env = os.pathsep.join(managed_roots)
 
     command = [
         sys.executable,
@@ -168,6 +176,7 @@ def run_profile(
         capture_output=True,
         text=True,
         shell=False,
+        env={**os.environ, "QRP_MANAGED_REPO_ROOTS": managed_roots_env},
     )
     ended_at = datetime.now(UTC)
     duration_seconds = perf_counter() - started
@@ -190,6 +199,8 @@ def run_profile(
         "stderr_path": _repo_relative(repo_root, stderr_path),
         "tmp_dir": _repo_relative(repo_root, profile_tmp),
         "pytest_tmp_dir": _repo_relative(repo_root, pytest_tmp),
+        "managed_roots_env": managed_roots_env,
+        "reserved_profile": profile.reserved,
     }
     summary_path.write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",

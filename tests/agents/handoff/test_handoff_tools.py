@@ -429,6 +429,24 @@ def test_verifier_rejects_duplicate_artifact_manifest_entries(
     )
 
 
+def test_artifact_manifest_anchor_is_not_manifest_entry(
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = valid_handoff_package
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    with zipfile.ZipFile(package) as archive:
+        manifest = json.loads(archive.read("artifact_manifest.json").decode("utf-8"))
+        names = set(archive.namelist())
+        failures = verifier.verify_artifact_manifest(archive, sidecar_payload)
+
+    entry_paths = {entry["path"] for entry in manifest["entries"]}
+
+    assert "artifact_manifest.json" in names
+    assert "artifact_manifest.json" not in entry_paths
+    assert failures == []
+
+
 @pytest.mark.parametrize(
     ("target", "expected_failure"),
     (

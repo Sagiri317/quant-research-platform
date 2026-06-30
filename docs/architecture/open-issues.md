@@ -28,14 +28,7 @@ Scope boundary:
 
 ## P1 Current Issues
 
-ID: profile-runner-governance-temp-boundary
-Severity: P1
-Owner layer: tests / profile runner / governance tooling
-Status: open
-Evidence: `tests/tools/run_profile.py` allows user-selected `--output-dir` and `--tmp-dir`. When those directories are inside the repo, pytest-generated temporary files or negative-test samples can be scanned by `verify_governance.py` active-docs or state scans as if they were real repo files, causing false governance `FAIL` results.
-Next action: add a controlled managed-roots mechanism where `run_profile.py` declares the current run's output and tmp roots to child processes, and `verify_governance.py` skips only those roots for that run after validating the roots are repo-contained, are not `src/`, `tests/`, `docs/`, `.agents/`, or other formal source directories, do not escape the repo, and do not hide tracked files.
-Acceptance gate: governance scans do not fail on profile-owned temporary output roots, while real repo files and tracked files under formal source directories remain scanned.
-Scope boundary: do not force all profile outputs into `.run/`; keep `--output-dir` and `--tmp-dir` user-selectable; do not permanently add `.review-profile/` to ignore lists. The post-merge handoff package having validation `NOT_RUN` is expected packaging evidence behavior, not a separate open issue or merge-gate validation result.
+暂无。
 
 ## P2 Deferred
 

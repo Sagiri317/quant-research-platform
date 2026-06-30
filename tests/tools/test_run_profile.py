@@ -81,7 +81,7 @@ def test_profile_markers_are_declared_and_excluded_markers_have_profiles() -> No
     }
 
 
-def test_default_pytest_excludes_slow_and_local_data() -> None:
+def test_default_pytest_excludes_non_default_profiles_and_local_data() -> None:
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     addopts = pyproject["tool"]["pytest"]["ini_options"]["addopts"]
     marker_expression = " ".join(
@@ -90,7 +90,10 @@ def test_default_pytest_excludes_slow_and_local_data() -> None:
         if option != "-m" and (index == 0 or addopts[index - 1] == "-m")
     )
 
+    assert "not integration" in marker_expression
+    assert "not mutation" in marker_expression
     assert "not slow" in marker_expression
+    assert "not performance" in marker_expression
     assert "not requires_local_data" in marker_expression
 
 
@@ -150,6 +153,9 @@ def test_fast_profile_runs_pytest_with_repo_relative_paths_and_shell_false(
     assert summary["stderr_path"] == "out/fast-stderr.log"
     assert summary["tmp_dir"] == "tmp/f"
     assert summary["pytest_tmp_dir"] == "tmp/f"
+    expected_managed_roots = runner.os.pathsep.join(("out", "tmp/f"))
+    assert summary["managed_roots_env"] == expected_managed_roots
+    assert kwargs["env"]["QRP_MANAGED_REPO_ROOTS"] == expected_managed_roots
     assert (tmp_path / "out" / "fast-stdout.log").read_text() == "pytest ok\n"
 
 
@@ -213,6 +219,7 @@ def test_profile_with_no_collected_tests_returns_non_zero_not_run_summary(
     summary = json.loads((tmp_path / "out" / "performance-summary.json").read_text())
     assert exit_code == runner.NO_TESTS_COLLECTED
     assert summary["status"] == "NOT_RUN"
+    assert summary["reserved_profile"] is True
 
 
 def _marker_names(expression: str) -> set[str]:

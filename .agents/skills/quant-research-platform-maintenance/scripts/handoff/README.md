@@ -23,6 +23,10 @@ self_test.py
 
 handoff 输出应写到 `.run/` 或用户指定目录。`.run/` 是 output layer，不是工具事实源。
 
+`artifact_manifest.json` 是 package manifest anchor。它必须存在于 zip 根部，
+由 sidecar 记录 hash，但不列入自己的 `entries`；`entries` 只覆盖 manifest
+锚点之外的 package 成员。
+
 handoff package 内的 `final-branch.bundle` 应可用以下形式重建分支：
 
 ```text
