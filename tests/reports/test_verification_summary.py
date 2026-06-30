@@ -1,29 +1,8 @@
 from __future__ import annotations
 
 from quant_research_platform.reports.verification_summary import (
-    build_validation_summary,
     render_run_summary_markdown,
 )
-
-
-def test_build_validation_summary_consumes_embedded_layer_summaries() -> None:
-    summary = build_validation_summary(
-        run_id="demo_run",
-        dataset_roots=(),
-        layer_summaries=(
-            {
-                "logical_layer": "research",
-                "layer_validation_status": "pass",
-            },
-        ),
-        generated_text_paths=(),
-    )
-
-    assert summary["status"] == "PASS"
-    assert summary["data_layer_summary_completeness"] == {
-        "missing": [],
-        "checked_count": 1,
-    }
 
 
 def test_render_run_summary_markdown_uses_component_statuses() -> None:

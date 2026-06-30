@@ -9,7 +9,7 @@ import pandas as pd
 from typer.testing import CliRunner
 
 from quant_research_platform.interfaces.private_cli import app as private_app
-from quant_research_platform.reports.schema_inventory import (
+from quant_research_platform.workflows.diagnostics.schema_inventory import (
     build_schema_inventory_payload,
 )
 from tests.helpers import frequency_ids

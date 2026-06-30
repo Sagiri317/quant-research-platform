@@ -10,10 +10,10 @@ import typer
 
 from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.reports.schema_inventory import (
+from quant_research_platform.storage.atomic import atomic_write_text
+from quant_research_platform.workflows.diagnostics.schema_inventory import (
     build_schema_inventory_payload,
 )
-from quant_research_platform.storage.atomic import atomic_write_text
 from quant_research_platform.workflows.local_verification import (
     LocalVerificationRunConfig,
     run_local_verification,

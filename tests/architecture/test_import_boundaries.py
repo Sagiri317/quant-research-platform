@@ -21,6 +21,7 @@ FORBIDDEN_CONTRACT_IMPORT_PREFIXES = (
 FORBIDDEN_REPORT_IMPORT_PREFIXES = (
     "quant_research_platform.compute",
     "quant_research_platform.research",
+    "quant_research_platform.storage",
     "quant_research_platform.workflows",
     "quant_research_platform.interfaces",
 )
@@ -90,7 +91,7 @@ def test_contracts_do_not_import_upper_layers(
     assert not hits, "contracts_import_boundary_violation: " + "; ".join(hits)
 
 
-def test_reports_do_not_import_compute_research_workflows_or_interfaces(
+def test_reports_do_not_import_compute_research_storage_workflows_or_interfaces(
     import_edges: tuple[ImportEdge, ...],
 ) -> None:
     hits = [

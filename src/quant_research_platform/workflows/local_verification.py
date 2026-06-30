@@ -30,7 +30,6 @@ from quant_research_platform.policy.check_status import (
 from quant_research_platform.policy.share_safety import local_run_root_reason
 from quant_research_platform.profiles.research import ResearchProfile
 from quant_research_platform.reports.verification_summary import (
-    build_validation_summary,
     render_run_summary_markdown,
 )
 from quant_research_platform.research.datasets import (
@@ -58,6 +57,9 @@ from quant_research_platform.storage.manifests import (
     build_run_data_summary,
     read_qrp_json,
     replace_qrp_json,
+)
+from quant_research_platform.workflows.diagnostics.validation_summary import (
+    build_validation_summary,
 )
 from quant_research_platform.workflows.local_verification_layout import (
     LocalVerificationLayout,
