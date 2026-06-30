@@ -6,6 +6,9 @@ from pathlib import Path
 from tests.helpers import frequency_ids
 
 SOURCE_ROOT = Path("src/quant_research_platform")
+API_APP = SOURCE_ROOT / "interfaces/api/app.py"
+PUBLIC_CLI = SOURCE_ROOT / "interfaces/cli/commands.py"
+PRIVATE_CLI = SOURCE_ROOT / "interfaces/private_cli.py"
 
 
 def _read_source(path: Path) -> str:
@@ -455,6 +458,69 @@ def test_non_interface_source_modules_do_not_define_hidden_cli_entrypoints() -> 
     assert hits == []
 
 
+def test_public_api_routes_match_approved_inventory() -> None:
+    tree = _parse_source(API_APP)
+    routes = sorted(
+        _first_string_arg(decorator)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        for decorator in node.decorator_list
+        if _is_app_route_decorator(decorator)
+    )
+
+    assert routes == [
+        "/api/0.1/catalog/factors",
+        "/api/0.1/catalog/labels",
+        "/api/0.1/research-datasets/{dataset_id}/requirements",
+    ]
+
+
+def test_public_cli_commands_match_approved_inventory() -> None:
+    tree = _parse_source(PUBLIC_CLI)
+    groups = sorted(
+        _keyword_string(call, "name")
+        for call in _ast_calls(tree)
+        if _is_add_typer_call(call)
+    )
+    commands = sorted(
+        (
+            _decorator_owner_name(decorator),
+            _first_string_arg(decorator),
+        )
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        for decorator in node.decorator_list
+        if _is_typer_command_decorator(decorator)
+    )
+
+    assert groups == ["catalog", "research-datasets"]
+    assert commands == [
+        ("catalog_app", "factors"),
+        ("catalog_app", "labels"),
+        ("research_datasets_app", "requirements"),
+    ]
+
+
+def test_private_cli_stdout_and_stderr_are_sanitized() -> None:
+    tree = _parse_source(PRIVATE_CLI)
+    unsafe_echoes = []
+    safe_literal_tokens = {"output_already_exists"}
+    for call in _ast_calls(tree):
+        if not _is_typer_echo_call(call):
+            continue
+        if not call.args:
+            unsafe_echoes.append("missing_echo_payload")
+            continue
+        payload = call.args[0]
+        if _is_sanitize_shared_text_call(payload):
+            continue
+        if isinstance(payload, ast.Constant) and payload.value in safe_literal_tokens:
+            continue
+        unsafe_echoes.append(f"line {call.lineno}")
+
+    assert unsafe_echoes == []
+
+
 def test_csmar_source_package_does_not_own_market_interim_contracts() -> None:
     source_root = SOURCE_ROOT / "sources/csmar"
     forbidden_raw_names = {
@@ -800,6 +866,78 @@ def _is_dunder_main_guard(node: ast.AST) -> bool:
         return False
     comparator = node.comparators[0]
     return isinstance(comparator, ast.Constant) and comparator.value == "__main__"
+
+
+def _ast_calls(tree: ast.Module) -> list[ast.Call]:
+    return [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+
+def _is_app_route_decorator(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "app"
+        and node.func.attr in {"get", "post", "put", "patch", "delete"}
+    )
+
+
+def _is_add_typer_call(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_typer"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "app"
+    )
+
+
+def _is_typer_command_decorator(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "command"
+        and isinstance(node.func.value, ast.Name)
+    )
+
+
+def _decorator_owner_name(node: ast.Call) -> str:
+    if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+        return node.func.value.id
+    raise AssertionError("decorator_owner_missing")
+
+
+def _first_string_arg(node: ast.Call) -> str:
+    if node.args and isinstance(node.args[0], ast.Constant):
+        value = node.args[0].value
+        if isinstance(value, str):
+            return value
+    raise AssertionError("first_string_arg_missing")
+
+
+def _keyword_string(node: ast.Call, keyword_name: str) -> str:
+    for keyword in node.keywords:
+        if keyword.arg == keyword_name and isinstance(keyword.value, ast.Constant):
+            value = keyword.value.value
+            if isinstance(value, str):
+                return value
+    raise AssertionError(f"keyword_string_missing: {keyword_name}")
+
+
+def _is_typer_echo_call(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "typer"
+        and node.func.attr == "echo"
+    )
+
+
+def _is_sanitize_shared_text_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "sanitize_shared_text"
+    )
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
