@@ -50,6 +50,30 @@ MARKET_PANEL_DATA_ID = market_panel_data_id()
 MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 REVERSAL_1D_COLUMN = price_volume_window_column("rev", 1)
 FORWARD_RETURN_20D_COLUMN = forward_return_label_column(20)
+NEW_STANDARD_PRICE_VOLUME_FACTORS = (
+    "amount_chg_20d",
+    "amount_chg_60d",
+    "amount_shock_20d",
+    "amount_shock_60d",
+    "amount_vol_20d",
+    "amount_vol_60d",
+    "volume_chg_20d",
+    "volume_chg_60d",
+    "volume_shock_20d",
+    "volume_shock_60d",
+    "ret_amount_corr_20d",
+    "ret_amount_corr_60d",
+    "ret_volume_corr_20d",
+    "ret_volume_corr_60d",
+    "ret_turnover_corr_20d",
+    "ret_turnover_corr_60d",
+    "trend_efficiency_20d",
+    "trend_efficiency_60d",
+    "signed_amount_flow_20d",
+    "signed_amount_flow_60d",
+    "ret_amount_imbalance_20d",
+    "ret_amount_imbalance_60d",
+)
 
 
 def test_price_volume_standard_preset_defines_catalog_contract() -> None:
@@ -58,7 +82,10 @@ def test_price_volume_standard_preset_defines_catalog_contract() -> None:
     assert columns
     assert "mom_252d" in columns
     assert "rev_252d" in columns
+    assert set(NEW_STANDARD_PRICE_VOLUME_FACTORS).issubset(columns)
     assert "vol_252d" not in columns
+    assert "amount_to_float_mcap" not in columns
+    assert "amount_to_total_mcap" not in columns
     assert FORWARD_RETURN_20D_COLUMN not in columns
     assert price_volume_factor_columns() == columns
     assert price_volume_factor_columns(preset=PRICE_VOLUME_CORE_PRESET) == (
@@ -66,6 +93,12 @@ def test_price_volume_standard_preset_defines_catalog_contract() -> None:
     )
     assert price_volume_factor_columns(preset=PRICE_VOLUME_SMOKE_PRESET) == (
         SMOKE_PRICE_VOLUME_FACTORS
+    )
+    assert not set(NEW_STANDARD_PRICE_VOLUME_FACTORS).intersection(
+        price_volume_factor_columns(preset=PRICE_VOLUME_CORE_PRESET)
+    )
+    assert not set(NEW_STANDARD_PRICE_VOLUME_FACTORS).intersection(
+        price_volume_factor_columns(preset=PRICE_VOLUME_SMOKE_PRESET)
     )
     with pytest.raises(ValueError, match="invalid_price_volume_preset"):
         price_volume_factor_columns(preset="full")
@@ -104,6 +137,29 @@ def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
         "high",
         "low",
         "prev_close",
+    )
+    assert by_id["amount_chg_20d"].input_columns == ("amount",)
+    assert by_id["volume_chg_20d"].input_columns == ("volume",)
+    assert by_id["ret_amount_corr_20d"].input_columns == (
+        "period_return",
+        "amount",
+    )
+    assert by_id["ret_volume_corr_20d"].input_columns == (
+        "period_return",
+        "volume",
+    )
+    assert by_id["ret_turnover_corr_20d"].input_columns == (
+        "period_return",
+        "turnover",
+    )
+    assert by_id["trend_efficiency_20d"].input_columns == ("period_return",)
+    assert by_id["signed_amount_flow_20d"].input_columns == (
+        "period_return",
+        "amount",
+    )
+    assert by_id["ret_amount_imbalance_20d"].input_columns == (
+        "period_return",
+        "amount",
     )
 
 
@@ -244,6 +300,7 @@ def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None
 
     panel.loc[panel["timestamp"].eq(denominator_date), "adj_close"] = np.inf
     panel.loc[panel["timestamp"].eq(denominator_date), "amount"] = np.inf
+    panel.loc[panel["timestamp"].eq(denominator_date), "volume"] = np.inf
     panel.loc[panel["timestamp"].eq(denominator_date), "prev_close"] = np.inf
     panel.loc[panel["timestamp"].eq(denominator_date), "turnover"] = np.inf
     panel.loc[panel["timestamp"].eq(rolling_window_end), "period_return"] = np.inf
@@ -257,6 +314,16 @@ def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None
         "amplitude_20d",
         "intraday_range_20d",
         "turnover_chg_20d",
+        "amount_chg_20d",
+        "amount_shock_20d",
+        "volume_chg_20d",
+        "volume_shock_20d",
+        "ret_amount_corr_20d",
+        "ret_volume_corr_20d",
+        "ret_turnover_corr_20d",
+        "trend_efficiency_20d",
+        "signed_amount_flow_20d",
+        "ret_amount_imbalance_20d",
     )
     result = calculate_price_volume_factors(
         panel.sample(frac=1.0, random_state=17),
@@ -270,7 +337,114 @@ def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None
     assert pd.isna(result.loc[20, MOMENTUM_20D_COLUMN])
     assert pd.isna(result.loc[20, "rev_20d"])
     assert pd.isna(result.loc[20, "turnover_chg_20d"])
+    assert pd.isna(result.loc[20, "amount_chg_20d"])
+    assert pd.isna(result.loc[20, "volume_chg_20d"])
+    assert pd.isna(result.loc[19, "amount_shock_20d"])
+    assert pd.isna(result.loc[19, "volume_shock_20d"])
+    assert pd.isna(result.loc[19, "ret_amount_corr_20d"])
+    assert pd.isna(result.loc[19, "ret_volume_corr_20d"])
+    assert pd.isna(result.loc[19, "ret_turnover_corr_20d"])
+    assert pd.isna(result.loc[19, "trend_efficiency_20d"])
+    assert pd.isna(result.loc[19, "signed_amount_flow_20d"])
+    assert pd.isna(result.loc[19, "ret_amount_imbalance_20d"])
     assert not np.isinf(result.loc[:, factor_columns].to_numpy(dtype="float64")).any()
+
+
+def test_price_volume_new_standard_factors_are_past_only_and_chunk_stable() -> None:
+    panel = make_synthetic_factor_panel(
+        sessions=130,
+        assets=("asset_a", "asset_b"),
+    )
+    factor_columns = NEW_STANDARD_PRICE_VOLUME_FACTORS
+    full = (
+        calculate_price_volume_factors(panel, factor_columns=factor_columns)
+        .sort_values(["asset_id", "timestamp"])
+        .reset_index(drop=True)
+    )
+    chunked = _calculate_price_volume_in_session_chunks(
+        panel,
+        factor_columns=factor_columns,
+        split_session_index=75,
+        warmup_sessions=60,
+    )
+    cutoff = panel["timestamp"].sort_values().unique()[79]
+    perturbed_future = panel.copy()
+    future_mask = perturbed_future["timestamp"].gt(cutoff)
+    for column in ("period_return", "amount", "volume", "turnover"):
+        perturbed_future.loc[future_mask, column] = (
+            pd.to_numeric(perturbed_future.loc[future_mask, column], errors="coerce")
+            * 11.0
+            + 7.0
+        )
+    with_future_noise = (
+        calculate_price_volume_factors(
+            perturbed_future,
+            factor_columns=factor_columns,
+        )
+        .sort_values(["asset_id", "timestamp"])
+        .reset_index(drop=True)
+    )
+    primary_key = ("market_id", "asset_id", "timestamp")
+
+    assert full.loc[:18, "amount_shock_20d"].isna().all()
+    assert full.loc[:18, "volume_shock_20d"].isna().all()
+    assert full.loc[:19, "amount_chg_20d"].isna().all()
+    assert full.loc[:59, "amount_chg_60d"].isna().all()
+    assert full.loc[:, factor_columns].notna().any().all()
+    assert not np.isinf(full.loc[:, factor_columns].to_numpy(dtype="float64")).any()
+    assert_frame_matches_reference(
+        full.loc[:, (*primary_key, *factor_columns)],
+        chunked.loc[:, (*primary_key, *factor_columns)],
+    )
+    assert_frame_matches_reference(
+        full.loc[
+            full["timestamp"].le(cutoff),
+            (*primary_key, *factor_columns),
+        ].reset_index(drop=True),
+        with_future_noise.loc[
+            with_future_noise["timestamp"].le(cutoff),
+            (*primary_key, *factor_columns),
+        ].reset_index(drop=True),
+    )
+
+
+def test_price_volume_new_standard_factor_formulas_match_reference() -> None:
+    panel = make_synthetic_factor_panel(
+        sessions=90,
+        assets=("asset_a", "asset_b"),
+    )
+    factor_columns = (
+        "amount_chg_20d",
+        "amount_shock_20d",
+        "amount_vol_20d",
+        "volume_chg_20d",
+        "volume_shock_20d",
+        "ret_amount_corr_20d",
+        "ret_volume_corr_20d",
+        "ret_turnover_corr_20d",
+        "trend_efficiency_20d",
+        "signed_amount_flow_20d",
+        "ret_amount_imbalance_20d",
+    )
+    result = calculate_price_volume_factors(
+        panel.sample(frac=1.0, random_state=29),
+        factor_columns=factor_columns,
+    )
+    reference = _reference_calculate_price_volume_factors(
+        panel.sample(frac=1.0, random_state=29),
+        factor_columns=factor_columns,
+    )
+    primary_key = ("market_id", "asset_id", "timestamp")
+
+    assert result["ret_amount_corr_20d"].notna().any()
+    assert result["trend_efficiency_20d"].dropna().between(0.0, 1.0).all()
+    assert result["signed_amount_flow_20d"].dropna().between(-1.0, 1.0).all()
+    assert result["ret_amount_imbalance_20d"].dropna().between(-1.0, 1.0).all()
+    assert_frame_matches_reference(
+        result.loc[:, (*primary_key, *factor_columns)].reset_index(drop=True),
+        reference.loc[:, (*primary_key, *factor_columns)].reset_index(drop=True),
+        rtol=1e-9,
+    )
 
 
 def test_price_volume_standard_formula_matches_reference() -> None:
@@ -372,6 +546,7 @@ def test_price_volume_standard_formula_matches_reference() -> None:
     assert_frame_matches_reference(
         result.loc[:, expected_columns].reset_index(drop=True),
         reference.loc[:, expected_columns].reset_index(drop=True),
+        rtol=1e-9,
     )
 
 
@@ -540,6 +715,7 @@ def _reference_calculate_price_volume_factors(
     price = pd.to_numeric(result["adj_close"], errors="coerce")
     returns = pd.to_numeric(result["period_return"], errors="coerce")
     amount = pd.to_numeric(result["amount"], errors="coerce")
+    volume = pd.to_numeric(result["volume"], errors="coerce")
     turnover = pd.to_numeric(result["turnover"], errors="coerce")
 
     if REVERSAL_1D_COLUMN in requested_set:
@@ -640,6 +816,92 @@ def _reference_calculate_price_volume_factors(
                     lambda series, w=window: series.rolling(w, min_periods=w).mean()
                 )
             )
+        if f"amount_chg_{window}d" in requested_set:
+            shifted_amount = amount.groupby(group_keys, sort=False).shift(window)
+            denominator = _reference_valid_denominator(shifted_amount)
+            result[f"amount_chg_{window}d"] = amount / denominator - 1.0
+        if f"amount_shock_{window}d" in requested_set:
+            mean_amount = amount.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            result[f"amount_shock_{window}d"] = (
+                amount / _reference_valid_denominator(mean_amount) - 1.0
+            )
+        if f"amount_vol_{window}d" in requested_set:
+            result[f"amount_vol_{window}d"] = reference_qrp_window_moment_by_asset(
+                amount,
+                group_keys,
+                window,
+                "std",
+            )
+        if f"volume_chg_{window}d" in requested_set:
+            shifted_volume = volume.groupby(group_keys, sort=False).shift(window)
+            denominator = _reference_valid_denominator(shifted_volume)
+            result[f"volume_chg_{window}d"] = volume / denominator - 1.0
+        if f"volume_shock_{window}d" in requested_set:
+            mean_volume = volume.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            result[f"volume_shock_{window}d"] = (
+                volume / _reference_valid_denominator(mean_volume) - 1.0
+            )
+        if f"ret_amount_corr_{window}d" in requested_set:
+            result[f"ret_amount_corr_{window}d"] = _reference_rolling_corr(
+                returns,
+                amount,
+                group_keys,
+                window,
+            )
+        if f"ret_volume_corr_{window}d" in requested_set:
+            result[f"ret_volume_corr_{window}d"] = _reference_rolling_corr(
+                returns,
+                volume,
+                group_keys,
+                window,
+            )
+        if f"ret_turnover_corr_{window}d" in requested_set:
+            result[f"ret_turnover_corr_{window}d"] = _reference_rolling_corr(
+                returns,
+                turnover,
+                group_keys,
+                window,
+            )
+        if f"trend_efficiency_{window}d" in requested_set:
+            return_mean = returns.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            abs_return_mean = returns.abs().groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            result[f"trend_efficiency_{window}d"] = (
+                return_mean.abs() / _reference_valid_denominator(abs_return_mean)
+            )
+        if f"signed_amount_flow_{window}d" in requested_set:
+            signed_amount = np.sign(returns) * amount
+            numerator = signed_amount.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            denominator = amount.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            result[f"signed_amount_flow_{window}d"] = (
+                numerator / _reference_valid_denominator(denominator)
+            )
+        if f"ret_amount_imbalance_{window}d" in requested_set:
+            weighted_return = returns * amount
+            weighted_abs_return = returns.abs() * amount
+            numerator = weighted_return.groupby(group_keys, sort=False).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            denominator = weighted_abs_return.groupby(
+                group_keys,
+                sort=False,
+            ).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+            result[f"ret_amount_imbalance_{window}d"] = (
+                numerator / _reference_valid_denominator(denominator)
+            )
 
     denominator = _reference_valid_denominator(amount)
     illiquidity = (returns.abs() / denominator).replace([np.inf, -np.inf], np.nan)
@@ -722,6 +984,21 @@ def _reference_rolling_drawdown(
     )
 
 
+def _reference_rolling_corr(
+    left: pd.Series,
+    right: pd.Series,
+    group_keys: pd.Series,
+    window: int,
+) -> pd.Series:
+    pairs = pd.DataFrame({"left": left, "right": right, "asset_id": group_keys})
+    parts = []
+    for _, group in pairs.groupby("asset_id", sort=False):
+        parts.append(
+            group["left"].rolling(window, min_periods=window).corr(group["right"])
+        )
+    return pd.concat(parts).sort_index()
+
+
 def _reference_safe_log(values: pd.Series) -> pd.Series:
     numeric = pd.to_numeric(values, errors="coerce")
     numeric = numeric.where(np.isfinite(numeric) & numeric.gt(0.0))
@@ -794,6 +1071,7 @@ def _factor_panel_for_dates(dates) -> pd.DataFrame:
                 "adj_close": float(100 + offset),
                 "period_return": 0.001 * offset,
                 "amount": 10000.0 + offset,
+                "volume": 1000.0 + offset,
                 "turnover": 0.01 + offset / 100000.0,
                 "high": float(101 + offset),
                 "low": float(99 + offset),

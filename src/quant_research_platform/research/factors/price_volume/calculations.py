@@ -16,6 +16,7 @@ from .columns import (
 )
 from .rolling import (
     _rolling_aggregate,
+    _rolling_correlation,
     _rolling_drawdown,
     _rolling_kurt,
     _rolling_rms,
@@ -34,6 +35,7 @@ def calculate_price_volume_factors(
     price_column: str = "adj_close",
     return_column: str = "period_return",
     amount_column: str = "amount",
+    volume_column: str = "volume",
     turnover_column: str = "turnover",
     high_column: str = "high",
     low_column: str = "low",
@@ -109,18 +111,44 @@ def calculate_price_volume_factors(
                 "skew",
                 "kurt",
                 "amihud",
+                "ret_amount_corr",
+                "ret_volume_corr",
+                "ret_turnover_corr",
+                "trend_efficiency",
+                "signed_amount_flow",
+                "ret_amount_imbalance",
             )
             for window in required_windows
         )
     )
     needs_amount = any(
         price_volume_window_column(prefix, window) in requested_set
-        for prefix in ("avg_amount", "amihud", "zero_volume_ratio")
+        for prefix in (
+            "avg_amount",
+            "amount_chg",
+            "amount_shock",
+            "amount_vol",
+            "amihud",
+            "zero_volume_ratio",
+            "ret_amount_corr",
+            "signed_amount_flow",
+            "ret_amount_imbalance",
+        )
+        for window in required_windows
+    )
+    needs_volume = any(
+        price_volume_window_column(prefix, window) in requested_set
+        for prefix in ("volume_chg", "volume_shock", "ret_volume_corr")
         for window in required_windows
     )
     needs_turnover = any(
         price_volume_window_column(prefix, window) in requested_set
-        for prefix in ("turnover", "turnover_chg", "turnover_vol")
+        for prefix in (
+            "turnover",
+            "turnover_chg",
+            "turnover_vol",
+            "ret_turnover_corr",
+        )
         for window in required_windows
     )
     price = (
@@ -138,6 +166,11 @@ def calculate_price_volume_factors(
         if needs_amount
         else None
     )
+    volume = (
+        pd.to_numeric(result[volume_column], errors="coerce")
+        if needs_volume
+        else None
+    )
     turnover = (
         pd.to_numeric(result[turnover_column], errors="coerce")
         if needs_turnover
@@ -146,6 +179,9 @@ def calculate_price_volume_factors(
     price_grouped = price.groupby(group_keys, sort=False) if price is not None else None
     amount_grouped = (
         amount.groupby(group_keys, sort=False) if amount is not None else None
+    )
+    volume_grouped = (
+        volume.groupby(group_keys, sort=False) if volume is not None else None
     )
     turnover_grouped = (
         turnover.groupby(group_keys, sort=False) if turnover is not None else None
@@ -280,6 +316,122 @@ def calculate_price_volume_factors(
                 window,
                 "mean",
             )
+        column = price_volume_window_column("amount_chg", window)
+        if column in requested_set:
+            shifted_amount = amount_grouped.shift(window)
+            denominator = _valid_denominator(shifted_amount)
+            result[column] = amount / denominator - 1.0
+        column = price_volume_window_column("amount_shock", window)
+        if column in requested_set:
+            mean_amount = _rolling_aggregate(
+                amount,
+                amount_grouped,
+                group_positions,
+                window,
+                "mean",
+            )
+            result[column] = amount / _valid_denominator(mean_amount) - 1.0
+        column = price_volume_window_column("amount_vol", window)
+        if column in requested_set:
+            result[column] = _rolling_std(
+                amount,
+                group_keys,
+                group_positions,
+                window,
+            )
+        column = price_volume_window_column("volume_chg", window)
+        if column in requested_set:
+            shifted_volume = volume_grouped.shift(window)
+            denominator = _valid_denominator(shifted_volume)
+            result[column] = volume / denominator - 1.0
+        column = price_volume_window_column("volume_shock", window)
+        if column in requested_set:
+            mean_volume = _rolling_aggregate(
+                volume,
+                volume_grouped,
+                group_positions,
+                window,
+                "mean",
+            )
+            result[column] = volume / _valid_denominator(mean_volume) - 1.0
+        column = price_volume_window_column("ret_amount_corr", window)
+        if column in requested_set:
+            result[column] = _rolling_correlation(
+                returns,
+                amount,
+                group_positions,
+                window,
+            )
+        column = price_volume_window_column("ret_volume_corr", window)
+        if column in requested_set:
+            result[column] = _rolling_correlation(
+                returns,
+                volume,
+                group_positions,
+                window,
+            )
+        column = price_volume_window_column("ret_turnover_corr", window)
+        if column in requested_set:
+            result[column] = _rolling_correlation(
+                returns,
+                turnover,
+                group_positions,
+                window,
+            )
+        column = price_volume_window_column("trend_efficiency", window)
+        if column in requested_set:
+            return_mean = _rolling_aggregate(
+                returns,
+                returns.groupby(group_keys, sort=False),
+                group_positions,
+                window,
+                "mean",
+            )
+            abs_return_mean = _rolling_aggregate(
+                returns.abs(),
+                returns.abs().groupby(group_keys, sort=False),
+                group_positions,
+                window,
+                "mean",
+            )
+            result[column] = return_mean.abs() / _valid_denominator(abs_return_mean)
+        column = price_volume_window_column("signed_amount_flow", window)
+        if column in requested_set:
+            signed_amount = np.sign(returns) * amount
+            numerator = _rolling_aggregate(
+                signed_amount,
+                signed_amount.groupby(group_keys, sort=False),
+                group_positions,
+                window,
+                "mean",
+            )
+            denominator = _rolling_aggregate(
+                amount,
+                amount_grouped,
+                group_positions,
+                window,
+                "mean",
+            )
+            result[column] = numerator / _valid_denominator(denominator)
+        column = price_volume_window_column("ret_amount_imbalance", window)
+        if column in requested_set:
+            weighted_return = returns * amount
+            weighted_abs_return = returns.abs() * amount
+            numerator = _rolling_aggregate(
+                weighted_return,
+                weighted_return.groupby(group_keys, sort=False),
+                group_positions,
+                window,
+                "mean",
+            )
+            denominator = _rolling_aggregate(
+                weighted_abs_return,
+                weighted_abs_return.groupby(group_keys, sort=False),
+                group_positions,
+                window,
+                "mean",
+            )
+            result[column] = numerator / _valid_denominator(denominator)
 
     illiquidity = None
     if any(

@@ -83,6 +83,73 @@ def _rolling_std(
     return _rolling_window_statistic(values, group_keys, group_positions, window, "std")
 
 
+def _rolling_correlation(
+    left: pd.Series,
+    right: pd.Series,
+    group_positions: tuple[np.ndarray, ...],
+    window: int,
+) -> pd.Series:
+    left_values = pd.to_numeric(left, errors="coerce").to_numpy(
+        dtype="float64",
+        copy=False,
+    )
+    right_values = pd.to_numeric(right, errors="coerce").to_numpy(
+        dtype="float64",
+        copy=False,
+    )
+    output = np.full(len(left), np.nan, dtype="float64")
+    for positions in group_positions:
+        output[positions] = _rolling_correlation_array(
+            left_values[positions],
+            right_values[positions],
+            window,
+        )
+    return pd.Series(output, index=left.index, name=left.name)
+
+
+def _rolling_correlation_array(
+    left: np.ndarray,
+    right: np.ndarray,
+    window: int,
+) -> np.ndarray:
+    output = np.full(len(left), np.nan, dtype="float64")
+    if window <= 1 or len(left) < window:
+        return output
+    left_windows = np.lib.stride_tricks.sliding_window_view(
+        left,
+        window_shape=window,
+    )
+    right_windows = np.lib.stride_tricks.sliding_window_view(
+        right,
+        window_shape=window,
+    )
+    valid_windows = np.isfinite(left_windows).all(axis=1) & np.isfinite(
+        right_windows
+    ).all(axis=1)
+    if not valid_windows.any():
+        return output
+    valid_left = left_windows[valid_windows]
+    valid_right = right_windows[valid_windows]
+    left_centered = valid_left - valid_left.mean(axis=1, keepdims=True)
+    right_centered = valid_right - valid_right.mean(axis=1, keepdims=True)
+    numerator = np.sum(left_centered * right_centered, axis=1)
+    denominator = np.sqrt(
+        np.sum(left_centered * left_centered, axis=1)
+        * np.sum(right_centered * right_centered, axis=1)
+    )
+    values = np.full(len(valid_left), np.nan, dtype="float64")
+    valid_denominator = denominator > _ROLLING_MOMENT_NEAR_ZERO_VARIANCE
+    with np.errstate(divide="ignore", invalid="ignore"):
+        values[valid_denominator] = (
+            numerator[valid_denominator] / denominator[valid_denominator]
+        )
+    values[~np.isfinite(values)] = np.nan
+    window_values = np.full(len(left_windows), np.nan, dtype="float64")
+    window_values[valid_windows] = values
+    output[window - 1 :] = window_values
+    return output
+
+
 def _rolling_skew(
     values: pd.Series,
     group_keys: pd.Series,

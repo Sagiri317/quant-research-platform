@@ -208,6 +208,7 @@ def make_synthetic_factor_panel(
                     "adj_close": close,
                     "period_return": close / previous_close - 1.0,
                     "amount": 10_000.0 + offset,
+                    "volume": 1_000.0 + offset,
                     "turnover": 0.01 + offset / 100_000.0,
                     "high": close + 1.0,
                     "low": close - 1.0,
