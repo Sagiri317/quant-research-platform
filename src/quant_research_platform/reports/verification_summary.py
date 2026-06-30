@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from quant_research_platform.policy.share_safety import evidence_text_unsafe_reason
+
 
 def render_run_summary_markdown(payload: dict[str, Any]) -> str:
     status = payload["status"]
@@ -84,7 +86,7 @@ def render_review_safe_aggregate_evidence_markdown(payload: dict[str, Any]) -> s
     )
     if not payload["handoff_ready"]:
         lines.append("- human approval required before final review status")
-    return "\n".join(lines) + "\n"
+    return _render_review_safe_markdown(lines)
 
 
 def render_local_verification_inventory_markdown(payload: dict[str, Any]) -> str:
@@ -141,7 +143,15 @@ def render_local_verification_inventory_markdown(payload: dict[str, Any]) -> str
     )
     if payload["uncovered_roots"]:
         lines.append("- uncovered dataset roots require review before final status")
-    return "\n".join(lines) + "\n"
+    return _render_review_safe_markdown(lines)
+
+
+def _render_review_safe_markdown(lines: list[str]) -> str:
+    text = "\n".join(lines) + "\n"
+    reason = evidence_text_unsafe_reason(text)
+    if reason is not None:
+        raise ValueError(f"unsafe_review_safe_markdown: {reason}")
+    return text
 
 
 __all__ = [
