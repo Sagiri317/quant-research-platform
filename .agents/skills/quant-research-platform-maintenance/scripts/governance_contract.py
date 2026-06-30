@@ -73,24 +73,16 @@ class SourceTreeSensitiveNegativeRule:
         return re.compile(self.pattern, self.flags)
 
 
-@dataclass(frozen=True)
-class SourceTreeAllowlistEntry:
+@dataclass(frozen=True, eq=False)
+class SourceTreeAllowedOccurrence:
     path: Path
-    scan_group: str
-    rule_name: str
-    literal: str = ""
-    context_kind: str = ""
-    ast_owner: str = ""
-    exact_line: str = ""
+    rule_id: str
+    exact_line: str
     owner: str = ""
     rationale: str = ""
     lifecycle: str = ""
     covered_by: tuple[str, ...] = ()
-    max_occurrences: int = 1
-
-    @property
-    def rule_id(self) -> str:
-        return self.rule_name
+    py_owner: str = ""
 
 
 @dataclass(frozen=True)
@@ -432,6 +424,18 @@ RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {
     Path("tests/workflows/test_local_verification.py"),
     Path("tests/workflows/test_local_verification_contract.py"),
 }
+SOURCE_TREE_RETIRED_TEXT_NEGATIVE_TEST_SOURCES = {
+    Path("tests/agents/test_verify_governance.py"),
+    Path("tests/architecture/test_governance_contract_rg_gate.py"),
+    Path("tests/architecture/test_handoff_package_contract.py"),
+}
+SOURCE_TREE_NEGATIVE_TEST_RETIRED_TEXT_RULES = frozenset(
+    {
+        "public_path",
+        "private_summary",
+        "clean_rewrite",
+    }
+)
 
 RUN_OUTPUT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = (
     ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
@@ -833,11 +837,6 @@ NEGATIVE_TEST_LITERAL_ALLOWLIST = {
         "tests/agents/test_verify_governance.py",
         "tests/architecture/test_governance_contract_rg_gate.py",
     ),
-    "retired_name": (
-        "tests/agents/test_verify_governance.py",
-        "tests/architecture/test_governance_contract_rg_gate.py",
-        "tests/architecture/test_handoff_package_contract.py",
-    ),
 }
 
 RULE_DEFINITION_ALLOWLIST = (
@@ -1052,55 +1051,38 @@ VERIFY_GOVERNANCE_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py"
 )
 
-def _source_tree_allowlist_entry(
+
+def _source_tree_allowed_occurrence(
     *,
     path: Path,
-    scan_group: str,
-    rule_name: str,
+    rule_id: str,
+    exact_line: str,
     owner: str,
     rationale: str,
     lifecycle: str,
     covered_by: tuple[str, ...],
-    literal: str = "",
-    context_kind: str = "",
-    ast_owner: str = "",
-    exact_line: str = "",
-    max_occurrences: int = 1,
-) -> SourceTreeAllowlistEntry:
-    return SourceTreeAllowlistEntry(
+    py_owner: str = "",
+) -> SourceTreeAllowedOccurrence:
+    return SourceTreeAllowedOccurrence(
         path=path,
-        scan_group=scan_group,
-        rule_name=rule_name,
-        literal=literal,
-        context_kind=context_kind or _default_context_kind(scan_group=scan_group),
-        ast_owner=ast_owner,
+        rule_id=rule_id,
         exact_line=exact_line,
         owner=owner,
         rationale=rationale,
         lifecycle=lifecycle,
         covered_by=covered_by,
-        max_occurrences=max_occurrences,
+        py_owner=py_owner,
     )
 
 
-def _default_context_kind(*, scan_group: str) -> str:
-    if scan_group == "retired_rule_definition":
-        return "governance_rule_definition"
-    if scan_group in {"active_test_literals", "active_test_literal_path"}:
-        return "registered_active_fixture"
-    if scan_group == "sensitive_negative_literals":
-        return "registered_sensitive_fixture"
-    return ""
+def _exact_line(*parts: str) -> str:
+    return "".join(parts)
 
 
-SOURCE_TREE_ALLOWLIST_ENTRIES = (
-    _source_tree_allowlist_entry(
+SOURCE_TREE_ALLOWED_OCCURRENCES = (
+    _source_tree_allowed_occurrence(
         path=VERIFY_HANDOFF_PACKAGE_SCRIPT,
-        scan_group="retired_occurrence",
-        rule_name="retired_review_safe_public_wording",
-        literal='if summary.get("public_safe") is not True:',
-        context_kind="python_exact_line",
-        ast_owner="verify_smoke_compare_portable_summary",
+        rule_id="retired_text:retired_review_safe_public_wording",
         exact_line='if summary.get("public_safe") is not True:',
         owner="handoff-package-verifier",
         rationale=(
@@ -1112,14 +1094,11 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             "tests/agents/handoff/test_handoff_tools.py::"
             "test_verify_smoke_compare_rejects_weak_portable_summary_shape",
         ),
+        py_owner="def:verify_smoke_compare_portable_summary",
     ),
-    _source_tree_allowlist_entry(
+    _source_tree_allowed_occurrence(
         path=Path("src/quant_research_platform/policy/share_safety.py"),
-        scan_group="retired_occurrence",
-        rule_name="forbidden_private_real",
-        literal='"private_real",',
-        context_kind="python_exact_line",
-        ast_owner="_RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES",
+        rule_id="retired_text:forbidden_private_real",
         exact_line='"private_real",',
         owner="share-safety-policy",
         rationale=(
@@ -1134,14 +1113,11 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             "tests/architecture/test_retired_surface_absent.py::"
             "test_retired_local_only_report_paths_remain_share_unsafe",
         ),
+        py_owner="assign:_RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES",
     ),
-    _source_tree_allowlist_entry(
+    _source_tree_allowed_occurrence(
         path=Path("src/quant_research_platform/policy/share_safety.py"),
-        scan_group="retired_occurrence",
-        rule_name="forbidden_private_data",
-        literal='"private_data",',
-        context_kind="python_exact_line",
-        ast_owner="_RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES",
+        rule_id="retired_text:forbidden_private_data",
         exact_line='"private_data",',
         owner="share-safety-policy",
         rationale=(
@@ -1156,70 +1132,12 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             "tests/architecture/test_retired_surface_absent.py::"
             "test_retired_local_only_report_paths_remain_share_unsafe",
         ),
+        py_owner="assign:_RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES",
     ),
     *(
-        _source_tree_allowlist_entry(
-            path=BUILD_HANDOFF_PACKAGE_SCRIPT,
-            scan_group="active_test_literals",
-            rule_name=rule_name,
-            owner="handoff-builder-active-fixtures",
-            rationale="builder fixture uses current market data identifiers",
-            lifecycle="current active literal; remove if fixture changes",
-            covered_by=(
-                "tests/architecture/test_handoff_package_contract.py::"
-                "test_handoff_source_tree_rules_import_governance_contract",
-            ),
-        )
-        for rule_name in (
-            "active_market_bars_data_id",
-            "active_market_panel_data_id",
-            "active_market_context_data_id",
-            "active_frequency_slug",
-        )
-    ),
-    *(
-        _source_tree_allowlist_entry(
-            path=Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
-            scan_group="active_test_literal_path",
-            rule_name=rule_name,
-            owner="architecture-active-vocabulary-tests",
-            rationale="owner-approved active data-frequency vocabulary assertions",
-            lifecycle="current active test fixture; update with frequency contract",
-            covered_by=(
-                "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
-            ),
-        )
-        for rule_name in (
-            "active_market_bars_data_id",
-            "active_market_panel_data_id",
-            "active_market_context_data_id",
-            "active_frequency_slug",
-        )
-    ),
-    *(
-        _source_tree_allowlist_entry(
-            path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
-            scan_group="active_test_literal_path",
-            rule_name=rule_name,
-            owner="architecture-governance-negative-tests",
-            rationale="owner-approved retired/current vocabulary gate fixture",
-            lifecycle="current governance test fixture; update with rule owner",
-            covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
-        )
-        for rule_name in (
-            "retired_local_verification_evidence_range_surface",
-            "retired_local_verification_output_surface",
-            "retired_result_evidence_root_text",
-        )
-    ),
-    *(
-        _source_tree_allowlist_entry(
+        _source_tree_allowed_occurrence(
             path=GOVERNANCE_CONTRACT_SCRIPT,
-            scan_group="retired_occurrence",
-            rule_name=rule.name,
-            literal=rule.example,
-            context_kind="python_exact_line",
-            ast_owner="PROFILE_RUNNER_RETIRED_LITERALS",
+            rule_id=f"retired_text:{rule.name}",
             exact_line=f'"{rule.example}",',
             owner="governance-contract-rule-source",
             rationale="profile runner retired literal inventory line is owned here",
@@ -1228,17 +1146,14 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
                 "tests/architecture/test_governance_contract_rg_gate.py::"
                 "test_profile_runner_retired_text_rules_are_contract_owned",
             ),
+            py_owner="assign:PROFILE_RUNNER_RETIRED_LITERALS",
         )
         for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
     ),
     *(
-        _source_tree_allowlist_entry(
+        _source_tree_allowed_occurrence(
             path=GOVERNANCE_CONTRACT_SCRIPT,
-            scan_group="retired_occurrence",
-            rule_name=rule.name,
-            literal=rule.example,
-            context_kind="python_exact_line",
-            ast_owner="PROFILE_RUNNER_RETIRED_TEXT_RULES",
+            rule_id=f"retired_text:{rule.name}",
             exact_line=f'r"{rule.pattern}",',
             owner="governance-contract-rule-source",
             rationale="profile runner retired regex rule line is owned here",
@@ -1247,17 +1162,14 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
                 "tests/architecture/test_governance_contract_rg_gate.py::"
                 "test_profile_runner_retired_text_rules_are_contract_owned",
             ),
+            py_owner="assign:PROFILE_RUNNER_RETIRED_TEXT_RULES",
         )
         for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
     ),
     *(
-        _source_tree_allowlist_entry(
+        _source_tree_allowed_occurrence(
             path=GOVERNANCE_CONTRACT_SCRIPT,
-            scan_group="retired_occurrence",
-            rule_name=rule.name,
-            literal=rule.example,
-            context_kind="python_exact_line",
-            ast_owner="PROFILE_RUNNER_RETIRED_TEXT_RULES",
+            rule_id=f"retired_text:{rule.name}",
             exact_line=f'example="{rule.example}",',
             owner="governance-contract-rule-source",
             rationale="profile runner retired example line is owned here",
@@ -1266,20 +1178,14 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
                 "tests/architecture/test_governance_contract_rg_gate.py::"
                 "test_profile_runner_retired_text_rules_are_contract_owned",
             ),
+            py_owner="assign:PROFILE_RUNNER_RETIRED_TEXT_RULES",
         )
         for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
     ),
     *(
-        _source_tree_allowlist_entry(
+        _source_tree_allowed_occurrence(
             path=Path("tests/agents/test_verify_governance.py"),
-            scan_group="retired_occurrence",
-            rule_name=rule.name,
-            literal=rule.example,
-            context_kind="python_exact_line",
-            ast_owner=(
-                "test_forged_retired_profile_env_does_not_skip_repo_file_"
-                "negative_payload"
-            ),
+            rule_id=f"retired_text:{rule.name}",
             exact_line=f'monkeypatch.setenv("{rule.example}", "forge-managed-root")',
             owner="governance-negative-tests",
             rationale="forged environment negative test proves the env is ignored",
@@ -1288,23 +1194,24 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
                 "tests/agents/test_verify_governance.py::"
                 "test_forged_retired_profile_env_does_not_skip_repo_file_negative_payload",
             ),
+            py_owner=(
+                "def:test_forged_retired_profile_env_does_not_skip_repo_file_"
+                "negative_payload"
+            ),
         )
         for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
         if rule.name == "profile_runner_retired_qrp_managed_repo_roots"
     ),
     *(
-        _source_tree_allowlist_entry(
+        _source_tree_allowed_occurrence(
             path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
-            scan_group="retired_occurrence",
-            rule_name=rule_name,
-            literal=literal,
-            context_kind="python_exact_line",
-            ast_owner=function_name,
+            rule_id=f"retired_text:{rule_name}",
             exact_line=line_text,
             owner="architecture-governance-negative-tests",
             rationale="architecture gate carries an exact retired fixture line",
             lifecycle="current negative fixture; update with profile runner rule",
             covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+            py_owner=f"def:{function_name}",
         )
         for rule_name, literal, function_name, line_text in (
             (
@@ -1318,8 +1225,8 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
                 PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
                 "test_profile_runner_retired_text_allowlist_is_precise",
                 (
-                    "assert {entry.literal for entry in agent_entries} == "
-                    f'{{"{PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example}"}}'
+                    f'assert all("{PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example}" '
+                    "in entry.exact_line for entry in agent_entries)"
                 ),
             ),
             (
@@ -1362,6 +1269,12 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             (
                 PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
                 PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+                "test_source_tree_path_allowed_does_not_consume_literal_occurrences",
+                "line_text='x = \"QRP_MANAGED_REPO_ROOTS\"',",
+            ),
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
                 "test_profile_runner_env_is_not_forwarded_to_pytest_subprocess",
                 (
                     "monkeypatch.setenv("
@@ -1380,47 +1293,759 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             ),
         )
     ),
-    *(
-        _source_tree_allowlist_entry(
-            path=GOVERNANCE_CONTRACT_SCRIPT,
-            scan_group="retired_rule_definition",
-            rule_name=rule.name,
-            owner="governance-contract-rule-source",
-            rationale="rule names are defined only in the governance contract",
-            lifecycle="current rule definition; remove with retired rule",
-            covered_by=(
-                "tests/architecture/test_handoff_package_contract.py::"
-                "test_source_tree_scan_rule_allowlist_is_definition_scoped",
-            ),
-        )
-        for rule in RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
-    ),
-    *(
-        _source_tree_allowlist_entry(
-            path=Path("tests/architecture/test_retired_surface_absent.py"),
-            scan_group="retired_rule_definition",
-            rule_name=rule_name,
-            owner="architecture-governance-negative-tests",
-            rationale="test derives retired rule names from governance contract",
-            lifecycle="current negative test fixture; update with governance rule",
-            covered_by=(
-                "tests/architecture/test_handoff_package_contract.py::"
-                "test_source_tree_scan_rule_allowlist_is_definition_scoped",
-            ),
-        )
-        for rule_name in (
-            "retired_csmar_source_alias",
-            "retired_a_share_market_alias",
-            "retired_model_algorithm_collection",
-            "forbidden_render_pr_body",
-        )
-    ),
 )
 
-SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS = {
-    entry.path
-    for entry in SOURCE_TREE_ALLOWLIST_ENTRIES
-    if entry.scan_group == "active_test_literal_path"
+_MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
+    (
+        "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+        "active_test_literals:active_market_bars_data_id",
+        _exact_line(
+            "assert source_ids.market_bars_data_id(DataFrequency.DAILY) ",
+            '== "market_bars_1d"',
+        ),
+        "def:test_current_source_and_market_ids_are_frequency_derived",
+    ),
+    (
+        "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+        "active_test_literals:active_market_bars_data_id",
+        '"market_bars_1d",',
+        "def:test_regular_tests_do_not_hardcode_active_frequency_literals",
+    ),
+    (
+        "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+        "active_test_literals:active_market_panel_data_id",
+        _exact_line(
+            "assert market_ids.market_panel_data_id(DataFrequency.DAILY) ",
+            '== "market_panel_1d"',
+        ),
+        "def:test_current_source_and_market_ids_are_frequency_derived",
+    ),
+    (
+        "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+        "active_test_literals:active_market_panel_data_id",
+        '"market_panel_1d",',
+        "def:test_regular_tests_do_not_hardcode_active_frequency_literals",
+    ),
+    (
+        "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+        "active_test_literals:active_market_context_data_id",
+        _exact_line(
+            "assert market_ids.market_context_data_id(DataFrequency.DAILY) ",
+            '== "market_context_1d"',
+        ),
+        "def:test_current_source_and_market_ids_are_frequency_derived",
+    ),
+    (
+        "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+        "active_test_literals:active_market_context_data_id",
+        '"market_context_1d",',
+        "def:test_regular_tests_do_not_hardcode_active_frequency_literals",
+    ),
+    (
+        "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+        "active_test_literals:active_frequency_slug",
+        'assert normalize_data_frequency("1d") is DataFrequency.DAILY',
+        "def:test_data_frequency_helpers_define_reserved_vocabulary_and_active_support",
+    ),
+    (
+        "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+        "active_test_literals:active_frequency_slug",
+        'assert data_frequency_slug(DataFrequency.DAILY) == "1d"',
+        "def:test_data_frequency_helpers_define_reserved_vocabulary_and_active_support",
+    ),
+    (
+        "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+        "active_test_literals:active_frequency_slug",
+        "'\"1d\"',",
+        "def:test_regular_tests_do_not_hardcode_active_frequency_literals",
+    ),
+    (
+        "tests/architecture/test_frequency_vocabulary_vs_active_support.py",
+        "active_test_literals:active_frequency_slug",
+        "\"'1d'\",",
+        "def:test_regular_tests_do_not_hardcode_active_frequency_literals",
+    ),
+    (
+        "tests/agents/test_verify_governance.py",
+        "retired_text:clean_rewrite",
+        _exact_line(
+            "f\"{rule_form(contract.RETIRED_NAME_RULES, 'clean_",
+            "rewrite')} is current.\",",
+        ),
+        "def:test_active_doc_scan_fails_stale_current_truth",
+    ),
+    (
+        "tests/agents/test_verify_governance.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"clean_', 'rewrite",'),
+        "def:test_retired_naming_rules_cover_required_derived_forms",
+    ),
+    (
+        "tests/agents/test_verify_governance.py",
+        "retired_text:clean_rewrite",
+        _exact_line('assert not patterns["clean_', 'rewrite"].search("clean")'),
+        "def:test_retired_naming_rules_cover_required_derived_forms",
+    ),
+    (
+        "tests/agents/test_verify_governance.py",
+        "retired_text:clean_rewrite",
+        _exact_line(
+            'retired_component = rule_form(contract.RETIRED_NAME_RULES, "clean_',
+            'rewrite")',
+        ),
+        "def:test_path_name_gate_fails_retired_stage_paths",
+    ),
+    (
+        "tests/agents/test_verify_governance.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"clean_', 'rewrite",'),
+        "def:test_python_symbol_gate_fails_retired_stage_and_surface_names",
+    ),
+    (
+        "tests/agents/test_verify_governance.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"clean_', 'rewrite": rule_form('),
+        "def:test_synthesized_string_gate_fails_retired_stage_names",
+    ),
+    (
+        "tests/agents/test_verify_governance.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"clean_', 'rewrite",'),
+        "def:test_synthesized_string_gate_fails_retired_stage_names",
+    ),
+    (
+        "tests/agents/test_verify_governance.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"clean_', 'rewrite",'),
+        "def:test_structured_key_gate_fails_retired_keys_and_allows_values",
+    ),
+    (
+        "tests/agents/test_verify_governance.py",
+        "retired_text:clean_rewrite",
+        _exact_line(
+            'contract.structured_key_forbidden_patterns()["clean_', 'rewrite"],'
+        ),
+        "def:test_structured_key_gate_fails_retired_keys_and_allows_values",
+    ),
+    (
+        "tests/architecture/test_handoff_package_contract.py",
+        "retired_text:clean_rewrite",
+        _exact_line(
+            'retired_component = rule_form(contract.RETIRED_NAME_RULES, "clean_',
+            'rewrite")',
+        ),
+        "def:test_source_tree_scan_rejects_retired_stage_path_names",
+    ),
+    (
+        "tests/architecture/test_handoff_package_contract.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"rule": "clean_', 'rewrite",'),
+        "def:test_source_tree_scan_rejects_retired_stage_path_names",
+    ),
+    (
+        "tests/architecture/test_handoff_package_contract.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"clean_', 'rewrite",'),
+        "def:test_source_tree_scan_rejects_retired_structured_keys",
+    ),
+    (
+        "tests/architecture/test_handoff_package_contract.py",
+        "retired_text:clean_rewrite",
+        _exact_line(
+            'contract.structured_key_forbidden_patterns()["clean_', 'rewrite"],'
+        ),
+        "def:test_source_tree_scan_rejects_retired_structured_keys",
+    ),
+    (
+        "tests/architecture/test_handoff_package_contract.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"rule": "clean_', 'rewrite",'),
+        "def:test_source_tree_scan_rejects_retired_structured_keys",
+    ),
+    (
+        "tests/architecture/test_handoff_package_contract.py",
+        "retired_text:clean_rewrite",
+        _exact_line(
+            'retired_value = rule_form(contract.RETIRED_NAME_RULES, "clean_',
+            'rewrite")',
+        ),
+        "def:test_source_tree_scan_independently_rejects_synthesized_strings",
+    ),
+    (
+        "tests/architecture/test_handoff_package_contract.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"clean_', 'rewrite",'),
+        "def:test_source_tree_scan_independently_rejects_synthesized_strings",
+    ),
+    (
+        "tests/architecture/test_handoff_package_contract.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"clean_', 'rewrite",'),
+        "def:test_source_tree_scan_independently_rejects_synthesized_strings",
+    ),
+    (
+        "tests/architecture/test_handoff_package_contract.py",
+        "retired_text:clean_rewrite",
+        _exact_line('"clean_', 'rewrite",'),
+        "def:test_source_tree_scan_independently_rejects_python_symbols",
+    ),
+    (
+        "tests/architecture/test_handoff_package_contract.py",
+        "retired_text:clean_rewrite",
+        _exact_line('} == {("tools/hack_symbol.py", symbol, "clean_', 'rewrite")}'),
+        "def:test_source_tree_scan_independently_rejects_python_symbols",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_local_verification_evidence_range_surface",
+        _exact_line(
+            '"retired_local_verification_evidence_range_surface": ',
+            '("outside_evidence_range"),',
+        ),
+        "def:test_result_architecture_rules_cover_hard_cut_examples",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_local_verification_evidence_range_surface",
+        '"outside_evidence_range",',
+        "def:test_active_docs_reject_retired_review_safety_names",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_local_verification_evidence_range_surface",
+        '"evidence_range",',
+        "def:test_active_docs_reject_retired_review_safety_names",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_local_verification_evidence_range_surface",
+        "\"    label = 'evidence_range'\",",
+        "def:test_source_tree_rejects_retired_local_verification_surface_terms",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_local_verification_output_surface",
+        '"retired_local_verification_output_surface": "verification-output",',
+        "def:test_result_architecture_rules_cover_hard_cut_examples",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_local_verification_output_surface",
+        '"verification-output",',
+        "def:test_active_docs_reject_retired_review_safety_names",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_local_verification_output_surface",
+        '"verification_output",',
+        "def:test_active_docs_reject_retired_review_safety_names",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_local_verification_output_surface",
+        "\"    run_root = Path('verification-output/s1')\",",
+        "def:test_source_tree_rejects_retired_local_verification_surface_terms",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_local_verification_output_surface",
+        "\"    run_id = 'verification_output'\",",
+        "def:test_source_tree_rejects_retired_local_verification_surface_terms",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_result_evidence_root_text",
+        '"retired_result_evidence_root_text": "evidence root",',
+        "def:test_result_architecture_rules_cover_hard_cut_examples",
+    ),
+    (
+        "tests/architecture/test_governance_contract_rg_gate.py",
+        "active_test_literals:retired_result_evidence_root_text",
+        '"evidence root",',
+        "def:test_active_docs_reject_retired_review_safety_names",
+    ),
+    (
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('return "vendor', '_marker"'),
+        "def:unsafe_text_reason",
+    ),
+    (
+        ".agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py",
+        "sensitive_negative_literals:sensitive_secret",
+        _exact_line("tok", "en = re.compile("),
+        "def:check_markdown_paths",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"zip_path": "E', ':/quant-workspace/private/handoff.zip",'),
+        "def:test_handoff_package_verifier_scans_json_sidecar_absolute_paths",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('\'{"path": "E', ":/private\"}\\n',"),
+        "def:test_handoff_package_verifier_still_rejects_regular_evidence_paths",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('".run\\\\\\\\priv', 'ate\\\\\\\\s1",'),
+        "def:test_handoff_package_verifier_rejects_local_run_paths_in_sidecar",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/work', "space/qrp/data/r", 'esearch/a_share/demo",'),
+        "def:test_handoff_verifier_rejects_posix_local_workspace_paths",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/work', "spaces/qrp/reports/priv", 'ate_research/a_share/run",'),
+        "def:test_handoff_verifier_rejects_posix_local_workspace_paths",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/h', 'ome/user/private.txt",'),
+        "def:test_handoff_verifier_rejects_posix_local_workspace_paths",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/Us', 'ers/user/private.txt",'),
+        "def:test_handoff_verifier_rejects_posix_local_workspace_paths",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('"provider_name', '=raw-provider",'),
+        "def:test_handoff_package_verifier_rejects_private_provider_markers",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('"source_name', '=raw-source",'),
+        "def:test_handoff_package_verifier_rejects_private_provider_markers",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('"data_provider', '=raw-provider",'),
+        "def:test_handoff_package_verifier_rejects_private_provider_markers",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('"vendor_name=', 'raw-provider",'),
+        "def:test_handoff_package_verifier_rejects_private_provider_markers",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('"raw_v', 'endor=export",'),
+        "def:test_handoff_package_verifier_rejects_private_provider_markers",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('"vendor_', 'payload={}",'),
+        "def:test_handoff_package_verifier_rejects_private_provider_markers",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"E', ":/repo/data/pr", 'ocessed/a_share/factor/demo",'),
+        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"E', ":/repo/data/r", 'esearch/a_share/demo",'),
+        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"E', ":/repo/reports/priv", 'ate_research/a_share/run",'),
+        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/work', "space/qrp/data/pr", 'ocessed/a_share/factor/demo",'),
+        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/work', "spaces/qrp/data/r", 'esearch/a_share/demo",'),
+        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/mnt', "/data/reports/priv", 'ate_research/a_share/run",'),
+        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"leaked_zip_path": "E', ':/quant-workspace/private/handoff.zip",'),
+        "def:test_handoff_package_verifier_scans_external_json_sidecar",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"home_bad": "/h', 'ome/user/private/handoff.zip",'),
+        "def:test_handoff_package_verifier_scans_external_json_sidecar",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('[".run/priv', 'ate/s1", ".run\\\\\\\\priv', 'ate\\\\\\\\s1"],'),
+        "def:test_handoff_package_verifier_rejects_local_run_path_in_sidecar",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/work', "space/qrp/data/r", 'esearch/a_share/demo",'),
+        "def:test_handoff_package_verifier_rejects_absolute_paths_with_local_only_segments",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/work', "spaces/qrp/reports/priv", 'ate_research/a_share/run",'),
+        "def:test_handoff_package_verifier_rejects_absolute_paths_with_local_only_segments",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"old local example C', ":/Us", 'ers/name/private.txt",'),
+        "def:test_handoff_package_verifier_rejects_local_paths_in_plain_text",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            '"old workspace example /work', "space/qrp/data/r", 'esearch/a_share/demo",'
+        ),
+        "def:test_handoff_package_verifier_rejects_local_paths_in_plain_text",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            '("config", {"local_path": "C', ":/Us", 'ers/name/private/data"}),'
+        ),
+        "def:test_handoff_package_verifier_rejects_unsafe_complete_run_json",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"zip_path": "E', ':/quant-workspace/private/handoff.zip",'),
+        "def:test_verify_fails_when_sidecar_safety_fails",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"C', ':/private/run.json",'),
+        "def:test_verify_smoke_compare_rejects_invalid_source_artifact_path_shapes",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('r"E:', '\\priv', 'ate\\run.json",'),
+        "def:test_verify_smoke_compare_rejects_invalid_source_artifact_path_shapes",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"C', ':/private/run.json",'),
+        "def:test_verify_smoke_compare_rejects_unsafe_portable_result_fields",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"python verify.py --input C', ':/private/run.json",'),
+        "def:test_verify_smoke_compare_rejects_unsafe_portable_result_fields",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            '{"status": "PASS", "path": "E', ":/repo/data", '/raw/vendor.csv"},'
+        ),
+        "def:test_verify_smoke_compare_rejects_unsafe_portable_summary",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('("checks", {"vendor', '_marker": "provider-internal"}),'),
+        "def:test_handoff_package_verifier_rejects_unsafe_complete_run_json",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('"provider_name', '=raw-provider",'),
+        "def:test_verify_smoke_compare_rejects_unsafe_portable_result_fields",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('"smoke_compare_status_field_unsafe: 0:scope:vendor', '_marker",'),
+        "def:test_verify_smoke_compare_rejects_unsafe_portable_result_fields",
+    ),
+    (
+        "tests/agents/handoff/test_handoff_tools.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line(
+            '"smoke_compare_status_portable_summary_unsafe: 0:vendor', '_marker",'
+        ),
+        "def:test_verify_smoke_compare_rejects_unsafe_portable_summary",
+    ),
+    (
+        "tests/policy/test_share_safety.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            'text = "created at C',
+            ":/Us",
+            "ers/example/project/data",
+            '/raw/source/file.csv"',
+        ),
+        "def:test_share_safety_rejects_local_path_and_sanitizes_it",
+    ),
+    (
+        "tests/policy/test_share_safety.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('assert "C', ":/Us", 'ers" not in sanitize_shared_text(text)'),
+        "def:test_share_safety_rejects_local_path_and_sanitizes_it",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            'text = r"C:',
+            '\\Users\\DELL\\secret.csv \\\\serv',
+            "er\\sha",
+            "re\\raw.xlsx /mnt",
+            "/data/private.csv /h",
+            "ome/user/private.csv /Us",
+            'ers/name/private.csv /tmp/x"  # noqa: E501',
+        ),
+        "def:test_sanitizer_redacts_windows_unc_and_posix_paths",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('assert "\\\\\\\\serv', 'er" not in sanitized'),
+        "def:test_sanitizer_redacts_windows_unc_and_posix_paths",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            'text = "/work',
+            "space/qrp/data/r",
+            'esearch/a_share/demo/_manifest/manifest.json"',
+        ),
+        "def:test_sanitizer_redacts_absolute_private_repo_path_as_one_token",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/work', "space/qrp/data/r", 'esearch/a_share/demo",'),
+        "def:test_sanitizer_redacts_repo_private_absolute_paths",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/work', "spaces/qrp/reports/priv", 'ate_research/a_share/run",'),
+        "def:test_sanitizer_redacts_repo_private_absolute_paths",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            'r"C:',
+            "\\repo\\data\\research\\a_",
+            'share\\demo",',
+        ),
+        "def:test_sanitizer_redacts_repo_private_absolute_paths",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            'r"D:',
+            "\\repo\\reports\\priv",
+            "ate_research\\a_",
+            'share\\run",',
+        ),
+        "def:test_sanitizer_redacts_repo_private_absolute_paths",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/work', "space/qrp/reports/priv", 'ate_research/a_share/run",'),
+        "def:test_sanitizer_rejects_local_output_paths",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line('"/work', "space/qrp/reports/priv", 'ate_research/a_share/run",'),
+        "def:test_sanitizer_rejects_local_output_paths",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            '"path": r"D:',
+            "\\quant-workspace\\data\\processed\\a_",
+            'share",',
+        ),
+        "def:test_sanitizer_recurses_public_objects",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            '({"path": "/work',
+            "space/qrp/data/r",
+            'esearch/a_share/demo"}, "local_only_path"),',
+        ),
+        "def:test_internal_artifact_metadata_safety_is_owned_by_runtime",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_secret",
+        _exact_line(
+            '"data',
+            "/raw/csmar/export.csv stock code 6000",
+            "00.SH CSMAR vendor tok",
+            'en=abcdef123456"  # noqa: E501',
+        ),
+        "def:test_sanitizer_redacts_shared_markers_stock_codes_and_credentials",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_secret",
+        _exact_line('"nested": {"secret": "pass', 'word=abcdef123456"},'),
+        "def:test_sanitizer_recurses_public_objects",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_secret",
+        _exact_line('({"credential": "tok', 'en=abcdef123456"}, "credential"),'),
+        "def:test_internal_artifact_metadata_safety_is_owned_by_runtime",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('("vendor', '_marker=raw-provider", "provider_source_marker"),'),
+        "def:test_unsafe_for_share_reason_covers_share_safety_markers",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('("provider_name', '=raw-provider", "provider_source_marker"),'),
+        "def:test_unsafe_for_share_reason_covers_share_safety_markers",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('("source_name', '=raw-source", "provider_source_marker"),'),
+        "def:test_unsafe_for_share_reason_covers_share_safety_markers",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('("data_provider', '=raw-provider", "provider_source_marker"),'),
+        "def:test_unsafe_for_share_reason_covers_share_safety_markers",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_provider_marker",
+        _exact_line('("vendor_name=', 'raw-provider", "provider_source_marker"),'),
+        "def:test_unsafe_for_share_reason_covers_share_safety_markers",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_stock_code_sample",
+        _exact_line(
+            '"data',
+            "/raw/csmar/export.csv stock code 6000",
+            "00.SH CSMAR vendor tok",
+            'en=abcdef123456"  # noqa: E501',
+        ),
+        "def:test_sanitizer_redacts_shared_markers_stock_codes_and_credentials",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_stock_code_sample",
+        _exact_line('"8300', '00.BJ",'),
+        "def:test_stock_code_detector_covers_a_share_exchange_suffixes",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_stock_code_sample",
+        _exact_line('"4300', '47.BJ",'),
+        "def:test_stock_code_detector_covers_a_share_exchange_suffixes",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_stock_code_sample",
+        _exact_line('"6000', '00.SH",'),
+        "def:test_stock_code_detector_covers_a_share_exchange_suffixes",
+    ),
+    (
+        "tests/policy/test_share_safety_runtime_edges.py",
+        "sensitive_negative_literals:sensitive_stock_code_sample",
+        _exact_line('"rows": ["0000', '01.SZ"],'),
+        "def:test_sanitizer_recurses_public_objects",
+    ),
+    (
+        "tests/storage/test_manifest_helper_edges.py",
+        "sensitive_negative_literals:sensitive_local_only_path",
+        _exact_line(
+            '({"path": "/work',
+            "space/qrp/data/r",
+            'esearch/a_share/demo"}, "local_only_path"),',
+        ),
+        "def:test_internal_manifest_rejects_private_or_row_level_metadata",
+    ),
+)
+SOURCE_TREE_ALLOWED_OCCURRENCES += tuple(
+    _source_tree_allowed_occurrence(
+        path=Path(path),
+        rule_id=rule_id,
+        exact_line=exact_line,
+        owner="source-tree-exact-occurrence-migration",
+        rationale="migrated literal fixture from path-level source-tree allowance",
+        lifecycle="current exact occurrence fixture; update when fixture line changes",
+        covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+        py_owner=py_owner,
+    )
+    for (
+        path,
+        rule_id,
+        exact_line,
+        py_owner,
+    ) in _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS
+)
+
+SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
+    GOVERNANCE_CONTRACT_SCRIPT: {
+        rule.name for rule in RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
+    },
+    Path("tests/architecture/test_retired_surface_absent.py"): {
+        "retired_csmar_source_alias",
+        "retired_a_share_market_alias",
+        "retired_model_algorithm_collection",
+        "forbidden_render_pr_body",
+    },
 }
 
 SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS = tuple(
@@ -1437,32 +2062,6 @@ SOURCE_TREE_RETIRED_TERM_ROOTS = SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS + (
 )
 
 SOURCE_TREE_RETIRED_PATH_POLICY_MARKERS = RETIRED_PATH_POLICY_MARKERS
-
-def _source_tree_grouped_rule_allowlist(
-    scan_group: str,
-) -> dict[Path, set[str]]:
-    result: dict[Path, set[str]] = {}
-    for entry in SOURCE_TREE_ALLOWLIST_ENTRIES:
-        if entry.scan_group != scan_group:
-            continue
-        result.setdefault(entry.path, set()).add(entry.rule_name)
-    return result
-
-
-SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST = {
-    path: rules
-    for path, rules in _source_tree_grouped_rule_allowlist(
-        "active_test_literals"
-    ).items()
-} | {
-    path: rules
-    for path, rules in _source_tree_grouped_rule_allowlist(
-        "active_test_literal_path"
-    ).items()
-}
-SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = (
-    _source_tree_grouped_rule_allowlist("retired_rule_definition")
-)
 
 SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
     SourceTreeSensitiveNegativeRule(
@@ -1547,10 +2146,8 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "SCANNER_DEFINITION_MARKERS",
         "SCANNER_SCRIPT_DEFINITION_MARKERS",
         "CODE_MAP_FORBIDDEN_TERMS",
-        "SOURCE_TREE_ALLOWLIST_ENTRIES",
-        "SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST",
+        "SOURCE_TREE_ALLOWED_OCCURRENCES",
         "SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST",
-        "SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST",
         "SOURCE_TREE_SENSITIVE_NEGATIVE_RULES",
         "active_doc_forbidden_patterns",
         "path_name_forbidden_patterns",
@@ -1584,352 +2181,155 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
     },
 }
 
-SOURCE_TREE_ALLOWLIST_ENTRIES += tuple(
-    _source_tree_allowlist_entry(
-        path=path,
-        scan_group="sensitive_negative_literals",
-        rule_name=rule_name,
-        owner=owner,
-        rationale=rationale,
-        lifecycle="current safety negative fixture; update with share-safety rules",
-        covered_by=covered_by,
-    )
-    for path, owner, rationale, covered_by, rule_names in (
-        (
-            GOVERNANCE_CONTRACT_SCRIPT,
-            "governance-contract-rule-source",
-            "sensitive negative rules are defined only in governance contract",
-            (
-                "tests/architecture/test_handoff_package_contract.py::"
-                "test_source_tree_allowlist_entries_have_owner_metadata_and_coverage",
-            ),
-            (
-                "sensitive_local_only_path",
-                "sensitive_secret",
-                "sensitive_provider_marker",
-                "sensitive_stock_code_sample",
-            ),
-        ),
-        (
-            VERIFY_GOVERNANCE_SCRIPT,
-            "governance-verifier",
-            "verifier consumes sensitive fixtures from governance contract",
-            (
-                "tests/agents/test_verify_governance.py::"
-                "test_active_doc_scan_fails_retired_public_surface_terms",
-            ),
-            (
-                "sensitive_local_only_path",
-                "sensitive_secret",
-                "sensitive_provider_marker",
-            ),
-        ),
-        (
-            VERIFY_HANDOFF_PACKAGE_SCRIPT,
-            "handoff-package-verifier",
-            "handoff verifier consumes sensitive fixtures from share-safety policy",
-            (
-                "tests/agents/handoff/test_handoff_package_verifier.py::"
-                "test_handoff_package_verifier_still_rejects_regular_evidence_paths",
-            ),
-            (
-                "sensitive_local_only_path",
-                "sensitive_secret",
-                "sensitive_provider_marker",
-            ),
-        ),
-        (
-            HANDOFF_SELF_TEST_SCRIPT,
-            "handoff-self-test",
-            "self-test carries intentional sensitive negative fixtures",
-            (
-                "tests/agents/handoff/test_handoff_package_verifier.py::"
-                "test_handoff_package_verifier_still_rejects_regular_evidence_paths",
-            ),
-            (
-                "sensitive_local_only_path",
-                "sensitive_secret",
-                "sensitive_provider_marker",
-            ),
-        ),
-        (
-            Path("tests/agents/handoff/test_handoff_tools.py"),
-            "handoff-package-safety-tests",
-            "handoff tests carry malicious package payload fixtures",
-            (
-                "tests/agents/handoff/test_handoff_tools.py::"
-                "test_handoff_package_verifier_delegates_text_privacy_semantics",
-            ),
-            (
-                "sensitive_local_only_path",
-                "sensitive_secret",
-                "sensitive_provider_marker",
-            ),
-        ),
-        (
-            Path("tests/agents/handoff/test_handoff_package_verifier.py"),
-            "handoff-package-safety-tests",
-            "handoff verifier tests carry malicious package payload fixtures",
-            (
-                "tests/agents/handoff/test_handoff_package_verifier.py::"
-                "test_handoff_package_verifier_still_rejects_regular_evidence_paths",
-            ),
-            (
-                "sensitive_local_only_path",
-                "sensitive_secret",
-                "sensitive_provider_marker",
-            ),
-        ),
-        (
-            Path("tests/policy/test_share_safety.py"),
-            "share-safety-policy-tests",
-            "policy test carries intentional local-only path negative fixture",
-            ("tests/policy/test_share_safety.py",),
-            ("sensitive_local_only_path",),
-        ),
-        (
-            Path("tests/policy/test_share_safety_runtime_edges.py"),
-            "share-safety-policy-tests",
-            "policy runtime edge tests carry intentional sensitive fixtures",
-            ("tests/policy/test_share_safety_runtime_edges.py",),
-            (
-                "sensitive_local_only_path",
-                "sensitive_secret",
-                "sensitive_provider_marker",
-                "sensitive_stock_code_sample",
-            ),
-        ),
-        (
-            Path("tests/storage/test_manifest_helper_edges.py"),
-            "storage-manifest-safety-tests",
-            "manifest tests carry local-only path and provider marker fixtures",
-            ("tests/storage/test_manifest_helper_edges.py",),
-            (
-                "sensitive_local_only_path",
-                "sensitive_provider_marker",
-            ),
-        ),
-    )
-    for rule_name in rule_names
-)
 
-SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST = (
-    _source_tree_grouped_rule_allowlist("sensitive_negative_literals")
-)
-
-
-def validate_source_tree_allowlist_entries(
-    entries: tuple[SourceTreeAllowlistEntry, ...],
+def validate_source_tree_allowed_occurrences(
+    entries: tuple[SourceTreeAllowedOccurrence, ...],
+    *,
+    patterns_by_rule_id: Mapping[str, re.Pattern[str]] | None = None,
 ) -> list[str]:
+    patterns = (
+        dict(patterns_by_rule_id)
+        if patterns_by_rule_id is not None
+        else source_tree_allowed_occurrence_patterns(repo_root=Path("."))
+    )
     failures: list[str] = []
     for index, entry in enumerate(entries):
-        prefix = f"source_tree_allowlist_entry_invalid:{index}:{entry.path}"
+        prefix = f"source_tree_allowed_occurrence_invalid:{index}:{entry.path}"
         failures.extend(
             f"{prefix}:{failure}"
-            for failure in source_tree_allowlist_path_failures(entry.path)
+            for failure in source_tree_allowed_occurrence_path_failures(entry.path)
         )
         if not str(entry.rule_id).strip():
-            failures.append(f"{prefix}:source_tree_allowlist_missing_rule_id")
-        elif entry.rule_name not in source_tree_allowlist_rule_names(entry.scan_group):
-            failures.append(f"{prefix}:source_tree_allowlist_unknown_rule")
-        if not str(entry.owner).strip():
-            failures.append(f"{prefix}:source_tree_allowlist_missing_owner")
-        if not str(entry.rationale).strip():
-            failures.append(f"{prefix}:source_tree_allowlist_missing_rationale")
-        if not str(entry.lifecycle).strip():
-            failures.append(f"{prefix}:source_tree_allowlist_missing_lifecycle")
-        if not entry.covered_by:
-            failures.append(f"{prefix}:source_tree_allowlist_missing_covered_by")
-        if not isinstance(entry.max_occurrences, int) or entry.max_occurrences < 1:
-            failures.append(f"{prefix}:source_tree_allowlist_invalid_max_occurrences")
-        elif entry.scan_group == "retired_occurrence" and entry.max_occurrences != 1:
+            failures.append(f"{prefix}:source_tree_allowed_occurrence_missing_rule_id")
+        elif entry.rule_id not in patterns:
+            failures.append(f"{prefix}:source_tree_allowed_occurrence_unknown_rule")
+        elif str(entry.exact_line).strip():
+            match_count = len(patterns[entry.rule_id].findall(entry.exact_line))
+            if match_count == 0:
+                failures.append(
+                    f"{prefix}:source_tree_allowed_occurrence_exact_line_rule_mismatch"
+                )
+            elif match_count > 1:
+                failures.append(
+                    f"{prefix}:source_tree_allowed_occurrence_exact_line_rule_overmatched"
+                )
+        if not str(entry.exact_line).strip():
             failures.append(
-                f"{prefix}:source_tree_allowlist_max_occurrences_not_strict"
+                f"{prefix}:source_tree_allowed_occurrence_missing_exact_line"
             )
-        if entry.scan_group == "retired_occurrence":
-            failures.extend(
-                f"{prefix}:{failure}"
-                for failure in source_tree_retired_occurrence_entry_failures(entry)
+        path_suffix = PurePosixPath(
+            entry.path if isinstance(entry.path, str) else entry.path.as_posix()
+        ).suffix
+        if path_suffix == ".py":
+            if not str(entry.py_owner).strip():
+                failures.append(
+                    f"{prefix}:source_tree_allowed_occurrence_missing_py_owner"
+                )
+        elif entry.py_owner:
+            failures.append(
+                f"{prefix}:source_tree_allowed_occurrence_non_python_rejects_py_owner"
             )
-        elif not str(entry.context_kind).strip():
-            failures.append(f"{prefix}:source_tree_allowlist_missing_context_kind")
+        if not str(entry.owner).strip():
+            failures.append(f"{prefix}:source_tree_allowed_occurrence_missing_owner")
+        if not str(entry.rationale).strip():
+            failures.append(
+                f"{prefix}:source_tree_allowed_occurrence_missing_rationale"
+            )
+        if not str(entry.lifecycle).strip():
+            failures.append(
+                f"{prefix}:source_tree_allowed_occurrence_missing_lifecycle"
+            )
+        if not entry.covered_by:
+            failures.append(
+                f"{prefix}:source_tree_allowed_occurrence_missing_covered_by"
+            )
     return failures
 
 
-def source_tree_allowlist_path_failures(path: Path) -> list[str]:
+def source_tree_allowed_occurrence_path_failures(path: Path) -> list[str]:
     raw = path if isinstance(path, str) else path.as_posix()
     failures: list[str] = []
     if not raw or raw == ".":
-        failures.append("source_tree_allowlist_missing_path")
+        failures.append("source_tree_allowed_occurrence_missing_path")
         return failures
     if "\\" in raw:
-        failures.append("source_tree_allowlist_windows_backslash_path")
+        failures.append("source_tree_allowed_occurrence_windows_backslash_path")
     if raw.startswith("/") or re.match(r"^[A-Za-z]:[/\\]", raw):
-        failures.append("source_tree_allowlist_absolute_path")
+        failures.append("source_tree_allowed_occurrence_absolute_path")
     normalized = raw.replace("\\", "/")
     parts = PurePosixPath(normalized).parts
     if ".." in parts:
-        failures.append("source_tree_allowlist_parent_path")
+        failures.append("source_tree_allowed_occurrence_parent_path")
     if "." in parts or PurePosixPath(normalized).as_posix() != normalized:
-        failures.append("source_tree_allowlist_not_posix_normalized")
+        failures.append("source_tree_allowed_occurrence_not_posix_normalized")
     return failures
 
 
-def source_tree_allowlist_rule_names(scan_group: str) -> set[str]:
-    if scan_group in {"retired_occurrence", "retired_rule_definition"}:
-        return set(source_tree_forbidden_patterns())
-    if scan_group in {"active_test_literals", "active_test_literal_path"}:
-        return {
-            "active_market_bars_data_id",
-            "active_market_panel_data_id",
-            "active_market_context_data_id",
-            "active_frequency_slug",
-            "retired_local_verification_evidence_range_surface",
-            "retired_local_verification_output_surface",
-            "retired_result_evidence_root_text",
-        }
-    if scan_group == "sensitive_negative_literals":
-        return set(source_tree_sensitive_negative_patterns())
-    return set()
-
-
-def source_tree_retired_occurrence_entry_failures(
-    entry: SourceTreeAllowlistEntry,
-) -> list[str]:
-    failures: list[str] = []
-    if not str(entry.literal).strip():
-        failures.append("source_tree_allowlist_missing_literal")
-    if not str(entry.exact_line).strip():
-        failures.append("source_tree_allowlist_missing_exact_line")
-    elif entry.literal and entry.literal not in entry.exact_line:
-        failures.append("source_tree_allowlist_exact_line_missing_literal")
-    if entry.context_kind not in {"python_exact_line", "text_exact_line"}:
-        failures.append("source_tree_allowlist_invalid_context_kind")
-    path_suffix = PurePosixPath(
-        entry.path if isinstance(entry.path, str) else entry.path.as_posix()
-    ).suffix
-    if path_suffix == ".py":
-        if entry.context_kind != "python_exact_line":
-            failures.append("source_tree_allowlist_python_requires_python_exact_line")
-        if not str(entry.ast_owner).strip():
-            failures.append("source_tree_allowlist_missing_python_ast_owner")
-    else:
-        if entry.context_kind == "python_exact_line":
-            failures.append(
-                "source_tree_allowlist_non_python_rejects_python_exact_line"
-            )
-        if entry.ast_owner:
-            failures.append("source_tree_allowlist_non_python_rejects_ast_owner")
-    return failures
-
-
-def _source_tree_allowlist_context_matches(
-    entry: SourceTreeAllowlistEntry,
+def source_tree_allowed_occurrence_patterns(
     *,
-    line_text: str,
-    line_number: int | None,
-    rule_definition_lines: set[int] | None,
-    definition_contexts: dict[str, set[int]] | None = None,
-) -> bool:
-    del line_text, definition_contexts
-    if entry.context_kind == "governance_rule_definition":
-        return (
-            line_number is not None
-            and rule_definition_lines is not None
-            and line_number in rule_definition_lines
+    repo_root: Path | None = None,
+) -> dict[str, re.Pattern[str]]:
+    patterns: dict[str, re.Pattern[str]] = {}
+    for namespace in ("retired_text", "retired_terms", "synthesized_strings"):
+        patterns.update(
+            {
+                f"{namespace}:{rule}": pattern
+                for rule, pattern in source_tree_forbidden_patterns().items()
+            }
         )
-    if entry.context_kind in {
-        "registered_active_fixture",
-        "registered_sensitive_fixture",
-    }:
-        return True
-    return False
+    patterns.update(
+        {
+            f"sensitive_negative_literals:{rule}": pattern
+            for rule, pattern in source_tree_sensitive_negative_patterns().items()
+        }
+    )
+    if repo_root is not None:
+        patterns.update(
+            {
+                f"active_test_literals:{rule}": pattern
+                for rule, pattern in source_tree_active_test_literal_patterns(
+                    repo_root
+                ).items()
+            }
+        )
+    return patterns
 
 
-def _source_tree_allowlist_entries(
+def _source_tree_allowed_occurrence_entries(
     relative: Path,
     *,
     scan_group: str,
     rule: str,
-) -> tuple[SourceTreeAllowlistEntry, ...]:
-    if scan_group in {"retired_text", "synthesized_strings", "retired_terms"}:
-        entry_groups = {"retired_occurrence", "retired_rule_definition"}
-    else:
-        entry_groups = {scan_group}
+) -> tuple[SourceTreeAllowedOccurrence, ...]:
+    rule_id = f"{scan_group}:{rule}"
     return tuple(
         entry
-        for entry in SOURCE_TREE_ALLOWLIST_ENTRIES
-        if entry.path == relative
-        and entry.rule_name == rule
-        and entry.scan_group in entry_groups
+        for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
+        if entry.path == relative and entry.rule_id == rule_id
     )
 
 
-def _source_tree_retired_occurrence_allowed(
-    relative: Path,
-    *,
-    rule: str,
-    line_text: str,
-    line_number: int | None,
-    rule_definition_lines: set[int] | None,
-    definition_contexts: dict[str, set[int]] | None = None,
-) -> bool:
-    del rule_definition_lines
-    owner_counts = source_tree_python_definition_owner_counts_from_contexts(
-        definition_contexts or {},
-    )
-    for entry in _source_tree_allowlist_entries(
-        relative,
-        scan_group="retired_text",
-        rule=rule,
-    ):
-        if entry.scan_group != "retired_occurrence":
-            continue
-        match = _source_tree_retired_occurrence_match_status(
-            entry,
-            relative=relative,
-            rule=rule,
-            line_text=line_text,
-            line_number=line_number,
-            definition_contexts=definition_contexts or {},
-            owner_counts=owner_counts,
-        )
-        if match == "match":
-            return True
-    return False
-
-
-def _source_tree_retired_occurrence_match_status(
-    entry: SourceTreeAllowlistEntry,
+def _source_tree_allowed_occurrence_match_status(
+    entry: SourceTreeAllowedOccurrence,
     *,
     relative: Path,
-    rule: str,
+    rule_id: str,
     line_text: str,
     line_number: int | None,
-    definition_contexts: dict[str, set[int]],
-    owner_counts: dict[str, int],
+    owner_ranges: dict[str, tuple[frozenset[int], ...]],
 ) -> str:
-    if entry.scan_group != "retired_occurrence":
-        return "no_match"
-    if entry.path != relative or entry.rule_name != rule:
-        return "no_match"
-    if not entry.literal or entry.literal not in line_text:
+    if entry.path != relative or entry.rule_id != rule_id:
         return "no_match"
     if line_text.strip() != entry.exact_line:
         return "no_match"
-    if entry.context_kind == "text_exact_line":
+    if relative.suffix != ".py":
         return "match"
-    if entry.context_kind != "python_exact_line":
-        return "no_match"
-    owner_count = owner_counts.get(entry.ast_owner, 0)
-    if owner_count > 1:
+    ranges = owner_ranges.get(entry.py_owner, ())
+    if len(ranges) > 1:
         return "ambiguous_owner"
-    if owner_count == 0:
-        return "no_match"
-    if line_number is None or line_number not in definition_contexts.get(
-        entry.ast_owner,
-        set(),
-    ):
+    if len(ranges) == 0:
+        return "stale_owner"
+    if line_number is None or line_number not in ranges[0]:
         return "no_match"
     return "match"
 
@@ -1943,56 +2343,53 @@ def _source_tree_retired_rule_definition_allowed(
     rule_definition_lines: set[int] | None,
     definition_contexts: dict[str, set[int]] | None = None,
 ) -> bool:
-    for entry in _source_tree_allowlist_entries(
-        relative,
-        scan_group="retired_text",
-        rule=rule,
-    ):
-        if entry.scan_group != "retired_rule_definition":
-            continue
-        if _source_tree_allowlist_context_matches(
-            entry,
-            line_text=line_text,
-            line_number=line_number,
-            rule_definition_lines=rule_definition_lines,
-            definition_contexts=definition_contexts,
-        ):
-            return True
-    return False
+    del line_text, definition_contexts
+    allowed_rules = SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST.get(relative, set())
+    return (
+        rule in allowed_rules
+        and line_number is not None
+        and rule_definition_lines is not None
+        and line_number in rule_definition_lines
+    )
 
 
-def _source_tree_matching_retired_occurrence_entries(
+def _source_tree_matching_allowed_occurrence_entries(
     relative: Path,
     *,
+    scan_group: str,
     rule: str,
     line_text: str,
     line_number: int | None,
-    definition_contexts: dict[str, set[int]] | None = None,
-    owner_counts: dict[str, int] | None = None,
-) -> tuple[tuple[SourceTreeAllowlistEntry, ...], tuple[SourceTreeAllowlistEntry, ...]]:
-    matches: list[SourceTreeAllowlistEntry] = []
-    ambiguous: list[SourceTreeAllowlistEntry] = []
-    for entry in _source_tree_allowlist_entries(
+    owner_ranges: dict[str, tuple[frozenset[int], ...]] | None = None,
+) -> tuple[
+    tuple[SourceTreeAllowedOccurrence, ...],
+    tuple[SourceTreeAllowedOccurrence, ...],
+    tuple[SourceTreeAllowedOccurrence, ...],
+]:
+    matches: list[SourceTreeAllowedOccurrence] = []
+    ambiguous: list[SourceTreeAllowedOccurrence] = []
+    stale_owner: list[SourceTreeAllowedOccurrence] = []
+    rule_id = f"{scan_group}:{rule}"
+    for entry in _source_tree_allowed_occurrence_entries(
         relative,
-        scan_group="retired_text",
+        scan_group=scan_group,
         rule=rule,
     ):
-        if entry.scan_group != "retired_occurrence":
-            continue
-        match = _source_tree_retired_occurrence_match_status(
+        match = _source_tree_allowed_occurrence_match_status(
             entry,
             relative=relative,
-            rule=rule,
+            rule_id=rule_id,
             line_text=line_text,
             line_number=line_number,
-            definition_contexts=definition_contexts or {},
-            owner_counts=owner_counts or {},
+            owner_ranges=owner_ranges or {},
         )
         if match == "match":
             matches.append(entry)
         elif match == "ambiguous_owner":
             ambiguous.append(entry)
-    return tuple(matches), tuple(ambiguous)
+        elif match == "stale_owner":
+            stale_owner.append(entry)
+    return tuple(matches), tuple(ambiguous), tuple(stale_owner)
 
 
 def normalize_repo_path(path: str | Path) -> str:
@@ -2271,18 +2668,17 @@ def is_allowed_stale_or_retired_fixture(path: str | Path, line: str) -> bool:
         return True
     if is_retired_path_policy_line(path, line):
         return True
-    allowlisted_negative_test = (
-        normalize_repo_path(path) in STALE_NEGATIVE_TEST_PATHS
-        or is_negative_test_allowlisted(path, "stale_governance_truth")
-        or is_negative_test_allowlisted(path, "retired_name")
+    allowlisted_negative_test = normalize_repo_path(
+        path
+    ) in STALE_NEGATIVE_TEST_PATHS or is_negative_test_allowlisted(
+        path, "stale_governance_truth"
     )
     if not allowlisted_negative_test:
         return False
     if any(marker in line for marker in stale_fixture_markers()):
         return True
     return any(
-        pattern.search(line)
-        for pattern in active_doc_forbidden_patterns().values()
+        pattern.search(line) for pattern in active_doc_forbidden_patterns().values()
     )
 
 
@@ -2543,7 +2939,6 @@ def iter_synthesized_string_findings(
         return []
     if allow_negative_tests and (
         is_negative_test_allowlisted(path, "stale_governance_truth")
-        or is_negative_test_allowlisted(path, "retired_name")
     ):
         return []
     active_patterns = patterns or synthesized_string_forbidden_patterns()
@@ -2928,9 +3323,7 @@ ALLOWED_VALIDATION_CHECKS = MANDATORY_VALIDATION_CHECKS | ADVISORY_VALIDATION_CH
 REVIEW_HANDOFF_EVIDENCE_NAME_TOKENS = frozenset(
     {"review", "subagent", "reconciliation"}
 )
-BUILDER_OWNED_VALIDATION_CHECKS = frozenset(
-    {"handoff_verify", "handoff_safety_scan"}
-)
+BUILDER_OWNED_VALIDATION_CHECKS = frozenset({"handoff_verify", "handoff_safety_scan"})
 
 
 def source_tree_scan_payload(
@@ -2987,9 +3380,12 @@ def source_tree_scan_from_clone(
 def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
     groups = source_tree_scan_groups(clone_dir)
     return [
+        *groups["allowance_contract"]["findings"],
         *groups["retired_text"]["findings"],
         *groups["python_symbols"]["findings"],
         *groups["synthesized_strings"]["findings"],
+        *groups["active_test_literals"]["findings"],
+        *groups["sensitive_negative_literals"]["findings"],
     ]
 
 
@@ -3034,7 +3430,13 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
             tracked_text_files=tracked_text_files,
         )
     )
+    allowance_contract_findings = source_tree_allowance_contract_findings(clone_dir)
     return {
+        "allowance_contract": {
+            "status": "PASS" if not allowance_contract_findings else "FAIL",
+            "finding_count": len(allowance_contract_findings),
+            "findings": allowance_contract_findings,
+        },
         "retired_text": {
             "status": "PASS" if not retired_text_findings else "FAIL",
             "finding_count": len(retired_text_findings),
@@ -3083,13 +3485,88 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
     }
 
 
+def source_tree_allowance_contract_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    tracked_paths = set(source_tree_tracked_paths(clone_dir))
+    patterns = source_tree_allowed_occurrence_patterns(repo_root=clone_dir)
+    for failure in validate_source_tree_allowed_occurrences(
+        SOURCE_TREE_ALLOWED_OCCURRENCES,
+        patterns_by_rule_id=patterns,
+    ):
+        findings.append(
+            {
+                "path": "",
+                "line": 0,
+                "rule": "source_tree_allowed_occurrence_contract",
+                "reason": failure,
+            }
+        )
+    for entry in SOURCE_TREE_ALLOWED_OCCURRENCES:
+        path = clone_dir / entry.path
+        if entry.path not in tracked_paths or not path.exists():
+            findings.append(
+                {
+                    "path": entry.path.as_posix(),
+                    "line": 0,
+                    "rule": entry.rule_id,
+                    "reason": "source_tree_allowed_occurrence_stale",
+                }
+            )
+            continue
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        owner_ranges = source_tree_python_owner_ranges(path)
+        if entry.py_owner:
+            ranges = owner_ranges.get(entry.py_owner, ())
+            if len(ranges) > 1:
+                findings.append(
+                    {
+                        "path": entry.path.as_posix(),
+                        "line": 0,
+                        "rule": entry.rule_id,
+                        "reason": "source_tree_allowed_occurrence_ambiguous_owner",
+                    }
+                )
+                continue
+            if len(ranges) == 0:
+                findings.append(
+                    {
+                        "path": entry.path.as_posix(),
+                        "line": 0,
+                        "rule": entry.rule_id,
+                        "reason": "source_tree_allowed_occurrence_stale",
+                    }
+                )
+                continue
+        exact_lines = {
+            line_number
+            for line_number, line in enumerate(lines, start=1)
+            if line.strip() == entry.exact_line
+        }
+        if entry.py_owner and entry.py_owner in owner_ranges:
+            exact_lines &= set(owner_ranges[entry.py_owner][0])
+        if not exact_lines:
+            findings.append(
+                {
+                    "path": entry.path.as_posix(),
+                    "line": 0,
+                    "rule": entry.rule_id,
+                    "reason": "source_tree_allowed_occurrence_stale",
+                }
+            )
+    return findings
+
+
 def source_tree_retired_governance_path_findings(
     clone_dir: Path,
     *,
     tracked_paths: tuple[Path, ...] | None = None,
 ) -> list[dict[str, object]]:
-    paths = tracked_paths if tracked_paths is not None else source_tree_tracked_paths(
-        clone_dir
+    paths = (
+        tracked_paths
+        if tracked_paths is not None
+        else source_tree_tracked_paths(clone_dir)
     )
     tracked = tuple(path.as_posix() for path in paths)
     return retired_governance_path_findings(clone_dir, tracked_paths=tracked)
@@ -3100,12 +3577,12 @@ def source_tree_retired_path_name_findings(
     *,
     tracked_paths: tuple[Path, ...] | None = None,
 ) -> list[dict[str, object]]:
-    paths = tracked_paths if tracked_paths is not None else source_tree_tracked_paths(
-        clone_dir
+    paths = (
+        tracked_paths
+        if tracked_paths is not None
+        else source_tree_tracked_paths(clone_dir)
     )
-    return iter_path_name_findings(
-        relative.as_posix() for relative in paths
-    )
+    return iter_path_name_findings(relative.as_posix() for relative in paths)
 
 
 def source_tree_python_symbol_findings(
@@ -3164,17 +3641,18 @@ def source_tree_retired_text_findings(
         else source_tree_tracked_text_files(clone_dir)
     )
     known_patterns = source_tree_forbidden_patterns()
+    scanned_files = set(files)
     occurrence_entries = {
         entry: 0
-        for entry in SOURCE_TREE_ALLOWLIST_ENTRIES
-        if entry.scan_group == "retired_occurrence"
-        and entry.rule_name in known_patterns
+        for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
+        if (
+            entry.path in scanned_files
+            and entry.rule_id.startswith("retired_text:")
+            and entry.rule_id.split(":", 1)[1] in known_patterns
+        )
     }
     for relative in files:
-        if source_tree_should_scan_retired_text(relative):
-            patterns = source_tree_forbidden_patterns()
-        else:
-            patterns = profile_runner_retired_patterns()
+        patterns = source_tree_retired_text_patterns_for(relative)
         path = clone_dir / relative
         if not path.exists():
             continue
@@ -3184,8 +3662,7 @@ def source_tree_retired_text_findings(
             relative,
             path,
         )
-        definition_contexts = source_tree_python_definition_contexts(path)
-        owner_counts = source_tree_python_definition_owner_counts(path)
+        owner_ranges = source_tree_python_owner_ranges(path)
         for rule, pattern in patterns.items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
@@ -3199,25 +3676,36 @@ def source_tree_retired_text_findings(
                     line_text=line_text,
                     line_number=line_number,
                     rule_definition_lines=rule_definition_lines,
-                    definition_contexts=definition_contexts,
                 ):
                     continue
-                matched_entries = _source_tree_matching_retired_occurrence_entries(
+                matched_entries = _source_tree_matching_allowed_occurrence_entries(
                     relative,
+                    scan_group="retired_text",
                     rule=rule,
                     line_text=line_text,
                     line_number=line_number,
-                    definition_contexts=definition_contexts,
-                    owner_counts=owner_counts,
+                    owner_ranges=owner_ranges,
                 )
-                matched_entries, ambiguous_entries = matched_entries
+                matched_entries, ambiguous_entries, stale_owner_entries = (
+                    matched_entries
+                )
                 if ambiguous_entries:
                     findings.append(
                         {
                             "path": relative.as_posix(),
                             "line": line_number,
                             "rule": rule,
-                            "reason": "source_tree_allowlist_ambiguous_owner",
+                            "reason": "source_tree_allowed_occurrence_ambiguous_owner",
+                        }
+                    )
+                    continue
+                if stale_owner_entries:
+                    findings.append(
+                        {
+                            "path": relative.as_posix(),
+                            "line": line_number,
+                            "rule": rule,
+                            "reason": "source_tree_allowed_occurrence_stale",
                         }
                     )
                     continue
@@ -3225,7 +3713,7 @@ def source_tree_retired_text_findings(
                     (
                         entry
                         for entry in matched_entries
-                        if occurrence_entries.get(entry, 0) < entry.max_occurrences
+                        if occurrence_entries.get(entry, 0) < 1
                     ),
                     None,
                 )
@@ -3238,7 +3726,7 @@ def source_tree_retired_text_findings(
                             "path": relative.as_posix(),
                             "line": line_number,
                             "rule": rule,
-                            "reason": "source_tree_allowlist_overmatched",
+                            "reason": "source_tree_allowed_occurrence_overmatched",
                         }
                     )
                     continue
@@ -3256,20 +3744,36 @@ def source_tree_retired_text_findings(
             {
                 "path": entry.path.as_posix(),
                 "line": 0,
-                "rule": entry.rule_name,
-                "reason": "source_tree_allowlist_stale",
+                "rule": entry.rule_id.split(":", 1)[1],
+                "reason": "source_tree_allowed_occurrence_stale",
             }
         )
     return findings
 
 
 def source_tree_should_scan_retired_text(relative: Path) -> bool:
-    if is_negative_test_allowlisted(relative.as_posix(), "retired_name"):
-        return False
     return any(
         relative == root or root in relative.parents
         for root in SOURCE_TREE_RETIRED_TERM_ROOTS
     )
+
+
+def source_tree_retired_text_patterns_for(
+    relative: Path,
+) -> dict[str, re.Pattern[str]]:
+    if source_tree_should_scan_retired_text(relative):
+        return source_tree_forbidden_patterns()
+    patterns = dict(profile_runner_retired_patterns())
+    if relative in SOURCE_TREE_RETIRED_TEXT_NEGATIVE_TEST_SOURCES:
+        source_tree_patterns = source_tree_forbidden_patterns()
+        patterns.update(
+            {
+                rule: pattern
+                for rule, pattern in source_tree_patterns.items()
+                if rule in SOURCE_TREE_NEGATIVE_TEST_RETIRED_TEXT_RULES
+            }
+        )
+    return patterns
 
 
 def source_tree_synthesized_string_scan_findings(
@@ -3289,7 +3793,7 @@ def source_tree_synthesized_string_scan_findings(
         if is_negative_test_allowlisted(
             relative.as_posix(),
             "stale_governance_truth",
-        ) or is_negative_test_allowlisted(relative.as_posix(), "retired_name"):
+        ):
             continue
         path = clone_dir / relative
         if not path.exists():
@@ -3300,7 +3804,6 @@ def source_tree_synthesized_string_scan_findings(
             relative,
             path,
         )
-        definition_contexts = source_tree_python_definition_contexts(path)
         findings.extend(
             source_tree_synthesized_string_findings(
                 relative,
@@ -3308,7 +3811,7 @@ def source_tree_synthesized_string_scan_findings(
                 lines,
                 skip_lines,
                 rule_definition_lines,
-                definition_contexts,
+                None,
                 scan_group="synthesized_strings",
                 patterns=source_tree_forbidden_patterns(),
             )
@@ -3329,7 +3832,7 @@ def source_tree_split_string_findings(
         lines,
         skip_lines,
         rule_definition_lines,
-        source_tree_python_definition_contexts(path),
+        None,
         scan_group="synthesized_strings",
         patterns=source_tree_forbidden_patterns(),
     )
@@ -3345,11 +3848,21 @@ def source_tree_synthesized_string_findings(
     *,
     scan_group: str,
     patterns: dict[str, re.Pattern[str]],
+    occurrence_entries: dict[SourceTreeAllowedOccurrence, int] | None = None,
+    report_stale: bool = True,
+    scan_modes: frozenset[str] | None = None,
 ) -> list[dict[str, object]]:
     if path.suffix != ".py":
         return []
     source = path.read_text(encoding="utf-8", errors="ignore")
     findings: list[dict[str, object]] = []
+    owner_ranges = source_tree_python_owner_ranges(path)
+    if occurrence_entries is None:
+        occurrence_entries = {
+            entry: 0
+            for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
+            if entry.path == relative and entry.rule_id.startswith(f"{scan_group}:")
+        }
     for item in iter_synthesized_string_findings(
         relative,
         source,
@@ -3357,18 +3870,66 @@ def source_tree_synthesized_string_findings(
         allow_negative_tests=False,
         skip_rule_definition=False,
     ):
+        if scan_modes is not None and str(item["scan_mode"]) not in scan_modes:
+            continue
         line_number = int(item["line"])
         if line_number in skip_lines:
             continue
         line_text = lines[line_number - 1].strip() if line_number else ""
-        if source_tree_path_allowed(
+        matched_entries, ambiguous_entries, stale_owner_entries = (
+            _source_tree_matching_allowed_occurrence_entries(
+                relative,
+                scan_group=scan_group,
+                rule=str(item["rule"]),
+                line_text=line_text,
+                line_number=line_number,
+                owner_ranges=owner_ranges,
+            )
+        )
+        if ambiguous_entries:
+            findings.append(
+                {
+                    **item,
+                    "path": relative.as_posix(),
+                    "reason": "source_tree_allowed_occurrence_ambiguous_owner",
+                }
+            )
+            continue
+        if stale_owner_entries:
+            findings.append(
+                {
+                    **item,
+                    "path": relative.as_posix(),
+                    "reason": "source_tree_allowed_occurrence_stale",
+                }
+            )
+            continue
+        available_entry = next(
+            (
+                entry
+                for entry in matched_entries
+                if occurrence_entries.get(entry, 0) < 1
+            ),
+            None,
+        )
+        if available_entry is not None:
+            occurrence_entries[available_entry] += 1
+            continue
+        if matched_entries:
+            findings.append(
+                {
+                    **item,
+                    "path": relative.as_posix(),
+                    "reason": "source_tree_allowed_occurrence_overmatched",
+                }
+            )
+            continue
+        if _source_tree_retired_rule_definition_allowed(
             relative,
-            scan_group=scan_group,
             rule=str(item["rule"]),
             line_text=line_text,
             line_number=line_number,
             rule_definition_lines=rule_definition_lines,
-            definition_contexts=definition_contexts,
         ):
             continue
         findings.append(
@@ -3377,6 +3938,18 @@ def source_tree_synthesized_string_findings(
                 "path": relative.as_posix(),
             }
         )
+    if report_stale:
+        for entry, count in occurrence_entries.items():
+            if count:
+                continue
+            findings.append(
+                {
+                    "path": entry.path.as_posix(),
+                    "line": 0,
+                    "rule": entry.rule_id.split(":", 1)[1],
+                    "reason": "source_tree_allowed_occurrence_stale",
+                }
+            )
     return findings
 
 
@@ -3416,8 +3989,21 @@ def source_tree_governance_rule_definition_lines(
         name = source_tree_definition_name(node)
         if name not in block_names:
             continue
-        start = getattr(node, "lineno", 0)
-        end = getattr(node, "end_lineno", start)
+        decorator_lines = [
+            getattr(decorator, "lineno", 0)
+            for decorator in getattr(node, "decorator_list", ())
+        ]
+        start = min(
+            [line for line in decorator_lines if line] or [getattr(node, "lineno", 0)]
+        )
+        decorator_end_lines = [
+            getattr(decorator, "end_lineno", getattr(decorator, "lineno", 0))
+            for decorator in getattr(node, "decorator_list", ())
+        ]
+        end = max(
+            [line for line in decorator_end_lines if line]
+            + [getattr(node, "end_lineno", start)]
+        )
         if start and end:
             lines.update(range(start, end + 1))
     return lines
@@ -3435,20 +4021,40 @@ def source_tree_definition_name(node: ast.AST) -> str | None:
     return None
 
 
-def source_tree_python_definition_contexts(path: Path) -> dict[str, set[int]]:
+def source_tree_python_owner_ranges(
+    path: Path,
+) -> dict[str, tuple[frozenset[int], ...]]:
     if path.suffix != ".py" or not path.exists():
         return {}
     try:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
     except SyntaxError:
         return {}
-    contexts: dict[str, set[int]] = {}
+    ranges: dict[str, list[frozenset[int]]] = {}
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            start = getattr(node, "lineno", 0)
-            end = getattr(node, "end_lineno", start)
-            if start and end:
-                contexts.setdefault(node.name, set()).update(range(start, end + 1))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            key = f"def:{node.name}"
+        elif isinstance(node, ast.ClassDef):
+            key = f"class:{node.name}"
+        else:
+            continue
+        decorator_lines = [
+            getattr(decorator, "lineno", 0)
+            for decorator in getattr(node, "decorator_list", ())
+        ]
+        start = min(
+            [line for line in decorator_lines if line] or [getattr(node, "lineno", 0)]
+        )
+        decorator_end_lines = [
+            getattr(decorator, "end_lineno", getattr(decorator, "lineno", 0))
+            for decorator in getattr(node, "decorator_list", ())
+        ]
+        end = max(
+            [line for line in decorator_end_lines if line]
+            + [getattr(node, "end_lineno", start)]
+        )
+        if start and end:
+            ranges.setdefault(key, []).append(frozenset(range(start, end + 1)))
     for node in ast.iter_child_nodes(tree):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
@@ -3456,42 +4062,35 @@ def source_tree_python_definition_contexts(path: Path) -> dict[str, set[int]]:
         start = getattr(node, "lineno", 0)
         end = getattr(node, "end_lineno", start)
         if name and start and end:
-            contexts.setdefault(name, set()).update(range(start, end + 1))
-    return contexts
-
-
-def source_tree_python_definition_owner_counts(path: Path) -> dict[str, int]:
-    if path.suffix != ".py" or not path.exists():
-        return {}
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
-    except SyntaxError:
-        return {}
-    counts: dict[str, int] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            counts[node.name] = counts.get(node.name, 0) + 1
-    for node in ast.iter_child_nodes(tree):
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-            continue
-        name = source_tree_definition_name(node)
-        if name:
-            counts[name] = counts.get(name, 0) + 1
-    return counts
-
-
-def source_tree_python_definition_owner_counts_from_contexts(
-    definition_contexts: dict[str, set[int]],
-) -> dict[str, int]:
-    return {name: 1 for name in definition_contexts}
+            ranges.setdefault(f"assign:{name}", []).append(
+                frozenset(range(start, end + 1))
+            )
+    return {key: tuple(value) for key, value in ranges.items()}
 
 
 def source_tree_allowlist_definition_lines(
     relative: Path,
     lines: list[str],
 ) -> set[int]:
-    del relative, lines
-    return set()
+    block_names = set(SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES.get(relative, set()))
+    if not block_names:
+        return set()
+    try:
+        tree = ast.parse("\n".join(lines) + "\n")
+    except SyntaxError:
+        return set()
+    result: set[int] = set()
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        name = source_tree_definition_name(node)
+        if name not in block_names:
+            continue
+        start = getattr(node, "lineno", 0)
+        end = getattr(node, "end_lineno", start)
+        if start and end:
+            result.update(range(start, end + 1))
+    return result
 
 
 def source_tree_active_test_literal_findings(
@@ -3520,23 +4119,78 @@ def source_tree_active_test_literal_findings(
             relative,
             path,
         )
-        definition_contexts = source_tree_python_definition_contexts(path)
-        for rule, pattern in source_tree_active_test_literal_patterns(
-            clone_dir
-        ).items():
+        owner_ranges = source_tree_python_owner_ranges(path)
+        occurrence_entries = {
+            entry: 0
+            for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
+            if entry.path == relative
+            and entry.rule_id.startswith("active_test_literals:")
+        }
+        active_patterns = source_tree_active_test_literal_patterns(clone_dir)
+        for rule, pattern in active_patterns.items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
                     continue
                 if not pattern.search(line):
                     continue
-                if source_tree_path_allowed(
+                line_text = line.strip()
+                matched_entries, ambiguous_entries, stale_owner_entries = (
+                    _source_tree_matching_allowed_occurrence_entries(
+                        relative,
+                        scan_group="active_test_literals",
+                        rule=rule,
+                        line_text=line_text,
+                        line_number=line_number,
+                        owner_ranges=owner_ranges,
+                    )
+                )
+                if ambiguous_entries:
+                    findings.append(
+                        {
+                            "path": relative.as_posix(),
+                            "line": line_number,
+                            "rule": rule,
+                            "reason": "source_tree_allowed_occurrence_ambiguous_owner",
+                        }
+                    )
+                    continue
+                if stale_owner_entries:
+                    findings.append(
+                        {
+                            "path": relative.as_posix(),
+                            "line": line_number,
+                            "rule": rule,
+                            "reason": "source_tree_allowed_occurrence_stale",
+                        }
+                    )
+                    continue
+                available_entry = next(
+                    (
+                        entry
+                        for entry in matched_entries
+                        if occurrence_entries.get(entry, 0) < 1
+                    ),
+                    None,
+                )
+                if available_entry is not None:
+                    occurrence_entries[available_entry] += 1
+                    continue
+                if matched_entries:
+                    findings.append(
+                        {
+                            "path": relative.as_posix(),
+                            "line": line_number,
+                            "rule": rule,
+                            "reason": "source_tree_allowed_occurrence_overmatched",
+                        }
+                    )
+                    continue
+                if _source_tree_retired_rule_definition_allowed(
                     relative,
-                    scan_group="active_test_literals",
                     rule=rule,
-                    line_text=line.strip(),
+                    line_text=line_text,
                     line_number=line_number,
                     rule_definition_lines=rule_definition_lines,
-                    definition_contexts=definition_contexts,
                 ):
                     continue
                 findings.append(
@@ -3553,16 +4207,26 @@ def source_tree_active_test_literal_findings(
                 lines,
                 skip_lines,
                 rule_definition_lines,
-                definition_contexts,
+                None,
                 scan_group="active_test_literals",
-                patterns=source_tree_active_test_literal_patterns(clone_dir),
+                patterns=active_patterns,
+                occurrence_entries=occurrence_entries,
+                report_stale=False,
+                scan_modes=frozenset({"ast_static_string", "token_static_string"}),
             )
         )
+        for entry, count in occurrence_entries.items():
+            if count:
+                continue
+            findings.append(
+                {
+                    "path": entry.path.as_posix(),
+                    "line": 0,
+                    "rule": entry.rule_id.split(":", 1)[1],
+                    "reason": "source_tree_allowed_occurrence_stale",
+                }
+            )
     return findings
-
-
-def source_tree_active_test_literal_path_allowed(relative: Path) -> bool:
-    return bool(SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST.get(relative))
 
 
 def source_tree_governance_truth_findings(
@@ -3730,21 +4394,78 @@ def source_tree_sensitive_negative_literal_findings(
             relative,
             path,
         )
-        definition_contexts = source_tree_python_definition_contexts(path)
-        for rule, pattern in source_tree_sensitive_negative_patterns().items():
+        owner_ranges = source_tree_python_owner_ranges(path)
+        occurrence_entries = {
+            entry: 0
+            for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
+            if entry.path == relative
+            and entry.rule_id.startswith("sensitive_negative_literals:")
+        }
+        sensitive_patterns = source_tree_sensitive_negative_patterns()
+        for rule, pattern in sensitive_patterns.items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
                     continue
                 if not pattern.search(line):
                     continue
-                if source_tree_path_allowed(
+                line_text = line.strip()
+                matched_entries, ambiguous_entries, stale_owner_entries = (
+                    _source_tree_matching_allowed_occurrence_entries(
+                        relative,
+                        scan_group="sensitive_negative_literals",
+                        rule=rule,
+                        line_text=line_text,
+                        line_number=line_number,
+                        owner_ranges=owner_ranges,
+                    )
+                )
+                if ambiguous_entries:
+                    findings.append(
+                        {
+                            "path": relative.as_posix(),
+                            "line": line_number,
+                            "rule": rule,
+                            "reason": "source_tree_allowed_occurrence_ambiguous_owner",
+                        }
+                    )
+                    continue
+                if stale_owner_entries:
+                    findings.append(
+                        {
+                            "path": relative.as_posix(),
+                            "line": line_number,
+                            "rule": rule,
+                            "reason": "source_tree_allowed_occurrence_stale",
+                        }
+                    )
+                    continue
+                available_entry = next(
+                    (
+                        entry
+                        for entry in matched_entries
+                        if occurrence_entries.get(entry, 0) < 1
+                    ),
+                    None,
+                )
+                if available_entry is not None:
+                    occurrence_entries[available_entry] += 1
+                    continue
+                if matched_entries:
+                    findings.append(
+                        {
+                            "path": relative.as_posix(),
+                            "line": line_number,
+                            "rule": rule,
+                            "reason": "source_tree_allowed_occurrence_overmatched",
+                        }
+                    )
+                    continue
+                if _source_tree_retired_rule_definition_allowed(
                     relative,
-                    scan_group="sensitive_negative_literals",
                     rule=rule,
-                    line_text=line.strip(),
+                    line_text=line_text,
                     line_number=line_number,
                     rule_definition_lines=rule_definition_lines,
-                    definition_contexts=definition_contexts,
                 ):
                     continue
                 findings.append(
@@ -3761,11 +4482,25 @@ def source_tree_sensitive_negative_literal_findings(
                 lines,
                 skip_lines,
                 rule_definition_lines,
-                definition_contexts,
+                None,
                 scan_group="sensitive_negative_literals",
-                patterns=source_tree_sensitive_negative_patterns(),
+                patterns=sensitive_patterns,
+                occurrence_entries=occurrence_entries,
+                report_stale=False,
+                scan_modes=frozenset({"ast_static_string", "token_static_string"}),
             )
         )
+        for entry, count in occurrence_entries.items():
+            if count:
+                continue
+            findings.append(
+                {
+                    "path": entry.path.as_posix(),
+                    "line": 0,
+                    "rule": entry.rule_id.split(":", 1)[1],
+                    "reason": "source_tree_allowed_occurrence_stale",
+                }
+            )
     return findings
 
 
@@ -3802,18 +4537,17 @@ def source_tree_path_allowed(
     rule_definition_lines: set[int] | None = None,
     definition_contexts: dict[str, set[int]] | None = None,
 ) -> bool:
+    del definition_contexts
     in_governance_rule_definition = (
         line_number is not None
         and rule_definition_lines is not None
         and line_number in rule_definition_lines
     )
-    if scan_group in {"retired_text", "synthesized_strings", "retired_terms"}:
-        if (
-            rule is not None
-            and rule.startswith("retired_result_")
-            and relative in RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES
-        ):
-            return True
+    if scan_group == "sensitive_negative_literals":
+        return False
+    if scan_group in {"synthesized_strings", "active_test_literals"}:
+        return False
+    if scan_group in {"retired_text", "retired_terms"}:
         if rule is None or line_text is None:
             return False
         for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", line_text):
@@ -3821,41 +4555,11 @@ def source_tree_path_allowed(
                 return True
         if is_retired_path_policy_line(relative, line_text):
             return True
-        if _source_tree_retired_occurrence_allowed(
-            relative,
-            rule=rule,
-            line_text=line_text,
-            line_number=line_number,
-            rule_definition_lines=rule_definition_lines,
-            definition_contexts=definition_contexts,
-        ):
-            return True
         allowed_rules = SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST.get(
             relative,
             set(),
         )
         return rule in allowed_rules and in_governance_rule_definition
-    if scan_group == "active_test_literals":
-        allowed_rules = SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST.get(relative, set())
-        if rule not in allowed_rules:
-            return False
-        if relative in SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS:
-            return True
-        return in_governance_rule_definition
-    if scan_group == "sensitive_negative_literals":
-        allowed = SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST.get(
-            relative,
-            set(),
-        )
-        if isinstance(allowed, set):
-            if rule not in allowed:
-                return False
-            if relative.parts[:1] == ("tests",):
-                return True
-            return in_governance_rule_definition
-        if rule is None or line_text is None:
-            return False
-        return any(term in line_text for term in allowed.get(rule, set()))
     raise ValueError(f"unsupported_source_tree_scan_group: {scan_group}")
 
 
@@ -4018,8 +4722,7 @@ def validation_evidence_contract_failures(
         extra = sorted(set(row) - VALIDATION_ROW_KEYS)
         if extra:
             failures.append(
-                f"validation_evidence_row_unapproved_field: {index}:"
-                + ",".join(extra)
+                f"validation_evidence_row_unapproved_field: {index}:" + ",".join(extra)
             )
         for key in ("name", "status", "evidence"):
             if key not in row:
@@ -4034,9 +4737,7 @@ def validation_evidence_contract_failures(
             failures.append(f"validation_evidence_name_invalid: {index}")
         else:
             if name in seen:
-                failures.append(
-                    f"validation_evidence_duplicate_check: {name}"
-                )
+                failures.append(f"validation_evidence_duplicate_check: {name}")
             seen.add(name)
         if "status" in row:
             status = row.get("status")
@@ -4051,8 +4752,7 @@ def validation_evidence_contract_failures(
     if require_mandatory:
         missing = sorted(MANDATORY_VALIDATION_CHECKS - seen)
         failures.extend(
-            f"validation_evidence_mandatory_check_missing: {name}"
-            for name in missing
+            f"validation_evidence_mandatory_check_missing: {name}" for name in missing
         )
     return failures
 

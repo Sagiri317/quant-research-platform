@@ -92,6 +92,19 @@ def test_governance_allows_sanitization_negative_fixtures_only() -> None:
     )
 
 
+def test_governance_only_allows_exact_policy_literal_fixture_only() -> None:
+    module = _load_governance_module()
+
+    assert module.is_governance_only_allowed_path(
+        Path("."),
+        "tests/policy/test_share_safety_runtime_edges.py",
+    )
+    assert not module.is_governance_only_allowed_path(
+        Path("."),
+        "tests/policy/test_share_safety.py",
+    )
+
+
 def test_active_doc_scan_collects_non_empty_clean_tree_file_set() -> None:
     module = _load_governance_module()
     contract = _load_contract_module()
@@ -479,18 +492,16 @@ def test_broad_retired_occurrence_allowlist_cannot_hide_literal(
         encoding="utf-8",
     )
     with pytest.raises(TypeError):
-        contract.SourceTreeAllowlistEntry(
+        contract.SourceTreeAllowedOccurrence(
             path=Path("tests/agents/test_verify_governance.py"),
-            scan_group="retired_occurrence",
-            rule_name=rule.name,
-            literal=rule.example,
-            allowed_context=(
-                f"python_ast:test_func;line_regex:^.+{rule.example}.+$"
-            ),
+            rule_id=f"retired_text:{rule.name}",
+            exact_line=f'x = "prefix {rule.example} suffix"',
+            allowed_context=(f"python_ast:test_func;line_regex:^.+{rule.example}.+$"),
             owner="governance-negative-tests",
             rationale="old DSL must not be constructible",
             lifecycle="test-only",
             covered_by=("tests/agents/test_verify_governance.py",),
+            py_owner="def:test_func",
         )
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
@@ -520,23 +531,20 @@ def test_retired_occurrence_duplicate_exact_line_overmatches(
         + "\n",
         encoding="utf-8",
     )
-    entry = contract.SourceTreeAllowlistEntry(
+    entry = contract.SourceTreeAllowedOccurrence(
         path=Path("tests/agents/test_verify_governance.py"),
-        scan_group="retired_occurrence",
-        rule_name=rule.name,
-        literal=rule.example,
-        context_kind="python_exact_line",
-        ast_owner="test_func",
+        rule_id=f"retired_text:{rule.name}",
         exact_line=exact_line,
         owner="governance-negative-tests",
         rationale="proves duplicate exact retired occurrence is overmatched",
         lifecycle="test-only",
         covered_by=("tests/agents/test_verify_governance.py",),
+        py_owner="def:test_func",
     )
     monkeypatch.setattr(
         contract,
-        "SOURCE_TREE_ALLOWLIST_ENTRIES",
-        contract.SOURCE_TREE_ALLOWLIST_ENTRIES + (entry,),
+        "SOURCE_TREE_ALLOWED_OCCURRENCES",
+        contract.SOURCE_TREE_ALLOWED_OCCURRENCES + (entry,),
     )
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
@@ -547,7 +555,7 @@ def test_retired_occurrence_duplicate_exact_line_overmatches(
         finding["path"] == "tests/agents/test_verify_governance.py"
         and finding["line"] == 3
         and finding["rule"] == rule.name
-        and finding.get("reason") == "source_tree_allowlist_overmatched"
+        and finding.get("reason") == "source_tree_allowed_occurrence_overmatched"
         for finding in findings
     ), findings
 
@@ -562,28 +570,24 @@ def test_retired_occurrence_stale_exact_line_is_reported(
     path = repo / "tests" / "agents" / "test_verify_governance.py"
     path.parent.mkdir(parents=True)
     path.write_text(
-        "\n".join(["def test_func():", f'    x = "{rule.example}"'])
-        + "\n",
+        "\n".join(["def test_func():", f'    x = "{rule.example}"']) + "\n",
         encoding="utf-8",
     )
     stale_line = f'y = "{rule.example}"'
-    stale = contract.SourceTreeAllowlistEntry(
+    stale = contract.SourceTreeAllowedOccurrence(
         path=Path("tests/agents/test_verify_governance.py"),
-        scan_group="retired_occurrence",
-        rule_name=rule.name,
-        literal=rule.example,
-        context_kind="python_exact_line",
-        ast_owner="test_func",
+        rule_id=f"retired_text:{rule.name}",
         exact_line=stale_line,
         owner="governance-negative-tests",
         rationale="proves stale exact retired occurrence allowlist is reported",
         lifecycle="test-only",
         covered_by=("tests/agents/test_verify_governance.py",),
+        py_owner="def:test_func",
     )
     monkeypatch.setattr(
         contract,
-        "SOURCE_TREE_ALLOWLIST_ENTRIES",
-        contract.SOURCE_TREE_ALLOWLIST_ENTRIES + (stale,),
+        "SOURCE_TREE_ALLOWED_OCCURRENCES",
+        contract.SOURCE_TREE_ALLOWED_OCCURRENCES + (stale,),
     )
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
@@ -593,7 +597,7 @@ def test_retired_occurrence_stale_exact_line_is_reported(
     assert any(
         finding["path"] == "tests/agents/test_verify_governance.py"
         and finding["rule"] == rule.name
-        and finding.get("reason") == "source_tree_allowlist_stale"
+        and finding.get("reason") == "source_tree_allowed_occurrence_stale"
         for finding in findings
     ), findings
 
@@ -739,8 +743,7 @@ def test_structured_key_gate_fails_retired_keys_and_allows_values(
 
     for retired_key in retired_keys:
         assert any(
-            "config.json" in error and retired_key in error
-            for error in result.errors
+            "config.json" in error and retired_key in error for error in result.errors
         )
     assert not any("allowed.json" in error for error in result.errors)
 

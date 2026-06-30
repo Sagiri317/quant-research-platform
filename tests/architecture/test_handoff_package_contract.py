@@ -52,6 +52,7 @@ def test_handoff_package_contract_uses_evidence_mode_outputs(
     assert "handoff_generation.json" not in builder
     assert "handoff_generation.json" not in verifier
     source_tree_scan = live_source_tree_scan
+    assert source_tree_scan["allowance_contract"]["findings"] == []
     assert source_tree_scan["retired_text"]["findings"] == []
     assert source_tree_scan["retired_governance_paths"]["findings"] == []
     assert source_tree_scan["retired_path_names"]["findings"] == []
@@ -74,6 +75,29 @@ def test_handoff_package_contract_uses_evidence_mode_outputs(
     assert "FORBIDDEN_PATH_SEGMENTS =" not in verifier
     assert "PACKAGE_FORBIDDEN_PATH_PARTS" in verifier
     assert "BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES" in verifier
+
+
+def test_handoff_verifier_requires_allowance_contract_group(
+    live_source_tree_scan: dict[str, dict[str, object]],
+) -> None:
+    verifier = _load_handoff_verifier()
+    payload = {
+        "schema_id": "qrp-source-tree-scan-result",
+        "status": "PASS",
+        "scanned_head": "abc123",
+        "expected_head": "abc123",
+        "scanned_tree": "final-branch.bundle clone",
+        "finding_count": 0,
+        "findings": [],
+        "scan_groups": dict(live_source_tree_scan),
+    }
+    payload["scan_groups"].pop("allowance_contract", None)
+    sidecar = {"final_head": "abc123"}
+
+    failures = verifier.verify_source_tree_scan_evidence(payload, sidecar)
+
+    assert "source_tree_scan_groups_unexpected" in failures
+    assert "source_tree_scan_group_missing: allowance_contract" in failures
 
 
 def test_pr_closure_only_entries_are_not_required_for_evidence_mode() -> None:
@@ -145,7 +169,7 @@ def test_source_tree_scan_rule_allowlist_is_definition_scoped() -> None:
 def test_source_tree_allowlist_entries_have_owner_metadata_and_coverage() -> None:
     contract = _load_governance_contract()
 
-    entries = contract.SOURCE_TREE_ALLOWLIST_ENTRIES
+    entries = contract.SOURCE_TREE_ALLOWED_OCCURRENCES
 
     assert entries
     for entry in entries:
@@ -163,13 +187,14 @@ def test_source_tree_allowlist_entries_have_owner_metadata_and_coverage() -> Non
                 assert f"def {test_name}" in text
 
 
-def test_source_tree_allowlist_does_not_reference_retired_runtime_privacy_path(
-) -> None:
+def test_source_tree_allowlist_does_not_reference_retired_runtime_privacy_path() -> (
+    None
+):
     contract = _load_governance_contract()
 
     assert not any(
         entry.path == Path("src/quant_research_platform/runtime/privacy.py")
-        for entry in contract.SOURCE_TREE_ALLOWLIST_ENTRIES
+        for entry in contract.SOURCE_TREE_ALLOWED_OCCURRENCES
     )
 
 
@@ -177,18 +202,18 @@ def test_share_safety_retired_inventory_is_owner_allowlisted() -> None:
     contract = _load_governance_contract()
     share_safety = Path("src/quant_research_platform/policy/share_safety.py")
     entries = {
-        (entry.path, entry.rule_name, entry.owner)
-        for entry in contract.SOURCE_TREE_ALLOWLIST_ENTRIES
+        (entry.path, entry.rule_id, entry.owner)
+        for entry in contract.SOURCE_TREE_ALLOWED_OCCURRENCES
     }
 
     assert (
         share_safety,
-        "forbidden_private_real",
+        "retired_text:forbidden_private_real",
         "share-safety-policy",
     ) in entries
     assert (
         share_safety,
-        "forbidden_private_data",
+        "retired_text:forbidden_private_data",
         "share-safety-policy",
     ) in entries
 
@@ -232,7 +257,6 @@ def test_source_tree_allowlist_facts_are_structured_not_bare_dicts() -> None:
     bare_fact_sources: list[str] = []
     target_names = {
         "SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST",
-        "SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST",
     }
 
     for node in ast.walk(tree):
@@ -255,7 +279,7 @@ def test_structured_source_tree_allowlist_coverage_points_to_current_tests() -> 
     contract = _load_governance_contract()
     covered = {
         coverage
-        for entry in contract.SOURCE_TREE_ALLOWLIST_ENTRIES
+        for entry in contract.SOURCE_TREE_ALLOWED_OCCURRENCES
         for coverage in entry.covered_by
     }
 
@@ -324,13 +348,10 @@ def test_owner_approved_negative_fixture_uses_structured_allowlist() -> None:
     contract = _load_governance_contract()
     relative = Path("tests/architecture/test_retired_surface_absent.py")
 
-    entry = next(
-        item
-        for item in contract.SOURCE_TREE_ALLOWLIST_ENTRIES
-        if item.path == relative and item.rule_name == "forbidden_render_pr_body"
+    assert (
+        "forbidden_render_pr_body"
+        in contract.SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST[relative]
     )
-
-    assert entry.owner == "architecture-governance-negative-tests"
     assert contract.source_tree_path_allowed(
         relative,
         scan_group="retired_text",

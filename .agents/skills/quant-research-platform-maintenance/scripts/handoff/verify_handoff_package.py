@@ -1076,10 +1076,9 @@ def verify_generation_evidence(
         failures.append("generation_evidence_validation_status_invalid")
     else:
         status_summary = sidecar.get("status_summary")
-        if (
-            isinstance(status_summary, dict)
-            and payload.get("validation_status") != status_summary.get("validation")
-        ):
+        if isinstance(status_summary, dict) and payload.get(
+            "validation_status"
+        ) != status_summary.get("validation"):
             failures.append("generation_validation_status_sidecar_mismatch")
         validation_status = validation_status_from_archive(archive)
         if (
@@ -1157,9 +1156,7 @@ def verify_smoke_compare_status(payload: dict[str, object]) -> list[str]:
         if status == "PASS":
             failures.extend(verify_pass_smoke_compare_result(row, index))
         elif "portable_summary" in row:
-            summary_reason = evidence_json_value_unsafe_reason(
-                row["portable_summary"]
-            )
+            summary_reason = evidence_json_value_unsafe_reason(row["portable_summary"])
             if summary_reason is not None:
                 failures.append(
                     f"smoke_compare_status_portable_summary_unsafe: "
@@ -1237,9 +1234,7 @@ def valid_source_artifact_path(value: str) -> bool:
         PORTABLE_SOURCE_RUN_ID_RE.fullmatch(run_id) is not None
         and PORTABLE_SOURCE_ARTIFACT_RE.fullmatch(artifact_file) is not None
         and portable_source_segment_is_windows_safe(run_id)
-        and portable_source_segment_is_windows_safe(
-            artifact_file.removesuffix(".json")
-        )
+        and portable_source_segment_is_windows_safe(artifact_file.removesuffix(".json"))
     )
 
 
@@ -1247,8 +1242,7 @@ def portable_source_segment_is_windows_safe(value: str) -> bool:
     if value.endswith(".") or ".." in value:
         return False
     return all(
-        part.upper() not in WINDOWS_RESERVED_PATH_PARTS
-        for part in value.split(".")
+        part.upper() not in WINDOWS_RESERVED_PATH_PARTS for part in value.split(".")
     )
 
 
@@ -1281,18 +1275,14 @@ def verify_smoke_compare_portable_summary(
             f"smoke_compare_status_portable_summary_missing: {index}:status"
         )
     if "kind" in summary:
-        failures.append(
-            f"smoke_compare_status_portable_summary_kind_present: {index}"
-        )
+        failures.append(f"smoke_compare_status_portable_summary_kind_present: {index}")
     summary_type = summary.get("summary_type")
     if not isinstance(summary_type, str) or not summary_type.strip():
         failures.append(
             f"smoke_compare_status_portable_summary_missing: {index}:summary_type"
         )
     elif summary_type not in PORTABLE_STATUS_SUMMARY_TYPES:
-        failures.append(
-            f"smoke_compare_status_portable_summary_type_invalid: {index}"
-        )
+        failures.append(f"smoke_compare_status_portable_summary_type_invalid: {index}")
     if isinstance(status, str) and status != "":
         if status not in VALID_STATUS_TOKENS:
             failures.append(
@@ -1309,8 +1299,7 @@ def verify_smoke_compare_portable_summary(
     summary_reason = evidence_json_value_unsafe_reason(summary)
     if summary_reason is not None:
         failures.append(
-            f"smoke_compare_status_portable_summary_unsafe: "
-            f"{index}:{summary_reason}"
+            f"smoke_compare_status_portable_summary_unsafe: {index}:{summary_reason}"
         )
     return failures
 
@@ -1340,6 +1329,7 @@ def verify_source_tree_scan_evidence(
         failures.append("source_tree_scan_groups_invalid")
     else:
         expected_groups = {
+            "allowance_contract",
             "retired_text",
             "retired_governance_paths",
             "retired_path_names",

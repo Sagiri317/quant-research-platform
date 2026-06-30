@@ -100,7 +100,14 @@ def test_stock_code_detector_does_not_flag_hash_payloads() -> None:
     assert sanitize_shared_text(text) == text
 
 
-@pytest.mark.parametrize("text", ["830000.BJ", "430047.BJ", "600000.SH"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "830000.BJ",
+        "430047.BJ",
+        "600000.SH",
+    ],
+)
 def test_stock_code_detector_covers_a_share_exchange_suffixes(text: str) -> None:
     assert unsafe_for_share_reason(text) == "stock_code_sample"
     assert text not in sanitize_shared_text(text)

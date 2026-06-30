@@ -78,6 +78,10 @@ GOVERNANCE_TOOLING_EXCEPTIONS = {
     "tests/tools/test_run_profile.py",
 }
 
+GOVERNANCE_TEST_EXCEPTIONS = {
+    "tests/policy/test_share_safety_runtime_edges.py",
+}
+
 REPORTS_EVIDENCE_RENDERER_EXCEPTIONS = {
     "src/quant_research_platform/reports/verification_summary.py",
 }
@@ -142,6 +146,7 @@ IGNORED_STATE_PATH_PARTS = {
     ".ruff_cache",
     "__pycache__",
 }
+
 
 @dataclass
 class Result:
@@ -290,6 +295,8 @@ def is_governance_only_allowed_path(
         return True
     if path in GOVERNANCE_TOOLING_EXCEPTIONS:
         return True
+    if path in GOVERNANCE_TEST_EXCEPTIONS:
+        return True
     if path in REPORTS_EVIDENCE_RENDERER_EXCEPTIONS:
         return True
     if path in GOVERNANCE_ONLY_SOURCE_TEXT_EXCEPTIONS:
@@ -396,9 +403,7 @@ def check_synthesized_strings(
             continue
         if is_governance_rule_definition_path(rel):
             continue
-        if is_negative_test_allowlisted(rel, "stale_governance_truth") or (
-            is_negative_test_allowlisted(rel, "retired_name")
-        ):
+        if is_negative_test_allowlisted(rel, "stale_governance_truth"):
             continue
         try:
             source = path.read_text(encoding="utf-8")
