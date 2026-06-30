@@ -80,10 +80,15 @@ class SourceTreeAllowlistEntry:
     rule_name: str
     literal: str = ""
     pattern_name: str = ""
+    allowed_context: str = ""
     owner: str = ""
     rationale: str = ""
     lifecycle: str = ""
     covered_by: tuple[str, ...] = ()
+
+    @property
+    def rule_id(self) -> str:
+        return self.rule_name
 
 
 @dataclass(frozen=True)
@@ -1056,18 +1061,36 @@ def _source_tree_allowlist_entry(
     covered_by: tuple[str, ...],
     literal: str = "",
     pattern_name: str = "",
+    allowed_context: str = "",
 ) -> SourceTreeAllowlistEntry:
+    resolved_allowed_context = allowed_context or _default_allowed_context(
+        scan_group=scan_group,
+        literal=literal,
+    )
     return SourceTreeAllowlistEntry(
         path=path,
         scan_group=scan_group,
         rule_name=rule_name,
         literal=literal,
         pattern_name=pattern_name or rule_name,
+        allowed_context=resolved_allowed_context,
         owner=owner,
         rationale=rationale,
         lifecycle=lifecycle,
         covered_by=covered_by,
     )
+
+
+def _default_allowed_context(*, scan_group: str, literal: str) -> str:
+    if scan_group == "retired_rule_definition":
+        return "governance_rule_definition"
+    if scan_group in {"active_test_literals", "active_test_literal_path"}:
+        return "registered_active_fixture"
+    if scan_group == "sensitive_negative_literals":
+        return "registered_sensitive_fixture"
+    if literal:
+        return f"line_regex:{re.escape(literal.strip())}"
+    return "registered_fixture"
 
 
 SOURCE_TREE_ALLOWLIST_ENTRIES = (
@@ -1363,6 +1386,10 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             scan_group="retired_occurrence",
             rule_name=rule.name,
             literal=rule.example,
+            allowed_context=(
+                r"line_regex:^monkeypatch\.setenv\("
+                r"\"QRP_MANAGED_REPO_ROOTS\", \"forge-managed-root\"\)$"
+            ),
             owner="governance-negative-tests",
             rationale="forged environment negative test proves the env is ignored",
             lifecycle="current negative fixture; update with profile runner rule",
@@ -1373,6 +1400,23 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
         )
         for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
         if rule.example == "QRP_MANAGED_REPO_ROOTS"
+    ),
+    _source_tree_allowlist_entry(
+        path=Path("docs/architecture/governance.md"),
+        scan_group="retired_occurrence",
+        rule_name="profile_runner_retired_qrp_managed_repo_roots",
+        literal="QRP_MANAGED_REPO_ROOTS",
+        allowed_context=(
+            r"line_regex:^Allowed retired profile runner env fixture: "
+            r"`QRP_MANAGED_REPO_ROOTS`\.$"
+        ),
+        owner="architecture-governance-docs",
+        rationale="documents the exact retired env fixture used by scanner tests",
+        lifecycle="remove if the profile runner retired env rule is removed",
+        covered_by=(
+            "tests/architecture/test_governance_contract_rg_gate.py::"
+            "test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context",
+        ),
     ),
     *(
         _source_tree_allowlist_entry(
@@ -1740,6 +1784,103 @@ SOURCE_TREE_ALLOWLIST_ENTRIES += tuple(
 SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST = (
     _source_tree_grouped_rule_allowlist("sensitive_negative_literals")
 )
+
+
+def validate_source_tree_allowlist_entries(
+    entries: tuple[SourceTreeAllowlistEntry, ...],
+) -> list[str]:
+    failures: list[str] = []
+    for index, entry in enumerate(entries):
+        prefix = f"source_tree_allowlist_entry_invalid:{index}:{entry.path}"
+        if not str(entry.rule_id).strip():
+            failures.append(f"{prefix}:source_tree_allowlist_missing_rule_id")
+        if not str(entry.owner).strip():
+            failures.append(f"{prefix}:source_tree_allowlist_missing_owner")
+        if not str(entry.rationale).strip():
+            failures.append(f"{prefix}:source_tree_allowlist_missing_rationale")
+        if not entry.covered_by:
+            failures.append(f"{prefix}:source_tree_allowlist_missing_covered_by")
+        if not str(entry.allowed_context).strip():
+            failures.append(f"{prefix}:source_tree_allowlist_missing_allowed_context")
+        if entry.scan_group in {"retired_occurrence", "retired_rule_definition"}:
+            if not entry.literal and entry.scan_group == "retired_occurrence":
+                failures.append(f"{prefix}:source_tree_allowlist_missing_literal")
+    return failures
+
+
+def _source_tree_allowlist_context_matches(
+    entry: SourceTreeAllowlistEntry,
+    *,
+    line_text: str,
+    line_number: int | None,
+    rule_definition_lines: set[int] | None,
+) -> bool:
+    context = entry.allowed_context.strip()
+    if context == "governance_rule_definition":
+        return (
+            line_number is not None
+            and rule_definition_lines is not None
+            and line_number in rule_definition_lines
+        )
+    if context in {"registered_active_fixture", "registered_sensitive_fixture"}:
+        return True
+    if context.startswith("line_regex:"):
+        pattern = context.removeprefix("line_regex:")
+        return re.search(pattern, line_text) is not None
+    return False
+
+
+def _source_tree_allowlist_entries(
+    relative: Path,
+    *,
+    scan_group: str,
+    rule: str,
+) -> tuple[SourceTreeAllowlistEntry, ...]:
+    if scan_group in {"retired_text", "synthesized_strings", "retired_terms"}:
+        entry_groups = {"retired_occurrence", "retired_rule_definition"}
+    else:
+        entry_groups = {scan_group}
+    return tuple(
+        entry
+        for entry in SOURCE_TREE_ALLOWLIST_ENTRIES
+        if entry.path == relative
+        and entry.rule_name == rule
+        and entry.scan_group in entry_groups
+    )
+
+
+def _source_tree_retired_occurrence_allowed(
+    relative: Path,
+    *,
+    rule: str,
+    line_text: str,
+    line_number: int | None,
+    rule_definition_lines: set[int] | None,
+) -> bool:
+    for entry in _source_tree_allowlist_entries(
+        relative,
+        scan_group="retired_text",
+        rule=rule,
+    ):
+        if entry.scan_group == "retired_rule_definition":
+            if _source_tree_allowlist_context_matches(
+                entry,
+                line_text=line_text,
+                line_number=line_number,
+                rule_definition_lines=rule_definition_lines,
+            ):
+                return True
+            continue
+        if not entry.literal or entry.literal not in line_text:
+            continue
+        if _source_tree_allowlist_context_matches(
+            entry,
+            line_text=line_text,
+            line_number=line_number,
+            rule_definition_lines=rule_definition_lines,
+        ):
+            return True
+    return False
 
 
 def normalize_repo_path(path: str | Path) -> str:
@@ -2743,6 +2884,7 @@ def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
 def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
     tracked_paths = source_tree_tracked_paths(clone_dir)
     tracked_text_files = source_tree_tracked_text_files_from_paths(tracked_paths)
+    allowlist_contract_findings = source_tree_allowlist_contract_findings()
     retired_text_findings = source_tree_retired_text_findings(
         clone_dir,
         tracked_text_files=tracked_text_files,
@@ -2782,6 +2924,11 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
         )
     )
     return {
+        "allowlist_contract": {
+            "status": "PASS" if not allowlist_contract_findings else "FAIL",
+            "finding_count": len(allowlist_contract_findings),
+            "findings": allowlist_contract_findings,
+        },
         "retired_text": {
             "status": "PASS" if not retired_text_findings else "FAIL",
             "finding_count": len(retired_text_findings),
@@ -2828,6 +2975,21 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
             "findings": sensitive_negative_literal_findings,
         },
     }
+
+
+def source_tree_allowlist_contract_findings() -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for failure in validate_source_tree_allowlist_entries(
+        SOURCE_TREE_ALLOWLIST_ENTRIES,
+    ):
+        findings.append(
+            {
+                "path": "governance_contract.py",
+                "line": 0,
+                "rule": failure,
+            }
+        )
+    return findings
 
 
 def source_tree_retired_governance_path_findings(
@@ -3437,7 +3599,6 @@ def source_tree_path_allowed(
             and relative in RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES
         ):
             return True
-        allowed_by_rule = SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST.get(relative, {})
         if rule is None or line_text is None:
             return False
         for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", line_text):
@@ -3445,7 +3606,13 @@ def source_tree_path_allowed(
                 return True
         if is_retired_path_policy_line(relative, line_text):
             return True
-        if any(literal in line_text for literal in allowed_by_rule.get(rule, set())):
+        if _source_tree_retired_occurrence_allowed(
+            relative,
+            rule=rule,
+            line_text=line_text,
+            line_number=line_number,
+            rule_definition_lines=rule_definition_lines,
+        ):
             return True
         allowed_rules = SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST.get(
             relative,

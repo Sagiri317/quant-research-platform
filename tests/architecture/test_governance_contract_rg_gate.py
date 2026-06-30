@@ -286,6 +286,7 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
     assert entries
     assert {entry.path for entry in entries} <= {
         GOVERNANCE_CONTRACT_SCRIPT,
+        Path("docs/architecture/governance.md"),
         Path("tests/agents/test_verify_governance.py"),
         Path("tests/architecture/test_governance_contract_rg_gate.py"),
     }
@@ -315,6 +316,122 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
         if entry.path == Path("tests/architecture/test_governance_contract_rg_gate.py")
     ]
     assert {entry.rule_name for entry in architecture_entries} == retired_rule_names
+
+
+def test_source_tree_allowlist_entries_have_strict_context_metadata() -> None:
+    from governance_contract import (
+        SOURCE_TREE_ALLOWLIST_ENTRIES,
+        source_tree_allowlist_contract_findings,
+        validate_source_tree_allowlist_entries,
+    )
+
+    assert validate_source_tree_allowlist_entries(SOURCE_TREE_ALLOWLIST_ENTRIES) == []
+    assert source_tree_allowlist_contract_findings() == []
+
+    sample = SOURCE_TREE_ALLOWLIST_ENTRIES[0]
+    malformed = (
+        sample.__class__(
+            path=sample.path,
+            scan_group=sample.scan_group,
+            rule_name=sample.rule_name,
+            literal=sample.literal,
+            pattern_name=sample.pattern_name,
+            allowed_context=sample.allowed_context,
+            owner="",
+            rationale=sample.rationale,
+            lifecycle=sample.lifecycle,
+            covered_by=sample.covered_by,
+        ),
+    )
+
+    assert "source_tree_allowlist_missing_owner" in (
+        validate_source_tree_allowlist_entries(malformed)[0]
+    )
+    for field in ("rationale", "covered_by"):
+        broken = sample.__class__(
+            path=sample.path,
+            scan_group=sample.scan_group,
+            rule_name=sample.rule_name,
+            literal=sample.literal,
+            pattern_name=sample.pattern_name,
+            allowed_context=sample.allowed_context,
+            owner=sample.owner,
+            rationale="" if field == "rationale" else sample.rationale,
+            lifecycle=sample.lifecycle,
+            covered_by=() if field == "covered_by" else sample.covered_by,
+        )
+        failures = validate_source_tree_allowlist_entries((broken,))
+        assert any(f"source_tree_allowlist_missing_{field}" in item for item in failures)
+
+
+def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
+    tmp_path: Path,
+) -> None:
+    from governance_contract import source_tree_retired_text_findings
+
+    repo = tmp_path / "repo"
+    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                "def test_legitimate_forged_env_fixture(monkeypatch):",
+                '    monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", "forge-managed-root")',
+                "",
+                "def test_unrelated_comment():",
+                "    # QRP_MANAGED_REPO_ROOTS must not be broadly allowlisted",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = source_tree_retired_text_findings(repo)
+
+    assert {
+        (finding["path"], finding["line"], finding["rule"])
+        for finding in findings
+    } == {
+        (
+            "tests/agents/test_verify_governance.py",
+            5,
+            "profile_runner_retired_qrp_managed_repo_roots",
+        )
+    }
+
+
+def test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context(
+    tmp_path: Path,
+) -> None:
+    from governance_contract import source_tree_retired_text_findings
+
+    repo = tmp_path / "repo"
+    allowed = repo / "docs" / "architecture" / "governance.md"
+    rejected = repo / "docs" / "architecture" / "open-issues.md"
+    allowed.parent.mkdir(parents=True)
+    allowed.write_text(
+        "Allowed retired profile runner env fixture: `QRP_MANAGED_REPO_ROOTS`.\n",
+        encoding="utf-8",
+    )
+    rejected.write_text(
+        "This unrelated docs line mentions `QRP_MANAGED_REPO_ROOTS`.\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = source_tree_retired_text_findings(repo)
+
+    assert {
+        (finding["path"], finding["rule"]) for finding in findings
+    } == {
+        (
+            "docs/architecture/open-issues.md",
+            "profile_runner_retired_qrp_managed_repo_roots",
+        )
+    }
 
 
 def test_profile_runner_retired_cli_flags_are_rejected() -> None:
