@@ -246,23 +246,6 @@ def _repo_relative(repo_root: Path, path: Path) -> str:
     return PurePosixPath(path.resolve().relative_to(repo_root)).as_posix()
 
 
-def _profile_tmp_name(profile_name: str) -> str:
-    short_names = {
-        "all": "a",
-        "all-non-local": "an",
-        "architecture": "r",
-        "contract": "c",
-        "fast": "f",
-        "guardrails": "g",
-        "integration": "i",
-        "mutation": "m",
-        "performance": "p",
-        "requires-local-data": "l",
-        "slow": "s",
-    }
-    return short_names.get(profile_name, profile_name[:1] or "p")
-
-
 def _default_run_dir(profile_name: str) -> str:
     timestamp = datetime.now(UTC).strftime("%y%m%d%H%M%S")
     return f".run/test-profiles/{timestamp}-{profile_name}"

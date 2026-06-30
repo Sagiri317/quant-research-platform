@@ -118,7 +118,7 @@ def _unsafe_assignment_text() -> str:
     return f'credential = "{key}=unsafe"\n'
 
 
-def test_forged_managed_roots_env_does_not_skip_repo_file_negative_payload(
+def test_forged_retired_profile_env_does_not_skip_repo_file_negative_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1368,10 +1368,11 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             lifecycle="current negative fixture; update with profile runner rule",
             covered_by=(
                 "tests/agents/test_verify_governance.py::"
-                "test_forged_managed_roots_env_does_not_skip_repo_file_negative_payload",
+                "test_forged_retired_profile_env_does_not_skip_repo_file_negative_payload",
             ),
         )
         for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
+        if rule.example == "QRP_MANAGED_REPO_ROOTS"
     ),
     *(
         _source_tree_allowlist_entry(

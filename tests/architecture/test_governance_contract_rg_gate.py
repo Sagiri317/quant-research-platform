@@ -296,6 +296,26 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
     assert all(entry.rationale for entry in entries)
     assert all(entry.covered_by for entry in entries)
 
+    forged_env_rules = {
+        rule.name
+        for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
+        if rule.example == "QRP_MANAGED_REPO_ROOTS"
+    }
+    agent_entries = [
+        entry
+        for entry in entries
+        if entry.path == Path("tests/agents/test_verify_governance.py")
+    ]
+    assert {entry.rule_name for entry in agent_entries} == forged_env_rules
+    assert {entry.literal for entry in agent_entries} == {"QRP_MANAGED_REPO_ROOTS"}
+
+    architecture_entries = [
+        entry
+        for entry in entries
+        if entry.path == Path("tests/architecture/test_governance_contract_rg_gate.py")
+    ]
+    assert {entry.rule_name for entry in architecture_entries} == retired_rule_names
+
 
 def test_profile_runner_retired_cli_flags_are_rejected() -> None:
     runner = Path("tests/tools/run_profile.py")
