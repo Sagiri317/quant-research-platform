@@ -112,14 +112,14 @@ MATERIALIZED_SCAN_ALLOWLIST = {
         "not a workflow or private full-run hot path"
     ),
     (
-        Path("src/quant_research_platform/research/models/supervised.py"),
-        "_trim_training_buffer",
+        Path("src/quant_research_platform/research/models/validation_split.py"),
+        "trim_training_buffer",
     ): (
         "bounded training buffer combines only max_train_rows plus purge context"
     ),
     (
-        Path("src/quant_research_platform/research/models/supervised.py"),
-        "_apply_training_controls",
+        Path("src/quant_research_platform/research/models/validation_split.py"),
+        "apply_training_controls",
     ): "bounded in-memory training controls on an already capped frame",
     (
         Path("src/quant_research_platform/research/portfolios/runner.py"),

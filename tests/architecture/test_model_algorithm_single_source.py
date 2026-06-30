@@ -56,6 +56,20 @@ def test_supervised_model_root_delegates_prediction_and_rank_ensemble_owners() -
     assert not [name for name in root_owned_names if name in root_source]
 
 
+def test_supervised_model_root_delegates_validation_split_owner() -> None:
+    import quant_research_platform.research.models.supervised as supervised
+
+    root_source = Path(supervised.__file__).read_text(encoding="utf-8")
+    owner_path = MODELS_ROOT / "validation_split.py"
+    owner_source = owner_path.read_text(encoding="utf-8")
+
+    assert owner_path.is_file()
+    assert "def apply_training_controls" in owner_source
+    assert "def trim_training_buffer" in owner_source
+    assert "def _apply_training_controls" not in root_source
+    assert "def _trim_training_buffer" not in root_source
+
+
 def test_model_estimator_dispatch_uses_algorithm_facts_only() -> None:
     import quant_research_platform.research.models.supervised as supervised
 

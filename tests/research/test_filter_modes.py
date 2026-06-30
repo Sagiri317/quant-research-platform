@@ -1067,6 +1067,7 @@ def test_model_max_train_rows_trims_streaming_training_buffer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from quant_research_platform.research.models import supervised as model_supervised
+    from quant_research_platform.research.models import validation_split
 
     frame = pd.concat(
         [
@@ -1091,18 +1092,18 @@ def test_model_max_train_rows_trims_streaming_training_buffer(
         max_train_rows=7,
         purge_gap_steps=2,
     )
-    expected = model_supervised._apply_training_controls(
+    expected = validation_split.apply_training_controls(
         frame.loc[:, ["timestamp", "factor", "label"]],
         spec,
     )
-    original_trim = model_supervised._trim_training_buffer
+    original_trim = validation_split.trim_training_buffer
     observed_buffer_inputs: list[int] = []
 
     def wrapped_trim(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:
         observed_buffer_inputs.append(len(frame))
         return original_trim(frame, spec)
 
-    monkeypatch.setattr(model_supervised, "_trim_training_buffer", wrapped_trim)
+    monkeypatch.setattr(validation_split, "trim_training_buffer", wrapped_trim)
 
     training, row_counts, _metadata = model_supervised._collect_training_frame(
         (chunk for _, chunk in frame.groupby(frame.index // 5)),
