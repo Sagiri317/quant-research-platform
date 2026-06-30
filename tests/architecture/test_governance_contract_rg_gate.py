@@ -361,7 +361,10 @@ def test_source_tree_allowlist_entries_have_strict_context_metadata() -> None:
             covered_by=() if field == "covered_by" else sample.covered_by,
         )
         failures = validate_source_tree_allowlist_entries((broken,))
-        assert any(f"source_tree_allowlist_missing_{field}" in item for item in failures)
+        assert any(
+            f"source_tree_allowlist_missing_{field}" in item
+            for item in failures
+        )
 
 
 def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
@@ -376,7 +379,10 @@ def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
         "\n".join(
             [
                 "def test_legitimate_forged_env_fixture(monkeypatch):",
-                '    monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", "forge-managed-root")',
+                (
+                    '    monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", '
+                    '"forge-managed-root")'
+                ),
                 "",
                 "def test_unrelated_comment():",
                 "    # QRP_MANAGED_REPO_ROOTS must not be broadly allowlisted",
