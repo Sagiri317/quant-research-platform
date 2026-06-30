@@ -364,6 +364,55 @@ def test_a_share_source_to_dataset_old_helpers_are_absent() -> None:
     assert hits == []
 
 
+def test_a_share_materialization_validation_owner_is_split_from_entrypoint() -> None:
+    owner_path = (
+        SOURCE_ROOT
+        / "markets/implementations/a_share/processed/materialization_validation.py"
+    )
+    entrypoint_path = (
+        SOURCE_ROOT / "markets/implementations/a_share/processed/materializer.py"
+    )
+    owner_required = {
+        "_ProcessedInputContract",
+        "validate_active_processed_profile_frequencies",
+        "validate_processed_dependency_graph",
+        "validate_processed_input_contract",
+        "annotation_input_contract",
+        "factor_input_contract",
+        "label_input_contract",
+        "require_source_input_columns",
+        "require_source_input_columns_from_schema",
+        "require_source_inputs_for_spec",
+    }
+
+    owner_defined = _top_level_defined_names(_parse_source(owner_path))
+    entrypoint_defined = _top_level_defined_names(_parse_source(entrypoint_path))
+
+    assert sorted(owner_required - owner_defined) == []
+    assert sorted(owner_required & entrypoint_defined) == []
+
+
+def test_a_share_materialize_io_owner_is_split_from_entrypoint() -> None:
+    owner_path = (
+        SOURCE_ROOT / "markets/implementations/a_share/processed/materialize_io.py"
+    )
+    entrypoint_path = (
+        SOURCE_ROOT / "markets/implementations/a_share/processed/materializer.py"
+    )
+    owner_required = {
+        "iter_sorted_output_chunks",
+        "processed_root",
+        "read_processed_inputs_for_spec",
+        "write_and_inspect",
+    }
+
+    owner_defined = _top_level_defined_names(_parse_source(owner_path))
+    entrypoint_defined = _top_level_defined_names(_parse_source(entrypoint_path))
+
+    assert sorted(owner_required - owner_defined) == []
+    assert sorted(owner_required & entrypoint_defined) == []
+
+
 def test_csmar_package_init_does_not_reexport_convenience_functions() -> None:
     path = SOURCE_ROOT / "sources/csmar/__init__.py"
     tree = _parse_source(path)

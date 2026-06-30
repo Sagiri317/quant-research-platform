@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
 
@@ -30,9 +29,6 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
-from quant_research_platform.markets.implementations.a_share.ids import (
-    market_panel_data_id,
-)
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
@@ -41,6 +37,8 @@ from quant_research_platform.markets.implementations.a_share.labels import (
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
     annotations,
+    materialization_validation,
+    materialize_io,
     panels,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
@@ -63,7 +61,6 @@ from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
     read_dataset,
-    write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -71,24 +68,6 @@ SIZING_SAMPLE_SESSION_CAP = 20
 
 
 processed_catalog = processed_catalog_module.processed_catalog
-
-
-@dataclass(frozen=True)
-class _ProcessedInputContract:
-    required_input_data_ids: tuple[str, ...]
-    primary_input_data_id: str
-
-
-_MARKET_PANEL_INPUT_CONTRACT = _ProcessedInputContract(
-    required_input_data_ids=(market_panel_data_id(),),
-    primary_input_data_id=market_panel_data_id(),
-)
-_FACTOR_FAMILY_INPUT_CONTRACTS = {
-    "price_volume": _MARKET_PANEL_INPUT_CONTRACT,
-}
-_LABEL_FAMILY_INPUT_CONTRACTS = {
-    "forward_return": _MARKET_PANEL_INPUT_CONTRACT,
-}
 
 
 def materialize_processed_data(
@@ -113,7 +92,11 @@ def materialize_processed_data(
         targets = tuple(spec for spec in catalog.list() if spec.kind in kinds)
     if not targets:
         raise ValueError("no_processed_targets")
-    _validate_processed_dependency_graph(catalog, targets)
+    materialization_validation.validate_processed_dependency_graph(catalog, targets)
+    materialization_validation.validate_active_processed_profile_frequencies(
+        catalog,
+        targets,
+    )
     sessions = _available_trading_sessions(layout, source_id)
     _require_target_sessions(sessions, time_window)
     dependency_windows = _planned_processed_dependency_windows(
@@ -158,7 +141,7 @@ def _materialize_one(
     dependency_windows: dict[str, TimeWindow],
     panel_key_coverages: dict[Path, dict[object, tuple[pd.Timestamp, ...]]],
 ) -> DatasetInspection:
-    root = _processed_root(layout, spec)
+    root = materialize_io.processed_root(layout, spec)
     if spec.data_id in written:
         return written[spec.data_id]
     if root.exists():
@@ -236,14 +219,14 @@ def _write_panel(
         layout=layout,
         source_id=source_id,
     )
-    _require_source_inputs_for_spec(spec, source_inputs)
+    materialization_validation.require_source_inputs_for_spec(spec, source_inputs)
     stock_master = source_inputs["stock_master"]
     market_cap = source_inputs["market_cap"]
     trading_calendar = source_inputs["trading_calendar"]
     market_bars_data_id = _market_bars_source_data_id(spec)
     market_bars_root = layout.interim_data_root(source_id, market_bars_data_id)
     market_bars_inspection = inspect_dataset(market_bars_root)
-    _require_source_input_columns_from_schema(
+    materialization_validation.require_source_input_columns_from_schema(
         market_bars_data_id,
         market_bars_inspection.columns,
         columns=("open", "high", "low", "close", "volume", "amount"),
@@ -271,7 +254,7 @@ def _write_panel(
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
             market_bars = read_dataset(market_bars_root, time_window=window.read)
-            _require_source_input_columns(
+            materialization_validation.require_source_input_columns(
                 market_bars_data_id,
                 market_bars,
                 columns=("open", "high", "low", "close", "volume", "amount"),
@@ -285,7 +268,7 @@ def _write_panel(
             output = _filter_output_sessions(panel, window.core_sessions)
             yield output.loc[:, list(spec.required_columns)].copy()
 
-    return _write_and_inspect(
+    return materialize_io.write_and_inspect(
         spec,
         chunks(),
         layout=layout,
@@ -304,14 +287,14 @@ def _write_annotation(
     written: dict[str, DatasetInspection],
 ) -> DatasetInspection:
     catalog = processed_catalog()
-    contract = _annotation_input_contract(spec)
-    _validate_processed_input_contract(
+    contract = materialization_validation.annotation_input_contract(spec)
+    materialization_validation.validate_processed_input_contract(
         spec,
         contract=contract,
         purpose="annotation",
     )
     panel_spec = catalog.get(contract.primary_input_data_id)
-    panel_root = _processed_root(layout, panel_spec)
+    panel_root = materialize_io.processed_root(layout, panel_spec)
     windows = _planned_session_windows(
         sessions,
         time_window=time_window,
@@ -323,13 +306,13 @@ def _write_annotation(
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
-            processed_inputs = _read_processed_inputs_for_spec(
+            processed_inputs = materialize_io.read_processed_inputs_for_spec(
                 spec,
                 layout=layout,
                 processed_catalog=catalog,
                 time_window=window.read,
             )
-            _validate_processed_input_contract(
+            materialization_validation.validate_processed_input_contract(
                 spec,
                 contract=contract,
                 purpose="annotation",
@@ -339,7 +322,7 @@ def _write_annotation(
             outputs = annotations.derive_annotations(panel, data_ids=(spec.data_id,))
             yield _filter_output_sessions(outputs[spec.data_id], window.core_sessions)
 
-    return _write_and_inspect(
+    return materialize_io.write_and_inspect(
         spec,
         chunks(),
         layout=layout,
@@ -364,14 +347,14 @@ def _write_factors(
     catalog = processed_catalog()
     factor_catalog = factor_definitions.factor_catalog()
     definitions = _select_factor_definitions_for_spec(spec, factor_catalog)
-    contract = _factor_input_contract(definitions)
-    _validate_processed_input_contract(
+    contract = materialization_validation.factor_input_contract(definitions)
+    materialization_validation.validate_processed_input_contract(
         spec,
         contract=contract,
         purpose="factor",
     )
     panel_spec = catalog.get(contract.primary_input_data_id)
-    panel_root = _processed_root(layout, panel_spec)
+    panel_root = materialize_io.processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
     lookback_days = factor_calculations.factor_lookback_bars(definitions)
     panel_input_columns = factor_calculations.factor_panel_input_columns(definitions)
@@ -406,7 +389,7 @@ def _write_factors(
                 read_window=window.read,
                 core_sessions=window.core_sessions,
             )
-            processed_inputs = _read_processed_inputs_for_spec(
+            processed_inputs = materialize_io.read_processed_inputs_for_spec(
                 spec,
                 layout=layout,
                 processed_catalog=catalog,
@@ -415,7 +398,7 @@ def _write_factors(
                     contract.primary_input_data_id: panel_input_columns,
                 },
             )
-            _validate_processed_input_contract(
+            materialization_validation.validate_processed_input_contract(
                 spec,
                 contract=contract,
                 purpose="factor",
@@ -429,7 +412,7 @@ def _write_factors(
             output = _filter_output_sessions(factors, window.core_sessions)
             yield output.loc[:, list(spec.required_columns)].copy()
 
-    return _write_and_inspect(
+    return materialize_io.write_and_inspect(
         spec,
         chunks(),
         layout=layout,
@@ -454,14 +437,14 @@ def _write_labels(
     catalog = processed_catalog()
     label_catalog = label_definitions.label_catalog()
     definitions = _select_label_definitions_for_spec(spec, label_catalog)
-    contract = _label_input_contract(definitions)
-    _validate_processed_input_contract(
+    contract = materialization_validation.label_input_contract(definitions)
+    materialization_validation.validate_processed_input_contract(
         spec,
         contract=contract,
         purpose="label",
     )
     panel_spec = catalog.get(contract.primary_input_data_id)
-    panel_root = _processed_root(layout, panel_spec)
+    panel_root = materialize_io.processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
     lookahead_sessions = label_calculations.label_lookahead_bars(definitions)
     panel_input_columns = label_calculations.label_panel_input_columns(definitions)
@@ -496,7 +479,7 @@ def _write_labels(
                 read_window=window.read,
                 core_sessions=window.core_sessions,
             )
-            processed_inputs = _read_processed_inputs_for_spec(
+            processed_inputs = materialize_io.read_processed_inputs_for_spec(
                 spec,
                 layout=layout,
                 processed_catalog=catalog,
@@ -505,7 +488,7 @@ def _write_labels(
                     contract.primary_input_data_id: panel_input_columns,
                 },
             )
-            _validate_processed_input_contract(
+            materialization_validation.validate_processed_input_contract(
                 spec,
                 contract=contract,
                 purpose="label",
@@ -519,35 +502,13 @@ def _write_labels(
             output = _filter_output_sessions(labels, window.core_sessions)
             yield output.loc[:, list(spec.required_columns)].copy()
 
-    return _write_and_inspect(
+    return materialize_io.write_and_inspect(
         spec,
         chunks(),
         layout=layout,
         time_window=time_window,
         written=written,
     )
-
-
-def _write_and_inspect(
-    spec: ProcessedDataSpec,
-    frame: pd.DataFrame | Iterable[pd.DataFrame],
-    *,
-    layout: StorageLayout,
-    time_window: TimeWindow,
-    written: dict[str, DatasetInspection],
-) -> DatasetInspection:
-    root = _processed_root(layout, spec)
-    if root.exists():
-        raise ValueError("dataset_exists")
-    output = _iter_sorted_output_chunks(frame, spec)
-    write_dataset(root, output, spec=spec)
-    inspection = inspect_dataset(root, time_window=time_window)
-    written[spec.data_id] = inspection
-    return inspection
-
-
-def _processed_root(layout: StorageLayout, spec: ProcessedDataSpec) -> Path:
-    return layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
 
 
 def _filter_output_sessions(
@@ -640,18 +601,6 @@ def _processed_panel_key_coverage(
     if cache is not None:
         cache[cache_key] = result
     return result
-
-
-def _iter_sorted_output_chunks(
-    frame: pd.DataFrame | Iterable[pd.DataFrame],
-    spec: ProcessedDataSpec,
-) -> Iterable[pd.DataFrame]:
-    frames = [frame] if isinstance(frame, pd.DataFrame) else frame
-    for chunk in frames:
-        output = chunk.loc[:, list(spec.required_columns)].copy()
-        if output.empty:
-            continue
-        yield output.sort_values(list(spec.primary_key)).reset_index(drop=True)
 
 
 def _available_trading_sessions(
@@ -916,69 +865,6 @@ def _select_label_definitions_for_spec(
     return selected
 
 
-def _annotation_input_contract(spec: ProcessedDataSpec) -> _ProcessedInputContract:
-    if spec.kind is not ProcessedDataKind.ANNOTATION:
-        raise ValueError(f"invalid_annotation_spec_kind: {spec.data_id}")
-    return _MARKET_PANEL_INPUT_CONTRACT
-
-
-def _factor_input_contract(
-    definitions: Sequence[FactorDefinition],
-) -> _ProcessedInputContract:
-    families = tuple(dict.fromkeys(definition.family for definition in definitions))
-    if not families:
-        return _MARKET_PANEL_INPUT_CONTRACT
-    if len(families) > 1:
-        raise ValueError("mixed_factor_families: " + ", ".join(families))
-    try:
-        return _FACTOR_FAMILY_INPUT_CONTRACTS[families[0]]
-    except KeyError as exc:
-        raise ValueError(f"unknown_factor_family: {families[0]}") from exc
-
-
-def _label_input_contract(
-    definitions: Sequence[LabelDefinition],
-) -> _ProcessedInputContract:
-    families = tuple(dict.fromkeys(definition.family for definition in definitions))
-    if not families:
-        return _MARKET_PANEL_INPUT_CONTRACT
-    if len(families) > 1:
-        raise ValueError("mixed_label_families: " + ", ".join(families))
-    try:
-        return _LABEL_FAMILY_INPUT_CONTRACTS[families[0]]
-    except KeyError as exc:
-        raise ValueError(f"unknown_label_family: {families[0]}") from exc
-
-
-def _validate_processed_input_contract(
-    spec: ProcessedDataSpec,
-    *,
-    contract: _ProcessedInputContract,
-    purpose: str,
-    processed_inputs: dict[str, pd.DataFrame] | None = None,
-) -> None:
-    declared = tuple(spec.processed_input_data_ids)
-    required = tuple(contract.required_input_data_ids)
-    available = tuple(processed_inputs) if processed_inputs is not None else declared
-    missing = [data_id for data_id in required if data_id not in available]
-    if missing:
-        raise ValueError(
-            f"missing_processed_input_for_{purpose}: {spec.data_id}: "
-            + ", ".join(missing)
-        )
-    unexpected = [data_id for data_id in available if data_id not in required]
-    if unexpected:
-        raise ValueError(
-            f"unexpected_processed_input_for_{purpose}: {spec.data_id}: "
-            + ", ".join(unexpected)
-        )
-    if contract.primary_input_data_id not in required:
-        raise ValueError(
-            f"invalid_primary_processed_input_for_{purpose}: {spec.data_id}: "
-            f"{contract.primary_input_data_id}"
-        )
-
-
 def _read_source_inputs_for_spec(
     spec: ProcessedDataSpec,
     *,
@@ -1011,44 +897,6 @@ def _market_bars_source_data_id(spec: ProcessedDataSpec) -> str:
     return candidates[0]
 
 
-def _require_source_inputs_for_spec(
-    spec: ProcessedDataSpec,
-    source_inputs: dict[str, pd.DataFrame],
-) -> None:
-    if spec.kind is not ProcessedDataKind.PANEL:
-        return
-    missing = [
-        data_id
-        for data_id in ("stock_master", "market_cap", "trading_calendar")
-        if data_id not in source_inputs
-    ]
-    if missing:
-        raise ValueError("missing_source_input_for_panel: " + ", ".join(missing))
-
-
-def _read_processed_inputs_for_spec(
-    spec: ProcessedDataSpec,
-    *,
-    layout: StorageLayout,
-    processed_catalog: ProcessedDataCatalog,
-    time_window: TimeWindow | None = None,
-    columns_by_data_id: dict[str, Sequence[str]] | None = None,
-) -> dict[str, pd.DataFrame]:
-    inputs: dict[str, pd.DataFrame] = {}
-    for data_id in spec.processed_input_data_ids:
-        dependency = processed_catalog.get(data_id)
-        inputs[data_id] = read_dataset(
-            _processed_root(layout, dependency),
-            time_window=time_window,
-            columns=(
-                None
-                if columns_by_data_id is None
-                else columns_by_data_id.get(data_id)
-            ),
-        )
-    return inputs
-
-
 def _ensure_processed_dependencies(
     spec: ProcessedDataSpec,
     *,
@@ -1075,7 +923,7 @@ def _ensure_processed_dependencies(
             dependency_window,
             dependency_windows.get(data_id, dependency_window),
         )
-        dependency_root = _processed_root(layout, dependency)
+        dependency_root = materialize_io.processed_root(layout, dependency)
         if dependency_root.exists():
             if data_id in written:
                 continue
@@ -1145,9 +993,9 @@ def _processed_dependency_time_window(
             spec,
             factor_definitions.factor_catalog(),
         )
-        _validate_processed_input_contract(
+        materialization_validation.validate_processed_input_contract(
             spec,
-            contract=_factor_input_contract(definitions),
+            contract=materialization_validation.factor_input_contract(definitions),
             purpose="factor",
         )
         lookback = factor_calculations.factor_lookback_bars(definitions)
@@ -1162,9 +1010,9 @@ def _processed_dependency_time_window(
             spec,
             label_definitions.label_catalog(),
         )
-        _validate_processed_input_contract(
+        materialization_validation.validate_processed_input_contract(
             spec,
-            contract=_label_input_contract(definitions),
+            contract=materialization_validation.label_input_contract(definitions),
             purpose="label",
         )
         lookahead = label_calculations.label_lookahead_bars(definitions)
@@ -1207,57 +1055,6 @@ def _session_offset_time_window(
         normalized_sessions[start_position].date(),
         normalized_sessions[end_position].date(),
     )
-
-
-def _validate_processed_dependency_graph(
-    processed_catalog: ProcessedDataCatalog,
-    targets: tuple[ProcessedDataSpec, ...],
-) -> None:
-    visiting: set[str] = set()
-    visited: set[str] = set()
-
-    def visit(spec: ProcessedDataSpec) -> None:
-        if spec.data_id in visited:
-            return
-        if spec.data_id in visiting:
-            raise ValueError(f"processed_dependency_cycle: {spec.data_id}")
-        visiting.add(spec.data_id)
-        for dependency_id in spec.processed_input_data_ids:
-            try:
-                dependency = processed_catalog.get(dependency_id)
-            except KeyError as exc:
-                raise ValueError(
-                    f"unknown_processed_dependency: {dependency_id}"
-                ) from exc
-            visit(dependency)
-        visiting.remove(spec.data_id)
-        visited.add(spec.data_id)
-
-    for target in targets:
-        visit(target)
-
-
-def _require_source_input_columns(
-    data_id: str,
-    frame: pd.DataFrame,
-    *,
-    columns: tuple[str, ...],
-) -> None:
-    _require_source_input_columns_from_schema(data_id, frame.columns, columns=columns)
-
-
-def _require_source_input_columns_from_schema(
-    data_id: str,
-    available_columns: Iterable[str],
-    *,
-    columns: tuple[str, ...],
-) -> None:
-    available = set(available_columns)
-    missing = [column for column in columns if column not in available]
-    if missing:
-        raise ValueError(
-            f"missing_source_input_columns: {data_id}: " + ", ".join(missing)
-        )
 
 
 __all__ = ["materialize_processed_data"]

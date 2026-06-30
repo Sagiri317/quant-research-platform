@@ -110,6 +110,7 @@ def _factor_label_panel(dates) -> pd.DataFrame:
                 "adj_close": float(100 + offset),
                 "period_return": 0.001 * offset,
                 "amount": 10000.0 + offset,
+                "volume": 1000.0 + offset,
                 "turnover": 0.01 + offset / 100000.0,
                 "high": float(101 + offset),
                 "low": float(99 + offset),

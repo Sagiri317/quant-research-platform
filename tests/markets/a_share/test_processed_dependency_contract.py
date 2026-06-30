@@ -36,6 +36,8 @@ from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_validation,
+    materialize_io,
     materializer,
 )
 from quant_research_platform.markets.session_windows import SessionWindow
@@ -137,7 +139,7 @@ def test_materializer_reads_processed_inputs_from_spec_processed_input_data_ids(
         spec=panel_spec,
     )
 
-    inputs = materializer._read_processed_inputs_for_spec(
+    inputs = materialize_io.read_processed_inputs_for_spec(
         target,
         layout=layout,
         processed_catalog=_catalog(panel_spec, target),
@@ -155,7 +157,10 @@ def test_materializer_validates_unknown_processed_dependency() -> None:
     )
 
     with pytest.raises(ValueError, match="unknown_processed_dependency: missing_panel"):
-        materializer._validate_processed_dependency_graph(_catalog(target), (target,))
+        materialization_validation.validate_processed_dependency_graph(
+            _catalog(target),
+            (target,),
+        )
 
 
 def test_materializer_validates_processed_dependency_cycle() -> None:
@@ -171,7 +176,7 @@ def test_materializer_validates_processed_dependency_cycle() -> None:
     )
 
     with pytest.raises(ValueError, match="processed_dependency_cycle"):
-        materializer._validate_processed_dependency_graph(
+        materialization_validation.validate_processed_dependency_graph(
             _catalog(left, right),
             (left,),
         )
@@ -345,10 +350,10 @@ def test_write_paths_read_processed_inputs_via_helper(
         fake_planned_session_windows,
     )
     monkeypatch.setattr(materializer, "inspect_dataset", fake_inspect_dataset)
-    monkeypatch.setattr(materializer, "_write_and_inspect", fake_write_and_inspect)
+    monkeypatch.setattr(materialize_io, "write_and_inspect", fake_write_and_inspect)
     monkeypatch.setattr(
-        materializer,
-        "_read_processed_inputs_for_spec",
+        materialize_io,
+        "read_processed_inputs_for_spec",
         fake_read_processed_inputs,
     )
     monkeypatch.setattr(
@@ -469,7 +474,7 @@ def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
             spec=spec,
         )
 
-    inputs = materializer._read_processed_inputs_for_spec(
+    inputs = materialize_io.read_processed_inputs_for_spec(
         target,
         layout=layout,
         processed_catalog=_catalog(panel_spec, execution_spec, target),

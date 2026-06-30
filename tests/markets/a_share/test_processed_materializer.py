@@ -181,6 +181,58 @@ def test_materialize_processed_data_requires_exactly_one_selector(tmp_path) -> N
         )
 
 
+@pytest.mark.parametrize("frequency", [DataFrequency.MINUTE, DataFrequency.TICK])
+def test_materialize_processed_data_rejects_non_daily_active_profile_before_io(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    frequency: DataFrequency,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    catalog = ProcessedDataCatalog()
+    catalog.register(
+        replace(
+            processed_catalog().get(MARKET_PANEL_DATA_ID),
+            frequency=frequency,
+        )
+    )
+
+    def fail_if_sessions_are_read(
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[pd.Timestamp, ...]:
+        raise AssertionError("frequency validation should run before source reads")
+
+    monkeypatch.setattr(materializer, "processed_catalog", lambda: catalog)
+    monkeypatch.setattr(
+        materializer,
+        "_available_trading_sessions",
+        fail_if_sessions_are_read,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "unsupported_a_share_processed_frequency: "
+            f"{MARKET_PANEL_DATA_ID}: {frequency.value}"
+        ),
+    ):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SYNTHETIC_SOURCE_ID,
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+            data_ids=(MARKET_PANEL_DATA_ID,),
+        )
+
+    assert not (
+        tmp_path
+        / "data"
+        / "processed"
+        / "a_share"
+        / "panel"
+        / MARKET_PANEL_DATA_ID
+    ).exists()
+
+
 def test_materialize_processed_data_by_kind_writes_dependency_and_target(
     tmp_path,
 ) -> None:
