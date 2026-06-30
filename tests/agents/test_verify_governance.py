@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -452,6 +453,154 @@ def test_path_name_gate_fails_retired_stage_paths(tmp_path: Path) -> None:
             relative,
             result.errors,
         )
+
+
+def test_source_tree_retired_scan_is_clean_for_current_worktree() -> None:
+    contract = _load_contract_module()
+
+    assert contract.source_tree_retired_text_findings(Path(".")) == []
+
+
+def test_broad_retired_occurrence_allowlist_cannot_hide_literal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_contract_module()
+    rule = contract.PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    repo = tmp_path / "repo"
+    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                "def test_func():",
+                f'    x = "prefix {rule.example} suffix"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    broad = contract.SourceTreeAllowlistEntry(
+        path=Path("tests/agents/test_verify_governance.py"),
+        scan_group="retired_occurrence",
+        rule_name=rule.name,
+        literal=rule.example,
+        pattern_name=rule.name,
+        allowed_context=(
+            f"python_ast:test_func;line_regex:^.+{rule.example}.+$"
+        ),
+        owner="governance-negative-tests",
+        rationale="proves broad regex retired occurrence allowlist is ignored",
+        lifecycle="test-only",
+        covered_by=("tests/agents/test_verify_governance.py",),
+    )
+    monkeypatch.setattr(
+        contract,
+        "SOURCE_TREE_ALLOWLIST_ENTRIES",
+        contract.SOURCE_TREE_ALLOWLIST_ENTRIES + (broad,),
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = contract.source_tree_retired_text_findings(repo)
+
+    assert any(
+        finding["path"] == "tests/agents/test_verify_governance.py"
+        and finding["line"] == 2
+        and finding["rule"] == rule.name
+        for finding in findings
+    ), findings
+
+
+def test_retired_occurrence_duplicate_exact_line_overmatches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_contract_module()
+    rule = contract.PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    exact_line = f'x = "prefix {rule.example} suffix"'
+    repo = tmp_path / "repo"
+    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(["def test_func():", f"    {exact_line}", f"    {exact_line}"])
+        + "\n",
+        encoding="utf-8",
+    )
+    entry = contract.SourceTreeAllowlistEntry(
+        path=Path("tests/agents/test_verify_governance.py"),
+        scan_group="retired_occurrence",
+        rule_name=rule.name,
+        literal=rule.example,
+        pattern_name=rule.name,
+        allowed_context=f"python_ast:test_func;line_regex:^{re.escape(exact_line)}$",
+        owner="governance-negative-tests",
+        rationale="proves duplicate exact retired occurrence is overmatched",
+        lifecycle="test-only",
+        covered_by=("tests/agents/test_verify_governance.py",),
+    )
+    monkeypatch.setattr(
+        contract,
+        "SOURCE_TREE_ALLOWLIST_ENTRIES",
+        contract.SOURCE_TREE_ALLOWLIST_ENTRIES + (entry,),
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = contract.source_tree_retired_text_findings(repo)
+
+    assert any(
+        finding["path"] == "tests/agents/test_verify_governance.py"
+        and finding["line"] == 3
+        and finding["rule"] == rule.name
+        and finding.get("reason") == "source_tree_allowlist_overmatched"
+        for finding in findings
+    ), findings
+
+
+def test_retired_occurrence_stale_exact_line_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_contract_module()
+    rule = contract.PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    repo = tmp_path / "repo"
+    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(["def test_func():", f'    x = "{rule.example}"'])
+        + "\n",
+        encoding="utf-8",
+    )
+    stale_line = f'y = "{rule.example}"'
+    stale = contract.SourceTreeAllowlistEntry(
+        path=Path("tests/agents/test_verify_governance.py"),
+        scan_group="retired_occurrence",
+        rule_name=rule.name,
+        literal=rule.example,
+        pattern_name=rule.name,
+        allowed_context=f"python_ast:test_func;line_regex:^{re.escape(stale_line)}$",
+        owner="governance-negative-tests",
+        rationale="proves stale exact retired occurrence allowlist is reported",
+        lifecycle="test-only",
+        covered_by=("tests/agents/test_verify_governance.py",),
+    )
+    monkeypatch.setattr(
+        contract,
+        "SOURCE_TREE_ALLOWLIST_ENTRIES",
+        contract.SOURCE_TREE_ALLOWLIST_ENTRIES + (stale,),
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = contract.source_tree_retired_text_findings(repo)
+
+    assert any(
+        finding["path"] == "tests/agents/test_verify_governance.py"
+        and finding["rule"] == rule.name
+        and finding.get("reason") == "source_tree_allowlist_stale"
+        for finding in findings
+    ), findings
 
 
 def test_python_symbol_gate_fails_retired_stage_and_surface_names(

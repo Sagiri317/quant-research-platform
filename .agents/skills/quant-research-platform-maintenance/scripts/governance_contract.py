@@ -1821,12 +1821,32 @@ def source_tree_allowlist_context_failures(
         if not part.startswith("line_regex:"):
             continue
         pattern = part.removeprefix("line_regex:")
-        if not pattern.startswith("^") or not pattern.endswith("$"):
-            failures.append("source_tree_allowlist_broad_allowed_context")
-            continue
-        if ".*" in pattern:
+        if not source_tree_exact_line_regex(pattern):
             failures.append("source_tree_allowlist_broad_allowed_context")
     return failures
+
+
+def source_tree_exact_line_regex(pattern: str) -> bool:
+    if not pattern.startswith("^") or not pattern.endswith("$"):
+        return False
+    body = pattern[1:-1]
+    regex_operators = set(".^$*+?{}[]\\|()")
+    semantic_escapes = set("AbBdDsSwWZzG")
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == "\\":
+            if index + 1 >= len(body):
+                return False
+            escaped = body[index + 1]
+            if escaped in semantic_escapes or escaped.isdigit():
+                return False
+            index += 2
+            continue
+        if char in regex_operators:
+            return False
+        index += 1
+    return True
 
 
 def _source_tree_allowlist_context_matches(
@@ -1967,6 +1987,8 @@ def _source_tree_matching_retired_occurrence_entries(
         rule=rule,
     ):
         if entry.scan_group != "retired_occurrence":
+            continue
+        if source_tree_allowlist_context_failures(entry):
             continue
         if not entry.literal or entry.literal not in line_text:
             continue

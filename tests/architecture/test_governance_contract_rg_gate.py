@@ -396,6 +396,10 @@ def test_source_tree_allowlist_entries_have_strict_context_metadata() -> None:
     malformed_contexts = (
         f"line_regex:^{literal}$",
         f"line_regex:^.*{literal}.*$",
+        f"python_ast:test_func;line_regex:^.+{literal}.+$",
+        f"python_ast:test_func;line_regex:^.{{0,200}}{literal}.{{0,200}}$",
+        f"python_ast:test_func;line_regex:^(?:.+)?{literal}(?:.+)?$",
+        f"python_ast:test_func;line_regex:^[\\s\\S]*{literal}[\\s\\S]*$",
         f".*{literal}.*",
         "python_ast:test_func",
         f"python_ast:test_func;line_regex:^.*{literal}.*$",
@@ -420,6 +424,21 @@ def test_source_tree_allowlist_entries_have_strict_context_metadata() -> None:
             or "source_tree_allowlist_missing_exact_line" in item
             for item in failures
         ), (context, failures)
+
+    exact_line = f'x = "prefix {literal} suffix"'
+    exact = sample.__class__(
+        path=Path("tests/agents/test_verify_governance.py"),
+        scan_group="retired_occurrence",
+        rule_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+        literal=literal,
+        pattern_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+        allowed_context=f"python_ast:test_func;line_regex:^{re.escape(exact_line)}$",
+        owner=sample.owner,
+        rationale=sample.rationale,
+        lifecycle=sample.lifecycle,
+        covered_by=sample.covered_by,
+    )
+    assert validate_source_tree_allowlist_entries((exact,)) == []
 
     assert getattr(sample, "max_occurrences", None) == 1
     overbroad_count = sample.__class__(
