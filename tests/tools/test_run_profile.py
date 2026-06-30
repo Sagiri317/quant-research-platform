@@ -39,6 +39,7 @@ def test_list_profiles_includes_required_profiles(capsys) -> None:
         "integration",
         "mutation",
         "performance",
+        "profile-smoke",
         "requires-local-data",
         "slow",
     ):
@@ -161,12 +162,25 @@ def test_default_run_dir_is_profile_scoped_under_run_root(
     assert summary["profile"] == "fast"
     assert summary["status"] == "PASS"
     assert summary["return_code"] == 0
+    assert summary["command"][:3] == ["python", "-m", "pytest"]
+    assert not any(str(tmp_path) in item for item in summary["command"])
     assert summary["run_dir"] == run_dir.relative_to(tmp_path).as_posix()
     assert summary["stdout_path"] == f"{summary['run_dir']}/stdout.log"
     assert summary["stderr_path"] == f"{summary['run_dir']}/stderr.log"
     assert summary["tmp_path"] == f"{summary['run_dir']}/tmp"
     assert summary["pytest_basetemp"] == f"{summary['run_dir']}/tmp"
     assert "reserved_profile" in summary
+    assert summary["profile_marker"] == runner.FAST_EXCLUDES
+    assert summary["profile_scopes"] == [
+        "tests/contracts",
+        "tests/architecture",
+        "tests/policy",
+        "tests/agents",
+    ]
+    assert summary["scope_count"] == 4
+    assert summary["pytest_options"] == []
+    assert summary["extra_pytest_args"] == ["--durations=3"]
+    assert summary["python_version"]
 
     assert set(summary) == {
         "schema_id",
@@ -179,6 +193,12 @@ def test_default_run_dir_is_profile_scoped_under_run_root(
         "started_at",
         "ended_at",
         "duration_seconds",
+        "python_version",
+        "profile_marker",
+        "profile_scopes",
+        "scope_count",
+        "pytest_options",
+        "extra_pytest_args",
         "run_dir",
         "stdout_path",
         "stderr_path",
@@ -390,6 +410,105 @@ def test_profile_with_no_collected_tests_returns_non_zero_not_run_summary(
     assert exit_code == runner.NO_TESTS_COLLECTED
     assert summary["status"] == "NOT_RUN"
     assert summary["reserved_profile"] is True
+
+
+def test_profile_runner_adds_default_duration_summary_when_not_requested(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="pytest ok\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    exit_code = runner.main(
+        [
+            "--profile",
+            "profile-smoke",
+            "--repo-root",
+            str(tmp_path),
+            "--run-dir",
+            ".run/manual/profile-smoke",
+        ]
+    )
+
+    assert exit_code == 0
+    command, _kwargs = calls[0]
+    assert "--durations=10" in command
+    summary = json.loads(
+        (tmp_path / ".run" / "manual" / "profile-smoke" / "summary.json").read_text()
+    )
+    assert summary["profile"] == "profile-smoke"
+    assert summary["profile_marker"] == runner.FAST_EXCLUDES
+    assert summary["scope_count"] == 5
+    assert summary["profile_scopes"] == [
+        "tests/contracts",
+        "tests/agents",
+        "tests/architecture/test_import_boundaries.py",
+        "tests/architecture/test_share_safe_evidence.py",
+        "tests/agents/handoff/test_handoff_package_verifier.py",
+    ]
+    assert summary["extra_pytest_args"] == ["--durations=10"]
+
+
+def test_profile_summary_sanitizes_absolute_paths_in_pytest_args(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner()
+    local_report = tmp_path / "reports" / "profile.xml"
+    local_log = tmp_path / "logs" / "pytest.log"
+    local_equals_log = tmp_path / "logs=private" / "pytest.log"
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="pytest ok\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    exit_code = runner.main(
+        [
+            "--profile",
+            "fast",
+            "--repo-root",
+            str(tmp_path),
+            "--run-dir",
+            ".run/manual/fast",
+            "--",
+            f"--junitxml={local_report}",
+            "--log-file",
+            str(local_log),
+            str(local_equals_log),
+        ]
+    )
+
+    assert exit_code == 0
+    summary = json.loads(
+        (tmp_path / ".run" / "manual" / "fast" / "summary.json").read_text()
+    )
+    encoded = json.dumps(summary, ensure_ascii=False)
+    assert str(tmp_path) not in encoded
+    assert f"--junitxml={local_report.relative_to(tmp_path).as_posix()}" in (
+        summary["extra_pytest_args"]
+    )
+    assert "--log-file" in summary["extra_pytest_args"]
+    assert local_log.relative_to(tmp_path).as_posix() in summary["extra_pytest_args"]
+    assert local_equals_log.relative_to(tmp_path).as_posix() in (
+        summary["extra_pytest_args"]
+    )
 
 
 def _marker_names(expression: str) -> set[str]:

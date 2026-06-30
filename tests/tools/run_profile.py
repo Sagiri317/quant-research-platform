@@ -57,6 +57,17 @@ PROFILES: dict[str, Profile] = {
         scopes=("tests/architecture",),
         marker=FAST_EXCLUDES,
     ),
+    "profile-smoke": Profile(
+        name="profile-smoke",
+        scopes=(
+            "tests/contracts",
+            "tests/agents",
+            "tests/architecture/test_import_boundaries.py",
+            "tests/architecture/test_share_safe_evidence.py",
+            "tests/agents/handoff/test_handoff_package_verifier.py",
+        ),
+        marker=FAST_EXCLUDES,
+    ),
     "guardrails": Profile(
         name="guardrails",
         scopes=("tests",),
@@ -160,7 +171,8 @@ def run_profile(
     ]
     if profile.marker is not None:
         command.extend(["-m", profile.marker])
-    command.extend(pytest_args)
+    effective_pytest_args = _with_default_durations(pytest_args)
+    command.extend(effective_pytest_args)
 
     started_at = datetime.now(UTC)
     started = perf_counter()
@@ -185,12 +197,21 @@ def run_profile(
         "profile": profile.name,
         "status": status,
         "return_code": result.returncode,
-        "command": command,
+        "command": _review_safe_command(repo_root, command),
         "cwd": ".",
         "repo_root": ".",
         "started_at": started_at.isoformat(),
         "ended_at": ended_at.isoformat(),
         "duration_seconds": round(duration_seconds, 6),
+        "python_version": sys.version.split()[0],
+        "profile_marker": profile.marker,
+        "profile_scopes": list(profile.scopes),
+        "scope_count": len(profile.scopes),
+        "pytest_options": _review_safe_items(repo_root, list(profile.pytest_options)),
+        "extra_pytest_args": _review_safe_items(
+            repo_root,
+            list(effective_pytest_args),
+        ),
         "run_dir": _repo_relative(repo_root, run_dir),
         "stdout_path": _repo_relative(repo_root, stdout_path),
         "stderr_path": _repo_relative(repo_root, stderr_path),
@@ -247,6 +268,48 @@ def _resolve_run_dir(repo_root: Path, value: str | None, *, profile_name: str) -
 
 def _repo_relative(repo_root: Path, path: Path) -> str:
     return PurePosixPath(path.resolve().relative_to(repo_root)).as_posix()
+
+
+def _with_default_durations(pytest_args: tuple[str, ...]) -> tuple[str, ...]:
+    if any(
+        arg == "--durations" or arg.startswith("--durations=")
+        for arg in pytest_args
+    ):
+        return pytest_args
+    return (*pytest_args, "--durations=10")
+
+
+def _review_safe_command(repo_root: Path, command: list[str]) -> list[str]:
+    safe: list[str] = []
+    for index, item in enumerate(command):
+        if index == 0:
+            safe.append("python")
+            continue
+        safe.append(_review_safe_command_item(repo_root, item))
+    return safe
+
+
+def _review_safe_items(repo_root: Path, items: list[str]) -> list[str]:
+    return [_review_safe_command_item(repo_root, item) for item in items]
+
+
+def _review_safe_command_item(repo_root: Path, item: str) -> str:
+    path = Path(item)
+    if path.is_absolute():
+        return _review_safe_path(repo_root, path)
+    if "=" in item:
+        key, value = item.split("=", maxsplit=1)
+        return f"{key}={_review_safe_command_item(repo_root, value)}"
+    return item
+
+
+def _review_safe_path(repo_root: Path, path: Path) -> str:
+    if not path.is_absolute():
+        return str(path)
+    try:
+        return _repo_relative(repo_root, path)
+    except ValueError:
+        return path.name
 
 
 def _create_default_run_dir(repo_root: Path, profile_name: str) -> Path:
