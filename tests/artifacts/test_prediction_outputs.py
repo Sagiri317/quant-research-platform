@@ -12,9 +12,9 @@ def test_output_catalog_uses_prediction_outputs_definition() -> None:
 
 
 def test_prediction_report_errors_use_artifact_semantics() -> None:
-    source = Path("src/quant_research_platform/artifacts/outputs.py").read_text(
-        encoding="utf-8"
-    )
+    source = Path(
+        "src/quant_research_platform/artifacts/_prediction_outputs.py"
+    ).read_text(encoding="utf-8")
 
     assert "prediction_outputs" in source
     assert "missing_prediction_output_columns" in source

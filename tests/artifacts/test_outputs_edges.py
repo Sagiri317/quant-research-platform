@@ -7,6 +7,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.artifacts._output_validation as output_validation
+import quant_research_platform.artifacts._parquet_writers as parquet_writers
+import quant_research_platform.artifacts._portfolio_outputs as portfolio_outputs
 from quant_research_platform.artifacts import outputs
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
@@ -61,13 +64,13 @@ def test_output_spec_rejects_output_definition_id_as_output_id() -> None:
 
 def test_report_frame_validation_rejects_missing_and_extra_columns() -> None:
     with pytest.raises(ValueError, match="missing_evaluation_metrics_columns: ic"):
-        outputs._validate_output_frame(
+        output_validation._validate_output_frame(
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
             required=("timestamp", "ic"),
             error_name="evaluation_metrics",
         )
     with pytest.raises(ValueError, match="unregistered_evaluation_metrics_columns"):
-        outputs._validate_output_frame(
+        output_validation._validate_output_frame(
             pd.DataFrame(
                 {
                     "timestamp": [pd.Timestamp("2024-01-02")],
@@ -431,13 +434,13 @@ def test_output_bundle_root_rejects_mismatched_specs(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
 
     with pytest.raises(ValueError, match="output_spec_mismatch"):
-        outputs._derive_output_bundle_root(
+        output_validation._derive_output_bundle_root(
             output_spec=_report_spec("unknown", "run_demo", "prediction"),
             layout=layout,
             expected_definition_id="prediction_outputs",
         )
     with pytest.raises(ValueError, match="output_spec_mismatch"):
-        outputs._derive_output_bundle_root(
+        output_validation._derive_output_bundle_root(
             output_spec=_report_spec(
                 "evaluation_outputs",
                 "run_demo",
@@ -458,13 +461,13 @@ def test_output_bundle_root_rejects_dataset_roots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        outputs,
+        output_validation,
         "output_bundle_root",
         lambda _root, _output_id: tmp_path / "data" / data_layer / "report",
     )
 
     with pytest.raises(ValueError, match="output_bundle_must_not_be_dataset_root"):
-        outputs._derive_output_bundle_root(
+        output_validation._derive_output_bundle_root(
             output_spec=_report_spec(
                 "prediction_outputs",
                 "prediction_demo",
@@ -787,7 +790,7 @@ def test_portfolio_outputs_write_row_artifacts_from_chunks(
             for artifact_name in row_artifacts
         },
     )
-    output_bundle = outputs._write_portfolio_output_chunks(
+    output_bundle = portfolio_outputs._write_portfolio_output_chunks(
         chunks,
         summary_factory=lambda: {
             artifact_name: artifacts[artifact_name]
@@ -886,7 +889,7 @@ def test_portfolio_outputs_clean_temp_bundle_directory_on_failure(
         Path(path).write_text("partial", encoding="utf-8")
         raise RuntimeError("portfolio parquet failed")
 
-    monkeypatch.setattr(outputs, "_write_parquet", fail_write)
+    monkeypatch.setattr(portfolio_outputs, "_write_parquet", fail_write)
 
     with pytest.raises(RuntimeError, match="portfolio parquet failed"):
         _write_portfolio_chunks_for_test(
@@ -912,7 +915,7 @@ def test_report_parquet_writer_cleans_temp_on_failure(
     monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_to_parquet)
 
     with pytest.raises(RuntimeError, match="write failed"):
-        outputs._write_parquet(
+        parquet_writers._write_parquet(
             frame,
             tmp_path / "report.parquet",
         )
@@ -1111,7 +1114,7 @@ def _write_portfolio_chunks_for_test(
     layout: StorageLayout,
 ) -> Path:
     row_artifacts = _portfolio_row_artifact_names()
-    return outputs._write_portfolio_output_chunks(
+    return portfolio_outputs._write_portfolio_output_chunks(
         ({artifact_name: artifacts[artifact_name] for artifact_name in row_artifacts},),
         summary_factory=lambda: {
             artifact_name: artifacts[artifact_name]

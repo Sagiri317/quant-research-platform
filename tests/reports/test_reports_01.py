@@ -6,6 +6,10 @@ import json
 import pandas as pd
 import pytest
 
+import quant_research_platform.artifacts._evaluation_outputs as evaluation_outputs
+import quant_research_platform.artifacts._output_manifest as output_manifest
+import quant_research_platform.artifacts._prediction_outputs as prediction_outputs
+import quant_research_platform.artifacts._stage_profile_outputs as stage_profile_outputs
 import quant_research_platform.artifacts.outputs as outputs_module
 from quant_research_platform.artifacts.outputs import (
     write_evaluation_outputs,
@@ -157,7 +161,7 @@ def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) ->
         output_spec=_prediction_report_spec(),
         layout=StorageLayout(project_root=tmp_path / "materialized"),
     )
-    chunked_writer = outputs_module._write_prediction_output_chunks
+    chunked_writer = prediction_outputs._write_prediction_output_chunks
     chunked_root = chunked_writer(
         (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
         spec=_prediction_spec(),
@@ -179,7 +183,7 @@ def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) ->
 def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> None:
     frame = _prediction_frame()
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
-        outputs_module._write_prediction_output_chunks(
+        prediction_outputs._write_prediction_output_chunks(
             (frame.copy(), frame.copy()),
             spec=_prediction_spec(),
             output_spec=_prediction_report_spec(),
@@ -192,9 +196,9 @@ def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> Non
 
 
 def test_report_manifest_payload_builders_are_private_and_local() -> None:
-    assert hasattr(outputs_module, "_stage_profile_output_manifest_payload")
-    assert hasattr(outputs_module, "_prediction_output_metadata")
-    assert hasattr(outputs_module, "_evaluation_output_metadata")
+    assert hasattr(output_manifest, "_stage_profile_output_manifest_payload")
+    assert hasattr(output_manifest, "_prediction_output_metadata")
+    assert hasattr(output_manifest, "_evaluation_output_metadata")
     private_builders = {
         "_stage_profile_output_manifest_payload",
         "_prediction_output_metadata",
@@ -297,7 +301,7 @@ def test_stage_profile_outputs_clean_temp_root_after_mid_write_failure(
         (path.parent / "partial.json").write_text("partial\n", encoding="utf-8")
         raise RuntimeError("simulated_stage_profile_failure")
 
-    monkeypatch.setattr(outputs_module, "atomic_write_json", fail_json_write)
+    monkeypatch.setattr(stage_profile_outputs, "atomic_write_json", fail_json_write)
 
     with pytest.raises(RuntimeError, match="simulated_stage_profile_failure"):
         write_stage_profile_outputs(
@@ -323,7 +327,7 @@ def test_prediction_outputs_clean_temp_root_after_mid_write_failure(
         raise RuntimeError("simulated_prediction_failure")
 
     monkeypatch.setattr(
-        outputs_module,
+        prediction_outputs,
         "_write_parquet",
         fail_parquet_write,
     )
@@ -357,7 +361,7 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
         path.write_text("first\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        outputs_module,
+        evaluation_outputs,
         "_write_parquet",
         fail_second_parquet_write,
     )
