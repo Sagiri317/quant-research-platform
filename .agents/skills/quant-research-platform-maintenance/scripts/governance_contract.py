@@ -85,6 +85,7 @@ class SourceTreeAllowlistEntry:
     rationale: str = ""
     lifecycle: str = ""
     covered_by: tuple[str, ...] = ()
+    max_occurrences: int = 1
 
     @property
     def rule_id(self) -> str:
@@ -1062,6 +1063,7 @@ def _source_tree_allowlist_entry(
     literal: str = "",
     pattern_name: str = "",
     allowed_context: str = "",
+    max_occurrences: int = 1,
 ) -> SourceTreeAllowlistEntry:
     resolved_allowed_context = allowed_context or _default_allowed_context(
         scan_group=scan_group,
@@ -1078,6 +1080,7 @@ def _source_tree_allowlist_entry(
         rationale=rationale,
         lifecycle=lifecycle,
         covered_by=covered_by,
+        max_occurrences=max_occurrences,
     )
 
 
@@ -1124,21 +1127,12 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
     _source_tree_allowlist_entry(
         path=VERIFY_HANDOFF_PACKAGE_SCRIPT,
         scan_group="retired_occurrence",
-        rule_name="forbidden_final_head_full",
-        literal='"final_head_full",',
-        owner="handoff-package-verifier",
-        rationale="verifier rejects the retired validation metadata field",
-        lifecycle="current negative contract; remove when field rule is retired",
-        covered_by=(
-            "tests/agents/handoff/test_handoff_tools.py::"
-            "test_verify_rejects_validation_row_extra_fields",
-        ),
-    ),
-    _source_tree_allowlist_entry(
-        path=VERIFY_HANDOFF_PACKAGE_SCRIPT,
-        scan_group="retired_occurrence",
         rule_name="retired_review_safe_public_wording",
         literal='if summary.get("public_safe") is not True:',
+        allowed_context=_exact_python_line_context(
+            "verify_smoke_compare_portable_summary",
+            'if summary.get("public_safe") is not True:',
+        ),
         owner="handoff-package-verifier",
         rationale=(
             "verifier enforces the user-required portable_summary public_safe "
@@ -1155,6 +1149,10 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
         scan_group="retired_occurrence",
         rule_name="forbidden_private_real",
         literal='"private_real",',
+        allowed_context=_exact_python_line_context(
+            "_RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES",
+            '"private_real",',
+        ),
         owner="share-safety-policy",
         rationale=(
             "share-safety policy keeps retired local-only report path names as "
@@ -1174,6 +1172,10 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
         scan_group="retired_occurrence",
         rule_name="forbidden_private_data",
         literal='"private_data",',
+        allowed_context=_exact_python_line_context(
+            "_RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES",
+            '"private_data",',
+        ),
         owner="share-safety-policy",
         rationale=(
             "share-safety policy keeps retired local-only report path names as "
@@ -1187,139 +1189,6 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             "tests/architecture/test_retired_surface_absent.py::"
             "test_retired_local_only_report_paths_remain_share_unsafe",
         ),
-    ),
-    *(
-        _source_tree_allowlist_entry(
-            path=Path("tests/architecture/test_retired_surface_absent.py"),
-            scan_group="retired_occurrence",
-            rule_name=rule_name,
-            literal=literal,
-            owner="architecture-governance-negative-tests",
-            rationale="owner-approved retired public surface absence assertion",
-            lifecycle="current negative test fixture; update with governance rule",
-            covered_by=(
-                "tests/architecture/test_retired_surface_absent.py::"
-                "test_retired_constant_fixtures_are_derived_from_governance_contract",
-            ),
-        )
-        for rule_name, literal in (
-            ("retired_a_share_market_definition", '"a_share_market_definition",'),
-            ("retired_a_share_field_catalog", '"a_share_field_catalog",'),
-            ("retired_a_share_processed_catalog", '"a_share_processed_catalog",'),
-            ("retired_a_share_factor_catalog", '"a_share_factor_catalog",'),
-            ("retired_a_share_label_catalog", '"a_share_label_catalog",'),
-            (
-                "retired_workflow_module",
-                'importlib.util.find_spec("quant_research_platform.contracts.workflow_run")',
-            ),
-            (
-                "retired_model_algorithm_collection",
-                'assert not hasattr(contracts_models, "MODEL_ALGORITHMS")',
-            ),
-            (
-                "retired_csmar_source_alias",
-                'assert not hasattr(source_ids, "CSMAR_SOURCE_ID")',
-            ),
-            (
-                "retired_a_share_market_alias",
-                'assert not hasattr(market_ids, "A_SHARE_MARKET_ID")',
-            ),
-        )
-    ),
-    *(
-        _source_tree_allowlist_entry(
-            path=Path("tests/architecture/test_retired_surface_absent.py"),
-            scan_group="retired_occurrence",
-            rule_name="retired_build_a_share",
-            literal=literal,
-            owner="architecture-governance-negative-tests",
-            rationale="owner-approved retired A-share builder surface assertion",
-            lifecycle="current negative test fixture; update with governance rule",
-            covered_by=(
-                "tests/architecture/test_retired_surface_absent.py::"
-                "test_retired_owner_local_function_names_are_absent",
-            ),
-        )
-        for literal in (
-            '"build_a_share_research_dataset_catalog",',
-            '"build_a_share_research_dataset_specs",',
-            '"build_a_share_model_catalog",',
-            '"build_a_share_model_specs",',
-            '"build_a_share_prediction_catalog",',
-            '"build_a_share_prediction_specs",',
-            '"build_a_share_portfolio_catalog",',
-            '"build_a_share_portfolio_specs",',
-        )
-    ),
-    *(
-        _source_tree_allowlist_entry(
-            path=Path("tests/architecture/test_retired_surface_absent.py"),
-            scan_group="retired_occurrence",
-            rule_name="retired_default_a_share",
-            literal=literal,
-            owner="architecture-governance-negative-tests",
-            rationale="owner-approved retired A-share default surface assertion",
-            lifecycle="current negative test fixture; update with governance rule",
-            covered_by=(
-                "tests/architecture/test_retired_surface_absent.py::"
-                "test_retired_owner_local_function_names_are_absent",
-            ),
-        )
-        for literal in (
-            '"default_a_share_prediction_smoke_id",',
-            '"default_a_share_prediction_oos_period",',
-        )
-    ),
-    *(
-        _source_tree_allowlist_entry(
-            path=Path("tests/architecture/test_retired_surface_absent.py"),
-            scan_group="retired_occurrence",
-            rule_name="forbidden_render_pr_body",
-            literal=literal,
-            owner="architecture-governance-negative-tests",
-            rationale="owner-approved handoff retired renderer absence assertion",
-            lifecycle="current negative test fixture; update with governance rule",
-            covered_by=(
-                "tests/architecture/test_retired_surface_absent.py::"
-                "test_retired_pr_body_renderer_is_absent",
-            ),
-        )
-        for literal in (
-            '".agents/skills/quant-research-platform-maintenance/scripts/render_pr_body_from_validation_evidence.py"',
-            '"render_pr_body_from_validation_evidence.py"',
-        )
-    ),
-    _source_tree_allowlist_entry(
-        path=Path("tests/agents/handoff/test_handoff_tools.py"),
-        scan_group="retired_occurrence",
-        rule_name="forbidden_private_data",
-        literal='"reports/private_data/a_share/run/summary.json",',
-        owner="handoff-package-safety-tests",
-        rationale="malicious handoff path payload must remain rejected",
-        lifecycle="current negative test fixture; update with package path rules",
-        covered_by=(
-            "tests/agents/handoff/test_handoff_tools.py::"
-            "test_handoff_package_verifier_rejects_retired_local_output_paths",
-        ),
-    ),
-    *(
-        _source_tree_allowlist_entry(
-            path=Path("tests/agents/handoff/test_handoff_tools.py"),
-            scan_group="retired_occurrence",
-            rule_name="forbidden_private_real",
-            literal=literal,
-            owner="handoff-package-safety-tests",
-            rationale="malicious handoff path payload must remain rejected",
-            lifecycle="current negative test fixture; update with package path rules",
-            covered_by=(
-                "tests/agents/handoff/test_handoff_tools.py::"
-                "test_handoff_package_verifier_rejects_retired_local_output_path_text",
-            ),
-        )
-        for literal in (
-            '"reports/private_real/a_share/run/summary.json",',
-            '"retired path reports/private_real/a_share/run\\n",',
-        )
     ),
     *(
         _source_tree_allowlist_entry(
@@ -1402,9 +1271,9 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             scan_group="retired_occurrence",
             rule_name=rule.name,
             literal=rule.example,
-            allowed_context=_python_line_context(
+            allowed_context=_exact_python_line_context(
                 "PROFILE_RUNNER_RETIRED_TEXT_RULES",
-                r"^r\".*" + re.escape(rule.example) + r".*\",$",
+                f'r"{rule.pattern}",',
             ),
             owner="governance-contract-rule-source",
             rationale="profile runner retired regex rule line is owned here",
@@ -1454,22 +1323,6 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
         for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
         if rule.name == "profile_runner_retired_qrp_managed_repo_roots"
     ),
-    _source_tree_allowlist_entry(
-        path=Path("docs/architecture/governance.md"),
-        scan_group="retired_occurrence",
-        rule_name="profile_runner_retired_qrp_managed_repo_roots",
-        literal=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
-        allowed_context=_profile_runner_docs_line_context(
-            PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
-        ),
-        owner="architecture-governance-docs",
-        rationale="documents the exact retired env fixture used by scanner tests",
-        lifecycle="remove if the profile runner retired env rule is removed",
-        covered_by=(
-            "tests/architecture/test_governance_contract_rg_gate.py::"
-            "test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context",
-        ),
-    ),
     *(
         _source_tree_allowlist_entry(
             path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
@@ -1515,26 +1368,6 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
                     '"    # '
                     + PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
                     + ' must not be broadly allowlisted",'
-                ),
-            ),
-            (
-                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
-                "test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context",
-                (
-                    '"Allowed retired profile runner env fixture: `'
-                    + PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
-                    + '`.\\n",'
-                ),
-            ),
-            (
-                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
-                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
-                "test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context",
-                (
-                    '"This unrelated docs line mentions `'
-                    + PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
-                    + '`.\\n",'
                 ),
             ),
             (
@@ -1943,6 +1776,12 @@ def validate_source_tree_allowlist_entries(
             failures.append(f"{prefix}:source_tree_allowlist_missing_rationale")
         if not entry.covered_by:
             failures.append(f"{prefix}:source_tree_allowlist_missing_covered_by")
+        if not isinstance(entry.max_occurrences, int) or entry.max_occurrences < 1:
+            failures.append(f"{prefix}:source_tree_allowlist_invalid_max_occurrences")
+        elif entry.scan_group == "retired_occurrence" and entry.max_occurrences != 1:
+            failures.append(
+                f"{prefix}:source_tree_allowlist_max_occurrences_not_strict"
+            )
         if not str(entry.allowed_context).strip():
             failures.append(f"{prefix}:source_tree_allowlist_missing_allowed_context")
         failures.extend(
@@ -1963,6 +1802,21 @@ def source_tree_allowlist_context_failures(
         return []
     failures: list[str] = []
     parts = context.split(";")
+    ast_parts = [part for part in parts if part.startswith("python_ast:")]
+    line_parts = [part for part in parts if part.startswith("line_regex:")]
+    if entry.path.suffix == ".py" and len(ast_parts) != 1:
+        failures.append("source_tree_allowlist_missing_python_ast_owner")
+    if len(line_parts) != 1:
+        failures.append("source_tree_allowlist_missing_exact_line")
+    if any(
+        not part.startswith(("python_ast:", "line_regex:"))
+        for part in parts
+    ):
+        failures.append("source_tree_allowlist_broad_allowed_context")
+    for part in ast_parts:
+        owner = part.removeprefix("python_ast:")
+        if not owner.strip():
+            failures.append("source_tree_allowlist_missing_python_ast_owner")
     for part in parts:
         if not part.startswith("line_regex:"):
             continue
@@ -1970,8 +1824,7 @@ def source_tree_allowlist_context_failures(
         if not pattern.startswith("^") or not pattern.endswith("$"):
             failures.append("source_tree_allowlist_broad_allowed_context")
             continue
-        literal = entry.literal.strip()
-        if literal and pattern in {literal, re.escape(literal)}:
+        if ".*" in pattern:
             failures.append("source_tree_allowlist_broad_allowed_context")
     return failures
 
@@ -2069,6 +1922,63 @@ def _source_tree_retired_occurrence_allowed(
         ):
             return True
     return False
+
+
+def _source_tree_retired_rule_definition_allowed(
+    relative: Path,
+    *,
+    rule: str,
+    line_text: str,
+    line_number: int | None,
+    rule_definition_lines: set[int] | None,
+    definition_contexts: dict[str, set[int]] | None = None,
+) -> bool:
+    for entry in _source_tree_allowlist_entries(
+        relative,
+        scan_group="retired_text",
+        rule=rule,
+    ):
+        if entry.scan_group != "retired_rule_definition":
+            continue
+        if _source_tree_allowlist_context_matches(
+            entry,
+            line_text=line_text,
+            line_number=line_number,
+            rule_definition_lines=rule_definition_lines,
+            definition_contexts=definition_contexts,
+        ):
+            return True
+    return False
+
+
+def _source_tree_matching_retired_occurrence_entries(
+    relative: Path,
+    *,
+    rule: str,
+    line_text: str,
+    line_number: int | None,
+    rule_definition_lines: set[int] | None,
+    definition_contexts: dict[str, set[int]] | None = None,
+) -> tuple[SourceTreeAllowlistEntry, ...]:
+    matches: list[SourceTreeAllowlistEntry] = []
+    for entry in _source_tree_allowlist_entries(
+        relative,
+        scan_group="retired_text",
+        rule=rule,
+    ):
+        if entry.scan_group != "retired_occurrence":
+            continue
+        if not entry.literal or entry.literal not in line_text:
+            continue
+        if _source_tree_allowlist_context_matches(
+            entry,
+            line_text=line_text,
+            line_number=line_number,
+            rule_definition_lines=rule_definition_lines,
+            definition_contexts=definition_contexts,
+        ):
+            matches.append(entry)
+    return tuple(matches)
 
 
 def normalize_repo_path(path: str | Path) -> str:
@@ -3254,21 +3164,57 @@ def source_tree_retired_text_findings(
             path,
         )
         definition_contexts = source_tree_python_definition_contexts(path)
+        occurrence_entries = {
+            entry: 0
+            for entry in SOURCE_TREE_ALLOWLIST_ENTRIES
+            if entry.path == relative
+            and entry.scan_group == "retired_occurrence"
+            and entry.rule_name in patterns
+        }
         for rule, pattern in patterns.items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
                     continue
                 if not pattern.search(line):
                     continue
-                if source_tree_path_allowed(
+                line_text = line.strip()
+                if _source_tree_retired_rule_definition_allowed(
                     relative,
-                    scan_group="retired_text",
                     rule=rule,
-                    line_text=line.strip(),
+                    line_text=line_text,
                     line_number=line_number,
                     rule_definition_lines=rule_definition_lines,
                     definition_contexts=definition_contexts,
                 ):
+                    continue
+                matched_entries = _source_tree_matching_retired_occurrence_entries(
+                    relative,
+                    rule=rule,
+                    line_text=line_text,
+                    line_number=line_number,
+                    rule_definition_lines=rule_definition_lines,
+                    definition_contexts=definition_contexts,
+                )
+                available_entry = next(
+                    (
+                        entry
+                        for entry in matched_entries
+                        if occurrence_entries.get(entry, 0) < entry.max_occurrences
+                    ),
+                    None,
+                )
+                if available_entry is not None:
+                    occurrence_entries[available_entry] += 1
+                    continue
+                if matched_entries:
+                    findings.append(
+                        {
+                            "path": relative.as_posix(),
+                            "line": line_number,
+                            "rule": rule,
+                            "reason": "source_tree_allowlist_overmatched",
+                        }
+                    )
                     continue
                 findings.append(
                     {
@@ -3277,6 +3223,17 @@ def source_tree_retired_text_findings(
                         "rule": rule,
                     }
                 )
+        for entry, count in occurrence_entries.items():
+            if count:
+                continue
+            findings.append(
+                {
+                    "path": relative.as_posix(),
+                    "line": 0,
+                    "rule": entry.rule_name,
+                    "reason": "source_tree_allowlist_stale",
+                }
+            )
     return findings
 
 

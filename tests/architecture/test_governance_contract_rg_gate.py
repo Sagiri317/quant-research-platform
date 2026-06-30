@@ -388,6 +388,58 @@ def test_source_tree_allowlist_entries_have_strict_context_metadata() -> None:
         for item in validate_source_tree_allowlist_entries((broad,))
     )
 
+    literal = PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
+    strict_context = (
+        "python_ast:test_func;"
+        + f"line_regex:^exact source line with {literal}$"
+    )
+    malformed_contexts = (
+        f"line_regex:^{literal}$",
+        f"line_regex:^.*{literal}.*$",
+        f".*{literal}.*",
+        "python_ast:test_func",
+        f"python_ast:test_func;line_regex:^.*{literal}.*$",
+    )
+    for context in malformed_contexts:
+        broken = sample.__class__(
+            path=Path("tests/agents/test_verify_governance.py"),
+            scan_group="retired_occurrence",
+            rule_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+            literal=literal,
+            pattern_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+            allowed_context=context,
+            owner=sample.owner,
+            rationale=sample.rationale,
+            lifecycle=sample.lifecycle,
+            covered_by=sample.covered_by,
+        )
+        failures = validate_source_tree_allowlist_entries((broken,))
+        assert any(
+            "source_tree_allowlist_broad_allowed_context" in item
+            or "source_tree_allowlist_missing_python_ast_owner" in item
+            or "source_tree_allowlist_missing_exact_line" in item
+            for item in failures
+        ), (context, failures)
+
+    assert getattr(sample, "max_occurrences", None) == 1
+    overbroad_count = sample.__class__(
+        path=Path("tests/agents/test_verify_governance.py"),
+        scan_group="retired_occurrence",
+        rule_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+        literal=literal,
+        pattern_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+        allowed_context=strict_context,
+        owner=sample.owner,
+        rationale=sample.rationale,
+        lifecycle=sample.lifecycle,
+        covered_by=sample.covered_by,
+        max_occurrences=2,
+    )
+    assert any(
+        "source_tree_allowlist_max_occurrences_not_strict" in item
+        for item in validate_source_tree_allowlist_entries((overbroad_count,))
+    )
+
 
 def test_profile_runner_retired_literals_are_not_allowed_by_unrelated_context(
     tmp_path: Path,
@@ -430,6 +482,38 @@ def test_profile_runner_retired_literals_are_not_allowed_by_unrelated_context(
             ), (target, rule.name, findings)
 
 
+def test_profile_runner_retired_literals_are_not_allowed_inside_owner_context(
+    tmp_path: Path,
+) -> None:
+    from governance_contract import (
+        GOVERNANCE_CONTRACT_SCRIPT,
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        source_tree_retired_text_findings,
+    )
+
+    source = GOVERNANCE_CONTRACT_SCRIPT.read_text(encoding="utf-8")
+    marker = "PROFILE_RUNNER_RETIRED_TEXT_RULES = (\n"
+    assert marker in source
+    for rule_index, rule in enumerate(PROFILE_RUNNER_RETIRED_TEXT_RULES):
+        repo = tmp_path / f"owner-context-{rule_index}"
+        repo_file = repo / GOVERNANCE_CONTRACT_SCRIPT
+        repo_file.parent.mkdir(parents=True)
+        repo_file.write_text(
+            source.replace(marker, marker + f"    # unrelated {rule.example}\n"),
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+        findings = source_tree_retired_text_findings(repo)
+
+        assert any(
+            finding["path"] == GOVERNANCE_CONTRACT_SCRIPT.as_posix()
+            and finding["rule"] == rule.name
+            for finding in findings
+        ), (rule.name, findings)
+
+
 def test_profile_runner_retired_literals_remain_allowed_in_authorized_contexts(
     tmp_path: Path,
 ) -> None:
@@ -460,6 +544,114 @@ def test_profile_runner_retired_literals_remain_allowed_in_authorized_contexts(
             for finding in findings
             if finding["path"] == target.as_posix()
         }.isdisjoint(expected_rules), (target, findings)
+
+
+def test_retired_profile_allowlist_rejects_duplicate_exact_occurrence(
+    tmp_path: Path,
+) -> None:
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        source_tree_retired_text_findings,
+    )
+
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    env_line = f'    monkeypatch.setenv("{rule.example}", "forge-managed-root")'
+    repo = tmp_path / "repo"
+    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                (
+                    "def "
+                    "test_forged_retired_profile_env_does_not_skip_repo_file_"
+                    "negative_payload(monkeypatch):"
+                ),
+                env_line,
+                env_line,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = source_tree_retired_text_findings(repo)
+
+    assert any(
+        finding["path"] == "tests/agents/test_verify_governance.py"
+        and finding["line"] == 3
+        and finding["rule"] == rule.name
+        and finding.get("reason") == "source_tree_allowlist_overmatched"
+        for finding in findings
+    ), findings
+
+
+def test_retired_profile_allowlist_rejects_stale_exact_occurrence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import governance_contract
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SourceTreeAllowlistEntry,
+        source_tree_retired_text_findings,
+    )
+
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    env_line = f'    monkeypatch.setenv("{rule.example}", "forge-managed-root")'
+    missing_env_line = f'monkeypatch.setenv("{rule.example}", "missing-value")'
+    repo = tmp_path / "repo"
+    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                (
+                    "def "
+                    "test_forged_retired_profile_env_does_not_skip_repo_file_"
+                    "negative_payload(monkeypatch):"
+                ),
+                env_line,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stale = SourceTreeAllowlistEntry(
+        path=Path("tests/agents/test_verify_governance.py"),
+        scan_group="retired_occurrence",
+        rule_name=rule.name,
+        literal=rule.example,
+        pattern_name=rule.name,
+        allowed_context=(
+            "python_ast:"
+            "test_forged_retired_profile_env_does_not_skip_repo_file_"
+            "negative_payload;"
+            f"line_regex:^{re.escape(missing_env_line)}$"
+        ),
+        owner="architecture-governance-negative-tests",
+        rationale="proves stale exact retired occurrence allowlists fail",
+        lifecycle="test-only",
+        covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+    )
+    monkeypatch.setattr(
+        governance_contract,
+        "SOURCE_TREE_ALLOWLIST_ENTRIES",
+        governance_contract.SOURCE_TREE_ALLOWLIST_ENTRIES + (stale,),
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = source_tree_retired_text_findings(repo)
+
+    assert any(
+        finding["path"] == "tests/agents/test_verify_governance.py"
+        and finding["rule"] == stale.rule_name
+        and finding.get("reason") == "source_tree_allowlist_stale"
+        for finding in findings
+    ), findings
 
 
 def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
@@ -497,6 +689,11 @@ def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
     } == {
         (
             "tests/agents/test_verify_governance.py",
+            0,
+            "profile_runner_retired_qrp_managed_repo_roots",
+        ),
+        (
+            "tests/agents/test_verify_governance.py",
             2,
             "profile_runner_retired_qrp_managed_repo_roots",
         ),
@@ -510,20 +707,46 @@ def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
 
 def test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    from governance_contract import source_tree_retired_text_findings
+    import governance_contract
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SourceTreeAllowlistEntry,
+        source_tree_retired_text_findings,
+    )
 
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
     repo = tmp_path / "repo"
     allowed = repo / "docs" / "architecture" / "governance.md"
     rejected = repo / "docs" / "architecture" / "open-issues.md"
     allowed.parent.mkdir(parents=True)
+    allowed_line = f"Allowed retired profile runner env fixture: `{rule.example}`."
+    rejected_line = f"This unrelated docs line mentions `{rule.example}`."
     allowed.write_text(
-        "Allowed retired profile runner env fixture: `QRP_MANAGED_REPO_ROOTS`.\n",
+        allowed_line + "\n",
         encoding="utf-8",
     )
     rejected.write_text(
-        "This unrelated docs line mentions `QRP_MANAGED_REPO_ROOTS`.\n",
+        rejected_line + "\n",
         encoding="utf-8",
+    )
+    docs_entry = SourceTreeAllowlistEntry(
+        path=Path("docs/architecture/governance.md"),
+        scan_group="retired_occurrence",
+        rule_name=rule.name,
+        literal=rule.example,
+        pattern_name=rule.name,
+        allowed_context=f"line_regex:^{re.escape(allowed_line)}$",
+        owner="architecture-governance-docs",
+        rationale="test-only exact docs line retired literal allowance",
+        lifecycle="test-only",
+        covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+    )
+    monkeypatch.setattr(
+        governance_contract,
+        "SOURCE_TREE_ALLOWLIST_ENTRIES",
+        governance_contract.SOURCE_TREE_ALLOWLIST_ENTRIES + (docs_entry,),
     )
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
@@ -535,7 +758,7 @@ def test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context(
     } == {
         (
             "docs/architecture/open-issues.md",
-            "profile_runner_retired_qrp_managed_repo_roots",
+            rule.name,
         )
     }
 
