@@ -32,6 +32,14 @@ from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
 
 
+def _signal(column: str) -> SignalSpec:
+    return SignalSpec(
+        signal_id=column,
+        source_column=column,
+        source_kind="factor",
+    )
+
+
 def test_research_portfolio_package_exports_final_names() -> None:
     assert not hasattr(portfolios_package, "construct_portfolio_frame")
     for name in (
@@ -104,6 +112,84 @@ def test_portfolio_engine_produces_required_signal_artifacts() -> None:
         "rank_weighted_quantile",
         "rank_weighted_quantile",
     ]
+
+
+def test_portfolio_engine_reports_buy_sell_cost_breakdown() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "b", "c", "d"] * 2,
+            "timestamp": [pd.Timestamp("2024-01-02")] * 4
+            + [pd.Timestamp("2024-01-03")] * 4,
+            "raw_signal": [1.0, 2.0, 3.0, 4.0] * 2,
+            "forward_return": [0.00, 0.01, 0.02, 0.04] * 2,
+        }
+    )
+    spec = PortfolioSpec(
+        portfolio_id="cost_breakdown_portfolio",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(_signal("raw_signal"),),
+        return_source_column="forward_return",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
+        execution_lag_steps=0,
+        weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
+        cost_config=CostConfig(
+            buy_cost_bps=5.0,
+            sell_cost_bps=10.0,
+            slippage_bps=1.0,
+            spread_bps=2.0,
+        ),
+    )
+
+    result = construct_portfolio_positions(frame, spec)
+    first_cost = result.cost_breakdown.iloc[0]
+    second_cost = result.cost_breakdown.iloc[1]
+
+    assert first_cost["buy_turnover"] == pytest.approx(1.0)
+    assert first_cost["sell_turnover"] == pytest.approx(1.0)
+    assert first_cost["turnover"] == pytest.approx(2.0)
+    assert first_cost["buy_cost"] == pytest.approx(0.0005)
+    assert first_cost["sell_cost"] == pytest.approx(0.001)
+    assert first_cost["slippage_cost"] == pytest.approx(0.0002)
+    assert first_cost["spread_cost"] == pytest.approx(0.0004)
+    assert first_cost["total_cost"] == pytest.approx(0.0021)
+    assert first_cost["cost_model"] == "detailed_bps"
+    assert second_cost["turnover"] == pytest.approx(0.0)
+    assert second_cost["total_cost"] == pytest.approx(0.0)
+    assert result.portfolio_returns.loc[0, "cost"] == pytest.approx(0.0021)
+
+
+def test_portfolio_engine_long_only_positions_do_not_short_assets() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "b", "c", "d"],
+            "timestamp": [pd.Timestamp("2024-01-02")] * 4,
+            "raw_signal": [1.0, 2.0, 3.0, 4.0],
+            "forward_return": [0.00, 0.01, 0.02, 0.04],
+        }
+    )
+    spec = PortfolioSpec(
+        portfolio_id="long_only_portfolio",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(_signal("raw_signal"),),
+        return_source_column="forward_return",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
+        execution_lag_steps=0,
+        weight_config=WeightConfig(
+            portfolio_mode="long_only",
+            top_quantile=0.5,
+            bottom_quantile=0.25,
+        ),
+    )
+
+    result = construct_portfolio_positions(frame, spec)
+
+    assert result.positions["position"].ge(0.0).all()
+    assert result.positions["position"].sum() == pytest.approx(1.0)
+    assert result.portfolio_returns.loc[0, "portfolio_mode"] == "long_only"
+    assert result.portfolio_returns.loc[0, "short_count"] == 0
+    assert result.exposure_summary.loc[0, "mean_net_exposure"] == pytest.approx(1.0)
 
 
 def test_portfolio_engine_keeps_two_signal_inputs_separate() -> None:
