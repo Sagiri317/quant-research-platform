@@ -315,11 +315,18 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
         for entry in entries
         if entry.path == Path("tests/architecture/test_governance_contract_rg_gate.py")
     ]
-    assert {entry.rule_name for entry in architecture_entries} == retired_rule_names
+    assert architecture_entries
+    assert {entry.rule_name for entry in architecture_entries} <= retired_rule_names
+    assert all("python_ast:" in entry.allowed_context for entry in architecture_entries)
+    assert all(
+        ";line_regex:^" in entry.allowed_context for entry in architecture_entries
+    )
+    assert all(entry.allowed_context.endswith("$") for entry in architecture_entries)
 
 
 def test_source_tree_allowlist_entries_have_strict_context_metadata() -> None:
     from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
         SOURCE_TREE_ALLOWLIST_ENTRIES,
         validate_source_tree_allowlist_entries,
     )
@@ -364,6 +371,96 @@ def test_source_tree_allowlist_entries_have_strict_context_metadata() -> None:
             for item in failures
         )
 
+    broad = sample.__class__(
+        path=sample.path,
+        scan_group="retired_occurrence",
+        rule_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+        literal=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+        pattern_name=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+        allowed_context=f"line_regex:{PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example}",
+        owner=sample.owner,
+        rationale=sample.rationale,
+        lifecycle=sample.lifecycle,
+        covered_by=sample.covered_by,
+    )
+    assert any(
+        "source_tree_allowlist_broad_allowed_context" in item
+        for item in validate_source_tree_allowlist_entries((broad,))
+    )
+
+
+def test_profile_runner_retired_literals_are_not_allowed_by_unrelated_context(
+    tmp_path: Path,
+) -> None:
+    from governance_contract import (
+        GOVERNANCE_CONTRACT_SCRIPT,
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        source_tree_retired_text_findings,
+    )
+
+    targets = (
+        GOVERNANCE_CONTRACT_SCRIPT,
+        Path("tests/architecture/test_governance_contract_rg_gate.py"),
+        Path("tests/agents/test_verify_governance.py"),
+    )
+    for target_index, target in enumerate(targets):
+        for rule_index, rule in enumerate(PROFILE_RUNNER_RETIRED_TEXT_RULES):
+            repo = tmp_path / f"repo-{target_index}-{rule_index}"
+            repo_file = repo / target
+            repo_file.parent.mkdir(parents=True)
+            repo_file.write_text(
+                target.read_text(encoding="utf-8")
+                + f"\n# unrelated {rule.example}\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+
+            findings = source_tree_retired_text_findings(repo)
+
+            assert any(
+                finding["path"] == target.as_posix()
+                and finding["rule"] == rule.name
+                for finding in findings
+            ), (target, rule.name, findings)
+
+
+def test_profile_runner_retired_literals_remain_allowed_in_authorized_contexts(
+    tmp_path: Path,
+) -> None:
+    from governance_contract import (
+        GOVERNANCE_CONTRACT_SCRIPT,
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        source_tree_retired_text_findings,
+    )
+
+    targets = (
+        GOVERNANCE_CONTRACT_SCRIPT,
+        Path("tests/architecture/test_governance_contract_rg_gate.py"),
+        Path("tests/agents/test_verify_governance.py"),
+    )
+    expected_rules = {rule.name for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES}
+    for target_index, target in enumerate(targets):
+        repo = tmp_path / f"repo-authorized-{target_index}"
+        repo_file = repo / target
+        repo_file.parent.mkdir(parents=True)
+        repo_file.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+        findings = source_tree_retired_text_findings(repo)
+
+        assert {
+            finding["rule"]
+            for finding in findings
+            if finding["path"] == target.as_posix()
+        }.isdisjoint(expected_rules), (target, findings)
+
 
 def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
     tmp_path: Path,
@@ -400,9 +497,14 @@ def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
     } == {
         (
             "tests/agents/test_verify_governance.py",
+            2,
+            "profile_runner_retired_qrp_managed_repo_roots",
+        ),
+        (
+            "tests/agents/test_verify_governance.py",
             5,
             "profile_runner_retired_qrp_managed_repo_roots",
-        )
+        ),
     }
 
 

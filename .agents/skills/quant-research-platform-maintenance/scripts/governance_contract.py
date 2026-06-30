@@ -1089,8 +1089,35 @@ def _default_allowed_context(*, scan_group: str, literal: str) -> str:
     if scan_group == "sensitive_negative_literals":
         return "registered_sensitive_fixture"
     if literal:
-        return f"line_regex:{re.escape(literal.strip())}"
+        return f"line_regex:^{re.escape(literal.strip())}$"
     return "registered_fixture"
+
+
+def _python_line_context(definition_name: str, line_pattern: str) -> str:
+    return f"python_ast:{definition_name};line_regex:{line_pattern}"
+
+
+def _exact_python_line_context(definition_name: str, line_text: str) -> str:
+    return _python_line_context(definition_name, f"^{re.escape(line_text.strip())}$")
+
+
+def _profile_runner_forged_env_context(literal: str) -> str:
+    return _python_line_context(
+        "test_forged_retired_profile_env_does_not_skip_repo_file_negative_payload",
+        (
+            r"^monkeypatch\.setenv\("
+            + re.escape(f'"{literal}", "forge-managed-root"')
+            + r"\)$"
+        ),
+    )
+
+
+def _profile_runner_docs_line_context(literal: str) -> str:
+    return (
+        r"line_regex:^Allowed retired profile runner env fixture: `"
+        + re.escape(literal)
+        + r"`\.$"
+    )
 
 
 SOURCE_TREE_ALLOWLIST_ENTRIES = (
@@ -1355,8 +1382,12 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             scan_group="retired_occurrence",
             rule_name=rule.name,
             literal=rule.example,
+            allowed_context=_exact_python_line_context(
+                "PROFILE_RUNNER_RETIRED_LITERALS",
+                f'"{rule.example}",',
+            ),
             owner="governance-contract-rule-source",
-            rationale="profile runner retired surface literals are defined only here",
+            rationale="profile runner retired literal inventory line is owned here",
             lifecycle="current hard-cutover rule; remove only if rule is retired",
             covered_by=(
                 "tests/architecture/test_governance_contract_rg_gate.py::"
@@ -1368,10 +1399,35 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
     *(
         _source_tree_allowlist_entry(
             path=GOVERNANCE_CONTRACT_SCRIPT,
-            scan_group="retired_rule_definition",
+            scan_group="retired_occurrence",
             rule_name=rule.name,
+            literal=rule.example,
+            allowed_context=_python_line_context(
+                "PROFILE_RUNNER_RETIRED_TEXT_RULES",
+                r"^r\".*" + re.escape(rule.example) + r".*\",$",
+            ),
             owner="governance-contract-rule-source",
-            rationale="profile runner retired surface rule names are contract-owned",
+            rationale="profile runner retired regex rule line is owned here",
+            lifecycle="current hard-cutover rule; remove only if rule is retired",
+            covered_by=(
+                "tests/architecture/test_governance_contract_rg_gate.py::"
+                "test_profile_runner_retired_text_rules_are_contract_owned",
+            ),
+        )
+        for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
+    ),
+    *(
+        _source_tree_allowlist_entry(
+            path=GOVERNANCE_CONTRACT_SCRIPT,
+            scan_group="retired_occurrence",
+            rule_name=rule.name,
+            literal=rule.example,
+            allowed_context=_exact_python_line_context(
+                "PROFILE_RUNNER_RETIRED_TEXT_RULES",
+                f'example="{rule.example}",',
+            ),
+            owner="governance-contract-rule-source",
+            rationale="profile runner retired example line is owned here",
             lifecycle="current hard-cutover rule; remove only if rule is retired",
             covered_by=(
                 "tests/architecture/test_governance_contract_rg_gate.py::"
@@ -1386,10 +1442,7 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             scan_group="retired_occurrence",
             rule_name=rule.name,
             literal=rule.example,
-            allowed_context=(
-                r"line_regex:^monkeypatch\.setenv\("
-                r"\"QRP_MANAGED_REPO_ROOTS\", \"forge-managed-root\"\)$"
-            ),
+            allowed_context=_profile_runner_forged_env_context(rule.example),
             owner="governance-negative-tests",
             rationale="forged environment negative test proves the env is ignored",
             lifecycle="current negative fixture; update with profile runner rule",
@@ -1399,16 +1452,15 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
             ),
         )
         for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
-        if rule.example == "QRP_MANAGED_REPO_ROOTS"
+        if rule.name == "profile_runner_retired_qrp_managed_repo_roots"
     ),
     _source_tree_allowlist_entry(
         path=Path("docs/architecture/governance.md"),
         scan_group="retired_occurrence",
         rule_name="profile_runner_retired_qrp_managed_repo_roots",
-        literal="QRP_MANAGED_REPO_ROOTS",
-        allowed_context=(
-            r"line_regex:^Allowed retired profile runner env fixture: "
-            r"`QRP_MANAGED_REPO_ROOTS`\.$"
+        literal=PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+        allowed_context=_profile_runner_docs_line_context(
+            PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
         ),
         owner="architecture-governance-docs",
         rationale="documents the exact retired env fixture used by scanner tests",
@@ -1422,16 +1474,107 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
         _source_tree_allowlist_entry(
             path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
             scan_group="retired_occurrence",
-            rule_name=rule.name,
-            literal=rule.example,
+            rule_name=rule_name,
+            literal=literal,
+            allowed_context=_exact_python_line_context(function_name, line_text),
             owner="architecture-governance-negative-tests",
-            rationale=(
-                "existing architecture gate owns retired profile runner surface checks"
-            ),
+            rationale="architecture gate carries an exact retired fixture line",
             lifecycle="current negative fixture; update with profile runner rule",
             covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
         )
-        for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
+        for rule_name, literal, function_name, line_text in (
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+                "test_profile_runner_retired_text_allowlist_is_precise",
+                f'if rule.example == "{PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example}"',
+            ),
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+                "test_profile_runner_retired_text_allowlist_is_precise",
+                (
+                    "assert {entry.literal for entry in agent_entries} == "
+                    f'{{"{PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example}"}}'
+                ),
+            ),
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+                "test_retired_profile_literal_allowlist_is_context_scoped_in_python_file",
+                (
+                    "'    monkeypatch.setenv("
+                    f'"{PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example}", ' + "'"
+                ),
+            ),
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+                "test_retired_profile_literal_allowlist_is_context_scoped_in_python_file",
+                (
+                    '"    # '
+                    + PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
+                    + ' must not be broadly allowlisted",'
+                ),
+            ),
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+                "test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context",
+                (
+                    '"Allowed retired profile runner env fixture: `'
+                    + PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
+                    + '`.\\n",'
+                ),
+            ),
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+                "test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context",
+                (
+                    '"This unrelated docs line mentions `'
+                    + PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
+                    + '`.\\n",'
+                ),
+            ),
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[6].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[6].example,
+                "test_profile_runner_retired_cli_flags_are_rejected",
+                (
+                    f'for flag in ("{PROFILE_RUNNER_RETIRED_TEXT_RULES[6].example}", '
+                    f'"{PROFILE_RUNNER_RETIRED_TEXT_RULES[7].example}"):'
+                ),
+            ),
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[7].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[7].example,
+                "test_profile_runner_retired_cli_flags_are_rejected",
+                (
+                    f'for flag in ("{PROFILE_RUNNER_RETIRED_TEXT_RULES[6].example}", '
+                    f'"{PROFILE_RUNNER_RETIRED_TEXT_RULES[7].example}"):'
+                ),
+            ),
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+                "test_profile_runner_env_is_not_forwarded_to_pytest_subprocess",
+                (
+                    "monkeypatch.setenv("
+                    f'"{PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example}", '
+                    '"forge-managed-root")'
+                ),
+            ),
+            (
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].name,
+                PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example,
+                "test_profile_runner_env_is_not_forwarded_to_pytest_subprocess",
+                (
+                    f'assert "{PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example}" '
+                    'not in captured["env"]'
+                ),
+            ),
+        )
     ),
     *(
         _source_tree_allowlist_entry(
@@ -1802,9 +1945,34 @@ def validate_source_tree_allowlist_entries(
             failures.append(f"{prefix}:source_tree_allowlist_missing_covered_by")
         if not str(entry.allowed_context).strip():
             failures.append(f"{prefix}:source_tree_allowlist_missing_allowed_context")
+        failures.extend(
+            f"{prefix}:{failure}"
+            for failure in source_tree_allowlist_context_failures(entry)
+        )
         if entry.scan_group in {"retired_occurrence", "retired_rule_definition"}:
             if not entry.literal and entry.scan_group == "retired_occurrence":
                 failures.append(f"{prefix}:source_tree_allowlist_missing_literal")
+    return failures
+
+
+def source_tree_allowlist_context_failures(
+    entry: SourceTreeAllowlistEntry,
+) -> list[str]:
+    context = entry.allowed_context.strip()
+    if not context or entry.scan_group != "retired_occurrence":
+        return []
+    failures: list[str] = []
+    parts = context.split(";")
+    for part in parts:
+        if not part.startswith("line_regex:"):
+            continue
+        pattern = part.removeprefix("line_regex:")
+        if not pattern.startswith("^") or not pattern.endswith("$"):
+            failures.append("source_tree_allowlist_broad_allowed_context")
+            continue
+        literal = entry.literal.strip()
+        if literal and pattern in {literal, re.escape(literal)}:
+            failures.append("source_tree_allowlist_broad_allowed_context")
     return failures
 
 
@@ -1814,8 +1982,28 @@ def _source_tree_allowlist_context_matches(
     line_text: str,
     line_number: int | None,
     rule_definition_lines: set[int] | None,
+    definition_contexts: dict[str, set[int]] | None = None,
 ) -> bool:
     context = entry.allowed_context.strip()
+    parts = context.split(";")
+    matched_any = False
+    for part in parts:
+        if part.startswith("python_ast:"):
+            name = part.removeprefix("python_ast:")
+            if (
+                line_number is None
+                or definition_contexts is None
+                or line_number not in definition_contexts.get(name, set())
+            ):
+                return False
+            matched_any = True
+            continue
+        if part.startswith("line_regex:"):
+            pattern = part.removeprefix("line_regex:")
+            if re.search(pattern, line_text) is None:
+                return False
+            matched_any = True
+            continue
     if context == "governance_rule_definition":
         return (
             line_number is not None
@@ -1824,10 +2012,7 @@ def _source_tree_allowlist_context_matches(
         )
     if context in {"registered_active_fixture", "registered_sensitive_fixture"}:
         return True
-    if context.startswith("line_regex:"):
-        pattern = context.removeprefix("line_regex:")
-        return re.search(pattern, line_text) is not None
-    return False
+    return matched_any
 
 
 def _source_tree_allowlist_entries(
@@ -1856,6 +2041,7 @@ def _source_tree_retired_occurrence_allowed(
     line_text: str,
     line_number: int | None,
     rule_definition_lines: set[int] | None,
+    definition_contexts: dict[str, set[int]] | None = None,
 ) -> bool:
     for entry in _source_tree_allowlist_entries(
         relative,
@@ -1868,6 +2054,7 @@ def _source_tree_retired_occurrence_allowed(
                 line_text=line_text,
                 line_number=line_number,
                 rule_definition_lines=rule_definition_lines,
+                definition_contexts=definition_contexts,
             ):
                 return True
             continue
@@ -1878,6 +2065,7 @@ def _source_tree_retired_occurrence_allowed(
             line_text=line_text,
             line_number=line_number,
             rule_definition_lines=rule_definition_lines,
+            definition_contexts=definition_contexts,
         ):
             return True
     return False
@@ -3065,6 +3253,7 @@ def source_tree_retired_text_findings(
             relative,
             path,
         )
+        definition_contexts = source_tree_python_definition_contexts(path)
         for rule, pattern in patterns.items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
@@ -3078,6 +3267,7 @@ def source_tree_retired_text_findings(
                     line_text=line.strip(),
                     line_number=line_number,
                     rule_definition_lines=rule_definition_lines,
+                    definition_contexts=definition_contexts,
                 ):
                     continue
                 findings.append(
@@ -3127,6 +3317,7 @@ def source_tree_synthesized_string_scan_findings(
             relative,
             path,
         )
+        definition_contexts = source_tree_python_definition_contexts(path)
         findings.extend(
             source_tree_synthesized_string_findings(
                 relative,
@@ -3134,6 +3325,7 @@ def source_tree_synthesized_string_scan_findings(
                 lines,
                 skip_lines,
                 rule_definition_lines,
+                definition_contexts,
                 scan_group="synthesized_strings",
                 patterns=source_tree_forbidden_patterns(),
             )
@@ -3154,6 +3346,7 @@ def source_tree_split_string_findings(
         lines,
         skip_lines,
         rule_definition_lines,
+        source_tree_python_definition_contexts(path),
         scan_group="synthesized_strings",
         patterns=source_tree_forbidden_patterns(),
     )
@@ -3165,6 +3358,7 @@ def source_tree_synthesized_string_findings(
     lines: list[str],
     skip_lines: set[int],
     rule_definition_lines: set[int],
+    definition_contexts: dict[str, set[int]] | None = None,
     *,
     scan_group: str,
     patterns: dict[str, re.Pattern[str]],
@@ -3191,6 +3385,7 @@ def source_tree_synthesized_string_findings(
             line_text=line_text,
             line_number=line_number,
             rule_definition_lines=rule_definition_lines,
+            definition_contexts=definition_contexts,
         ):
             continue
         findings.append(
@@ -3257,6 +3452,31 @@ def source_tree_definition_name(node: ast.AST) -> str | None:
     return None
 
 
+def source_tree_python_definition_contexts(path: Path) -> dict[str, set[int]]:
+    if path.suffix != ".py" or not path.exists():
+        return {}
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+    except SyntaxError:
+        return {}
+    contexts: dict[str, set[int]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            start = getattr(node, "lineno", 0)
+            end = getattr(node, "end_lineno", start)
+            if start and end:
+                contexts.setdefault(node.name, set()).update(range(start, end + 1))
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        name = source_tree_definition_name(node)
+        start = getattr(node, "lineno", 0)
+        end = getattr(node, "end_lineno", start)
+        if name and start and end:
+            contexts.setdefault(name, set()).update(range(start, end + 1))
+    return contexts
+
+
 def source_tree_allowlist_definition_lines(
     relative: Path,
     lines: list[str],
@@ -3291,6 +3511,7 @@ def source_tree_active_test_literal_findings(
             relative,
             path,
         )
+        definition_contexts = source_tree_python_definition_contexts(path)
         for rule, pattern in source_tree_active_test_literal_patterns(
             clone_dir
         ).items():
@@ -3306,6 +3527,7 @@ def source_tree_active_test_literal_findings(
                     line_text=line.strip(),
                     line_number=line_number,
                     rule_definition_lines=rule_definition_lines,
+                    definition_contexts=definition_contexts,
                 ):
                     continue
                 findings.append(
@@ -3322,6 +3544,7 @@ def source_tree_active_test_literal_findings(
                 lines,
                 skip_lines,
                 rule_definition_lines,
+                definition_contexts,
                 scan_group="active_test_literals",
                 patterns=source_tree_active_test_literal_patterns(clone_dir),
             )
@@ -3498,6 +3721,7 @@ def source_tree_sensitive_negative_literal_findings(
             relative,
             path,
         )
+        definition_contexts = source_tree_python_definition_contexts(path)
         for rule, pattern in source_tree_sensitive_negative_patterns().items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
@@ -3511,6 +3735,7 @@ def source_tree_sensitive_negative_literal_findings(
                     line_text=line.strip(),
                     line_number=line_number,
                     rule_definition_lines=rule_definition_lines,
+                    definition_contexts=definition_contexts,
                 ):
                     continue
                 findings.append(
@@ -3527,6 +3752,7 @@ def source_tree_sensitive_negative_literal_findings(
                 lines,
                 skip_lines,
                 rule_definition_lines,
+                definition_contexts,
                 scan_group="sensitive_negative_literals",
                 patterns=source_tree_sensitive_negative_patterns(),
             )
@@ -3565,6 +3791,7 @@ def source_tree_path_allowed(
     line_text: str | None = None,
     line_number: int | None = None,
     rule_definition_lines: set[int] | None = None,
+    definition_contexts: dict[str, set[int]] | None = None,
 ) -> bool:
     in_governance_rule_definition = (
         line_number is not None
@@ -3591,6 +3818,7 @@ def source_tree_path_allowed(
             line_text=line_text,
             line_number=line_number,
             rule_definition_lines=rule_definition_lines,
+            definition_contexts=definition_contexts,
         ):
             return True
         allowed_rules = SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST.get(
