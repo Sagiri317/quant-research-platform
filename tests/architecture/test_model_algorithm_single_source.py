@@ -70,6 +70,37 @@ def test_supervised_model_root_delegates_validation_split_owner() -> None:
     assert "def _trim_training_buffer" not in root_source
 
 
+def test_supervised_model_root_delegates_estimator_owner() -> None:
+    import quant_research_platform.research.models.supervised as supervised
+
+    root_source = Path(supervised.__file__).read_text(encoding="utf-8")
+    owner_path = MODELS_ROOT / "estimators.py"
+    owner_source = owner_path.read_text(encoding="utf-8")
+    owner_names = (
+        "class _LinearRegressionEstimator",
+        "class _SingleFactorBaseline",
+        "def _linear_regression_estimator",
+        "def _ridge_regression_estimator",
+        "def _lasso_regression_estimator",
+        "def _elastic_net_estimator",
+        "def _huber_regression_estimator",
+        "def _decision_tree_regressor",
+        "def _random_forest_regressor",
+        "def _extra_trees_regressor",
+        "def _gradient_boosting_regressor",
+        "def _hist_gradient_boosting_regressor",
+        "def _xgboost_regressor",
+        "def _lightgbm_regressor",
+        "def _single_factor_baseline",
+        "def _equal_weight_rank_ensemble",
+        "def _ic_weighted_rank_ensemble",
+    )
+
+    assert owner_path.is_file()
+    assert [name for name in owner_names if name not in owner_source] == []
+    assert [name for name in owner_names if name in root_source] == []
+
+
 def test_model_estimator_dispatch_uses_algorithm_facts_only() -> None:
     import quant_research_platform.research.models.supervised as supervised
 
