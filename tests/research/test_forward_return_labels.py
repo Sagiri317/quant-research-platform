@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.data import DataFrequency
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as a_share_label_calculations,
 )
@@ -14,6 +15,7 @@ from quant_research_platform.markets.implementations.a_share.labels.definitions 
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
     forward_return_label_column,
+    forward_return_valid_bar_read_window,
 )
 from tests.helpers.synthetic_a_share import make_synthetic_market_panel
 
@@ -98,6 +100,78 @@ def test_forward_return_labels_treat_non_finite_prices_as_invalid() -> None:
     assert pd.isna(result.loc[0, one_step_label])
     assert pd.isna(result.loc[1, one_step_label])
     assert not np.isinf(result[[one_step_label]].to_numpy(dtype="float64")).any()
+
+
+def test_forward_return_valid_bar_read_window_uses_sparse_asset_keys() -> None:
+    panel_keys = pd.DataFrame(
+        [
+            ("asset_a", "2024-01-02"),
+            ("asset_a", "2024-01-03"),
+            ("asset_a", "2024-01-05"),
+            ("asset_a", "2024-01-09"),
+            ("asset_b", "2024-01-03"),
+            ("asset_b", "2024-01-04"),
+            ("asset_b", "2024-01-08"),
+            ("asset_c", "2024-01-10"),
+        ],
+        columns=["asset_id", "timestamp"],
+    )
+
+    read_window = forward_return_valid_bar_read_window(
+        panel_keys,
+        read_window=TimeWindow("2024-01-03", "2024-01-03"),
+        core_sessions=(pd.Timestamp("2024-01-03"),),
+        lookahead_bars=2,
+    )
+
+    assert read_window == TimeWindow("2024-01-03", "2024-01-09")
+
+
+def test_forward_return_labels_multi_horizon_do_not_read_past_exit_bar() -> None:
+    panel = make_synthetic_market_panel(sessions=14, assets=("asset_a",))
+    ordered = panel.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
+    horizons = (1, 5, 10)
+    decision_index = 1
+    max_exit_index = decision_index + max(horizons) + 1
+
+    baseline = add_forward_return_labels(ordered, horizons=horizons)
+    after_exit_noise = ordered.copy()
+    after_exit_noise.loc[max_exit_index + 1 :, "adj_open"] = (
+        after_exit_noise.loc[max_exit_index + 1 :, "adj_open"] * 17.0
+    )
+    with_after_exit_noise = add_forward_return_labels(
+        after_exit_noise,
+        horizons=horizons,
+    )
+    five_day_exit_noise = ordered.copy()
+    five_day_exit_index = decision_index + 5 + 1
+    five_day_exit_noise.loc[five_day_exit_index, "adj_open"] = (
+        five_day_exit_noise.loc[five_day_exit_index, "adj_open"] * 3.0
+    )
+    with_five_day_exit_noise = add_forward_return_labels(
+        five_day_exit_noise,
+        horizons=horizons,
+    )
+
+    for horizon in horizons:
+        column = forward_return_label_column(horizon)
+        assert with_after_exit_noise.loc[decision_index, column] == pytest.approx(
+            baseline.loc[decision_index, column]
+        )
+
+    one_day_column = forward_return_label_column(1)
+    five_day_column = forward_return_label_column(5)
+    ten_day_column = forward_return_label_column(10)
+    assert with_five_day_exit_noise.loc[
+        decision_index,
+        one_day_column,
+    ] == pytest.approx(baseline.loc[decision_index, one_day_column])
+    assert with_five_day_exit_noise.loc[decision_index, five_day_column] != (
+        pytest.approx(baseline.loc[decision_index, five_day_column])
+    )
+    assert with_five_day_exit_noise.loc[decision_index, ten_day_column] == (
+        pytest.approx(baseline.loc[decision_index, ten_day_column])
+    )
 
 
 def test_label_catalog_horizons_mask_invalid_entry() -> None:
