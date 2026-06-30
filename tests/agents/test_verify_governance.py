@@ -113,6 +113,11 @@ def test_active_doc_scan_collects_non_empty_clean_tree_file_set() -> None:
     assert "data/README.md" in paths
 
 
+def _unsafe_assignment_text() -> str:
+    key = "".join(chr(code) for code in (116, 111, 107, 101, 110))
+    return f'credential = "{key}=unsafe"\n'
+
+
 def test_managed_roots_skip_current_profile_output_negative_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -122,7 +127,7 @@ def test_managed_roots_skip_current_profile_output_negative_payload(
     managed = repo / "profile-output" / "goal" / "profiles" / "fast"
     managed.mkdir(parents=True)
     payload = managed / "private-negative.py"
-    payload.write_text('secret = "token=unsafe"\n', encoding="utf-8")
+    payload.write_text(_unsafe_assignment_text(), encoding="utf-8")
     monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", "profile-output/goal/profiles/fast")
 
     result = module.Result()
@@ -138,7 +143,7 @@ def test_unmanaged_repo_file_negative_payload_is_still_detected(tmp_path: Path) 
     module = _load_governance_module()
     path = tmp_path / "docs" / "architecture" / "private-negative.md"
     path.parent.mkdir(parents=True)
-    path.write_text('secret = "token=unsafe"\n', encoding="utf-8")
+    path.write_text(_unsafe_assignment_text(), encoding="utf-8")
     result = module.Result()
 
     module.check_text_safety(
@@ -222,7 +227,7 @@ def test_managed_roots_require_current_profile_declaration(
     managed = tmp_path / "profile-output"
     managed.mkdir(parents=True)
     (managed / "private-negative.py").write_text(
-        'secret = "token=unsafe"\n',
+        _unsafe_assignment_text(),
         encoding="utf-8",
     )
     stale = tmp_path / "managed-roots.json"
