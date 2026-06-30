@@ -54,7 +54,7 @@ def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_column
         return original_read_parquet(path, *args, **kwargs)
 
     monkeypatch.setattr(
-        "quant_research_platform.storage.datasets.pd.read_parquet",
+        "quant_research_platform.storage._dataset_reading.pd.read_parquet",
         spy_read_parquet,
     )
 
@@ -160,7 +160,7 @@ def test_fingerprint_dataset_time_window_prunes_year_partitions(
         return original_read_parquet(path, *args, **kwargs)
 
     monkeypatch.setattr(
-        "quant_research_platform.storage.datasets.pd.read_parquet",
+        "quant_research_platform.storage._dataset_fingerprinting.pd.read_parquet",
         spy_read_parquet,
     )
 

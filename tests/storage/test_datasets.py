@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.storage._dataset_reading as dataset_reading
 import quant_research_platform.storage.datasets as datasets
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.contracts.columns import ColumnRole
@@ -383,14 +384,18 @@ def test_read_dataset_reuses_one_candidate_file_listing(
     root = _artifact_root(tmp_path, "read_plan_reuse")
     write_dataset(root, _frame(), spec=_spec("read_plan_reuse"))
     calls = 0
-    original = datasets._candidate_data_files
+    original = dataset_reading._candidate_data_files
 
     def spy_candidate_data_files(*args, **kwargs):
         nonlocal calls
         calls += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(datasets, "_candidate_data_files", spy_candidate_data_files)
+    monkeypatch.setattr(
+        dataset_reading,
+        "_candidate_data_files",
+        spy_candidate_data_files,
+    )
 
     read_dataset(
         root,
@@ -408,14 +413,18 @@ def test_fingerprint_dataset_reuses_one_candidate_file_listing(
     root = _artifact_root(tmp_path, "fingerprint_plan_reuse")
     write_dataset(root, _frame(), spec=_spec("fingerprint_plan_reuse"))
     calls = 0
-    original = datasets._candidate_data_files
+    original = dataset_reading._candidate_data_files
 
     def spy_candidate_data_files(*args, **kwargs):
         nonlocal calls
         calls += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(datasets, "_candidate_data_files", spy_candidate_data_files)
+    monkeypatch.setattr(
+        dataset_reading,
+        "_candidate_data_files",
+        spy_candidate_data_files,
+    )
 
     fingerprint_dataset(
         root,

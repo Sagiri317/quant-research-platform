@@ -1,0 +1,310 @@
+"""Dataset schema, metadata, and payload validation helpers."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import pyarrow.parquet as pq
+
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import (
+    DataGrain,
+    DataSpec,
+    InterimDataSpec,
+    ProcessedDataSpec,
+)
+from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.storage.manifests import require_qrp_json_identity
+
+_DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset({"input_fingerprints"})
+_DATASET_MANIFEST_RESERVED_KEYS = frozenset(
+    {
+        "schema_version",
+        "data_id",
+        "frequency",
+        "grain",
+        "primary_key",
+        "partition_columns",
+        "required_columns",
+        "column_roles",
+        "source_id",
+        "market_id",
+        "kind",
+        "source_input_data_ids",
+        "processed_input_data_ids",
+        "input_data_ids",
+        "base_input_data_id",
+        "factor_columns",
+        "feature_columns",
+        "label_columns",
+        "filter_columns",
+        "context_columns",
+        "key_coverage",
+        "row_count",
+        "file_count",
+        "file_size_bytes",
+        "columns",
+        "schema_hash",
+        "partition_row_counts",
+        "partition_count",
+        "partitions",
+        "date_min",
+        "date_max",
+        "null_count_summary",
+        "non_finite_count_summary",
+        "duplicate_primary_key_count",
+        "factor_nan_profile",
+        "label_nan_profile",
+        "validation_status",
+    }
+)
+_DATASET_INPUT_FINGERPRINT_KEYS = frozenset(
+    {
+        "schema_hash",
+        "row_count",
+        "key_columns",
+        "content_hash",
+        "partition_fingerprints",
+        "file_count",
+        "column_names",
+    }
+)
+_DATASET_PARTITION_FINGERPRINT_KEYS = frozenset(
+    {"partition", "row_count", "content_hash"}
+)
+
+
+def _merge_dataset_instance_metadata(
+    payload: Mapping[str, Any],
+    instance_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    result = dict(payload)
+    if instance_metadata is None:
+        return result
+    if not isinstance(instance_metadata, Mapping):
+        raise TypeError("invalid_dataset_instance_metadata")
+    metadata: dict[str, Any] = {}
+    for key, value in instance_metadata.items():
+        if not isinstance(key, str):
+            raise ValueError("unsupported_dataset_instance_metadata_key")
+        if key in _DATASET_MANIFEST_RESERVED_KEYS or key in result:
+            raise ValueError(f"reserved_dataset_instance_metadata_key: {key}")
+        if key not in _DATASET_INSTANCE_METADATA_ALLOWED_KEYS:
+            raise ValueError(f"unsupported_dataset_instance_metadata_key: {key}")
+        if key == "input_fingerprints":
+            metadata[key] = _validate_input_fingerprints_metadata(value)
+    _require_json_serializable(metadata)
+    result.update(metadata)
+    return result
+
+
+def _require_json_serializable(value: Mapping[str, Any]) -> None:
+    try:
+        json.dumps(value, ensure_ascii=True, sort_keys=True, allow_nan=False)
+    except TypeError as exc:
+        raise ValueError("dataset_instance_metadata_not_json_serializable") from exc
+    except ValueError as exc:
+        raise ValueError("dataset_instance_metadata_not_json_serializable") from exc
+
+
+def _validate_input_fingerprints_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid_input_fingerprints_metadata")
+    fingerprints: dict[str, Any] = {}
+    for data_id, fingerprint in value.items():
+        if not isinstance(data_id, str) or not data_id:
+            raise ValueError("invalid_input_fingerprints_metadata")
+        fingerprints[data_id] = _validate_input_fingerprint_payload(fingerprint)
+    return fingerprints
+
+
+def _validate_input_fingerprint_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid_input_fingerprints_metadata")
+    keys = set(value)
+    if keys != _DATASET_INPUT_FINGERPRINT_KEYS:
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return {
+        "schema_hash": _require_string(value["schema_hash"]),
+        "row_count": _require_non_negative_int(value["row_count"]),
+        "key_columns": _require_string_list(value["key_columns"]),
+        "content_hash": _require_string(value["content_hash"]),
+        "partition_fingerprints": [
+            _validate_partition_fingerprint_payload(item)
+            for item in _require_list(value["partition_fingerprints"])
+        ],
+        "file_count": _require_non_negative_int(value["file_count"]),
+        "column_names": _require_string_list(value["column_names"]),
+    }
+
+
+def _validate_partition_fingerprint_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid_input_fingerprints_metadata")
+    keys = set(value)
+    if keys != _DATASET_PARTITION_FINGERPRINT_KEYS:
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return {
+        "partition": _require_string(value["partition"]),
+        "row_count": _require_non_negative_int(value["row_count"]),
+        "content_hash": _require_string(value["content_hash"]),
+    }
+
+
+def _require_string(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return value
+
+
+def _require_string_list(value: Any) -> list[str]:
+    values = _require_list(value)
+    if any(not isinstance(item, str) or not item for item in values):
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return list(values)
+
+
+def _require_list(value: Any) -> list[Any]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return list(value)
+
+
+def _require_non_negative_int(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return int(value)
+
+
+def _validate_dataset_spec(spec: DataSpec) -> str | None:
+    if spec.schema_version != "0.1":
+        raise ValueError("unsupported_schema_version")
+    if not isinstance(spec.grain, DataGrain):
+        raise ValueError("invalid_grain")
+    if not spec.primary_key:
+        raise ValueError("missing_primary_key")
+    if spec.partition_columns not in {("year",), ()}:
+        raise ValueError("unsupported_partitioning")
+    for column, role in spec.column_roles.items():
+        if not isinstance(role, ColumnRole):
+            raise ValueError(f"invalid_column_role: {column}")
+    invalid_key_roles = [
+        column
+        for column in spec.primary_key
+        if spec.column_roles.get(column) not in {ColumnRole.KEY, ColumnRole.TIMESTAMP}
+    ]
+    if invalid_key_roles:
+        raise ValueError(f"invalid_primary_key_roles: {', '.join(invalid_key_roles)}")
+    timestamp_columns = [
+        column
+        for column in spec.primary_key
+        if spec.column_roles[column] is ColumnRole.TIMESTAMP
+    ]
+    if spec.partition_columns == ():
+        if timestamp_columns:
+            raise ValueError("unpartitioned_data_must_not_use_timestamp_key")
+        return None
+    if len(timestamp_columns) != 1:
+        raise ValueError("invalid_timestamp_primary_key")
+    return timestamp_columns[0]
+
+
+def _validated_schema(paths: list[Path]) -> tuple[tuple[str, str], ...]:
+    if not paths:
+        raise ValueError("dataset_data_dir_missing")
+    schemas = [_canonical_schema(path) for path in paths]
+    first = schemas[0]
+    if any(schema != first for schema in schemas[1:]):
+        raise ValueError("dataset_schema_mismatch")
+    return first
+
+
+def _canonical_schema(path: Path) -> tuple[tuple[str, str], ...]:
+    schema = pq.ParquetFile(path).schema_arrow
+    return _canonical_schema_from_schema(schema)
+
+
+def _canonical_schema_from_file(
+    parquet_file: pq.ParquetFile,
+) -> tuple[tuple[str, str], ...]:
+    return _canonical_schema_from_schema(parquet_file.schema_arrow)
+
+
+def _canonical_schema_from_schema(schema: Any) -> tuple[tuple[str, str], ...]:
+    return tuple((field.name, str(field.type)) for field in schema)
+
+
+def _data_spec_payload(spec: DataSpec) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_id": "qrp-dataset-spec",
+        "data_id": spec.data_id,
+        "frequency": spec.frequency.value,
+        "grain": spec.grain.value,
+        "primary_key": list(spec.primary_key),
+        "partition_columns": list(spec.partition_columns),
+        "required_columns": list(spec.required_columns),
+        "column_roles": {
+            column: role.value for column, role in sorted(spec.column_roles.items())
+        },
+    }
+    if isinstance(spec, InterimDataSpec):
+        payload.update({"source_id": str(spec.source_id)})
+    if isinstance(spec, ProcessedDataSpec):
+        payload.update(
+            {
+                "market_id": str(spec.market_id),
+                "kind": spec.kind.value,
+                "source_input_data_ids": list(spec.source_input_data_ids),
+                "processed_input_data_ids": list(spec.processed_input_data_ids),
+            }
+        )
+    if isinstance(spec, ResearchDatasetSpec):
+        payload.update(
+            {
+                "market_id": str(spec.market_id),
+                "input_data_ids": list(spec.input_data_ids),
+                "base_input_data_id": spec.base_input_data_id,
+                "factor_columns": list(spec.factor_columns),
+                "feature_columns": list(spec.feature_columns),
+                "label_columns": list(spec.label_columns),
+                "filter_columns": list(spec.filter_columns),
+                "context_columns": list(spec.context_columns),
+                "key_coverage": dict(spec.key_coverage),
+            }
+        )
+    return payload
+
+
+def _require_qrp_json_schema_id(
+    payload: object,
+    *,
+    expected: str,
+    error: str,
+) -> None:
+    require_qrp_json_identity(
+        payload,
+        expected_schema_id=expected,
+        error=error,
+    )
+
+
+def _date_string(value: pd.Timestamp | None) -> str | None:
+    if value is None:
+        return None
+    return pd.Timestamp(value).date().isoformat()
+
+
+def _sha256_json(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

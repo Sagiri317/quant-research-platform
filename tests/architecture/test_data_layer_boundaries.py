@@ -105,7 +105,7 @@ RUN_RESULT_AND_RUN_ID_SCAN_ROOTS = (
 
 MATERIALIZED_SCAN_ALLOWLIST = {
     (
-        Path("src/quant_research_platform/storage/datasets.py"),
+        Path("src/quant_research_platform/storage/_dataset_reading.py"),
         "read_dataset",
     ): (
         "materialized read mode is the explicit storage materialization boundary, "

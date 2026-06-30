@@ -10,6 +10,30 @@ AGENTS_SRC = PROJECT_SRC / "agents"
 PROVIDER_BINDINGS = PROJECT_SRC / "catalog" / "provider_bindings.py"
 STORAGE_DATASETS = PROJECT_SRC / "storage" / "datasets.py"
 DELETED_STORAGE_PARQUET = PROJECT_SRC / "storage" / "parquet.py"
+STORAGE_DATASET_OWNER_MODULES = (
+    PROJECT_SRC / "storage" / "_dataset_types.py",
+    PROJECT_SRC / "storage" / "_dataset_schema.py",
+    PROJECT_SRC / "storage" / "_dataset_paths.py",
+    PROJECT_SRC / "storage" / "_dataset_writing.py",
+    PROJECT_SRC / "storage" / "_dataset_reading.py",
+    PROJECT_SRC / "storage" / "_dataset_inspection.py",
+    PROJECT_SRC / "storage" / "_dataset_fingerprinting.py",
+    PROJECT_SRC / "storage" / "_dataset_comparison.py",
+    PROJECT_SRC / "storage" / "_dataset_manifest_validation.py",
+)
+STORAGE_DATASET_PUBLIC_FUNCTIONS = {
+    "write_dataset",
+    "read_dataset",
+    "inspect_dataset",
+    "fingerprint_dataset",
+    "compare_datasets",
+}
+STORAGE_DATASET_PUBLIC_TYPES = {
+    "DatasetReadMode",
+    "DatasetInspection",
+    "DatasetFingerprint",
+    "DatasetComparison",
+}
 WORKFLOW_INTERFACE_ROOTS = (
     PROJECT_SRC / "workflows",
     PROJECT_SRC / "interfaces",
@@ -81,6 +105,30 @@ def test_storage_datasets_exposes_single_artifact_root_api() -> None:
     }.issubset(public_functions)
 
 
+def test_storage_datasets_root_delegates_to_owner_modules() -> None:
+    source = STORAGE_DATASETS.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(STORAGE_DATASETS))
+    function_names = {
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    missing_modules = [
+        path.as_posix() for path in STORAGE_DATASET_OWNER_MODULES if not path.is_file()
+    ]
+    non_delegating_functions = [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in STORAGE_DATASET_PUBLIC_FUNCTIONS
+        and not _function_body_is_single_call(node)
+    ]
+
+    assert missing_modules == []
+    assert function_names == STORAGE_DATASET_PUBLIC_FUNCTIONS
+    assert class_names.isdisjoint(STORAGE_DATASET_PUBLIC_TYPES)
+    assert non_delegating_functions == []
+
+
 def test_workflow_and_interface_public_names_use_validate_only_wording() -> None:
     forbidden_terms = (
         "workflow" + "-fixture",
@@ -110,3 +158,19 @@ def _referenced_names(tree: ast.Module) -> set[str]:
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             names.add(node.value)
     return names
+
+
+def _function_body_is_single_call(function: ast.FunctionDef) -> bool:
+    body = [
+        node
+        for node in function.body
+        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
+    ]
+    if len(body) != 1:
+        return False
+    statement = body[0]
+    if isinstance(statement, ast.Return):
+        return isinstance(statement.value, ast.Call)
+    if isinstance(statement, ast.Expr):
+        return isinstance(statement.value, ast.Call)
+    return False
