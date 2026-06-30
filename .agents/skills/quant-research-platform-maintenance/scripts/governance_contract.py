@@ -2884,7 +2884,6 @@ def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
 def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
     tracked_paths = source_tree_tracked_paths(clone_dir)
     tracked_text_files = source_tree_tracked_text_files_from_paths(tracked_paths)
-    allowlist_contract_findings = source_tree_allowlist_contract_findings()
     retired_text_findings = source_tree_retired_text_findings(
         clone_dir,
         tracked_text_files=tracked_text_files,
@@ -2924,11 +2923,6 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
         )
     )
     return {
-        "allowlist_contract": {
-            "status": "PASS" if not allowlist_contract_findings else "FAIL",
-            "finding_count": len(allowlist_contract_findings),
-            "findings": allowlist_contract_findings,
-        },
         "retired_text": {
             "status": "PASS" if not retired_text_findings else "FAIL",
             "finding_count": len(retired_text_findings),
@@ -2975,21 +2969,6 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
             "findings": sensitive_negative_literal_findings,
         },
     }
-
-
-def source_tree_allowlist_contract_findings() -> list[dict[str, object]]:
-    findings: list[dict[str, object]] = []
-    for failure in validate_source_tree_allowlist_entries(
-        SOURCE_TREE_ALLOWLIST_ENTRIES,
-    ):
-        findings.append(
-            {
-                "path": "governance_contract.py",
-                "line": 0,
-                "rule": failure,
-            }
-        )
-    return findings
 
 
 def source_tree_retired_governance_path_findings(

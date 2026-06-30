@@ -321,12 +321,10 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
 def test_source_tree_allowlist_entries_have_strict_context_metadata() -> None:
     from governance_contract import (
         SOURCE_TREE_ALLOWLIST_ENTRIES,
-        source_tree_allowlist_contract_findings,
         validate_source_tree_allowlist_entries,
     )
 
     assert validate_source_tree_allowlist_entries(SOURCE_TREE_ALLOWLIST_ENTRIES) == []
-    assert source_tree_allowlist_contract_findings() == []
 
     sample = SOURCE_TREE_ALLOWLIST_ENTRIES[0]
     malformed = (
