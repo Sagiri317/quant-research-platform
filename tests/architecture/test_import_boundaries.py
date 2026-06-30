@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 from pathlib import Path
 
@@ -172,6 +173,33 @@ def test_session_window_owner_is_unique(import_edges: tuple[ImportEdge, ...]) ->
     assert not imports, "retired_markets_calendars_import: " + "; ".join(imports)
 
 
+def test_price_volume_root_is_public_reexport_surface() -> None:
+    retired_module = PROJECT_SRC / "research" / "factors" / "price_volume.py"
+    package_root = PROJECT_SRC / "research" / "factors" / "price_volume"
+    init_path = package_root / "__init__.py"
+
+    assert not retired_module.exists()
+    assert package_root.is_dir()
+    assert init_path.is_file()
+
+    tree = ast.parse(init_path.read_text(encoding="utf-8"))
+    local_definitions = (
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.ClassDef,
+    )
+    assert not [
+        node.name for node in tree.body if isinstance(node, local_definitions)
+    ], "price_volume_root_defines_behavior"
+
+    exports = _literal_all_exports(tree)
+    assert exports, "price_volume_root_missing_all"
+    private_exports = [name for name in exports if name.startswith("_")]
+    assert not private_exports, "price_volume_root_private_exports: " + repr(
+        private_exports
+    )
+
+
 def test_known_cross_layer_imports_are_explicitly_allowlisted(
     import_edges: tuple[ImportEdge, ...],
 ) -> None:
@@ -229,6 +257,20 @@ def test_profiles_research_is_the_only_interface_composition_root(
         "interfaces_market_implementation_import: "
         + "; ".join(interface_market_imports)
     )
+
+
+def _literal_all_exports(tree: ast.Module) -> tuple[str, ...]:
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "__all__"
+            for target in node.targets
+        ):
+            continue
+        value = ast.literal_eval(node.value)
+        return tuple(value)
+    return ()
 
 
 def _is_selected_boundary(path: Path, module: str) -> bool:

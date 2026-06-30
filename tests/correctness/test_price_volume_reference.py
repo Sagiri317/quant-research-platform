@@ -20,11 +20,19 @@ from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
 from quant_research_platform.markets.session_windows import SessionWindow
-from quant_research_platform.research.factors import price_volume as price_volume_module
 from quant_research_platform.research.factors.price_volume import (
-    _rolling_aggregate,
     calculate_price_volume_factors,
     price_volume_factor_columns,
+)
+from quant_research_platform.research.factors.price_volume import (
+    calculations as price_volume_calculations,
+)
+from quant_research_platform.research.factors.price_volume import (
+    rolling as price_volume_rolling,
+)
+from quant_research_platform.research.factors.price_volume.rolling import (
+    _ROLLING_MOMENT_NEAR_ZERO_VARIANCE,
+    _rolling_aggregate,
 )
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
@@ -58,7 +66,9 @@ def test_price_volume_all_factor_columns_match_qrp_reference() -> None:
 
 
 def test_price_volume_rolling_moment_contract_names_near_zero_policy() -> None:
-    source = inspect.getsource(price_volume_module)
+    source = inspect.getsource(price_volume_calculations) + inspect.getsource(
+        price_volume_rolling
+    )
 
     assert "stable =" not in source
     assert "1e-14" not in source
@@ -68,7 +78,7 @@ def test_price_volume_rolling_moment_contract_names_near_zero_policy() -> None:
     unsupported_assignment = "unsupported = unsupported_price_volume_factors(requested)"
     assert source.count(unsupported_assignment) == 1
     assert (
-        price_volume_module._ROLLING_MOMENT_NEAR_ZERO_VARIANCE
+        _ROLLING_MOMENT_NEAR_ZERO_VARIANCE
         == REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE
     )
 

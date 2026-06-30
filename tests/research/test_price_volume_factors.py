@@ -17,7 +17,6 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.ids import (
     market_panel_data_id,
 )
-from quant_research_platform.research.factors import price_volume as price_volume_module
 from quant_research_platform.research.factors.price_volume import (
     CORE_PRICE_VOLUME_FACTORS,
     PRICE_VOLUME_CORE_PRESET,
@@ -32,6 +31,9 @@ from quant_research_platform.research.factors.price_volume import (
     price_volume_factor_input_columns,
     price_volume_window_column,
     select_price_volume_feature_columns_from_schema,
+)
+from quant_research_platform.research.factors.price_volume import (
+    rolling as price_volume_rolling,
 )
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
@@ -459,7 +461,7 @@ def test_price_volume_rolling_moments_are_chunk_start_invariant() -> None:
 
 
 def test_price_volume_drawdown_path_avoids_pandas_rolling_apply_hot_path() -> None:
-    source = inspect.getsource(price_volume_module._rolling_drawdown)
+    source = inspect.getsource(price_volume_rolling._rolling_drawdown)
 
     assert ".rolling(" not in source
     assert ".apply(" not in source
