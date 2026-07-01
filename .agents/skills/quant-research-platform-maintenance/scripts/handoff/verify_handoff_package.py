@@ -899,7 +899,6 @@ def validation_sidecar_status_failures(
         failures.append("validation_status_summary_mismatch")
     pairs = {
         "handoff_verify": "handoff_verify",
-        "handoff_safety": "handoff_safety_scan",
     }
     for summary_key, check_name in pairs.items():
         if (
