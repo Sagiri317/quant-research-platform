@@ -897,15 +897,6 @@ def validation_sidecar_status_failures(
         validation_status = "FAIL"
     if status_summary.get("validation") != validation_status:
         failures.append("validation_status_summary_mismatch")
-    pairs = {
-        "handoff_verify": "handoff_verify",
-    }
-    for summary_key, check_name in pairs.items():
-        if (
-            check_name in mandatory_statuses
-            and status_summary.get(summary_key) != mandatory_statuses[check_name]
-        ):
-            failures.append(f"status_summary_{summary_key}_mismatch")
     blocked_count = sum(
         1 for status in mandatory_statuses.values() if status == "BLOCKED"
     )

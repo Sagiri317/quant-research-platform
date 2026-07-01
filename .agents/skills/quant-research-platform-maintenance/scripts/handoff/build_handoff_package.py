@@ -141,6 +141,11 @@ def build_handoff_package(
 
         verify_failures = verify_handoff_package(zip_path, json_path)
         verify_status = "PASS" if not verify_failures else "FAIL"
+        update_sidecar_run_status(
+            json_path,
+            handoff_verify=verify_status,
+            handoff_safety=safety_status,
+        )
     return {
         "ok": safety_status == "PASS" and verify_status in {"PASS", "NOT_RUN"},
         "zip_path": zip_path.as_posix(),
@@ -487,6 +492,21 @@ def sidecar_payload(
         ),
         "advisory_reviews": advisory_reviews_from_validation(status_map),
     }
+
+
+def update_sidecar_run_status(
+    json_path: Path,
+    *,
+    handoff_verify: str,
+    handoff_safety: str,
+) -> None:
+    payload = load_json_object(json_path, "handoff_sidecar")
+    summary = payload.get("status_summary")
+    if not isinstance(summary, dict):
+        raise SystemExit("sidecar_status_summary_required")
+    summary["handoff_verify"] = handoff_verify
+    summary["handoff_safety"] = handoff_safety
+    write_text(json_path, stable_json(payload))
 
 
 def status_summary_from_validation(
