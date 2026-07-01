@@ -240,6 +240,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         "structured_keys",
         "governance_truth",
         "sensitive_negative_literals",
+        "allowance_contract",
     }
     assert source_tree_scan["scan_groups"]["retired_text"]["status"] == "PASS"
     assert source_tree_scan["scan_groups"]["retired_text"]["finding_count"] == 0

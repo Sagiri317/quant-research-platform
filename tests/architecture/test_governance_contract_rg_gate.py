@@ -1089,7 +1089,12 @@ def test_retired_profile_allowlist_rejects_global_stale_entries(
     for name, overrides, actions in cases:
         repo = tmp_path / name
         path = repo / "tests" / "agents" / "test_verify_governance.py"
+        owner_path = repo / "tests" / "architecture" / (
+            "test_governance_contract_rg_gate.py"
+        )
         repo.mkdir(parents=True, exist_ok=True)
+        owner_path.parent.mkdir(parents=True)
+        owner_path.write_text("# allowlist owner\n", encoding="utf-8")
         if "write" in actions:
             path.parent.mkdir(parents=True)
             path.write_text(
@@ -1103,6 +1108,12 @@ def test_retired_profile_allowlist_rejects_global_stale_entries(
             (entry,),
         )
         subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", owner_path.relative_to(repo).as_posix()],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
         if "add" in actions:
             subprocess.run(
                 ["git", "add", "."],

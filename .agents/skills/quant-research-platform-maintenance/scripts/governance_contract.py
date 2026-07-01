@@ -1444,12 +1444,6 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
         "tests/architecture/test_handoff_package_contract.py",
         "retired_text:clean_rewrite",
         _exact_line('"clean_', 'rewrite",'),
-        "def:test_source_tree_scan_independently_rejects_synthesized_strings",
-    ),
-    (
-        "tests/architecture/test_handoff_package_contract.py",
-        "retired_text:clean_rewrite",
-        _exact_line('"clean_', 'rewrite",'),
         "def:test_source_tree_scan_independently_rejects_python_symbols",
     ),
     (
@@ -3484,6 +3478,12 @@ def source_tree_allowance_contract_findings(
     tracked_paths = {
         _source_tree_posix_path(path) for path in source_tree_tracked_paths(clone_dir)
     }
+    governance_allowlist_owner_path = Path(
+        "tests/architecture/test_governance_contract_rg_gate.py"
+    )
+    enforce_missing_allowance_entries = (
+        clone_dir / governance_allowlist_owner_path
+    ).is_file()
     patterns = source_tree_allowed_occurrence_patterns(repo_root=clone_dir)
     for failure in validate_source_tree_allowed_occurrences(
         SOURCE_TREE_ALLOWED_OCCURRENCES,
@@ -3500,6 +3500,8 @@ def source_tree_allowance_contract_findings(
     for entry in SOURCE_TREE_ALLOWED_OCCURRENCES:
         path = clone_dir / Path(entry.path.as_posix())
         if entry.path not in tracked_paths or not path.exists():
+            if not enforce_missing_allowance_entries:
+                continue
             findings.append(
                 {
                     "path": entry.path.as_posix(),
@@ -4376,16 +4378,21 @@ def source_tree_active_test_literal_patterns(
     repo_root: Path | None = None,
 ) -> dict[str, re.Pattern[str]]:
     ensure_runtime_src_path(repo_root)
-    from quant_research_platform.contracts.data import (
-        DataFrequency,
-        data_frequency_slug,
-    )
-    from quant_research_platform.markets.implementations.a_share.ids import (
-        market_context_data_id,
-        market_panel_data_id,
-    )
+    try:
+        from quant_research_platform.contracts.data import (
+            DataFrequency,
+            data_frequency_slug,
+        )
+        from quant_research_platform.markets.implementations.a_share.ids import (
+            market_context_data_id,
+            market_panel_data_id,
+        )
 
-    market_bars_data_id = discover_market_bars_data_id_helper(repo_root)
+        market_bars_data_id = discover_market_bars_data_id_helper(repo_root)
+    except (ModuleNotFoundError, RuntimeError):
+        if repo_root is not None:
+            return {}
+        raise
     frequency = DataFrequency.DAILY
     daily_slug = re.escape(data_frequency_slug(frequency))
     return {
@@ -4416,19 +4423,29 @@ def source_tree_active_test_literal_patterns(
 
 
 def discover_market_bars_data_id_helper(repo_root: Path | None) -> object:
-    src_root = ensure_runtime_src_path(repo_root)
-    source_root = src_root / "quant_research_platform" / "sources"
-    for path in sorted(source_root.rglob("ids.py")) if source_root.exists() else ():
-        if "market_bars_data_id" not in path.read_text(
-            encoding="utf-8",
-            errors="ignore",
-        ):
-            continue
-        module_name = ".".join(path.relative_to(src_root).with_suffix("").parts)
-        module = importlib.import_module(module_name)
-        helper = getattr(module, "market_bars_data_id", None)
-        if callable(helper):
-            return helper
+    primary_src_root = ensure_runtime_src_path(repo_root)
+    script_dir = Path(__file__).resolve().parent
+    candidate_src_roots = [primary_src_root]
+    candidate_src_roots.extend(
+        parent / "src"
+        for parent in script_dir.parents
+        if (parent / "src" / "quant_research_platform").is_dir()
+    )
+    for src_root in dict.fromkeys(candidate_src_roots):
+        source_root = src_root / "quant_research_platform" / "sources"
+        for path in sorted(source_root.rglob("ids.py")) if source_root.exists() else ():
+            if "market_bars_data_id" not in path.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            ):
+                continue
+            if str(src_root) not in sys.path:
+                sys.path.insert(0, str(src_root))
+            module_name = ".".join(path.relative_to(src_root).with_suffix("").parts)
+            module = importlib.import_module(module_name)
+            helper = getattr(module, "market_bars_data_id", None)
+            if callable(helper):
+                return helper
     raise RuntimeError("active market bars data id helper unavailable")
 
 

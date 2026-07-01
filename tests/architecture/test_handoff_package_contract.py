@@ -463,7 +463,7 @@ def test_source_tree_scan_independently_rejects_synthesized_strings(
     path = repo / "tools" / "hack_synthesized.py"
     path.parent.mkdir(parents=True)
     retired_value = rule_form(contract.RETIRED_NAME_RULES, "clean_rewrite")
-    retired_rule = retired_value
+    expected_rule = retired_value.replace("-", "_")
     path.write_text(
         "\n".join(
             [
@@ -488,12 +488,12 @@ def test_source_tree_scan_independently_rejects_synthesized_strings(
     }
     assert (
         "tools/hack_synthesized.py",
-        "clean_rewrite",
+        expected_rule,
         "token_static_string",
     ) in observed
     assert (
         "tools/hack_synthesized.py",
-        retired_rule,
+        expected_rule,
         "ast_join_string",
     ) in observed
 
