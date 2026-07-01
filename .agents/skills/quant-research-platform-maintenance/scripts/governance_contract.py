@@ -3263,8 +3263,6 @@ MANDATORY_VALIDATION_CHECKS = frozenset(
         "private_smoke_run_level",
         "private_smoke_child_checks",
         "baseline_compare",
-        "handoff_verify",
-        "handoff_safety_scan",
         "governance",
         "code_map",
     }
@@ -3274,7 +3272,6 @@ ALLOWED_VALIDATION_CHECKS = MANDATORY_VALIDATION_CHECKS | ADVISORY_VALIDATION_CH
 REVIEW_HANDOFF_EVIDENCE_NAME_TOKENS = frozenset(
     {"advisory-review-receipt"}
 )
-BUILDER_OWNED_VALIDATION_CHECKS = frozenset({"handoff_verify", "handoff_safety_scan"})
 
 
 def source_tree_scan_payload(
@@ -4775,27 +4772,6 @@ def collect_handoff_evidence_blocked_key_failures(
             )
 
 
-def validation_summary_with_status_overrides(
-    validation_summary: dict[str, object],
-    overrides: dict[str, str],
-) -> dict[str, object]:
-    payload = json.loads(_stable_governance_json(validation_summary))
-    rows = payload.get("checks")
-    if not isinstance(rows, list):
-        raise SystemExit("validation_summary_checks_must_be_list")
-    validate_validation_summary_contract(payload, require_mandatory=False)
-    for check_name in BUILDER_OWNED_VALIDATION_CHECKS:
-        set_validation_summary_check_status(
-            rows,
-            check_name,
-            overrides.get(check_name, "NOT_RUN"),
-        )
-    for check_name, status in overrides.items():
-        set_validation_summary_check_status(rows, check_name, status)
-    validate_validation_summary_contract(payload)
-    return payload
-
-
 def validate_validation_summary_contract(
     payload: dict[str, object],
     *,
@@ -4867,44 +4843,6 @@ def validation_summary_contract_failures(
             f"validation_summary_mandatory_check_missing: {name}" for name in missing
         )
     return failures
-
-
-def set_validation_summary_check_status(
-    rows: list[object],
-    check_name: str,
-    status: str,
-) -> None:
-    details_key = "evidence"
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = row.get("name")
-        if name == check_name:
-            raw_status = row.get("status")
-            current_status = raw_status if isinstance(raw_status, str) else ""
-            current_evidence = str(row.get(details_key) or "")
-            row["status"] = status
-            generated_summary = current_evidence.startswith(
-                "validation summary generated; "
-            )
-            if current_status != status or not generated_summary:
-                row[details_key] = validation_status_evidence(check_name, status)
-            return
-    rows.append(
-        {
-            "name": check_name,
-            "status": status,
-            details_key: validation_status_evidence(check_name, status),
-        }
-    )
-
-
-def validation_status_evidence(check_name: str, status: str) -> str:
-    if check_name == "handoff_verify":
-        return f"verify_handoff_package.py completed with {status}"
-    if check_name == "handoff_safety_scan":
-        return f"verify_handoff_package.py safety scan completed with {status}"
-    return f"{check_name}={status}"
 
 
 def validation_summary_status_map(payload: dict[str, object]) -> dict[str, str]:

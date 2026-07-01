@@ -393,6 +393,9 @@ def _replace_validation_summary(
         validation_status = "PASS"
     else:
         validation_status = "FAIL"
+    existing_summary = sidecar_payload.get("status_summary")
+    if not isinstance(existing_summary, dict):
+        existing_summary = {}
     sidecar_payload["status_summary"] = {
         "validation": validation_status,
         "tests": status_map.get("tests", "NOT_RUN"),
@@ -409,8 +412,8 @@ def _replace_validation_summary(
         "baseline_compare": status_map.get("baseline_compare", "NOT_RUN"),
         "governance": status_map.get("governance", "NOT_RUN"),
         "code_map": status_map.get("code_map", "NOT_RUN"),
-        "handoff_verify": status_map.get("handoff_verify", "NOT_RUN"),
-        "handoff_safety": status_map.get("handoff_safety_scan", "NOT_RUN"),
+        "handoff_verify": existing_summary.get("handoff_verify", "NOT_RUN"),
+        "handoff_safety": existing_summary.get("handoff_safety", "NOT_RUN"),
         "blocked_count": sum(
             1 for status in mandatory_statuses if status == "BLOCKED"
         ),

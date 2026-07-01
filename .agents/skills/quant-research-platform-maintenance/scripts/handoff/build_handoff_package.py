@@ -375,12 +375,6 @@ def validation_summary_from_receipts(
             check_statuses.get("code-map", "NOT_RUN"),
             "code map check receipt",
         ),
-        row("handoff_verify", "NOT_RUN", "handoff verifier not run at build time"),
-        row(
-            "handoff_safety_scan",
-            "NOT_RUN",
-            "handoff safety scan not run at build time",
-        ),
     ]
     advisory = receipts.get(ADVISORY_REVIEW_RECEIPT_EVIDENCE)
     rows.append(
