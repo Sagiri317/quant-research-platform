@@ -55,7 +55,10 @@ def test_qrp_private_script_entry_is_the_only_private_cli_addition() -> None:
 def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     _write_inventory_fixture(tmp_path)
 
-    inventory = build_schema_inventory_payload(tmp_path)
+    inventory = build_schema_inventory_payload(
+        tmp_path,
+        important_null_count_columns=("eligible",),
+    )
     items = inventory["datasets"]
     roots = {item["logical_relative_root"] for item in items}
     combined = json.dumps(inventory, ensure_ascii=False)
@@ -111,6 +114,25 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     assert "asset_a" not in combined
     assert "source_asset_a" not in combined
     assert "raw_ignored_value" not in combined
+
+
+def test_schema_inventory_default_has_no_a_share_important_columns(
+    tmp_path,
+) -> None:
+    _write_inventory_fixture(tmp_path)
+
+    inventory = build_schema_inventory_payload(tmp_path)
+    annotation = _inventory_item(
+        inventory,
+        "data/processed/a_share/annotation/default",
+    )
+    research = _inventory_item(
+        inventory,
+        "data/research/a_share/demo_research_dataset",
+    )
+
+    assert annotation["selected_important_column_null_counts"] == {}
+    assert research["selected_important_column_null_counts"] == {}
 
 
 def test_schema_inventory_infers_time_aware_reference_primary_key(tmp_path) -> None:

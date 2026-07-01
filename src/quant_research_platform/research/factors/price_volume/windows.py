@@ -2,11 +2,78 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 
 import pandas as pd
 
+from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.time import TimeWindow
+
+_PRICE_VOLUME_WINDOW_SUFFIXES: dict[str, DataFrequency] = {
+    "d": DataFrequency.DAILY,
+    "m": DataFrequency.MINUTE,
+    "tick": DataFrequency.TICK,
+}
+_WINDOWED_FACTOR_PATTERN = re.compile(
+    r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*)_"
+    r"(?P<window>[1-9]\d*)(?P<suffix>d|m|tick)$"
+)
+
+
+def _parse_price_volume_windowed_factor_name(
+    name: str,
+) -> tuple[str, int, DataFrequency] | None:
+    match = _WINDOWED_FACTOR_PATTERN.fullmatch(name)
+    if match is None:
+        return None
+    return (
+        match.group("prefix"),
+        int(match.group("window")),
+        _PRICE_VOLUME_WINDOW_SUFFIXES[match.group("suffix")],
+    )
+
+
+def _required_windows(factor_id: str) -> tuple[int, ...]:
+    parsed = _parse_price_volume_windowed_factor_name(factor_id)
+    if parsed is None:
+        return ()
+    _prefix, window, _frequency = parsed
+    return (window,)
+
+
+def _lookback_window(factor_id: str) -> int | None:
+    windows = _required_windows(factor_id)
+    if not windows:
+        return None
+    return max(windows)
+
+
+def _windows_from_requested_factors(requested: set[str]) -> tuple[int, ...]:
+    values: set[int] = set()
+    for factor in requested:
+        parsed = _parse_price_volume_windowed_factor_name(factor)
+        if parsed is None:
+            continue
+        _prefix, window, frequency = parsed
+        if frequency is DataFrequency.DAILY:
+            values.add(window)
+    return tuple(sorted(values))
+
+
+def largest_price_volume_lookback_days(
+    factor_columns: Iterable[str],
+) -> int:
+    """Return the largest rolling/trailing lookback encoded in factor names."""
+
+    windows = []
+    for column in factor_columns:
+        parsed = _parse_price_volume_windowed_factor_name(column)
+        if parsed is None:
+            continue
+        _prefix, window, _frequency = parsed
+        windows.append(window)
+    return max(windows, default=0)
 
 
 def price_volume_valid_bar_read_window(
@@ -79,4 +146,7 @@ def _iter_panel_key_groups(
         if not dates.empty:
             yield dates
 
-__all__ = ["price_volume_valid_bar_read_window"]
+__all__ = [
+    "largest_price_volume_lookback_days",
+    "price_volume_valid_bar_read_window",
+]

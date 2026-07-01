@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import fields, is_dataclass
 from typing import Any
 
 from quant_research_platform.policy.share_safety import unsafe_for_share_reason
+
+_PROPOSAL_DATA_FILE_PATH_RE = re.compile(
+    r"(?i)(?:^|[\s`'\"=:\[{(])[^`'\"\s\]}),;]+"
+    r"\.(?:parquet|csv|pkl|pickle|feather|arrow)(?:$|[\s`'\"\]}),;])"
+)
 
 
 class ProposalSafetyError(ValueError):
@@ -28,6 +34,8 @@ def assert_proposal_starts_unapproved(proposal: Any) -> None:
 
 
 def assert_share_safe_text(text: str) -> None:
+    if _PROPOSAL_DATA_FILE_PATH_RE.search(text):
+        raise ProposalSafetyError("proposal_contains_share_unsafe_text:data_file_path")
     reason = unsafe_for_share_reason(text)
     if reason is not None:
         raise ProposalSafetyError(f"proposal_contains_share_unsafe_text:{reason}")

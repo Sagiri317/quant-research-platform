@@ -9,8 +9,6 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
     compute_ic_and_grouped_label_values,
-    summarize_group_spread,
-    summarize_ic,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.evaluations import (
@@ -19,6 +17,11 @@ from quant_research_platform.contracts.evaluations import (
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
+from quant_research_platform.research.evaluations.diagnostics import (
+    _evaluation_diagnostics,
+    summarize_group_spread,
+    summarize_period_ic,
+)
 from quant_research_platform.research.signals.materialization import (
     materialize_signal_frame,
 )
@@ -69,7 +72,7 @@ def _evaluate_signal_frame_chunks(
             source_columns_by_kind=source_columns_by_kind,
         )
     )
-    ic_summary = summarize_ic(metrics)
+    ic_summary = summarize_period_ic(metrics)
     group_spread_summary = summarize_group_spread(grouped_label_values)
     diagnostics = _evaluation_diagnostics(
         spec=spec,
@@ -219,50 +222,6 @@ def _concat_parts(parts: list[pd.DataFrame]) -> pd.DataFrame:
     if not non_empty:
         return parts[0].copy() if parts else pd.DataFrame()
     return pd.concat(non_empty, ignore_index=True)
-
-
-def _evaluation_diagnostics(
-    *,
-    spec: EvaluationSpec,
-    filter_metadata: dict[str, object],
-    rows_after_signal_label_dropna: int,
-    metrics: pd.DataFrame,
-    grouped_label_values: pd.DataFrame,
-    ic_summary: pd.DataFrame,
-    group_spread_summary: pd.DataFrame,
-    n_groups: int,
-    timestamp_column: str,
-) -> EvaluationDiagnostics:
-    timestamps = pd.to_datetime(metrics.get(timestamp_column), errors="coerce").dropna()
-    n_obs = pd.to_numeric(metrics.get("n_obs"), errors="coerce")
-    skipped_timestamp_count = (
-        int(metrics.loc[n_obs.lt(2), timestamp_column].nunique())
-        if n_obs is not None
-        else 0
-    )
-    return EvaluationDiagnostics(
-        filter_mode=spec.filter_mode,
-        filter_columns_used=tuple(
-            str(column) for column in filter_metadata["filter_columns_used"]
-        ),
-        filter_definition=str(filter_metadata["filter_definition"]),
-        rows_input=int(filter_metadata["rows_input"]),
-        rows_after_filter_mode=int(filter_metadata["rows_after_filter_mode"]),
-        rows_after_signal_label_dropna=rows_after_signal_label_dropna,
-        metric_rows=int(len(metrics)),
-        grouped_label_value_rows=int(len(grouped_label_values)),
-        ic_summary_rows=int(len(ic_summary)),
-        group_spread_summary_rows=int(len(group_spread_summary)),
-        timestamp_count=int(timestamps.nunique()) if not timestamps.empty else 0,
-        min_timestamp=_date_string(timestamps.min()) if not timestamps.empty else None,
-        max_timestamp=_date_string(timestamps.max()) if not timestamps.empty else None,
-        n_groups=n_groups,
-        skipped_timestamp_count=skipped_timestamp_count,
-    )
-
-
-def _date_string(value: pd.Timestamp) -> str:
-    return pd.Timestamp(value).date().isoformat()
 
 
 __all__ = ["EvaluationResult", "evaluate_signal_frame"]

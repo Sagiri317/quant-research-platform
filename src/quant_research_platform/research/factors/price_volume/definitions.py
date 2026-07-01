@@ -6,15 +6,14 @@ from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
 
-from .columns import (
+from .columns import PRICE_VOLUME_FACTOR_FAMILY
+from .presets import (
     CORE_PRICE_VOLUME_FACTORS,
-    PRICE_VOLUME_FACTOR_FAMILY,
     SMOKE_PRICE_VOLUME_FACTORS,
-    _lookback_window,
-    _required_windows,
     price_volume_factor_columns,
-    price_volume_factor_input_columns,
 )
+from .requirements import price_volume_factor_input_columns
+from .windows import _lookback_window, _required_windows
 
 
 def price_volume_factor_definitions(
@@ -40,7 +39,7 @@ def price_volume_factor_definitions(
                 output_column=factor_id,
                 display_name=factor_id,
                 description=(
-                    "Daily price-volume factor registered by the QRP 0.1 "
+                    "Price-volume factor registered by the QRP 0.1 "
                     "factor catalog."
                 ),
                 family=PRICE_VOLUME_FACTOR_FAMILY,

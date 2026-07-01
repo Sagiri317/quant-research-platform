@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 
@@ -161,6 +162,17 @@ def test_local_verification_workflow_exposes_current_run_root_config() -> None:
         "replace_output",
         "run_id",
     }
+
+
+def test_local_verification_uses_profile_schema_inventory_columns() -> None:
+    module = _workflow_module()
+    source = inspect.getsource(module)
+
+    assert "profile.schema_inventory_important_columns()" in source
+    assert "important_null_count_columns=" in source
+    assert "forward_return_label_column" not in source
+    assert '"eligible"' not in source
+    assert "markets.implementations.a_share" not in source
 
 
 @pytest.mark.parametrize(

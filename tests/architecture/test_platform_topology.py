@@ -139,6 +139,7 @@ def test_platform_target_files_exist() -> None:
         "sources/csmar/checksums.py",
         "sources/csmar/interim.py",
         "markets/implementations/a_share/processed/annotations.py",
+        "markets/implementations/a_share/processed/materialization_io.py",
         "markets/implementations/a_share/processed/materializer.py",
         "markets/implementations/a_share/processed/panels.py",
         "markets/implementations/a_share/factors/definitions.py",
@@ -392,9 +393,9 @@ def test_a_share_materialization_validation_owner_is_split_from_entrypoint() -> 
     assert sorted(owner_required & entrypoint_defined) == []
 
 
-def test_a_share_materialize_io_owner_is_split_from_entrypoint() -> None:
+def test_a_share_materialization_io_owner_is_split_from_entrypoint() -> None:
     owner_path = (
-        SOURCE_ROOT / "markets/implementations/a_share/processed/materialize_io.py"
+        SOURCE_ROOT / "markets/implementations/a_share/processed/materialization_io.py"
     )
     entrypoint_path = (
         SOURCE_ROOT / "markets/implementations/a_share/processed/materializer.py"

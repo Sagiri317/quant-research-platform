@@ -36,8 +36,12 @@ from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_io,
+    materialization_planning,
     materialization_validation,
-    materialize_io,
+    materialize_annotations,
+    materialize_factors,
+    materialize_labels,
     materializer,
 )
 from quant_research_platform.markets.session_windows import SessionWindow
@@ -98,10 +102,11 @@ def test_panel_materializer_skips_market_bars_source_preload(
     _write_interim_frame(layout, source_id, MARKET_BARS_DATA_ID)
     _write_interim_frame(layout, source_id, "trading_calendar")
 
-    inputs = materializer._read_source_inputs_for_spec(
+    inputs = materialization_io.read_source_inputs_for_spec(
         spec,
         layout=layout,
         source_id=source_id,
+        market_bars_data_id=materializer._market_bars_source_data_id(spec),
     )
 
     assert set(inputs) == {"trading_calendar"}
@@ -139,7 +144,7 @@ def test_materializer_reads_processed_inputs_from_spec_processed_input_data_ids(
         spec=panel_spec,
     )
 
-    inputs = materialize_io.read_processed_inputs_for_spec(
+    inputs = materialization_io.read_processed_inputs_for_spec(
         target,
         layout=layout,
         processed_catalog=_catalog(panel_spec, target),
@@ -194,7 +199,7 @@ def test_materializer_selects_factor_definitions_from_required_columns_only() ->
         columns=(*platform_entity_time_key(), "mom_5d"),
     )
 
-    definitions = materializer._select_factor_definitions_for_spec(spec, catalog)
+    definitions = materialize_factors._select_factor_definitions_for_spec(spec, catalog)
 
     assert definitions == (selected,)
     assert max(definition.lookback_window or 0 for definition in definitions) == 5
@@ -212,7 +217,7 @@ def test_materializer_selects_label_definitions_from_required_columns_only() -> 
         columns=(*platform_entity_time_key(), "forward_return_2d"),
     )
 
-    definitions = materializer._select_label_definitions_for_spec(spec, catalog)
+    definitions = materialize_labels._select_label_definitions_for_spec(spec, catalog)
 
     assert definitions == (selected,)
     assert max(definition.lookahead for definition in definitions) == 3
@@ -345,59 +350,65 @@ def test_write_paths_read_processed_inputs_via_helper(
         return _key_frame()
 
     monkeypatch.setattr(
-        materializer,
+        materialization_planning,
         "_planned_session_windows",
         fake_planned_session_windows,
     )
-    monkeypatch.setattr(materializer, "inspect_dataset", fake_inspect_dataset)
-    monkeypatch.setattr(materialize_io, "write_and_inspect", fake_write_and_inspect)
+    for module in (materialize_annotations, materialize_factors, materialize_labels):
+        monkeypatch.setattr(module, "inspect_dataset", fake_inspect_dataset)
     monkeypatch.setattr(
-        materialize_io,
+        materialization_planning,
+        "inspect_dataset",
+        fake_inspect_dataset,
+    )
+    monkeypatch.setattr(materialization_io, "write_and_inspect", fake_write_and_inspect)
+    monkeypatch.setattr(
+        materialization_io,
         "read_processed_inputs_for_spec",
         fake_read_processed_inputs,
     )
     monkeypatch.setattr(
-        materializer,
+        materialization_planning,
         "read_dataset",
         fake_read_dataset,
     )
     monkeypatch.setattr(
-        materializer.annotations,
+        materialize_annotations.annotations,
         "derive_annotations",
         fake_derive_annotations,
     )
     monkeypatch.setattr(
-        materializer.factor_calculations,
+        materialize_factors.factor_calculations,
         "calculate_factors_for_panel",
         fake_calculate_factors_for_panel,
     )
     monkeypatch.setattr(
-        materializer.factor_calculations,
+        materialize_factors.factor_calculations,
         "factor_read_window_for_panel",
         fake_factor_read_window_for_panel,
     )
     monkeypatch.setattr(
-        materializer.label_calculations,
+        materialize_labels.label_calculations,
         "calculate_labels_for_panel",
         fake_calculate_labels_for_panel,
     )
     monkeypatch.setattr(
-        materializer.label_calculations,
+        materialize_labels.label_calculations,
         "label_read_window_for_panel",
         fake_label_read_window_for_panel,
     )
     monkeypatch.setattr(
-        materializer,
+        materialization_planning,
         "_estimate_factor_bytes_per_session",
         lambda *args, **kwargs: 1,
     )
     monkeypatch.setattr(
-        materializer,
+        materialization_planning,
         "_estimate_label_bytes_per_session",
         lambda *args, **kwargs: 1,
     )
 
-    materializer._write_annotation(
+    materialize_annotations._write_annotation(
         _processed_spec(
             "execution",
             kind=ProcessedDataKind.ANNOTATION,
@@ -416,7 +427,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         sessions=sessions,
         written={},
     )
-    materializer._write_factors(
+    materialize_factors._write_factors(
         _processed_spec(
             "price_volume",
             kind=ProcessedDataKind.FACTOR,
@@ -429,7 +440,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         sessions=sessions,
         written={},
     )
-    materializer._write_labels(
+    materialize_labels._write_labels(
         _processed_spec(
             "forward_returns",
             kind=ProcessedDataKind.LABEL,
@@ -474,7 +485,7 @@ def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
             spec=spec,
         )
 
-    inputs = materialize_io.read_processed_inputs_for_spec(
+    inputs = materialization_io.read_processed_inputs_for_spec(
         target,
         layout=layout,
         processed_catalog=_catalog(panel_spec, execution_spec, target),

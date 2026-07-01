@@ -8,7 +8,8 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
-from quant_research_platform.contracts.data import ProcessedDataSpec
+from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
+from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
@@ -76,9 +77,29 @@ def iter_sorted_output_chunks(
         yield output.sort_values(list(spec.primary_key)).reset_index(drop=True)
 
 
+def read_source_inputs_for_spec(
+    spec: ProcessedDataSpec,
+    *,
+    layout: StorageLayout,
+    source_id: SourceId,
+    market_bars_data_id: str | None = None,
+) -> dict[str, pd.DataFrame]:
+    inputs: dict[str, pd.DataFrame] = {}
+    market_bars_data_id = (
+        market_bars_data_id
+    )
+    for data_id in spec.source_input_data_ids:
+        if spec.kind is ProcessedDataKind.PANEL and data_id == market_bars_data_id:
+            continue
+        root = layout.interim_data_root(source_id, data_id)
+        inputs[data_id] = read_dataset(root)
+    return inputs
+
+
 __all__ = [
     "iter_sorted_output_chunks",
     "processed_root",
     "read_processed_inputs_for_spec",
+    "read_source_inputs_for_spec",
     "write_and_inspect",
 ]

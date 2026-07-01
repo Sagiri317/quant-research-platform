@@ -7,9 +7,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import quant_research_platform.artifacts._output_validation as output_validation
 import quant_research_platform.artifacts._parquet_writers as parquet_writers
 import quant_research_platform.artifacts._portfolio_outputs as portfolio_outputs
+from quant_research_platform.artifacts import (
+    _output_common_validation as output_common_validation,
+)
 from quant_research_platform.artifacts import outputs
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
@@ -64,13 +66,13 @@ def test_output_spec_rejects_output_definition_id_as_output_id() -> None:
 
 def test_report_frame_validation_rejects_missing_and_extra_columns() -> None:
     with pytest.raises(ValueError, match="missing_evaluation_metrics_columns: ic"):
-        output_validation._validate_output_frame(
+        output_common_validation._validate_output_frame(
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
             required=("timestamp", "ic"),
             error_name="evaluation_metrics",
         )
     with pytest.raises(ValueError, match="unregistered_evaluation_metrics_columns"):
-        output_validation._validate_output_frame(
+        output_common_validation._validate_output_frame(
             pd.DataFrame(
                 {
                     "timestamp": [pd.Timestamp("2024-01-02")],
@@ -434,13 +436,13 @@ def test_output_bundle_root_rejects_mismatched_specs(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
 
     with pytest.raises(ValueError, match="output_spec_mismatch"):
-        output_validation._derive_output_bundle_root(
+        output_common_validation._derive_output_bundle_root(
             output_spec=_report_spec("unknown", "run_demo", "prediction"),
             layout=layout,
             expected_definition_id="prediction_outputs",
         )
     with pytest.raises(ValueError, match="output_spec_mismatch"):
-        output_validation._derive_output_bundle_root(
+        output_common_validation._derive_output_bundle_root(
             output_spec=_report_spec(
                 "evaluation_outputs",
                 "run_demo",
@@ -461,13 +463,13 @@ def test_output_bundle_root_rejects_dataset_roots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        output_validation,
+        output_common_validation,
         "output_bundle_root",
         lambda _root, _output_id: tmp_path / "data" / data_layer / "report",
     )
 
     with pytest.raises(ValueError, match="output_bundle_must_not_be_dataset_root"):
-        output_validation._derive_output_bundle_root(
+        output_common_validation._derive_output_bundle_root(
             output_spec=_report_spec(
                 "prediction_outputs",
                 "prediction_demo",

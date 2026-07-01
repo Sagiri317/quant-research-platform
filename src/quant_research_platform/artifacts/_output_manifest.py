@@ -7,7 +7,9 @@ from dataclasses import asdict
 
 import pandas as pd
 
-from quant_research_platform.artifacts._output_validation import _PORTFOLIO_ARTIFACTS
+from quant_research_platform.artifacts._portfolio_output_validation import (
+    _PORTFOLIO_ARTIFACTS,
+)
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,

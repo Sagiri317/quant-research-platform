@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.artifacts._output_common_validation import (
+    _derive_output_bundle_root,
+)
 from quant_research_platform.artifacts._output_manifest import (
     _stage_profile_output_manifest_payload,
-)
-from quant_research_platform.artifacts._output_validation import (
-    _derive_output_bundle_root,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.policy.share_safety import (

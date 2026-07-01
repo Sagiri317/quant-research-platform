@@ -50,7 +50,7 @@ MARKET_PANEL_DATA_ID = market_panel_data_id()
 MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 REVERSAL_1D_COLUMN = price_volume_window_column("rev", 1)
 FORWARD_RETURN_20D_COLUMN = forward_return_label_column(20)
-NEW_STANDARD_PRICE_VOLUME_FACTORS = (
+FLOW_STANDARD_PRICE_VOLUME_FACTORS = (
     "amount_chg_20d",
     "amount_chg_60d",
     "amount_shock_20d",
@@ -82,7 +82,7 @@ def test_price_volume_standard_preset_defines_catalog_contract() -> None:
     assert columns
     assert "mom_252d" in columns
     assert "rev_252d" in columns
-    assert set(NEW_STANDARD_PRICE_VOLUME_FACTORS).issubset(columns)
+    assert set(FLOW_STANDARD_PRICE_VOLUME_FACTORS).issubset(columns)
     assert "vol_252d" not in columns
     assert "amount_to_float_mcap" not in columns
     assert "amount_to_total_mcap" not in columns
@@ -94,10 +94,10 @@ def test_price_volume_standard_preset_defines_catalog_contract() -> None:
     assert price_volume_factor_columns(preset=PRICE_VOLUME_SMOKE_PRESET) == (
         SMOKE_PRICE_VOLUME_FACTORS
     )
-    assert not set(NEW_STANDARD_PRICE_VOLUME_FACTORS).intersection(
+    assert not set(FLOW_STANDARD_PRICE_VOLUME_FACTORS).intersection(
         price_volume_factor_columns(preset=PRICE_VOLUME_CORE_PRESET)
     )
-    assert not set(NEW_STANDARD_PRICE_VOLUME_FACTORS).intersection(
+    assert not set(FLOW_STANDARD_PRICE_VOLUME_FACTORS).intersection(
         price_volume_factor_columns(preset=PRICE_VOLUME_SMOKE_PRESET)
     )
     with pytest.raises(ValueError, match="invalid_price_volume_preset"):
@@ -350,12 +350,12 @@ def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None
     assert not np.isinf(result.loc[:, factor_columns].to_numpy(dtype="float64")).any()
 
 
-def test_price_volume_new_standard_factors_are_past_only_and_chunk_stable() -> None:
+def test_price_volume_flow_factors_are_past_only_and_chunk_stable() -> None:
     panel = make_synthetic_factor_panel(
         sessions=130,
         assets=("asset_a", "asset_b"),
     )
-    factor_columns = NEW_STANDARD_PRICE_VOLUME_FACTORS
+    factor_columns = FLOW_STANDARD_PRICE_VOLUME_FACTORS
     full = (
         calculate_price_volume_factors(panel, factor_columns=factor_columns)
         .sort_values(["asset_id", "timestamp"])
@@ -408,7 +408,7 @@ def test_price_volume_new_standard_factors_are_past_only_and_chunk_stable() -> N
     )
 
 
-def test_price_volume_new_standard_factor_formulas_match_reference() -> None:
+def test_price_volume_flow_factor_formulas_match_reference() -> None:
     panel = make_synthetic_factor_panel(
         sessions=90,
         assets=("asset_a", "asset_b"),
@@ -653,7 +653,7 @@ def test_price_volume_compute_fails_closed_when_required_input_missing() -> None
         calculate_price_volume_factors(panel, factor_columns=("amihud_20d",))
 
 
-def test_price_volume_compute_fails_closed_for_non_daily_factor_suffix() -> None:
+def test_price_volume_compute_fails_closed_for_unsupported_factor_suffix() -> None:
     panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5))
 
     assert unsupported_price_volume_factors(("mom_2m",)) == ("mom_2m",)
@@ -661,7 +661,7 @@ def test_price_volume_compute_fails_closed_for_non_daily_factor_suffix() -> None
         calculate_price_volume_factors(panel, factor_columns=("mom_2m",))
 
 
-def test_price_volume_compute_fails_closed_for_malformed_daily_factor_names() -> None:
+def test_price_volume_compute_fails_closed_for_malformed_factor_names() -> None:
     panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5))
     malformed = ("log_float_market_cap_20d", "rev_1d_2d")
 
@@ -698,6 +698,43 @@ def test_price_volume_window_column_uses_frequency_suffix_contract() -> None:
     assert (
         price_volume_window_column("ret_volume_corr", 7, DataFrequency.TICK)
         == "ret_volume_corr_7tick"
+    )
+
+
+def test_price_volume_owner_modules_hold_their_real_contracts() -> None:
+    from quant_research_platform.research.factors.price_volume import (
+        columns,
+        presets,
+        requirements,
+        windows,
+    )
+
+    assert not hasattr(columns, "CORE_PRICE_VOLUME_FACTORS")
+    assert not hasattr(columns, "BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS")
+    assert not hasattr(columns, "largest_price_volume_lookback_days")
+    assert presets.CORE_PRICE_VOLUME_FACTORS
+    assert presets.PRICE_VOLUME_FACTOR_PRESETS["standard"]
+    assert requirements.BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS
+    assert (
+        requirements.price_volume_factor_input_columns("ret_volume_corr_20d")
+        == ("period_return", "volume")
+    )
+    assert windows._parse_price_volume_windowed_factor_name("ret_volume_corr_20d") == (
+        "ret_volume_corr",
+        20,
+        DataFrequency.DAILY,
+    )
+    assert windows._parse_price_volume_windowed_factor_name("ret_volume_corr_20m") == (
+        "ret_volume_corr",
+        20,
+        DataFrequency.MINUTE,
+    )
+    assert windows._parse_price_volume_windowed_factor_name(
+        "ret_volume_corr_20tick"
+    ) == (
+        "ret_volume_corr",
+        20,
+        DataFrequency.TICK,
     )
 
 

@@ -54,6 +54,9 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     catalog as processed_catalog_module,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
+    diagnostics as processed_diagnostics_module,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
     materializer as processed_materializer_module,
 )
 from quant_research_platform.sources.csmar.catalog import source_definition
@@ -91,6 +94,7 @@ class ResearchProfile:
         [StorageLayout, SourceId, TimeWindow, frozenset[ProcessedDataKind]],
         Mapping[str, DatasetInspection],
     ]
+    schema_inventory_important_columns: Callable[[], tuple[str, ...]]
 
 
 def research_profile_id(
@@ -148,6 +152,9 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         build_portfolio_catalog=a_share_research_scenarios.build_portfolio_catalog,
         materialize_interim_data=_materialize_a_share_csmar_interim_data,
         materialize_processed_data=_materialize_processed_data,
+        schema_inventory_important_columns=(
+            processed_diagnostics_module.schema_inventory_important_columns
+        ),
     )
 
 

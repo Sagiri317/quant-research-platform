@@ -4,44 +4,36 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.contracts.data import DataFrequency
-from quant_research_platform.research.labels.forward_returns import (
-    forward_return_label_column,
-)
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
     read_dataset,
 )
 
-IMPORTANT_NULL_COUNT_COLUMNS = frozenset(
-    {
-        "eligible",
-        "can_enter",
-        "can_exit",
-        "is_st",
-        "is_pt",
-        "limit_status",
-        *(
-            forward_return_label_column(horizon, DataFrequency.DAILY)
-            for horizon in (1, 5, 10, 20, 60, 120)
-        ),
-    }
-)
 
-
-def build_schema_inventory_payload(project_root: Path) -> dict[str, Any]:
+def build_schema_inventory_payload(
+    project_root: Path,
+    *,
+    important_null_count_columns: Collection[str] | None = None,
+) -> dict[str, Any]:
     """Build sanitized aggregate schema metadata for private dataset artifacts."""
 
     root = Path(project_root)
+    important_columns = frozenset(str(column) for column in (
+        important_null_count_columns or ()
+    ))
     items = [
-        _inventory_item(root, artifact_root)
+        _inventory_item(
+            root,
+            artifact_root,
+            important_null_count_columns=important_columns,
+        )
         for artifact_root in _iter_dataset_artifact_roots(root)
     ]
     if not items:
@@ -65,7 +57,12 @@ def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
             yield spec_path.parent
 
 
-def _inventory_item(project_root: Path, artifact_root: Path) -> dict[str, Any]:
+def _inventory_item(
+    project_root: Path,
+    artifact_root: Path,
+    *,
+    important_null_count_columns: frozenset[str],
+) -> dict[str, Any]:
     inspection = inspect_dataset(artifact_root)
     logical_root = artifact_root.relative_to(project_root).as_posix()
     spec_payload = inspection.spec
@@ -80,7 +77,12 @@ def _inventory_item(project_root: Path, artifact_root: Path) -> dict[str, Any]:
         warnings.append(
             "primary_key_inferred" if primary_key else "primary_key_missing"
         )
-    stats = _aggregate_dataset_stats(artifact_root, columns, primary_key)
+    stats = _aggregate_dataset_stats(
+        artifact_root,
+        columns,
+        primary_key,
+        important_null_count_columns=important_null_count_columns,
+    )
     layer, kind, artifact_id = _logical_identifiers(logical_root)
     return {
         "artifact_id": artifact_id,
@@ -115,6 +117,8 @@ def _aggregate_dataset_stats(
     artifact_root: Path,
     columns: tuple[str, ...],
     primary_key: tuple[str, ...],
+    *,
+    important_null_count_columns: frozenset[str],
 ) -> dict[str, Any]:
     dtypes: dict[str, str] = {}
     row_count = 0
@@ -123,7 +127,7 @@ def _aggregate_dataset_stats(
     duplicate_primary_key_count = 0
     seen_key_hashes: set[int] = set()
     important_columns = tuple(
-        column for column in columns if column in IMPORTANT_NULL_COUNT_COLUMNS
+        column for column in columns if column in important_null_count_columns
     )
     important_null_counts = {column: 0 for column in important_columns}
     min_timestamp: pd.Timestamp | None = None

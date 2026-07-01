@@ -9,7 +9,10 @@ PROJECT_SRC = Path("src/quant_research_platform")
 ARTIFACT_OUTPUTS = PROJECT_SRC / "artifacts" / "outputs.py"
 ARTIFACT_OUTPUT_OWNER_MODULES = (
     PROJECT_SRC / "artifacts" / "_output_manifest.py",
-    PROJECT_SRC / "artifacts" / "_output_validation.py",
+    PROJECT_SRC / "artifacts" / "_output_common_validation.py",
+    PROJECT_SRC / "artifacts" / "_prediction_output_validation.py",
+    PROJECT_SRC / "artifacts" / "_evaluation_output_validation.py",
+    PROJECT_SRC / "artifacts" / "_portfolio_output_validation.py",
     PROJECT_SRC / "artifacts" / "_stage_profile_outputs.py",
     PROJECT_SRC / "artifacts" / "_prediction_outputs.py",
     PROJECT_SRC / "artifacts" / "_evaluation_outputs.py",

@@ -324,10 +324,17 @@ def test_proposals_expose_spec_like_payloads_without_approval_state() -> None:
 
     payload = proposal.to_spec_payload()
 
-    assert payload == {
+    assert {
         "proposal_id": "workflow-proposal-003",
         "workflow_id": "factor_review_workflow",
         "step_ids": ("dataset_spec", "human_review"),
         "contract_version": "0.1",
-    }
+        "proposal_type": "workflow",
+        "title": "factor_review_workflow",
+        "rationale": "workflow proposal",
+        "expected_inputs": ("dataset_spec", "human_review"),
+        "expected_outputs": ("factor_review_workflow",),
+        "required_contracts": (),
+        "status": "proposed",
+    }.items() <= payload.items()
     assert "approved" not in payload

@@ -8,6 +8,8 @@ from typing import Any
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
 
+PROPOSAL_STATUSES = frozenset({"proposed", "needs_human_approval", "rejected"})
+
 
 class ProposalPayloadMixin:
     def to_spec_payload(self) -> dict[str, Any]:
@@ -28,15 +30,28 @@ class FactorProposal(ProposalPayloadMixin):
     derived_input_producers: dict[str, str] = field(default_factory=dict)
     required_input_data_id: str = ""
     contract_version: str = "0.1"
+    proposal_type: str = "factor"
+    title: str = ""
+    expected_inputs: tuple[str, ...] = ()
+    expected_outputs: tuple[str, ...] = ()
+    required_contracts: tuple[str, ...] = ("FactorDefinition",)
+    status: str = "proposed"
     approved: bool = False
 
     def __post_init__(self) -> None:
+        _validate_proposal_status(self.status)
         if self.contract_version != "0.1":
             raise ValueError("unsupported_factor_proposal_contract_version")
         if not self.output_columns:
             object.__setattr__(self, "output_columns", (self.factor_id,))
         if not self.base_input_columns and not self.derived_input_columns:
             object.__setattr__(self, "base_input_columns", self.input_columns)
+        if not self.title:
+            object.__setattr__(self, "title", self.factor_id)
+        if not self.expected_inputs:
+            object.__setattr__(self, "expected_inputs", self.input_columns)
+        if not self.expected_outputs:
+            object.__setattr__(self, "expected_outputs", self.output_columns)
 
 
 @dataclass(frozen=True)
@@ -46,7 +61,22 @@ class LabelProposal(ProposalPayloadMixin):
     rationale: str
     horizon: int
     contract_version: str = "0.1"
+    proposal_type: str = "label"
+    title: str = ""
+    expected_inputs: tuple[str, ...] = ()
+    expected_outputs: tuple[str, ...] = ()
+    required_contracts: tuple[str, ...] = ("LabelDefinition",)
+    status: str = "proposed"
     approved: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_proposal_status(self.status)
+        if self.contract_version != "0.1":
+            raise ValueError("unsupported_label_proposal_contract_version")
+        if not self.title:
+            object.__setattr__(self, "title", self.label_id)
+        if not self.expected_outputs:
+            object.__setattr__(self, "expected_outputs", (self.label_id,))
 
 
 @dataclass(frozen=True)
@@ -55,7 +85,25 @@ class ResearchDatasetProposal(ProposalPayloadMixin):
     data_id: str
     input_data_ids: tuple[str, ...]
     contract_version: str = "0.1"
+    proposal_type: str = "research_dataset"
+    title: str = ""
+    rationale: str = "research dataset proposal"
+    expected_inputs: tuple[str, ...] = ()
+    expected_outputs: tuple[str, ...] = ()
+    required_contracts: tuple[str, ...] = ("ResearchDatasetSpec",)
+    status: str = "proposed"
     approved: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_proposal_status(self.status)
+        if self.contract_version != "0.1":
+            raise ValueError("unsupported_research_dataset_proposal_contract_version")
+        if not self.title:
+            object.__setattr__(self, "title", self.data_id)
+        if not self.expected_inputs:
+            object.__setattr__(self, "expected_inputs", self.input_data_ids)
+        if not self.expected_outputs:
+            object.__setattr__(self, "expected_outputs", (self.data_id,))
 
 
 @dataclass(frozen=True)
@@ -64,7 +112,25 @@ class WorkflowProposal(ProposalPayloadMixin):
     workflow_id: str
     step_ids: tuple[str, ...] = field(default_factory=tuple)
     contract_version: str = "0.1"
+    proposal_type: str = "workflow"
+    title: str = ""
+    rationale: str = "workflow proposal"
+    expected_inputs: tuple[str, ...] = ()
+    expected_outputs: tuple[str, ...] = ()
+    required_contracts: tuple[str, ...] = ()
+    status: str = "proposed"
     approved: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_proposal_status(self.status)
+        if self.contract_version != "0.1":
+            raise ValueError("unsupported_workflow_proposal_contract_version")
+        if not self.title:
+            object.__setattr__(self, "title", self.workflow_id)
+        if not self.expected_inputs:
+            object.__setattr__(self, "expected_inputs", self.step_ids)
+        if not self.expected_outputs:
+            object.__setattr__(self, "expected_outputs", (self.workflow_id,))
 
 
 def factor_definition_from_proposal(
@@ -117,9 +183,15 @@ def factor_definition_from_proposal(
     )
 
 
+def _validate_proposal_status(status: str) -> None:
+    if status not in PROPOSAL_STATUSES:
+        raise ValueError("invalid_proposal_status")
+
+
 __all__ = [
     "FactorProposal",
     "LabelProposal",
+    "PROPOSAL_STATUSES",
     "ProposalPayloadMixin",
     "ResearchDatasetProposal",
     "WorkflowProposal",

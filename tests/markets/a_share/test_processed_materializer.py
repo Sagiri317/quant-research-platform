@@ -26,6 +26,10 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     market_panel_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_planning,
+    materialize_factors,
+    materialize_labels,
+    materialize_panel,
     materializer,
 )
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
@@ -86,7 +90,7 @@ def test_panel_materializer_reuses_market_bar_inspection(
         MARKET_BARS_DATA_ID,
     )
     calls = 0
-    original = materializer.inspect_dataset
+    original = materialize_panel.inspect_dataset
 
     def spy_inspect_dataset(*args, **kwargs):
         nonlocal calls
@@ -94,7 +98,7 @@ def test_panel_materializer_reuses_market_bar_inspection(
             calls += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(materializer, "inspect_dataset", spy_inspect_dataset)
+    monkeypatch.setattr(materialize_panel, "inspect_dataset", spy_inspect_dataset)
 
     materializer.materialize_processed_data(
         layout=layout,
@@ -116,7 +120,7 @@ def test_panel_materializer_does_not_preload_full_market_bars(
         SYNTHETIC_SOURCE_ID,
         MARKET_BARS_DATA_ID,
     )
-    original = materializer.read_dataset
+    original = materialize_panel.read_dataset
     full_market_bars_reads = 0
     windowed_market_bars_reads = 0
 
@@ -129,7 +133,7 @@ def test_panel_materializer_does_not_preload_full_market_bars(
                 windowed_market_bars_reads += 1
         return original(root, **kwargs)
 
-    monkeypatch.setattr(materializer, "read_dataset", spy_read_dataset)
+    monkeypatch.setattr(materialize_panel, "read_dataset", spy_read_dataset)
 
     materializer.materialize_processed_data(
         layout=layout,
@@ -204,7 +208,7 @@ def test_materialize_processed_data_rejects_non_daily_active_profile_before_io(
 
     monkeypatch.setattr(materializer, "processed_catalog", lambda: catalog)
     monkeypatch.setattr(
-        materializer,
+        materialization_planning,
         "_available_trading_sessions",
         fail_if_sessions_are_read,
     )
@@ -450,7 +454,7 @@ def test_factor_materializer_unknown_family_fails_closed(
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout)
     monkeypatch.setattr(
-        materializer.factor_definitions,
+        materialize_factors.factor_definitions,
         "factor_catalog",
         lambda: _factor_catalog_with_families(("alternative_price_family",)),
     )
@@ -474,7 +478,7 @@ def test_factor_materializer_mixed_families_fail_closed(
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout)
     monkeypatch.setattr(
-        materializer.factor_definitions,
+        materialize_factors.factor_definitions,
         "factor_catalog",
         lambda: _factor_catalog_with_families(("price_volume", "other_factor")),
     )
@@ -498,7 +502,7 @@ def test_label_materializer_unknown_family_fails_closed(
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout)
     monkeypatch.setattr(
-        materializer.label_definitions,
+        materialize_labels.label_definitions,
         "label_catalog",
         lambda: _label_catalog_with_families(("alternative_label_family",)),
     )
@@ -522,7 +526,7 @@ def test_label_materializer_mixed_families_fail_closed(
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout)
     monkeypatch.setattr(
-        materializer.label_definitions,
+        materialize_labels.label_definitions,
         "label_catalog",
         lambda: _label_catalog_with_families(("forward_return", "other_label")),
     )
@@ -909,7 +913,7 @@ def _catalog_with_momentum_20d_only() -> ProcessedDataCatalog:
 
 def _factor_catalog_with_families(families: tuple[str, ...]) -> FactorCatalog:
     catalog = FactorCatalog()
-    definitions = materializer.factor_definitions.factor_definitions()
+    definitions = materialize_factors.factor_definitions.factor_definitions()
     for index, definition in enumerate(definitions):
         family = families[min(index, len(families) - 1)]
         catalog.register(replace(definition, family=family))
@@ -918,7 +922,7 @@ def _factor_catalog_with_families(families: tuple[str, ...]) -> FactorCatalog:
 
 def _label_catalog_with_families(families: tuple[str, ...]) -> LabelCatalog:
     catalog = LabelCatalog()
-    definitions = materializer.label_definitions.label_definitions()
+    definitions = materialize_labels.label_definitions.label_definitions()
     for index, definition in enumerate(definitions):
         family = families[min(index, len(families) - 1)]
         catalog.register(replace(definition, family=family))
@@ -1089,7 +1093,6 @@ def _stock_master_frame() -> pd.DataFrame:
             }
         ]
     )
-
 
 def _market_cap_frame() -> pd.DataFrame:
     return pd.DataFrame(

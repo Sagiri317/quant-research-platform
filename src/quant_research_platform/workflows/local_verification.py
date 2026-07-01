@@ -58,6 +58,9 @@ from quant_research_platform.storage.manifests import (
     read_qrp_json,
     replace_qrp_json,
 )
+from quant_research_platform.workflows.diagnostics.schema_inventory import (
+    build_schema_inventory_payload,
+)
 from quant_research_platform.workflows.diagnostics.validation_summary import (
     build_validation_summary,
 )
@@ -263,6 +266,13 @@ def _run_local_verification_with_policy(
         dataset_roots=dataset_roots,
     )
     with recorder.record("validation_summary"):
+        schema_inventory = build_schema_inventory_payload(
+            run_root,
+            important_null_count_columns=(
+                config.profile.schema_inventory_important_columns()
+            ),
+        )
+        schema_inventory_summary = _schema_inventory_run_summary(schema_inventory)
         validation_summary = build_validation_summary(
             run_id=run_id,
             dataset_roots=dataset_roots,
@@ -318,7 +328,10 @@ def _run_local_verification_with_policy(
         },
         "data": build_run_data_summary(layer_summaries=layer_summaries),
         "outputs": [_output_index(root, run_root) for root in output_bundles],
-        "checks": {"validation": validation_summary},
+        "checks": {
+            "schema_inventory": schema_inventory_summary,
+            "validation": validation_summary,
+        },
         "execution_metrics": recorder.payload(run_id=run_id),
         "logs": {},
         "summary": {"markdown_path": "summary.md"},
@@ -332,6 +345,45 @@ def _run_local_verification_with_policy(
         run_root=_logical_run_root(run_root),
         summary=run_payload,
     )
+
+
+def _schema_inventory_run_summary(
+    schema_inventory: dict[str, object],
+) -> dict[str, object]:
+    datasets = schema_inventory.get("datasets", ())
+    if not isinstance(datasets, list):
+        raise ValueError("schema_inventory_datasets_required")
+    schema_hash = _hash_inventory_schemas(datasets)
+    return {
+        "schema_id": "qrp-schema-inventory-summary",
+        "dataset_count": len(datasets),
+        "total_row_count": sum(int(item.get("row_count", 0)) for item in datasets),
+        "schema_hash": schema_hash,
+    }
+
+
+def _hash_inventory_schemas(datasets: list[object]) -> str:
+    import hashlib
+    import json
+
+    payload = [
+        {
+            "artifact_id": item.get("artifact_id"),
+            "layer": item.get("layer"),
+            "kind": item.get("kind"),
+            "schema_hash": item.get("schema_hash"),
+            "row_count": item.get("row_count"),
+        }
+        for item in datasets
+        if isinstance(item, dict)
+    ]
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _write_prediction_result(
