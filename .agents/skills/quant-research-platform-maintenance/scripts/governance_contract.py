@@ -6,6 +6,7 @@ This module is an internal tooling fact source. It is not a public API.
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import io
 import json
@@ -3184,18 +3185,17 @@ def layer_boundary_import_rules() -> tuple[dict[str, object], ...]:
     return LAYER_BOUNDARY_IMPORT_RULES
 
 
-# Handoff package contract and source-tree scan ownership.
+# Handoff package contract, compact receipts, and source-tree scan ownership.
 VALID_STATUSES = set(VALID_STATUS_TOKENS)
 GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
-PACKAGE_SMOKE_EVIDENCE = "handoff_evidence/package-smoke.json"
-HARD_SCAN_CLASSIFICATION_EVIDENCE = "handoff_evidence/hard-scan-classification.json"
-SUBAGENT_REVIEW_FINDINGS_EVIDENCE = "handoff_evidence/subagent-review-findings.json"
-SUBAGENT_REVIEW_RECONCILIATION_EVIDENCE = (
-    "handoff_evidence/subagent-review-reconciliation.json"
-)
-TEST_CHECKS_EVIDENCE = "handoff_evidence/test-checks.json"
+PACKAGE_SMOKE_EVIDENCE = "handoff_evidence/package-smoke-receipt.json"
+HARD_SCAN_CLASSIFICATION_EVIDENCE = "handoff_evidence/hard-scan-receipt.json"
+CHECK_RECEIPTS_EVIDENCE = "handoff_evidence/check-receipts.json"
+PRIVATE_SMOKE_STATUS_EVIDENCE = "handoff_evidence/private-smoke-status.json"
+ADVISORY_REVIEW_RECEIPT_EVIDENCE = "handoff_evidence/advisory-review-receipt.json"
+TEST_CHECKS_EVIDENCE = CHECK_RECEIPTS_EVIDENCE
 BUILDER_OWNED_HANDOFF_EVIDENCE = {
     GENERATION_EVIDENCE,
     SOURCE_TREE_SCAN_EVIDENCE,
@@ -3205,9 +3205,17 @@ TASK_REQUIRED_HANDOFF_EVIDENCE = frozenset(
     {
         PACKAGE_SMOKE_EVIDENCE,
         HARD_SCAN_CLASSIFICATION_EVIDENCE,
-        SUBAGENT_REVIEW_FINDINGS_EVIDENCE,
-        SUBAGENT_REVIEW_RECONCILIATION_EVIDENCE,
-        TEST_CHECKS_EVIDENCE,
+        CHECK_RECEIPTS_EVIDENCE,
+        PRIVATE_SMOKE_STATUS_EVIDENCE,
+    }
+)
+OLD_HANDOFF_EVIDENCE_PATHS = frozenset(
+    {
+        "handoff_evidence/package-smoke.json",
+        "handoff_evidence/hard-scan-classification.json",
+        "handoff_evidence/subagent-review-findings.json",
+        "handoff_evidence/subagent-review-reconciliation.json",
+        "handoff_evidence/test-checks.json",
     }
 )
 HARD_SCAN_CLASSIFICATIONS = frozenset(
@@ -3261,18 +3269,18 @@ BLOCKED_PACKAGE_ENTRY_PARTS = {
 }
 HANDOFF_TOOL_SOURCE_PATHS = [
     ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/run_check.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/collect_handoff_receipts.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/collect_private_smoke_status.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/run_package_smoke.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py",
     ".agents/skills/quant-research-platform-maintenance/templates/handoff/task_metadata.template.json",
     ".agents/skills/quant-research-platform-maintenance/schemas/handoff/task_metadata.schema.json",
     ".agents/skills/quant-research-platform-maintenance/schemas/handoff/sidecar.schema.json",
 ]
-TASK_CONTROL_KEYS = {
-    "validation_evidence",
-    "handoff_evidence",
-    "handoff_markdown_evidence",
-}
+TASK_CONTROL_KEYS: set[str] = set()
 TASK_METADATA_KEYS = {
     "schema_id",
     "mode",
@@ -3314,6 +3322,9 @@ BLOCKED_TASK_KEYS = {
     "sidecar_logical_path",
     "validation_table",
     "zip_logical_path",
+    "validation_evidence",
+    "handoff_evidence",
+    "handoff_markdown_evidence",
 }
 TASK_REJECTED_KEYS = BLOCKED_TASK_KEYS
 BLOCKED_VALIDATION_KEYS = {
@@ -3345,8 +3356,11 @@ VALIDATION_ROW_KEYS = {"name", "status", "evidence"}
 MANDATORY_VALIDATION_CHECKS = frozenset(
     {
         "tests",
-        "smoke",
-        "compare",
+        "package_smoke",
+        "profile_smoke",
+        "private_smoke_run_level",
+        "private_smoke_child_checks",
+        "baseline_compare",
         "handoff_verify",
         "handoff_safety_scan",
         "governance",
@@ -3356,7 +3370,7 @@ MANDATORY_VALIDATION_CHECKS = frozenset(
 ADVISORY_VALIDATION_CHECKS = frozenset({"review_subagent"})
 ALLOWED_VALIDATION_CHECKS = MANDATORY_VALIDATION_CHECKS | ADVISORY_VALIDATION_CHECKS
 REVIEW_HANDOFF_EVIDENCE_NAME_TOKENS = frozenset(
-    {"review", "subagent", "reconciliation"}
+    {"advisory-review-receipt"}
 )
 BUILDER_OWNED_VALIDATION_CHECKS = frozenset({"handoff_verify", "handoff_safety_scan"})
 
@@ -3410,6 +3424,89 @@ def source_tree_scan_from_clone(
             for group, payload in scan_groups.items()
         },
     }
+
+
+def hard_scan_receipt_from_clone(
+    clone_dir: Path,
+    *,
+    final_head: str,
+) -> dict[str, object]:
+    scanned_head = _governance_git_text(clone_dir, "rev-parse", "HEAD").strip()
+    scan_groups = source_tree_scan_groups(clone_dir)
+    scan_runs: list[dict[str, object]] = []
+    classified_exceptions: list[dict[str, object]] = []
+    for group_name, group_payload in sorted(scan_groups.items()):
+        findings = list(group_payload["findings"])
+        actual_violations = len(findings)
+        result_payload = {
+            "scan_id": group_name,
+            "findings": findings,
+            "finding_count": len(findings),
+        }
+        scan_runs.append(
+            {
+                "scan_id": group_name,
+                "rule_set_id": f"source-tree:{group_name}",
+                "match_count": len(findings),
+                "actual_violation_count": actual_violations,
+                "deferred_count": 0,
+                "negative_fixture_count": 0,
+                "false_positive_count": 0,
+                "result_sha256": _sha256_text(_stable_governance_json(result_payload)),
+                "replayable_from_bundle": True,
+            }
+        )
+        for finding in findings:
+            if isinstance(finding, Mapping):
+                classified_exceptions.append(
+                    {
+                        "scan_id": group_name,
+                        "classification": "actual_violation",
+                        "owner": str(finding.get("path") or group_name),
+                        "rationale": str(finding.get("reason") or finding.get("rule")),
+                        "reference": "governance_contract.py",
+                    }
+                )
+    return {
+        "schema_id": "qrp-hard-scan-receipt",
+        "status": "PASS"
+        if scanned_head == final_head
+        and all(run["actual_violation_count"] == 0 for run in scan_runs)
+        else "FAIL",
+        "scanned_head": scanned_head,
+        "scanner_source_sha256": sha256_file(Path(__file__)),
+        "scan_runs": scan_runs,
+        "classified_exceptions": classified_exceptions,
+    }
+
+
+def hard_scan_receipt_from_bundle(
+    *,
+    bundle_path: Path,
+    branch: str,
+    final_head: str,
+) -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix="handoff-hard-scan-") as temp:
+        clone_dir = Path(temp) / "repo"
+        subprocess.run(
+            ["git", "clone", "--branch", branch, str(bundle_path), str(clone_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return hard_scan_receipt_from_clone(clone_dir, final_head=final_head)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
@@ -5007,10 +5104,11 @@ def advisory_review_consistency_failures(
         for path in evidence_paths
         if isinstance(path, str) and is_review_handoff_evidence_path(path)
     ]
-    if review_paths and not advisory_reviews:
-        return ["advisory_reviews_missing_for_review_evidence"]
-    if advisory_reviews and not review_paths:
-        return ["advisory_reviews_without_review_evidence"]
+    pass_reviews = {
+        key: value for key, value in advisory_reviews.items() if value == "PASS"
+    }
+    if pass_reviews and not review_paths:
+        return ["advisory_reviews_pass_without_advisory_receipt"]
     return []
 
 

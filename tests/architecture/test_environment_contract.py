@@ -84,6 +84,7 @@ def test_core_dependencies_have_version_boundaries() -> None:
 def test_engineering_contract_points_to_executable_environment_contracts() -> None:
     text = ENGINEERING_CONTRACT.read_text(encoding="utf-8")
     environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
+    environment_name = _environment_name(environment)
 
     assert "pyproject.toml" in text
     assert "environment.yml" in text
@@ -91,7 +92,7 @@ def test_engineering_contract_points_to_executable_environment_contracts() -> No
         encoding="utf-8"
     )
     assert "python=3.13" in environment
-    assert "quantlab313" in environment
+    assert environment_name
 
 
 def test_engineering_contract_includes_current_formal_commands() -> None:
@@ -111,7 +112,7 @@ def test_engineering_contract_includes_current_formal_commands() -> None:
     assert "verify_code_map_flow.py --repo-root ." in text
 
 
-def test_default_environment_update_commands_do_not_prune_quantlab313() -> None:
+def test_default_environment_update_commands_keep_declared_env() -> None:
     checked = {
         "README.md": README,
         "docs/architecture/engineering-contract.md": ENGINEERING_CONTRACT,
@@ -191,6 +192,13 @@ def test_environment_contract_docs_do_not_hardcode_local_absolute_paths() -> Non
 def _load_pyproject() -> dict[str, object]:
     with PYPROJECT.open("rb") as handle:
         return tomllib.load(handle)
+
+
+def _environment_name(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("name:"):
+            return line.split(":", 1)[1].strip()
+    return ""
 
 
 def _dependency_specs(items: list[str]) -> dict[str, str]:

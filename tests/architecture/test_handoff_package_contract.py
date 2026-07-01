@@ -37,8 +37,10 @@ def test_handoff_package_contract_uses_evidence_mode_outputs(
     builder = (HANDOFF_ROOT / "build_handoff_package.py").read_text(encoding="utf-8")
     verifier = (HANDOFF_ROOT / "verify_handoff_package.py").read_text(encoding="utf-8")
 
-    assert "normalized_handoff_evidence_path" in builder
+    assert "receipts_dir" in builder
+    assert "load_handoff_receipts" in builder
     assert "stage_handoff_evidence" in builder
+    assert "handoff_evidence_must_be_object" not in builder
     assert "handoff_evidence/" in verifier
     contract = _load_governance_contract()
     assert contract.GENERATION_EVIDENCE == "handoff_evidence/generation.json"
@@ -52,12 +54,14 @@ def test_handoff_package_contract_uses_evidence_mode_outputs(
     assert "TASK_REQUIRED_HANDOFF_EVIDENCE" in verifier
     assert contract.TASK_REQUIRED_HANDOFF_EVIDENCE == frozenset(
         {
-            "handoff_evidence/package-smoke.json",
-            "handoff_evidence/hard-scan-classification.json",
-            "handoff_evidence/subagent-review-findings.json",
-            "handoff_evidence/subagent-review-reconciliation.json",
-            "handoff_evidence/test-checks.json",
+            "handoff_evidence/package-smoke-receipt.json",
+            "handoff_evidence/hard-scan-receipt.json",
+            "handoff_evidence/check-receipts.json",
+            "handoff_evidence/private-smoke-status.json",
         }
+    )
+    assert contract.ADVISORY_REVIEW_RECEIPT_EVIDENCE == (
+        "handoff_evidence/advisory-review-receipt.json"
     )
     assert "handoff_generation.json" not in builder
     assert "handoff_generation.json" not in verifier

@@ -11,6 +11,7 @@ from tests.agents.handoff.conftest import (
     HANDOFF_TOOL_ROOT,
     MANDATORY_VALIDATION_CHECKS,
     TEST_BRANCH,
+    _advisory_review_receipt,
     _build_test_package,
     _copy_valid_package,
     _generation_evidence,
@@ -23,7 +24,6 @@ from tests.agents.handoff.conftest import (
     _replace_generation_evidence,
     _replace_validation_evidence,
     _rewrite_package_member,
-    _subagent_review_findings_evidence,
     _test_checks_evidence,
     _validation_checks,
     _validation_payload,
@@ -60,6 +60,7 @@ def test_builder_main_resolves_relative_out_dir_under_repo_root(
     def fake_build_handoff_package(**kwargs) -> dict[str, object]:
         captured["repo_root"] = kwargs["repo_root"]
         captured["out_dir"] = kwargs["out_dir"]
+        captured["receipts_dir"] = kwargs["receipts_dir"]
         return {
             "ok": True,
             "zip_path": str(kwargs["out_dir"] / "handoff.zip"),
@@ -81,6 +82,8 @@ def test_builder_main_resolves_relative_out_dir_under_repo_root(
             str(repo_root),
             "--out-dir",
             "relative-out",
+            "--receipts-dir",
+            "receipts",
         ]
     )
 
@@ -88,6 +91,7 @@ def test_builder_main_resolves_relative_out_dir_under_repo_root(
     assert captured == {
         "repo_root": repo_root.resolve(),
         "out_dir": repo_root.resolve() / "relative-out",
+        "receipts_dir": repo_root.resolve() / "receipts",
     }
 
 
@@ -493,7 +497,7 @@ def test_verifier_rejects_status_only_package_smoke_evidence() -> None:
 
     failures = verifier.verify_package_smoke_evidence({"status": "PASS"})
 
-    assert "package_smoke_missing: build_command" in failures
+    assert "package_smoke_missing: wheel" in failures
     assert "package_smoke_missing: content_scan" in failures
 
 
@@ -502,55 +506,51 @@ def test_verifier_rejects_incomplete_hard_scan_classification_evidence() -> None
 
     failures = verifier.verify_hard_scan_classification_evidence(
         {
-            "scan_name": "hard-scan",
-            "command": "rg -n scan src tests",
+            "schema_id": "qrp-hard-scan-receipt",
             "status": "PASS",
-            "raw_findings": [{"path": "src/example.py"}],
+            "scan_runs": [{"scan_id": "source-tree"}],
+            "classified_exceptions": [],
         }
     )
 
-    assert "hard_scan_classification_finding_missing: 0:line" in failures
-    assert "hard_scan_classification_finding_missing: 0:classification" in failures
-    assert "hard_scan_classification_finding_missing: 0:owner" in failures
-    assert "hard_scan_classification_finding_missing: 0:rule_id" in failures
+    assert "hard_scan_receipt_missing: scanned_head" in failures
+    assert "hard_scan_receipt_missing: scanner_source_sha256" in failures
+    assert "hard_scan_receipt_run_missing: 0:rule_set_id" in failures
 
 
 def test_verifier_rejects_unresolved_hard_scan_actual_violation() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     payload = _hard_scan_classification_evidence()
-    payload["raw_findings"][0]["classification"] = "actual_violation"
+    payload["scan_runs"][0]["actual_violation_count"] = 1
 
     failures = verifier.verify_hard_scan_classification_evidence(payload)
 
-    assert "hard_scan_classification_actual_violation: 0" in failures
+    assert "hard_scan_receipt_actual_violation: 0" in failures
 
 
-def test_verifier_rejects_hard_scan_placeholder_evidence() -> None:
+def test_verifier_rejects_hard_scan_raw_output_evidence() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     payload = _hard_scan_classification_evidence()
-    payload["raw_findings"][0]["path"] = "<review-safe-path-*>"
-    payload["raw_findings"][0]["matched_text"] = "<review-safe-match-sample>"
+    payload["raw_output"] = "raw rg hit"
 
     failures = verifier.verify_hard_scan_classification_evidence(payload)
 
-    assert "hard_scan_classification_placeholder: 0:path" in failures
-    assert "hard_scan_classification_placeholder: 0:matched_text" in failures
+    assert "hard_scan_receipt_raw_output_present" in failures
 
 
 def test_verifier_requires_deferred_hard_scan_proof() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     payload = _hard_scan_classification_evidence()
-    payload["raw_findings"][0]["classification"] = (
-        "valuable_deferred_feature_no_change"
-    )
+    payload["classified_exceptions"] = [{"classification": "false_positive"}]
 
     failures = verifier.verify_hard_scan_classification_evidence(payload)
 
-    assert "hard_scan_classification_deferred_owner_missing: 0" in failures
-    assert "hard_scan_classification_deferred_baseline_missing: 0" in failures
+    assert "hard_scan_receipt_exception_missing: 0:owner" in failures
+    assert "hard_scan_receipt_exception_missing: 0:rationale" in failures
 
-    payload["raw_findings"][0]["deferred_owner"] = "documented owner"
-    payload["raw_findings"][0]["no_change_from_baseline"] = True
+    payload["classified_exceptions"][0]["owner"] = "documented owner"
+    payload["classified_exceptions"][0]["rationale"] = "documented rationale"
+    payload["classified_exceptions"][0]["reference"] = "documented reference"
 
     assert verifier.verify_hard_scan_classification_evidence(payload) == []
 
@@ -567,20 +567,19 @@ def test_verifier_accepts_complete_package_and_hard_scan_evidence_shapes() -> No
     )
 
 
-def test_verifier_accepts_test_white_box_hard_scan_classification() -> None:
+def test_verifier_accepts_zero_count_hard_scan_receipt() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     payload = _hard_scan_classification_evidence()
-    payload["raw_findings"][0]["classification"] = "test_white_box_allowed"
 
     assert verifier.verify_hard_scan_classification_evidence(payload) == []
 
 
-def test_verifier_rejects_status_only_subagent_review_findings() -> None:
+def test_verifier_rejects_status_only_advisory_review_receipt() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
 
-    failures = verifier.verify_subagent_review_findings_evidence({"status": "PASS"})
+    failures = verifier.verify_advisory_review_receipt({"status": "PASS"})
 
-    assert "subagent_review_findings_missing: findings" in failures
+    assert "advisory_review_missing: findings" in failures
 
 
 def test_verifier_rejects_status_only_test_checks_evidence() -> None:
@@ -627,7 +626,8 @@ def test_verifier_rejects_test_checks_parent_child_status_mismatch() -> None:
 def test_verifier_rejects_package_smoke_parent_child_status_mismatch() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     payload = _package_smoke_evidence()
-    payload["import_status"] = "FAIL"
+    payload["import"]["status"] = "FAIL"
+    payload["status"] = "PASS"
 
     failures = verifier.verify_package_smoke_evidence(payload)
 
@@ -636,43 +636,50 @@ def test_verifier_rejects_package_smoke_parent_child_status_mismatch() -> None:
 
 def test_verifier_accepts_resolved_true_issue_review_row() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    payload = _review_reconciliation_payload()
-    payload["rows"][0]["classification"] = "true_issue_to_fix"
-    payload["rows"][0]["fix_action"] = "fixed by handoff verifier gate"
-    payload["rows"][0]["final_status"] = "FIXED"
-    payload["rows"][0]["re_review_status"] = "PASS"
+    payload = _advisory_review_receipt()
+    payload["status"] = "PASS"
+    payload["re_review_status"] = "PASS"
+    payload["finding_count"] = 1
+    payload["true_issue_count"] = 1
+    payload["findings"] = [
+        {
+            "review_lane": "governance_safety",
+            "finding_id": "review-1",
+            "classification": "true_issue_to_fix",
+            "final_status": "FIXED",
+            "re_review_status": "PASS",
+        }
+    ]
 
-    assert verifier.verify_subagent_review_reconciliation_evidence(payload) == []
+    assert verifier.verify_advisory_review_receipt(payload) == []
 
 
 def test_verifier_rejects_unresolved_true_issue_review_row() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    payload = _review_reconciliation_payload()
-    payload["rows"][0]["classification"] = "true_issue_to_fix"
-    payload["rows"][0]["final_status"] = "OPEN"
-    payload["rows"][0]["re_review_status"] = "NOT_RUN"
-    payload["rows"][0]["not_run_reason"] = "synthetic unresolved"
+    payload = _advisory_review_receipt()
+    payload["status"] = "PASS"
+    payload["re_review_status"] = "NOT_RUN"
+    payload["finding_count"] = 1
+    payload["true_issue_count"] = 1
+    payload["findings"] = [
+        {
+            "review_lane": "governance_safety",
+            "finding_id": "review-1",
+            "classification": "true_issue_to_fix",
+            "final_status": "OPEN",
+            "re_review_status": "NOT_RUN",
+        }
+    ]
 
-    failures = verifier.verify_subagent_review_reconciliation_evidence(payload)
+    failures = verifier.verify_advisory_review_receipt(payload)
 
-    assert "subagent_review_reconciliation_unresolved_true_issue: 0" in failures
+    assert "advisory_review_unresolved_true_issue: 0" in failures
 
 
 def test_verifier_accepts_complete_review_and_test_check_evidence() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
 
-    assert (
-        verifier.verify_subagent_review_findings_evidence(
-            _subagent_review_findings_evidence()
-        )
-        == []
-    )
-    assert (
-        verifier.verify_subagent_review_reconciliation_evidence(
-            _review_reconciliation_payload()
-        )
-        == []
-    )
+    assert verifier.verify_advisory_review_receipt(_advisory_review_receipt()) == []
     assert verifier.verify_test_checks_evidence(_test_checks_evidence()) == []
 
 
@@ -1111,6 +1118,7 @@ def test_builder_requires_pr_url_for_pr_closure_even_without_verify(
         builder.build_handoff_package(
             repo_root=repo,
             out_dir=tmp_path / "out",
+            receipts_dir=tmp_path / "receipts",
             task={
                 "schema_id": "qrp-handoff-task-metadata",
                 "mode": "pr_closure",
@@ -2314,21 +2322,18 @@ def test_verify_smoke_compare_accepts_pass_with_portable_summary_and_hash() -> N
     ) == []
 
 
-def test_handoff_evidence_requires_schema_id() -> None:
+def test_builder_rejects_task_json_manual_handoff_evidence() -> None:
     builder = _load_handoff_module("build_handoff_package")
 
-    with pytest.raises(SystemExit, match="schema_id_required"):
-        builder.stage_handoff_evidence(
-            Path("unused"),
-            {"handoff_evidence": {"run": {"status": {"overall": "PASS"}}}},
+    with pytest.raises(SystemExit, match="task_metadata_forbidden_field"):
+        builder.task_metadata(
             {
-                "schema_id": "qrp-handoff-validation-evidence",
-                "checks": [],
-            },
-            bundle_path=Path("unused.bundle"),
-            branch="feature/test",
-            base="0" * 40,
-            final_head="1" * 40,
-            mode="evidence",
-            zip_filename="handoff.zip",
+                "schema_id": "qrp-handoff-task-metadata",
+                "mode": "evidence",
+                "slug": "demo",
+                "branch": "feature/demo",
+                "base": "0" * 40,
+                "final_head": "1" * 40,
+                "handoff_evidence": {"manual": {"status": "PASS"}},
+            }
         )

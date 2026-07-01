@@ -62,27 +62,24 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
     repo = tmp_path / "repo"
     base, final_head = _init_handoff_repo(repo)
     out_dir = tmp_path / "out"
+    receipts_dir = tmp_path / "receipts"
+    _write_receipts(
+        receipts_dir,
+        repo=repo,
+        final_head=final_head,
+        include_advisory=True,
+    )
     task = {
         "slug": "handoff-test",
         "mode": "evidence",
         "branch": TEST_BRANCH,
         "base": base,
         "final_head": final_head,
-        "validation_evidence": {
-            "schema_id": "qrp-handoff-validation-evidence",
-            "checks": _review_validation_checks("NOT_RUN"),
-        },
-        "handoff_evidence": {
-            "package-smoke": _package_smoke_evidence(),
-            "hard-scan-classification": _hard_scan_classification_evidence(),
-            "subagent-review-findings": _subagent_review_findings_evidence(),
-            "subagent-review-reconciliation": _review_reconciliation_payload(),
-            "test-checks": _test_checks_evidence(),
-        },
     }
     result = builder.build_handoff_package(
         repo_root=repo,
         out_dir=out_dir,
+        receipts_dir=receipts_dir,
         task=task,
         verify=False,
     )
@@ -156,42 +153,49 @@ def _validation_payload(
 
 def _package_smoke_evidence() -> dict[str, object]:
     return {
-        "schema_id": "qrp-package-smoke-evidence",
+        "schema_id": "qrp-package-smoke-receipt",
         "status": "PASS",
-        "build_command": "python -m build --sdist --wheel",
-        "wheel_filename": "quant_research_platform-0.0.0-py3-none-any.whl",
-        "wheel_sha256": "0" * 64,
-        "sdist_filename": "quant_research_platform-0.0.0.tar.gz",
-        "sdist_sha256": "1" * 64,
-        "install_target": "temporary isolated target; not included in handoff",
-        "import_command": "python -c import quant_research_platform",
-        "import_status": "PASS",
+        "wheel": {
+            "filename": "quant_research_platform-0.0.0-py3-none-any.whl",
+            "sha256": "0" * 64,
+        },
+        "sdist": {
+            "filename": "quant_research_platform-0.0.0.tar.gz",
+            "sha256": "1" * 64,
+        },
+        "install": {
+            "target_kind": "temporary isolated target",
+            "no_deps": True,
+            "status": "PASS",
+        },
+        "import": {"status": "PASS"},
         "content_scan": {
-            "no_run_dir": True,
-            "no_parquet_csv_pickle_feather_arrow": True,
-            "no_row_level_data": True,
-            "no_local_absolute_paths": True,
+            "status": "PASS",
+            "forbidden_member_count": 0,
         },
     }
 
 
 def _hard_scan_classification_evidence() -> dict[str, object]:
     return {
-        "schema_id": "qrp-hard-scan-classification-evidence",
-        "scan_name": "handoff-fixture-hard-scan",
-        "command": "rg -n boundary-scan src tests",
+        "schema_id": "qrp-hard-scan-receipt",
         "status": "PASS",
-        "raw_findings": [
+        "scanned_head": "1" * 40,
+        "scanner_source_sha256": "2" * 64,
+        "scan_runs": [
             {
-                "path": "tests/negative_fixture.py",
-                "line": 1,
-                "matched_text": "synthetic negative fixture",
-                "classification": "negative_test_fixture",
-                "reason": "synthetic fixture used only to exercise verifier shape",
-                "owner": "handoff-verifier-test-fixture",
-                "rule_id": "negative_fixture_shape",
+                "scan_id": "allowance_contract",
+                "rule_set_id": "source-tree:allowance_contract",
+                "match_count": 0,
+                "actual_violation_count": 0,
+                "deferred_count": 0,
+                "negative_fixture_count": 0,
+                "false_positive_count": 0,
+                "result_sha256": "3" * 64,
+                "replayable_from_bundle": True,
             }
         ],
+        "classified_exceptions": [],
     }
 
 
@@ -237,22 +241,83 @@ def _review_reconciliation_payload() -> dict[str, object]:
 
 def _test_checks_evidence() -> dict[str, object]:
     return {
-        "schema_id": "qrp-test-checks-evidence",
+        "schema_id": "qrp-check-receipts",
         "status": "PASS",
         "checks": [
             {
+                "schema_id": "qrp-check-receipt",
+                "command_id": "handoff-tests",
                 "command": "pytest tests/agents/handoff -q",
                 "scope": "handoff verifier tests",
                 "status": "PASS",
                 "exit_code": 0,
                 "test_count": 1,
                 "duration_seconds": 1.0,
-                "blocked_reason": "",
-                "not_run_reason": "",
+                "stdout_sha256": "4" * 64,
+                "stderr_sha256": "5" * 64,
                 "output_summary": "1 passed",
+                "failure_excerpt": "",
             }
         ],
     }
+
+
+def _private_smoke_status() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-private-smoke-status",
+        "status": "NOT_RUN",
+        "command_id": "private-smoke",
+        "exit_code": None,
+        "run_level_overall": "NOT_RUN",
+        "private_smoke_run_level": "NOT_RUN",
+        "private_smoke_child_checks": "NOT_RUN",
+        "compare": "NOT_RUN",
+        "full_horizon": "NOT_RUN",
+        "child_statuses": {},
+        "run_json_sha256": "",
+        "row_level_data_included": False,
+        "not_run_reason": "private smoke not run in test fixture",
+    }
+
+
+def _advisory_review_receipt() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-advisory-review-receipt",
+        "status": "NOT_RUN",
+        "review_lanes": [],
+        "finding_count": 0,
+        "true_issue_count": 0,
+        "false_positive_count": 0,
+        "re_review_status": "NOT_RUN",
+        "findings": [],
+    }
+
+
+def _write_receipts(
+    receipts_dir: Path,
+    *,
+    repo: Path,
+    final_head: str,
+    include_advisory: bool = False,
+) -> None:
+    governance = _load_handoff_module("governance_contract")
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+    payloads = {
+        "package-smoke-receipt.json": _package_smoke_evidence(),
+        "hard-scan-receipt.json": governance.hard_scan_receipt_from_clone(
+            repo,
+            final_head=final_head,
+        ),
+        "check-receipts.json": _test_checks_evidence(),
+        "private-smoke-status.json": _private_smoke_status(),
+    }
+    if include_advisory:
+        payloads["advisory-review-receipt.json"] = _advisory_review_receipt()
+    for name, payload in payloads.items():
+        (receipts_dir / name).write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _rewrite_package_member(package: Path, member: str, data: bytes) -> None:

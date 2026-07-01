@@ -60,7 +60,15 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_governa
 
 active doc roots、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 必须从这里读取或派生。
 
-handoff required evidence paths、hard-scan classifications、subagent review severities/classifications 和 advisory review consistency 也必须从 `governance_contract.py` 读取或派生，不得在 builder、verifier 或 tests 中复制平行规则表。
+handoff required receipt paths、hard-scan replay rules、advisory review consistency 和 status token 也必须从 `governance_contract.py` 读取或派生，不得在 builder、verifier 或 tests 中复制平行规则表。
+
+Hard-scan receipt gate 使用：
+
+```bash
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --hard-scan-suite --receipt-out .run/<purpose>/receipts/hard-scan-receipt.json
+```
+
+该模式只写 compact receipt，不写 raw grep output。verifier 必须从 `final-branch.bundle` 重放 hard scan 并比对 `scan_id`、`rule_set_id`、count 和 `result_sha256`。
 
 ### Code-map gate
 
@@ -77,6 +85,8 @@ python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 
 如果完整运行超时，必须写 `BLOCKED` 并记录超时，可以补充分段运行结果。
+
+Handoff receipt flow 的低成本 gate 放在 `tests/agents/handoff/`：覆盖 task 大 evidence 拒绝、status-only/placeholder/raw output 拒绝、generic smoke PASS 拒绝、advisory PASS 缺 receipt 拒绝、package/private/check receipt schema，以及从 bundle 重放 hard scan。
 
 ## 4. Active-doc scan
 

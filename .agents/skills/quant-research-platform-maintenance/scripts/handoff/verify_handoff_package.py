@@ -25,34 +25,31 @@ if str(SCRIPT_PARENT) not in sys.path:
 if str(SCRIPT_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPT_REPO_SRC))
 
-from governance_contract import (  # noqa: E402
+from governance_contract import (  # noqa: E402, I001
+    ADVISORY_REVIEW_RECEIPT_EVIDENCE,
     ADVISORY_VALIDATION_CHECKS as ADVISORY_REVIEW_CHECKS,
-)
-from governance_contract import (  # noqa: E402
     BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES,
     BLOCKED_PACKAGE_ENTRY_PARTS,
     BLOCKED_TASK_KEYS,
     BLOCKED_VALIDATION_KEYS,
+    CHECK_RECEIPTS_EVIDENCE,
     GENERATION_EVIDENCE,
     HANDOFF_TOOL_SOURCE_PATHS,
     HARD_SCAN_CLASSIFICATION_EVIDENCE,
-    HARD_SCAN_CLASSIFICATIONS,
+    OLD_HANDOFF_EVIDENCE_PATHS,
     PACKAGE_FORBIDDEN_PATH_PARTS,
     PACKAGE_SMOKE_EVIDENCE,
+    PRIVATE_SMOKE_STATUS_EVIDENCE,
     RESULT_ARCHITECTURE_RETIRED_TEXT_RULES,
     SOURCE_TREE_SCAN_EVIDENCE,
-    SUBAGENT_REVIEW_CLASSIFICATIONS,
-    SUBAGENT_REVIEW_FINDINGS_EVIDENCE,
-    SUBAGENT_REVIEW_RECONCILIATION_EVIDENCE,
-    SUBAGENT_REVIEW_SEVERITIES,
     TASK_REQUIRED_HANDOFF_EVIDENCE,
-    TEST_CHECKS_EVIDENCE,
     VALID_STATUS_TOKENS,
     VALIDATION_ROW_KEYS,
     VERIFICATION_MATRIX_EVIDENCE,
     advisory_review_consistency_failures,
     aggregate_mandatory_validation_status,
     handoff_evidence_blocked_key_failures,
+    hard_scan_receipt_from_clone,
     is_reserved_handoff_evidence_path,
     mandatory_validation_status_map,
     source_tree_scan_from_clone,
@@ -583,6 +580,10 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 if name.startswith("handoff_evidence/")
                 and is_reserved_handoff_evidence_path(name)
             )
+            failures.extend(
+                f"old_handoff_evidence_entry: {name}"
+                for name in sorted(name_set & OLD_HANDOFF_EVIDENCE_PATHS)
+            )
             duplicate_source = sorted(
                 name
                 for name in names
@@ -962,12 +963,12 @@ def verify_handoff_evidence_json(
             failures.extend(verify_package_smoke_evidence(payload))
         if name == HARD_SCAN_CLASSIFICATION_EVIDENCE:
             failures.extend(verify_hard_scan_classification_evidence(payload))
-        if name == SUBAGENT_REVIEW_FINDINGS_EVIDENCE:
-            failures.extend(verify_subagent_review_findings_evidence(payload))
-        if name == SUBAGENT_REVIEW_RECONCILIATION_EVIDENCE:
-            failures.extend(verify_subagent_review_reconciliation_evidence(payload))
-        if name == TEST_CHECKS_EVIDENCE:
+        if name == CHECK_RECEIPTS_EVIDENCE:
             failures.extend(verify_test_checks_evidence(payload))
+        if name == PRIVATE_SMOKE_STATUS_EVIDENCE:
+            failures.extend(verify_private_smoke_status(payload))
+        if name == ADVISORY_REVIEW_RECEIPT_EVIDENCE:
+            failures.extend(verify_advisory_review_receipt(payload))
         if name.endswith("verification-matrix.json"):
             failures.extend(verify_verification_matrix(payload))
     if VERIFICATION_MATRIX_EVIDENCE not in archive.namelist():
@@ -995,201 +996,181 @@ def handoff_evidence_forbidden_field_failures(
 def verify_package_smoke_evidence(payload: dict[str, object]) -> list[str]:
     failures: list[str] = []
     for key in (
+        "schema_id",
         "status",
-        "build_command",
-        "wheel_filename",
-        "wheel_sha256",
-        "sdist_filename",
-        "sdist_sha256",
-        "install_target",
-        "import_command",
-        "import_status",
+        "wheel",
+        "sdist",
+        "install",
+        "import",
         "content_scan",
     ):
         if key not in payload:
             failures.append(f"package_smoke_missing: {key}")
+    if payload.get("schema_id") != "qrp-package-smoke-receipt":
+        failures.append("package_smoke_schema_id_invalid")
     if payload.get("status") not in VALID_STATUS_TOKENS:
         failures.append("package_smoke_status_invalid")
-    if payload.get("import_status") not in VALID_STATUS_TOKENS:
-        failures.append("package_smoke_import_status_invalid")
+    import_payload = payload.get("import")
     if (
-        payload.get("status") in VALID_STATUS_TOKENS
-        and payload.get("import_status") in VALID_STATUS_TOKENS
+        not isinstance(import_payload, dict)
+        or import_payload.get("status") not in VALID_STATUS_TOKENS
     ):
-        content_status = (
-            "PASS"
-            if isinstance(payload.get("content_scan"), dict)
-            and all(
-                payload["content_scan"].get(key) is True
-                for key in (
-                    "no_run_dir",
-                    "no_parquet_csv_pickle_feather_arrow",
-                    "no_row_level_data",
-                    "no_local_absolute_paths",
-                )
-            )
-            else "FAIL"
-        )
-        expected_status = aggregate_validation_matrix_status(
-            [str(payload["import_status"]), content_status]
-        )
-        if payload.get("status") != expected_status:
-            failures.append("package_smoke_status_mismatch")
-    for key in (
-        "build_command",
-        "wheel_filename",
-        "sdist_filename",
-        "install_target",
-        "import_command",
-    ):
-        if key in payload and (
-            not isinstance(payload.get(key), str) or not str(payload.get(key)).strip()
+        failures.append("package_smoke_import_status_invalid")
+    for key in ("wheel", "sdist"):
+        artifact = payload.get(key)
+        if not isinstance(artifact, dict):
+            failures.append(f"package_smoke_artifact_invalid: {key}")
+            continue
+        if not isinstance(artifact.get("filename"), str):
+            failures.append(f"package_smoke_string_invalid: {key}.filename")
+        sha = artifact.get("sha256")
+        if not (
+            isinstance(sha, str)
+            and (sha == "" or re.fullmatch(r"[0-9a-f]{64}", sha))
         ):
-            failures.append(f"package_smoke_string_invalid: {key}")
-    for key in ("wheel_sha256", "sdist_sha256"):
-        value = payload.get(key)
-        if key in payload and not (
-            isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
-        ):
-            failures.append(f"package_smoke_sha256_invalid: {key}")
+            failures.append(f"package_smoke_sha256_invalid: {key}.sha256")
+    install = payload.get("install")
+    if not isinstance(install, dict):
+        failures.append("package_smoke_install_invalid")
+    else:
+        if install.get("no_deps") is not True:
+            failures.append("package_smoke_install_no_deps_invalid")
+        if install.get("status") not in VALID_STATUS_TOKENS:
+            failures.append("package_smoke_install_status_invalid")
     content_scan = payload.get("content_scan")
     if not isinstance(content_scan, dict):
         failures.append("package_smoke_content_scan_invalid")
         return failures
-    for key in (
-        "no_run_dir",
-        "no_parquet_csv_pickle_feather_arrow",
-        "no_row_level_data",
-        "no_local_absolute_paths",
+    if content_scan.get("status") not in VALID_STATUS_TOKENS:
+        failures.append("package_smoke_content_scan_status_invalid")
+    if not isinstance(content_scan.get("forbidden_member_count"), int):
+        failures.append("package_smoke_forbidden_member_count_invalid")
+    child_statuses = []
+    if isinstance(install, dict) and install.get("status") in VALID_STATUS_TOKENS:
+        child_statuses.append(str(install["status"]))
+    if (
+        isinstance(import_payload, dict)
+        and import_payload.get("status") in VALID_STATUS_TOKENS
     ):
-        if content_scan.get(key) is not True:
-            failures.append(f"package_smoke_content_scan_not_pass: {key}")
+        child_statuses.append(str(import_payload["status"]))
+    if content_scan.get("status") in VALID_STATUS_TOKENS:
+        child_statuses.append(str(content_scan["status"]))
+    if child_statuses:
+        expected = aggregate_validation_matrix_status(child_statuses)
+        if payload.get("status") != expected:
+            failures.append("package_smoke_status_mismatch")
     return failures
 
 
 def verify_hard_scan_classification_evidence(payload: dict[str, object]) -> list[str]:
     failures: list[str] = []
-    for key in ("scan_name", "command", "status", "raw_findings"):
+    for key in (
+        "schema_id",
+        "status",
+        "scanned_head",
+        "scanner_source_sha256",
+        "scan_runs",
+        "classified_exceptions",
+    ):
         if key not in payload:
-            failures.append(f"hard_scan_classification_missing: {key}")
-    for key in ("scan_name", "command"):
-        if key in payload and (
-            not isinstance(payload.get(key), str) or not str(payload.get(key)).strip()
-        ):
-            failures.append(f"hard_scan_classification_string_invalid: {key}")
+            failures.append(f"hard_scan_receipt_missing: {key}")
+    if payload.get("schema_id") != "qrp-hard-scan-receipt":
+        failures.append("hard_scan_receipt_schema_id_invalid")
     if payload.get("status") not in VALID_STATUS_TOKENS:
-        failures.append("hard_scan_classification_status_invalid")
-    raw_findings = payload.get("raw_findings")
-    if not isinstance(raw_findings, list):
-        failures.append("hard_scan_classification_raw_findings_invalid")
+        failures.append("hard_scan_receipt_status_invalid")
+    if "raw_findings" in payload or "raw_output" in payload or "grep_hits" in payload:
+        failures.append("hard_scan_receipt_raw_output_present")
+    if not is_sha256(payload.get("scanner_source_sha256")):
+        failures.append("hard_scan_receipt_scanner_sha256_invalid")
+    runs = payload.get("scan_runs")
+    if not isinstance(runs, list) or not runs:
+        failures.append("hard_scan_receipt_scan_runs_invalid")
         return failures
-    for index, finding in enumerate(raw_findings):
-        if not isinstance(finding, dict):
-            failures.append(f"hard_scan_classification_finding_invalid: {index}")
+    for index, run in enumerate(runs):
+        if not isinstance(run, dict):
+            failures.append(f"hard_scan_receipt_scan_run_invalid: {index}")
             continue
-        for key in ("line", "classification", "reason", "owner", "rule_id"):
-            if key not in finding:
-                failures.append(
-                    f"hard_scan_classification_finding_missing: {index}:{key}"
-                )
-        has_path = bool(finding.get("path")) or (
-            bool(finding.get("redacted_path")) and bool(finding.get("redaction_reason"))
-        )
-        if not has_path:
-            failures.append(f"hard_scan_classification_finding_missing: {index}:path")
-        has_match = bool(finding.get("matched_text")) or bool(
-            finding.get("safe_excerpt")
-        )
-        if not has_match:
-            failures.append(
-                f"hard_scan_classification_finding_missing: {index}:matched_text"
-            )
-        if "line" in finding and not isinstance(finding.get("line"), int):
-            failures.append(f"hard_scan_classification_line_invalid: {index}")
+        for key in ("scan_id", "rule_set_id", "result_sha256"):
+            if not isinstance(run.get(key), str) or not str(run.get(key)).strip():
+                failures.append(f"hard_scan_receipt_run_missing: {index}:{key}")
         for key in (
-            "path",
-            "redacted_path",
-            "redaction_reason",
-            "matched_text",
-            "safe_excerpt",
-            "reason",
-            "owner",
-            "rule_id",
+            "match_count",
+            "actual_violation_count",
+            "deferred_count",
+            "negative_fixture_count",
+            "false_positive_count",
         ):
-            if key in finding and (
-                not isinstance(finding.get(key), str)
-                or not str(finding.get(key)).strip()
+            if not isinstance(run.get(key), int) or int(run.get(key)) < 0:
+                failures.append(f"hard_scan_receipt_run_count_invalid: {index}:{key}")
+        if not is_sha256(run.get("result_sha256")):
+            failures.append(f"hard_scan_receipt_result_sha256_invalid: {index}")
+        if run.get("replayable_from_bundle") is not True:
+            failures.append(f"hard_scan_receipt_not_replayable: {index}")
+        if run.get("actual_violation_count") != 0:
+            failures.append(f"hard_scan_receipt_actual_violation: {index}")
+    exceptions = payload.get("classified_exceptions")
+    if not isinstance(exceptions, list):
+        failures.append("hard_scan_receipt_classified_exceptions_invalid")
+        return failures
+    for index, exception in enumerate(exceptions):
+        if not isinstance(exception, dict):
+            failures.append(f"hard_scan_receipt_exception_invalid: {index}")
+            continue
+        if exception.get("classification") == "actual_violation":
+            failures.append(f"hard_scan_receipt_exception_actual_violation: {index}")
+        for key in ("owner", "rationale", "reference"):
+            if (
+                not isinstance(exception.get(key), str)
+                or not str(exception.get(key)).strip()
             ):
-                failures.append(
-                    f"hard_scan_classification_string_invalid: {index}:{key}"
-                )
-            elif key in {"path", "redacted_path", "matched_text", "safe_excerpt"}:
-                value = finding.get(key)
-                if isinstance(value, str) and re.fullmatch(
-                    r"<review-safe-(?:path|match)-[^>]+>", value
-                ):
-                    failures.append(
-                        f"hard_scan_classification_placeholder: {index}:{key}"
-                    )
-        if (
-            "classification" in finding
-            and finding.get("classification") not in HARD_SCAN_CLASSIFICATIONS
-        ):
-            failures.append(
-                f"hard_scan_classification_classification_invalid: {index}"
-            )
-        if finding.get("classification") == "actual_violation":
-            failures.append(f"hard_scan_classification_actual_violation: {index}")
-        if finding.get("classification") == "valuable_deferred_feature_no_change":
-            if not finding.get("deferred_owner") or not isinstance(
-                finding.get("deferred_owner"),
-                str,
-            ):
-                failures.append(
-                    f"hard_scan_classification_deferred_owner_missing: {index}"
-                )
-            if finding.get("no_change_from_baseline") is not True:
-                failures.append(
-                    f"hard_scan_classification_deferred_baseline_missing: {index}"
-                )
+                failures.append(f"hard_scan_receipt_exception_missing: {index}:{key}")
     return failures
 
 
-def verify_subagent_review_findings_evidence(payload: dict[str, object]) -> list[str]:
+def verify_private_smoke_status(payload: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    if payload.get("schema_id") != "qrp-private-smoke-status":
+        failures.append("private_smoke_schema_id_invalid")
+    for key in (
+        "status",
+        "private_smoke_run_level",
+        "private_smoke_child_checks",
+        "compare",
+        "full_horizon",
+    ):
+        if payload.get(key) not in VALID_STATUS_TOKENS:
+            failures.append(f"private_smoke_status_invalid: {key}")
+    if payload.get("row_level_data_included") is not False:
+        failures.append("private_smoke_row_level_data_included")
+    sha = payload.get("run_json_sha256")
+    if sha not in {"", None} and not is_sha256(sha):
+        failures.append("private_smoke_run_json_sha256_invalid")
+    return failures
+
+
+def verify_advisory_review_receipt(payload: dict[str, object]) -> list[str]:
     failures = _verify_review_payload_header(
         payload,
-        expected_schema_id="qrp-subagent-review-findings",
+        expected_schema_id="qrp-advisory-review-receipt",
         rows_key="findings",
-        prefix="subagent_review_findings",
+        prefix="advisory_review",
     )
+    for key in (
+        "review_lanes",
+        "finding_count",
+        "true_issue_count",
+        "false_positive_count",
+        "re_review_status",
+    ):
+        if key not in payload:
+            failures.append(f"advisory_review_missing: {key}")
+    if payload.get("re_review_status") not in VALID_STATUS_TOKENS:
+        failures.append("advisory_review_re_review_status_invalid")
     rows = payload.get("findings")
     if isinstance(rows, list):
-        failures.extend(
-            _verify_subagent_review_rows(
-                rows,
-                prefix="subagent_review_findings",
-            )
-        )
-    return failures
-
-
-def verify_subagent_review_reconciliation_evidence(
-    payload: dict[str, object],
-) -> list[str]:
-    failures = _verify_review_payload_header(
-        payload,
-        expected_schema_id="qrp-subagent-review-reconciliation",
-        rows_key="rows",
-        prefix="subagent_review_reconciliation",
-    )
-    rows = payload.get("rows")
-    if isinstance(rows, list):
-        failures.extend(
-            _verify_subagent_review_rows(
-                rows,
-                prefix="subagent_review_reconciliation",
-            )
-        )
+        failures.extend(_verify_advisory_review_rows(rows))
+        if payload.get("finding_count") != len(rows):
+            failures.append("advisory_review_finding_count_mismatch")
     return failures
 
 
@@ -1212,42 +1193,32 @@ def _verify_review_payload_header(
     return failures
 
 
-def _verify_subagent_review_rows(
-    rows: list[object],
-    *,
-    prefix: str,
-) -> list[str]:
+def _verify_advisory_review_rows(rows: list[object]) -> list[str]:
     failures: list[str] = []
     required = (
         "review_lane",
         "finding_id",
-        "severity",
-        "file_or_symbol",
-        "why_true_issue",
         "classification",
-        "fix_action",
         "re_review_status",
     )
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
-            failures.append(f"{prefix}_row_invalid: {index}")
+            failures.append(f"advisory_review_row_invalid: {index}")
             continue
         for key in required:
             if key not in row:
-                failures.append(f"{prefix}_row_missing: {index}:{key}")
+                failures.append(f"advisory_review_row_missing: {index}:{key}")
         if "fix_commit" not in row and "final_status" not in row:
-            failures.append(f"{prefix}_row_missing: {index}:fix_commit_or_final_status")
+            failures.append(
+                f"advisory_review_row_missing: {index}:fix_commit_or_final_status"
+            )
         for key in required + ("fix_commit", "final_status"):
             if key in row and (
                 not isinstance(row.get(key), str) or not str(row.get(key)).strip()
             ):
-                failures.append(f"{prefix}_row_string_invalid: {index}:{key}")
-        if row.get("severity") not in SUBAGENT_REVIEW_SEVERITIES:
-            failures.append(f"{prefix}_severity_invalid: {index}")
-        if row.get("classification") not in SUBAGENT_REVIEW_CLASSIFICATIONS:
-            failures.append(f"{prefix}_classification_invalid: {index}")
+                failures.append(f"advisory_review_row_string_invalid: {index}:{key}")
         if row.get("re_review_status") not in VALID_STATUS_TOKENS:
-            failures.append(f"{prefix}_re_review_status_invalid: {index}")
+            failures.append(f"advisory_review_re_review_status_invalid: {index}")
         if row.get("classification") == "true_issue_to_fix":
             final_status = str(row.get("final_status") or "").strip().upper()
             fix_commit = str(row.get("fix_commit") or "").strip()
@@ -1259,13 +1230,13 @@ def _verify_subagent_review_rows(
                 )
             )
             if not resolved:
-                failures.append(f"{prefix}_unresolved_true_issue: {index}")
+                failures.append(f"advisory_review_unresolved_true_issue: {index}")
     return failures
 
 
 def verify_test_checks_evidence(payload: dict[str, object]) -> list[str]:
     failures: list[str] = []
-    if payload.get("schema_id") != "qrp-test-checks-evidence":
+    if payload.get("schema_id") != "qrp-check-receipts":
         failures.append("test_checks_schema_id_invalid")
     if payload.get("status") not in VALID_STATUS_TOKENS:
         failures.append("test_checks_status_invalid")
@@ -1282,20 +1253,25 @@ def verify_test_checks_evidence(payload: dict[str, object]) -> list[str]:
             failures.append(f"test_checks_row_invalid: {index}")
             continue
         for key in (
+            "command_id",
             "command",
             "scope",
             "status",
             "exit_code",
             "test_count",
             "duration_seconds",
-            "blocked_reason",
-            "not_run_reason",
+            "stdout_sha256",
+            "stderr_sha256",
         ):
             if key not in row:
                 failures.append(f"test_checks_row_missing: {index}:{key}")
-        if "log_excerpt" not in row and "output_summary" not in row:
+        if "stdout" in row or "stderr" in row or "raw_output" in row:
+            failures.append(f"test_checks_row_raw_output_present: {index}")
+        if "failure_excerpt" in row and not isinstance(row["failure_excerpt"], str):
+            failures.append(f"test_checks_row_failure_excerpt_invalid: {index}")
+        if "output_summary" not in row:
             failures.append(f"test_checks_row_missing: {index}:output_summary")
-        for key in ("command", "scope"):
+        for key in ("command_id", "command", "scope"):
             if key in row and (
                 not isinstance(row.get(key), str) or not str(row.get(key)).strip()
             ):
@@ -1316,11 +1292,10 @@ def verify_test_checks_evidence(payload: dict[str, object]) -> list[str]:
         duration = row.get("duration_seconds")
         if not isinstance(duration, (int, float)) or duration < 0:
             failures.append(f"test_checks_row_duration_invalid: {index}")
-        if status == "BLOCKED" and not str(row.get("blocked_reason") or "").strip():
-            failures.append(f"test_checks_row_blocked_reason_missing: {index}")
-        if status == "NOT_RUN" and not str(row.get("not_run_reason") or "").strip():
-            failures.append(f"test_checks_row_not_run_reason_missing: {index}")
-        summary = row.get("output_summary", row.get("log_excerpt"))
+        for key in ("stdout_sha256", "stderr_sha256"):
+            if not is_sha256(row.get(key)):
+                failures.append(f"test_checks_row_sha256_invalid: {index}:{key}")
+        summary = row.get("output_summary")
         if not isinstance(summary, str) or not summary.strip():
             failures.append(f"test_checks_row_output_summary_invalid: {index}")
     if row_statuses:
@@ -1472,6 +1447,10 @@ def validation_status_from_archive(archive: ZipFile) -> str | None:
 
 def is_full_sha(value: object) -> bool:
     return isinstance(value, str) and bool(FULL_SHA_RE.fullmatch(value))
+
+
+def is_sha256(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{64}", value))
 
 
 def verify_smoke_compare_status(payload: dict[str, object]) -> list[str]:
@@ -1803,6 +1782,7 @@ def verify_final_branch_bundle(
                     failures.append(f"source_tree_scan_bundle_rule: {finding['rule']}")
         if scan.get("scanned_head") != final_head:
             failures.append("source_tree_scan_bundle_head_mismatch")
+        failures.extend(verify_hard_scan_replay(archive, clone_dir, final_head))
         subject = git_text(clone_dir, "show", "-s", "--format=%s", "HEAD").strip()
         if "synthetic" in subject.lower():
             failures.append("bundle_head_synthetic_marker")
@@ -1810,6 +1790,54 @@ def verify_final_branch_bundle(
         if base_commit is None:
             failures.append("base_required_for_bundle_context")
     return failures
+
+
+def verify_hard_scan_replay(
+    archive: ZipFile,
+    clone_dir: Path,
+    final_head: str,
+) -> list[str]:
+    try:
+        receipt = json.loads(
+            archive.read(HARD_SCAN_CLASSIFICATION_EVIDENCE).decode("utf-8")
+        )
+    except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+        return ["hard_scan_receipt_missing_for_replay"]
+    if not isinstance(receipt, dict):
+        return ["hard_scan_receipt_invalid_for_replay"]
+    replay = hard_scan_receipt_from_clone(clone_dir, final_head=final_head)
+    failures: list[str] = []
+    if receipt.get("scanner_source_sha256") != replay.get("scanner_source_sha256"):
+        failures.append("hard_scan_replay_scanner_source_sha256_mismatch")
+    receipt_runs = keyed_scan_runs(receipt)
+    replay_runs = keyed_scan_runs(replay)
+    if set(receipt_runs) != set(replay_runs):
+        failures.append("hard_scan_replay_scan_ids_mismatch")
+    for scan_id in sorted(set(receipt_runs) & set(replay_runs)):
+        expected = replay_runs[scan_id]
+        actual = receipt_runs[scan_id]
+        for key in (
+            "rule_set_id",
+            "match_count",
+            "actual_violation_count",
+            "result_sha256",
+        ):
+            if actual.get(key) != expected.get(key):
+                failures.append(f"hard_scan_replay_{key}_mismatch: {scan_id}")
+        if actual.get("actual_violation_count") != 0:
+            failures.append(f"hard_scan_replay_actual_violation: {scan_id}")
+    return failures
+
+
+def keyed_scan_runs(payload: dict[str, object]) -> dict[str, dict[str, object]]:
+    rows = payload.get("scan_runs")
+    if not isinstance(rows, list):
+        return {}
+    result: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("scan_id"), str):
+            result[row["scan_id"]] = row
+    return result
 
 
 def verify_tracked_handoff_sources(repo: Path) -> list[str]:

@@ -25,6 +25,7 @@ from governance_contract import (  # noqa: E402
     STALE_GOVERNANCE_TRUTH_TEST_SOURCES,
     active_doc_forbidden_patterns,
     git_tracked_paths,
+    hard_scan_receipt_from_clone,
     is_allowed_stale_or_retired_fixture,
     is_governance_rule_definition_path,
     is_retired_governance_path,
@@ -169,6 +170,17 @@ def run_git(repo: Path, args: list[str]) -> tuple[int, str, str]:
         check=False,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def git_text(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=True,
+        encoding="utf-8",
+    ).stdout
 
 
 def normalize(path: str) -> str:
@@ -656,6 +668,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     parser.add_argument(
+        "--hard-scan-suite",
+        action="store_true",
+        help="Run replayable hard-scan suite and optionally write a compact receipt.",
+    )
+    parser.add_argument(
+        "--receipt-out",
+        default=None,
+        help="Path for compact receipt JSON when --hard-scan-suite is used.",
+    )
+    parser.add_argument(
         "--summary",
         action="store_true",
         help="Print a one-line summary for final reports.",
@@ -665,6 +687,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--governance-only requires --scan-scope")
 
     repo = Path(args.repo_root).resolve()
+    if args.hard_scan_suite:
+        final_head = git_text(repo, "rev-parse", "HEAD").strip()
+        receipt = hard_scan_receipt_from_clone(repo, final_head=final_head)
+        if args.receipt_out:
+            receipt_path = Path(args.receipt_out)
+            if not receipt_path.is_absolute():
+                receipt_path = repo / receipt_path
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            receipt_path.write_text(
+                json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+        print(json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if receipt.get("status") == "PASS" else 1
     result = Result()
     scan_scope = args.scan_scope or "changed-files"
     check_retired_governance_paths(result, repo)

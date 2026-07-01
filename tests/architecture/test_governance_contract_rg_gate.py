@@ -1597,9 +1597,26 @@ APPROVED_FIELD_SPEC_FILES = {
 }
 
 APPROVED_WRITER_MODULES = {
+    Path(".agents/skills/quant-research-platform-maintenance/scripts/run_check.py"),
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "verify_governance.py"
+    ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
         "build_handoff_package.py"
+    ),
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "collect_handoff_receipts.py"
+    ),
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "collect_private_smoke_status.py"
+    ),
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "run_package_smoke.py"
     ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"

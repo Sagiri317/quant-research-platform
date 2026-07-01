@@ -9,6 +9,8 @@
 - 不写死用户本地 Python 路径、conda 环境名、Windows 盘符或私有数据路径。
 - 输出应可被 human 和 machine 读取。
 - 检查失败时返回非零 exit code。
+- Handoff 检查脚本写 compact receipt；不要把 raw grep output、完整 pytest log、完整 stdout/stderr、wheel/sdist 或本地临时安装目录写入 handoff。
+- Builder 只读取 task metadata 和 receipts-dir；`.run/` 只保存 output/evidence，不作为脚本来源。
 
 ## 2. Python 检查
 
@@ -31,11 +33,11 @@ PY
 
 ## 4. Subagent 和 review-fix loop
 
-可以用 subagent 做只读扫描或分工 review，但最终责任在主 agent。subagent 结果必须被主 agent 复核，不能原样当事实。结束前必须汇总并关闭 subagent。
+可以用 subagent 做只读扫描或分工 review，但 subagent review 是 advisory，不是每次 handoff 的 mandatory gate。用户明确要求或高风险重构时才运行。
 
-review-fix loop 应小步执行：scan → classify → patch → validate → rescan。不要在未确认 scope 前做大范围重构。
+review-fix loop 应小步执行：scan → classify → patch → validate → rescan。重验证在 review-fix loop 完成后执行，不要在未确认 scope 前做大范围重构。
 
-fresh review-only subagent 的输出必须是结构化、可归并、可复核的 finding evidence。主 agent 必须把 review 结果归并为待修、误报、延期、base issue 或需批准项，并把最终 reconciliation 写入 handoff evidence。
+fresh review-only subagent 的输出必须是结构化、可归并、可复核的 finding evidence。若本轮声明 advisory review `PASS`，必须生成 `handoff_evidence/advisory-review-receipt.json`；不得打包完整 transcript。
 
 ## 5. 禁止配置扩张
 

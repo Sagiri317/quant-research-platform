@@ -20,7 +20,8 @@ QRP 是本地量化研究平台，不是生产交易系统，不是 live trading
 - 未运行写 `NOT_RUN`。
 - 环境、权限、依赖、超时阻塞写 `BLOCKED`。
 - 不允许把 sidecar PASS、single handoff verifier safety scan PASS、pytest PASS、compare PASS 互相替代。
-- formal handoff evidence 必须完整、结构化、可由 verifier 审查；status-only 摘要不够。
+- formal handoff evidence 必须是 compact replayable receipts：可重放检查从 `final-branch.bundle` 重放并比对 count/hash，不可重放 private/local 检查只保存 REVIEW_SAFE 状态摘要；status-only 摘要不够。
+- Codex 不应手写 handoff evidence，builder 只读取 task metadata 和 receipts-dir；subagent review 是 advisory，只有声明 `PASS` 时才要求 advisory receipt。
 - sandbox 或 Codex 环境中，允许在边界内安装缺失依赖进行测试；缺依赖不是默认跳过理由。
 
 ## 文档偏好

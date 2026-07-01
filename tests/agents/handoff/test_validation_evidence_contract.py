@@ -120,66 +120,20 @@ def test_validation_evidence_rejects_invalid_status_values(status: object) -> No
 
 
 @pytest.mark.parametrize(
-    ("validation_evidence", "expected_error"),
-    [
-        (
-            {"schema_id": "qrp-handoff-validation-evidence"},
-            "validation_evidence_checks_missing",
-        ),
-        (
-            {"schema_id": "qrp-handoff-validation-evidence", "checks": None},
-            "validation_evidence_checks_must_be_list",
-        ),
-        (
-            {"schema_id": "qrp-handoff-validation-evidence", "checks": {}},
-            "validation_evidence_checks_must_be_list",
-        ),
-        (
-            {"schema_id": "qrp-handoff-validation-evidence", "checks": "bad"},
-            "validation_evidence_checks_must_be_list",
-        ),
-        ("bad", "validation_evidence_must_be_object"),
-        (None, "validation_evidence_must_be_object"),
-    ],
+    "manual_key",
+    ["validation_evidence", "handoff_evidence", "handoff_markdown_evidence"],
 )
-def test_builder_task_validation_evidence_rejects_malformed_payloads(
-    validation_evidence: object,
-    expected_error: str,
-) -> None:
+def test_builder_task_metadata_rejects_manual_evidence_keys(manual_key: str) -> None:
     builder = _load_handoff_module("build_handoff_package")
-
-    with pytest.raises(SystemExit, match=expected_error):
-        builder.task_validation_evidence({"validation_evidence": validation_evidence})
-
-
-def test_builder_task_validation_evidence_generates_missing_key_rows() -> None:
-    builder = _load_handoff_module("build_handoff_package")
-    contract = _load_handoff_module("governance_contract")
-
-    payload = builder.task_validation_evidence({})
-    checks = {row["name"]: row for row in payload["checks"]}
-
-    assert set(checks) == {
-        *contract.MANDATORY_VALIDATION_CHECKS,
-        *contract.ADVISORY_VALIDATION_CHECKS,
+    payload = {
+        "schema_id": "qrp-handoff-task-metadata",
+        "mode": "evidence",
+        "slug": "demo",
+        "branch": "feature/demo",
+        "base": "0" * 40,
+        "final_head": "1" * 40,
+        manual_key: {},
     }
-    assert {row["status"] for row in checks.values()} == {"NOT_RUN"}
-    assert all(
-        "task validation_evidence missing; generated mandatory NOT_RUN row"
-        in row["evidence"]
-        for name, row in checks.items()
-        if name in contract.MANDATORY_VALIDATION_CHECKS
-    )
-    assert all(
-        "task validation_evidence missing; generated advisory NOT_RUN row"
-        in row["evidence"]
-        for name, row in checks.items()
-        if name in contract.ADVISORY_VALIDATION_CHECKS
-    )
 
-    verifier = _load_handoff_module("verify_handoff_package")
-    failures = verifier.verify_validation_evidence_schema(payload)
-    assert not any(
-        failure.startswith("validation_evidence_mandatory_check_missing")
-        for failure in failures
-    )
+    with pytest.raises(SystemExit, match="task_metadata_forbidden_field"):
+        builder.task_metadata(payload)
