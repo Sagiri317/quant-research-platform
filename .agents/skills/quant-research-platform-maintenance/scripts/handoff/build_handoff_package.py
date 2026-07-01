@@ -687,7 +687,7 @@ def git_text(repo: Path, *args: str) -> str:
 
 
 def load_json_object(path: Path, label: str) -> dict[str, object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise SystemExit(f"{label}_must_be_json_object")
     return payload

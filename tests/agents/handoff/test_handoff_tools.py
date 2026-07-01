@@ -95,6 +95,19 @@ def test_builder_main_resolves_relative_out_dir_under_repo_root(
     }
 
 
+def test_builder_load_json_accepts_utf8_bom_task_metadata(tmp_path: Path) -> None:
+    builder = _load_handoff_module("build_handoff_package")
+    task_path = tmp_path / "task.json"
+    task_path.write_text(
+        '{"schema_id":"qrp-handoff-task-metadata"}',
+        encoding="utf-8-sig",
+    )
+
+    payload = builder.load_json_object(task_path, "task")
+
+    assert payload == {"schema_id": "qrp-handoff-task-metadata"}
+
+
 def _update_sidecar_hashes(
     package: Path, sidecar: Path, artifact_manifest: bytes
 ) -> None:
