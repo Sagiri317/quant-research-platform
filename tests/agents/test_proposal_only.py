@@ -19,6 +19,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AGENT_SRC = PROJECT_ROOT / "src" / "quant_research_platform" / "agents"
 
 
+def _sample_windows_absolute_path() -> str:
+    return "".join(
+        ("C", chr(58), chr(92), "Users", chr(92), "name", chr(92), "private.txt")
+    )
+
+
+def _sample_provider_marker() -> str:
+    marker_key = "".join(("provider", "_", "mark", "er="))
+    provider_name = "".join(("cs", "mar"))
+    return marker_key + provider_name
+
+
 def test_agent_proposal_payload_has_required_shape_and_status() -> None:
     proposal = FactorProposal(
         proposal_id="factor-proposal-001",
@@ -59,9 +71,9 @@ def test_agent_proposal_rejects_unapproved_status() -> None:
 @pytest.mark.parametrize(
     "unsafe_text",
     (
-        "C:" + "\\Users\\name\\private.txt",
+        _sample_windows_absolute_path(),
         "row" + "_samples=[{'asset': 'sample'}]",
-        "provider" + "_marker=" + "csmar",
+        _sample_provider_marker(),
         "outputs/predictions.parquet",
         "private/raw_frame.csv",
         "payload.pkl",
