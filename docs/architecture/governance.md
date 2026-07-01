@@ -42,10 +42,13 @@ templates/     机器输入模板
 - naming gate：检查 current-contract path、文件/路径名、Python symbol 和静态字符串拼接。
 - code-map gate：检查代码地图与当前合同一致。
 - handoff gate：检查 builder、verifier、source-tree scan、single handoff verifier safety scan。
+- handoff evidence gate：检查 required evidence 存在、结构完整且不是 status-only。
+- internal API gate：检查 owner-local internal API 和 private module 边界。
+- test placement gate：检查 tests 位于对应 owner 目录。
 - test gate：检查当前合同测试。
 
 ## 返工防护
 
 如果 Codex 或其他 agent 需要越过 current-contract-only 边界，必须停止并要求用户确认。
 
-active-doc scan 必须覆盖运行结果命名、运行级路径、JSON identity、compare 硬编码和状态 owner；allowlist 必须精确到规则和负向测试文件。
+active-doc scan 必须覆盖运行结果命名、运行级路径、JSON identity、compare 硬编码和状态 owner；allowlist 必须精确到规则和负向测试文件。scan classification 的细则由 maintenance references、governance contract 和 verifier tests 拥有。

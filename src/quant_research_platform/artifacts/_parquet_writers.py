@@ -21,7 +21,7 @@ class _PredictionOutputWriteSummary:
     effective_test_end: str
 
 
-def _write_parquet_chunks(
+def write_parquet_chunks(
     frames: Iterable[pd.DataFrame],
     path: Path,
     *,
@@ -107,7 +107,7 @@ def _prediction_output_chunk_frame(
     return selected
 
 
-def _write_parquet(
+def write_parquet(
     frame: pd.DataFrame,
     path: Path,
     **kwargs: object,

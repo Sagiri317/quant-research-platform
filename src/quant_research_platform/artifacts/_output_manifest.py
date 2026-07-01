@@ -8,7 +8,7 @@ from dataclasses import asdict
 import pandas as pd
 
 from quant_research_platform.artifacts._portfolio_output_validation import (
-    _PORTFOLIO_ARTIFACTS,
+    PORTFOLIO_ARTIFACTS,
 )
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
@@ -20,11 +20,11 @@ from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.policy.share_safety import sanitize_shared_object
 
 
-def _stage_profile_output_manifest_payload(
+def stage_profile_output_manifest_payload(
     *,
     spec: OutputSpec,
 ) -> dict[str, object]:
-    return _output_manifest_payload(
+    return output_manifest_payload(
         output_spec=spec,
         metadata={
             "market_id": str(spec.market_id),
@@ -35,7 +35,7 @@ def _stage_profile_output_manifest_payload(
     )
 
 
-def _output_manifest_payload(
+def output_manifest_payload(
     *,
     output_spec: OutputSpec,
     metadata: Mapping[str, object],
@@ -63,7 +63,7 @@ def _without_json_version_fields(value: object) -> object:
     return value
 
 
-def _prediction_output_metadata(
+def prediction_output_metadata(
     *,
     spec: PredictionSpec,
     model_metadata: dict[str, object],
@@ -87,7 +87,7 @@ def _prediction_output_metadata(
     }
 
 
-def _evaluation_output_metadata(
+def evaluation_output_metadata(
     *,
     spec: EvaluationSpec,
     evaluation_diagnostics: EvaluationDiagnostics,
@@ -106,7 +106,7 @@ def _evaluation_output_metadata(
     }
 
 
-def _portfolio_output_metadata(
+def portfolio_output_metadata(
     *,
     spec: PortfolioSpec,
     artifacts: Mapping[str, pd.DataFrame],
@@ -130,20 +130,20 @@ def _portfolio_output_metadata(
     }
 
 
-def _portfolio_output_metadata_from_row_counts(
+def portfolio_output_metadata_from_row_counts(
     *,
     spec: PortfolioSpec,
     row_counts: Mapping[str, int],
 ) -> dict[str, object]:
-    payload = _portfolio_output_metadata(
+    payload = portfolio_output_metadata(
         spec=spec,
         artifacts={
             artifact_name: pd.DataFrame(index=range(int(row_counts[artifact_name])))
-            for artifact_name in _PORTFOLIO_ARTIFACTS
+            for artifact_name in PORTFOLIO_ARTIFACTS
         },
     )
     payload["row_counts"] = {
         artifact_name: int(row_counts[artifact_name])
-        for artifact_name in _PORTFOLIO_ARTIFACTS
+        for artifact_name in PORTFOLIO_ARTIFACTS
     }
     return payload

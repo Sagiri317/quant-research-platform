@@ -36,6 +36,7 @@ from governance_contract import (  # noqa: E402
     TASK_INPUT_KEYS,
     TASK_METADATA_KEYS,
     TASK_REJECTED_KEYS,
+    TASK_REQUIRED_HANDOFF_EVIDENCE,
     VERIFICATION_MATRIX_EVIDENCE,
     advisory_review_consistency_failures,
     aggregate_mandatory_validation_status,
@@ -90,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"json={result['json_path']}")
     print(f"zip_sha256={result['zip_sha256']}")
     print(f"handoff_package_verify_status={result['handoff_verify_status']}")
+    for failure in result.get("verify_failures", []):
+        print(f"verify_failure={failure}")
     print(f"handoff_safety_scan_status={result['handoff_safety_status']}")
     return 0 if result["ok"] else 1
 
@@ -356,6 +359,17 @@ def missing_validation_evidence_payload() -> dict[str, object]:
                 ),
             }
             for name in sorted(MANDATORY_VALIDATION_CHECKS)
+        ]
+        + [
+            {
+                "name": name,
+                "status": "NOT_RUN",
+                "evidence": (
+                    "task validation_evidence missing; "
+                    "generated advisory NOT_RUN row"
+                ),
+            }
+            for name in sorted(ADVISORY_REVIEW_CHECKS)
         ],
     }
 
@@ -408,6 +422,12 @@ def stage_handoff_evidence(
                     f"handoff_markdown_evidence_entry_must_be_string: {name}"
                 )
             write_text(stage_root / name, share_safe_text_clean(payload))
+    missing_required = sorted(TASK_REQUIRED_HANDOFF_EVIDENCE - set(evidence_paths))
+    if missing_required:
+        raise SystemExit(
+            "handoff_evidence_required_entry_missing: "
+            + ",".join(missing_required)
+        )
     review_failures = advisory_review_consistency_failures(
         evidence_paths,
         advisory_reviews_from_validation(validation_status_map(validation_evidence)),

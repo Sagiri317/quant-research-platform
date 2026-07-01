@@ -66,13 +66,13 @@ def test_output_spec_rejects_output_definition_id_as_output_id() -> None:
 
 def test_report_frame_validation_rejects_missing_and_extra_columns() -> None:
     with pytest.raises(ValueError, match="missing_evaluation_metrics_columns: ic"):
-        output_common_validation._validate_output_frame(
+        output_common_validation.validate_output_frame(
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
             required=("timestamp", "ic"),
             error_name="evaluation_metrics",
         )
     with pytest.raises(ValueError, match="unregistered_evaluation_metrics_columns"):
-        output_common_validation._validate_output_frame(
+        output_common_validation.validate_output_frame(
             pd.DataFrame(
                 {
                     "timestamp": [pd.Timestamp("2024-01-02")],
@@ -576,13 +576,13 @@ def test_output_bundle_root_rejects_mismatched_specs(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
 
     with pytest.raises(ValueError, match="output_spec_mismatch"):
-        output_common_validation._derive_output_bundle_root(
+        output_common_validation.derive_output_bundle_root(
             output_spec=_report_spec("unknown", "run_demo", "prediction"),
             layout=layout,
             expected_definition_id="prediction_outputs",
         )
     with pytest.raises(ValueError, match="output_spec_mismatch"):
-        output_common_validation._derive_output_bundle_root(
+        output_common_validation.derive_output_bundle_root(
             output_spec=_report_spec(
                 "evaluation_outputs",
                 "run_demo",
@@ -609,7 +609,7 @@ def test_output_bundle_root_rejects_dataset_roots(
     )
 
     with pytest.raises(ValueError, match="output_bundle_must_not_be_dataset_root"):
-        output_common_validation._derive_output_bundle_root(
+        output_common_validation.derive_output_bundle_root(
             output_spec=_report_spec(
                 "prediction_outputs",
                 "prediction_demo",
@@ -1037,7 +1037,7 @@ def test_portfolio_outputs_clean_temp_bundle_directory_on_failure(
         Path(path).write_text("partial", encoding="utf-8")
         raise RuntimeError("portfolio parquet failed")
 
-    monkeypatch.setattr(portfolio_outputs, "_write_parquet", fail_write)
+    monkeypatch.setattr(portfolio_outputs, "write_parquet", fail_write)
 
     with pytest.raises(RuntimeError, match="portfolio parquet failed"):
         _write_portfolio_chunks_for_test(
@@ -1063,7 +1063,7 @@ def test_report_parquet_writer_cleans_temp_on_failure(
     monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_to_parquet)
 
     with pytest.raises(RuntimeError, match="write failed"):
-        parquet_writers._write_parquet(
+        parquet_writers.write_parquet(
             frame,
             tmp_path / "report.parquet",
         )

@@ -91,7 +91,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                 },
                 "validation_evidence": {
                     "schema_id": "qrp-handoff-validation-evidence",
-                    "checks": _validation_checks("PASS"),
+                    "checks": _review_validation_checks("PASS"),
                 },
             },
             indent=2,
@@ -169,6 +169,9 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert "handoff_evidence/bundle-reconstruction.json" in names
     assert "handoff_evidence/package-smoke.json" in names
     assert "handoff_evidence/hard-scan-classification.json" in names
+    assert "handoff_evidence/subagent-review-findings.json" in names
+    assert "handoff_evidence/subagent-review-reconciliation.json" in names
+    assert "handoff_evidence/test-checks.json" in names
     assert "handoff_evidence/custom-note.json" in names
     assert "handoff_evidence/smoke-semantic-parity-compare.md" in names
     assert markdown_evidence == "# Smoke semantic parity compare\n\nstatus: PASS\n"
@@ -370,6 +373,7 @@ def test_build_handoff_package_generates_missing_validation_evidence_mandatory_r
                 "final_head": final_head,
                 "handoff_package_path": f"{run_handoffs}/{slug}.zip",
                 "handoff_sidecar_path": f"{run_handoffs}/{slug}.json",
+                "handoff_evidence": _formal_handoff_evidence(),
             },
             indent=2,
             sort_keys=True,
@@ -404,13 +408,18 @@ def test_build_handoff_package_generates_missing_validation_evidence_mandatory_r
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     checks = {row["name"]: row for row in validation_evidence["checks"]}
 
-    assert set(checks) == set(_mandatory_validation_checks())
+    assert set(checks) == {*_mandatory_validation_checks(), "review_subagent"}
     assert "validation_evidence" not in checks
     assert {row["status"] for row in checks.values()} == {"NOT_RUN"}
     assert all(
         "task validation_evidence missing; generated mandatory NOT_RUN row"
         in row["evidence"]
-        for row in checks.values()
+        for name, row in checks.items()
+        if name != "review_subagent"
+    )
+    assert (
+        "task validation_evidence missing; generated advisory NOT_RUN row"
+        in checks["review_subagent"]["evidence"]
     )
     assert sidecar["status_summary"]["validation"] == "NOT_RUN"
     failures = _load_verify_module().verify_handoff_package(package, sidecar_path)
@@ -494,18 +503,34 @@ def test_build_handoff_package_rejects_one_forbidden_custom_evidence_key(
     assert not list(out_dir.glob("*"))
 
 
-def test_build_handoff_package_allows_empty_advisory_without_review_evidence(
+def test_build_handoff_package_rejects_missing_mandatory_handoff_evidence(
     tmp_path: Path,
 ) -> None:
     result, out_dir = _run_builder_with_handoff_evidence(
         tmp_path,
-        _formal_handoff_evidence(),
+        {},
         verify=True,
     )
 
-    assert result.returncode == 0
-    sidecar = json.loads((out_dir / "synthetic-handoff-negative.json").read_text())
-    assert sidecar["advisory_reviews"] == {}
+    assert result.returncode != 0
+    assert "handoff_evidence_required_entry_missing:" in result.stderr
+    assert "handoff_evidence/package-smoke.json" in result.stderr
+    assert not list(out_dir.glob("*"))
+
+
+def test_build_handoff_package_requires_mandatory_evidence_without_verify(
+    tmp_path: Path,
+) -> None:
+    result, out_dir = _run_builder_with_handoff_evidence(
+        tmp_path,
+        {},
+        verify=False,
+    )
+
+    assert result.returncode != 0
+    assert "handoff_evidence_required_entry_missing:" in result.stderr
+    assert "handoff_evidence/package-smoke.json" in result.stderr
+    assert not list(out_dir.glob("*"))
 
 
 def test_build_handoff_package_allows_review_evidence_with_advisory(
@@ -515,7 +540,6 @@ def test_build_handoff_package_allows_review_evidence_with_advisory(
         tmp_path,
         {
             **_formal_handoff_evidence(),
-            "subagent-review-reconciliation": _review_reconciliation_payload(),
         },
         validation_checks=_review_validation_checks("PASS"),
         verify=True,
@@ -531,7 +555,7 @@ def test_build_handoff_package_rejects_review_evidence_without_advisory(
 ) -> None:
     result, out_dir = _run_builder_with_handoff_evidence(
         tmp_path,
-        {"subagent-review-reconciliation": _review_reconciliation_payload()},
+        _formal_handoff_evidence(),
     )
 
     assert result.returncode != 0
@@ -539,17 +563,23 @@ def test_build_handoff_package_rejects_review_evidence_without_advisory(
     assert not list(out_dir.glob("*"))
 
 
-def test_build_handoff_package_rejects_advisory_without_review_evidence(
+def test_build_handoff_package_rejects_missing_review_evidence_with_advisory(
     tmp_path: Path,
 ) -> None:
+    handoff_evidence = _formal_handoff_evidence()
+    handoff_evidence.pop("subagent-review-reconciliation")
     result, out_dir = _run_builder_with_handoff_evidence(
         tmp_path,
-        {},
+        handoff_evidence,
         validation_checks=_review_validation_checks("PASS"),
     )
 
     assert result.returncode != 0
-    assert "advisory_reviews_without_review_evidence" in result.stderr
+    assert (
+        "handoff_evidence_required_entry_missing: "
+        "handoff_evidence/subagent-review-reconciliation.json"
+        in result.stderr
+    )
     assert not list(out_dir.glob("*"))
 
 
@@ -708,9 +738,15 @@ def _review_reconciliation_payload() -> dict[str, object]:
         "status": "PASS",
         "rows": [
             {
+                "review_lane": "governance_safety",
                 "finding_id": "review-1",
-                "classification": "NO_FINDINGS",
-                "action": "none",
+                "severity": "INFO",
+                "file_or_symbol": "handoff-test-fixture",
+                "why_true_issue": "No unresolved issue in synthetic fixture.",
+                "classification": "no_findings",
+                "fix_action": "none",
+                "final_status": "NO_CHANGE",
+                "re_review_status": "PASS",
             }
         ],
     }
@@ -720,6 +756,9 @@ def _formal_handoff_evidence() -> dict[str, dict[str, object]]:
     return {
         "package-smoke": _package_smoke_evidence(),
         "hard-scan-classification": _hard_scan_classification_evidence(),
+        "subagent-review-findings": _subagent_review_findings_evidence(),
+        "subagent-review-reconciliation": _review_reconciliation_payload(),
+        "test-checks": _test_checks_evidence(),
     }
 
 
@@ -757,6 +796,48 @@ def _hard_scan_classification_evidence() -> dict[str, object]:
                 "matched_text": "synthetic negative fixture",
                 "classification": "negative_test_fixture",
                 "reason": "synthetic fixture used only to exercise verifier shape",
+                "owner": "handoff-verifier-test-fixture",
+                "rule_id": "negative_fixture_shape",
+            }
+        ],
+    }
+
+
+def _subagent_review_findings_evidence() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-subagent-review-findings",
+        "status": "PASS",
+        "findings": [
+            {
+                "review_lane": "governance_safety",
+                "finding_id": "review-1",
+                "severity": "INFO",
+                "file_or_symbol": "handoff-test-fixture",
+                "why_true_issue": "No unresolved issue in synthetic fixture.",
+                "classification": "no_findings",
+                "fix_action": "none",
+                "final_status": "NO_CHANGE",
+                "re_review_status": "PASS",
+            }
+        ],
+    }
+
+
+def _test_checks_evidence() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-test-checks-evidence",
+        "status": "PASS",
+        "checks": [
+            {
+                "command": "pytest tests/agents/handoff -q",
+                "scope": "handoff verifier tests",
+                "status": "PASS",
+                "exit_code": 0,
+                "test_count": 1,
+                "duration_seconds": 1.0,
+                "blocked_reason": "",
+                "not_run_reason": "",
+                "output_summary": "1 passed",
             }
         ],
     }

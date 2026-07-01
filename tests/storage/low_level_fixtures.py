@@ -58,8 +58,8 @@ def _write_runtime_manifest(root: Path, data_root: Path, paths: list[Path]) -> N
     partition_row_counts: dict[str, int] = {}
     for path in sorted(paths):
         parquet_file = pq.ParquetFile(path)
-        schemas.append(_canonical_schema_from_file(parquet_file))
-        partition = _relative_partition_label(data_root, path)
+        schemas.append(canonical_schema_from_file(parquet_file))
+        partition = relative_partition_label(data_root, path)
         rows = int(parquet_file.metadata.num_rows)
         row_count += rows
         partition_row_counts[partition] = partition_row_counts.get(partition, 0) + rows
@@ -69,7 +69,7 @@ def _write_runtime_manifest(root: Path, data_root: Path, paths: list[Path]) -> N
     manifest = {
         "schema_id": "qrp-dataset-manifest",
         "columns": [name for name, _ in first_schema],
-        "schema_hash": _sha256_json(first_schema),
+        "schema_hash": sha256_json(first_schema),
         "partition_row_counts": dict(sorted(partition_row_counts.items())),
         "file_count": len(paths),
         "row_count": row_count,
@@ -99,18 +99,18 @@ def _column_roles(
     return roles
 
 
-def _canonical_schema_from_file(
+def canonical_schema_from_file(
     parquet_file: pq.ParquetFile,
 ) -> tuple[tuple[str, str], ...]:
     return tuple((field.name, str(field.type)) for field in parquet_file.schema_arrow)
 
 
-def _relative_partition_label(data_root: Path, path: Path) -> str:
+def relative_partition_label(data_root: Path, path: Path) -> str:
     label = path.parent.relative_to(data_root).as_posix()
     return "unpartitioned" if label == "." else label
 
 
-def _sha256_json(payload: Any) -> str:
+def sha256_json(payload: Any) -> str:
     encoded = json.dumps(
         payload,
         sort_keys=True,

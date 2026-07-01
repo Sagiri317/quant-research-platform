@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.research.models.trial_selection import (
+    evaluate_model_trial_metrics,
     select_best_validation_trial,
     validate_trial_metric_columns,
 )
@@ -80,3 +81,17 @@ def test_select_best_validation_trial_fails_closed_on_bad_inputs() -> None:
             ),
             **kwargs,
         )
+
+
+def test_evaluate_model_trial_metrics_returns_zero_correlation_for_one_row() -> None:
+    metrics = evaluate_model_trial_metrics(
+        pd.DataFrame({"label": [1.0], "prediction": [1.0]}),
+        model_id="single_row",
+        label_column="label",
+        prediction_column="prediction",
+    )
+
+    assert metrics["validation_rows"] == 1
+    assert metrics["validation_ic"] == 0.0
+    assert metrics["validation_rankic"] == 0.0
+    assert metrics["validation_mse"] == 0.0

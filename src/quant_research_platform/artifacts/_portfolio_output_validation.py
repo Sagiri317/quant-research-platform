@@ -13,7 +13,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioSpec,
 )
 
-_PORTFOLIO_ARTIFACTS = {
+PORTFOLIO_ARTIFACTS = {
     "positions": "positions.parquet",
     "turnover": "turnover.parquet",
     "cost_breakdown": "cost_breakdown.parquet",
@@ -156,7 +156,7 @@ _PORTFOLIO_DIAGNOSTIC_COLUMNS = (
 )
 
 
-def _portfolio_required_columns() -> dict[str, tuple[str, ...]]:
+def portfolio_required_columns() -> dict[str, tuple[str, ...]]:
     return {
         "positions": _PORTFOLIO_POSITION_COLUMNS,
         "turnover": _PORTFOLIO_TURNOVER_COLUMNS,
@@ -176,12 +176,12 @@ def _portfolio_required_columns() -> dict[str, tuple[str, ...]]:
     }
 
 
-def _validate_portfolio_artifact_semantics(
+def validate_portfolio_artifact_semantics(
     artifacts: Mapping[str, pd.DataFrame],
     spec: PortfolioSpec,
 ) -> None:
     for artifact_name, frame in artifacts.items():
-        _validate_portfolio_signal_column(
+        validate_portfolio_signal_column(
             frame,
             artifact_name=artifact_name,
             spec=spec,
@@ -197,7 +197,7 @@ def _validate_portfolio_artifact_semantics(
         raise ValueError("portfolio_return_source_column_mismatch")
 
 
-def _validate_portfolio_signal_column(
+def validate_portfolio_signal_column(
     frame: pd.DataFrame,
     *,
     artifact_name: str,

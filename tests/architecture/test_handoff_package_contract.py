@@ -46,9 +46,19 @@ def test_handoff_package_contract_uses_evidence_mode_outputs(
         "handoff_evidence/source-tree-scan.json"
     )
     assert "GENERATION_EVIDENCE" in builder
-    assert "handoff_evidence/generation.json" in verifier
+    assert "GENERATION_EVIDENCE" in verifier
     assert "SOURCE_TREE_SCAN_EVIDENCE" in builder
-    assert "handoff_evidence/source-tree-scan.json" in verifier
+    assert "SOURCE_TREE_SCAN_EVIDENCE" in verifier
+    assert "TASK_REQUIRED_HANDOFF_EVIDENCE" in verifier
+    assert contract.TASK_REQUIRED_HANDOFF_EVIDENCE == frozenset(
+        {
+            "handoff_evidence/package-smoke.json",
+            "handoff_evidence/hard-scan-classification.json",
+            "handoff_evidence/subagent-review-findings.json",
+            "handoff_evidence/subagent-review-reconciliation.json",
+            "handoff_evidence/test-checks.json",
+        }
+    )
     assert "handoff_generation.json" not in builder
     assert "handoff_generation.json" not in verifier
     source_tree_scan = live_source_tree_scan

@@ -5,12 +5,12 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_research_platform.artifacts._output_common_validation import (
-    _require_metadata_string,
-    _require_metadata_string_list,
-    _require_non_negative_metadata_int,
-    _require_optional_metadata_string,
-    _validate_filter_metadata,
-    _validate_metadata_row_count_chain,
+    require_metadata_string,
+    require_metadata_string_list,
+    require_non_negative_metadata_int,
+    require_optional_metadata_string,
+    validate_filter_metadata,
+    validate_metadata_row_count_chain,
 )
 from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
@@ -101,7 +101,7 @@ _PREDICTION_METADATA_KEYS = frozenset(
 )
 
 
-def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, object]:
+def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, object]:
     metadata_keys = set(metadata)
     feature_keys = metadata_keys.intersection(_MODEL_METADATA_FEATURE_KEYS)
     extra_keys = (
@@ -115,51 +115,51 @@ def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obj
         raise ValueError("invalid_model_metadata")
     if metadata["contract_version"] != "0.1":
         raise ValueError("invalid_model_metadata")
-    _require_non_negative_metadata_int(metadata, "rows_input", "invalid_model_metadata")
-    _require_non_negative_metadata_int(
+    require_non_negative_metadata_int(metadata, "rows_input", "invalid_model_metadata")
+    require_non_negative_metadata_int(
         metadata,
         "rows_after_filter_mode",
         "invalid_model_metadata",
     )
-    _require_non_negative_metadata_int(
+    require_non_negative_metadata_int(
         metadata,
         "rows_after_input_label_dropna",
         "invalid_model_metadata",
     )
-    input_factor_columns = _require_metadata_string_list(
+    input_factor_columns = require_metadata_string_list(
         metadata,
         "input_factor_columns",
         "invalid_model_metadata",
         allow_empty=True,
     )
-    input_feature_columns = _require_metadata_string_list(
+    input_feature_columns = require_metadata_string_list(
         metadata,
         "input_feature_columns",
         "invalid_model_metadata",
         allow_empty=True,
     )
-    input_columns = _require_metadata_string_list(
+    input_columns = require_metadata_string_list(
         metadata,
         "input_columns",
         "invalid_model_metadata",
     )
-    input_count = _require_non_negative_metadata_int(
+    input_count = require_non_negative_metadata_int(
         metadata,
         "input_count",
         "invalid_model_metadata",
     )
-    coefficient_count = _require_non_negative_metadata_int(
+    coefficient_count = require_non_negative_metadata_int(
         metadata,
         "coefficient_count",
         "invalid_model_metadata",
     )
-    _require_non_negative_metadata_int(
+    require_non_negative_metadata_int(
         metadata,
         "purge_gap_steps",
         "invalid_model_metadata",
     )
     if metadata["max_train_rows"] is not None:
-        _require_non_negative_metadata_int(
+        require_non_negative_metadata_int(
             metadata,
             "max_train_rows",
             "invalid_model_metadata",
@@ -181,34 +181,34 @@ def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obj
     ):
         raise ValueError("invalid_model_metadata")
     if "feature_importance_status" in metadata:
-        _require_metadata_string(
+        require_metadata_string(
             metadata,
             "feature_importance_status",
             "invalid_model_metadata",
         )
     if "model_selection" in metadata:
-        _validate_model_selection_metadata_shape(metadata["model_selection"])
+        validate_model_selection_metadata_shape(metadata["model_selection"])
     if (
         input_columns != [*input_factor_columns, *input_feature_columns]
         or input_count != len(input_columns)
         or coefficient_count < 1
     ):
         raise ValueError("invalid_model_metadata")
-    _require_metadata_string(metadata, "model_algorithm", "invalid_model_metadata")
-    _require_metadata_string(metadata, "sample_filter_mode", "invalid_model_metadata")
-    _require_metadata_string(metadata, "filter_definition", "invalid_model_metadata")
-    _require_metadata_string(metadata, "label_column", "invalid_model_metadata")
-    _require_metadata_string(metadata, "train_start", "invalid_model_metadata")
-    _require_metadata_string(metadata, "train_end", "invalid_model_metadata")
-    _require_optional_metadata_string(
+    require_metadata_string(metadata, "model_algorithm", "invalid_model_metadata")
+    require_metadata_string(metadata, "sample_filter_mode", "invalid_model_metadata")
+    require_metadata_string(metadata, "filter_definition", "invalid_model_metadata")
+    require_metadata_string(metadata, "label_column", "invalid_model_metadata")
+    require_metadata_string(metadata, "train_start", "invalid_model_metadata")
+    require_metadata_string(metadata, "train_end", "invalid_model_metadata")
+    require_optional_metadata_string(
         metadata,
         "test_start",
         "invalid_model_metadata",
     )
-    _require_optional_metadata_string(metadata, "test_end", "invalid_model_metadata")
-    _require_optional_metadata_string(metadata, "oos_start", "invalid_model_metadata")
-    _require_optional_metadata_string(metadata, "oos_end", "invalid_model_metadata")
-    _require_metadata_string_list(
+    require_optional_metadata_string(metadata, "test_end", "invalid_model_metadata")
+    require_optional_metadata_string(metadata, "oos_start", "invalid_model_metadata")
+    require_optional_metadata_string(metadata, "oos_end", "invalid_model_metadata")
+    require_metadata_string_list(
         metadata,
         "filter_columns_used",
         "invalid_model_metadata",
@@ -217,7 +217,7 @@ def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obj
     return metadata
 
 
-def _validate_model_selection_metadata_shape(metadata: object) -> None:
+def validate_model_selection_metadata_shape(metadata: object) -> None:
     if not isinstance(metadata, dict) or set(metadata) != _MODEL_SELECTION_KEYS:
         raise ValueError("invalid_model_metadata")
     if metadata["status"] != "selected":
@@ -230,7 +230,7 @@ def _validate_model_selection_metadata_shape(metadata: object) -> None:
         "validation_start",
         "validation_end",
     ):
-        _require_metadata_string(metadata, key, "invalid_model_metadata")
+        require_metadata_string(metadata, key, "invalid_model_metadata")
     if metadata["selection_direction"] not in {"maximize", "minimize"}:
         raise ValueError("invalid_model_metadata")
     if (
@@ -238,17 +238,17 @@ def _validate_model_selection_metadata_shape(metadata: object) -> None:
         != metadata["selection_direction"]
     ):
         raise ValueError("invalid_model_metadata")
-    candidate_model_ids = _require_metadata_string_list(
+    candidate_model_ids = require_metadata_string_list(
         metadata,
         "candidate_model_ids",
         "invalid_model_metadata",
     )
-    _require_metadata_string_list(
+    require_metadata_string_list(
         metadata,
         "selected_model_input_columns",
         "invalid_model_metadata",
     )
-    candidate_count = _require_non_negative_metadata_int(
+    candidate_count = require_non_negative_metadata_int(
         metadata,
         "candidate_count",
         "invalid_model_metadata",
@@ -264,8 +264,8 @@ def _validate_model_selection_metadata_shape(metadata: object) -> None:
             or set(trial) != _MODEL_SELECTION_TRIAL_METRIC_KEYS
         ):
             raise ValueError("invalid_model_metadata")
-        _require_metadata_string(trial, "model_id", "invalid_model_metadata")
-        _require_non_negative_metadata_int(
+        require_metadata_string(trial, "model_id", "invalid_model_metadata")
+        require_non_negative_metadata_int(
             trial,
             "validation_rows",
             "invalid_model_metadata",
@@ -275,79 +275,79 @@ def _validate_model_selection_metadata_shape(metadata: object) -> None:
                 raise ValueError("invalid_model_metadata")
 
 
-def _validate_prediction_metadata_shape(
+def validate_prediction_metadata_shape(
     metadata: dict[str, object],
 ) -> dict[str, object]:
     if set(metadata) != _PREDICTION_METADATA_KEYS:
         raise ValueError("invalid_prediction_metadata")
     if metadata["contract_version"] != "0.1":
         raise ValueError("invalid_prediction_metadata")
-    _require_non_negative_metadata_int(
+    require_non_negative_metadata_int(
         metadata,
         "rows_input",
         "invalid_prediction_metadata",
     )
-    _require_non_negative_metadata_int(
+    require_non_negative_metadata_int(
         metadata,
         "rows_after_filter_mode",
         "invalid_prediction_metadata",
     )
-    _require_non_negative_metadata_int(
+    require_non_negative_metadata_int(
         metadata,
         "rows_after_input_dropna",
         "invalid_prediction_metadata",
     )
-    _require_non_negative_metadata_int(
+    require_non_negative_metadata_int(
         metadata,
         "prediction_rows",
         "invalid_prediction_metadata",
     )
-    input_columns = _require_metadata_string_list(
+    input_columns = require_metadata_string_list(
         metadata,
         "input_columns",
         "invalid_prediction_metadata",
     )
-    input_count = _require_non_negative_metadata_int(
+    input_count = require_non_negative_metadata_int(
         metadata,
         "input_count",
         "invalid_prediction_metadata",
     )
     if input_count != len(input_columns):
         raise ValueError("invalid_prediction_metadata")
-    _require_metadata_string(
+    require_metadata_string(
         metadata,
         "prediction_mode",
         "invalid_prediction_metadata",
     )
-    _require_metadata_string(
+    require_metadata_string(
         metadata,
         "sample_filter_mode",
         "invalid_prediction_metadata",
     )
-    _require_metadata_string(
+    require_metadata_string(
         metadata,
         "filter_definition",
         "invalid_prediction_metadata",
     )
-    _require_metadata_string(metadata, "test_start", "invalid_prediction_metadata")
-    _require_metadata_string(metadata, "train_end", "invalid_prediction_metadata")
+    require_metadata_string(metadata, "test_start", "invalid_prediction_metadata")
+    require_metadata_string(metadata, "train_end", "invalid_prediction_metadata")
     if metadata["requested_test_end"] is not None:
-        _require_metadata_string(
+        require_metadata_string(
             metadata,
             "requested_test_end",
             "invalid_prediction_metadata",
         )
-    _require_metadata_string(
+    require_metadata_string(
         metadata,
         "effective_test_end",
         "invalid_prediction_metadata",
     )
-    _require_metadata_string(
+    require_metadata_string(
         metadata,
         "prediction_column",
         "invalid_prediction_metadata",
     )
-    _require_metadata_string_list(
+    require_metadata_string_list(
         metadata,
         "filter_columns_used",
         "invalid_prediction_metadata",
@@ -361,7 +361,7 @@ def _validate_prediction_metadata_shape(
     return metadata
 
 
-def _validate_model_metadata_consistency(
+def validate_model_metadata_consistency(
     metadata: dict[str, object],
     *,
     spec: PredictionSpec,
@@ -370,12 +370,12 @@ def _validate_model_metadata_consistency(
     input_columns = metadata["input_columns"]
     if not isinstance(input_columns, list) or input_count != len(input_columns):
         raise ValueError("model_metadata_inconsistent")
-    _validate_metadata_row_count_chain(
+    validate_metadata_row_count_chain(
         metadata,
         ("rows_input", "rows_after_filter_mode", "rows_after_input_label_dropna"),
         "model_metadata_inconsistent",
     )
-    _validate_filter_metadata(
+    validate_filter_metadata(
         mode=str(metadata["sample_filter_mode"]),
         columns=metadata["filter_columns_used"],
         definition=str(metadata["filter_definition"]),
@@ -393,10 +393,10 @@ def _validate_model_metadata_consistency(
         raise ValueError("model_metadata_inconsistent")
     if int(metadata["coefficient_count"]) <= 0:
         raise ValueError("model_metadata_inconsistent")
-    _validate_model_selection_metadata_consistency(metadata, spec=spec)
+    validate_model_selection_metadata_consistency(metadata, spec=spec)
 
 
-def _validate_model_selection_metadata_consistency(
+def validate_model_selection_metadata_consistency(
     metadata: dict[str, object],
     *,
     spec: PredictionSpec,
@@ -429,7 +429,7 @@ def _validate_model_selection_metadata_consistency(
         raise ValueError("model_metadata_inconsistent")
 
 
-def _validate_prediction_metadata_consistency(
+def validate_prediction_metadata_consistency(
     metadata: dict[str, object],
     *,
     spec: PredictionSpec,
@@ -439,7 +439,7 @@ def _validate_prediction_metadata_consistency(
     if bool(timestamps.isna().any()):
         raise ValueError("prediction_metadata_inconsistent")
     effective_test_end = pd.Timestamp(timestamps.max()).date().isoformat()
-    _validate_prediction_metadata_consistency_from_summary(
+    validate_prediction_metadata_consistency_from_summary(
         metadata,
         spec=spec,
         row_count=len(frame),
@@ -447,7 +447,7 @@ def _validate_prediction_metadata_consistency(
     )
 
 
-def _validate_prediction_metadata_consistency_from_summary(
+def validate_prediction_metadata_consistency_from_summary(
     metadata: dict[str, object],
     *,
     spec: PredictionSpec,
@@ -468,14 +468,14 @@ def _validate_prediction_metadata_consistency_from_summary(
     for key, value in expected.items():
         if metadata[key] != value:
             raise ValueError("prediction_metadata_inconsistent")
-    _validate_metadata_row_count_chain(
+    validate_metadata_row_count_chain(
         metadata,
         ("rows_input", "rows_after_filter_mode", "rows_after_input_dropna"),
         "prediction_metadata_inconsistent",
     )
     if int(metadata["prediction_rows"]) > int(metadata["rows_after_input_dropna"]):
         raise ValueError("prediction_metadata_inconsistent")
-    _validate_filter_metadata(
+    validate_filter_metadata(
         mode=str(metadata["sample_filter_mode"]),
         columns=metadata["filter_columns_used"],
         definition=str(metadata["filter_definition"]),
@@ -490,7 +490,7 @@ def _validate_prediction_metadata_consistency_from_summary(
         raise ValueError("prediction_metadata_inconsistent")
 
 
-def _validate_model_prediction_metadata_consistency(
+def validate_model_prediction_metadata_consistency(
     model_metadata: dict[str, object],
     prediction_metadata: dict[str, object],
 ) -> None:
@@ -502,7 +502,7 @@ def _validate_model_prediction_metadata_consistency(
         raise ValueError("prediction_metadata_inconsistent")
 
 
-def _model_metadata_with_effective_prediction_end(
+def model_metadata_with_effective_prediction_end(
     model_metadata: dict[str, object],
     prediction_metadata: dict[str, object],
 ) -> dict[str, object]:

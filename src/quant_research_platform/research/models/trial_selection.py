@@ -143,6 +143,8 @@ def _correlation(
     *,
     rank: bool,
 ) -> float:
+    if len(labels) < 2:
+        return 0.0
     left = labels.rank(method="average") if rank else labels
     right = predictions.rank(method="average") if rank else predictions
     value = left.corr(right)

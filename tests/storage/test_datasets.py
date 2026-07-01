@@ -384,17 +384,17 @@ def test_read_dataset_reuses_one_candidate_file_listing(
     root = _artifact_root(tmp_path, "read_plan_reuse")
     write_dataset(root, _frame(), spec=_spec("read_plan_reuse"))
     calls = 0
-    original = dataset_reading._candidate_data_files
+    original = dataset_reading.candidate_data_files
 
-    def spy_candidate_data_files(*args, **kwargs):
+    def spycandidate_data_files(*args, **kwargs):
         nonlocal calls
         calls += 1
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
         dataset_reading,
-        "_candidate_data_files",
-        spy_candidate_data_files,
+        "candidate_data_files",
+        spycandidate_data_files,
     )
 
     read_dataset(
@@ -413,17 +413,17 @@ def test_fingerprint_dataset_reuses_one_candidate_file_listing(
     root = _artifact_root(tmp_path, "fingerprint_plan_reuse")
     write_dataset(root, _frame(), spec=_spec("fingerprint_plan_reuse"))
     calls = 0
-    original = dataset_reading._candidate_data_files
+    original = dataset_reading.candidate_data_files
 
-    def spy_candidate_data_files(*args, **kwargs):
+    def spycandidate_data_files(*args, **kwargs):
         nonlocal calls
         calls += 1
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
         dataset_reading,
-        "_candidate_data_files",
-        spy_candidate_data_files,
+        "candidate_data_files",
+        spycandidate_data_files,
     )
 
     fingerprint_dataset(

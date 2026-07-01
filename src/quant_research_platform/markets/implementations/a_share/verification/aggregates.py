@@ -115,23 +115,23 @@ class AggregateSummary:
 
     @property
     def column_set_hash(self) -> str:
-        return _sha256_json(list(self.columns))
+        return sha256_json(list(self.columns))
 
     @property
     def dtype_summary_hash(self) -> str:
-        return _sha256_json(self.dtype_summary)
+        return sha256_json(self.dtype_summary)
 
     @property
     def null_summary_hash(self) -> str:
-        return _sha256_json(self.null_summary)
+        return sha256_json(self.null_summary)
 
     @property
     def key_value_paired_summary_hash(self) -> str:
-        return _sha256_json(self.key_value_paired_summary)
+        return sha256_json(self.key_value_paired_summary)
 
     @property
     def aggregate_checksum(self) -> str:
-        return _sha256_json(
+        return sha256_json(
             {
                 "row_count": self.row_count,
                 "key_count": self.key_count,
@@ -1210,7 +1210,7 @@ def _parse_period(period: str) -> tuple[pd.Timestamp | None, pd.Timestamp | None
     return pd.Timestamp(start), pd.Timestamp(end)
 
 
-def _sha256_json(payload: Any) -> str:
+def sha256_json(payload: Any) -> str:
     encoded = json.dumps(
         payload,
         sort_keys=True,

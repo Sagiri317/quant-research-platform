@@ -79,7 +79,7 @@ _DATASET_PARTITION_FINGERPRINT_KEYS = frozenset(
 )
 
 
-def _merge_dataset_instance_metadata(
+def merge_dataset_instance_metadata(
     payload: Mapping[str, Any],
     instance_metadata: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
@@ -181,7 +181,7 @@ def _require_non_negative_int(value: Any) -> int:
     return int(value)
 
 
-def _validate_dataset_spec(spec: DataSpec) -> str | None:
+def validate_dataset_spec(spec: DataSpec) -> str | None:
     if spec.schema_version != "0.1":
         raise ValueError("unsupported_schema_version")
     if not isinstance(spec.grain, DataGrain):
@@ -214,32 +214,32 @@ def _validate_dataset_spec(spec: DataSpec) -> str | None:
     return timestamp_columns[0]
 
 
-def _validated_schema(paths: list[Path]) -> tuple[tuple[str, str], ...]:
+def validated_schema(paths: list[Path]) -> tuple[tuple[str, str], ...]:
     if not paths:
         raise ValueError("dataset_data_dir_missing")
-    schemas = [_canonical_schema(path) for path in paths]
+    schemas = [canonical_schema(path) for path in paths]
     first = schemas[0]
     if any(schema != first for schema in schemas[1:]):
         raise ValueError("dataset_schema_mismatch")
     return first
 
 
-def _canonical_schema(path: Path) -> tuple[tuple[str, str], ...]:
+def canonical_schema(path: Path) -> tuple[tuple[str, str], ...]:
     schema = pq.ParquetFile(path).schema_arrow
-    return _canonical_schema_from_schema(schema)
+    return canonical_schema_from_schema(schema)
 
 
-def _canonical_schema_from_file(
+def canonical_schema_from_file(
     parquet_file: pq.ParquetFile,
 ) -> tuple[tuple[str, str], ...]:
-    return _canonical_schema_from_schema(parquet_file.schema_arrow)
+    return canonical_schema_from_schema(parquet_file.schema_arrow)
 
 
-def _canonical_schema_from_schema(schema: Any) -> tuple[tuple[str, str], ...]:
+def canonical_schema_from_schema(schema: Any) -> tuple[tuple[str, str], ...]:
     return tuple((field.name, str(field.type)) for field in schema)
 
 
-def _data_spec_payload(spec: DataSpec) -> dict[str, Any]:
+def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema_id": "qrp-dataset-spec",
         "data_id": spec.data_id,
@@ -280,7 +280,7 @@ def _data_spec_payload(spec: DataSpec) -> dict[str, Any]:
     return payload
 
 
-def _require_qrp_json_schema_id(
+def require_qrp_json_schema_id(
     payload: object,
     *,
     expected: str,
@@ -293,13 +293,13 @@ def _require_qrp_json_schema_id(
     )
 
 
-def _date_string(value: pd.Timestamp | None) -> str | None:
+def date_string(value: pd.Timestamp | None) -> str | None:
     if value is None:
         return None
     return pd.Timestamp(value).date().isoformat()
 
 
-def _sha256_json(payload: Any) -> str:
+def sha256_json(payload: Any) -> str:
     encoded = json.dumps(
         payload,
         sort_keys=True,

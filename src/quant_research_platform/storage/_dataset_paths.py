@@ -18,7 +18,7 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.policy.share_safety import is_local_only_path
 
 
-def _partition_timestamp_series(
+def partition_timestamp_series(
     frame: pd.DataFrame,
     *,
     timestamp_column: str,
@@ -33,7 +33,7 @@ def _partition_timestamp_series(
     return timestamp
 
 
-def _partition_frames(
+def partition_frames(
     frame: pd.DataFrame,
     *,
     timestamp_column: str | None,
@@ -48,7 +48,7 @@ def _partition_frames(
         raise ValueError("unsupported_partitioning")
     if timestamp_column is None:
         raise ValueError("missing_partition_timestamp_column")
-    timestamp = _partition_timestamp_series(frame, timestamp_column=timestamp_column)
+    timestamp = partition_timestamp_series(frame, timestamp_column=timestamp_column)
     min_timestamp = timestamp.min()
     max_timestamp = timestamp.max()
     timezone = timestamp.dt.tz
@@ -60,13 +60,13 @@ def _partition_frames(
             yield f"year={int(year)}", frame.loc[mask]
 
 
-def _partition_part_path(root: Path, partition: str, part_index: int) -> Path:
+def partition_part_path(root: Path, partition: str, part_index: int) -> Path:
     if partition:
         return root / partition / f"part-{part_index:03d}.parquet"
     return root / f"part-{part_index:03d}.parquet"
 
 
-def _validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
+def validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
     if not is_local_only_path(root):
         raise ValueError("outside_local_only_boundary")
     path_parts = _path_parts(root)
@@ -103,7 +103,7 @@ def _validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
     raise ValueError("unsupported_data_spec_type")
 
 
-def _require_artifact_root(root: Path) -> Path:
+def require_artifact_root(root: Path) -> Path:
     candidate = Path(root)
     if candidate.name == "data":
         raise ValueError("dataset_root_must_be_artifact_root")
@@ -186,7 +186,7 @@ def _matches_artifact_segment(segment: str, expected: str) -> bool:
     return segment == expected or segment.startswith(f".{expected}.tmp-")
 
 
-def _candidate_data_files(
+def candidate_data_files(
     data_root: Path,
     *,
     spec: Mapping[str, Any],
@@ -213,7 +213,7 @@ def _candidate_data_files(
     return paths
 
 
-def _timestamp_primary_key_column_from_spec(spec: DataSpec) -> str | None:
+def timestamp_primary_key_column_from_spec(spec: DataSpec) -> str | None:
     timestamp_columns = [
         column
         for column in spec.primary_key
@@ -222,7 +222,7 @@ def _timestamp_primary_key_column_from_spec(spec: DataSpec) -> str | None:
     return timestamp_columns[0] if timestamp_columns else None
 
 
-def _timestamp_column_from_spec_payload(spec: Mapping[str, Any]) -> str | None:
+def timestamp_column_from_spec_payload(spec: Mapping[str, Any]) -> str | None:
     roles = spec.get("column_roles", {})
     if not isinstance(roles, Mapping):
         raise ValueError("invalid_column_roles")
@@ -237,7 +237,7 @@ def _timestamp_column_from_spec_payload(spec: Mapping[str, Any]) -> str | None:
     return timestamp_columns[0] if timestamp_columns else None
 
 
-def _relative_partition_label(data_root: Path, path: Path) -> str:
+def relative_partition_label(data_root: Path, path: Path) -> str:
     relative_parent = path.parent.relative_to(data_root)
     label = relative_parent.as_posix()
     return "unpartitioned" if label == "." else label

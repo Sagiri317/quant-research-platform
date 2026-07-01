@@ -35,6 +35,8 @@ PY
 
 review-fix loop 应小步执行：scan → classify → patch → validate → rescan。不要在未确认 scope 前做大范围重构。
 
+fresh review-only subagent 的输出必须是结构化、可归并、可复核的 finding evidence。主 agent 必须把 review 结果归并为待修、误报、延期、base issue 或需批准项，并把最终 reconciliation 写入 handoff evidence。
+
 ## 5. 禁止配置扩张
 
 未经用户批准，禁止新增 repo-local `.codex/`、global `.codex/`、hooks、MCP config、plugin runtime config、custom subagent runtime config。文档可以说明未来方向，但当前任务默认不启用这些机制。

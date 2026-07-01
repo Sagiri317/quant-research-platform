@@ -7,23 +7,23 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.artifacts._evaluation_output_validation import (
-    _EVALUATION_ARTIFACTS,
-    _EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
-    _EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
-    _EVALUATION_IC_SUMMARY_COLUMNS,
-    _EVALUATION_METRICS_COLUMNS,
-    _validate_evaluation_artifact_structure,
+    EVALUATION_ARTIFACTS,
+    EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
+    EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
+    EVALUATION_IC_SUMMARY_COLUMNS,
+    EVALUATION_METRICS_COLUMNS,
+    validate_evaluation_artifact_structure,
     validate_evaluation_diagnostics_consistency,
 )
 from quant_research_platform.artifacts._output_common_validation import (
-    _derive_output_bundle_root,
-    _validate_output_frame,
+    derive_output_bundle_root,
+    validate_output_frame,
 )
 from quant_research_platform.artifacts._output_manifest import (
-    _evaluation_output_metadata,
-    _output_manifest_payload,
+    evaluation_output_metadata,
+    output_manifest_payload,
 )
-from quant_research_platform.artifacts._parquet_writers import _write_parquet
+from quant_research_platform.artifacts._parquet_writers import write_parquet
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
@@ -47,33 +47,33 @@ def write_evaluation_outputs(
 ) -> Path:
     """Write local evaluation outputs into an output bundle."""
 
-    output_bundle = _derive_output_bundle_root(
+    output_bundle = derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="evaluation_outputs",
     )
 
-    _validate_output_frame(
+    validate_output_frame(
         metrics,
-        required=_EVALUATION_METRICS_COLUMNS,
+        required=EVALUATION_METRICS_COLUMNS,
         error_name="evaluation_metrics",
     )
-    _validate_output_frame(
+    validate_output_frame(
         grouped_label_values,
-        required=_EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
+        required=EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
         error_name="evaluation_grouped_label_values",
     )
-    _validate_output_frame(
+    validate_output_frame(
         ic_summary,
-        required=_EVALUATION_IC_SUMMARY_COLUMNS,
+        required=EVALUATION_IC_SUMMARY_COLUMNS,
         error_name="evaluation_ic_summary",
     )
-    _validate_output_frame(
+    validate_output_frame(
         group_spread_summary,
-        required=_EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
+        required=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
         error_name="evaluation_group_spread_summary",
     )
-    _validate_evaluation_artifact_structure(
+    validate_evaluation_artifact_structure(
         metrics=metrics,
         grouped_label_values=grouped_label_values,
         ic_summary=ic_summary,
@@ -91,28 +91,28 @@ def write_evaluation_outputs(
     )
 
     def _write(temp_root: Path) -> None:
-        _write_parquet(
+        write_parquet(
             metrics,
             temp_root / "metrics.parquet",
             engine="pyarrow",
             compression="zstd",
             index=False,
         )
-        _write_parquet(
+        write_parquet(
             grouped_label_values,
             temp_root / "grouped_label_values.parquet",
             engine="pyarrow",
             compression="zstd",
             index=False,
         )
-        _write_parquet(
+        write_parquet(
             ic_summary,
             temp_root / "ic_summary.parquet",
             engine="pyarrow",
             compression="zstd",
             index=False,
         )
-        _write_parquet(
+        write_parquet(
             group_spread_summary,
             temp_root / "group_spread_summary.parquet",
             engine="pyarrow",
@@ -121,13 +121,13 @@ def write_evaluation_outputs(
         )
         write_manifest(
             temp_root / "manifest.json",
-            _output_manifest_payload(
+            output_manifest_payload(
                 output_spec=output_spec,
-                metadata=_evaluation_output_metadata(
+                metadata=evaluation_output_metadata(
                     spec=spec,
                     evaluation_diagnostics=evaluation_diagnostics,
                 ),
-                files=_EVALUATION_ARTIFACTS,
+                files=EVALUATION_ARTIFACTS,
             ),
         )
 

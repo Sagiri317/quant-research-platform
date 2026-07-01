@@ -196,13 +196,13 @@ def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> Non
 
 
 def test_report_manifest_payload_builders_are_private_and_local() -> None:
-    assert hasattr(output_manifest, "_stage_profile_output_manifest_payload")
-    assert hasattr(output_manifest, "_prediction_output_metadata")
-    assert hasattr(output_manifest, "_evaluation_output_metadata")
+    assert hasattr(output_manifest, "stage_profile_output_manifest_payload")
+    assert hasattr(output_manifest, "prediction_output_metadata")
+    assert hasattr(output_manifest, "evaluation_output_metadata")
     private_builders = {
-        "_stage_profile_output_manifest_payload",
-        "_prediction_output_metadata",
-        "_evaluation_output_metadata",
+        "stage_profile_output_manifest_payload",
+        "prediction_output_metadata",
+        "evaluation_output_metadata",
     }
     assert private_builders.isdisjoint(outputs_module.__all__)
     assert not hasattr(outputs_module, "ReportManifest")
@@ -328,7 +328,7 @@ def test_prediction_outputs_clean_temp_root_after_mid_write_failure(
 
     monkeypatch.setattr(
         prediction_outputs,
-        "_write_parquet",
+        "write_parquet",
         fail_parquet_write,
     )
 
@@ -362,7 +362,7 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
 
     monkeypatch.setattr(
         evaluation_outputs,
-        "_write_parquet",
+        "write_parquet",
         fail_second_parquet_write,
     )
 

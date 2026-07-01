@@ -11,18 +11,18 @@ import pandas as pd
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage._dataset_manifest_validation import (
-    _manifest_has_runtime_metadata,
-    _validate_manifest_runtime_metadata,
+    manifest_has_runtime_metadata,
+    validate_manifest_runtime_metadata,
 )
 from quant_research_platform.storage._dataset_paths import (
-    _candidate_data_files,
-    _relative_partition_label,
-    _require_artifact_root,
-    _timestamp_column_from_spec_payload,
+    candidate_data_files,
+    relative_partition_label,
+    require_artifact_root,
+    timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage._dataset_schema import (
-    _sha256_json,
-    _validated_schema,
+    sha256_json,
+    validated_schema,
 )
 from quant_research_platform.storage._dataset_types import (
     DatasetInspection,
@@ -32,7 +32,7 @@ from quant_research_platform.storage.manifests import read_qrp_json
 
 
 @dataclass(frozen=True)
-class _DatasetReadContext:
+class DatasetReadContext:
     root: Path
     data_root: Path
     spec: dict[str, Any]
@@ -55,7 +55,7 @@ def read_dataset(
     time_window: TimeWindow | None = None,
     mode: DatasetReadMode = DatasetReadMode.MATERIALIZED,
 ) -> pd.DataFrame | Iterator[pd.DataFrame]:
-    context = _build_dataset_read_context(
+    context = build_dataset_read_context(
         dataset_root,
         columns=columns,
         time_window=time_window,
@@ -72,13 +72,13 @@ def read_dataset(
     return pd.concat(frames, ignore_index=True)
 
 
-def _build_dataset_read_context(
+def build_dataset_read_context(
     dataset_root: Path,
     *,
     columns: tuple[str, ...] | list[str] | None,
     time_window: TimeWindow | None,
-) -> _DatasetReadContext:
-    root = _require_artifact_root(Path(dataset_root))
+) -> DatasetReadContext:
+    root = require_artifact_root(Path(dataset_root))
     spec_path = root / "spec.json"
     data_root = root / "data"
     manifest_path = root / "_manifest" / "manifest.json"
@@ -98,15 +98,15 @@ def _build_dataset_read_context(
         expected_schema_id="qrp-dataset-manifest",
         error="dataset_manifest_schema_id_invalid",
     )
-    if not _manifest_has_runtime_metadata(manifest):
+    if not manifest_has_runtime_metadata(manifest):
         raise ValueError("manifest_runtime_metadata_missing")
-    all_paths = tuple(_candidate_data_files(data_root, spec=spec_payload))
+    all_paths = tuple(candidate_data_files(data_root, spec=spec_payload))
     if not all_paths:
         raise ValueError("dataset_data_dir_missing")
-    schema = _validated_schema(list(all_paths))
+    schema = validated_schema(list(all_paths))
     schema_columns = tuple(name for name, _ in schema)
-    schema_hash = _sha256_json(schema)
-    _validate_manifest_runtime_metadata(
+    schema_hash = sha256_json(schema)
+    validate_manifest_runtime_metadata(
         manifest,
         data_root=data_root,
         paths=list(all_paths),
@@ -116,25 +116,25 @@ def _build_dataset_read_context(
         raise ValueError("manifest_columns_mismatch")
     if str(manifest["schema_hash"]) != schema_hash:
         raise ValueError("manifest_schema_hash_mismatch")
-    logical_columns = _resolve_columns_from_schema(
+    logical_columns = resolve_columns_from_schema(
         schema_columns,
         spec=spec_payload,
         columns=columns,
     )
-    timestamp_column = _timestamp_column_from_spec_payload(spec_payload)
-    physical_columns = _read_columns_for_time_window(
+    timestamp_column = timestamp_column_from_spec_payload(spec_payload)
+    physical_columns = read_columns_for_time_window(
         logical_columns,
         spec=spec_payload,
         time_window=time_window,
     )
-    return _DatasetReadContext(
+    return DatasetReadContext(
         root=root,
         data_root=data_root,
         spec=spec_payload,
         manifest=manifest,
         all_paths=all_paths,
         read_paths=tuple(
-            _prune_paths_for_time_window(
+            prune_paths_for_time_window(
                 data_root,
                 all_paths,
                 spec=spec_payload,
@@ -147,7 +147,7 @@ def _build_dataset_read_context(
         time_window=time_window,
         schema=schema,
         schema_hash=schema_hash,
-        parquet_filters=_parquet_filters_for_time_window(
+        parquet_filters=parquet_filters_for_time_window(
             timestamp_column=timestamp_column,
             time_window=time_window,
         ),
@@ -155,7 +155,7 @@ def _build_dataset_read_context(
 
 
 def _read_dataset_chunks(
-    context: _DatasetReadContext,
+    context: DatasetReadContext,
 ) -> Iterator[pd.DataFrame]:
     if not context.read_paths:
         yield pd.DataFrame(columns=list(context.logical_columns))
@@ -167,7 +167,7 @@ def _read_dataset_chunks(
             engine="pyarrow",
             filters=context.parquet_filters,
         )
-        filtered = _filter_frame_by_time_window(
+        filtered = filter_frame_by_time_window(
             frame,
             spec=context.spec,
             time_window=context.time_window,
@@ -175,7 +175,7 @@ def _read_dataset_chunks(
         yield filtered.loc[:, list(context.logical_columns)]
 
 
-def _filter_frame_by_time_window(
+def filter_frame_by_time_window(
     frame: pd.DataFrame,
     *,
     spec: Mapping[str, Any],
@@ -183,7 +183,7 @@ def _filter_frame_by_time_window(
 ) -> pd.DataFrame:
     if time_window is None:
         return frame
-    timestamp_column = _timestamp_column_from_spec_payload(spec)
+    timestamp_column = timestamp_column_from_spec_payload(spec)
     if timestamp_column is None:
         raise ValueError("time_window_not_supported")
     if timestamp_column not in frame:
@@ -194,7 +194,7 @@ def _filter_frame_by_time_window(
     return frame.loc[mask.fillna(False)].copy()
 
 
-def _prune_paths_for_time_window(
+def prune_paths_for_time_window(
     data_root: Path,
     paths: tuple[Path, ...],
     *,
@@ -203,7 +203,7 @@ def _prune_paths_for_time_window(
 ) -> tuple[Path, ...]:
     if time_window is None:
         return paths
-    timestamp_column = _timestamp_column_from_spec_payload(spec)
+    timestamp_column = timestamp_column_from_spec_payload(spec)
     if timestamp_column is None:
         raise ValueError("time_window_not_supported")
     partition_columns = tuple(
@@ -216,11 +216,11 @@ def _prune_paths_for_time_window(
         for year in range(int(time_window.start.year), int(time_window.end.year) + 1)
     }
     return tuple(
-        path for path in paths if _relative_partition_label(data_root, path) in years
+        path for path in paths if relative_partition_label(data_root, path) in years
     )
 
 
-def _parquet_filters_for_time_window(
+def parquet_filters_for_time_window(
     *,
     timestamp_column: str | None,
     time_window: TimeWindow | None,
@@ -237,7 +237,7 @@ def _parquet_filters_for_time_window(
     ]
 
 
-def _resolve_columns(
+def resolve_columns(
     inspection: DatasetInspection,
     columns: tuple[str, ...] | list[str] | None,
 ) -> tuple[str, ...]:
@@ -251,7 +251,7 @@ def _resolve_columns(
     return requested
 
 
-def _resolve_columns_from_schema(
+def resolve_columns_from_schema(
     schema_columns: tuple[str, ...],
     *,
     spec: Mapping[str, Any],
@@ -267,7 +267,7 @@ def _resolve_columns_from_schema(
     return requested
 
 
-def _read_columns_for_time_window(
+def read_columns_for_time_window(
     columns: tuple[str, ...],
     *,
     spec: Mapping[str, Any],
@@ -275,7 +275,7 @@ def _read_columns_for_time_window(
 ) -> tuple[str, ...]:
     if time_window is None:
         return columns
-    timestamp_column = _timestamp_column_from_spec_payload(spec)
+    timestamp_column = timestamp_column_from_spec_payload(spec)
     if timestamp_column is None:
         raise ValueError("time_window_not_supported")
     return tuple(dict.fromkeys((*columns, timestamp_column)))

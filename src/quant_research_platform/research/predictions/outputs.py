@@ -99,7 +99,7 @@ class _PredictionBuildState:
         timestamps = pd.to_datetime(output["timestamp"], errors="coerce")
         if bool(timestamps.isna().any()):
             raise ValueError("invalid_prediction_timestamp_values")
-        current_end = _date_string(timestamps.max())
+        current_end = date_string(timestamps.max())
         if self.effective_test_end is None or pd.Timestamp(current_end) > pd.Timestamp(
             self.effective_test_end
         ):
@@ -220,7 +220,7 @@ def _validate_oos_split(spec: PredictionSpec) -> None:
         raise ValueError("prediction_test_end_must_not_precede_test_start")
 
 
-def _date_string(value: pd.Timestamp) -> str:
+def date_string(value: pd.Timestamp) -> str:
     return pd.Timestamp(value).date().isoformat()
 
 

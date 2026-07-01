@@ -10,20 +10,20 @@ from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage import datasets
 from quant_research_platform.storage._dataset_manifest_validation import (
-    _validate_manifest_runtime_metadata_shape,
+    validate_manifest_runtime_metadata_shape,
 )
 from quant_research_platform.storage._dataset_paths import (
-    _candidate_data_files,
-    _partition_frames,
-    _timestamp_column_from_spec_payload,
+    candidate_data_files,
+    partition_frames,
+    timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage._dataset_reading import (
-    _filter_frame_by_time_window,
-    _read_columns_for_time_window,
+    filter_frame_by_time_window,
+    read_columns_for_time_window,
 )
 from quant_research_platform.storage._dataset_schema import (
-    _data_spec_payload,
-    _validated_schema,
+    data_spec_payload,
+    validated_schema,
 )
 from quant_research_platform.storage._dataset_writing import _WriteStats
 from tests.research.test_research_dataset_contract_closure import _processed_spec
@@ -73,20 +73,20 @@ def test_dataset_compare_and_filter_fail_closed_paths(tmp_path: Path) -> None:
         },
     }
     with pytest.raises(ValueError, match="time_window_not_supported"):
-        _filter_frame_by_time_window(
+        filter_frame_by_time_window(
             _frame(),
             spec=spec_payload,
             time_window=TimeWindow("2024-01-01", "2024-01-31"),
         )
     with pytest.raises(ValueError, match="time_window_timestamp_column_not_selected"):
-        _filter_frame_by_time_window(
+        filter_frame_by_time_window(
             _frame().drop(columns=["timestamp"]),
-            spec=_data_spec_payload(_storage_spec()),
+            spec=data_spec_payload(_storage_spec()),
             time_window=TimeWindow("2024-01-01", "2024-01-31"),
         )
-    assert _filter_frame_by_time_window(
+    assert filter_frame_by_time_window(
         _frame(),
-        spec=_data_spec_payload(_storage_spec()),
+        spec=data_spec_payload(_storage_spec()),
         time_window=TimeWindow("2025-01-03", "2025-01-31"),
     ).empty
 
@@ -95,14 +95,14 @@ def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
     frame = _frame()
 
     assert list(
-        _partition_frames(
+        partition_frames(
             frame.iloc[0:0],
             timestamp_column="timestamp",
             partition_columns=("year",),
         )
     ) == []
     assert list(
-        _partition_frames(
+        partition_frames(
             frame,
             timestamp_column="timestamp",
             partition_columns=(),
@@ -110,7 +110,7 @@ def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
     )[0][0] == ""
     with pytest.raises(ValueError, match="unsupported_partitioning"):
         list(
-            _partition_frames(
+            partition_frames(
                 frame,
                 timestamp_column="timestamp",
                 partition_columns=("month",),
@@ -118,7 +118,7 @@ def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="missing_partition_timestamp_column"):
         list(
-            _partition_frames(
+            partition_frames(
                 frame.drop(columns=["timestamp"]),
                 timestamp_column="timestamp",
                 partition_columns=("year",),
@@ -132,7 +132,7 @@ def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
         "row_count": 2,
         "partition_row_counts": {"year=2024": 2},
     }
-    assert _validate_manifest_runtime_metadata_shape(manifest)[0] == 1
+    assert validate_manifest_runtime_metadata_shape(manifest)[0] == 1
     for bad_manifest, error in (
         ({**manifest, "columns": []}, "manifest_columns_invalid"),
         ({**manifest, "schema_hash": ""}, "manifest_schema_hash_invalid"),
@@ -157,20 +157,20 @@ def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
         ({**manifest, "row_count": 3}, "manifest_row_count_mismatch"),
     ):
         with pytest.raises(ValueError, match=error):
-            _validate_manifest_runtime_metadata_shape(bad_manifest)
+            validate_manifest_runtime_metadata_shape(bad_manifest)
 
 
 def test_dataset_timestamp_and_candidate_file_helpers(tmp_path: Path) -> None:
-    spec = _data_spec_payload(_storage_spec())
-    assert _read_columns_for_time_window(
+    spec = data_spec_payload(_storage_spec())
+    assert read_columns_for_time_window(
         ("market_id",),
         spec=spec,
         time_window=TimeWindow("2024-01-01", "2024-01-31"),
     ) == ("market_id", "timestamp")
     with pytest.raises(ValueError, match="invalid_column_roles"):
-        _timestamp_column_from_spec_payload({"column_roles": []})
+        timestamp_column_from_spec_payload({"column_roles": []})
     with pytest.raises(ValueError, match="invalid_timestamp_primary_key"):
-        _timestamp_column_from_spec_payload(
+        timestamp_column_from_spec_payload(
             {
                 "primary_key": ["timestamp", "as_of"],
                 "column_roles": {
@@ -182,17 +182,17 @@ def test_dataset_timestamp_and_candidate_file_helpers(tmp_path: Path) -> None:
 
     data_root = tmp_path / "data"
     data_root.mkdir()
-    assert _candidate_data_files(
+    assert candidate_data_files(
         data_root,
         spec={**spec, "partition_columns": []},
     ) == []
     with pytest.raises(ValueError, match="unsupported_partitioning"):
-        _candidate_data_files(
+        candidate_data_files(
             data_root,
             spec={**spec, "partition_columns": ["month"]},
         )
     with pytest.raises(ValueError, match="dataset_data_dir_missing"):
-        _validated_schema([])
+        validated_schema([])
 
 
 def _storage_spec():

@@ -60,6 +60,8 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_governa
 
 active doc roots、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 必须从这里读取或派生。
 
+handoff required evidence paths、hard-scan classifications、subagent review severities/classifications 和 advisory review consistency 也必须从 `governance_contract.py` 读取或派生，不得在 builder、verifier 或 tests 中复制平行规则表。
+
 ### Code-map gate
 
 ```bash
@@ -101,6 +103,27 @@ QRP-owned JSON 必须是顶层 object，必须包含 `schema_id`，且 `schema_i
 ## 5. Current-Contract Surface
 
 current-contract-only 边界由 owner-layer negative tests 或明确 allowlist 控制。allowlist 必须说明目的和移除条件。
+
+内部接口 gate 检查：
+
+- 跨文件 private symbol import。
+- `__all__` 单下划线导出。
+- owner-local internal API 从 package `__init__.py` 重导出。
+- storage/artifacts private module pattern。
+- tests 白盒调用 private helper 分类为 `test_white_box_allowed`。
+
+parallel/stale implementation gate 扫描 legacy、compat、deprecated、migration、old、new、v2、shim、fallback、wrapper 和 alias。真问题必须合并或删除；valuable deferred feature 必须有 owner、rationale、lifecycle 和 reference。
+
+测试位置 gate：
+
+- architecture boundary tests 放 `tests/architecture/`。
+- handoff builder/verifier/evidence tests 放 `tests/agents/handoff/`。
+- governance CLI/规则行为 tests 放 `tests/agents/`。
+- A 股 processed owner behavior tests 放 `tests/markets/a_share/`。
+- research behavior tests 放 `tests/research/`。
+- artifact/storage/compute/workflow behavior tests 放对应 owner 目录。
+
+A 股 owner-local naming gate 禁止 `markets/implementations/a_share/**` 内部 symbol、常量、文件名和 error code 重复 `a_share` / `ashare` / `china_a` / `china_share` 前缀；字符串 id 需要分类，不机械删除。
 
 关键测试入口：
 

@@ -7,10 +7,10 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.artifacts._output_common_validation import (
-    _derive_output_bundle_root,
+    derive_output_bundle_root,
 )
 from quant_research_platform.artifacts._output_manifest import (
-    _stage_profile_output_manifest_payload,
+    stage_profile_output_manifest_payload,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.policy.share_safety import (
@@ -36,7 +36,7 @@ def write_stage_profile_outputs(
 ) -> dict[str, Path]:
     """Write local stage-profile outputs."""
 
-    destination = _derive_output_bundle_root(
+    destination = derive_output_bundle_root(
         output_spec=spec,
         layout=layout,
         expected_definition_id="stage_profile_diagnostic",
@@ -60,7 +60,7 @@ def write_stage_profile_outputs(
         )
         write_manifest(
             temp_root / "manifest.json",
-            _stage_profile_output_manifest_payload(spec=spec),
+            stage_profile_output_manifest_payload(spec=spec),
         )
 
     atomic_write_directory(destination, _write)

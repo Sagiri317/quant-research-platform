@@ -216,7 +216,7 @@ def test_materialize_processed_data_rejects_non_daily_active_profile_before_io(
     with pytest.raises(
         ValueError,
         match=(
-            "unsupported_a_share_processed_frequency: "
+            "unsupported_processed_frequency: "
             f"{MARKET_PANEL_DATA_ID}: {frequency.value}"
         ),
     ):

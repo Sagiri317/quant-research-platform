@@ -7,7 +7,7 @@ from dataclasses import asdict
 import pandas as pd
 
 from quant_research_platform.artifacts._output_common_validation import (
-    _validate_filter_metadata,
+    validate_filter_metadata,
 )
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
@@ -18,8 +18,8 @@ from quant_research_platform.contracts.filtering import (
     required_filter_columns,
 )
 
-_EVALUATION_METRICS_COLUMNS = ("timestamp", "signal", "label", "ic", "rankic", "n_obs")
-_EVALUATION_GROUPED_LABEL_VALUE_COLUMNS = (
+EVALUATION_METRICS_COLUMNS = ("timestamp", "signal", "label", "ic", "rankic", "n_obs")
+EVALUATION_GROUPED_LABEL_VALUE_COLUMNS = (
     "timestamp",
     "signal",
     "label",
@@ -27,7 +27,7 @@ _EVALUATION_GROUPED_LABEL_VALUE_COLUMNS = (
     "mean_label_value",
     "n_obs",
 )
-_EVALUATION_IC_SUMMARY_COLUMNS = (
+EVALUATION_IC_SUMMARY_COLUMNS = (
     "signal",
     "label",
     "mean_ic",
@@ -41,7 +41,7 @@ _EVALUATION_IC_SUMMARY_COLUMNS = (
     "positive_rankic_rate",
     "valid_rankic_count",
 )
-_EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (
+EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (
     "signal",
     "label",
     "top_group_mean_label_value",
@@ -50,7 +50,7 @@ _EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (
     "top_bottom_label_value_spread_hit_rate",
     "group_monotonicity_score",
 )
-_EVALUATION_ARTIFACTS = [
+EVALUATION_ARTIFACTS = [
     "metrics.parquet",
     "grouped_label_values.parquet",
     "ic_summary.parquet",
@@ -81,7 +81,7 @@ def validate_evaluation_diagnostics_consistency(
         and 0 <= rows_after_signal_label_dropna <= max_signal_label_rows
     ):
         raise ValueError("evaluation_diagnostics_inconsistent")
-    _validate_filter_metadata(
+    validate_filter_metadata(
         mode=evaluation_diagnostics.filter_mode,
         columns=list(evaluation_diagnostics.filter_columns_used),
         definition=evaluation_diagnostics.filter_definition,
@@ -127,7 +127,7 @@ def validate_evaluation_diagnostics_consistency(
             raise ValueError("evaluation_diagnostics_inconsistent")
 
 
-def _validate_evaluation_artifact_structure(
+def validate_evaluation_artifact_structure(
     *,
     metrics: pd.DataFrame,
     grouped_label_values: pd.DataFrame,

@@ -7,8 +7,8 @@ from typing import Any
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage._dataset_fingerprinting import (
-    _partition_keys,
     fingerprint_dataset,
+    partition_keys,
 )
 from quant_research_platform.storage._dataset_types import DatasetComparison
 
@@ -59,7 +59,7 @@ def compare_datasets(
         status = "ROW_COUNT_MISMATCH"
     elif left.key_columns != right.key_columns:
         status = "KEY_MISMATCH"
-    elif _partition_keys(left) != _partition_keys(right):
+    elif partition_keys(left) != partition_keys(right):
         status = "PARTITION_MISMATCH"
     elif left.content_hash != right.content_hash:
         status = "CONTENT_MISMATCH"

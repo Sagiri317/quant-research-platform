@@ -78,7 +78,7 @@ def validate_active_processed_profile_frequencies(
         visited.add(spec.data_id)
         if spec.frequency is not DataFrequency.DAILY:
             raise ValueError(
-                "unsupported_a_share_processed_frequency: "
+                "unsupported_processed_frequency: "
                 f"{spec.data_id}: {spec.frequency.value}"
             )
         for dependency_id in spec.processed_input_data_ids:

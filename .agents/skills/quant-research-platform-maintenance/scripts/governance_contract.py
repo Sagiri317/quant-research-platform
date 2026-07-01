@@ -3189,11 +3189,49 @@ VALID_STATUSES = set(VALID_STATUS_TOKENS)
 GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
+PACKAGE_SMOKE_EVIDENCE = "handoff_evidence/package-smoke.json"
+HARD_SCAN_CLASSIFICATION_EVIDENCE = "handoff_evidence/hard-scan-classification.json"
+SUBAGENT_REVIEW_FINDINGS_EVIDENCE = "handoff_evidence/subagent-review-findings.json"
+SUBAGENT_REVIEW_RECONCILIATION_EVIDENCE = (
+    "handoff_evidence/subagent-review-reconciliation.json"
+)
+TEST_CHECKS_EVIDENCE = "handoff_evidence/test-checks.json"
 BUILDER_OWNED_HANDOFF_EVIDENCE = {
     GENERATION_EVIDENCE,
     SOURCE_TREE_SCAN_EVIDENCE,
     VERIFICATION_MATRIX_EVIDENCE,
 }
+TASK_REQUIRED_HANDOFF_EVIDENCE = frozenset(
+    {
+        PACKAGE_SMOKE_EVIDENCE,
+        HARD_SCAN_CLASSIFICATION_EVIDENCE,
+        SUBAGENT_REVIEW_FINDINGS_EVIDENCE,
+        SUBAGENT_REVIEW_RECONCILIATION_EVIDENCE,
+        TEST_CHECKS_EVIDENCE,
+    }
+)
+HARD_SCAN_CLASSIFICATIONS = frozenset(
+    {
+        "actual_violation",
+        "allowed_generated_evidence",
+        "negative_test_fixture",
+        "existing_base_issue",
+        "false_positive",
+        "valuable_deferred_feature_no_change",
+        "test_white_box_allowed",
+    }
+)
+SUBAGENT_REVIEW_SEVERITIES = frozenset({"P0", "P1", "P2", "P3", "INFO"})
+SUBAGENT_REVIEW_CLASSIFICATIONS = frozenset(
+    {
+        "true_issue_to_fix",
+        "false_positive",
+        "valuable_deferred_feature_no_change",
+        "existing_base_issue_no_change",
+        "blocked_approval",
+        "no_findings",
+    }
+)
 RESERVED_HANDOFF_EVIDENCE_STEMS = {
     "diff.patch",
     "external_evidence_json_path",

@@ -27,7 +27,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 
 公开文档和 evidence 使用 repo-relative path。用户本地绝对路径、临时私有目录和供应商私有路径留在 LOCAL_ONLY 边界内。
 
-package evidence 描述 handoff package 的成员、hash、manifest、sidecar 和 Git bundle。reviewer evidence 描述 review role、scope、files inspected、commands run、findings、fixes 和 limitations。二者必须分开记录；如果 reviewer/subagent review 写 `PASS`，handoff evidence 中必须有可检查的 reviewer evidence。
+package evidence 描述 handoff package 的成员、hash、manifest、sidecar 和 Git bundle。reviewer evidence 描述 review role、scope、files inspected、commands run、findings、fixes 和 limitations。二者必须分开记录；具体 required evidence 由 handoff references、governance contract 和 verifier tests 拥有。
 
 ## 代码修改原则
 
@@ -36,6 +36,7 @@ package evidence 描述 handoff package 的成员、hash、manifest、sidecar �
 - 被替换实现优先收敛，不并行保留。
 - 不新增 public surface，除非用户批准。
 - artifact 字段过渡期需要用户批准。
+- owner-local internal API、private module pattern 和 storage/artifacts 边界由 references 与 executable gates 执行，本文不复制细则。
 
 ## 测试职责
 
@@ -80,4 +81,4 @@ python tests/tools/run_profile.py --list-profiles
 python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<profile>
 ```
 
-handoff tests 的具体执行入口统一使用 `tests/tools/run_profile.py`。
+handoff tests 的具体执行入口统一使用 `tests/tools/run_profile.py`。测试位置按 owner layer 放置；详细 placement 规则由 maintenance references 和 architecture gates 拥有。

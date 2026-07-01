@@ -18,7 +18,7 @@ from quant_research_platform.policy.share_safety import sanitize_shared_object
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def _required_frame_metadata(
+def required_frame_metadata(
     frame: pd.DataFrame,
     *,
     key: str,
@@ -26,10 +26,10 @@ def _required_frame_metadata(
 ) -> dict[str, object]:
     if key not in frame.attrs:
         raise ValueError(error_name)
-    return _sanitize_required_metadata(frame.attrs[key], error_name=error_name)
+    return sanitize_required_metadata(frame.attrs[key], error_name=error_name)
 
 
-def _sanitize_required_metadata(
+def sanitize_required_metadata(
     value: object,
     *,
     error_name: str,
@@ -42,7 +42,7 @@ def _sanitize_required_metadata(
     return sanitized
 
 
-def _validate_metadata_row_count_chain(
+def validate_metadata_row_count_chain(
     metadata: dict[str, object],
     keys: tuple[str, str, str],
     error_name: str,
@@ -52,7 +52,7 @@ def _validate_metadata_row_count_chain(
         raise ValueError(error_name)
 
 
-def _validate_filter_metadata(
+def validate_filter_metadata(
     *,
     mode: str,
     columns: object,
@@ -65,7 +65,7 @@ def _validate_filter_metadata(
         raise ValueError(error_name)
 
 
-def _require_metadata_string(
+def require_metadata_string(
     metadata: dict[str, object],
     key: str,
     error_name: str,
@@ -76,7 +76,7 @@ def _require_metadata_string(
     return value
 
 
-def _require_optional_metadata_string(
+def require_optional_metadata_string(
     metadata: dict[str, object],
     key: str,
     error_name: str,
@@ -89,7 +89,7 @@ def _require_optional_metadata_string(
     return value
 
 
-def _require_metadata_string_list(
+def require_metadata_string_list(
     metadata: dict[str, object],
     key: str,
     error_name: str,
@@ -106,7 +106,7 @@ def _require_metadata_string_list(
     return value
 
 
-def _require_non_negative_metadata_int(
+def require_non_negative_metadata_int(
     metadata: dict[str, object],
     key: str,
     error_name: str,
@@ -117,7 +117,7 @@ def _require_non_negative_metadata_int(
     return value
 
 
-def _validate_output_frame(
+def validate_output_frame(
     frame: pd.DataFrame,
     *,
     required: tuple[str, ...],
@@ -131,7 +131,7 @@ def _validate_output_frame(
         raise ValueError(f"unregistered_{error_name}_columns: {', '.join(extra)}")
 
 
-def _derive_output_bundle_root(
+def derive_output_bundle_root(
     *,
     output_spec: OutputSpec,
     layout: StorageLayout,

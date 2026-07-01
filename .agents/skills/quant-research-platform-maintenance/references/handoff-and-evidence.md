@@ -52,6 +52,20 @@ handoff 可以纳入完整 `run.json`，但必须校验 `schema_id` 并通过统
 
 status-only 摘要不能作为完整 evidence；具体判定由 tracked verifier 和 tests 拥有。
 
+正式 handoff 必须包含以下机器 evidence：
+
+```text
+handoff_evidence/package-smoke.json
+handoff_evidence/hard-scan-classification.json
+handoff_evidence/subagent-review-findings.json
+handoff_evidence/subagent-review-reconciliation.json
+handoff_evidence/test-checks.json
+```
+
+`package-smoke.json` 必须记录 build/import/status/hash/content scan，并说明临时安装目标不进入 handoff。`hard-scan-classification.json` 的每个 raw finding 必须自包含 path 或 redacted_path、line、matched_text 或 safe_excerpt、classification、reason、owner 和 rule_id，不得使用 `<review-safe-path-*>` 或 `<review-safe-match-*>` 占位符。
+
+subagent review findings 和 reconciliation 是 evidence 文件；sidecar `advisory_reviews` 只能摘要 review status，不能替代 evidence 文件。`test-checks.json` 必须按命令记录 scope、status、exit_code、test_count、duration、blocked/not_run reason 和输出摘要。
+
 ## 4. Sidecar 规则
 
 sidecar 是机器可读 evidence summary，不是业务结论本身。sidecar PASS 只表示 sidecar 对应检查通过，不代表 full pytest、local private validation 或 business correctness。

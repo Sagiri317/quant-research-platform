@@ -16,22 +16,22 @@ import pyarrow.parquet as pq
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.storage._dataset_manifest_validation import (
-    _validate_written_artifact,
+    validate_written_artifact,
 )
 from quant_research_platform.storage._dataset_paths import (
-    _partition_frames,
-    _partition_part_path,
-    _relative_partition_label,
-    _timestamp_primary_key_column_from_spec,
-    _validate_dataset_artifact_root,
+    partition_frames,
+    partition_part_path,
+    relative_partition_label,
+    timestamp_primary_key_column_from_spec,
+    validate_dataset_artifact_root,
 )
 from quant_research_platform.storage._dataset_schema import (
-    _canonical_schema_from_file,
-    _data_spec_payload,
-    _date_string,
-    _merge_dataset_instance_metadata,
-    _sha256_json,
-    _validate_dataset_spec,
+    canonical_schema_from_file,
+    data_spec_payload,
+    date_string,
+    merge_dataset_instance_metadata,
+    sha256_json,
+    validate_dataset_spec,
 )
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 
@@ -77,14 +77,14 @@ class _WriteStats:
         actual_row_count = int(parquet_file.metadata.num_rows)
         if actual_row_count != int(row_count):
             raise ValueError("dataset_row_count_mismatch")
-        schema = _canonical_schema_from_file(parquet_file)
+        schema = canonical_schema_from_file(parquet_file)
         if self._schema is None:
             self._schema = schema
             self.columns = tuple(name for name, _ in schema)
-            self.schema_hash = _sha256_json(schema)
+            self.schema_hash = sha256_json(schema)
         elif schema != self._schema:
             raise ValueError("dataset_schema_mismatch")
-        partition = _relative_partition_label(self.data_root, path)
+        partition = relative_partition_label(self.data_root, path)
         self.file_count += 1
         self.file_size_bytes += int(path.stat().st_size)
         self.partitions.add(partition)
@@ -100,7 +100,7 @@ class _WriteStats:
             or any(value > 0 for value in self.null_count_summary.values())
             or any(value > 0 for value in self.non_finite_count_summary.values())
         )
-        payload = _data_spec_payload(self.spec)
+        payload = data_spec_payload(self.spec)
         payload.update(
             {
                 "row_count": int(self.row_count),
@@ -114,8 +114,8 @@ class _WriteStats:
                 },
                 "partition_count": len(self.partitions),
                 "partitions": sorted(self.partitions),
-                "date_min": _date_string(self.date_min),
-                "date_max": _date_string(self.date_max),
+                "date_min": date_string(self.date_min),
+                "date_max": date_string(self.date_max),
                 "null_count_summary": dict(sorted(self.null_count_summary.items())),
                 "non_finite_count_summary": dict(
                     sorted(self.non_finite_count_summary.items())
@@ -147,7 +147,7 @@ class _WriteStats:
         self.duplicate_primary_key_count += local_duplicates + cross_duplicates
 
     def _update_dates(self, frame: pd.DataFrame) -> None:
-        timestamp_column = _timestamp_primary_key_column_from_spec(self.spec)
+        timestamp_column = timestamp_primary_key_column_from_spec(self.spec)
         if timestamp_column is None or timestamp_column not in frame or frame.empty:
             return
         values = pd.to_datetime(frame[timestamp_column], errors="coerce").dropna()
@@ -197,8 +197,8 @@ def write_dataset(
     instance_metadata: Mapping[str, Any] | None = None,
 ) -> None:
     final_root = Path(dataset_root)
-    _validate_dataset_spec(spec)
-    _validate_dataset_artifact_root(final_root, spec)
+    validate_dataset_spec(spec)
+    validate_dataset_artifact_root(final_root, spec)
     if final_root.exists():
         raise ValueError("dataset_exists")
 
@@ -210,11 +210,11 @@ def write_dataset(
         )
         write_internal_artifact_manifest(
             temp_root / "spec.json",
-            _data_spec_payload(spec),
+            data_spec_payload(spec),
         )
         write_internal_artifact_manifest(
             temp_root / "_manifest" / "manifest.json",
-            _merge_dataset_instance_metadata(
+            merge_dataset_instance_metadata(
                 {
                     **accumulator.payload(),
                     "schema_id": "qrp-dataset-manifest",
@@ -222,7 +222,7 @@ def write_dataset(
                 instance_metadata,
             ),
         )
-        _validate_written_artifact(temp_root, accumulator)
+        validate_written_artifact(temp_root, accumulator)
 
     _staged_write_directory(final_root, _writer)
 
@@ -260,7 +260,7 @@ def _write_contents(
     *,
     spec: DataSpec,
 ) -> _WriteStats:
-    timestamp_column = _validate_dataset_spec(spec)
+    timestamp_column = validate_dataset_spec(spec)
     accumulator = _WriteStats(spec=spec, data_root=root)
     part_indices: dict[str, int] = {}
     empty_schema_frame: pd.DataFrame | None = None
@@ -270,21 +270,21 @@ def _write_contents(
             if empty_schema_frame is None:
                 empty_schema_frame = frame
             continue
-        for partition, partition_frame in _partition_frames(
+        for partition, partition_frame in partition_frames(
             frame,
             timestamp_column=timestamp_column,
             partition_columns=spec.partition_columns,
         ):
             part_index = part_indices.get(partition, 0)
             part_indices[partition] = part_index + 1
-            output_path = _partition_part_path(root, partition, part_index)
-            _write_parquet_file(partition_frame, output_path)
+            output_path = partition_part_path(root, partition, part_index)
+            write_parquet_file(partition_frame, output_path)
             accumulator.record_file(output_path, row_count=len(partition_frame))
     if accumulator.row_count == 0:
         if empty_schema_frame is None:
             raise ValueError("empty_dataset_schema_missing")
-        output_path = _partition_part_path(root, "", 0)
-        _write_parquet_file(empty_schema_frame, output_path)
+        output_path = partition_part_path(root, "", 0)
+        write_parquet_file(empty_schema_frame, output_path)
         accumulator.record_file(output_path, row_count=0)
     return accumulator
 
@@ -310,7 +310,7 @@ def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
         raise ValueError("dataset_infinite_value")
 
 
-def _write_parquet_file(frame: pd.DataFrame, path: Path) -> Path:
+def write_parquet_file(frame: pd.DataFrame, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(path, engine="pyarrow", compression="zstd", index=False)
     return path

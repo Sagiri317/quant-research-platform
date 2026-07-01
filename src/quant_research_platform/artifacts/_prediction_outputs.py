@@ -8,26 +8,26 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.artifacts._output_common_validation import (
-    _derive_output_bundle_root,
-    _required_frame_metadata,
-    _sanitize_required_metadata,
+    derive_output_bundle_root,
+    required_frame_metadata,
+    sanitize_required_metadata,
 )
 from quant_research_platform.artifacts._output_manifest import (
-    _output_manifest_payload,
-    _prediction_output_metadata,
+    output_manifest_payload,
+    prediction_output_metadata,
 )
 from quant_research_platform.artifacts._parquet_writers import (
-    _write_parquet,
-    _write_parquet_chunks,
+    write_parquet,
+    write_parquet_chunks,
 )
 from quant_research_platform.artifacts._prediction_output_validation import (
-    _model_metadata_with_effective_prediction_end,
-    _validate_model_metadata_consistency,
-    _validate_model_metadata_shape,
-    _validate_model_prediction_metadata_consistency,
-    _validate_prediction_metadata_consistency,
-    _validate_prediction_metadata_consistency_from_summary,
-    _validate_prediction_metadata_shape,
+    model_metadata_with_effective_prediction_end,
+    validate_model_metadata_consistency,
+    validate_model_metadata_shape,
+    validate_model_prediction_metadata_consistency,
+    validate_prediction_metadata_consistency,
+    validate_prediction_metadata_consistency_from_summary,
+    validate_prediction_metadata_shape,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
@@ -62,7 +62,7 @@ def write_prediction_outputs(
     if frame is None:
         raise ValueError("prediction_output_frame_required")
 
-    output_bundle = _derive_output_bundle_root(
+    output_bundle = derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="prediction_outputs",
@@ -76,38 +76,38 @@ def write_prediction_outputs(
         raise ValueError(f"unregistered_prediction_output_columns: {', '.join(extra)}")
     if bool(frame.duplicated(list(spec.primary_key)).any()):
         raise ValueError("duplicate_prediction_keys")
-    model_metadata = _validate_model_metadata_shape(
-        _required_frame_metadata(
+    model_metadata = validate_model_metadata_shape(
+        required_frame_metadata(
             frame,
             key="model_metadata",
             error_name="missing_model_metadata",
         )
     )
-    prediction_metadata = _validate_prediction_metadata_shape(
-        _required_frame_metadata(
+    prediction_metadata = validate_prediction_metadata_shape(
+        required_frame_metadata(
             frame,
             key="prediction_metadata",
             error_name="missing_prediction_metadata",
         )
     )
-    _validate_model_metadata_consistency(model_metadata, spec=spec)
-    _validate_prediction_metadata_consistency(
+    validate_model_metadata_consistency(model_metadata, spec=spec)
+    validate_prediction_metadata_consistency(
         prediction_metadata,
         spec=spec,
         frame=frame,
     )
-    model_metadata = _model_metadata_with_effective_prediction_end(
+    model_metadata = model_metadata_with_effective_prediction_end(
         model_metadata,
         prediction_metadata,
     )
-    _validate_model_metadata_consistency(model_metadata, spec=spec)
-    _validate_model_prediction_metadata_consistency(
+    validate_model_metadata_consistency(model_metadata, spec=spec)
+    validate_model_prediction_metadata_consistency(
         model_metadata,
         prediction_metadata,
     )
 
     def _write(temp_root: Path) -> None:
-        _write_parquet(
+        write_parquet(
             frame.loc[:, list(required)],
             temp_root / "prediction.parquet",
             engine="pyarrow",
@@ -116,9 +116,9 @@ def write_prediction_outputs(
         )
         write_manifest(
             temp_root / "manifest.json",
-            _output_manifest_payload(
+            output_manifest_payload(
                 output_spec=output_spec,
-                metadata=_prediction_output_metadata(
+                metadata=prediction_output_metadata(
                     spec=spec,
                     model_metadata=model_metadata,
                     prediction_metadata=prediction_metadata,
@@ -140,54 +140,54 @@ def _write_prediction_output_chunks(
     model_metadata: Mapping[str, object],
     prediction_metadata_factory: Callable[[], Mapping[str, object]],
 ) -> Path:
-    output_bundle = _derive_output_bundle_root(
+    output_bundle = derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="prediction_outputs",
     )
     required = (*spec.primary_key, spec.prediction_column)
-    model_metadata_payload = _validate_model_metadata_shape(
-        _sanitize_required_metadata(
+    model_metadata_payload = validate_model_metadata_shape(
+        sanitize_required_metadata(
             model_metadata,
             error_name="missing_model_metadata",
         )
     )
-    _validate_model_metadata_consistency(model_metadata_payload, spec=spec)
+    validate_model_metadata_consistency(model_metadata_payload, spec=spec)
 
     def _write(temp_root: Path) -> None:
-        write_summary = _write_parquet_chunks(
+        write_summary = write_parquet_chunks(
             frames,
             temp_root / "prediction.parquet",
             required=required,
             key_columns=tuple(spec.primary_key),
             compression="zstd",
         )
-        prediction_metadata = _validate_prediction_metadata_shape(
-            _sanitize_required_metadata(
+        prediction_metadata = validate_prediction_metadata_shape(
+            sanitize_required_metadata(
                 prediction_metadata_factory(),
                 error_name="missing_prediction_metadata",
             )
         )
-        _validate_prediction_metadata_consistency_from_summary(
+        validate_prediction_metadata_consistency_from_summary(
             prediction_metadata,
             spec=spec,
             row_count=write_summary.row_count,
             effective_test_end=write_summary.effective_test_end,
         )
-        effective_model_metadata = _model_metadata_with_effective_prediction_end(
+        effective_model_metadata = model_metadata_with_effective_prediction_end(
             model_metadata_payload,
             prediction_metadata,
         )
-        _validate_model_metadata_consistency(effective_model_metadata, spec=spec)
-        _validate_model_prediction_metadata_consistency(
+        validate_model_metadata_consistency(effective_model_metadata, spec=spec)
+        validate_model_prediction_metadata_consistency(
             effective_model_metadata,
             prediction_metadata,
         )
         write_manifest(
             temp_root / "manifest.json",
-            _output_manifest_payload(
+            output_manifest_payload(
                 output_spec=output_spec,
-                metadata=_prediction_output_metadata(
+                metadata=prediction_output_metadata(
                     spec=spec,
                     model_metadata=effective_model_metadata,
                     prediction_metadata=prediction_metadata,

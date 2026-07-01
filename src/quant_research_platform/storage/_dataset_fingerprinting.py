@@ -8,13 +8,13 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.storage._dataset_paths import _relative_partition_label
+from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_reading import (
-    _build_dataset_read_context,
-    _filter_frame_by_time_window,
-    _read_columns_for_time_window,
+    build_dataset_read_context,
+    filter_frame_by_time_window,
+    read_columns_for_time_window,
 )
-from quant_research_platform.storage._dataset_schema import _sha256_json
+from quant_research_platform.storage._dataset_schema import sha256_json
 from quant_research_platform.storage._dataset_types import DatasetFingerprint
 
 
@@ -24,14 +24,14 @@ def fingerprint_dataset(
     columns: tuple[str, ...] | list[str] | None = None,
     time_window: TimeWindow | None = None,
 ) -> DatasetFingerprint:
-    context = _build_dataset_read_context(
+    context = build_dataset_read_context(
         dataset_root,
         columns=columns,
         time_window=time_window,
     )
     key_columns = tuple(str(column) for column in context.spec["primary_key"])
     hash_columns = tuple(dict.fromkeys((*key_columns, *context.logical_columns)))
-    hash_physical_columns = _read_columns_for_time_window(
+    hash_physical_columns = read_columns_for_time_window(
         hash_columns,
         spec=context.spec,
         time_window=context.time_window,
@@ -52,7 +52,7 @@ def fingerprint_dataset(
             engine="pyarrow",
             filters=context.parquet_filters,
         )
-        chunk = _filter_frame_by_time_window(
+        chunk = filter_frame_by_time_window(
             chunk,
             spec=context.spec,
             time_window=context.time_window,
@@ -67,7 +67,7 @@ def fingerprint_dataset(
         ).to_numpy("uint64")
         chunk_sum = int(hashes.sum(dtype=np.uint64))
         chunk_xor = int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0)))
-        partition = _relative_partition_label(context.data_root, path)
+        partition = relative_partition_label(context.data_root, path)
         row_count += int(len(chunk))
         row_hash_sum = (row_hash_sum + chunk_sum) % 2**64
         row_hash_xor ^= chunk_xor
@@ -77,7 +77,7 @@ def fingerprint_dataset(
         ) % 2**64
         partition_hash_xor[partition] = partition_hash_xor.get(partition, 0) ^ chunk_xor
 
-    content_hash = _sha256_json(
+    content_hash = sha256_json(
         {
             "row_hash_sum": row_hash_sum,
             "row_hash_xor": row_hash_xor,
@@ -90,7 +90,7 @@ def fingerprint_dataset(
         {
             "partition": partition,
             "row_count": int(partition_rows[partition]),
-            "content_hash": _sha256_json(
+            "content_hash": sha256_json(
                 {
                     "row_hash_sum": int(partition_hash_sum[partition]),
                     "row_hash_xor": int(partition_hash_xor[partition]),
@@ -112,5 +112,5 @@ def fingerprint_dataset(
     )
 
 
-def _partition_keys(fingerprint: DatasetFingerprint) -> tuple[str, ...]:
+def partition_keys(fingerprint: DatasetFingerprint) -> tuple[str, ...]:
     return tuple(str(item["partition"]) for item in fingerprint.partition_fingerprints)

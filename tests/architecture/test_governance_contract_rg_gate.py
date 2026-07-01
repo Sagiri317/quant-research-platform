@@ -1619,7 +1619,11 @@ APPROVED_WRITER_MODULES = {
     Path("src/quant_research_platform/storage/manifests.py"),
     Path("src/quant_research_platform/artifacts/evidence.py"),
     Path("src/quant_research_platform/artifacts/execution_metrics.py"),
+    Path("src/quant_research_platform/artifacts/_evaluation_outputs.py"),
+    Path("src/quant_research_platform/artifacts/_portfolio_outputs.py"),
     Path("src/quant_research_platform/artifacts/_parquet_writers.py"),
+    Path("src/quant_research_platform/artifacts/_prediction_outputs.py"),
+    Path("src/quant_research_platform/artifacts/_stage_profile_outputs.py"),
     Path("src/quant_research_platform/artifacts/outputs.py"),
     Path("src/quant_research_platform/runtime/execution_metrics.py"),
 }

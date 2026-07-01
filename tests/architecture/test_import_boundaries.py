@@ -8,6 +8,7 @@ from tests.helpers.import_graph import ImportEdge, import_edges_under
 
 PROJECT_SRC = Path("src/quant_research_platform")
 OWNER_LOCAL_INTERNAL_API_ROOTS = (
+    PROJECT_SRC / "artifacts",
     PROJECT_SRC / "markets" / "implementations" / "a_share" / "processed",
     PROJECT_SRC / "research" / "models",
     PROJECT_SRC / "research" / "datasets",
@@ -15,6 +16,7 @@ OWNER_LOCAL_INTERNAL_API_ROOTS = (
     PROJECT_SRC / "research" / "predictions",
     PROJECT_SRC / "research" / "factors" / "price_volume",
     PROJECT_SRC / "compute",
+    PROJECT_SRC / "storage",
 )
 RETIRED_OWNER_LOCAL_PRIVATE_SYMBOLS = {
     "_ensure_processed_dependencies",

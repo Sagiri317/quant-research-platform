@@ -32,6 +32,12 @@ compute 只提供数值计算核心，不持有 market session domain 工具，�
 
 跨文件生产调用的 owner-local internal API 使用非下划线名称，可以留在 owner module 的 `__all__`，但不得从 package `__init__.py` 重导出为 public surface。同文件私有 helper 保留下划线且不进入 `__all__`。
 
+`markets/implementations/a_share/**` 内部命名遵守 owner-local naming；路径已经表达 A 股 owner，具体禁用前缀和允许 id 由 maintenance references 与 gates 执行。
+
+model selection 的 metric、direction 和 warning-free behavior 必须由合同与 owner-layer tests 保护，runner 不维护平行事实源。
+
+valuable deferred feature 可以保留在 owner layer，但不得接入当前 production path 或 claim DONE；具体分类要求由 governance/handoff evidence 规则执行。
+
 ## 数据安全
 
 研究 evidence 不能泄漏 row-level local-only data。可交接结果只能包含统计摘要、schema、counts、hash、status 和 sanitized logical path。

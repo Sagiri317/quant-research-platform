@@ -39,9 +39,9 @@ git branch -a
 
 `.agents/skills/quant-research-platform-maintenance/scripts/` 是 tracked governance tooling。handoff builder、verifier、single handoff verifier safety scan、governance check 等工具必须从这里读取。
 
-`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
+`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、handoff evidence 合同、package safety path parts 和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
 
-`.agents` handoff verifier 必须校验正式 handoff 的 REVIEW_SAFE evidence 完整性，并拒绝 status-only 摘要；具体 evidence shape 由 tracked verifier 和 tests 拥有。
+`.agents` handoff verifier 必须校验正式 handoff 的 REVIEW_SAFE evidence 完整性，并拒绝 status-only 摘要；具体 required evidence 和 shape 由 `governance_contract.py`、tracked verifier 和 tests 拥有。
 
 `.run/` 只是 output layer 和 evidence layer。它可以保存运行产物、handoff zip、manifest、logs、reports、temporary evidence，但不能反向定义架构、合同、工具入口或当前状态。
 
@@ -79,6 +79,8 @@ QRP 采用 current-contract-only。普通 tests 只保护当前合同；边界�
 Current-contract path rules are owned by `governance_contract.py` and enforced by `verify_governance`.
 
 版本面和命名规则由 `governance_contract.py`、owner-layer negative tests 和治理 gate 控制。QRP-owned generated JSON 顶层身份只使用 `schema_id`；Python internal model version 字段不能作为 generated JSON identity。
+
+内部接口、owner-local 命名、parallel implementation 和 valuable deferred feature 的具体规则由 references、`governance_contract.py` 和 owner-layer gates 执行；顶层文件只保留边界原则，不复制细则。
 
 ## 8. private safety
 

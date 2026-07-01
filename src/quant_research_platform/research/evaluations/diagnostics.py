@@ -49,8 +49,8 @@ def summarize_signal_label_coverage(
         "metric_rows": int(len(metrics)),
         "rows_after_signal_label_dropna": int(n_obs.sum()),
         "timestamp_count": int(timestamps.nunique()),
-        "min_timestamp": _date_string(timestamps.min()),
-        "max_timestamp": _date_string(timestamps.max()),
+        "min_timestamp": date_string(timestamps.min()),
+        "max_timestamp": date_string(timestamps.max()),
         "skipped_timestamp_count": int(
             metrics.loc[n_obs.lt(2), timestamp_column].nunique()
         ),
@@ -110,7 +110,7 @@ def build_evaluation_diagnostics(
     )
 
 
-def _date_string(value: pd.Timestamp) -> str:
+def date_string(value: pd.Timestamp) -> str:
     return pd.Timestamp(value).date().isoformat()
 
 

@@ -9,15 +9,15 @@ import pandas as pd
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage._dataset_manifest_validation import (
-    _manifest_partition_row_counts,
+    manifest_partition_row_counts,
 )
-from quant_research_platform.storage._dataset_paths import _relative_partition_label
+from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_reading import (
-    _build_dataset_read_context,
-    _DatasetReadContext,
-    _filter_frame_by_time_window,
+    DatasetReadContext,
+    build_dataset_read_context,
+    filter_frame_by_time_window,
 )
-from quant_research_platform.storage._dataset_schema import _date_string
+from quant_research_platform.storage._dataset_schema import date_string
 from quant_research_platform.storage._dataset_types import DatasetInspection
 
 
@@ -26,7 +26,7 @@ def inspect_dataset(
     *,
     time_window: TimeWindow | None = None,
 ) -> DatasetInspection:
-    context = _build_dataset_read_context(
+    context = build_dataset_read_context(
         dataset_root,
         columns=None,
         time_window=time_window,
@@ -51,10 +51,10 @@ def inspect_dataset(
 
 
 def _inspection_runtime_metadata(
-    context: _DatasetReadContext,
+    context: DatasetReadContext,
 ) -> dict[str, Any]:
     if context.time_window is None:
-        partition_row_counts = _manifest_partition_row_counts(context.manifest)
+        partition_row_counts = manifest_partition_row_counts(context.manifest)
         return {
             "file_count": int(context.manifest["file_count"]),
             "row_count": int(context.manifest["row_count"]),
@@ -78,7 +78,7 @@ def _inspection_runtime_metadata(
             engine="pyarrow",
             filters=context.parquet_filters,
         )
-        filtered = _filter_frame_by_time_window(
+        filtered = filter_frame_by_time_window(
             frame,
             spec=context.spec,
             time_window=context.time_window,
@@ -86,7 +86,7 @@ def _inspection_runtime_metadata(
         if filtered.empty:
             continue
         file_count += 1
-        partition = _relative_partition_label(context.data_root, path)
+        partition = relative_partition_label(context.data_root, path)
         partition_row_counts[partition] = partition_row_counts.get(partition, 0) + len(
             filtered
         )
@@ -102,6 +102,6 @@ def _inspection_runtime_metadata(
         "row_count": int(row_count),
         "partitions": tuple(sorted(partition_row_counts)),
         "partition_row_counts": dict(sorted(partition_row_counts.items())),
-        "date_min": _date_string(date_min),
-        "date_max": _date_string(date_max),
+        "date_min": date_string(date_min),
+        "date_max": date_string(date_max),
     }

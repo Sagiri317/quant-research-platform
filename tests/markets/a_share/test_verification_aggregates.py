@@ -35,7 +35,7 @@ def test_aggregates_summarizes_frames_without_row_level_output() -> None:
     assert summary.duplicate_key_count == 1
     assert summary.period == "2024-01-02 through 2024-01-03"
     assert summary.column_count == 5
-    assert summary.dtype_summary_hash == aggregates._sha256_json(summary.dtype_summary)
+    assert summary.dtype_summary_hash == aggregates.sha256_json(summary.dtype_summary)
     assert len(summary.aggregate_checksum) == 64
     assert "value" in summary.content_summary
     assert summary.content_summary["flag"]["numeric_max"] == 1.0

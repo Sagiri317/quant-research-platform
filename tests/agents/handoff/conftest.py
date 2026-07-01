@@ -70,11 +70,14 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
         "final_head": final_head,
         "validation_evidence": {
             "schema_id": "qrp-handoff-validation-evidence",
-            "checks": _validation_checks("NOT_RUN"),
+            "checks": _review_validation_checks("NOT_RUN"),
         },
         "handoff_evidence": {
             "package-smoke": _package_smoke_evidence(),
             "hard-scan-classification": _hard_scan_classification_evidence(),
+            "subagent-review-findings": _subagent_review_findings_evidence(),
+            "subagent-review-reconciliation": _review_reconciliation_payload(),
+            "test-checks": _test_checks_evidence(),
         },
     }
     result = builder.build_handoff_package(
@@ -131,6 +134,17 @@ def _validation_checks(status: str = "PASS") -> list[dict[str, str]]:
     ]
 
 
+def _review_validation_checks(status: str = "PASS") -> list[dict[str, str]]:
+    return [
+        *_validation_checks(status),
+        {
+            "name": "review_subagent",
+            "status": status,
+            "evidence": f"review_subagent {status}",
+        },
+    ]
+
+
 def _validation_payload(
     checks: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
@@ -174,6 +188,68 @@ def _hard_scan_classification_evidence() -> dict[str, object]:
                 "matched_text": "synthetic negative fixture",
                 "classification": "negative_test_fixture",
                 "reason": "synthetic fixture used only to exercise verifier shape",
+                "owner": "handoff-verifier-test-fixture",
+                "rule_id": "negative_fixture_shape",
+            }
+        ],
+    }
+
+
+def _subagent_review_findings_evidence() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-subagent-review-findings",
+        "status": "PASS",
+        "findings": [
+            {
+                "review_lane": "governance_safety",
+                "finding_id": "review-1",
+                "severity": "INFO",
+                "file_or_symbol": "handoff-test-fixture",
+                "why_true_issue": "No unresolved issue in synthetic fixture.",
+                "classification": "no_findings",
+                "fix_action": "none",
+                "final_status": "NO_CHANGE",
+                "re_review_status": "PASS",
+            }
+        ],
+    }
+
+
+def _review_reconciliation_payload() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-subagent-review-reconciliation",
+        "status": "PASS",
+        "rows": [
+            {
+                "review_lane": "governance_safety",
+                "finding_id": "review-1",
+                "severity": "INFO",
+                "file_or_symbol": "handoff-test-fixture",
+                "why_true_issue": "No unresolved issue in synthetic fixture.",
+                "classification": "no_findings",
+                "fix_action": "none",
+                "final_status": "NO_CHANGE",
+                "re_review_status": "PASS",
+            }
+        ],
+    }
+
+
+def _test_checks_evidence() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-test-checks-evidence",
+        "status": "PASS",
+        "checks": [
+            {
+                "command": "pytest tests/agents/handoff -q",
+                "scope": "handoff verifier tests",
+                "status": "PASS",
+                "exit_code": 0,
+                "test_count": 1,
+                "duration_seconds": 1.0,
+                "blocked_reason": "",
+                "not_run_reason": "",
+                "output_summary": "1 passed",
             }
         ],
     }

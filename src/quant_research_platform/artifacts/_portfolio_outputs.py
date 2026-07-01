@@ -10,18 +10,18 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quant_research_platform.artifacts._output_common_validation import (
-    _derive_output_bundle_root,
-    _validate_output_frame,
+    derive_output_bundle_root,
+    validate_output_frame,
 )
 from quant_research_platform.artifacts._output_manifest import (
-    _output_manifest_payload,
-    _portfolio_output_metadata_from_row_counts,
+    output_manifest_payload,
+    portfolio_output_metadata_from_row_counts,
 )
-from quant_research_platform.artifacts._parquet_writers import _write_parquet
+from quant_research_platform.artifacts._parquet_writers import write_parquet
 from quant_research_platform.artifacts._portfolio_output_validation import (
-    _PORTFOLIO_ARTIFACTS,
-    _portfolio_required_columns,
-    _validate_portfolio_signal_column,
+    PORTFOLIO_ARTIFACTS,
+    portfolio_required_columns,
+    validate_portfolio_signal_column,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
@@ -59,12 +59,12 @@ def _write_portfolio_output_chunks(
 ) -> Path:
     """Write local portfolio row outputs from bounded chunks."""
 
-    output_bundle = _derive_output_bundle_root(
+    output_bundle = derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="portfolio_outputs",
     )
-    required_columns = _portfolio_required_columns()
+    required_columns = portfolio_required_columns()
     row_artifacts = (
         "positions",
         "turnover",
@@ -76,7 +76,7 @@ def _write_portfolio_output_chunks(
         "categorical_exposure_diagnostics",
     )
     summary_names = tuple(
-        name for name in _PORTFOLIO_ARTIFACTS if name not in row_artifacts
+        name for name in PORTFOLIO_ARTIFACTS if name not in row_artifacts
     )
 
     def _write(temp_root: Path) -> None:
@@ -89,19 +89,19 @@ def _write_portfolio_output_chunks(
         )
         summary_outputs = summary_factory()
         for artifact_name in summary_names:
-            _validate_output_frame(
+            validate_output_frame(
                 summary_outputs[artifact_name],
                 required=required_columns[artifact_name],
                 error_name=f"portfolio_{artifact_name}",
             )
-            _validate_portfolio_signal_column(
+            validate_portfolio_signal_column(
                 summary_outputs[artifact_name],
                 artifact_name=artifact_name,
                 spec=spec,
             )
-            _write_parquet(
+            write_parquet(
                 summary_outputs[artifact_name],
-                temp_root / _PORTFOLIO_ARTIFACTS[artifact_name],
+                temp_root / PORTFOLIO_ARTIFACTS[artifact_name],
                 engine="pyarrow",
                 compression="zstd",
                 index=False,
@@ -109,13 +109,13 @@ def _write_portfolio_output_chunks(
             row_counts[artifact_name] = int(len(summary_outputs[artifact_name]))
         write_manifest(
             temp_root / "manifest.json",
-            _output_manifest_payload(
+            output_manifest_payload(
                 output_spec=output_spec,
-                metadata=_portfolio_output_metadata_from_row_counts(
+                metadata=portfolio_output_metadata_from_row_counts(
                     spec=spec,
                     row_counts=row_counts,
                 ),
-                files=tuple(_PORTFOLIO_ARTIFACTS.values()),
+                files=tuple(PORTFOLIO_ARTIFACTS.values()),
             ),
         )
 
@@ -133,10 +133,10 @@ def _write_portfolio_row_artifact_chunks(
 ) -> dict[str, int]:
     writers: dict[str, pq.ParquetWriter] = {}
     temp_paths = {
-        artifact_name: temp_root / _PORTFOLIO_ARTIFACTS[artifact_name]
+        artifact_name: temp_root / PORTFOLIO_ARTIFACTS[artifact_name]
         for artifact_name in row_artifacts
     }
-    row_counts = {artifact_name: 0 for artifact_name in _PORTFOLIO_ARTIFACTS}
+    row_counts = {artifact_name: 0 for artifact_name in PORTFOLIO_ARTIFACTS}
     try:
         for artifact_chunk in artifact_chunks:
             for artifact_name in row_artifacts:
@@ -165,7 +165,7 @@ def _write_portfolio_row_artifact_chunks(
         writers.clear()
         for artifact_name in row_artifacts:
             if row_counts[artifact_name] == 0:
-                _write_parquet(
+                write_parquet(
                     pd.DataFrame(columns=list(required_columns[artifact_name])),
                     temp_paths[artifact_name],
                     engine="pyarrow",
@@ -186,7 +186,7 @@ def _portfolio_output_chunk_frame(
     required: tuple[str, ...],
     spec: PortfolioSpec,
 ) -> pd.DataFrame:
-    _validate_output_frame(
+    validate_output_frame(
         frame,
         required=required,
         error_name=f"portfolio_{artifact_name}",

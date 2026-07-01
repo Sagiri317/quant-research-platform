@@ -33,11 +33,23 @@ from governance_contract import (  # noqa: E402
     BLOCKED_PACKAGE_ENTRY_PARTS,
     BLOCKED_TASK_KEYS,
     BLOCKED_VALIDATION_KEYS,
+    GENERATION_EVIDENCE,
     HANDOFF_TOOL_SOURCE_PATHS,
+    HARD_SCAN_CLASSIFICATION_EVIDENCE,
+    HARD_SCAN_CLASSIFICATIONS,
     PACKAGE_FORBIDDEN_PATH_PARTS,
+    PACKAGE_SMOKE_EVIDENCE,
     RESULT_ARCHITECTURE_RETIRED_TEXT_RULES,
+    SOURCE_TREE_SCAN_EVIDENCE,
+    SUBAGENT_REVIEW_CLASSIFICATIONS,
+    SUBAGENT_REVIEW_FINDINGS_EVIDENCE,
+    SUBAGENT_REVIEW_RECONCILIATION_EVIDENCE,
+    SUBAGENT_REVIEW_SEVERITIES,
+    TASK_REQUIRED_HANDOFF_EVIDENCE,
+    TEST_CHECKS_EVIDENCE,
     VALID_STATUS_TOKENS,
     VALIDATION_ROW_KEYS,
+    VERIFICATION_MATRIX_EVIDENCE,
     advisory_review_consistency_failures,
     aggregate_mandatory_validation_status,
     handoff_evidence_blocked_key_failures,
@@ -72,24 +84,9 @@ REQUIRED_ZIP_ENTRIES = {
     "task_metadata.json",
     "validation_evidence.json",
 }
-GENERATION_EVIDENCE = "handoff_evidence/generation.json"
-SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
-VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
 SMOKE_COMPARE_STATUS_EVIDENCE = "handoff_evidence/smoke-compare-status.json"
 BUNDLE_RECONSTRUCTION_EVIDENCE = "handoff_evidence/bundle-reconstruction.json"
-PACKAGE_SMOKE_EVIDENCE = "handoff_evidence/package-smoke.json"
-HARD_SCAN_CLASSIFICATION_EVIDENCE = "handoff_evidence/hard-scan-classification.json"
 BUNDLE_RECONSTRUCTION_SCHEMA_ID = "qrp-bundle-reconstruction-evidence"
-HARD_SCAN_CLASSIFICATIONS = frozenset(
-    {
-        "actual_violation",
-        "allowed_generated_evidence",
-        "negative_test_fixture",
-        "existing_base_issue",
-        "false_positive",
-        "valuable_deferred_feature_no_change",
-    }
-)
 PORTABLE_STATUS_SUMMARY_SCHEMA_ID = "qrp-portable-status-summary"
 PORTABLE_STATUS_SUMMARY_TYPES = frozenset(
     {"smoke", "compare", "local_verification", "run_compare"}
@@ -598,8 +595,7 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 GENERATION_EVIDENCE,
                 SOURCE_TREE_SCAN_EVIDENCE,
                 VERIFICATION_MATRIX_EVIDENCE,
-                PACKAGE_SMOKE_EVIDENCE,
-                HARD_SCAN_CLASSIFICATION_EVIDENCE,
+                *sorted(TASK_REQUIRED_HANDOFF_EVIDENCE),
             ):
                 if required_evidence not in name_set:
                     failures.append(f"missing_required_entry: {required_evidence}")
@@ -966,6 +962,12 @@ def verify_handoff_evidence_json(
             failures.extend(verify_package_smoke_evidence(payload))
         if name == HARD_SCAN_CLASSIFICATION_EVIDENCE:
             failures.extend(verify_hard_scan_classification_evidence(payload))
+        if name == SUBAGENT_REVIEW_FINDINGS_EVIDENCE:
+            failures.extend(verify_subagent_review_findings_evidence(payload))
+        if name == SUBAGENT_REVIEW_RECONCILIATION_EVIDENCE:
+            failures.extend(verify_subagent_review_reconciliation_evidence(payload))
+        if name == TEST_CHECKS_EVIDENCE:
+            failures.extend(verify_test_checks_evidence(payload))
         if name.endswith("verification-matrix.json"):
             failures.extend(verify_verification_matrix(payload))
     if VERIFICATION_MATRIX_EVIDENCE not in archive.namelist():
@@ -1010,6 +1012,29 @@ def verify_package_smoke_evidence(payload: dict[str, object]) -> list[str]:
         failures.append("package_smoke_status_invalid")
     if payload.get("import_status") not in VALID_STATUS_TOKENS:
         failures.append("package_smoke_import_status_invalid")
+    if (
+        payload.get("status") in VALID_STATUS_TOKENS
+        and payload.get("import_status") in VALID_STATUS_TOKENS
+    ):
+        content_status = (
+            "PASS"
+            if isinstance(payload.get("content_scan"), dict)
+            and all(
+                payload["content_scan"].get(key) is True
+                for key in (
+                    "no_run_dir",
+                    "no_parquet_csv_pickle_feather_arrow",
+                    "no_row_level_data",
+                    "no_local_absolute_paths",
+                )
+            )
+            else "FAIL"
+        )
+        expected_status = aggregate_validation_matrix_status(
+            [str(payload["import_status"]), content_status]
+        )
+        if payload.get("status") != expected_status:
+            failures.append("package_smoke_status_mismatch")
     for key in (
         "build_command",
         "wheel_filename",
@@ -1062,14 +1087,35 @@ def verify_hard_scan_classification_evidence(payload: dict[str, object]) -> list
         if not isinstance(finding, dict):
             failures.append(f"hard_scan_classification_finding_invalid: {index}")
             continue
-        for key in ("path", "line", "matched_text", "classification", "reason"):
+        for key in ("line", "classification", "reason", "owner", "rule_id"):
             if key not in finding:
                 failures.append(
                     f"hard_scan_classification_finding_missing: {index}:{key}"
                 )
+        has_path = bool(finding.get("path")) or (
+            bool(finding.get("redacted_path")) and bool(finding.get("redaction_reason"))
+        )
+        if not has_path:
+            failures.append(f"hard_scan_classification_finding_missing: {index}:path")
+        has_match = bool(finding.get("matched_text")) or bool(
+            finding.get("safe_excerpt")
+        )
+        if not has_match:
+            failures.append(
+                f"hard_scan_classification_finding_missing: {index}:matched_text"
+            )
         if "line" in finding and not isinstance(finding.get("line"), int):
             failures.append(f"hard_scan_classification_line_invalid: {index}")
-        for key in ("path", "matched_text", "reason"):
+        for key in (
+            "path",
+            "redacted_path",
+            "redaction_reason",
+            "matched_text",
+            "safe_excerpt",
+            "reason",
+            "owner",
+            "rule_id",
+        ):
             if key in finding and (
                 not isinstance(finding.get(key), str)
                 or not str(finding.get(key)).strip()
@@ -1077,6 +1123,14 @@ def verify_hard_scan_classification_evidence(payload: dict[str, object]) -> list
                 failures.append(
                     f"hard_scan_classification_string_invalid: {index}:{key}"
                 )
+            elif key in {"path", "redacted_path", "matched_text", "safe_excerpt"}:
+                value = finding.get(key)
+                if isinstance(value, str) and re.fullmatch(
+                    r"<review-safe-(?:path|match)-[^>]+>", value
+                ):
+                    failures.append(
+                        f"hard_scan_classification_placeholder: {index}:{key}"
+                    )
         if (
             "classification" in finding
             and finding.get("classification") not in HARD_SCAN_CLASSIFICATIONS
@@ -1098,6 +1152,181 @@ def verify_hard_scan_classification_evidence(payload: dict[str, object]) -> list
                 failures.append(
                     f"hard_scan_classification_deferred_baseline_missing: {index}"
                 )
+    return failures
+
+
+def verify_subagent_review_findings_evidence(payload: dict[str, object]) -> list[str]:
+    failures = _verify_review_payload_header(
+        payload,
+        expected_schema_id="qrp-subagent-review-findings",
+        rows_key="findings",
+        prefix="subagent_review_findings",
+    )
+    rows = payload.get("findings")
+    if isinstance(rows, list):
+        failures.extend(
+            _verify_subagent_review_rows(
+                rows,
+                prefix="subagent_review_findings",
+            )
+        )
+    return failures
+
+
+def verify_subagent_review_reconciliation_evidence(
+    payload: dict[str, object],
+) -> list[str]:
+    failures = _verify_review_payload_header(
+        payload,
+        expected_schema_id="qrp-subagent-review-reconciliation",
+        rows_key="rows",
+        prefix="subagent_review_reconciliation",
+    )
+    rows = payload.get("rows")
+    if isinstance(rows, list):
+        failures.extend(
+            _verify_subagent_review_rows(
+                rows,
+                prefix="subagent_review_reconciliation",
+            )
+        )
+    return failures
+
+
+def _verify_review_payload_header(
+    payload: dict[str, object],
+    *,
+    expected_schema_id: str,
+    rows_key: str,
+    prefix: str,
+) -> list[str]:
+    failures: list[str] = []
+    if payload.get("schema_id") != expected_schema_id:
+        failures.append(f"{prefix}_schema_id_invalid")
+    if payload.get("status") not in VALID_STATUS_TOKENS:
+        failures.append(f"{prefix}_status_invalid")
+    if rows_key not in payload:
+        failures.append(f"{prefix}_missing: {rows_key}")
+    elif not isinstance(payload.get(rows_key), list):
+        failures.append(f"{prefix}_{rows_key}_invalid")
+    return failures
+
+
+def _verify_subagent_review_rows(
+    rows: list[object],
+    *,
+    prefix: str,
+) -> list[str]:
+    failures: list[str] = []
+    required = (
+        "review_lane",
+        "finding_id",
+        "severity",
+        "file_or_symbol",
+        "why_true_issue",
+        "classification",
+        "fix_action",
+        "re_review_status",
+    )
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            failures.append(f"{prefix}_row_invalid: {index}")
+            continue
+        for key in required:
+            if key not in row:
+                failures.append(f"{prefix}_row_missing: {index}:{key}")
+        if "fix_commit" not in row and "final_status" not in row:
+            failures.append(f"{prefix}_row_missing: {index}:fix_commit_or_final_status")
+        for key in required + ("fix_commit", "final_status"):
+            if key in row and (
+                not isinstance(row.get(key), str) or not str(row.get(key)).strip()
+            ):
+                failures.append(f"{prefix}_row_string_invalid: {index}:{key}")
+        if row.get("severity") not in SUBAGENT_REVIEW_SEVERITIES:
+            failures.append(f"{prefix}_severity_invalid: {index}")
+        if row.get("classification") not in SUBAGENT_REVIEW_CLASSIFICATIONS:
+            failures.append(f"{prefix}_classification_invalid: {index}")
+        if row.get("re_review_status") not in VALID_STATUS_TOKENS:
+            failures.append(f"{prefix}_re_review_status_invalid: {index}")
+        if row.get("classification") == "true_issue_to_fix":
+            final_status = str(row.get("final_status") or "").strip().upper()
+            fix_commit = str(row.get("fix_commit") or "").strip()
+            resolved = (
+                row.get("re_review_status") == "PASS"
+                and (
+                    final_status in {"FIXED", "RESOLVED", "CLOSED"}
+                    or bool(fix_commit)
+                )
+            )
+            if not resolved:
+                failures.append(f"{prefix}_unresolved_true_issue: {index}")
+    return failures
+
+
+def verify_test_checks_evidence(payload: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    if payload.get("schema_id") != "qrp-test-checks-evidence":
+        failures.append("test_checks_schema_id_invalid")
+    if payload.get("status") not in VALID_STATUS_TOKENS:
+        failures.append("test_checks_status_invalid")
+    checks = payload.get("checks")
+    if "checks" not in payload:
+        failures.append("test_checks_missing: checks")
+        return failures
+    if not isinstance(checks, list):
+        failures.append("test_checks_checks_invalid")
+        return failures
+    row_statuses: list[str] = []
+    for index, row in enumerate(checks):
+        if not isinstance(row, dict):
+            failures.append(f"test_checks_row_invalid: {index}")
+            continue
+        for key in (
+            "command",
+            "scope",
+            "status",
+            "exit_code",
+            "test_count",
+            "duration_seconds",
+            "blocked_reason",
+            "not_run_reason",
+        ):
+            if key not in row:
+                failures.append(f"test_checks_row_missing: {index}:{key}")
+        if "log_excerpt" not in row and "output_summary" not in row:
+            failures.append(f"test_checks_row_missing: {index}:output_summary")
+        for key in ("command", "scope"):
+            if key in row and (
+                not isinstance(row.get(key), str) or not str(row.get(key)).strip()
+            ):
+                failures.append(f"test_checks_row_string_invalid: {index}:{key}")
+        status = row.get("status")
+        if status not in VALID_STATUS_TOKENS:
+            failures.append(f"test_checks_row_status_invalid: {index}")
+        else:
+            row_statuses.append(str(status))
+        if status in {"PASS", "FAIL"} and not isinstance(row.get("exit_code"), int):
+            failures.append(f"test_checks_row_exit_code_invalid: {index}")
+        elif status == "PASS" and row.get("exit_code") != 0:
+            failures.append(f"test_checks_row_exit_code_status_mismatch: {index}")
+        elif status == "FAIL" and row.get("exit_code") == 0:
+            failures.append(f"test_checks_row_exit_code_status_mismatch: {index}")
+        if not isinstance(row.get("test_count"), int) or int(row.get("test_count")) < 0:
+            failures.append(f"test_checks_row_test_count_invalid: {index}")
+        duration = row.get("duration_seconds")
+        if not isinstance(duration, (int, float)) or duration < 0:
+            failures.append(f"test_checks_row_duration_invalid: {index}")
+        if status == "BLOCKED" and not str(row.get("blocked_reason") or "").strip():
+            failures.append(f"test_checks_row_blocked_reason_missing: {index}")
+        if status == "NOT_RUN" and not str(row.get("not_run_reason") or "").strip():
+            failures.append(f"test_checks_row_not_run_reason_missing: {index}")
+        summary = row.get("output_summary", row.get("log_excerpt"))
+        if not isinstance(summary, str) or not summary.strip():
+            failures.append(f"test_checks_row_output_summary_invalid: {index}")
+    if row_statuses:
+        expected_status = aggregate_validation_matrix_status(row_statuses)
+        if payload.get("status") != expected_status:
+            failures.append("test_checks_status_mismatch")
     return failures
 
 

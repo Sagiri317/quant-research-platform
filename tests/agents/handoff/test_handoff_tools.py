@@ -23,6 +23,8 @@ from tests.agents.handoff.conftest import (
     _replace_generation_evidence,
     _replace_validation_evidence,
     _rewrite_package_member,
+    _subagent_review_findings_evidence,
+    _test_checks_evidence,
     _validation_checks,
     _validation_payload,
 )
@@ -194,9 +196,15 @@ def _review_reconciliation_payload() -> dict[str, object]:
         "status": "PASS",
         "rows": [
             {
+                "review_lane": "governance_safety",
                 "finding_id": "review-1",
-                "classification": "NO_FINDINGS",
-                "action": "none",
+                "severity": "INFO",
+                "file_or_symbol": "handoff-test-fixture",
+                "why_true_issue": "No unresolved issue in synthetic fixture.",
+                "classification": "no_findings",
+                "fix_action": "none",
+                "final_status": "NO_CHANGE",
+                "re_review_status": "PASS",
             }
         ],
     }
@@ -257,7 +265,7 @@ def test_verify_allows_empty_advisory_reviews_without_review_evidence(
 
     failures = verifier.verify_handoff_package(package, sidecar)
 
-    assert sidecar_payload["advisory_reviews"] == {}
+    assert sidecar_payload["advisory_reviews"] == {"review_subagent": "NOT_RUN"}
     assert "advisory_reviews_without_review_evidence" not in failures
     assert "advisory_reviews_missing_for_review_evidence" not in failures
 
@@ -292,6 +300,7 @@ def test_verify_rejects_review_evidence_without_advisory_reviews(
     verifier = _load_handoff_module("verify_handoff_package")
     package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     _write_review_reconciliation_evidence(package, sidecar)
+    _set_sidecar_advisory_reviews(sidecar, {})
 
     failures = verifier.verify_handoff_package(package, sidecar)
 
@@ -300,14 +309,13 @@ def test_verify_rejects_review_evidence_without_advisory_reviews(
 
 @pytest.mark.mutation
 def test_verify_rejects_advisory_reviews_without_review_evidence(
-    tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
-    _set_sidecar_advisory_reviews(sidecar, {"review_subagent": "PASS"})
 
-    failures = verifier.verify_handoff_package(package, sidecar)
+    failures = verifier.advisory_review_consistency_failures(
+        (),
+        {"review_subagent": "PASS"},
+    )
 
     assert "advisory_reviews_without_review_evidence" in failures
 
@@ -503,6 +511,8 @@ def test_verifier_rejects_incomplete_hard_scan_classification_evidence() -> None
 
     assert "hard_scan_classification_finding_missing: 0:line" in failures
     assert "hard_scan_classification_finding_missing: 0:classification" in failures
+    assert "hard_scan_classification_finding_missing: 0:owner" in failures
+    assert "hard_scan_classification_finding_missing: 0:rule_id" in failures
 
 
 def test_verifier_rejects_unresolved_hard_scan_actual_violation() -> None:
@@ -513,6 +523,18 @@ def test_verifier_rejects_unresolved_hard_scan_actual_violation() -> None:
     failures = verifier.verify_hard_scan_classification_evidence(payload)
 
     assert "hard_scan_classification_actual_violation: 0" in failures
+
+
+def test_verifier_rejects_hard_scan_placeholder_evidence() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _hard_scan_classification_evidence()
+    payload["raw_findings"][0]["path"] = "<review-safe-path-*>"
+    payload["raw_findings"][0]["matched_text"] = "<review-safe-match-sample>"
+
+    failures = verifier.verify_hard_scan_classification_evidence(payload)
+
+    assert "hard_scan_classification_placeholder: 0:path" in failures
+    assert "hard_scan_classification_placeholder: 0:matched_text" in failures
 
 
 def test_verifier_requires_deferred_hard_scan_proof() -> None:
@@ -543,6 +565,115 @@ def test_verifier_accepts_complete_package_and_hard_scan_evidence_shapes() -> No
         )
         == []
     )
+
+
+def test_verifier_accepts_test_white_box_hard_scan_classification() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _hard_scan_classification_evidence()
+    payload["raw_findings"][0]["classification"] = "test_white_box_allowed"
+
+    assert verifier.verify_hard_scan_classification_evidence(payload) == []
+
+
+def test_verifier_rejects_status_only_subagent_review_findings() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    failures = verifier.verify_subagent_review_findings_evidence({"status": "PASS"})
+
+    assert "subagent_review_findings_missing: findings" in failures
+
+
+def test_verifier_rejects_status_only_test_checks_evidence() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    failures = verifier.verify_test_checks_evidence({"status": "PASS"})
+
+    assert "test_checks_missing: checks" in failures
+
+
+def test_verifier_rejects_test_check_status_exit_code_mismatch() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _test_checks_evidence()
+    payload["checks"][0]["exit_code"] = 1
+
+    failures = verifier.verify_test_checks_evidence(payload)
+
+    assert "test_checks_row_exit_code_status_mismatch: 0" in failures
+
+
+def test_verifier_rejects_failed_test_check_with_zero_exit_code() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _test_checks_evidence()
+    payload["status"] = "FAIL"
+    payload["checks"][0]["status"] = "FAIL"
+    payload["checks"][0]["exit_code"] = 0
+
+    failures = verifier.verify_test_checks_evidence(payload)
+
+    assert "test_checks_row_exit_code_status_mismatch: 0" in failures
+
+
+def test_verifier_rejects_test_checks_parent_child_status_mismatch() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _test_checks_evidence()
+    payload["checks"][0]["status"] = "NOT_RUN"
+    payload["checks"][0]["not_run_reason"] = "synthetic not run"
+
+    failures = verifier.verify_test_checks_evidence(payload)
+
+    assert "test_checks_status_mismatch" in failures
+
+
+def test_verifier_rejects_package_smoke_parent_child_status_mismatch() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _package_smoke_evidence()
+    payload["import_status"] = "FAIL"
+
+    failures = verifier.verify_package_smoke_evidence(payload)
+
+    assert "package_smoke_status_mismatch" in failures
+
+
+def test_verifier_accepts_resolved_true_issue_review_row() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _review_reconciliation_payload()
+    payload["rows"][0]["classification"] = "true_issue_to_fix"
+    payload["rows"][0]["fix_action"] = "fixed by handoff verifier gate"
+    payload["rows"][0]["final_status"] = "FIXED"
+    payload["rows"][0]["re_review_status"] = "PASS"
+
+    assert verifier.verify_subagent_review_reconciliation_evidence(payload) == []
+
+
+def test_verifier_rejects_unresolved_true_issue_review_row() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _review_reconciliation_payload()
+    payload["rows"][0]["classification"] = "true_issue_to_fix"
+    payload["rows"][0]["final_status"] = "OPEN"
+    payload["rows"][0]["re_review_status"] = "NOT_RUN"
+    payload["rows"][0]["not_run_reason"] = "synthetic unresolved"
+
+    failures = verifier.verify_subagent_review_reconciliation_evidence(payload)
+
+    assert "subagent_review_reconciliation_unresolved_true_issue: 0" in failures
+
+
+def test_verifier_accepts_complete_review_and_test_check_evidence() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    assert (
+        verifier.verify_subagent_review_findings_evidence(
+            _subagent_review_findings_evidence()
+        )
+        == []
+    )
+    assert (
+        verifier.verify_subagent_review_reconciliation_evidence(
+            _review_reconciliation_payload()
+        )
+        == []
+    )
+    assert verifier.verify_test_checks_evidence(_test_checks_evidence()) == []
 
 
 @pytest.mark.parametrize(

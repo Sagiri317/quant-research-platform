@@ -159,12 +159,22 @@ def test_builder_task_validation_evidence_generates_missing_key_rows() -> None:
     payload = builder.task_validation_evidence({})
     checks = {row["name"]: row for row in payload["checks"]}
 
-    assert set(checks) == set(contract.MANDATORY_VALIDATION_CHECKS)
+    assert set(checks) == {
+        *contract.MANDATORY_VALIDATION_CHECKS,
+        *contract.ADVISORY_VALIDATION_CHECKS,
+    }
     assert {row["status"] for row in checks.values()} == {"NOT_RUN"}
     assert all(
         "task validation_evidence missing; generated mandatory NOT_RUN row"
         in row["evidence"]
-        for row in checks.values()
+        for name, row in checks.items()
+        if name in contract.MANDATORY_VALIDATION_CHECKS
+    )
+    assert all(
+        "task validation_evidence missing; generated advisory NOT_RUN row"
+        in row["evidence"]
+        for name, row in checks.items()
+        if name in contract.ADVISORY_VALIDATION_CHECKS
     )
 
     verifier = _load_handoff_module("verify_handoff_package")

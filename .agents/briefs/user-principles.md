@@ -13,12 +13,14 @@ QRP 是本地量化研究平台，不是生产交易系统，不是 live trading
 - naming first-class：命名应稳定、清晰、长期可维护，不使用 v2 这类临时后缀。
 - current-contract-only：兼容期需要用户明确批准。
 - fail fast：builder 应在写出非法 artifact 前失败，verifier 和 source-tree scan 是独立后续门。
+- owner-local internal API、private module pattern 和 package re-export 边界应由可执行 gate 保护，不靠口头约定。
 
 ## 验证偏好
 
 - 未运行写 `NOT_RUN`。
 - 环境、权限、依赖、超时阻塞写 `BLOCKED`。
 - 不允许把 sidecar PASS、single handoff verifier safety scan PASS、pytest PASS、compare PASS 互相替代。
+- formal handoff evidence 必须完整、结构化、可由 verifier 审查；status-only 摘要不够。
 - sandbox 或 Codex 环境中，允许在边界内安装缺失依赖进行测试；缺依赖不是默认跳过理由。
 
 ## 文档偏好
