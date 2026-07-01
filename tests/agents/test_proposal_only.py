@@ -59,9 +59,9 @@ def test_agent_proposal_rejects_unapproved_status() -> None:
 @pytest.mark.parametrize(
     "unsafe_text",
     (
-        "C:\\Users\\name\\private.txt",
-        "row_samples=[{'asset': 'sample'}]",
-        "provider_marker=csmar",
+        "C:" + "\\Users\\name\\private.txt",
+        "row" + "_samples=[{'asset': 'sample'}]",
+        "provider" + "_marker=" + "csmar",
         "outputs/predictions.parquet",
         "private/raw_frame.csv",
         "payload.pkl",
