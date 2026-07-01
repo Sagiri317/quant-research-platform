@@ -48,7 +48,7 @@ def _select_factor_definitions_for_spec(
     return selected
 
 
-def _write_factors(
+def write_factors(
     spec: ProcessedDataSpec,
     *,
     layout: StorageLayout,
@@ -142,6 +142,4 @@ def _write_factors(
     )
 
 
-__all__ = ["_select_factor_definitions_for_spec", "_write_factors"]
-
-
+__all__ = ["_select_factor_definitions_for_spec", "write_factors"]

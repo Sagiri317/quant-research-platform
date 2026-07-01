@@ -6,11 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.contracts.data import (
-    DataFrequency,
-    ProcessedDataKind,
-    ProcessedDataSpec,
-)
+from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
@@ -25,12 +21,12 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     materialize_factors,
     materialize_labels,
     materialize_panel,
+    source_ids,
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
 )
-from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import DatasetInspection, inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -137,18 +133,18 @@ def _materialize_one(
         materialize_one=_materialize_one,
     )
     if spec.kind is ProcessedDataKind.PANEL:
-        return materialize_panel._write_panel(
+        return materialize_panel.write_panel(
             spec,
             layout=layout,
             source_id=source_id,
-            market_bars_data_id=_market_bars_source_data_id(spec),
+            market_bars_data_id=source_ids.market_bars_source_data_id(spec),
             time_window=time_window,
             policy=policy,
             sessions=sessions,
             written=written,
         )
     if spec.kind is ProcessedDataKind.ANNOTATION:
-        return materialize_annotations._write_annotation(
+        return materialize_annotations.write_annotations(
             spec,
             layout=layout,
             time_window=time_window,
@@ -157,7 +153,7 @@ def _materialize_one(
             written=written,
         )
     if spec.kind is ProcessedDataKind.FACTOR:
-        return materialize_factors._write_factors(
+        return materialize_factors.write_factors(
             spec,
             layout=layout,
             time_window=time_window,
@@ -167,7 +163,7 @@ def _materialize_one(
             panel_key_coverages=panel_key_coverages,
         )
     if spec.kind is ProcessedDataKind.LABEL:
-        return materialize_labels._write_labels(
+        return materialize_labels.write_labels(
             spec,
             layout=layout,
             time_window=time_window,
@@ -177,18 +173,6 @@ def _materialize_one(
             panel_key_coverages=panel_key_coverages,
         )
     raise ValueError(f"unsupported_processed_kind: {spec.kind}")
-
-
-def _market_bars_source_data_id(spec: ProcessedDataSpec) -> str:
-    expected = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
-    candidates = tuple(
-        data_id
-        for data_id in spec.source_input_data_ids
-        if data_id == expected
-    )
-    if len(candidates) != 1:
-        raise ValueError("panel_market_bars_source_input_not_unique")
-    return candidates[0]
 
 
 __all__ = ["materialize_processed_data"]

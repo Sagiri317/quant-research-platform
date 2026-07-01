@@ -80,6 +80,10 @@ def _portfolio_read_columns(spec: PortfolioSpec) -> tuple[str, ...]:
         spec.tradability_config.eligibility_column,
         spec.tradability_config.can_enter_column,
         spec.tradability_config.can_exit_column,
+        spec.diagnostics_config.capacity_amount_column,
+        spec.diagnostics_config.capacity_float_market_cap_column,
+        *spec.diagnostics_config.numeric_exposure_columns,
+        *spec.diagnostics_config.categorical_exposure_columns,
     )
     return tuple(
         dict.fromkeys(
@@ -156,6 +160,18 @@ def _iter_portfolio_output_chunks(
             ),
             "diagnostics": _select_actual_timestamps(
                 result.diagnostics,
+                actual_timestamps,
+            ),
+            "capacity_diagnostics": _select_actual_timestamps(
+                result.capacity_diagnostics,
+                actual_timestamps,
+            ),
+            "numeric_exposure_diagnostics": _select_actual_timestamps(
+                result.numeric_exposure_diagnostics,
+                actual_timestamps,
+            ),
+            "categorical_exposure_diagnostics": _select_actual_timestamps(
+                result.categorical_exposure_diagnostics,
                 actual_timestamps,
             ),
         }

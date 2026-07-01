@@ -6,7 +6,6 @@ from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
 
-from .columns import PRICE_VOLUME_FACTOR_FAMILY
 from .presets import (
     CORE_PRICE_VOLUME_FACTORS,
     SMOKE_PRICE_VOLUME_FACTORS,
@@ -14,6 +13,8 @@ from .presets import (
 )
 from .requirements import price_volume_factor_input_columns
 from .windows import _lookback_window, _required_windows
+
+PRICE_VOLUME_FACTOR_FAMILY = "price_volume"
 
 
 def price_volume_factor_definitions(
@@ -63,4 +64,4 @@ def _factor_set_for_column(factor_id: str) -> FactorSet:
         return FactorSet.CORE
     return FactorSet.STANDARD
 
-__all__ = ["price_volume_factor_definitions"]
+__all__ = ["PRICE_VOLUME_FACTOR_FAMILY", "price_volume_factor_definitions"]

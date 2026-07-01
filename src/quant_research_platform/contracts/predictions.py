@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 from quant_research_platform.contracts.filtering import (
     SampleFilterMode,
@@ -13,6 +14,11 @@ from quant_research_platform.contracts.run_id import validate_run_id
 PREDICTION_SCORE_COLUMN = "prediction_score"
 PREDICTION_PRIMARY_KEY = ("timestamp", "asset_id")
 PREDICTION_OUTPUT_COLUMNS = (*PREDICTION_PRIMARY_KEY, PREDICTION_SCORE_COLUMN)
+MODEL_SELECTION_METRIC_DIRECTIONS = {
+    "validation_ic": "maximize",
+    "validation_rankic": "maximize",
+    "validation_mse": "minimize",
+}
 
 
 @dataclass(frozen=True)
@@ -30,6 +36,10 @@ class PredictionSpec:
     sample_filter_mode: SampleFilterMode = "eligible"
     is_oos: bool = True
     is_final_oos_window: bool = True
+    candidate_model_ids: tuple[str, ...] = ()
+    model_selection_metric: str = "validation_rankic"
+    model_selection_validation_start: str | None = None
+    model_selection_validation_end: str | None = None
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
@@ -50,11 +60,62 @@ class PredictionSpec:
             raise ValueError("prediction_open_ended_window_must_be_final")
         if self.test_end is not None and self.is_final_oos_window:
             object.__setattr__(self, "is_final_oos_window", False)
+        _validate_model_selection_contract(self)
+
+    @property
+    def model_selection_enabled(self) -> bool:
+        return bool(self.candidate_model_ids)
+
+
+def _validate_model_selection_contract(spec: PredictionSpec) -> None:
+    candidate_model_ids = spec.candidate_model_ids
+    if any(
+        not isinstance(model_id, str) or not model_id
+        for model_id in candidate_model_ids
+    ):
+        raise ValueError("candidate_model_ids_must_be_non_empty_strings")
+    if len(set(candidate_model_ids)) != len(candidate_model_ids):
+        raise ValueError("candidate_model_ids_must_not_contain_duplicates")
+    if spec.model_id in candidate_model_ids:
+        raise ValueError("candidate_model_ids_must_not_include_model_id")
+    if spec.model_selection_metric not in MODEL_SELECTION_METRIC_DIRECTIONS:
+        raise ValueError("invalid_model_selection_metric")
+    if not candidate_model_ids:
+        return
+    if (
+        spec.model_selection_validation_start is None
+        or spec.model_selection_validation_end is None
+    ):
+        raise ValueError("model_selection_validation_window_required")
+    train_end = _iso_date(spec.train_end, "train_end")
+    test_start = _iso_date(spec.test_start, "test_start")
+    validation_start = _iso_date(
+        spec.model_selection_validation_start,
+        "model_selection_validation_start",
+    )
+    validation_end = _iso_date(
+        spec.model_selection_validation_end,
+        "model_selection_validation_end",
+    )
+    if train_end >= validation_start:
+        raise ValueError("model_selection_window_must_follow_train_window")
+    if validation_start > validation_end:
+        raise ValueError("model_selection_window_must_not_be_reversed")
+    if validation_end >= test_start:
+        raise ValueError("model_selection_window_must_precede_test_window")
+
+
+def _iso_date(value: str, field_name: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid_{field_name}") from exc
 
 
 __all__ = [
     "PREDICTION_OUTPUT_COLUMNS",
     "PREDICTION_PRIMARY_KEY",
     "PREDICTION_SCORE_COLUMN",
+    "MODEL_SELECTION_METRIC_DIRECTIONS",
     "PredictionSpec",
 ]

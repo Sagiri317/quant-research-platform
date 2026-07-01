@@ -32,15 +32,6 @@ Scope boundary:
 
 ## P2 Deferred
 
-ID: ml-validation-and-trial-contract-owner
-Severity: P2
-Owner layer: research / architecture
-Status: deferred
-Evidence: `research/models/validation_split.py` owns training buffer and purge controls, but no trial selection contract owner exists yet.
-Next action: when trial selection primitives are introduced, add owner-layer tests for train/validation/test date ordering, asset-date disjointness, test-metric exclusion from best-trial selection, and seeded trial sequence determinism.
-Acceptance gate: contract tests derive expected behavior from the selected owner primitives without adding a tuning framework in tests.
-Scope boundary: do not introduce a tuning framework, DL dependency, public registry, or model registry as part of a test-speed guardrail goal.
-
 ID: handoff-integration-subprocess-cost
 Severity: P2
 Owner layer: tests / handoff tooling

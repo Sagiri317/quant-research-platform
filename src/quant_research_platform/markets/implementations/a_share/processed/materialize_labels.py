@@ -48,7 +48,7 @@ def _select_label_definitions_for_spec(
     return selected
 
 
-def _write_labels(
+def write_labels(
     spec: ProcessedDataSpec,
     *,
     layout: StorageLayout,
@@ -142,6 +142,4 @@ def _write_labels(
     )
 
 
-__all__ = ["_select_label_definitions_for_spec", "_write_labels"]
-
-
+__all__ = ["_select_label_definitions_for_spec", "write_labels"]

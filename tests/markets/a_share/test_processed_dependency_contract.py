@@ -43,6 +43,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     materialize_factors,
     materialize_labels,
     materializer,
+    source_ids,
 )
 from quant_research_platform.markets.session_windows import SessionWindow
 from quant_research_platform.research.factors.price_volume import (
@@ -106,7 +107,7 @@ def test_panel_materializer_skips_market_bars_source_preload(
         spec,
         layout=layout,
         source_id=source_id,
-        market_bars_data_id=materializer._market_bars_source_data_id(spec),
+        market_bars_data_id=source_ids.market_bars_source_data_id(spec),
     )
 
     assert set(inputs) == {"trading_calendar"}
@@ -121,7 +122,7 @@ def test_panel_materializer_rejects_unapproved_market_bars_source_variant() -> N
     )
 
     with pytest.raises(ValueError, match="panel_market_bars_source_input_not_unique"):
-        materializer._market_bars_source_data_id(spec)
+        source_ids.market_bars_source_data_id(spec)
 
 
 def test_materializer_reads_processed_inputs_from_spec_processed_input_data_ids(
@@ -408,7 +409,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         lambda *args, **kwargs: 1,
     )
 
-    materialize_annotations._write_annotation(
+    materialize_annotations.write_annotations(
         _processed_spec(
             "execution",
             kind=ProcessedDataKind.ANNOTATION,
@@ -427,7 +428,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         sessions=sessions,
         written={},
     )
-    materialize_factors._write_factors(
+    materialize_factors.write_factors(
         _processed_spec(
             "price_volume",
             kind=ProcessedDataKind.FACTOR,
@@ -440,7 +441,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         sessions=sessions,
         written={},
     )
-    materialize_labels._write_labels(
+    materialize_labels.write_labels(
         _processed_spec(
             "forward_returns",
             kind=ProcessedDataKind.LABEL,

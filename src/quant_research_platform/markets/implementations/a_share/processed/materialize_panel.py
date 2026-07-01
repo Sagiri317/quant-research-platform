@@ -24,7 +24,7 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def _write_panel(
+def write_panel(
     spec: ProcessedDataSpec,
     *,
     layout: StorageLayout,
@@ -101,6 +101,4 @@ def _write_panel(
     )
 
 
-__all__ = ["_write_panel"]
-
-
+__all__ = ["write_panel"]

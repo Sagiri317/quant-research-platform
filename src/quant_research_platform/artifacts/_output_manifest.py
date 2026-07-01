@@ -123,6 +123,7 @@ def _portfolio_output_metadata(
         "weight_config": asdict(spec.weight_config),
         "tradability_config": asdict(spec.tradability_config),
         "cost_config": asdict(spec.cost_config),
+        "diagnostics_config": asdict(spec.diagnostics_config),
         "row_counts": {
             artifact_name: int(len(frame)) for artifact_name, frame in artifacts.items()
         },

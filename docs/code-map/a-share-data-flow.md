@@ -18,7 +18,7 @@ sources 层负责内部供应商 raw schema、字段映射、raw/interim 转换�
 
 A-share active processed profile 仍为日频。minute/tick 只由通用 data frequency contract 表达，A-share processed materialization 对 active profile 以日频 fail-closed。mask owner 是 `markets/implementations/a_share/processed/annotations.py`；research/factors、research/labels 和 research/evaluations 不重算 A-share mask。
 
-`markets/implementations/a_share/processed/materializer.py` 保留 `materialize_processed_data()` 入口和必要 source ID mapping。dependency graph、profile frequency、input contract 和 required column validation 位于 `materialization_validation.py`；dataset root、processed input read、chunk iteration 和 write/inspect 位于 `materialize_io.py`。annotation、factor 和 label materialization 继续通过当前 processed owner 调用 `annotations.derive_annotations()`、factor definitions 和 label definitions。
+`markets/implementations/a_share/processed/materializer.py` 保留 `materialize_processed_data()` 入口和窄 orchestration。source ID mapping 位于 `source_ids.py`；dependency graph、profile frequency、input contract 和 required column validation 位于 `materialization_validation.py`；dataset root、processed input read、chunk iteration 和 write/inspect 位于 `materialization_io.py`。panel、annotation、factor 和 label materialization 继续通过当前 processed owner modules 调用 panel compute、`annotations.derive_annotations()`、factor definitions 和 label definitions。
 
 ## storage 层
 

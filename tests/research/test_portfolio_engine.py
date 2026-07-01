@@ -320,6 +320,9 @@ def test_portfolio_runner_writes_private_outputs(tmp_path) -> None:
         "concentration.parquet",
         "period_breakdown.parquet",
         "diagnostics.parquet",
+        "capacity_diagnostics.parquet",
+        "numeric_exposure_diagnostics.parquet",
+        "categorical_exposure_diagnostics.parquet",
         "manifest.json",
     ):
         assert (output_bundle / filename).is_file()
@@ -390,6 +393,9 @@ def test_portfolio_runner_chunked_output_matches_single_chunk_path(
         "concentration.parquet",
         "period_breakdown.parquet",
         "diagnostics.parquet",
+        "capacity_diagnostics.parquet",
+        "numeric_exposure_diagnostics.parquet",
+        "categorical_exposure_diagnostics.parquet",
     ):
         pd.testing.assert_frame_equal(
             _sorted_artifact_frame(pd.read_parquet(normal_root / filename)),

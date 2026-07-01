@@ -24,6 +24,36 @@ PORTFOLIO_MODES = {"long_short", "long_only"}
 BLOCKED_ENTRY_POLICIES = {"skip", "hold_cash", "redistribute"}
 BLOCKED_EXIT_POLICIES = {"carry_forward", "force_exit", "error"}
 SUPPORTED_REBALANCE_FREQUENCIES = {data_frequency_slug(DataFrequency.DAILY)}
+PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS = (
+    "timestamp",
+    "signal",
+    "row_count",
+    "positive_amount_row_count",
+    "excluded_non_positive_amount_count",
+    "gross_weight",
+    "covered_gross_weight",
+    "weighted_amount_proxy",
+    "weighted_float_market_cap_proxy",
+)
+PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS = (
+    "timestamp",
+    "signal",
+    "exposure_column",
+    "exposure_value",
+    "row_count",
+    "gross_weight",
+)
+PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS = (
+    "timestamp",
+    "signal",
+    "exposure_column",
+    "exposure_value",
+    "asset_count",
+    "gross_weight",
+    "net_weight",
+    "long_weight",
+    "short_weight",
+)
 
 
 @dataclass(frozen=True)
@@ -107,6 +137,51 @@ class CostConfig:
 
 
 @dataclass(frozen=True)
+class PortfolioDiagnosticsConfig:
+    """Portfolio diagnostics column configuration."""
+
+    capacity_amount_column: str | None = None
+    capacity_float_market_cap_column: str | None = None
+    numeric_exposure_columns: tuple[str, ...] = ()
+    categorical_exposure_columns: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_optional_column_name(
+            self.capacity_amount_column,
+            "capacity_amount_column",
+        )
+        _validate_optional_column_name(
+            self.capacity_float_market_cap_column,
+            "capacity_float_market_cap_column",
+        )
+        _validate_column_tuple(
+            self.numeric_exposure_columns,
+            "numeric_exposure_columns",
+            required=False,
+        )
+        _validate_column_tuple(
+            self.categorical_exposure_columns,
+            "categorical_exposure_columns",
+            required=False,
+        )
+        if (
+            self.capacity_float_market_cap_column is not None
+            and self.capacity_amount_column is None
+        ):
+            raise ValueError("capacity_amount_column_required")
+        overlap = sorted(
+            set(self.numeric_exposure_columns).intersection(
+                self.categorical_exposure_columns
+            )
+        )
+        if overlap:
+            raise ValueError(
+                "diagnostic_exposure_columns_must_not_overlap: "
+                + ", ".join(overlap)
+            )
+
+
+@dataclass(frozen=True)
 class PortfolioSpec:
     portfolio_id: str
     market_id: MarketId
@@ -118,6 +193,9 @@ class PortfolioSpec:
     weight_config: WeightConfig = field(default_factory=WeightConfig)
     cost_config: CostConfig = field(default_factory=CostConfig)
     tradability_config: TradabilityConfig = field(default_factory=TradabilityConfig)
+    diagnostics_config: PortfolioDiagnosticsConfig = field(
+        default_factory=PortfolioDiagnosticsConfig
+    )
     run_type: str = "portfolio"
     contract_version: str = "0.1"
 
@@ -185,6 +263,20 @@ def _validate_optional_column_name(value: str | None, name: str) -> None:
         raise ValueError(f"{name} must be a non-empty string.")
 
 
+def _validate_column_tuple(
+    columns: tuple[str, ...],
+    field_name: str,
+    *,
+    required: bool = True,
+) -> None:
+    if required and not columns:
+        raise ValueError(f"{field_name}_required")
+    if any(not isinstance(column, str) or not column for column in columns):
+        raise ValueError(f"{field_name}_must_be_non_empty_strings")
+    if len(set(columns)) != len(columns):
+        raise ValueError(f"{field_name}_must_not_contain_duplicates")
+
+
 def _cross_signal_id_column_overlaps(signals: tuple[SignalSpec, ...]) -> list[str]:
     overlaps = {
         signal.signal_id
@@ -212,6 +304,10 @@ __all__ = [
     "BLOCKED_EXIT_POLICIES",
     "CostConfig",
     "PORTFOLIO_MODES",
+    "PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS",
+    "PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS",
+    "PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS",
+    "PortfolioDiagnosticsConfig",
     "PortfolioSpec",
     "SUPPORTED_REBALANCE_FREQUENCIES",
     "TradabilityConfig",

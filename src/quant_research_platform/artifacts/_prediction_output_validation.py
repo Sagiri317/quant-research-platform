@@ -49,6 +49,30 @@ _MODEL_METADATA_FEATURE_KEYS = frozenset(
         "feature_importance_status",
     }
 )
+_MODEL_METADATA_OPTIONAL_KEYS = frozenset({"model_selection"})
+_MODEL_SELECTION_KEYS = frozenset(
+    {
+        "status",
+        "configured_model_id",
+        "selected_model_id",
+        "candidate_model_ids",
+        "selection_metric",
+        "selection_direction",
+        "validation_start",
+        "validation_end",
+        "candidate_count",
+        "trial_metrics",
+    }
+)
+_MODEL_SELECTION_TRIAL_METRIC_KEYS = frozenset(
+    {
+        "model_id",
+        "validation_rows",
+        "validation_ic",
+        "validation_rankic",
+        "validation_mse",
+    }
+)
 _PREDICTION_METADATA_KEYS = frozenset(
     {
         "contract_version",
@@ -76,13 +100,14 @@ _PREDICTION_METADATA_KEYS = frozenset(
 def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, object]:
     metadata_keys = set(metadata)
     feature_keys = metadata_keys.intersection(_MODEL_METADATA_FEATURE_KEYS)
-    if (
-        not _MODEL_METADATA_BASE_KEYS.issubset(metadata_keys)
-        or len(feature_keys) != 1
-        or metadata_keys.difference(_MODEL_METADATA_BASE_KEYS).difference(
-            _MODEL_METADATA_FEATURE_KEYS
-        )
-    ):
+    extra_keys = (
+        metadata_keys.difference(_MODEL_METADATA_BASE_KEYS)
+        .difference(_MODEL_METADATA_FEATURE_KEYS)
+        .difference(_MODEL_METADATA_OPTIONAL_KEYS)
+    )
+    if not _MODEL_METADATA_BASE_KEYS.issubset(metadata_keys) or len(feature_keys) != 1:
+        raise ValueError("invalid_model_metadata")
+    if extra_keys:
         raise ValueError("invalid_model_metadata")
     if metadata["contract_version"] != "0.1":
         raise ValueError("invalid_model_metadata")
@@ -157,6 +182,8 @@ def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obj
             "feature_importance_status",
             "invalid_model_metadata",
         )
+    if "model_selection" in metadata:
+        _validate_model_selection_metadata_shape(metadata["model_selection"])
     if (
         input_columns != [*input_factor_columns, *input_feature_columns]
         or input_count != len(input_columns)
@@ -184,6 +211,54 @@ def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obj
         allow_empty=True,
     )
     return metadata
+
+
+def _validate_model_selection_metadata_shape(metadata: object) -> None:
+    if not isinstance(metadata, dict) or set(metadata) != _MODEL_SELECTION_KEYS:
+        raise ValueError("invalid_model_metadata")
+    if metadata["status"] != "selected":
+        raise ValueError("invalid_model_metadata")
+    for key in (
+        "configured_model_id",
+        "selected_model_id",
+        "selection_metric",
+        "selection_direction",
+        "validation_start",
+        "validation_end",
+    ):
+        _require_metadata_string(metadata, key, "invalid_model_metadata")
+    if metadata["selection_direction"] not in {"maximize", "minimize"}:
+        raise ValueError("invalid_model_metadata")
+    candidate_model_ids = _require_metadata_string_list(
+        metadata,
+        "candidate_model_ids",
+        "invalid_model_metadata",
+    )
+    candidate_count = _require_non_negative_metadata_int(
+        metadata,
+        "candidate_count",
+        "invalid_model_metadata",
+    )
+    if candidate_count != len(candidate_model_ids):
+        raise ValueError("invalid_model_metadata")
+    trial_metrics = metadata["trial_metrics"]
+    if not isinstance(trial_metrics, list) or len(trial_metrics) != candidate_count:
+        raise ValueError("invalid_model_metadata")
+    for trial in trial_metrics:
+        if (
+            not isinstance(trial, dict)
+            or set(trial) != _MODEL_SELECTION_TRIAL_METRIC_KEYS
+        ):
+            raise ValueError("invalid_model_metadata")
+        _require_metadata_string(trial, "model_id", "invalid_model_metadata")
+        _require_non_negative_metadata_int(
+            trial,
+            "validation_rows",
+            "invalid_model_metadata",
+        )
+        for key in ("validation_ic", "validation_rankic", "validation_mse"):
+            if not isinstance(trial[key], int | float):
+                raise ValueError("invalid_model_metadata")
 
 
 def _validate_prediction_metadata_shape(
@@ -304,6 +379,48 @@ def _validate_model_metadata_consistency(
         raise ValueError("model_metadata_inconsistent")
     if int(metadata["coefficient_count"]) <= 0:
         raise ValueError("model_metadata_inconsistent")
+    _validate_model_selection_metadata_consistency(metadata, spec=spec)
+
+
+def _validate_model_selection_metadata_consistency(
+    metadata: dict[str, object],
+    *,
+    spec: PredictionSpec,
+) -> None:
+    model_selection = metadata.get("model_selection")
+    if not spec.candidate_model_ids:
+        if model_selection is not None:
+            raise ValueError("model_metadata_inconsistent")
+        return
+    if not isinstance(model_selection, dict):
+        raise ValueError("model_metadata_inconsistent")
+    candidate_model_ids = [spec.model_id, *spec.candidate_model_ids]
+    if model_selection["configured_model_id"] != spec.model_id:
+        raise ValueError("model_metadata_inconsistent")
+    if model_selection["candidate_model_ids"] != candidate_model_ids:
+        raise ValueError("model_metadata_inconsistent")
+    if model_selection["selected_model_id"] not in candidate_model_ids:
+        raise ValueError("model_metadata_inconsistent")
+    if model_selection["selection_metric"] != spec.model_selection_metric:
+        raise ValueError("model_metadata_inconsistent")
+    if (
+        model_selection["validation_start"]
+        != spec.model_selection_validation_start
+        or model_selection["validation_end"] != spec.model_selection_validation_end
+    ):
+        raise ValueError("model_metadata_inconsistent")
+    if len(model_selection["trial_metrics"]) != model_selection["candidate_count"]:
+        raise ValueError("model_metadata_inconsistent")
+    if metadata["input_columns"] != _selected_trial_input_columns(metadata, spec):
+        raise ValueError("model_metadata_inconsistent")
+
+
+def _selected_trial_input_columns(
+    metadata: dict[str, object],
+    spec: PredictionSpec,
+) -> list[str]:
+    del spec
+    return list(metadata["input_columns"])
 
 
 def _validate_prediction_metadata_consistency(

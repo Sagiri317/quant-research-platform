@@ -15,7 +15,10 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.contracts.portfolios import PortfolioSpec
+from quant_research_platform.contracts.portfolios import (
+    PortfolioDiagnosticsConfig,
+    PortfolioSpec,
+)
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.markets.implementations.a_share.ids import (
@@ -83,6 +86,11 @@ DEFAULT_MODEL_RANDOM_SEED = SCENARIO_DEFAULTS.random_seed
 DEFAULT_MAX_TRAIN_ROWS = SCENARIO_DEFAULTS.max_train_rows
 DEFAULT_TEST_END: str | None = SCENARIO_DEFAULTS.test_end
 DEFAULT_PREDICTION_MODEL_ALGORITHM = SCENARIO_DEFAULTS.prediction_model_algorithm
+DEFAULT_PORTFOLIO_DIAGNOSTICS_CONFIG = PortfolioDiagnosticsConfig(
+    capacity_amount_column="amount",
+    capacity_float_market_cap_column="float_market_cap",
+    categorical_exposure_columns=("csrc_2012_industry_code",),
+)
 
 
 def build_signal_specs() -> tuple[SignalSpec, ...]:
@@ -189,6 +197,7 @@ def build_portfolio_specs(
             return_source_column=return_source_column,
             rebalance_frequency=rebalance_frequency,
             execution_lag_steps=execution_lag_steps,
+            diagnostics_config=DEFAULT_PORTFOLIO_DIAGNOSTICS_CONFIG,
         ),
     )
 
@@ -341,6 +350,7 @@ def _model_hyperparameters(
 __all__ = [
     "DEFAULT_MAX_TRAIN_ROWS",
     "DEFAULT_MODEL_RANDOM_SEED",
+    "DEFAULT_PORTFOLIO_DIAGNOSTICS_CONFIG",
     "DEFAULT_RETURN_SOURCE_COLUMN",
     "DEFAULT_TEST_END",
     "build_evaluation_catalog",

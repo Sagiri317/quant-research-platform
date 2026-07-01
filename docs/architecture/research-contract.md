@@ -26,7 +26,7 @@ research 是通用研究算法层，可以依赖 contracts、storage、runtime r
 
 compute 只提供数值计算核心，不持有 market session domain 工具，也不写 report/storage 产物。
 
-`research/factors/price_volume/` 是量价因子的当前 owner。`columns.py` 负责列名、窗口集合和输入列合同，`calculations.py` 负责因子计算，`rolling.py` 和 `safety.py` 负责滚动数值与安全计算，`definitions.py` 和 `selection.py` 负责定义与特征选择，`windows.py` 负责 valid bar 读取窗口。package `__init__.py` 只导出当前 public names，不承载实现。
+`research/factors/price_volume/` 是量价因子的当前 owner。`columns.py` 只负责列名、列前缀、列集合和 feature exclusion；`presets.py` 负责 preset 名称与 factor 列集合；`requirements.py` 负责 factor 输入列需求；`windows.py` 负责 lookback 和 valid bar 读取窗口；`definitions.py` 负责 factor definition 语义；`calculations.py` 负责因子计算；`rolling.py` 和 `safety.py` 负责滚动数值与安全计算；`selection.py` 负责特征选择。package `__init__.py` 只导出当前 public names，不承载实现。
 
 `research/models/algorithm_facts.py` 是模型算法事实源。`estimators.py` 负责 estimator factories，`fitting.py` 负责 fit result、训练 frame 收集、线性拟合与 estimator fitting，`prediction.py` 负责预测输出 frame，`feature_importance.py` 负责特征重要性 payload，`rank_ensemble.py` 负责 rank ensemble predictor，`dependencies.py` 负责可选依赖状态，`validation_split.py` 负责训练 buffer 与 purge controls。`research/models/supervised.py` 保留当前 public boundary 并委派到这些 owner modules。单个算法字段使用 `model_algorithm`，算法 ID 集合使用 `model_algorithm_ids`。
 

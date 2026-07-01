@@ -6,7 +6,12 @@ from collections.abc import Mapping
 
 import pandas as pd
 
-from quant_research_platform.contracts.portfolios import PortfolioSpec
+from quant_research_platform.contracts.portfolios import (
+    PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS,
+    PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS,
+    PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS,
+    PortfolioSpec,
+)
 
 _PORTFOLIO_ARTIFACTS = {
     "positions": "positions.parquet",
@@ -19,6 +24,9 @@ _PORTFOLIO_ARTIFACTS = {
     "concentration": "concentration.parquet",
     "period_breakdown": "period_breakdown.parquet",
     "diagnostics": "diagnostics.parquet",
+    "capacity_diagnostics": "capacity_diagnostics.parquet",
+    "numeric_exposure_diagnostics": "numeric_exposure_diagnostics.parquet",
+    "categorical_exposure_diagnostics": "categorical_exposure_diagnostics.parquet",
 }
 _PORTFOLIO_POSITION_COLUMNS = ("timestamp", "asset", "signal", "position")
 _PORTFOLIO_TURNOVER_COLUMNS = ("timestamp", "signal", "turnover")
@@ -160,6 +168,11 @@ def _portfolio_required_columns() -> dict[str, tuple[str, ...]]:
         "concentration": _PORTFOLIO_CONCENTRATION_COLUMNS,
         "period_breakdown": _PORTFOLIO_PERIOD_BREAKDOWN_COLUMNS,
         "diagnostics": _PORTFOLIO_DIAGNOSTIC_COLUMNS,
+        "capacity_diagnostics": PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS,
+        "numeric_exposure_diagnostics": PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS,
+        "categorical_exposure_diagnostics": (
+            PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS
+        ),
     }
 
 

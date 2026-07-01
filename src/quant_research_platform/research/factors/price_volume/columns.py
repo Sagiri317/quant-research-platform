@@ -6,11 +6,6 @@ from collections.abc import Iterable
 
 from quant_research_platform.contracts.data import DataFrequency, horizon_unit_suffix
 
-PRICE_VOLUME_FACTOR_FAMILY = "price_volume"
-
-PRICE_VOLUME_STANDARD_PRESET = "standard"
-PRICE_VOLUME_CORE_PRESET = "core"
-PRICE_VOLUME_SMOKE_PRESET = "smoke"
 
 def price_volume_window_column(
     prefix: str,
@@ -133,13 +128,9 @@ def price_volume_factor_columns_for_windows(
     return tuple(dict.fromkeys(columns))
 
 __all__ = [
-    "PRICE_VOLUME_CORE_PRESET",
-    "PRICE_VOLUME_FACTOR_FAMILY",
     "PRICE_VOLUME_FEATURE_EXCLUDE_COLUMNS",
     "PRICE_VOLUME_FEATURE_EXCLUDE_PREFIXES",
     "PRICE_VOLUME_FACTOR_PREFIXES",
-    "PRICE_VOLUME_SMOKE_PRESET",
-    "PRICE_VOLUME_STANDARD_PRESET",
     "price_volume_factor_columns_for_windows",
     "price_volume_window_column",
 ]

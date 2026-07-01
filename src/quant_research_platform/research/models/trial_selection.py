@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
+import numpy as np
 import pandas as pd
+
+from quant_research_platform.contracts.predictions import (
+    MODEL_SELECTION_METRIC_DIRECTIONS,
+)
+
+VALIDATION_METRIC_COLUMNS = ("validation_ic", "validation_rankic", "validation_mse")
+TEST_METRIC_COLUMNS = ("test_ic", "test_rankic", "test_mse")
 
 
 def validate_trial_metric_columns(
@@ -58,4 +66,94 @@ def select_best_validation_trial(
     return str(ordered.iloc[0][trial_id_column])
 
 
-__all__ = ["select_best_validation_trial", "validate_trial_metric_columns"]
+def evaluate_model_trial_metrics(
+    frame: pd.DataFrame,
+    *,
+    model_id: str,
+    label_column: str,
+    prediction_column: str,
+) -> dict[str, object]:
+    """Evaluate validation-only trial metrics."""
+
+    missing = sorted({label_column, prediction_column}.difference(frame.columns))
+    if missing:
+        raise ValueError(f"missing_trial_metric_columns: {', '.join(missing)}")
+    usable = frame.loc[:, [label_column, prediction_column]].dropna()
+    if usable.empty:
+        raise ValueError("empty_model_selection_validation_window")
+    label_values = pd.to_numeric(usable[label_column], errors="coerce")
+    prediction_values = pd.to_numeric(usable[prediction_column], errors="coerce")
+    if bool(label_values.isna().any()) or bool(prediction_values.isna().any()):
+        raise ValueError("invalid_trial_metric_values")
+    errors = prediction_values - label_values
+    return {
+        "model_id": model_id,
+        "validation_rows": int(len(usable)),
+        "validation_ic": _correlation(label_values, prediction_values, rank=False),
+        "validation_rankic": _correlation(label_values, prediction_values, rank=True),
+        "validation_mse": float(np.square(errors).mean()),
+    }
+
+
+def build_model_selection_metadata(
+    *,
+    configured_model_id: str,
+    selected_model_id: str,
+    candidate_model_ids: tuple[str, ...],
+    selection_metric: str,
+    validation_start: str,
+    validation_end: str,
+    trial_metrics: pd.DataFrame,
+) -> dict[str, object]:
+    """Build prediction model selection metadata from validation metrics."""
+
+    if selection_metric not in MODEL_SELECTION_METRIC_DIRECTIONS:
+        raise ValueError("invalid_model_selection_metric")
+    if selected_model_id not in candidate_model_ids:
+        raise ValueError("selected_model_not_in_candidates")
+    records = trial_metrics.loc[:, ("model_id", *VALIDATION_METRIC_COLUMNS)].to_dict(
+        "records"
+    )
+    for record in records:
+        record["validation_rows"] = int(
+            trial_metrics.loc[
+                trial_metrics["model_id"] == record["model_id"],
+                "validation_rows",
+            ].iloc[0]
+        )
+    return {
+        "status": "selected",
+        "configured_model_id": configured_model_id,
+        "selected_model_id": selected_model_id,
+        "candidate_model_ids": list(candidate_model_ids),
+        "selection_metric": selection_metric,
+        "selection_direction": MODEL_SELECTION_METRIC_DIRECTIONS[selection_metric],
+        "validation_start": validation_start,
+        "validation_end": validation_end,
+        "candidate_count": len(candidate_model_ids),
+        "trial_metrics": records,
+    }
+
+
+def _correlation(
+    labels: pd.Series,
+    predictions: pd.Series,
+    *,
+    rank: bool,
+) -> float:
+    left = labels.rank(method="average") if rank else labels
+    right = predictions.rank(method="average") if rank else predictions
+    value = left.corr(right)
+    if pd.isna(value):
+        return 0.0
+    return float(value)
+
+
+__all__ = [
+    "VALIDATION_METRIC_COLUMNS",
+    "TEST_METRIC_COLUMNS",
+    "build_model_selection_metadata",
+    "evaluate_model_trial_metrics",
+    "select_best_validation_trial",
+    "validate_trial_metric_columns",
+]

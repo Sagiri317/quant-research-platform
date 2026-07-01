@@ -3,142 +3,137 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.portfolios import PortfolioDiagnosticsConfig
 from quant_research_platform.research.portfolios.diagnostics import (
-    summarize_capacity_proxy,
-    summarize_portfolio_exposures,
+    build_capacity_diagnostics,
+    build_categorical_exposure_diagnostics,
+    build_numeric_exposure_diagnostics,
 )
 
 
-def test_summarize_capacity_proxy_excludes_non_positive_amounts() -> None:
-    weights = pd.DataFrame(
+def test_build_capacity_diagnostics_excludes_non_positive_amounts() -> None:
+    positions = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-02"]),
             "asset": ["a", "b", "c"],
-            "weight": [0.5, -0.25, 0.25],
+            "signal": ["signal", "signal", "signal"],
+            "position": [0.5, -0.25, 0.25],
         }
     )
-    liquidity = pd.DataFrame(
+    context = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-02"]),
-            "asset": ["a", "b", "c"],
+            "asset_id": ["a", "b", "c"],
             "amount": [100.0, 0.0, -1.0],
             "float_market_cap": [1000.0, 500.0, 200.0],
         }
     )
 
-    summary = summarize_capacity_proxy(
-        weights,
-        liquidity,
-        float_market_cap_column="float_market_cap",
+    summary = build_capacity_diagnostics(
+        positions,
+        context,
+        PortfolioDiagnosticsConfig(
+            capacity_amount_column="amount",
+            capacity_float_market_cap_column="float_market_cap",
+        ),
     )
 
-    assert summary["row_count"] == 3.0
-    assert summary["positive_amount_row_count"] == 1.0
-    assert summary["excluded_non_positive_amount_count"] == 2.0
-    assert summary["weighted_amount_proxy"] == pytest.approx(50.0)
-    assert summary["weighted_float_market_cap_proxy"] == pytest.approx(500.0)
+    row = summary.iloc[0]
+    assert row["row_count"] == 3
+    assert row["positive_amount_row_count"] == 1
+    assert row["excluded_non_positive_amount_count"] == 2
+    assert row["weighted_amount_proxy"] == pytest.approx(50.0)
+    assert row["weighted_float_market_cap_proxy"] == pytest.approx(500.0)
 
 
-def test_summarize_capacity_proxy_fails_closed_on_bad_liquidity() -> None:
-    weights = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02"]),
-            "asset": ["a"],
-            "weight": [1.0],
-        }
+def test_build_capacity_diagnostics_writes_empty_schema_for_empty_config() -> None:
+    summary = build_capacity_diagnostics(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        PortfolioDiagnosticsConfig(),
     )
-    with pytest.raises(ValueError, match="missing_liquidity_columns"):
-        summarize_capacity_proxy(weights, pd.DataFrame({"asset": ["a"]}))
 
-    duplicate = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-            "asset": ["a", "a"],
-            "amount": [1.0, 2.0],
-        }
+    assert summary.empty
+    assert summary.columns.tolist() == [
+        "timestamp",
+        "signal",
+        "row_count",
+        "positive_amount_row_count",
+        "excluded_non_positive_amount_count",
+        "gross_weight",
+        "covered_gross_weight",
+        "weighted_amount_proxy",
+        "weighted_float_market_cap_proxy",
+    ]
+
+
+def test_build_numeric_exposure_diagnostics_returns_weighted_exposures() -> None:
+    positions = _positions()
+    context = _context()
+
+    summary = build_numeric_exposure_diagnostics(
+        positions,
+        context,
+        PortfolioDiagnosticsConfig(numeric_exposure_columns=("risk_beta",)),
     )
-    with pytest.raises(ValueError, match="duplicate_liquidity_keys"):
-        summarize_capacity_proxy(weights, duplicate)
 
-    missing = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-03"]),
-            "asset": ["a"],
-            "amount": [1.0],
-        }
+    assert summary["exposure_column"].tolist() == ["risk_beta", "risk_beta"]
+    assert summary["exposure_value"].round(6).tolist() == [0.0, 1.1]
+
+
+def test_build_categorical_exposure_diagnostics_returns_weight_buckets() -> None:
+    positions = _positions()
+    context = _context()
+
+    summary = build_categorical_exposure_diagnostics(
+        positions,
+        context,
+        PortfolioDiagnosticsConfig(categorical_exposure_columns=("industry",)),
     )
-    with pytest.raises(ValueError, match="missing_liquidity_for_weight"):
-        summarize_capacity_proxy(weights, missing)
+
+    assert set(summary["exposure_value"]) == {"tech", "finance"}
+    tech = summary.loc[summary["exposure_value"] == "tech"].iloc[0]
+    assert tech["asset_count"] == 1
+    assert tech["long_weight"] == pytest.approx(0.6)
 
 
-def test_summarize_portfolio_exposures_returns_timestamp_exposures() -> None:
-    weights = pd.DataFrame(
+def test_build_exposure_diagnostics_fail_closed_on_bad_inputs() -> None:
+    positions = _positions()
+    context = _context()
+
+    with pytest.raises(ValueError, match="missing_exposures_columns"):
+        build_numeric_exposure_diagnostics(
+            positions,
+            context,
+            PortfolioDiagnosticsConfig(numeric_exposure_columns=("missing_beta",)),
+        )
+
+    duplicate = pd.concat([context, context.iloc[[0]]], ignore_index=True)
+    with pytest.raises(ValueError, match="duplicate_exposures_keys"):
+        build_categorical_exposure_diagnostics(
+            positions,
+            duplicate,
+            PortfolioDiagnosticsConfig(categorical_exposure_columns=("industry",)),
+        )
+
+
+def _positions() -> pd.DataFrame:
+    return pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-03"]),
             "asset": ["a", "b", "a"],
-            "weight": [0.6, -0.4, 1.0],
+            "signal": ["signal", "signal", "signal"],
+            "position": [0.6, -0.4, 1.0],
         }
     )
-    exposures = pd.DataFrame(
+
+
+def _context() -> pd.DataFrame:
+    return pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-03"]),
-            "asset": ["a", "b", "a"],
-            "industry": [1.0, 0.0, 0.5],
+            "asset_id": ["a", "b", "a"],
+            "industry": ["tech", "finance", "tech"],
             "risk_beta": [0.8, 1.2, 1.1],
         }
     )
-
-    summary = summarize_portfolio_exposures(
-        weights,
-        exposures,
-        exposure_columns=("industry", "risk_beta"),
-    )
-
-    assert summary["timestamp"].tolist() == list(
-        pd.to_datetime(["2024-01-02", "2024-01-03"])
-    )
-    assert summary["industry"].round(6).tolist() == [0.6, 0.5]
-    assert summary["risk_beta"].round(6).tolist() == [0.0, 1.1]
-
-
-def test_summarize_portfolio_exposures_fails_closed() -> None:
-    weights = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02"]),
-            "asset": ["a"],
-            "weight": [1.0],
-        }
-    )
-    exposures = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02"]),
-            "asset": ["a"],
-            "industry": [1.0],
-        }
-    )
-
-    with pytest.raises(ValueError, match="exposure_columns_required"):
-        summarize_portfolio_exposures(weights, exposures, exposure_columns=())
-
-    with pytest.raises(ValueError, match="missing_exposures_columns"):
-        summarize_portfolio_exposures(
-            weights,
-            exposures,
-            exposure_columns=("risk_beta",),
-        )
-
-    duplicate = pd.concat([exposures, exposures], ignore_index=True)
-    with pytest.raises(ValueError, match="duplicate_exposures_keys"):
-        summarize_portfolio_exposures(
-            weights,
-            duplicate,
-            exposure_columns=("industry",),
-        )
-
-    missing_asset = exposures.assign(asset="b")
-    with pytest.raises(ValueError, match="missing_asset_exposure"):
-        summarize_portfolio_exposures(
-            weights,
-            missing_asset,
-            exposure_columns=("industry",),
-        )

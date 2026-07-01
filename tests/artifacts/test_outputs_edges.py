@@ -767,6 +767,9 @@ def test_portfolio_outputs_write_manifest_and_local_scope(
         "concentration.parquet",
         "period_breakdown.parquet",
         "diagnostics.parquet",
+        "capacity_diagnostics.parquet",
+        "numeric_exposure_diagnostics.parquet",
+        "categorical_exposure_diagnostics.parquet",
     ]
 
 
@@ -781,6 +784,9 @@ def test_portfolio_outputs_write_row_artifacts_from_chunks(
         "cost_breakdown",
         "portfolio_returns",
         "diagnostics",
+        "capacity_diagnostics",
+        "numeric_exposure_diagnostics",
+        "categorical_exposure_diagnostics",
     )
     chunks = (
         {
@@ -1105,6 +1111,42 @@ def _portfolio_artifacts() -> dict[str, pd.DataFrame]:
                 "fallback_reason": [None],
             }
         ),
+        "capacity_diagnostics": pd.DataFrame(
+            {
+                "timestamp": [timestamp],
+                "signal": ["signal"],
+                "row_count": [2],
+                "positive_amount_row_count": [2],
+                "excluded_non_positive_amount_count": [0],
+                "gross_weight": [2.0],
+                "covered_gross_weight": [2.0],
+                "weighted_amount_proxy": [100.0],
+                "weighted_float_market_cap_proxy": [1000.0],
+            }
+        ),
+        "numeric_exposure_diagnostics": pd.DataFrame(
+            {
+                "timestamp": [timestamp],
+                "signal": ["signal"],
+                "exposure_column": ["beta"],
+                "exposure_value": [0.0],
+                "row_count": [2],
+                "gross_weight": [2.0],
+            }
+        ),
+        "categorical_exposure_diagnostics": pd.DataFrame(
+            {
+                "timestamp": [timestamp],
+                "signal": ["signal"],
+                "exposure_column": ["industry"],
+                "exposure_value": ["tech"],
+                "asset_count": [2],
+                "gross_weight": [2.0],
+                "net_weight": [0.0],
+                "long_weight": [1.0],
+                "short_weight": [-1.0],
+            }
+        ),
     }
 
 
@@ -1136,6 +1178,9 @@ def _portfolio_row_artifact_names() -> tuple[str, ...]:
         "cost_breakdown",
         "portfolio_returns",
         "diagnostics",
+        "capacity_diagnostics",
+        "numeric_exposure_diagnostics",
+        "categorical_exposure_diagnostics",
     )
 
 

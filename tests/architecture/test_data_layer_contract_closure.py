@@ -27,10 +27,6 @@ A_SHARE_CSMAR_ID_IMPORTS = {
         "quant_research_platform.sources.csmar",
     ),
     (
-        PROJECT_SRC / "markets/implementations/a_share/processed/materializer.py",
-        "quant_research_platform.sources.csmar",
-    ),
-    (
         PROJECT_SRC / "markets/implementations/a_share/validation/internal_tables.py",
         "quant_research_platform.sources.csmar",
     ),
@@ -42,10 +38,6 @@ A_SHARE_CSMAR_ID_IMPORTS = {
 A_SHARE_CSMAR_ID_RESIDUE_LINES = {
     (
         Path("processed/catalog.py"),
-        "from quant_research_platform.sources.csmar import ids as csmar_ids",
-    ),
-    (
-        Path("processed/materializer.py"),
         "from quant_research_platform.sources.csmar import ids as csmar_ids",
     ),
     (

@@ -49,6 +49,8 @@ RESEARCH_DATASET_CONTEXT_COLUMNS: tuple[str, ...] = (
     "turnover",
     "total_market_cap",
     "float_market_cap",
+    "csrc_2012_industry_code",
+    "csrc_2012_industry_name",
 )
 RESEARCH_DATASET_FEATURE_COLUMNS: tuple[str, ...] = (
     RESEARCH_DATASET_MOMENTUM_FEATURE_COLUMN,

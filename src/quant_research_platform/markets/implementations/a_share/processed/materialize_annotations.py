@@ -22,7 +22,7 @@ from quant_research_platform.storage.datasets import DatasetInspection, inspect_
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def _write_annotation(
+def write_annotations(
     spec: ProcessedDataSpec,
     *,
     layout: StorageLayout,
@@ -79,6 +79,4 @@ def _write_annotation(
     )
 
 
-__all__ = ["_write_annotation"]
-
-
+__all__ = ["write_annotations"]

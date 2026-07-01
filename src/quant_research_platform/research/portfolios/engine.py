@@ -22,6 +22,11 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioSpec,
     normalize_rebalance_frequency,
 )
+from quant_research_platform.research.portfolios.diagnostics import (
+    build_capacity_diagnostics,
+    build_categorical_exposure_diagnostics,
+    build_numeric_exposure_diagnostics,
+)
 from quant_research_platform.research.signals.materialization import (
     materialize_signal_frame,
 )
@@ -40,6 +45,9 @@ class PortfolioComputationResult:
     concentration: pd.DataFrame
     period_breakdown: pd.DataFrame
     diagnostics: pd.DataFrame
+    capacity_diagnostics: pd.DataFrame
+    numeric_exposure_diagnostics: pd.DataFrame
+    categorical_exposure_diagnostics: pd.DataFrame
 
 
 def construct_portfolio_positions(
@@ -86,6 +94,21 @@ def construct_portfolio_positions(
     exposure_summary = compute_exposure_summary(positions, portfolio_returns)
     concentration = summarize_concentration(positions)
     period_breakdown = summarize_period_breakdown(portfolio_returns)
+    capacity_diagnostics = build_capacity_diagnostics(
+        positions,
+        panel,
+        spec.diagnostics_config,
+    )
+    numeric_exposure_diagnostics = build_numeric_exposure_diagnostics(
+        positions,
+        panel,
+        spec.diagnostics_config,
+    )
+    categorical_exposure_diagnostics = build_categorical_exposure_diagnostics(
+        positions,
+        panel,
+        spec.diagnostics_config,
+    )
     return PortfolioComputationResult(
         spec=spec,
         positions=positions,
@@ -98,6 +121,9 @@ def construct_portfolio_positions(
         concentration=concentration,
         period_breakdown=period_breakdown,
         diagnostics=diagnostics,
+        capacity_diagnostics=capacity_diagnostics,
+        numeric_exposure_diagnostics=numeric_exposure_diagnostics,
+        categorical_exposure_diagnostics=categorical_exposure_diagnostics,
     )
 
 
@@ -245,6 +271,10 @@ def _portfolio_panel(
         spec.tradability_config.eligibility_column,
         spec.tradability_config.can_enter_column,
         spec.tradability_config.can_exit_column,
+        spec.diagnostics_config.capacity_amount_column,
+        spec.diagnostics_config.capacity_float_market_cap_column,
+        *spec.diagnostics_config.numeric_exposure_columns,
+        *spec.diagnostics_config.categorical_exposure_columns,
     )
     required = {
         "asset_id",

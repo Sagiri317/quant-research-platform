@@ -1,4 +1,4 @@
-"""Research-only portfolio diagnostics."""
+"""Production portfolio diagnostics builders."""
 
 from __future__ import annotations
 
@@ -6,129 +6,352 @@ from collections.abc import Sequence
 
 import pandas as pd
 
+from quant_research_platform.contracts.portfolios import (
+    PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS,
+    PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS,
+    PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS,
+    PortfolioDiagnosticsConfig,
+)
 
-def summarize_capacity_proxy(
+
+def build_capacity_diagnostics(
+    positions: pd.DataFrame,
+    context: pd.DataFrame,
+    config: PortfolioDiagnosticsConfig,
+    *,
+    asset_column: str = "asset",
+    context_asset_column: str = "asset_id",
+    timestamp_column: str = "timestamp",
+    weight_column: str = "position",
+) -> pd.DataFrame:
+    """Build capacity proxy diagnostics for portfolio positions."""
+
+    if config.capacity_amount_column is None:
+        return pd.DataFrame(columns=list(PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS))
+    summary = _summarize_capacity_proxy(
+        positions,
+        context,
+        asset_column=asset_column,
+        context_asset_column=context_asset_column,
+        timestamp_column=timestamp_column,
+        signal_column="signal",
+        weight_column=weight_column,
+        amount_column=config.capacity_amount_column,
+        float_market_cap_column=config.capacity_float_market_cap_column,
+    )
+    return summary.loc[:, list(PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS)]
+
+
+def build_numeric_exposure_diagnostics(
+    positions: pd.DataFrame,
+    context: pd.DataFrame,
+    config: PortfolioDiagnosticsConfig,
+    *,
+    asset_column: str = "asset",
+    context_asset_column: str = "asset_id",
+    timestamp_column: str = "timestamp",
+    weight_column: str = "position",
+) -> pd.DataFrame:
+    """Build weighted numeric exposure diagnostics."""
+
+    if not config.numeric_exposure_columns:
+        return pd.DataFrame(columns=list(PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS))
+    summary = _summarize_numeric_exposures(
+        positions,
+        context,
+        exposure_columns=config.numeric_exposure_columns,
+        asset_column=asset_column,
+        context_asset_column=context_asset_column,
+        timestamp_column=timestamp_column,
+        signal_column="signal",
+        weight_column=weight_column,
+    )
+    return summary.loc[:, list(PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS)]
+
+
+def build_categorical_exposure_diagnostics(
+    positions: pd.DataFrame,
+    context: pd.DataFrame,
+    config: PortfolioDiagnosticsConfig,
+    *,
+    asset_column: str = "asset",
+    context_asset_column: str = "asset_id",
+    timestamp_column: str = "timestamp",
+    weight_column: str = "position",
+) -> pd.DataFrame:
+    """Build categorical exposure diagnostics."""
+
+    if not config.categorical_exposure_columns:
+        return pd.DataFrame(
+            columns=list(PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS)
+        )
+    summary = _summarize_categorical_exposures(
+        positions,
+        context,
+        exposure_columns=config.categorical_exposure_columns,
+        asset_column=asset_column,
+        context_asset_column=context_asset_column,
+        timestamp_column=timestamp_column,
+        signal_column="signal",
+        weight_column=weight_column,
+    )
+    return summary.loc[:, list(PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS)]
+
+
+def _summarize_capacity_proxy(
     weights: pd.DataFrame,
     liquidity: pd.DataFrame,
     *,
-    asset_column: str = "asset",
-    timestamp_column: str = "timestamp",
-    weight_column: str = "weight",
-    amount_column: str = "amount",
-    float_market_cap_column: str | None = None,
-) -> dict[str, float]:
-    """Summarize research-only capacity proxy diagnostics."""
-
+    asset_column: str,
+    context_asset_column: str,
+    timestamp_column: str,
+    signal_column: str,
+    weight_column: str,
+    amount_column: str,
+    float_market_cap_column: str | None,
+) -> pd.DataFrame:
     _require_columns(
         weights,
-        (asset_column, timestamp_column, weight_column),
+        (asset_column, timestamp_column, signal_column, weight_column),
         "weights",
     )
-    liquidity_columns = [asset_column, timestamp_column, amount_column]
+    liquidity_columns = [context_asset_column, timestamp_column, amount_column]
     if float_market_cap_column is not None:
         liquidity_columns.append(float_market_cap_column)
     _require_columns(liquidity, tuple(liquidity_columns), "liquidity")
-    _reject_duplicate_keys(liquidity, (asset_column, timestamp_column), "liquidity")
-
-    merged = weights.merge(
+    _reject_duplicate_keys(
         liquidity,
-        on=[asset_column, timestamp_column],
-        how="left",
-        validate="many_to_one",
-        indicator=True,
+        (context_asset_column, timestamp_column),
+        "liquidity",
     )
-    if bool(merged["_merge"].ne("both").any()):
-        raise ValueError("missing_liquidity_for_weight")
-
-    weight_values = pd.to_numeric(merged[weight_column], errors="coerce")
-    amount_values = pd.to_numeric(merged[amount_column], errors="coerce")
-    if bool(weight_values.isna().any()) or bool(amount_values.isna().any()):
+    merged = _merge_position_context(
+        weights,
+        liquidity,
+        asset_column=asset_column,
+        context_asset_column=context_asset_column,
+        timestamp_column=timestamp_column,
+        context_columns=tuple(liquidity_columns),
+        missing_error="missing_liquidity_for_weight",
+    )
+    merged[weight_column] = pd.to_numeric(merged[weight_column], errors="coerce")
+    merged[amount_column] = pd.to_numeric(merged[amount_column], errors="coerce")
+    if bool(merged[[weight_column, amount_column]].isna().any().any()):
         raise ValueError("invalid_capacity_proxy_values")
-
-    positive_amount = amount_values.gt(0)
-    valid_weights = weight_values[positive_amount]
-    valid_amounts = amount_values[positive_amount]
-    result = {
-        "row_count": float(len(merged)),
-        "positive_amount_row_count": float(positive_amount.sum()),
-        "excluded_non_positive_amount_count": float((~positive_amount).sum()),
-        "gross_weight": float(weight_values.abs().sum()),
-        "covered_gross_weight": float(valid_weights.abs().sum()),
-        "weighted_amount_proxy": float((valid_weights.abs() * valid_amounts).sum()),
-    }
     if float_market_cap_column is not None:
-        float_market_cap = pd.to_numeric(
+        merged[float_market_cap_column] = pd.to_numeric(
             merged[float_market_cap_column],
             errors="coerce",
         )
-        if bool(float_market_cap.isna().any()):
+        if bool(merged[float_market_cap_column].isna().any()):
             raise ValueError("invalid_capacity_proxy_values")
-        result["weighted_float_market_cap_proxy"] = float(
-            (valid_weights.abs() * float_market_cap[positive_amount]).sum()
-        )
-    return result
+    else:
+        merged["weighted_float_market_cap_proxy"] = 0.0
+    records: list[dict[str, object]] = []
+    for (timestamp, signal), group in merged.groupby(
+        [timestamp_column, signal_column],
+        sort=True,
+        dropna=False,
+    ):
+        weight_values = group[weight_column]
+        amount_values = group[amount_column]
+        positive_amount = amount_values.gt(0)
+        valid_weights = weight_values[positive_amount]
+        record = {
+            "timestamp": timestamp,
+            "signal": signal,
+            "row_count": int(len(group)),
+            "positive_amount_row_count": int(positive_amount.sum()),
+            "excluded_non_positive_amount_count": int((~positive_amount).sum()),
+            "gross_weight": float(weight_values.abs().sum()),
+            "covered_gross_weight": float(valid_weights.abs().sum()),
+            "weighted_amount_proxy": float(
+                (valid_weights.abs() * amount_values[positive_amount]).sum()
+            ),
+            "weighted_float_market_cap_proxy": 0.0,
+        }
+        if float_market_cap_column is not None:
+            record["weighted_float_market_cap_proxy"] = float(
+                (
+                    valid_weights.abs()
+                    * group.loc[positive_amount, float_market_cap_column]
+                ).sum()
+            )
+        records.append(record)
+    return pd.DataFrame.from_records(
+        records,
+        columns=PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS,
+    )
 
 
-def summarize_portfolio_exposures(
+def _summarize_numeric_exposures(
     weights: pd.DataFrame,
     exposures: pd.DataFrame,
     *,
-    asset_column: str = "asset",
-    timestamp_column: str = "timestamp",
-    weight_column: str = "weight",
     exposure_columns: Sequence[str],
+    asset_column: str,
+    context_asset_column: str,
+    timestamp_column: str,
+    signal_column: str,
+    weight_column: str,
 ) -> pd.DataFrame:
-    """Return timestamp-level weighted exposure diagnostics."""
-
     if not exposure_columns:
         raise ValueError("exposure_columns_required")
-    _require_columns(
+    merged = _merged_exposure_frame(
         weights,
-        (asset_column, timestamp_column, weight_column),
-        "weights",
-    )
-    _require_columns(
         exposures,
-        (asset_column, timestamp_column, *tuple(exposure_columns)),
-        "exposures",
+        exposure_columns=exposure_columns,
+        asset_column=asset_column,
+        context_asset_column=context_asset_column,
+        timestamp_column=timestamp_column,
+        signal_column=signal_column,
+        weight_column=weight_column,
     )
-    _reject_duplicate_keys(exposures, (asset_column, timestamp_column), "exposures")
-
-    merged = weights.merge(
-        exposures,
-        on=[asset_column, timestamp_column],
-        how="left",
-        validate="many_to_one",
-        indicator=True,
-    )
-    if bool(merged["_merge"].ne("both").any()):
-        raise ValueError("missing_asset_exposure")
-
-    merged[weight_column] = pd.to_numeric(merged[weight_column], errors="coerce")
-    if bool(merged[weight_column].isna().any()):
-        raise ValueError("invalid_portfolio_exposure_values")
     records: list[dict[str, object]] = []
-    for timestamp, group in merged.groupby(timestamp_column, sort=True, dropna=False):
-        record: dict[str, object] = {
-            timestamp_column: timestamp,
-            "row_count": float(len(group)),
-            "gross_weight": float(group[weight_column].abs().sum()),
-        }
+    for (timestamp, signal), group in merged.groupby(
+        [timestamp_column, signal_column],
+        sort=True,
+        dropna=False,
+    ):
+        weights_abs = group[weight_column].abs()
+        gross_weight = float(weights_abs.sum())
         for column in exposure_columns:
             values = pd.to_numeric(group[column], errors="coerce")
             if bool(values.isna().any()):
                 raise ValueError("invalid_portfolio_exposure_values")
-            record[column] = float((group[weight_column] * values).sum())
-        records.append(record)
+            records.append(
+                {
+                    "timestamp": timestamp,
+                    "signal": signal,
+                    "exposure_column": column,
+                    "exposure_value": float((group[weight_column] * values).sum()),
+                    "row_count": int(len(group)),
+                    "gross_weight": gross_weight,
+                }
+            )
     return pd.DataFrame.from_records(
         records,
-        columns=(
+        columns=PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS,
+    )
+
+
+def _summarize_categorical_exposures(
+    weights: pd.DataFrame,
+    exposures: pd.DataFrame,
+    *,
+    exposure_columns: Sequence[str],
+    asset_column: str,
+    context_asset_column: str,
+    timestamp_column: str,
+    signal_column: str,
+    weight_column: str,
+) -> pd.DataFrame:
+    if not exposure_columns:
+        raise ValueError("exposure_columns_required")
+    merged = _merged_exposure_frame(
+        weights,
+        exposures,
+        exposure_columns=exposure_columns,
+        asset_column=asset_column,
+        context_asset_column=context_asset_column,
+        timestamp_column=timestamp_column,
+        signal_column=signal_column,
+        weight_column=weight_column,
+    )
+    records: list[dict[str, object]] = []
+    for column in exposure_columns:
+        for (timestamp, signal, value), group in merged.groupby(
+            [timestamp_column, signal_column, column],
+            sort=True,
+            dropna=False,
+        ):
+            weights = group[weight_column]
+            records.append(
+                {
+                    "timestamp": timestamp,
+                    "signal": signal,
+                    "exposure_column": column,
+                    "exposure_value": value,
+                    "asset_count": int(len(group)),
+                    "gross_weight": float(weights.abs().sum()),
+                    "net_weight": float(weights.sum()),
+                    "long_weight": float(weights[weights > 0].sum()),
+                    "short_weight": float(weights[weights < 0].sum()),
+                }
+            )
+    return pd.DataFrame.from_records(
+        records,
+        columns=PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS,
+    )
+
+
+def _merged_exposure_frame(
+    weights: pd.DataFrame,
+    exposures: pd.DataFrame,
+    *,
+    exposure_columns: Sequence[str],
+    asset_column: str,
+    context_asset_column: str,
+    timestamp_column: str,
+    signal_column: str,
+    weight_column: str,
+) -> pd.DataFrame:
+    _require_columns(
+        weights,
+        (asset_column, timestamp_column, signal_column, weight_column),
+        "weights",
+    )
+    _require_columns(
+        exposures,
+        (context_asset_column, timestamp_column, *tuple(exposure_columns)),
+        "exposures",
+    )
+    _reject_duplicate_keys(
+        exposures,
+        (context_asset_column, timestamp_column),
+        "exposures",
+    )
+    merged = _merge_position_context(
+        weights,
+        exposures,
+        asset_column=asset_column,
+        context_asset_column=context_asset_column,
+        timestamp_column=timestamp_column,
+        context_columns=(
+            context_asset_column,
             timestamp_column,
-            "row_count",
-            "gross_weight",
             *tuple(exposure_columns),
         ),
+        missing_error="missing_asset_exposure",
     )
+    merged[weight_column] = pd.to_numeric(merged[weight_column], errors="coerce")
+    if bool(merged[weight_column].isna().any()):
+        raise ValueError("invalid_portfolio_exposure_values")
+    return merged
+
+
+def _merge_position_context(
+    weights: pd.DataFrame,
+    context: pd.DataFrame,
+    *,
+    asset_column: str,
+    context_asset_column: str,
+    timestamp_column: str,
+    context_columns: tuple[str, ...],
+    missing_error: str,
+) -> pd.DataFrame:
+    renamed_context = context.loc[:, list(context_columns)].rename(
+        columns={context_asset_column: asset_column}
+    )
+    merged = weights.merge(
+        renamed_context,
+        on=[asset_column, timestamp_column],
+        how="left",
+        validate="many_to_one",
+        indicator=True,
+    )
+    if bool(merged["_merge"].ne("both").any()):
+        raise ValueError(missing_error)
+    return merged.drop(columns=["_merge"])
 
 
 def _require_columns(frame: pd.DataFrame, columns: tuple[str, ...], name: str) -> None:
@@ -146,4 +369,8 @@ def _reject_duplicate_keys(
         raise ValueError(f"duplicate_{name}_keys")
 
 
-__all__ = ["summarize_capacity_proxy", "summarize_portfolio_exposures"]
+__all__ = [
+    "build_capacity_diagnostics",
+    "build_categorical_exposure_diagnostics",
+    "build_numeric_exposure_diagnostics",
+]

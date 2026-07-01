@@ -71,6 +71,9 @@ def _write_portfolio_output_chunks(
         "cost_breakdown",
         "portfolio_returns",
         "diagnostics",
+        "capacity_diagnostics",
+        "numeric_exposure_diagnostics",
+        "categorical_exposure_diagnostics",
     )
     summary_names = tuple(
         name for name in _PORTFOLIO_ARTIFACTS if name not in row_artifacts
