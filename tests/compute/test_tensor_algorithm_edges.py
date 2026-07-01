@@ -19,25 +19,25 @@ from quant_research_platform.compute.tensor.cross_section import (
     summarize_group_spread_tensor,
 )
 from quant_research_platform.compute.tensor.exposure import (
-    _exposure_record_from_arrays,
+    exposure_record_from_arrays,
     summarize_tensor_exposure_from_path,
 )
 from quant_research_platform.compute.tensor.portfolio_helpers import (
-    _filter_panel_group,
-    _leg_weight_values,
+    filter_panel_group,
+    leg_weight_values,
 )
 from quant_research_platform.compute.tensor.portfolio_returns import (
-    _build_path_records_from_arrays,
     _long_short_record_from_arrays,
+    build_path_records_from_arrays,
     calculate_tensor_long_short,
 )
 from quant_research_platform.compute.tensor.turnover import (
     _current_position_state,
-    _path_current_state,
     _path_turnover_and_cost_records,
-    _path_turnover_and_cost_records_from_arrays,
-    _position_map_from_arrays,
     calculate_tensor_turnover_and_cost,
+    path_current_state,
+    path_turnover_and_cost_records_from_arrays,
+    position_map_from_arrays,
 )
 from quant_research_platform.contracts.portfolios import (
     CostConfig,
@@ -128,7 +128,7 @@ def test_tensor_portfolio_helpers_cover_weight_methods_and_errors() -> None:
     assets = np.array([0, 1, 2])
     values = np.array([1.0, 2.0, 4.0])
 
-    equal, reason = _leg_weight_values(
+    equal, reason = leg_weight_values(
         asset_indices=assets,
         signal_values=values,
         risk_values=None,
@@ -139,7 +139,7 @@ def test_tensor_portfolio_helpers_cover_weight_methods_and_errors() -> None:
     assert equal.tolist() == pytest.approx([1 / 3, 1 / 3, 1 / 3])
     assert reason == ""
 
-    ranked, _ = _leg_weight_values(
+    ranked, _ = leg_weight_values(
         asset_indices=assets,
         signal_values=values,
         risk_values=None,
@@ -150,7 +150,7 @@ def test_tensor_portfolio_helpers_cover_weight_methods_and_errors() -> None:
     assert ranked.sum() == pytest.approx(-1.0)
     assert abs(ranked[0]) > abs(ranked[1]) > abs(ranked[2])
 
-    zscore, fallback = _leg_weight_values(
+    zscore, fallback = leg_weight_values(
         asset_indices=assets,
         signal_values=np.array([1.0, 1.0, 1.0]),
         risk_values=None,
@@ -161,7 +161,7 @@ def test_tensor_portfolio_helpers_cover_weight_methods_and_errors() -> None:
     assert zscore.tolist() == pytest.approx([1 / 3, 1 / 3, 1 / 3])
     assert fallback == "equal_weight_fallback"
 
-    inverse, _ = _leg_weight_values(
+    inverse, _ = leg_weight_values(
         asset_indices=assets,
         signal_values=values,
         risk_values=np.array([1.0, 2.0, 4.0]),
@@ -174,7 +174,7 @@ def test_tensor_portfolio_helpers_cover_weight_methods_and_errors() -> None:
     )
     assert inverse.sum() == pytest.approx(1.0)
     with pytest.raises(ValueError, match="risk_column values"):
-        _leg_weight_values(
+        leg_weight_values(
             asset_indices=assets,
             signal_values=values,
             risk_values=np.array([1.0, 0.0, 1.0]),
@@ -193,7 +193,7 @@ def test_tensor_constraints_rank_and_apply_tradability() -> None:
         can_enter=np.array([True, False, True]),
         can_exit=np.array([False, True, True]),
     )
-    ranked = constraints._ranked_asset_indices(
+    ranked = constraints.ranked_asset_indices(
         assets=("A", "B", "C"),
         signal_values=np.array([1.0, 2.0, np.nan]),
         weight_config=WeightConfig(),
@@ -203,7 +203,7 @@ def test_tensor_constraints_rank_and_apply_tradability() -> None:
     )
     assert ranked.tolist() == [0, 1]
 
-    adjusted = constraints._apply_array_tradability_constraints(
+    adjusted = constraints.apply_array_tradability_constraints(
         positions=np.array([1.0, -1.0, 0.5]),
         assets=("A", "B", "C"),
         timestamp_input=timestamp_input,
@@ -213,7 +213,7 @@ def test_tensor_constraints_rank_and_apply_tradability() -> None:
     assert adjusted.tolist() == pytest.approx([-0.5, -1.0, 0.5])
 
     with pytest.raises(ValueError, match="exit is blocked"):
-        constraints._apply_array_tradability_constraints(
+        constraints.apply_array_tradability_constraints(
             positions=np.array([1.0, -1.0, 0.0]),
             assets=("A", "B", "C"),
             timestamp_input=timestamp_input,
@@ -261,7 +261,7 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
     assert turnover_record["turnover"] == pytest.approx(1.75)
     assert cost_record["total_cost"] == pytest.approx(0.00175)
 
-    array_turnover, _array_cost = _path_turnover_and_cost_records_from_arrays(
+    array_turnover, _array_cost = path_turnover_and_cost_records_from_arrays(
         context={},
         timestamp=pd.Timestamp("2024-01-03"),
         signal="factor",
@@ -274,7 +274,7 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
     )
     assert array_turnover["turnover"] == pytest.approx(1.75)
 
-    offsets, state = _path_current_state(
+    offsets, state = path_current_state(
         assets=("A", "B"),
         position_values=np.array([0.0, -1.0]),
     )
@@ -287,7 +287,7 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
     )
     assert current == {"A": 0.5}
     assert current_state["net_exposure"] == pytest.approx(0.5)
-    assert _position_map_from_arrays(
+    assert position_map_from_arrays(
         assets=("A", "B"),
         positions=np.array([0.0, -0.25]),
     ) == {"B": -0.25}
@@ -351,7 +351,7 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
         )
         is None
     )
-    path = _build_path_records_from_arrays(
+    path = build_path_records_from_arrays(
         context={"segment": "s1"},
         timestamp=pd.Timestamp("2024-01-02"),
         signal="factor",
@@ -387,7 +387,7 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
         pd.DataFrame(),
         returns,
     ).empty
-    assert _exposure_record_from_arrays(
+    assert exposure_record_from_arrays(
         context={"segment": "s1"},
         timestamp="2024-01-02",
         signal="factor",
@@ -396,17 +396,17 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
     )["segment"] == "s1"
 
 
-def test_tensor_filter_panel_group_uses_segments() -> None:
+def test_tensorfilter_panel_group_uses_segments() -> None:
     panel = _panel().assign(segment=["s1", "s2", "s1", "s1", "s2", "s1"])
 
-    filtered = _filter_panel_group(
+    filtered = filter_panel_group(
         panel=panel,
         segment_columns=("segment",),
         group_values={"segment": "s1"},
     )
 
     assert set(filtered["segment"]) == {"s1"}
-    assert _filter_panel_group(
+    assert filter_panel_group(
         panel=panel,
         segment_columns=(),
         group_values={},

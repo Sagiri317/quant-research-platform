@@ -18,7 +18,7 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.evaluations.diagnostics import (
-    _evaluation_diagnostics,
+    build_evaluation_diagnostics,
     summarize_group_spread,
     summarize_period_ic,
 )
@@ -45,7 +45,7 @@ def evaluate_signal_frame(
     n_groups: int | None = None,
 ) -> EvaluationResult:
     asset_column = "asset_id" if "asset_id" in frame else "asset"
-    return _evaluate_signal_frame_chunks(
+    return evaluate_signal_frame_chunks(
         (frame,),
         spec,
         n_groups=spec.n_groups if n_groups is None else n_groups,
@@ -53,7 +53,7 @@ def evaluate_signal_frame(
     )
 
 
-def _evaluate_signal_frame_chunks(
+def evaluate_signal_frame_chunks(
     frames: Iterable[pd.DataFrame],
     spec: EvaluationSpec,
     *,
@@ -74,7 +74,7 @@ def _evaluate_signal_frame_chunks(
     )
     ic_summary = summarize_period_ic(metrics)
     group_spread_summary = summarize_group_spread(grouped_label_values)
-    diagnostics = _evaluation_diagnostics(
+    diagnostics = build_evaluation_diagnostics(
         spec=spec,
         filter_metadata=filter_metadata,
         rows_after_signal_label_dropna=rows_after_dropna,

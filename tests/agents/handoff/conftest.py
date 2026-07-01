@@ -72,6 +72,10 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
             "schema_id": "qrp-handoff-validation-evidence",
             "checks": _validation_checks("NOT_RUN"),
         },
+        "handoff_evidence": {
+            "package-smoke": _package_smoke_evidence(),
+            "hard-scan-classification": _hard_scan_classification_evidence(),
+        },
     }
     result = builder.build_handoff_package(
         repo_root=repo,
@@ -133,6 +137,45 @@ def _validation_payload(
     return {
         "schema_id": "qrp-handoff-validation-evidence",
         "checks": checks if checks is not None else _validation_checks("PASS"),
+    }
+
+
+def _package_smoke_evidence() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-package-smoke-evidence",
+        "status": "PASS",
+        "build_command": "python -m build --sdist --wheel",
+        "wheel_filename": "quant_research_platform-0.0.0-py3-none-any.whl",
+        "wheel_sha256": "0" * 64,
+        "sdist_filename": "quant_research_platform-0.0.0.tar.gz",
+        "sdist_sha256": "1" * 64,
+        "install_target": "temporary isolated target; not included in handoff",
+        "import_command": "python -c import quant_research_platform",
+        "import_status": "PASS",
+        "content_scan": {
+            "no_run_dir": True,
+            "no_parquet_csv_pickle_feather_arrow": True,
+            "no_row_level_data": True,
+            "no_local_absolute_paths": True,
+        },
+    }
+
+
+def _hard_scan_classification_evidence() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-hard-scan-classification-evidence",
+        "scan_name": "handoff-fixture-hard-scan",
+        "command": "rg -n boundary-scan src tests",
+        "status": "PASS",
+        "raw_findings": [
+            {
+                "path": "tests/negative_fixture.py",
+                "line": 1,
+                "matched_text": "synthetic negative fixture",
+                "classification": "negative_test_fixture",
+                "reason": "synthetic fixture used only to exercise verifier shape",
+            }
+        ],
     }
 
 

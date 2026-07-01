@@ -251,18 +251,18 @@ def test_compute_split_modules_own_implementations() -> None:
 def test_compute_constraint_helpers_are_not_owned_by_portfolio_helpers() -> None:
     forbidden = {
         SOURCE_ROOT / "compute/dataframe/portfolio_helpers.py": {
-            "_apply_tradability_constraints",
-            "_build_tradability_context",
+            "apply_tradability_constraints",
+            "build_tradability_context",
             "_is_entry_blocked",
             "_is_exit_blocked",
-            "_tradability_diagnostic_counts",
-            "_validate_tradability_columns",
+            "tradability_diagnostic_counts",
+            "validate_tradability_columns",
         },
         SOURCE_ROOT / "compute/tensor/portfolio_helpers.py": {
-            "_apply_array_tradability_constraints",
-            "_optional_bool_array",
-            "_previous_position_vector",
-            "_ranked_asset_indices",
+            "apply_array_tradability_constraints",
+            "optional_bool_array",
+            "previous_position_vector",
+            "ranked_asset_indices",
         },
     }
     hits: list[str] = []

@@ -42,7 +42,7 @@ from quant_research_platform.storage.layout import StorageLayout
 
 SIZING_SAMPLE_SESSION_CAP = 20
 
-def _filter_output_sessions(
+def filter_output_sessions(
     frame: pd.DataFrame,
     sessions: tuple[pd.Timestamp, ...],
 ) -> pd.DataFrame:
@@ -53,7 +53,7 @@ def _filter_output_sessions(
     return output.loc[dates.isin(session_dates_set).fillna(False)].copy()
 
 
-def _require_dataset_coverage(
+def require_dataset_coverage(
     root: Path,
     time_window: TimeWindow,
     *,
@@ -95,7 +95,7 @@ def _dataset_session_dates(
     return dates
 
 
-def _processed_panel_key_coverage(
+def processed_panel_key_coverage(
     root: Path,
     *,
     cache: dict[Path, dict[object, tuple[pd.Timestamp, ...]]] | None = None,
@@ -134,7 +134,7 @@ def _processed_panel_key_coverage(
     return result
 
 
-def _available_trading_sessions(
+def available_trading_sessions(
     layout: StorageLayout,
     source_id: SourceId,
 ) -> tuple[pd.Timestamp, ...]:
@@ -164,14 +164,14 @@ def _target_sessions(
     return target
 
 
-def _require_target_sessions(
+def require_target_sessions(
     sessions: tuple[pd.Timestamp, ...],
     time_window: TimeWindow,
 ) -> None:
     _ = _target_sessions(sessions, time_window)
 
 
-def _planned_session_windows(
+def planned_session_windows(
     sessions: tuple[pd.Timestamp, ...],
     *,
     time_window: TimeWindow,
@@ -211,7 +211,7 @@ def _estimated_bytes_per_session(
     return max(1, ceil(size / max(1, session_count)))
 
 
-def _estimate_panel_bytes_per_session(
+def estimate_panel_bytes_per_session(
     sessions: tuple[pd.Timestamp, ...],
     *,
     time_window: TimeWindow,
@@ -235,7 +235,7 @@ def _estimate_panel_bytes_per_session(
         market_cap=market_cap,
         trading_calendar=trading_calendar,
     )
-    output = _filter_output_sessions(panel, sample.core_sessions)
+    output = filter_output_sessions(panel, sample.core_sessions)
     selected = output.loc[:, list(required_columns)]
     return _measured_peak_bytes_per_session(
         frames=(market_bars, panel, selected),
@@ -246,7 +246,7 @@ def _estimate_panel_bytes_per_session(
     )
 
 
-def _estimate_factor_bytes_per_session(
+def estimate_factor_bytes_per_session(
     sessions: tuple[pd.Timestamp, ...],
     *,
     time_window: TimeWindow,
@@ -272,7 +272,7 @@ def _estimate_factor_bytes_per_session(
         panel,
         definitions=definitions,
     )
-    output = _filter_output_sessions(factors, sample.core_sessions)
+    output = filter_output_sessions(factors, sample.core_sessions)
     selected = output.loc[:, list(required_columns)]
     return _measured_peak_bytes_per_session(
         frames=(panel, factors, selected),
@@ -283,7 +283,7 @@ def _estimate_factor_bytes_per_session(
     )
 
 
-def _estimate_label_bytes_per_session(
+def estimate_label_bytes_per_session(
     sessions: tuple[pd.Timestamp, ...],
     *,
     time_window: TimeWindow,
@@ -309,7 +309,7 @@ def _estimate_label_bytes_per_session(
         panel,
         definitions=definitions,
     )
-    output = _filter_output_sessions(labels, sample.core_sessions)
+    output = filter_output_sessions(labels, sample.core_sessions)
     selected = output.loc[:, list(required_columns)]
     return _measured_peak_bytes_per_session(
         frames=(panel, labels, selected),
@@ -360,14 +360,13 @@ def _measured_peak_bytes_per_session(
     return max(1, ceil(bytes_per_row * target_rows_per_session))
 
 __all__ = [
-    "_available_trading_sessions",
-    "_estimate_factor_bytes_per_session",
-    "_estimate_label_bytes_per_session",
-    "_estimate_panel_bytes_per_session",
-    "_filter_output_sessions",
-    "_planned_session_windows",
-    "_processed_panel_key_coverage",
-    "_require_dataset_coverage",
-    "_require_target_sessions",
-    "_target_sessions",
+    "available_trading_sessions",
+    "estimate_factor_bytes_per_session",
+    "estimate_label_bytes_per_session",
+    "estimate_panel_bytes_per_session",
+    "filter_output_sessions",
+    "planned_session_windows",
+    "processed_panel_key_coverage",
+    "require_dataset_coverage",
+    "require_target_sessions",
 ]

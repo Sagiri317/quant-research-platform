@@ -8,7 +8,7 @@ import pandas as pd
 # QRP semantic policy: skew/kurt are undefined when window moment_2
 # (mean squared centered return) is near zero. std remains sample std.
 _ROLLING_MOMENT_NEAR_ZERO_VARIANCE = 1e-12
-def _rolling_aggregate(
+def rolling_aggregate(
     values: pd.Series,
     grouped_values: pd.core.groupby.SeriesGroupBy,
     group_positions: tuple[np.ndarray, ...],
@@ -20,7 +20,7 @@ def _rolling_aggregate(
     source = numeric.to_numpy(dtype="float64", copy=False)
     output = np.full(len(values), np.nan, dtype="float64")
     for positions in group_positions:
-        output[positions] = _rolling_aggregate_array(
+        output[positions] = rolling_aggregate_array(
             source[positions],
             window,
             aggregation,
@@ -28,7 +28,7 @@ def _rolling_aggregate(
     return pd.Series(output, index=values.index, name=values.name)
 
 
-def _rolling_aggregate_array(
+def rolling_aggregate_array(
     values: np.ndarray,
     window: int,
     aggregation: str,
@@ -57,14 +57,14 @@ def _rolling_aggregate_array(
     return output
 
 
-def _rolling_rms(
+def rolling_rms(
     values: pd.Series,
     group_keys: pd.Series,
     group_positions: tuple[np.ndarray, ...],
     window: int,
 ) -> pd.Series:
     squared = values.pow(2)
-    mean_squared = _rolling_aggregate(
+    mean_squared = rolling_aggregate(
         squared,
         squared.groupby(group_keys, sort=False),
         group_positions,
@@ -74,7 +74,7 @@ def _rolling_rms(
     return np.sqrt(mean_squared)
 
 
-def _rolling_std(
+def rolling_std(
     values: pd.Series,
     group_keys: pd.Series,
     group_positions: tuple[np.ndarray, ...],
@@ -83,7 +83,7 @@ def _rolling_std(
     return _rolling_window_statistic(values, group_keys, group_positions, window, "std")
 
 
-def _rolling_correlation(
+def rolling_correlation(
     left: pd.Series,
     right: pd.Series,
     group_positions: tuple[np.ndarray, ...],
@@ -99,7 +99,7 @@ def _rolling_correlation(
     )
     output = np.full(len(left), np.nan, dtype="float64")
     for positions in group_positions:
-        output[positions] = _rolling_correlation_array(
+        output[positions] = rolling_correlation_array(
             left_values[positions],
             right_values[positions],
             window,
@@ -107,7 +107,7 @@ def _rolling_correlation(
     return pd.Series(output, index=left.index, name=left.name)
 
 
-def _rolling_correlation_array(
+def rolling_correlation_array(
     left: np.ndarray,
     right: np.ndarray,
     window: int,
@@ -150,7 +150,7 @@ def _rolling_correlation_array(
     return output
 
 
-def _rolling_skew(
+def rolling_skew(
     values: pd.Series,
     group_keys: pd.Series,
     group_positions: tuple[np.ndarray, ...],
@@ -165,7 +165,7 @@ def _rolling_skew(
     )
 
 
-def _rolling_kurt(
+def rolling_kurt(
     values: pd.Series,
     group_keys: pd.Series,
     group_positions: tuple[np.ndarray, ...],
@@ -285,7 +285,7 @@ def _window_kurt_values(windows: np.ndarray) -> np.ndarray:
     return values
 
 
-def _rolling_drawdown(
+def rolling_drawdown(
     values: pd.Series,
     group_keys: pd.Series,
     group_positions: tuple[np.ndarray, ...],
@@ -295,11 +295,11 @@ def _rolling_drawdown(
     source = numeric.to_numpy(dtype="float64", copy=False)
     output = np.full(len(numeric), np.nan, dtype="float64")
     for positions in group_positions:
-        output[positions] = _rolling_drawdown_array(source[positions], window)
+        output[positions] = rolling_drawdown_array(source[positions], window)
     return pd.Series(output, index=values.index, name=values.name)
 
 
-def _rolling_drawdown_array(values: np.ndarray, window: int) -> np.ndarray:
+def rolling_drawdown_array(values: np.ndarray, window: int) -> np.ndarray:
     output = np.full(len(values), np.nan, dtype="float64")
     if window <= 0:
         return output

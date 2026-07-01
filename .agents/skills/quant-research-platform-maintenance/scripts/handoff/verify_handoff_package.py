@@ -33,6 +33,7 @@ from governance_contract import (  # noqa: E402
     BLOCKED_PACKAGE_ENTRY_PARTS,
     BLOCKED_TASK_KEYS,
     BLOCKED_VALIDATION_KEYS,
+    HANDOFF_TOOL_SOURCE_PATHS,
     PACKAGE_FORBIDDEN_PATH_PARTS,
     RESULT_ARCHITECTURE_RETIRED_TEXT_RULES,
     VALID_STATUS_TOKENS,
@@ -76,7 +77,19 @@ SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
 SMOKE_COMPARE_STATUS_EVIDENCE = "handoff_evidence/smoke-compare-status.json"
 BUNDLE_RECONSTRUCTION_EVIDENCE = "handoff_evidence/bundle-reconstruction.json"
+PACKAGE_SMOKE_EVIDENCE = "handoff_evidence/package-smoke.json"
+HARD_SCAN_CLASSIFICATION_EVIDENCE = "handoff_evidence/hard-scan-classification.json"
 BUNDLE_RECONSTRUCTION_SCHEMA_ID = "qrp-bundle-reconstruction-evidence"
+HARD_SCAN_CLASSIFICATIONS = frozenset(
+    {
+        "actual_violation",
+        "allowed_generated_evidence",
+        "negative_test_fixture",
+        "existing_base_issue",
+        "false_positive",
+        "valuable_deferred_feature_no_change",
+    }
+)
 PORTABLE_STATUS_SUMMARY_SCHEMA_ID = "qrp-portable-status-summary"
 PORTABLE_STATUS_SUMMARY_TYPES = frozenset(
     {"smoke", "compare", "local_verification", "run_compare"}
@@ -93,14 +106,7 @@ WINDOWS_RESERVED_PATH_PARTS = frozenset(
         *(f"LPT{index}" for index in range(1, 10)),
     }
 )
-TRACKED_HANDOFF_SOURCE_PATHS = (
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py",
-    ".agents/skills/quant-research-platform-maintenance/templates/handoff/task_metadata.template.json",
-    ".agents/skills/quant-research-platform-maintenance/schemas/handoff/task_metadata.schema.json",
-    ".agents/skills/quant-research-platform-maintenance/schemas/handoff/sidecar.schema.json",
-)
+TRACKED_HANDOFF_SOURCE_PATHS = tuple(HANDOFF_TOOL_SOURCE_PATHS)
 
 
 TEXT_LIKE_SUFFIXES = {
@@ -592,6 +598,8 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 GENERATION_EVIDENCE,
                 SOURCE_TREE_SCAN_EVIDENCE,
                 VERIFICATION_MATRIX_EVIDENCE,
+                PACKAGE_SMOKE_EVIDENCE,
+                HARD_SCAN_CLASSIFICATION_EVIDENCE,
             ):
                 if required_evidence not in name_set:
                     failures.append(f"missing_required_entry: {required_evidence}")
@@ -730,6 +738,8 @@ def verify_artifact_manifest(
         failures.append(f"artifact_manifest_identity_invalid: {identity_reason}")
     if manifest.get("schema_id") != "qrp-handoff-artifact-manifest":
         failures.append("artifact_manifest_schema_id_mismatch")
+    if manifest.get("tool_source_repo_paths") != list(TRACKED_HANDOFF_SOURCE_PATHS):
+        failures.append("artifact_manifest_tool_source_repo_paths_mismatch")
     entries = manifest.get("entries")
     if not isinstance(entries, list):
         return failures + ["artifact_manifest_entries_required"]
@@ -952,6 +962,10 @@ def verify_handoff_evidence_json(
             failures.extend(verify_source_tree_scan_evidence(payload, sidecar))
         if name == SMOKE_COMPARE_STATUS_EVIDENCE:
             failures.extend(verify_smoke_compare_status(payload))
+        if name == PACKAGE_SMOKE_EVIDENCE:
+            failures.extend(verify_package_smoke_evidence(payload))
+        if name == HARD_SCAN_CLASSIFICATION_EVIDENCE:
+            failures.extend(verify_hard_scan_classification_evidence(payload))
         if name.endswith("verification-matrix.json"):
             failures.extend(verify_verification_matrix(payload))
     if VERIFICATION_MATRIX_EVIDENCE not in archive.namelist():
@@ -974,6 +988,117 @@ def handoff_evidence_forbidden_field_failures(
     payload: dict[str, object],
 ) -> list[str]:
     return handoff_evidence_blocked_key_failures(name, payload)
+
+
+def verify_package_smoke_evidence(payload: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    for key in (
+        "status",
+        "build_command",
+        "wheel_filename",
+        "wheel_sha256",
+        "sdist_filename",
+        "sdist_sha256",
+        "install_target",
+        "import_command",
+        "import_status",
+        "content_scan",
+    ):
+        if key not in payload:
+            failures.append(f"package_smoke_missing: {key}")
+    if payload.get("status") not in VALID_STATUS_TOKENS:
+        failures.append("package_smoke_status_invalid")
+    if payload.get("import_status") not in VALID_STATUS_TOKENS:
+        failures.append("package_smoke_import_status_invalid")
+    for key in (
+        "build_command",
+        "wheel_filename",
+        "sdist_filename",
+        "install_target",
+        "import_command",
+    ):
+        if key in payload and (
+            not isinstance(payload.get(key), str) or not str(payload.get(key)).strip()
+        ):
+            failures.append(f"package_smoke_string_invalid: {key}")
+    for key in ("wheel_sha256", "sdist_sha256"):
+        value = payload.get(key)
+        if key in payload and not (
+            isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+        ):
+            failures.append(f"package_smoke_sha256_invalid: {key}")
+    content_scan = payload.get("content_scan")
+    if not isinstance(content_scan, dict):
+        failures.append("package_smoke_content_scan_invalid")
+        return failures
+    for key in (
+        "no_run_dir",
+        "no_parquet_csv_pickle_feather_arrow",
+        "no_row_level_data",
+        "no_local_absolute_paths",
+    ):
+        if content_scan.get(key) is not True:
+            failures.append(f"package_smoke_content_scan_not_pass: {key}")
+    return failures
+
+
+def verify_hard_scan_classification_evidence(payload: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    for key in ("scan_name", "command", "status", "raw_findings"):
+        if key not in payload:
+            failures.append(f"hard_scan_classification_missing: {key}")
+    for key in ("scan_name", "command"):
+        if key in payload and (
+            not isinstance(payload.get(key), str) or not str(payload.get(key)).strip()
+        ):
+            failures.append(f"hard_scan_classification_string_invalid: {key}")
+    if payload.get("status") not in VALID_STATUS_TOKENS:
+        failures.append("hard_scan_classification_status_invalid")
+    raw_findings = payload.get("raw_findings")
+    if not isinstance(raw_findings, list):
+        failures.append("hard_scan_classification_raw_findings_invalid")
+        return failures
+    for index, finding in enumerate(raw_findings):
+        if not isinstance(finding, dict):
+            failures.append(f"hard_scan_classification_finding_invalid: {index}")
+            continue
+        for key in ("path", "line", "matched_text", "classification", "reason"):
+            if key not in finding:
+                failures.append(
+                    f"hard_scan_classification_finding_missing: {index}:{key}"
+                )
+        if "line" in finding and not isinstance(finding.get("line"), int):
+            failures.append(f"hard_scan_classification_line_invalid: {index}")
+        for key in ("path", "matched_text", "reason"):
+            if key in finding and (
+                not isinstance(finding.get(key), str)
+                or not str(finding.get(key)).strip()
+            ):
+                failures.append(
+                    f"hard_scan_classification_string_invalid: {index}:{key}"
+                )
+        if (
+            "classification" in finding
+            and finding.get("classification") not in HARD_SCAN_CLASSIFICATIONS
+        ):
+            failures.append(
+                f"hard_scan_classification_classification_invalid: {index}"
+            )
+        if finding.get("classification") == "actual_violation":
+            failures.append(f"hard_scan_classification_actual_violation: {index}")
+        if finding.get("classification") == "valuable_deferred_feature_no_change":
+            if not finding.get("deferred_owner") or not isinstance(
+                finding.get("deferred_owner"),
+                str,
+            ):
+                failures.append(
+                    f"hard_scan_classification_deferred_owner_missing: {index}"
+                )
+            if finding.get("no_change_from_baseline") is not True:
+                failures.append(
+                    f"hard_scan_classification_deferred_baseline_missing: {index}"
+                )
+    return failures
 
 
 def verify_bundle_reconstruction_evidence(

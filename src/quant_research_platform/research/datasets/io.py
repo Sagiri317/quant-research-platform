@@ -34,7 +34,7 @@ def read_research_dataset(
     )
 
 
-def _iter_research_dataset_chunks(
+def iter_research_dataset_chunks(
     layout: StorageLayout,
     *,
     market_id: MarketId,

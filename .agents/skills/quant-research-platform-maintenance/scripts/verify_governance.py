@@ -17,9 +17,11 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from governance_contract import (  # noqa: E402
     ACTIVE_GOVERNANCE_DOC_ROOTS,
-    PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES,
+    GOVERNANCE_TEST_EXCEPTION_PATHS,
+    LOCAL_PATH_TEXT_SAFETY_FIXTURE_SOURCES,
     RETIRED_GOVERNANCE_EXACT_PATHS,
     RETIRED_GOVERNANCE_PREFIXES,
+    SOURCE_TREE_ALLOWED_OCCURRENCES,
     STALE_GOVERNANCE_TRUTH_TEST_SOURCES,
     active_doc_forbidden_patterns,
     git_tracked_paths,
@@ -79,9 +81,7 @@ GOVERNANCE_TOOLING_EXCEPTIONS = {
     "tests/tools/test_run_profile.py",
 }
 
-GOVERNANCE_TEST_EXCEPTIONS = {
-    "tests/policy/test_share_safety_runtime_edges.py",
-}
+GOVERNANCE_TEST_EXCEPTIONS = set(GOVERNANCE_TEST_EXCEPTION_PATHS)
 
 REPORTS_EVIDENCE_RENDERER_EXCEPTIONS = {
     "src/quant_research_platform/reports/verification_summary.py",
@@ -470,37 +470,23 @@ def _skip_regex_definition_line(rel: str, line: str) -> bool:
 
 
 def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
-    if rel in PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES and LOCAL_PATH_PATTERN.search(line):
-        return True
     if (
-        rel == "tests/architecture/test_share_safe_evidence.py"
+        rel in LOCAL_PATH_TEXT_SAFETY_FIXTURE_SOURCES
         and LOCAL_PATH_PATTERN.search(line)
     ):
-        return True
-    if rel in {
-        "tests/interfaces/test_api_cli_01_contract.py",
-        "tests/storage/test_storage_01.py",
-    } and LOCAL_PATH_PATTERN.search(line):
         return True
     return False
 
 
 def _is_allowed_secret_fixture(rel: str, line: str) -> bool:
-    if rel in PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES and SECRET_PATTERN.search(line):
-        return True
-    if rel == "tests/architecture/test_share_safe_evidence.py" and '"token="' in line:
-        return True
-    if (
-        rel
-        in {
-            "tests/interfaces/test_api_cli_01_contract.py",
-            "tests/storage/test_storage_01.py",
-        }
-        and '"token"' in line
-        and "token=" in line
-    ):
-        return True
-    return False
+    if not SECRET_PATTERN.search(line):
+        return False
+    return any(
+        occurrence.path.as_posix() == rel
+        and occurrence.rule_id.endswith(":sensitive_secret")
+        and occurrence.exact_line == line.strip()
+        for occurrence in SOURCE_TREE_ALLOWED_OCCURRENCES
+    )
 
 
 def _is_allowed_stale_fixture(rel: str, line: str) -> bool:

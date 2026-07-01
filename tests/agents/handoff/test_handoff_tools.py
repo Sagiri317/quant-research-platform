@@ -15,8 +15,10 @@ from tests.agents.handoff.conftest import (
     _copy_valid_package,
     _generation_evidence,
     _git,
+    _hard_scan_classification_evidence,
     _init_handoff_repo,
     _load_handoff_module,
+    _package_smoke_evidence,
     _refresh_manifest_and_sidecar,
     _replace_generation_evidence,
     _replace_validation_evidence,
@@ -445,6 +447,102 @@ def test_artifact_manifest_anchor_is_not_manifest_entry(
     assert "artifact_manifest.json" in names
     assert "artifact_manifest.json" not in entry_paths
     assert failures == []
+
+
+def test_verifier_uses_contract_owned_handoff_source_inventory() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    contract = _load_handoff_module("governance_contract")
+
+    assert verifier.TRACKED_HANDOFF_SOURCE_PATHS == tuple(
+        contract.HANDOFF_TOOL_SOURCE_PATHS
+    )
+    assert (
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "governance_contract.py"
+    ) in verifier.TRACKED_HANDOFF_SOURCE_PATHS
+
+
+def test_verifier_rejects_artifact_manifest_source_inventory_drift(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    with zipfile.ZipFile(package) as archive:
+        manifest = json.loads(archive.read("artifact_manifest.json").decode("utf-8"))
+    manifest["tool_source_repo_paths"] = manifest["tool_source_repo_paths"][:-1]
+    manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+    _rewrite_package_member(package, "artifact_manifest.json", manifest_bytes)
+    _update_sidecar_hashes(package, sidecar, manifest_bytes)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "artifact_manifest_tool_source_repo_paths_mismatch" in failures
+
+
+def test_verifier_rejects_status_only_package_smoke_evidence() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    failures = verifier.verify_package_smoke_evidence({"status": "PASS"})
+
+    assert "package_smoke_missing: build_command" in failures
+    assert "package_smoke_missing: content_scan" in failures
+
+
+def test_verifier_rejects_incomplete_hard_scan_classification_evidence() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    failures = verifier.verify_hard_scan_classification_evidence(
+        {
+            "scan_name": "hard-scan",
+            "command": "rg -n scan src tests",
+            "status": "PASS",
+            "raw_findings": [{"path": "src/example.py"}],
+        }
+    )
+
+    assert "hard_scan_classification_finding_missing: 0:line" in failures
+    assert "hard_scan_classification_finding_missing: 0:classification" in failures
+
+
+def test_verifier_rejects_unresolved_hard_scan_actual_violation() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _hard_scan_classification_evidence()
+    payload["raw_findings"][0]["classification"] = "actual_violation"
+
+    failures = verifier.verify_hard_scan_classification_evidence(payload)
+
+    assert "hard_scan_classification_actual_violation: 0" in failures
+
+
+def test_verifier_requires_deferred_hard_scan_proof() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _hard_scan_classification_evidence()
+    payload["raw_findings"][0]["classification"] = (
+        "valuable_deferred_feature_no_change"
+    )
+
+    failures = verifier.verify_hard_scan_classification_evidence(payload)
+
+    assert "hard_scan_classification_deferred_owner_missing: 0" in failures
+    assert "hard_scan_classification_deferred_baseline_missing: 0" in failures
+
+    payload["raw_findings"][0]["deferred_owner"] = "documented owner"
+    payload["raw_findings"][0]["no_change_from_baseline"] = True
+
+    assert verifier.verify_hard_scan_classification_evidence(payload) == []
+
+
+def test_verifier_accepts_complete_package_and_hard_scan_evidence_shapes() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    assert verifier.verify_package_smoke_evidence(_package_smoke_evidence()) == []
+    assert (
+        verifier.verify_hard_scan_classification_evidence(
+            _hard_scan_classification_evidence()
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize(

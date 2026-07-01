@@ -5,18 +5,18 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute._portfolio_math import _normalize_group_key
+from quant_research_platform.compute._portfolio_math import normalize_group_key
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     RETURNS_COLUMNS,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
-from quant_research_platform.compute.tensor.exposure import _exposure_record_from_arrays
+from quant_research_platform.compute.tensor.exposure import exposure_record_from_arrays
 from quant_research_platform.compute.tensor.portfolio_helpers import (
-    _filter_panel_group,
+    filter_panel_group,
 )
 from quant_research_platform.compute.tensor.turnover import (
-    _path_current_state,
-    _path_turnover_and_cost_records_from_arrays,
+    path_current_state,
+    path_turnover_and_cost_records_from_arrays,
 )
 from quant_research_platform.contracts.portfolios import (
     CostConfig,
@@ -49,13 +49,13 @@ def calculate_tensor_long_short(
     cost_lookup = cost_breakdown.set_index(metric_index)["total_cost"].to_dict()
     group_columns = [*segment_columns, "signal"]
     for group_key, group in positions.groupby(group_columns, sort=True, dropna=False):
-        group_values = _normalize_group_key(group_key, group_columns)
+        group_values = normalize_group_key(group_key, group_columns)
         position_matrix = (
             group.pivot(index="timestamp", columns="asset", values="position")
             .fillna(0.0)
             .sort_index()
         )
-        panel_group = _filter_panel_group(
+        panel_group = filter_panel_group(
             panel=panel,
             segment_columns=segment_columns,
             group_values=group_values,
@@ -166,7 +166,7 @@ def _long_short_record_from_arrays(
         "short_count": short_count,
     }
 
-def _build_path_records_from_arrays(
+def build_path_records_from_arrays(
     *,
     context: dict[str, object],
     timestamp: object,
@@ -192,7 +192,7 @@ def _build_path_records_from_arrays(
     nonzero_offsets, exposure_values = measure_stage(
         "metric",
         "positions.path_current_state",
-        lambda: _path_current_state(
+        lambda: path_current_state(
             assets=assets,
             position_values=position_values,
         ),
@@ -201,7 +201,7 @@ def _build_path_records_from_arrays(
     turnover_record, cost_record = measure_stage(
         "metric",
         "positions.path_turnover_cost",
-        lambda: _path_turnover_and_cost_records_from_arrays(
+        lambda: path_turnover_and_cost_records_from_arrays(
             context=context,
             timestamp=timestamp,
             signal=signal,
@@ -236,7 +236,7 @@ def _build_path_records_from_arrays(
     exposure_record = measure_stage(
         "metric",
         "positions.path_exposure",
-        lambda: _exposure_record_from_arrays(
+        lambda: exposure_record_from_arrays(
             context=context,
             timestamp=timestamp,
             signal=signal,

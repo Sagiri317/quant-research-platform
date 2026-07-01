@@ -6,21 +6,21 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.constraints import (
-    _apply_tradability_constraints,
-    _tradability_diagnostic_counts,
+    apply_tradability_constraints,
+    tradability_diagnostic_counts,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     POSITION_COLUMNS,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _risk_values,
-    _selection_count,
+    risk_values,
+    selection_count,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import TradabilityConfig, WeightConfig
 
 
-def _build_signal_positions(
+def build_signal_positions(
     *,
     timestamp_frame: pd.DataFrame,
     spec: ComputePanelSpec,
@@ -64,19 +64,19 @@ def _build_signal_positions(
     short_count = 0
     minimum_count = 1 if weight_config.portfolio_mode == "long_only" else 2
     if len(sorted_indices) >= minimum_count:
-        long_count = _selection_count(len(sorted_indices), weight_config.top_quantile)
+        long_count = selection_count(len(sorted_indices), weight_config.top_quantile)
         short_count = (
             0
             if weight_config.portfolio_mode == "long_only"
-            else _selection_count(len(sorted_indices), weight_config.bottom_quantile)
+            else selection_count(len(sorted_indices), weight_config.bottom_quantile)
         )
         if long_count + short_count <= len(sorted_indices):
             long_leg = sorted_indices[-long_count:]
-            risk_values = _risk_values(timestamp_frame, weight_config)
+            risk_array = risk_values(timestamp_frame, weight_config)
             long_weights, long_fallback = _leg_weights(
                 asset_values=asset_values[long_leg],
                 signal_values=signal_values[long_leg],
-                risk_values=None if risk_values is None else risk_values[long_leg],
+                risk_values=None if risk_array is None else risk_array[long_leg],
                 signal=signal,
                 weight_config=weight_config,
                 sign=1.0,
@@ -89,8 +89,8 @@ def _build_signal_positions(
                     signal_values=signal_values[sorted_indices[:short_count]],
                     risk_values=(
                         None
-                        if risk_values is None
-                        else risk_values[sorted_indices[:short_count]]
+                        if risk_array is None
+                        else risk_array[sorted_indices[:short_count]]
                     ),
                     signal=signal,
                     weight_config=weight_config,
@@ -102,7 +102,7 @@ def _build_signal_positions(
             )
             positions.update(long_weights)
             positions.update(short_weights)
-    positions = _apply_tradability_constraints(
+    positions = apply_tradability_constraints(
         positions=positions,
         timestamp_frame=timestamp_frame,
         spec=spec,
@@ -137,7 +137,7 @@ def _build_signal_positions(
     diagnostic = {
         "signal": signal,
         "method": weight_config.method,
-        **_tradability_diagnostic_counts(
+        **tradability_diagnostic_counts(
             timestamp_frame=timestamp_frame,
             signal=signal,
             spec=spec,
@@ -204,7 +204,7 @@ def _leg_weights(
     )
 
 
-def _validate_positions(
+def validate_positions(
     positions: pd.DataFrame,
     *,
     segment_columns: tuple[str, ...] = (),

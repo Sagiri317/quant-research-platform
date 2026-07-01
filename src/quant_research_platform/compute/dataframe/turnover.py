@@ -9,10 +9,10 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
     TURNOVER_COLUMNS,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _cost_components,
-    _normalize_group_key,
+    cost_components,
+    normalize_group_key,
 )
-from quant_research_platform.compute.dataframe.position_math import _validate_positions
+from quant_research_platform.compute.dataframe.position_math import validate_positions
 from quant_research_platform.contracts.portfolios import (
     CostConfig,
     WeightConfig,
@@ -26,14 +26,14 @@ def calculate_turnover(
 ) -> pd.DataFrame:
     """Calculate one-way turnover from timestamp-by-asset position changes."""
 
-    validated = _validate_positions(positions, segment_columns=segment_columns)
+    validated = validate_positions(positions, segment_columns=segment_columns)
     output_columns = [*segment_columns, *TURNOVER_COLUMNS]
     if validated.empty:
         return pd.DataFrame(columns=output_columns)
 
     records: list[dict[str, object]] = []
     for group_key, group in validated.groupby([*segment_columns, "signal"], sort=True):
-        group_values = _normalize_group_key(group_key, [*segment_columns, "signal"])
+        group_values = normalize_group_key(group_key, [*segment_columns, "signal"])
         position_matrix = (
             group.pivot(index="timestamp", columns="asset", values="position")
             .fillna(0.0)
@@ -64,14 +64,14 @@ def calculate_cost_breakdown(
 
     if cost_config is None:
         cost_config = CostConfig()
-    validated = _validate_positions(positions, segment_columns=segment_columns)
+    validated = validate_positions(positions, segment_columns=segment_columns)
     output_columns = [*segment_columns, *COST_BREAKDOWN_COLUMNS]
     if validated.empty:
         return pd.DataFrame(columns=output_columns)
 
     records: list[dict[str, object]] = []
     for group_key, group in validated.groupby([*segment_columns, "signal"], sort=True):
-        group_values = _normalize_group_key(group_key, [*segment_columns, "signal"])
+        group_values = normalize_group_key(group_key, [*segment_columns, "signal"])
         position_matrix = (
             group.pivot(index="timestamp", columns="asset", values="position")
             .fillna(0.0)
@@ -83,7 +83,7 @@ def calculate_cost_breakdown(
             buy_turnover = float(changes.clip(lower=0).sum())
             sell_turnover = float((-changes.clip(upper=0)).sum())
             turnover = buy_turnover + sell_turnover
-            costs = _cost_components(
+            costs = cost_components(
                 buy_turnover=buy_turnover,
                 sell_turnover=sell_turnover,
                 turnover=turnover,
@@ -102,14 +102,14 @@ def calculate_cost_breakdown(
             )
     return pd.DataFrame.from_records(records, columns=output_columns)
 
-def _active_position_map(records: list[dict[str, object]]) -> dict[str, float]:
+def active_position_map(records: list[dict[str, object]]) -> dict[str, float]:
     return {
         str(record["asset"]): float(record["position"])
         for record in records
         if float(record["position"]) != 0.0
     }
 
-def _position_change_turnover(
+def position_change_turnover(
     *,
     previous: dict[str, float],
     current: dict[str, float],

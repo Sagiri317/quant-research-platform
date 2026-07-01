@@ -134,7 +134,7 @@ def summarize_performance(
     records: list[dict[str, object]] = []
     group_columns = [*segment_columns, "signal"]
     for group_key, group in frame.groupby(group_columns, sort=True, dropna=False):
-        group_values = _normalize_group_key(group_key, group_columns)
+        group_values = normalize_group_key(group_key, group_columns)
         filters = cumulative_frame["signal"] == group_values["signal"]
         for segment in segment_columns:
             filters &= cumulative_frame[segment] == group_values[segment]
@@ -313,7 +313,7 @@ def _validate_returns_frame(
         raise ValueError(f"returns is missing columns: {missing_columns}.")
 
 
-def _normalize_group_key(
+def normalize_group_key(
     group_key: object,
     group_columns: list[str],
 ) -> dict[str, object]:

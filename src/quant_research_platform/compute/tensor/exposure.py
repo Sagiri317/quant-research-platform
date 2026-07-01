@@ -59,7 +59,7 @@ def summarize_tensor_exposure_from_path(
     )
     return summary[output_columns]
 
-def _exposure_record_from_arrays(
+def exposure_record_from_arrays(
     *,
     context: dict[str, object],
     timestamp: object,

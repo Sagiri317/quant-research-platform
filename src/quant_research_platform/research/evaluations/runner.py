@@ -7,10 +7,10 @@ from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import validate_evaluation_input
-from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
+from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.evaluations.engine import (
     EvaluationResult,
-    _evaluate_signal_frame_chunks,
+    evaluate_signal_frame_chunks,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -33,14 +33,14 @@ def build_evaluation_result_from_research_dataset(
         *spec.label_columns,
         *required_filter_columns(spec.filter_mode),
     )
-    chunks = _iter_research_dataset_chunks(
+    chunks = iter_research_dataset_chunks(
         layout,
         market_id=dataset_spec.market_id,
         dataset_id=dataset_spec.data_id,
         time_window=time_window,
         columns=read_columns,
     )
-    return _evaluate_signal_frame_chunks(
+    return evaluate_signal_frame_chunks(
         _validated_evaluation_chunks(
             chunks,
             dataset_spec=dataset_spec,

@@ -115,8 +115,8 @@ def _reference_price_volume_factors(
         needs_reversal = f"rev_{window}d" in requested_set
         if needs_momentum or needs_reversal:
             shifted_price = price.groupby(group_keys, sort=False).shift(window)
-            trailing_return = price / reference_valid_denominator(shifted_price) - 1.0
-            trailing_return = reference_finite_or_nan(trailing_return)
+            trailing_return = price / referencevalid_denominator(shifted_price) - 1.0
+            trailing_return = referencefinite_or_nan(trailing_return)
         if needs_momentum:
             result[f"mom_{window}d"] = trailing_return
         if needs_reversal:
@@ -131,13 +131,13 @@ def _reference_price_volume_factors(
                 "std",
             )
         if f"downside_vol_{window}d" in requested_set:
-            result[f"downside_vol_{window}d"] = reference_rolling_rms(
+            result[f"downside_vol_{window}d"] = referencerolling_rms(
                 returns.clip(upper=0.0),
                 group_keys,
                 window,
             )
         if f"upside_vol_{window}d" in requested_set:
-            result[f"upside_vol_{window}d"] = reference_rolling_rms(
+            result[f"upside_vol_{window}d"] = referencerolling_rms(
                 returns.clip(lower=0.0),
                 group_keys,
                 window,
@@ -151,7 +151,7 @@ def _reference_price_volume_factors(
                 lambda series, w=window: series.rolling(w, min_periods=w).min()
             )
         if f"drawdown_{window}d" in requested_set:
-            result[f"drawdown_{window}d"] = reference_rolling_drawdown(
+            result[f"drawdown_{window}d"] = referencerolling_drawdown(
                 price,
                 group_keys,
                 window,
@@ -187,7 +187,7 @@ def _reference_price_volume_factors(
         elif f"turnover_chg_{window}d" == column:
             shifted_turnover = turnover.groupby(group_keys, sort=False).shift(window)
             result[column] = (
-                turnover / reference_valid_denominator(shifted_turnover) - 1.0
+                turnover / referencevalid_denominator(shifted_turnover) - 1.0
             )
         elif f"turnover_vol_{window}d" == column:
             result[column] = reference_qrp_window_moment_by_asset(
@@ -203,12 +203,12 @@ def _reference_price_volume_factors(
             )
         elif f"amount_chg_{window}d" == column:
             shifted_amount = amount.groupby(group_keys, sort=False).shift(window)
-            result[column] = amount / reference_valid_denominator(shifted_amount) - 1.0
+            result[column] = amount / referencevalid_denominator(shifted_amount) - 1.0
         elif f"amount_shock_{window}d" == column:
             mean_amount = amount.groupby(group_keys, sort=False).transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).mean()
             )
-            result[column] = amount / reference_valid_denominator(mean_amount) - 1.0
+            result[column] = amount / referencevalid_denominator(mean_amount) - 1.0
         elif f"amount_vol_{window}d" == column:
             result[column] = reference_qrp_window_moment_by_asset(
                 amount,
@@ -218,12 +218,12 @@ def _reference_price_volume_factors(
             )
         elif f"volume_chg_{window}d" == column:
             shifted_volume = volume.groupby(group_keys, sort=False).shift(window)
-            result[column] = volume / reference_valid_denominator(shifted_volume) - 1.0
+            result[column] = volume / referencevalid_denominator(shifted_volume) - 1.0
         elif f"volume_shock_{window}d" == column:
             mean_volume = volume.groupby(group_keys, sort=False).transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).mean()
             )
-            result[column] = volume / reference_valid_denominator(mean_volume) - 1.0
+            result[column] = volume / referencevalid_denominator(mean_volume) - 1.0
         elif f"ret_amount_corr_{window}d" == column:
             result[column] = reference_rolling_corr(
                 returns,
@@ -253,7 +253,7 @@ def _reference_price_volume_factors(
                 lambda series, w=window: series.rolling(w, min_periods=w).mean()
             )
             result[column] = (
-                return_mean.abs() / reference_valid_denominator(abs_return_mean)
+                return_mean.abs() / referencevalid_denominator(abs_return_mean)
             )
         elif f"signed_amount_flow_{window}d" == column:
             signed_amount = np.sign(returns) * amount
@@ -263,7 +263,7 @@ def _reference_price_volume_factors(
             denominator = amount.groupby(group_keys, sort=False).transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).mean()
             )
-            result[column] = numerator / reference_valid_denominator(denominator)
+            result[column] = numerator / referencevalid_denominator(denominator)
         elif f"ret_amount_imbalance_{window}d" == column:
             weighted_return = returns * amount
             weighted_abs_return = returns.abs() * amount
@@ -276,22 +276,22 @@ def _reference_price_volume_factors(
             ).transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).mean()
             )
-            result[column] = numerator / reference_valid_denominator(denominator)
+            result[column] = numerator / referencevalid_denominator(denominator)
 
-    denominator = reference_valid_denominator(amount)
+    denominator = referencevalid_denominator(amount)
     illiquidity = (returns.abs() / denominator).replace([np.inf, -np.inf], np.nan)
     amplitude = (
         pd.to_numeric(result["high"], errors="coerce")
         - pd.to_numeric(result["low"], errors="coerce")
-    ) / reference_valid_denominator(
+    ) / referencevalid_denominator(
         pd.to_numeric(result["prev_close"], errors="coerce")
     )
-    amplitude = reference_finite_or_nan(amplitude)
+    amplitude = referencefinite_or_nan(amplitude)
     intraday_range = (
         pd.to_numeric(result["high"], errors="coerce")
         - pd.to_numeric(result["low"], errors="coerce")
-    ) / reference_valid_denominator(pd.to_numeric(result["adj_close"], errors="coerce"))
-    intraday_range = reference_finite_or_nan(intraday_range)
+    ) / referencevalid_denominator(pd.to_numeric(result["adj_close"], errors="coerce"))
+    intraday_range = referencefinite_or_nan(intraday_range)
     for window in required_windows:
         if f"amihud_{window}d" in requested_set:
             result[f"amihud_{window}d"] = illiquidity.groupby(
@@ -316,9 +316,9 @@ def _reference_price_volume_factors(
             )
 
     if "log_float_market_cap" in requested_set:
-        result["log_float_market_cap"] = reference_safe_log(result["float_market_cap"])
+        result["log_float_market_cap"] = referencesafe_log(result["float_market_cap"])
     if "log_total_market_cap" in requested_set:
-        result["log_total_market_cap"] = reference_safe_log(result["total_market_cap"])
+        result["log_total_market_cap"] = referencesafe_log(result["total_market_cap"])
     output_columns = [column for column in requested if column in result.columns]
     if output_columns:
         result.loc[:, output_columns] = result.loc[:, output_columns].replace(
@@ -434,7 +434,7 @@ def factor_window(column: str) -> int:
     raise ValueError(f"factor_window_missing: {column}")
 
 
-def reference_rolling_rms(
+def referencerolling_rms(
     values: pd.Series,
     group_keys: pd.Series,
     window: int,
@@ -446,7 +446,7 @@ def reference_rolling_rms(
     return np.sqrt(mean_squared)
 
 
-def reference_rolling_drawdown(
+def referencerolling_drawdown(
     values: pd.Series,
     group_keys: pd.Series,
     window: int,
@@ -454,7 +454,7 @@ def reference_rolling_drawdown(
     def calculate(series: pd.Series) -> float:
         peak = series.cummax()
         drawdown = series / peak.replace(0.0, np.nan) - 1.0
-        return float(reference_finite_or_nan(drawdown).min())
+        return float(referencefinite_or_nan(drawdown).min())
 
     return values.groupby(group_keys, sort=False).transform(
         lambda series, w=window: series.rolling(w, min_periods=w).apply(
@@ -479,17 +479,17 @@ def reference_rolling_corr(
     return pd.concat(parts).sort_index()
 
 
-def reference_safe_log(values: pd.Series) -> pd.Series:
+def referencesafe_log(values: pd.Series) -> pd.Series:
     numeric = pd.to_numeric(values, errors="coerce")
     numeric = numeric.where(np.isfinite(numeric) & numeric.gt(0.0))
-    return reference_finite_or_nan(np.log(numeric))
+    return referencefinite_or_nan(np.log(numeric))
 
 
-def reference_finite_or_nan(values: pd.Series) -> pd.Series:
+def referencefinite_or_nan(values: pd.Series) -> pd.Series:
     return values.replace([np.inf, -np.inf], np.nan)
 
 
-def reference_valid_denominator(values: pd.Series) -> pd.Series:
+def referencevalid_denominator(values: pd.Series) -> pd.Series:
     numeric = pd.to_numeric(values, errors="coerce")
     return numeric.where(np.isfinite(numeric) & numeric.ne(0.0))
 

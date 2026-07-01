@@ -8,9 +8,9 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
     EXPOSURE_SUMMARY_COLUMNS,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _normalize_group_key,
+    normalize_group_key,
 )
-from quant_research_platform.compute.dataframe.position_math import _validate_positions
+from quant_research_platform.compute.dataframe.position_math import validate_positions
 
 
 def summarize_exposure(
@@ -21,7 +21,7 @@ def summarize_exposure(
 ) -> pd.DataFrame:
     """Summarize gross/net exposure and active position counts."""
 
-    validated = _validate_positions(positions, segment_columns=segment_columns)
+    validated = validate_positions(positions, segment_columns=segment_columns)
     output_columns = [*segment_columns, *EXPOSURE_SUMMARY_COLUMNS]
     if validated.empty:
         return pd.DataFrame(columns=output_columns)
@@ -40,7 +40,7 @@ def summarize_exposure(
     count_frame = returns.copy()
     records: list[dict[str, object]] = []
     for group_key, group in exposure.groupby(group_columns, sort=True, dropna=False):
-        group_values = _normalize_group_key(group_key, group_columns)
+        group_values = normalize_group_key(group_key, group_columns)
         filters = count_frame["signal"] == group_values["signal"]
         for segment in segment_columns:
             filters &= count_frame[segment] == group_values[segment]

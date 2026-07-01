@@ -9,7 +9,7 @@ from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import TradabilityConfig
 
 
-def _validate_tradability_columns(
+def validate_tradability_columns(
     panel: pd.DataFrame,
     tradability_config: TradabilityConfig,
 ) -> None:
@@ -59,7 +59,7 @@ def _filter_new_entry_blocked_assets(
     return ranked[can_enter | has_previous].copy()
 
 
-def _tradability_diagnostic_counts(
+def tradability_diagnostic_counts(
     *,
     timestamp_frame: pd.DataFrame,
     signal: str,
@@ -90,7 +90,7 @@ def _tradability_diagnostic_counts(
     }
 
 
-def _apply_tradability_constraints(
+def apply_tradability_constraints(
     *,
     positions: dict[str, float],
     timestamp_frame: pd.DataFrame,
@@ -105,7 +105,7 @@ def _apply_tradability_constraints(
     ):
         return positions
 
-    context = tradability_context or _build_tradability_context(
+    context = tradability_context or build_tradability_context(
         timestamp_frame=timestamp_frame,
         spec=spec,
         tradability_config=tradability_config,
@@ -161,7 +161,7 @@ def _apply_tradability_constraints(
     return positions
 
 
-def _build_tradability_context(
+def build_tradability_context(
     *,
     timestamp_frame: pd.DataFrame,
     spec: ComputePanelSpec,

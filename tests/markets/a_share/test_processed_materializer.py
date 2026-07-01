@@ -209,7 +209,7 @@ def test_materialize_processed_data_rejects_non_daily_active_profile_before_io(
     monkeypatch.setattr(materializer, "processed_catalog", lambda: catalog)
     monkeypatch.setattr(
         materialization_planning,
-        "_available_trading_sessions",
+        "available_trading_sessions",
         fail_if_sessions_are_read,
     )
 

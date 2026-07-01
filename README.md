@@ -138,6 +138,9 @@ python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 正式 evidence 使用 `tests/tools/run_profile.py`，完整收口使用 runner 的
 `all` profile 显式选择。
 
+正式 handoff 的 REVIEW_SAFE evidence 完整性由 tracked verifier 和 tests
+强制执行；status-only 摘要不能作为完整 evidence。
+
 ## 数据安全
 
 禁止提交 private data、vendor marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE evidence 只能包含摘要、schema、计数、hash、命令状态和路径结构；结果安全边界使用 LOCAL_ONLY / REVIEW_SAFE。

@@ -30,7 +30,7 @@ from quant_research_platform.storage.datasets import DatasetInspection, inspect_
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def _select_label_definitions_for_spec(
+def select_label_definitions_for_spec(
     spec: ProcessedDataSpec,
     catalog: LabelCatalog,
 ) -> tuple[LabelDefinition, ...]:
@@ -63,7 +63,7 @@ def write_labels(
 ) -> DatasetInspection:
     catalog = processed_catalog()
     label_catalog = label_definitions.label_catalog()
-    definitions = _select_label_definitions_for_spec(spec, label_catalog)
+    definitions = select_label_definitions_for_spec(spec, label_catalog)
     contract = materialization_validation.label_input_contract(definitions)
     materialization_validation.validate_processed_input_contract(
         spec,
@@ -75,11 +75,11 @@ def write_labels(
     available = inspect_dataset(panel_root)
     lookahead_sessions = label_calculations.label_lookahead_bars(definitions)
     panel_input_columns = label_calculations.label_panel_input_columns(definitions)
-    panel_key_coverage = materialization_planning._processed_panel_key_coverage(
+    panel_key_coverage = materialization_planning.processed_panel_key_coverage(
         panel_root,
         cache=panel_key_coverages,
     )
-    estimated = materialization_planning._estimate_label_bytes_per_session(
+    estimated = materialization_planning.estimate_label_bytes_per_session(
         sessions,
         time_window=time_window,
         panel_root=panel_root,
@@ -89,7 +89,7 @@ def write_labels(
         required_columns=spec.required_columns,
         definitions=definitions,
     )
-    windows = materialization_planning._planned_session_windows(
+    windows = materialization_planning.planned_session_windows(
         sessions,
         time_window=time_window,
         policy=policy,
@@ -127,7 +127,7 @@ def write_labels(
                 panel,
                 definitions=definitions,
             )
-            output = materialization_planning._filter_output_sessions(
+            output = materialization_planning.filter_output_sessions(
                 labels,
                 window.core_sessions,
             )
@@ -142,4 +142,4 @@ def write_labels(
     )
 
 
-__all__ = ["_select_label_definitions_for_spec", "write_labels"]
+__all__ = ["select_label_definitions_for_spec", "write_labels"]

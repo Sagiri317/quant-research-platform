@@ -7,6 +7,84 @@ from pathlib import Path
 from tests.helpers.import_graph import ImportEdge, import_edges_under
 
 PROJECT_SRC = Path("src/quant_research_platform")
+OWNER_LOCAL_INTERNAL_API_ROOTS = (
+    PROJECT_SRC / "markets" / "implementations" / "a_share" / "processed",
+    PROJECT_SRC / "research" / "models",
+    PROJECT_SRC / "research" / "datasets",
+    PROJECT_SRC / "research" / "evaluations",
+    PROJECT_SRC / "research" / "predictions",
+    PROJECT_SRC / "research" / "factors" / "price_volume",
+    PROJECT_SRC / "compute",
+)
+RETIRED_OWNER_LOCAL_PRIVATE_SYMBOLS = {
+    "_ensure_processed_dependencies",
+    "_planned_processed_dependency_windows",
+    "_merge_time_windows",
+    "_available_trading_sessions",
+    "_require_target_sessions",
+    "_require_dataset_coverage",
+    "_planned_session_windows",
+    "_filter_output_sessions",
+    "_processed_panel_key_coverage",
+    "_estimate_panel_bytes_per_session",
+    "_estimate_factor_bytes_per_session",
+    "_estimate_label_bytes_per_session",
+    "_select_factor_definitions_for_spec",
+    "_select_label_definitions_for_spec",
+    "_linear_regression_estimator",
+    "_SingleFactorBaseline",
+    "_RankEnsemblePredictor",
+    "_ICWeightedRankEnsembleFactory",
+    "_ICWeightedRankEnsemble",
+    "_iter_research_dataset_chunks",
+    "_evaluation_diagnostics",
+    "_prediction_callable",
+    "_prediction_model_input_frame",
+    "_required_windows",
+    "_lookback_window",
+    "_windows_from_requested_factors",
+    "_simulate_weighted_long_short_returns_and_cost_from_validated_panel",
+}
+OWNER_LOCAL_INTERNAL_PACKAGE_EXPORTS = {
+    PROJECT_SRC
+    / "markets"
+    / "implementations"
+    / "a_share"
+    / "processed"
+    / "__init__.py": {
+        "ensure_processed_dependencies",
+        "planned_processed_dependency_windows",
+        "merge_time_windows",
+        "available_trading_sessions",
+        "require_target_sessions",
+        "require_dataset_coverage",
+        "planned_session_windows",
+        "filter_output_sessions",
+        "processed_panel_key_coverage",
+        "estimate_panel_bytes_per_session",
+        "estimate_factor_bytes_per_session",
+        "estimate_label_bytes_per_session",
+        "select_factor_definitions_for_spec",
+        "select_label_definitions_for_spec",
+    },
+    PROJECT_SRC / "research" / "models" / "__init__.py": {
+        "linear_regression_estimator",
+        "SingleFactorBaseline",
+        "RankEnsemblePredictor",
+        "ICWeightedRankEnsembleFactory",
+        "ICWeightedRankEnsemble",
+    },
+    PROJECT_SRC / "research" / "datasets" / "__init__.py": {
+        "iter_research_dataset_chunks",
+    },
+    PROJECT_SRC / "research" / "predictions" / "__init__.py": {
+        "prediction_callable",
+        "prediction_model_input_frame",
+    },
+    PROJECT_SRC / "compute" / "__init__.py": {
+        "simulate_weighted_long_short_returns_and_cost_from_validated_panel",
+    },
+}
 
 FORBIDDEN_CONTRACT_IMPORT_PREFIXES = (
     "quant_research_platform.compute",
@@ -198,6 +276,62 @@ def test_price_volume_root_is_public_reexport_surface() -> None:
     assert not private_exports, "price_volume_root_private_exports: " + repr(
         private_exports
     )
+
+
+def test_owner_local_internal_api_files_do_not_import_private_symbols() -> None:
+    hits: list[str] = []
+    for root in OWNER_LOCAL_INTERNAL_API_ROOTS:
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                for alias in node.names:
+                    if alias.name.startswith("_") and not alias.name.startswith("__"):
+                        hits.append(f"{path}:{node.lineno}: {alias.name}")
+
+    assert not hits, "owner_local_private_import: " + "; ".join(hits)
+
+
+def test_retired_owner_local_private_symbols_are_not_cross_file_attributes() -> None:
+    hits: list[str] = []
+    for root in OWNER_LOCAL_INTERNAL_API_ROOTS:
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr in RETIRED_OWNER_LOCAL_PRIVATE_SYMBOLS
+                ):
+                    hits.append(f"{path}:{node.lineno}: {node.attr}")
+
+    assert not hits, "retired_owner_local_private_attribute: " + "; ".join(hits)
+
+
+def test_owner_local_internal_api_files_do_not_export_private_names() -> None:
+    hits: list[str] = []
+    for root in OWNER_LOCAL_INTERNAL_API_ROOTS:
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for name in _literal_all_exports(tree):
+                if name.startswith("_"):
+                    hits.append(f"{path}: __all__ exports {name}")
+
+    assert not hits, "owner_local_private_all_export: " + "; ".join(hits)
+
+
+def test_owner_local_internal_api_is_not_package_reexported() -> None:
+    hits: list[str] = []
+    for path, internal_names in OWNER_LOCAL_INTERNAL_PACKAGE_EXPORTS.items():
+        if not path.exists():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        exports = set(_literal_all_exports(tree))
+        leaked = sorted(exports.intersection(internal_names))
+        if leaked:
+            hits.append(f"{path}: {', '.join(leaked)}")
+
+    assert not hits, "owner_local_internal_api_reexported: " + "; ".join(hits)
 
 
 def test_known_cross_layer_imports_are_explicitly_allowlisted(

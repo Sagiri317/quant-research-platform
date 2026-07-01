@@ -13,7 +13,7 @@ from quant_research_platform.artifacts._evaluation_output_validation import (
     _EVALUATION_IC_SUMMARY_COLUMNS,
     _EVALUATION_METRICS_COLUMNS,
     _validate_evaluation_artifact_structure,
-    _validate_evaluation_diagnostics_consistency,
+    validate_evaluation_diagnostics_consistency,
 )
 from quant_research_platform.artifacts._output_common_validation import (
     _derive_output_bundle_root,
@@ -81,7 +81,7 @@ def write_evaluation_outputs(
         spec=spec,
         n_groups=evaluation_diagnostics.n_groups,
     )
-    _validate_evaluation_diagnostics_consistency(
+    validate_evaluation_diagnostics_consistency(
         metrics=metrics,
         grouped_label_values=grouped_label_values,
         ic_summary=ic_summary,

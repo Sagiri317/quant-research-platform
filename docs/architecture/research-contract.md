@@ -30,6 +30,8 @@ compute 只提供数值计算核心，不持有 market session domain 工具，�
 
 `research/models/algorithm_facts.py` 是模型算法事实源。`estimators.py` 负责 estimator factories，`fitting.py` 负责 fit result、训练 frame 收集、线性拟合与 estimator fitting，`prediction.py` 负责预测输出 frame，`feature_importance.py` 负责特征重要性 payload，`rank_ensemble.py` 负责 rank ensemble predictor，`dependencies.py` 负责可选依赖状态，`validation_split.py` 负责训练 buffer 与 purge controls。`research/models/supervised.py` 保留当前 public boundary 并委派到这些 owner modules。单个算法字段使用 `model_algorithm`，算法 ID 集合使用 `model_algorithm_ids`。
 
+跨文件生产调用的 owner-local internal API 使用非下划线名称，可以留在 owner module 的 `__all__`，但不得从 package `__init__.py` 重导出为 public surface。同文件私有 helper 保留下划线且不进入 `__all__`。
+
 ## 数据安全
 
 研究 evidence 不能泄漏 row-level local-only data。可交接结果只能包含统计摘要、schema、counts、hash、status 和 sanitized logical path。

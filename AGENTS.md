@@ -41,6 +41,8 @@ git branch -a
 
 `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
 
+`.agents` handoff verifier 必须校验正式 handoff 的 REVIEW_SAFE evidence 完整性，并拒绝 status-only 摘要；具体 evidence shape 由 tracked verifier 和 tests 拥有。
+
 `.run/` 只是 output layer 和 evidence layer。它可以保存运行产物、handoff zip、manifest、logs、reports、temporary evidence，但不能反向定义架构、合同、工具入口或当前状态。
 
 正式 pytest profile runner 位于 `tests/tools/run_profile.py`。`.run/` 只保存输出、临时文件、profile 和 handoff/review artifacts。测试入口保持 Python-only；`.ps1` 和 `.sh` 不属于官方测试入口层。测试 profile 的输出路径和临时路径必须通过参数指定，未运行项状态为 `NOT_RUN`。

@@ -52,7 +52,7 @@ def write_panel(
         market_bars_inspection.columns,
         columns=("open", "high", "low", "close", "volume", "amount"),
     )
-    estimated = materialization_planning._estimate_panel_bytes_per_session(
+    estimated = materialization_planning.estimate_panel_bytes_per_session(
         sessions,
         time_window=time_window,
         market_bars_root=market_bars_root,
@@ -62,7 +62,7 @@ def write_panel(
         trading_calendar=trading_calendar,
         required_columns=spec.required_columns,
     )
-    windows = materialization_planning._planned_session_windows(
+    windows = materialization_planning.planned_session_windows(
         sessions,
         time_window=time_window,
         policy=policy,
@@ -86,7 +86,7 @@ def write_panel(
                 market_cap=market_cap,
                 trading_calendar=trading_calendar,
             )
-            output = materialization_planning._filter_output_sessions(
+            output = materialization_planning.filter_output_sessions(
                 panel,
                 window.core_sessions,
             )

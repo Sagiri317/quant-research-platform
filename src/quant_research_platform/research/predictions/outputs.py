@@ -16,7 +16,7 @@ from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.prediction import (
-    _prediction_model_input_frame,
+    prediction_model_input_frame,
 )
 from quant_research_platform.runtime.resources import ChunkAxis
 
@@ -60,7 +60,7 @@ def build_prediction_result_from_frames(
         spec=spec,
         coefficients=coefficients,
         input_columns=input_columns,
-        predictor=_prediction_callable(coefficients, input_columns, prediction_model),
+        predictor=prediction_callable(coefficients, input_columns, prediction_model),
         build_state=build_state,
     )
     return PredictionResult(
@@ -185,7 +185,7 @@ def _iter_prediction_output_frames(
         yield output
 
 
-def _prediction_callable(
+def prediction_callable(
     coefficients: np.ndarray,
     input_columns: tuple[str, ...],
     prediction_model: object | None,
@@ -194,7 +194,7 @@ def _prediction_callable(
 
         def predict_from_model(frame: pd.DataFrame) -> np.ndarray:
             predicted = prediction_model.predict(
-                _prediction_model_input_frame(
+                prediction_model_input_frame(
                     frame,
                     input_columns=input_columns,
                     prediction_model=prediction_model,

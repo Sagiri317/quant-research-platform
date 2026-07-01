@@ -328,7 +328,7 @@ def test_aggregates_filtering_and_calendar_helpers() -> None:
             "value": [1, 2, 3],
         }
     )
-    filtered = aggregates._filter_output_sessions(
+    filtered = aggregates.filter_output_sessions(
         frame,
         (pd.Timestamp("2024-01-03"),),
     )

@@ -20,6 +20,8 @@ A-share active processed profile 仍为日频。minute/tick 只由通用 data fr
 
 `markets/implementations/a_share/processed/materializer.py` 保留 `materialize_processed_data()` 入口和窄 orchestration。source ID mapping 位于 `source_ids.py`；dependency graph、profile frequency、input contract 和 required column validation 位于 `materialization_validation.py`；dataset root、processed input read、chunk iteration 和 write/inspect 位于 `materialization_io.py`。panel、annotation、factor 和 label materialization 继续通过当前 processed owner modules 调用 panel compute、`annotations.derive_annotations()`、factor definitions 和 label definitions。
 
+processed owner 内部跨文件生产 helper 使用非下划线 owner-local 名称，并且不从 `processed/__init__.py` 重导出。下划线 helper 只表示同文件私有实现细节。
+
 ## storage 层
 
 storage 层负责 dataset artifact 的读写、manifest、schema、partition、fingerprint 和 compare。private data 只能在本地 workspace 中使用，不进入 repo。

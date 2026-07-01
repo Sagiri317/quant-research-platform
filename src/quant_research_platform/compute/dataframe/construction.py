@@ -5,22 +5,22 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.constraints import (
-    _build_tradability_context,
-    _validate_tradability_columns,
+    build_tradability_context,
+    validate_tradability_columns,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     POSITION_COLUMNS,
     WEIGHT_DIAGNOSTIC_COLUMNS,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _normalize_group_key,
-    _select_signal,
-    _select_signals,
-    _validate_segment_columns,
-    _validate_weight_columns,
+    normalize_group_key,
+    select_signal,
+    select_signals,
+    validate_segment_columns,
+    validate_weight_columns,
 )
 from quant_research_platform.compute.dataframe.position_math import (
-    _build_signal_positions,
+    build_signal_positions,
 )
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
@@ -64,29 +64,29 @@ def _build_weighted_positions_from_validated_panel(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build positions from a validated timestamp-asset panel."""
 
-    _validate_segment_columns(panel, segment_columns)
-    _validate_weight_columns(panel, weight_config)
+    validate_segment_columns(panel, segment_columns)
+    validate_weight_columns(panel, weight_config)
     if tradability_config is None:
         tradability_config = TradabilityConfig()
-    _validate_tradability_columns(panel, tradability_config)
-    signals = _select_signals(spec, portfolio_signals)
+    validate_tradability_columns(panel, tradability_config)
+    signals = select_signals(spec, portfolio_signals)
     group_columns = [*segment_columns, spec.timestamp_column]
 
     position_records: list[dict[str, object]] = []
     diagnostic_records: list[dict[str, object]] = []
     previous_positions: dict[tuple[object, ...], dict[str, dict[str, float]]] = {}
     for group_key, timestamp_frame in panel.groupby(group_columns, sort=True):
-        group_values = _normalize_group_key(group_key, group_columns)
+        group_values = normalize_group_key(group_key, group_columns)
         timestamp = group_values[spec.timestamp_column]
         segment_key = tuple(group_values[column] for column in segment_columns)
         signal_previous = previous_positions.setdefault(segment_key, {})
-        tradability_context = _build_tradability_context(
+        tradability_context = build_tradability_context(
             timestamp_frame=timestamp_frame,
             spec=spec,
             tradability_config=tradability_config,
         )
         for signal in signals:
-            records, diagnostic = _build_signal_positions(
+            records, diagnostic = build_signal_positions(
                 timestamp_frame=timestamp_frame,
                 spec=spec,
                 signal=signal,
@@ -124,7 +124,7 @@ def build_long_short_positions(
 ) -> pd.DataFrame:
     """Build equal-weight long-short positions from timestamp-level ranks."""
 
-    signal = _select_signal(spec, signal_column)
+    signal = select_signal(spec, signal_column)
     config = WeightConfig(
         method="equal_weight_quantile",
         top_quantile=top_quantile,

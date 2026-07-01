@@ -24,18 +24,18 @@ PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID = "price_volume_forward_returns"
 
 
 def market_panel_data_id(frequency: DataFrequency | str = DataFrequency.DAILY) -> str:
-    normalized = _require_supported_panel_frequency(frequency, context="market panel")
+    normalized = require_supported_panel_frequency(frequency, context="market panel")
     return f"market_panel_{data_frequency_slug(normalized)}"
 
 
 def market_context_data_id(
     frequency: DataFrequency | str = DataFrequency.DAILY,
 ) -> str:
-    normalized = _require_supported_panel_frequency(frequency, context="market context")
+    normalized = require_supported_panel_frequency(frequency, context="market context")
     return f"market_context_{data_frequency_slug(normalized)}"
 
 
-def _require_supported_panel_frequency(
+def require_supported_panel_frequency(
     frequency: DataFrequency | str,
     *,
     context: str,

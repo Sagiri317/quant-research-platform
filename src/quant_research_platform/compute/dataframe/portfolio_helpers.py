@@ -14,7 +14,7 @@ from quant_research_platform.contracts.portfolios import (
 )
 
 
-def _cost_components(
+def cost_components(
     *,
     buy_turnover: float,
     sell_turnover: float,
@@ -59,7 +59,7 @@ def _uses_detailed_cost_config(cost_config: CostConfig) -> bool:
     )
 
 
-def _validate_segment_columns(
+def validate_segment_columns(
     panel: pd.DataFrame,
     segment_columns: tuple[str, ...],
 ) -> None:
@@ -68,7 +68,7 @@ def _validate_segment_columns(
         raise ValueError(f"segment columns are missing: {missing_columns}.")
 
 
-def _validate_weight_columns(panel: pd.DataFrame, weight_config: WeightConfig) -> None:
+def validate_weight_columns(panel: pd.DataFrame, weight_config: WeightConfig) -> None:
     if weight_config.risk_column is None:
         return
     if weight_config.risk_column not in panel:
@@ -80,7 +80,7 @@ def _validate_weight_columns(panel: pd.DataFrame, weight_config: WeightConfig) -
 
 
 
-def _risk_values(
+def risk_values(
     timestamp_frame: pd.DataFrame,
     weight_config: WeightConfig,
 ) -> np.ndarray | None:
@@ -93,7 +93,7 @@ def _risk_values(
 
 
 
-def _select_signals(
+def select_signals(
     spec: ComputePanelSpec,
     portfolio_signals: tuple[str, ...] | None,
 ) -> tuple[str, ...]:
@@ -107,18 +107,18 @@ def _select_signals(
     return portfolio_signals
 
 
-def _select_signal(spec: ComputePanelSpec, signal_column: str | None) -> str:
+def select_signal(spec: ComputePanelSpec, signal_column: str | None) -> str:
     signal = spec.signal_columns[0] if signal_column is None else signal_column
     if signal not in spec.signal_columns:
         raise ValueError(f"signal_column {signal!r} is not in the panel spec.")
     return signal
 
 
-def _selection_count(n_obs: int, quantile: float) -> int:
+def selection_count(n_obs: int, quantile: float) -> int:
     return max(1, floor(n_obs * quantile))
 
 
-def _normalize_group_key(
+def normalize_group_key(
     group_key: object,
     group_columns: list[str],
 ) -> dict[str, object]:

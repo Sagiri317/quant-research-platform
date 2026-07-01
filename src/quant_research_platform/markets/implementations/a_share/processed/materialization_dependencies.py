@@ -34,7 +34,7 @@ from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def _ensure_processed_dependencies(
+def ensure_processed_dependencies(
     spec: ProcessedDataSpec,
     *,
     layout: StorageLayout,
@@ -57,7 +57,7 @@ def _ensure_processed_dependencies(
     )
     for data_id in spec.processed_input_data_ids:
         dependency = processed_catalog.get(data_id)
-        required_window = _merge_time_windows(
+        required_window = merge_time_windows(
             dependency_window,
             dependency_windows.get(data_id, dependency_window),
         )
@@ -65,7 +65,7 @@ def _ensure_processed_dependencies(
         if dependency_root.exists():
             if data_id in written:
                 continue
-            materialization_planning._require_dataset_coverage(
+            materialization_planning.require_dataset_coverage(
                 dependency_root,
                 required_window,
                 sessions=sessions,
@@ -85,7 +85,7 @@ def _ensure_processed_dependencies(
         )
 
 
-def _planned_processed_dependency_windows(
+def planned_processed_dependency_windows(
     targets: tuple[ProcessedDataSpec, ...],
     *,
     layout: StorageLayout,
@@ -105,13 +105,13 @@ def _planned_processed_dependency_windows(
             sessions=sessions,
         )
         for data_id in spec.processed_input_data_ids:
-            windows[data_id] = _merge_time_windows(
+            windows[data_id] = merge_time_windows(
                 windows.get(data_id, dependency_window),
                 dependency_window,
             )
     return windows
 
-def _merge_time_windows(left: TimeWindow, right: TimeWindow) -> TimeWindow:
+def merge_time_windows(left: TimeWindow, right: TimeWindow) -> TimeWindow:
     return TimeWindow(min(left.start, right.start), max(left.end, right.end))
 
 def _processed_dependency_time_window(
@@ -125,7 +125,7 @@ def _processed_dependency_time_window(
     if not spec.processed_input_data_ids:
         return time_window
     if spec.kind is ProcessedDataKind.FACTOR:
-        definitions = materialize_factors._select_factor_definitions_for_spec(
+        definitions = materialize_factors.select_factor_definitions_for_spec(
             spec,
             factor_definitions.factor_catalog(),
         )
@@ -142,7 +142,7 @@ def _processed_dependency_time_window(
             lookahead_sessions=0,
         )
     if spec.kind is ProcessedDataKind.LABEL:
-        definitions = materialize_labels._select_label_definitions_for_spec(
+        definitions = materialize_labels.select_label_definitions_for_spec(
             spec,
             label_definitions.label_catalog(),
         )
@@ -192,7 +192,7 @@ def _session_offset_time_window(
     )
 
 __all__ = [
-    "_ensure_processed_dependencies",
-    "_merge_time_windows",
-    "_planned_processed_dependency_windows",
+    "ensure_processed_dependencies",
+    "merge_time_windows",
+    "planned_processed_dependency_windows",
 ]

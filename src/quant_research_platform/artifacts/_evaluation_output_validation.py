@@ -58,7 +58,7 @@ _EVALUATION_ARTIFACTS = [
 ]
 
 
-def _validate_evaluation_diagnostics_consistency(
+def validate_evaluation_diagnostics_consistency(
     *,
     metrics: pd.DataFrame,
     grouped_label_values: pd.DataFrame,

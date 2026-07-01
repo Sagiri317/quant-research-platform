@@ -14,7 +14,7 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
     MARKET_ID,
-    _require_supported_panel_frequency,
+    require_supported_panel_frequency,
 )
 
 _CANONICAL_NAMES = canonical_field_names()
@@ -38,7 +38,7 @@ def compute_market_panel(
 ) -> pd.DataFrame:
     """Compute the A-share processed market panel from source interim frames."""
 
-    _require_supported_panel_frequency(frequency, context="market panel")
+    require_supported_panel_frequency(frequency, context="market panel")
     market_bars = _ensure_datetime(
         _with_time_fields(_with_asset_keys(market_bars)),
         ["timestamp", "session_date", "available_at"],

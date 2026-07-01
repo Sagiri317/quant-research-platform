@@ -18,7 +18,7 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
-from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
+from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.portfolios.engine import (
     compute_cumulative_returns,
     compute_performance_summary,
@@ -108,7 +108,7 @@ def _portfolio_input_chunks(
     columns: tuple[str, ...],
 ):
     return iter_complete_time_sized_frames(
-        _iter_research_dataset_chunks(
+        iter_research_dataset_chunks(
             layout,
             market_id=market_id,
             dataset_id=dataset_id,

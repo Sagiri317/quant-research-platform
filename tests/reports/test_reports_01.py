@@ -276,7 +276,7 @@ def test_evaluation_outputs_reject_existing_output_bundle_without_writes(
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
-            evaluation_diagnostics=_evaluation_diagnostics(),
+            evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=_evaluation_spec(),
             output_spec=_evaluation_outputs_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -372,7 +372,7 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
-            evaluation_diagnostics=_evaluation_diagnostics(),
+            evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=_evaluation_spec(),
             output_spec=_evaluation_outputs_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -586,7 +586,7 @@ def _evaluation_group_spread_summary_frame() -> pd.DataFrame:
     )
 
 
-def _evaluation_diagnostics() -> EvaluationDiagnostics:
+def build_evaluation_diagnostics() -> EvaluationDiagnostics:
     return EvaluationDiagnostics(
         filter_mode="eligible",
         filter_columns_used=("eligible",),

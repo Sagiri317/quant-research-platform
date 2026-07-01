@@ -13,13 +13,13 @@ from quant_research_platform.contracts.portfolios import (
 )
 
 
-def _optional_bool_array(frame: pd.DataFrame, column: str | None) -> np.ndarray | None:
+def optional_bool_array(frame: pd.DataFrame, column: str | None) -> np.ndarray | None:
     if column is None:
         return None
     return frame[column].to_numpy(dtype="bool", copy=False)
 
 
-def _ranked_asset_indices(
+def ranked_asset_indices(
     *,
     assets: tuple[str, ...],
     signal_values: np.ndarray,
@@ -39,7 +39,7 @@ def _ranked_asset_indices(
         previous_vector = (
             previous_values
             if previous_values is not None
-            else _previous_position_vector(assets, previous_positions)
+            else previous_position_vector(assets, previous_positions)
         )
         valid &= timestamp_input.can_enter | (previous_vector != 0.0)
     candidate_indices = np.flatnonzero(valid)
@@ -47,7 +47,7 @@ def _ranked_asset_indices(
     return candidate_indices[order]
 
 
-def _apply_array_tradability_constraints(
+def apply_array_tradability_constraints(
     *,
     positions: np.ndarray,
     assets: tuple[str, ...],
@@ -66,7 +66,7 @@ def _apply_array_tradability_constraints(
     previous = (
         previous_values
         if previous_values is not None
-        else _previous_position_vector(assets, previous_positions)
+        else previous_position_vector(assets, previous_positions)
     )
 
     if (
@@ -98,7 +98,7 @@ def _apply_array_tradability_constraints(
     return constrained
 
 
-def _previous_position_vector(
+def previous_position_vector(
     assets: tuple[str, ...],
     previous_positions: dict[str, float],
     asset_to_offset: dict[str, int] | None = None,

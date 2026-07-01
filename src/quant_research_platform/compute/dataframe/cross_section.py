@@ -222,7 +222,7 @@ def summarize_ic(
     records: list[dict[str, object]] = []
     group_columns = [*segment_columns, "signal", "label"]
     for group_key, group in ic.groupby(group_columns, sort=True, dropna=False):
-        group_values = _normalize_group_key(group_key, group_columns)
+        group_values = normalize_group_key(group_key, group_columns)
         ic_values = pd.to_numeric(group["ic"], errors="coerce").dropna()
         rankic_values = pd.to_numeric(group["rankic"], errors="coerce").dropna()
         ic_stats = _summarize_correlation_values(ic_values)
@@ -391,7 +391,7 @@ def _summarize_correlation_values(values: pd.Series) -> dict[str, float | int]:
     }
 
 
-def _normalize_group_key(
+def normalize_group_key(
     group_key: object,
     group_columns: list[str],
 ) -> dict[str, object]:

@@ -78,6 +78,10 @@ def test_governance_allows_sanitization_negative_fixtures_only() -> None:
         "tests/policy/test_share_safety_runtime_edges.py",
         secret_line,
     )
+    assert not module._is_allowed_secret_fixture(
+        "tests/policy/test_share_safety_runtime_edges.py",
+        'accidental = "token=not_allowed"',
+    )
     assert not module._is_allowed_local_path_fixture(
         "tests/architecture/test_share_safe_evidence.py",
         '    "/mnt/",',

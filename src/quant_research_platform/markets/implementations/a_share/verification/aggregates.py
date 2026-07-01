@@ -719,7 +719,7 @@ def _iter_generated_full_market_panel_session_chunks(
             trading_calendar=trading_calendar,
         )
         output = panel[list(spec.required_columns)].copy()
-        yield _filter_output_sessions(output, window.core_sessions).reset_index(
+        yield filter_output_sessions(output, window.core_sessions).reset_index(
             drop=True
         )
 
@@ -760,7 +760,7 @@ def _trading_sessions_from_calendar(
     return normalize_session_dates(trading_calendar.loc[mask, "timestamp"])
 
 
-def _filter_output_sessions(
+def filter_output_sessions(
     frame: pd.DataFrame,
     sessions: tuple[pd.Timestamp, ...],
 ) -> pd.DataFrame:

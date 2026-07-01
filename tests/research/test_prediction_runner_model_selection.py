@@ -69,6 +69,53 @@ def test_prediction_runner_selects_model_using_validation_metric(
     assert model_selection["selection_direction"] == "minimize"
     assert model_selection["candidate_model_ids"] == ["base_model", "candidate_model"]
     assert manifest["metadata"]["model_metadata"]["input_columns"] == ["factor_b"]
+    assert model_selection["selected_model_input_columns"] == ["factor_b"]
+
+
+def test_prediction_runner_applies_sample_filter_to_validation_metrics(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = _dataset_catalog()
+    model_catalog = _model_catalog(
+        _model("base_model", ("factor_a",)),
+        _model("candidate_model", ("factor_b",)),
+    )
+    prediction_catalog = PredictionCatalog()
+    prediction_catalog.register(
+        PredictionSpec(
+            prediction_id="prediction_demo",
+            model_id="base_model",
+            research_dataset_id="research_demo",
+            train_end="2024-01-03",
+            test_start="2024-01-07",
+            test_end="2024-01-08",
+            candidate_model_ids=("candidate_model",),
+            model_selection_metric="validation_mse",
+            model_selection_validation_start="2024-01-04",
+            model_selection_validation_end="2024-01-06",
+            sample_filter_mode="eligible",
+        )
+    )
+    write_dataset(
+        layout.research_dataset_root(MarketId("a_share"), "research_demo"),
+        _prediction_filter_flip_frame(),
+        spec=_dataset_spec(),
+    )
+
+    result = build_prediction_result_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        model_catalog=model_catalog,
+        prediction_catalog=prediction_catalog,
+        prediction_id="prediction_demo",
+    )
+    output_bundle = write_prediction_result(layout, result)
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
+    model_selection = manifest["metadata"]["model_metadata"]["model_selection"]
+
+    assert model_selection["selected_model_id"] == "candidate_model"
+    assert model_selection["selected_model_input_columns"] == ["factor_b"]
 
 
 def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
@@ -178,5 +225,20 @@ def _prediction_frame() -> pd.DataFrame:
             "factor_b": factor_b,
             "eligible": [True] * len(dates),
             "label": label,
+        }
+    )
+
+
+def _prediction_filter_flip_frame() -> pd.DataFrame:
+    dates = pd.date_range("2024-01-01", periods=8, freq="D")
+    return pd.DataFrame(
+        {
+            "market_id": ["a_share"] * len(dates),
+            "asset_id": ["asset_a"] * len(dates),
+            "timestamp": dates,
+            "factor_a": [0.0, 1.0, 2.0, 100.0, 101.0, 0.0, 7.0, 8.0],
+            "factor_b": [0.0, 1.0, 2.0, 0.0, 0.0, 10.0, 7.0, 8.0],
+            "eligible": [True, True, True, False, False, True, True, True],
+            "label": [0.0, 1.0, 2.0, 100.0, 101.0, 10.0, 7.0, 8.0],
         }
     )

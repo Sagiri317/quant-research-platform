@@ -9,7 +9,7 @@ import pandas as pd
 
 
 @dataclass(frozen=True)
-class _RankEnsemblePredictor:
+class RankEnsemblePredictor:
     columns: tuple[str, ...]
     coefficient_count: int = 1
 
@@ -18,12 +18,12 @@ class _RankEnsemblePredictor:
 
 
 @dataclass(frozen=True)
-class _ICWeightedRankEnsembleFactory:
+class ICWeightedRankEnsembleFactory:
     columns: tuple[str, ...]
     label_column: str
 
-    def fit_training_frame(self, frame: pd.DataFrame) -> _ICWeightedRankEnsemble:
-        return _ICWeightedRankEnsemble.fit(
+    def fit_training_frame(self, frame: pd.DataFrame) -> ICWeightedRankEnsemble:
+        return ICWeightedRankEnsemble.fit(
             frame,
             input_columns=self.columns,
             label_column=self.label_column,
@@ -31,7 +31,7 @@ class _ICWeightedRankEnsembleFactory:
 
 
 @dataclass(frozen=True)
-class _ICWeightedRankEnsemble:
+class ICWeightedRankEnsemble:
     columns: tuple[str, ...]
     weights: np.ndarray
     coefficient_count: int
@@ -43,7 +43,7 @@ class _ICWeightedRankEnsemble:
         *,
         input_columns: tuple[str, ...],
         label_column: str,
-    ) -> _ICWeightedRankEnsemble:
+    ) -> ICWeightedRankEnsemble:
         weights = []
         label = _rank_series(frame, label_column)
         for column in input_columns:

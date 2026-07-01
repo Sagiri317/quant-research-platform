@@ -32,7 +32,7 @@ from quant_research_platform.research.factors.price_volume import (
 )
 from quant_research_platform.research.factors.price_volume.rolling import (
     _ROLLING_MOMENT_NEAR_ZERO_VARIANCE,
-    _rolling_aggregate,
+    rolling_aggregate,
 )
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
@@ -83,7 +83,7 @@ def test_price_volume_rolling_moment_contract_names_near_zero_policy() -> None:
     )
 
 
-def test_rolling_aggregate_preserves_groupby_rolling_row_alignment() -> None:
+def testrolling_aggregate_preserves_groupby_rolling_row_alignment() -> None:
     frame = pd.DataFrame(
         {
             "asset_id": ["asset_b", "asset_a", "asset_b", "asset_a", "asset_b"],
@@ -95,7 +95,7 @@ def test_rolling_aggregate_preserves_groupby_rolling_row_alignment() -> None:
     grouped = frame["value"].groupby(group_keys, sort=False)
     group_positions = tuple(frame.groupby("asset_id", sort=False).indices.values())
 
-    actual_mean = _rolling_aggregate(
+    actual_mean = rolling_aggregate(
         frame["value"],
         grouped,
         group_positions,
@@ -105,7 +105,7 @@ def test_rolling_aggregate_preserves_groupby_rolling_row_alignment() -> None:
     expected_mean = grouped.transform(
         lambda series: series.rolling(2, min_periods=2).mean()
     )
-    actual_std = _rolling_aggregate(
+    actual_std = rolling_aggregate(
         frame["value"],
         grouped,
         group_positions,
@@ -120,19 +120,19 @@ def test_rolling_aggregate_preserves_groupby_rolling_row_alignment() -> None:
     pd.testing.assert_series_equal(actual_std, expected_std)
 
 
-def test_rolling_aggregate_mean_is_segment_start_invariant() -> None:
+def testrolling_aggregate_mean_is_segment_start_invariant() -> None:
     rng = np.random.default_rng(7)
     _ = rng.normal(size=3000)
     values = pd.Series(
         rng.normal(size=1000) * 1_000_000_000_000.0 + np.arange(1000) * 0.01
     )
-    full = _calculate_rolling_aggregate_segment(
+    full = _calculaterolling_aggregate_segment(
         values,
         segment_start=0,
         core_start=500,
         window=120,
     )
-    shifted = _calculate_rolling_aggregate_segment(
+    shifted = _calculaterolling_aggregate_segment(
         values,
         segment_start=100,
         core_start=500,
@@ -142,7 +142,7 @@ def test_rolling_aggregate_mean_is_segment_start_invariant() -> None:
     pd.testing.assert_series_equal(full, shifted, check_exact=True)
 
 
-def test_rolling_aggregate_requires_finite_values_for_entire_window() -> None:
+def testrolling_aggregate_requires_finite_values_for_entire_window() -> None:
     frame = pd.DataFrame(
         {
             "asset_id": ["asset_a"] * 5,
@@ -153,14 +153,14 @@ def test_rolling_aggregate_requires_finite_values_for_entire_window() -> None:
     grouped = frame["value"].groupby(group_keys, sort=False)
     group_positions = tuple(frame.groupby("asset_id", sort=False).indices.values())
 
-    actual_min = _rolling_aggregate(
+    actual_min = rolling_aggregate(
         frame["value"],
         grouped,
         group_positions,
         2,
         "min",
     )
-    actual_max = _rolling_aggregate(
+    actual_max = rolling_aggregate(
         frame["value"],
         grouped,
         group_positions,
@@ -843,7 +843,7 @@ def calculate_forward_returns_in_session_chunks(
     return pd.concat(parts, ignore_index=True).loc[:, [*KEY_COLUMNS, *label_columns]]
 
 
-def _calculate_rolling_aggregate_segment(
+def _calculaterolling_aggregate_segment(
     values: pd.Series,
     *,
     segment_start: int,
@@ -859,7 +859,7 @@ def _calculate_rolling_aggregate_segment(
     group_keys = frame["asset_id"]
     grouped = frame["value"].groupby(group_keys, sort=False)
     group_positions = tuple(frame.groupby("asset_id", sort=False).indices.values())
-    result = _rolling_aggregate(
+    result = rolling_aggregate(
         frame["value"],
         grouped,
         group_positions,

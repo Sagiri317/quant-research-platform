@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute._portfolio_math import (
-    _cost_components,
-    _normalize_group_key,
+    cost_components,
+    normalize_group_key,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
@@ -39,7 +39,7 @@ def calculate_tensor_turnover_and_cost(
     cost_records: list[dict[str, object]] = []
     group_columns = [*segment_columns, "signal"]
     for group_key, group in positions.groupby(group_columns, sort=True, dropna=False):
-        group_values = _normalize_group_key(group_key, group_columns)
+        group_values = normalize_group_key(group_key, group_columns)
         matrix = (
             group.pivot(index="timestamp", columns="asset", values="position")
             .fillna(0.0)
@@ -60,7 +60,7 @@ def calculate_tensor_turnover_and_cost(
                 "timestamp": timestamp,
                 "signal": group_values["signal"],
             }
-            costs = _cost_components(
+            costs = cost_components(
                 buy_turnover=float(buy_turnover[row_offset]),
                 sell_turnover=float(sell_turnover[row_offset]),
                 turnover=float(turnover[row_offset]),
@@ -125,7 +125,7 @@ def _path_turnover_and_cost_records(
         "timestamp": timestamp,
         "signal": signal,
     }
-    costs = _cost_components(
+    costs = cost_components(
         buy_turnover=buy_turnover,
         sell_turnover=sell_turnover,
         turnover=turnover,
@@ -145,7 +145,7 @@ def _path_turnover_and_cost_records(
         },
     )
 
-def _path_turnover_and_cost_records_from_arrays(
+def path_turnover_and_cost_records_from_arrays(
     *,
     context: dict[str, object],
     timestamp: object,
@@ -181,7 +181,7 @@ def _path_turnover_and_cost_records_from_arrays(
         "timestamp": timestamp,
         "signal": signal,
     }
-    costs = _cost_components(
+    costs = cost_components(
         buy_turnover=buy_turnover,
         sell_turnover=sell_turnover,
         turnover=turnover,
@@ -201,7 +201,7 @@ def _path_turnover_and_cost_records_from_arrays(
         },
     )
 
-def _path_current_state(
+def path_current_state(
     *,
     assets: tuple[str, ...],
     position_values: np.ndarray,
@@ -231,7 +231,7 @@ def _current_position_state(
         "position_count": len(nonzero_offsets),
     }
 
-def _position_map_from_arrays(
+def position_map_from_arrays(
     *,
     assets: tuple[str, ...],
     positions: np.ndarray,

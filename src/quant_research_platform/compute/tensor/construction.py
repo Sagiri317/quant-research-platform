@@ -9,12 +9,12 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute._portfolio_math import (
-    _normalize_group_key,
-    _select_signals,
-    _selection_count,
-    _validate_segment_columns,
-    _validate_tradability_columns,
-    _validate_weight_columns,
+    normalize_group_key,
+    select_signals,
+    selection_count,
+    validate_segment_columns,
+    validate_tradability_columns,
+    validate_weight_columns,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
@@ -28,21 +28,21 @@ from quant_research_platform.compute.panels import (
     validate_compute_panel,
 )
 from quant_research_platform.compute.tensor.constraints import (
-    _apply_array_tradability_constraints,
-    _optional_bool_array,
-    _previous_position_vector,
-    _ranked_asset_indices,
+    apply_array_tradability_constraints,
+    optional_bool_array,
+    previous_position_vector,
+    ranked_asset_indices,
 )
 from quant_research_platform.compute.tensor.portfolio_constants import (
     EXPOSURE_PATH_COLUMNS,
 )
 from quant_research_platform.compute.tensor.portfolio_helpers import (
-    _leg_weight_values,
+    leg_weight_values,
 )
 from quant_research_platform.compute.tensor.portfolio_returns import (
-    _build_path_records_from_arrays,
+    build_path_records_from_arrays,
 )
-from quant_research_platform.compute.tensor.turnover import _position_map_from_arrays
+from quant_research_platform.compute.tensor.turnover import position_map_from_arrays
 from quant_research_platform.contracts.portfolios import (
     CostConfig,
     TradabilityConfig,
@@ -146,14 +146,14 @@ def _build_tensor_positions_core(
     if include_path_records:
         return_source_column = _require_return_source_column(return_source_column)
     panel = validate_compute_panel(panel, spec, segment_columns=segment_columns)
-    _validate_segment_columns(panel, segment_columns)
-    _validate_weight_columns(panel, weight_config)
+    validate_segment_columns(panel, segment_columns)
+    validate_weight_columns(panel, weight_config)
     if cost_config is None:
         cost_config = CostConfig()
     if tradability_config is None:
         tradability_config = TradabilityConfig()
-    _validate_tradability_columns(panel, tradability_config)
-    signals = _select_signals(spec, portfolio_signals)
+    validate_tradability_columns(panel, tradability_config)
+    signals = select_signals(spec, portfolio_signals)
     panel = panel.sort_values(
         [*segment_columns, spec.timestamp_column, spec.asset_column],
         kind="mergesort",
@@ -171,7 +171,7 @@ def _build_tensor_positions_core(
 
     group_columns = [*segment_columns, spec.timestamp_column]
     for group_key, timestamp_frame in panel.groupby(group_columns, sort=False):
-        group_values = _normalize_group_key(group_key, group_columns)
+        group_values = normalize_group_key(group_key, group_columns)
         timestamp = group_values[spec.timestamp_column]
         segment_context = {column: group_values[column] for column in segment_columns}
         segment_key = tuple(segment_context[column] for column in segment_columns)
@@ -211,7 +211,7 @@ def _build_tensor_positions_core(
                 previous_array_state[1] if previous_assets_match else None
             )
             previous_map = (
-                _position_map_from_arrays(
+                position_map_from_arrays(
                     assets=previous_array_state[0],
                     positions=previous_array_state[1],
                 )
@@ -253,7 +253,7 @@ def _build_tensor_positions_core(
                     timestamp=timestamp,
                     timestamp_input=timestamp_input,
                     position_values=position_values,
-                    previous_values=previous_values: _build_path_records_from_arrays(
+                    previous_values=previous_values: build_path_records_from_arrays(
                         context=segment_context,
                         timestamp=timestamp,
                         signal=signal,
@@ -348,7 +348,7 @@ def _build_tensor_signal_positions(
         lambda: (
             cached_previous_values
             if cached_previous_values is not None
-            else _previous_position_vector(
+            else previous_position_vector(
                 assets,
                 previous_positions,
                 timestamp_input.asset_to_offset,
@@ -360,7 +360,7 @@ def _build_tensor_signal_positions(
     ranked_indices = measure_stage(
         "metric",
         "positions.rank_indices",
-        lambda: _ranked_asset_indices(
+        lambda: ranked_asset_indices(
             assets=assets,
             signal_values=signal_values,
             weight_config=weight_config,
@@ -387,7 +387,7 @@ def _build_tensor_signal_positions(
     positions = measure_stage(
         "metric",
         "positions.rank_tradability",
-        lambda: _apply_array_tradability_constraints(
+        lambda: apply_array_tradability_constraints(
             positions=positions,
             assets=assets,
             timestamp_input=timestamp_input,
@@ -400,14 +400,14 @@ def _build_tensor_signal_positions(
     diagnostic = {
         "signal": signal,
         "method": weight_config.method,
-        **_tensor_tradability_diagnostic_counts(timestamp_input, signal),
+        **_tensortradability_diagnostic_counts(timestamp_input, signal),
         "long_count": int(long_count),
         "short_count": int(short_count),
         "fallback_reason": fallback_reason,
     }
     return diagnostic, positions, previous_values
 
-def _tensor_tradability_diagnostic_counts(
+def _tensortradability_diagnostic_counts(
     timestamp_input: _TimestampPositionInput,
     signal: str,
 ) -> dict[str, int]:
@@ -452,17 +452,17 @@ def _assign_ranked_position_weights(
     if len(ranked_indices) < minimum_count:
         return positions, long_count, short_count, fallback_reason
 
-    long_count = _selection_count(len(ranked_indices), weight_config.top_quantile)
+    long_count = selection_count(len(ranked_indices), weight_config.top_quantile)
     short_count = (
         0
         if weight_config.portfolio_mode == "long_only"
-        else _selection_count(len(ranked_indices), weight_config.bottom_quantile)
+        else selection_count(len(ranked_indices), weight_config.bottom_quantile)
     )
     if long_count + short_count > len(ranked_indices):
         return positions, long_count, short_count, fallback_reason
 
     long_indices = ranked_indices[-long_count:]
-    long_positions, long_fallback = _leg_weight_values(
+    long_positions, long_fallback = leg_weight_values(
         asset_indices=long_indices,
         signal_values=signal_values,
         risk_values=risk_values,
@@ -473,7 +473,7 @@ def _assign_ranked_position_weights(
     short_positions, short_fallback = (
         (np.array([], dtype="float64"), "")
         if weight_config.portfolio_mode == "long_only"
-        else _leg_weight_values(
+        else leg_weight_values(
             asset_indices=ranked_indices[:short_count],
             signal_values=signal_values,
             risk_values=risk_values,
@@ -596,15 +596,15 @@ def _prepare_timestamp_position_input(
             if weight_config.method == "inverse_vol_scaled_quantile"
             else None
         ),
-        eligible=_optional_bool_array(
+        eligible=optional_bool_array(
             timestamp_frame,
             tradability_config.eligibility_column,
         ),
-        can_enter=_optional_bool_array(
+        can_enter=optional_bool_array(
             timestamp_frame,
             tradability_config.can_enter_column,
         ),
-        can_exit=_optional_bool_array(
+        can_exit=optional_bool_array(
             timestamp_frame,
             tradability_config.can_exit_column,
         ),

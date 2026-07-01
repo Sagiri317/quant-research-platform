@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.constraints import (
-    _build_tradability_context,
-    _validate_tradability_columns,
+    build_tradability_context,
+    validate_tradability_columns,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
@@ -17,19 +17,19 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
     WEIGHT_DIAGNOSTIC_COLUMNS,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _cost_components,
-    _normalize_group_key,
-    _select_signal,
-    _select_signals,
-    _validate_segment_columns,
-    _validate_weight_columns,
+    cost_components,
+    normalize_group_key,
+    select_signal,
+    select_signals,
+    validate_segment_columns,
+    validate_weight_columns,
 )
 from quant_research_platform.compute.dataframe.position_math import (
-    _build_signal_positions,
+    build_signal_positions,
 )
 from quant_research_platform.compute.dataframe.turnover import (
-    _active_position_map,
-    _position_change_turnover,
+    active_position_map,
+    position_change_turnover,
 )
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
@@ -83,7 +83,7 @@ def _simulate_weighted_long_short_returns_from_validated_panel(
     """Simulate returns from a validated timestamp-asset panel."""
 
     positions, turnover, returns, diagnostics, _cost_breakdown = (
-        _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
             panel,
             spec,
             weight_config,
@@ -96,7 +96,7 @@ def _simulate_weighted_long_short_returns_from_validated_panel(
     )
     return positions, turnover, returns, diagnostics
 
-def _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+def simulate_weighted_long_short_returns_and_cost_from_validated_panel(
     panel: pd.DataFrame,
     spec: ComputePanelSpec,
     weight_config: WeightConfig,
@@ -137,15 +137,15 @@ def _stream_weighted_portfolio_from_validated_panel(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Stream positions, turnover, costs, and portfolio returns."""
 
-    _validate_segment_columns(panel, segment_columns)
-    _validate_weight_columns(panel, weight_config)
+    validate_segment_columns(panel, segment_columns)
+    validate_weight_columns(panel, weight_config)
     if tradability_config is None:
         tradability_config = TradabilityConfig()
     if cost_config is None:
         cost_config = CostConfig()
-    _validate_tradability_columns(panel, tradability_config)
+    validate_tradability_columns(panel, tradability_config)
     return_source_column = _require_return_source_column(return_source_column)
-    signals = _select_signals(spec, portfolio_signals)
+    signals = select_signals(spec, portfolio_signals)
     group_columns = [*segment_columns, spec.timestamp_column]
 
     position_records: list[dict[str, object]] = []
@@ -155,7 +155,7 @@ def _stream_weighted_portfolio_from_validated_panel(
     return_records: list[dict[str, object]] = []
     previous_positions: dict[tuple[object, ...], dict[str, dict[str, float]]] = {}
     for group_key, timestamp_frame in panel.groupby(group_columns, sort=True):
-        group_values = _normalize_group_key(group_key, group_columns)
+        group_values = normalize_group_key(group_key, group_columns)
         timestamp = group_values[spec.timestamp_column]
         segment_key = tuple(group_values[column] for column in segment_columns)
         signal_previous = previous_positions.setdefault(segment_key, {})
@@ -164,14 +164,14 @@ def _stream_weighted_portfolio_from_validated_panel(
             spec,
             return_source_column,
         )
-        tradability_context = _build_tradability_context(
+        tradability_context = build_tradability_context(
             timestamp_frame=timestamp_frame,
             spec=spec,
             tradability_config=tradability_config,
         )
         for signal in signals:
             previous = signal_previous.get(signal, {})
-            records, diagnostic = _build_signal_positions(
+            records, diagnostic = build_signal_positions(
                 timestamp_frame=timestamp_frame,
                 spec=spec,
                 signal=signal,
@@ -181,13 +181,13 @@ def _stream_weighted_portfolio_from_validated_panel(
                 group_values=group_values,
                 previous_positions=previous,
             )
-            current = _active_position_map(records)
-            buy_turnover, sell_turnover = _position_change_turnover(
+            current = active_position_map(records)
+            buy_turnover, sell_turnover = position_change_turnover(
                 previous=previous,
                 current=current,
             )
             turnover = buy_turnover + sell_turnover
-            costs = _cost_components(
+            costs = cost_components(
                 buy_turnover=buy_turnover,
                 sell_turnover=sell_turnover,
                 turnover=turnover,
@@ -254,7 +254,7 @@ def simulate_long_short_returns(
 ) -> pd.DataFrame:
     """Simulate equal-weight long-short returns with turnover-based costs."""
 
-    signal = _select_signal(spec, signal_column)
+    signal = select_signal(spec, signal_column)
     _positions, _turnover, returns, _diagnostics = simulate_weighted_long_short_returns(
         frame,
         spec,
@@ -307,7 +307,7 @@ def _calculate_long_short_from_positions(
         position_group_columns,
         sort=True,
     ):
-        group_values = _normalize_group_key(group_key, position_group_columns)
+        group_values = normalize_group_key(group_key, position_group_columns)
         positions_array = timestamp_positions["position"].to_numpy(
             dtype="float64",
             copy=False,

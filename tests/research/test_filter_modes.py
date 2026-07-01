@@ -549,7 +549,7 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
     )
     expected = evaluate_signal_frame(frame, spec, n_groups=2)
 
-    result = eval_engine._evaluate_signal_frame_chunks(
+    result = eval_engine.evaluate_signal_frame_chunks(
         (frame.iloc[:3], frame.iloc[3:]),
         spec,
         n_groups=2,
@@ -668,7 +668,7 @@ def test_evaluation_rejects_non_monotonic_time_chunk_order() -> None:
     )
 
     with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
-        eval_engine._evaluate_signal_frame_chunks(
+        eval_engine.evaluate_signal_frame_chunks(
             (first, second, late_overlap),
             spec,
             n_groups=2,
@@ -690,7 +690,7 @@ def test_evaluation_rejects_pending_non_monotonic_time_overlap() -> None:
     )
 
     with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
-        eval_engine._evaluate_signal_frame_chunks(
+        eval_engine.evaluate_signal_frame_chunks(
             (first, earlier),
             spec,
             n_groups=2,
@@ -716,7 +716,7 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
         ValueError,
         match="time_chunk_boundary_overlap_exceeds_memory_budget",
     ):
-        eval_engine._evaluate_signal_frame_chunks(
+        eval_engine.evaluate_signal_frame_chunks(
             (frame.iloc[:3], frame.iloc[3:]),
             spec,
             n_groups=2,
@@ -1259,7 +1259,7 @@ def _prediction_output_scores(
             spec=prediction_spec,
             coefficients=result.coefficients,
             input_columns=model_spec.input_columns,
-            predictor=prediction_outputs._prediction_callable(
+            predictor=prediction_outputs.prediction_callable(
                 result.coefficients,
                 model_spec.input_columns,
                 result.prediction_model,

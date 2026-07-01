@@ -816,7 +816,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         )
     )
 
-    original_iter = prediction_runner_module._iter_research_dataset_chunks
+    original_iter = prediction_runner_module.iter_research_dataset_chunks
     original_fit = prediction_runner_module.fitting.fit_model_result_from_frames
     original_write = prediction_runner_module.build_prediction_result_from_frames
     read_chunk_rows: list[int] = []
@@ -851,7 +851,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
 
     monkeypatch.setattr(
         prediction_runner_module,
-        "_iter_research_dataset_chunks",
+        "iter_research_dataset_chunks",
         wrapped_iter,
     )
     monkeypatch.setattr(
@@ -968,7 +968,7 @@ def test_evaluation_runner_streams_research_chunks(
             label_columns=("forward_return_20d",),
         )
     )
-    original_iter = evaluation_runner_module._iter_research_dataset_chunks
+    original_iter = evaluation_runner_module.iter_research_dataset_chunks
     read_chunk_rows: list[int] = []
 
     def wrapped_iter(*args, **kwargs):
@@ -978,7 +978,7 @@ def test_evaluation_runner_streams_research_chunks(
 
     monkeypatch.setattr(
         evaluation_runner_module,
-        "_iter_research_dataset_chunks",
+        "iter_research_dataset_chunks",
         wrapped_iter,
     )
 

@@ -21,7 +21,7 @@ _WINDOWED_FACTOR_PATTERN = re.compile(
 )
 
 
-def _parse_price_volume_windowed_factor_name(
+def parse_price_volume_windowed_factor_name(
     name: str,
 ) -> tuple[str, int, DataFrequency] | None:
     match = _WINDOWED_FACTOR_PATTERN.fullmatch(name)
@@ -34,25 +34,25 @@ def _parse_price_volume_windowed_factor_name(
     )
 
 
-def _required_windows(factor_id: str) -> tuple[int, ...]:
-    parsed = _parse_price_volume_windowed_factor_name(factor_id)
+def required_windows(factor_id: str) -> tuple[int, ...]:
+    parsed = parse_price_volume_windowed_factor_name(factor_id)
     if parsed is None:
         return ()
     _prefix, window, _frequency = parsed
     return (window,)
 
 
-def _lookback_window(factor_id: str) -> int | None:
-    windows = _required_windows(factor_id)
+def lookback_window(factor_id: str) -> int | None:
+    windows = required_windows(factor_id)
     if not windows:
         return None
     return max(windows)
 
 
-def _windows_from_requested_factors(requested: set[str]) -> tuple[int, ...]:
+def windows_from_requested_factors(requested: set[str]) -> tuple[int, ...]:
     values: set[int] = set()
     for factor in requested:
-        parsed = _parse_price_volume_windowed_factor_name(factor)
+        parsed = parse_price_volume_windowed_factor_name(factor)
         if parsed is None:
             continue
         _prefix, window, frequency = parsed
@@ -68,7 +68,7 @@ def largest_price_volume_lookback_days(
 
     windows = []
     for column in factor_columns:
-        parsed = _parse_price_volume_windowed_factor_name(column)
+        parsed = parse_price_volume_windowed_factor_name(column)
         if parsed is None:
             continue
         _prefix, window, _frequency = parsed

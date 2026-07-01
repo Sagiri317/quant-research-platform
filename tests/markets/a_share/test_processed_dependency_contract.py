@@ -200,7 +200,7 @@ def test_materializer_selects_factor_definitions_from_required_columns_only() ->
         columns=(*platform_entity_time_key(), "mom_5d"),
     )
 
-    definitions = materialize_factors._select_factor_definitions_for_spec(spec, catalog)
+    definitions = materialize_factors.select_factor_definitions_for_spec(spec, catalog)
 
     assert definitions == (selected,)
     assert max(definition.lookback_window or 0 for definition in definitions) == 5
@@ -218,7 +218,7 @@ def test_materializer_selects_label_definitions_from_required_columns_only() -> 
         columns=(*platform_entity_time_key(), "forward_return_2d"),
     )
 
-    definitions = materialize_labels._select_label_definitions_for_spec(spec, catalog)
+    definitions = materialize_labels.select_label_definitions_for_spec(spec, catalog)
 
     assert definitions == (selected,)
     assert max(definition.lookahead for definition in definitions) == 3
@@ -266,7 +266,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         "label_key_coverage": 0,
     }
 
-    def fake_planned_session_windows(*args: object, **kwargs: object):
+    def fakeplanned_session_windows(*args: object, **kwargs: object):
         return (session_window,)
 
     def fake_inspect_dataset(*args: object, **kwargs: object):
@@ -352,8 +352,8 @@ def test_write_paths_read_processed_inputs_via_helper(
 
     monkeypatch.setattr(
         materialization_planning,
-        "_planned_session_windows",
-        fake_planned_session_windows,
+        "planned_session_windows",
+        fakeplanned_session_windows,
     )
     for module in (materialize_annotations, materialize_factors, materialize_labels):
         monkeypatch.setattr(module, "inspect_dataset", fake_inspect_dataset)
@@ -400,12 +400,12 @@ def test_write_paths_read_processed_inputs_via_helper(
     )
     monkeypatch.setattr(
         materialization_planning,
-        "_estimate_factor_bytes_per_session",
+        "estimate_factor_bytes_per_session",
         lambda *args, **kwargs: 1,
     )
     monkeypatch.setattr(
         materialization_planning,
-        "_estimate_label_bytes_per_session",
+        "estimate_label_bytes_per_session",
         lambda *args, **kwargs: 1,
     )
 

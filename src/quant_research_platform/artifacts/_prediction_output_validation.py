@@ -12,7 +12,10 @@ from quant_research_platform.artifacts._output_common_validation import (
     _validate_filter_metadata,
     _validate_metadata_row_count_chain,
 )
-from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.predictions import (
+    MODEL_SELECTION_METRIC_DIRECTIONS,
+    PredictionSpec,
+)
 
 _MODEL_METADATA_BASE_KEYS = frozenset(
     {
@@ -55,6 +58,7 @@ _MODEL_SELECTION_KEYS = frozenset(
         "status",
         "configured_model_id",
         "selected_model_id",
+        "selected_model_input_columns",
         "candidate_model_ids",
         "selection_metric",
         "selection_direction",
@@ -229,9 +233,19 @@ def _validate_model_selection_metadata_shape(metadata: object) -> None:
         _require_metadata_string(metadata, key, "invalid_model_metadata")
     if metadata["selection_direction"] not in {"maximize", "minimize"}:
         raise ValueError("invalid_model_metadata")
+    if (
+        MODEL_SELECTION_METRIC_DIRECTIONS.get(str(metadata["selection_metric"]))
+        != metadata["selection_direction"]
+    ):
+        raise ValueError("invalid_model_metadata")
     candidate_model_ids = _require_metadata_string_list(
         metadata,
         "candidate_model_ids",
+        "invalid_model_metadata",
+    )
+    _require_metadata_string_list(
+        metadata,
+        "selected_model_input_columns",
         "invalid_model_metadata",
     )
     candidate_count = _require_non_negative_metadata_int(
@@ -411,16 +425,8 @@ def _validate_model_selection_metadata_consistency(
         raise ValueError("model_metadata_inconsistent")
     if len(model_selection["trial_metrics"]) != model_selection["candidate_count"]:
         raise ValueError("model_metadata_inconsistent")
-    if metadata["input_columns"] != _selected_trial_input_columns(metadata, spec):
+    if model_selection["selected_model_input_columns"] != metadata["input_columns"]:
         raise ValueError("model_metadata_inconsistent")
-
-
-def _selected_trial_input_columns(
-    metadata: dict[str, object],
-    spec: PredictionSpec,
-) -> list[str]:
-    del spec
-    return list(metadata["input_columns"])
 
 
 def _validate_prediction_metadata_consistency(

@@ -9,15 +9,15 @@ from quant_research_platform.compute.dataframe.construction import (
     build_weighted_positions,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _cost_components,
-    _normalize_group_key,
-    _risk_values,
-    _select_signal,
-    _select_signals,
-    _selection_count,
     _uses_detailed_cost_config,
-    _validate_segment_columns,
-    _validate_weight_columns,
+    cost_components,
+    normalize_group_key,
+    risk_values,
+    select_signal,
+    select_signals,
+    selection_count,
+    validate_segment_columns,
+    validate_weight_columns,
 )
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
@@ -97,15 +97,15 @@ def test_portfolio_helper_validation_and_selection_edges() -> None:
         label_column="label",
     )
 
-    _validate_segment_columns(panel, ("segment",))
+    validate_segment_columns(panel, ("segment",))
     with pytest.raises(ValueError, match="segment columns are missing"):
-        _validate_segment_columns(panel, ("missing",))
-    _validate_weight_columns(
+        validate_segment_columns(panel, ("missing",))
+    validate_weight_columns(
         panel,
         WeightConfig(method="inverse_vol_scaled_quantile", risk_column="risk"),
     )
     with pytest.raises(ValueError, match="risk column 'missing' is missing"):
-        _validate_weight_columns(
+        validate_weight_columns(
             panel,
             WeightConfig(
                 method="inverse_vol_scaled_quantile",
@@ -113,38 +113,38 @@ def test_portfolio_helper_validation_and_selection_edges() -> None:
             ),
         )
     with pytest.raises(TypeError, match="risk column 'risk' must be numeric"):
-        _validate_weight_columns(
+        validate_weight_columns(
             panel.assign(risk=["x", "y"]),
             WeightConfig(method="inverse_vol_scaled_quantile", risk_column="risk"),
         )
     with pytest.raises(ValueError, match="risk column 'risk' must be positive"):
-        _validate_weight_columns(
+        validate_weight_columns(
             panel.assign(risk=[1.0, 0.0]),
             WeightConfig(method="inverse_vol_scaled_quantile", risk_column="risk"),
         )
 
-    assert _risk_values(panel, WeightConfig(method="equal_weight_quantile")) is None
-    assert _risk_values(
+    assert risk_values(panel, WeightConfig(method="equal_weight_quantile")) is None
+    assert risk_values(
         panel,
         WeightConfig(method="inverse_vol_scaled_quantile", risk_column="risk"),
     ).tolist() == [1.0, 2.0]
-    assert _select_signals(spec, None) == ("signal", "signal_alt")
-    assert _select_signals(spec, ("signal_alt",)) == ("signal_alt",)
+    assert select_signals(spec, None) == ("signal", "signal_alt")
+    assert select_signals(spec, ("signal_alt",)) == ("signal_alt",)
     with pytest.raises(ValueError, match="portfolio signals are not in spec"):
-        _select_signals(spec, ("missing",))
-    assert _select_signal(spec, None) == "signal"
+        select_signals(spec, ("missing",))
+    assert select_signal(spec, None) == "signal"
     with pytest.raises(ValueError, match="signal_column"):
-        _select_signal(spec, "missing")
+        select_signal(spec, "missing")
 
 
 def test_portfolio_helper_costs_signals_and_group_keys() -> None:
-    simple = _cost_components(
+    simple = cost_components(
         buy_turnover=1.0,
         sell_turnover=1.0,
         turnover=2.0,
         cost_config=CostConfig(),
     )
-    detailed = _cost_components(
+    detailed = cost_components(
         buy_turnover=1.0,
         sell_turnover=2.0,
         turnover=3.0,
@@ -162,9 +162,9 @@ def test_portfolio_helper_costs_signals_and_group_keys() -> None:
     assert _uses_detailed_cost_config(CostConfig(impact_model="custom")) is True
     assert detailed["cost_model"] == "custom"
     assert detailed["total_cost"] == pytest.approx(0.001 + 0.004 + 0.0003 + 0.0006)
-    assert _selection_count(3, 0.1) == 1
-    assert _normalize_group_key("signal", ["signal"]) == {"signal": "signal"}
-    assert _normalize_group_key(("s1", "signal"), ["segment", "signal"]) == {
+    assert selection_count(3, 0.1) == 1
+    assert normalize_group_key("signal", ["signal"]) == {"signal": "signal"}
+    assert normalize_group_key(("s1", "signal"), ["segment", "signal"]) == {
         "segment": "s1",
         "signal": "signal",
     }
@@ -208,14 +208,14 @@ def test_dataframe_tradability_helper_edges() -> None:
         can_exit_column="can_exit",
     )
 
-    constraints._validate_tradability_columns(frame, tradability)
+    constraints.validate_tradability_columns(frame, tradability)
     with pytest.raises(ValueError, match="tradability columns are missing"):
-        constraints._validate_tradability_columns(
+        constraints.validate_tradability_columns(
             frame,
             TradabilityConfig(can_enter_column="missing"),
         )
     with pytest.raises(TypeError, match="must be boolean"):
-        constraints._validate_tradability_columns(
+        constraints.validate_tradability_columns(
             frame.assign(can_enter=[1, 0]),
             TradabilityConfig(can_enter_column="can_enter"),
         )
@@ -229,14 +229,14 @@ def test_dataframe_tradability_helper_edges() -> None:
             previous_positions={"B": 1.0},
         )
     ) == 2
-    counts = constraints._tradability_diagnostic_counts(
+    counts = constraints.tradability_diagnostic_counts(
         timestamp_frame=frame,
         signal="signal",
         spec=spec,
         tradability_config=tradability,
     )
     assert counts["entry_blocked_count"] == 0
-    context = constraints._build_tradability_context(
+    context = constraints.build_tradability_context(
         timestamp_frame=frame,
         spec=spec,
         tradability_config=tradability,

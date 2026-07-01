@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .columns import price_volume_window_column
-from .windows import _parse_price_volume_windowed_factor_name
+from .windows import parse_price_volume_windowed_factor_name
 
 BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     price_volume_window_column("rev", 1): ("period_return",),
@@ -100,7 +100,7 @@ def unsupported_price_volume_factors(
 def _required_fields_for_factor(factor: str) -> tuple[str, ...]:
     if factor in BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS:
         return BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS[factor]
-    parsed = _parse_price_volume_windowed_factor_name(factor)
+    parsed = parse_price_volume_windowed_factor_name(factor)
     if parsed is None:
         return ()
     prefix, _window, frequency = parsed

@@ -258,6 +258,146 @@ def test_prediction_outputs_reject_inconsistent_metadata(
         )
 
 
+def test_prediction_outputs_reject_tampered_selected_model_input_columns(
+    tmp_path: Path,
+) -> None:
+    spec = PredictionSpec(
+        prediction_id="prediction_demo",
+        model_id="model_demo",
+        research_dataset_id="research_demo",
+        train_end="2024-01-01",
+        test_start="2024-01-03",
+        candidate_model_ids=("candidate_model",),
+        model_selection_validation_start="2024-01-02",
+        model_selection_validation_end="2024-01-02",
+    )
+    report_spec = _report_spec(
+        "prediction_outputs",
+        spec.prediction_id,
+        "prediction",
+    )
+    tampered = _prediction_frame(with_metadata=True).assign(
+        timestamp=pd.to_datetime(["2024-01-03"])
+    )
+    tampered.attrs["model_metadata"] = {
+        **_model_metadata(),
+        "test_start": "2024-01-03",
+        "oos_start": "2024-01-03",
+        "oos_end": "2024-01-03",
+        "model_selection": {
+            "status": "selected",
+            "configured_model_id": "model_demo",
+            "selected_model_id": "candidate_model",
+            "selected_model_input_columns": ["other_input"],
+            "candidate_model_ids": ["model_demo", "candidate_model"],
+            "selection_metric": "validation_rankic",
+            "selection_direction": "maximize",
+            "validation_start": "2024-01-02",
+            "validation_end": "2024-01-02",
+            "candidate_count": 2,
+            "trial_metrics": [
+                {
+                    "model_id": "model_demo",
+                    "validation_rows": 1,
+                    "validation_ic": 0.0,
+                    "validation_rankic": 0.0,
+                    "validation_mse": 1.0,
+                },
+                {
+                    "model_id": "candidate_model",
+                    "validation_rows": 1,
+                    "validation_ic": 0.0,
+                    "validation_rankic": 0.0,
+                    "validation_mse": 0.0,
+                },
+            ],
+        },
+    }
+    tampered.attrs["prediction_metadata"] = {
+        **_prediction_metadata(),
+        "test_start": "2024-01-03",
+        "effective_test_end": "2024-01-03",
+    }
+
+    with pytest.raises(ValueError, match="model_metadata_inconsistent"):
+        outputs.write_prediction_outputs(
+            tampered,
+            spec=spec,
+            output_spec=report_spec,
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+
+def test_prediction_outputs_reject_tampered_model_selection_direction(
+    tmp_path: Path,
+) -> None:
+    spec = PredictionSpec(
+        prediction_id="prediction_demo",
+        model_id="model_demo",
+        research_dataset_id="research_demo",
+        train_end="2024-01-01",
+        test_start="2024-01-03",
+        candidate_model_ids=("candidate_model",),
+        model_selection_validation_start="2024-01-02",
+        model_selection_validation_end="2024-01-02",
+    )
+    report_spec = _report_spec(
+        "prediction_outputs",
+        spec.prediction_id,
+        "prediction",
+    )
+    tampered = _prediction_frame(with_metadata=True).assign(
+        timestamp=pd.to_datetime(["2024-01-03"])
+    )
+    tampered.attrs["model_metadata"] = {
+        **_model_metadata(),
+        "test_start": "2024-01-03",
+        "oos_start": "2024-01-03",
+        "oos_end": "2024-01-03",
+        "model_selection": {
+            "status": "selected",
+            "configured_model_id": "model_demo",
+            "selected_model_id": "candidate_model",
+            "selected_model_input_columns": ["factor"],
+            "candidate_model_ids": ["model_demo", "candidate_model"],
+            "selection_metric": "validation_rankic",
+            "selection_direction": "minimize",
+            "validation_start": "2024-01-02",
+            "validation_end": "2024-01-02",
+            "candidate_count": 2,
+            "trial_metrics": [
+                {
+                    "model_id": "model_demo",
+                    "validation_rows": 1,
+                    "validation_ic": 0.0,
+                    "validation_rankic": 0.0,
+                    "validation_mse": 1.0,
+                },
+                {
+                    "model_id": "candidate_model",
+                    "validation_rows": 1,
+                    "validation_ic": 0.0,
+                    "validation_rankic": 0.0,
+                    "validation_mse": 0.0,
+                },
+            ],
+        },
+    }
+    tampered.attrs["prediction_metadata"] = {
+        **_prediction_metadata(),
+        "test_start": "2024-01-03",
+        "effective_test_end": "2024-01-03",
+    }
+
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
+        outputs.write_prediction_outputs(
+            tampered,
+            spec=spec,
+            output_spec=report_spec,
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+
 def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
     tmp_path: Path,
 ) -> None:
@@ -496,7 +636,7 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
-            evaluation_diagnostics=_evaluation_diagnostics(),
+            evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=spec,
             output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
@@ -508,7 +648,7 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
             _evaluation_grouped_label_values_frame(),
             ic_summary=pd.DataFrame({"signal": ["signal"]}),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
-            evaluation_diagnostics=_evaluation_diagnostics(),
+            evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=spec,
             output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
@@ -520,7 +660,7 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=pd.DataFrame({"signal": ["signal"]}),
-            evaluation_diagnostics=_evaluation_diagnostics(),
+            evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=spec,
             output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
@@ -538,7 +678,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
     report_spec = _report_spec("evaluation_outputs", spec.run_id, "evaluation")
     layout = StorageLayout(project_root=tmp_path)
 
-    bad_metric_rows = replace(_evaluation_diagnostics(), metric_rows=2)
+    bad_metric_rows = replace(build_evaluation_diagnostics(), metric_rows=2)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
             _evaluation_metrics_frame(),
@@ -551,7 +691,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
             layout=layout,
         )
 
-    bad_filter_mode = replace(_evaluation_diagnostics(), filter_mode="unfiltered")
+    bad_filter_mode = replace(build_evaluation_diagnostics(), filter_mode="unfiltered")
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
             _evaluation_metrics_frame(),
@@ -564,7 +704,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
             layout=layout,
         )
 
-    bad_timestamp_count = replace(_evaluation_diagnostics(), timestamp_count=2)
+    bad_timestamp_count = replace(build_evaluation_diagnostics(), timestamp_count=2)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
             _evaluation_metrics_frame(),
@@ -578,7 +718,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
         )
 
     skipped_metrics = _evaluation_metrics_frame().assign(n_obs=[1])
-    bad_skipped = replace(_evaluation_diagnostics(), skipped_timestamp_count=0)
+    bad_skipped = replace(build_evaluation_diagnostics(), skipped_timestamp_count=0)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
             skipped_metrics,
@@ -593,7 +733,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
 
     bad_timestamp_metrics = _evaluation_metrics_frame().assign(timestamp=["bad-date"])
     bad_timestamp_diagnostics = replace(
-        _evaluation_diagnostics(),
+        build_evaluation_diagnostics(),
         timestamp_count=0,
         min_timestamp=None,
         max_timestamp=None,
@@ -629,7 +769,7 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
         ignore_index=True,
     )
     duplicate_diagnostics = replace(
-        _evaluation_diagnostics(),
+        build_evaluation_diagnostics(),
         metric_rows=2,
         rows_after_signal_label_dropna=4,
     )
@@ -652,7 +792,7 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
-            evaluation_diagnostics=_evaluation_diagnostics(),
+            evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=spec,
             output_spec=report_spec,
             layout=layout,
@@ -665,13 +805,13 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
             bad_group,
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
-            evaluation_diagnostics=_evaluation_diagnostics(),
+            evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=spec,
             output_spec=report_spec,
             layout=layout,
         )
 
-    bad_row_chain = replace(_evaluation_diagnostics(), rows_after_filter_mode=1)
+    bad_row_chain = replace(build_evaluation_diagnostics(), rows_after_filter_mode=1)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
             _evaluation_metrics_frame(),
@@ -700,7 +840,7 @@ def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> 
         _evaluation_grouped_label_values_frame(),
         ic_summary=_evaluation_ic_summary_frame(),
         group_spread_summary=_evaluation_group_spread_summary_frame(),
-        evaluation_diagnostics=_evaluation_diagnostics(),
+        evaluation_diagnostics=build_evaluation_diagnostics(),
         spec=spec,
         output_spec=report_spec,
         layout=StorageLayout(project_root=tmp_path),
@@ -1334,7 +1474,7 @@ def _evaluation_group_spread_summary_frame() -> pd.DataFrame:
     )
 
 
-def _evaluation_diagnostics() -> EvaluationDiagnostics:
+def build_evaluation_diagnostics() -> EvaluationDiagnostics:
     return EvaluationDiagnostics(
         filter_mode="eligible",
         filter_columns_used=("eligible",),

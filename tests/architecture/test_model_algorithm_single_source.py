@@ -42,14 +42,14 @@ def test_supervised_model_root_delegates_prediction_and_rank_ensemble_owners() -
         if not path.is_file()
     ]
     root_owned_names = (
-        "class _RankEnsemblePredictor",
-        "class _ICWeightedRankEnsembleFactory",
-        "class _ICWeightedRankEnsemble",
+        "class RankEnsemblePredictor",
+        "class ICWeightedRankEnsembleFactory",
+        "class ICWeightedRankEnsemble",
         "def _rank_ensemble_scores",
         "def _rank_frame_columns",
         "def _rank_series",
         "def _predict_scores",
-        "def _prediction_model_input_frame",
+        "def prediction_model_input_frame",
     )
 
     assert missing_modules == []
@@ -78,22 +78,22 @@ def test_supervised_model_root_delegates_estimator_owner() -> None:
     owner_source = owner_path.read_text(encoding="utf-8")
     owner_names = (
         "class _LinearRegressionEstimator",
-        "class _SingleFactorBaseline",
-        "def _linear_regression_estimator",
-        "def _ridge_regression_estimator",
-        "def _lasso_regression_estimator",
-        "def _elastic_net_estimator",
-        "def _huber_regression_estimator",
-        "def _decision_tree_regressor",
-        "def _random_forest_regressor",
-        "def _extra_trees_regressor",
-        "def _gradient_boosting_regressor",
-        "def _hist_gradient_boosting_regressor",
-        "def _xgboost_regressor",
-        "def _lightgbm_regressor",
-        "def _single_factor_baseline",
-        "def _equal_weight_rank_ensemble",
-        "def _ic_weighted_rank_ensemble",
+        "class SingleFactorBaseline",
+        "def linear_regression_estimator",
+        "def ridge_regression_estimator",
+        "def lasso_regression_estimator",
+        "def elastic_net_estimator",
+        "def huber_regression_estimator",
+        "def decision_tree_regressor",
+        "def random_forest_regressor",
+        "def extra_trees_regressor",
+        "def gradient_boosting_regressor",
+        "def hist_gradient_boosting_regressor",
+        "def xgboost_regressor",
+        "def lightgbm_regressor",
+        "def single_factor_baseline",
+        "def equal_weight_rank_ensemble",
+        "def ic_weighted_rank_ensemble",
     )
 
     assert owner_path.is_file()
@@ -180,7 +180,7 @@ def test_model_estimator_dispatch_uses_algorithm_facts_only() -> None:
     assert 'spec.model_algorithm != "linear_regression"' not in fitting_source
     assert "_LinearRegressionEstimator" not in fitting_source
     assert "isinstance(estimator," not in fitting_source
-    assert "_ICWeightedRankEnsembleFactory" not in fitting_source
+    assert "ICWeightedRankEnsembleFactory" not in fitting_source
 
 
 def test_model_algorithm_ids_is_the_only_collection_helper() -> None:

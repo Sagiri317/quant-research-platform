@@ -78,4 +78,4 @@ templates/handoff/
 
 ## 读取规则
 
-先用 live git baseline 确认现场，再按任务选择最小文件集合。`.run/` 产物不定义当前合同。
+先用 live git baseline 确认现场，再按任务选择最小文件集合。`.run/` 产物不定义当前合同。handoff 合同由 tracked `.agents` tooling、verifier 和 tests 定义。

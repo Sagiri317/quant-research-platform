@@ -904,6 +904,17 @@ PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES = (
     "tests/agents/handoff/test_handoff_package_verifier.py",
 )
 
+GOVERNANCE_TEST_EXCEPTION_PATHS = (
+    "tests/policy/test_share_safety_runtime_edges.py",
+)
+
+LOCAL_PATH_TEXT_SAFETY_FIXTURE_SOURCES = (
+    *PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES,
+    "tests/architecture/test_share_safe_evidence.py",
+    "tests/interfaces/test_api_cli_01_contract.py",
+    "tests/storage/test_storage_01.py",
+)
+
 SCANNER_DEFINITION_MARKERS = (
     "SECRET_PATTERN",
     "LOCAL_PATH_PATTERN",

@@ -7,8 +7,8 @@ import numpy as np
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models import estimators
 from quant_research_platform.research.models.rank_ensemble import (
-    _ICWeightedRankEnsemble,
-    _RankEnsemblePredictor,
+    ICWeightedRankEnsemble,
+    RankEnsemblePredictor,
 )
 
 
@@ -27,12 +27,12 @@ def estimator_feature_importance(
     spec: ModelSpec,
     predictor: object,
 ) -> dict[str, float] | None:
-    if isinstance(predictor, estimators._SingleFactorBaseline):
+    if isinstance(predictor, estimators.SingleFactorBaseline):
         return {predictor.column: 1.0}
-    if isinstance(predictor, _RankEnsemblePredictor):
+    if isinstance(predictor, RankEnsemblePredictor):
         weight = 1.0 / len(predictor.columns)
         return {column: weight for column in predictor.columns}
-    if isinstance(predictor, _ICWeightedRankEnsemble):
+    if isinstance(predictor, ICWeightedRankEnsemble):
         return {
             column: float(abs(weight))
             for column, weight in zip(predictor.columns, predictor.weights, strict=True)

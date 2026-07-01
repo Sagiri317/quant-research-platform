@@ -60,10 +60,10 @@ def materialize_processed_data(
         catalog,
         targets,
     )
-    sessions = materialization_planning._available_trading_sessions(layout, source_id)
-    materialization_planning._require_target_sessions(sessions, time_window)
+    sessions = materialization_planning.available_trading_sessions(layout, source_id)
+    materialization_planning.require_target_sessions(sessions, time_window)
     dependency_windows = (
-        materialization_dependencies._planned_processed_dependency_windows(
+        materialization_dependencies.planned_processed_dependency_windows(
             targets,
             layout=layout,
             source_id=source_id,
@@ -74,7 +74,7 @@ def materialize_processed_data(
     written: dict[str, DatasetInspection] = {}
     panel_key_coverages: dict[Path, dict[object, tuple[pd.Timestamp, ...]]] = {}
     for spec in targets:
-        target_time_window = materialization_dependencies._merge_time_windows(
+        target_time_window = materialization_dependencies.merge_time_windows(
             time_window,
             dependency_windows.get(spec.data_id, time_window),
         )
@@ -112,14 +112,14 @@ def _materialize_one(
     if root.exists():
         if requested:
             raise ValueError("dataset_exists")
-        materialization_planning._require_dataset_coverage(
+        materialization_planning.require_dataset_coverage(
             root,
             time_window,
             sessions=sessions,
         )
         return inspect_dataset(root, time_window=time_window)
     catalog = processed_catalog()
-    materialization_dependencies._ensure_processed_dependencies(
+    materialization_dependencies.ensure_processed_dependencies(
         spec,
         layout=layout,
         source_id=source_id,

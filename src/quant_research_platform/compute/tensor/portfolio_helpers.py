@@ -8,7 +8,7 @@ import pandas as pd
 from quant_research_platform.contracts.portfolios import WeightConfig
 
 
-def _leg_weight_values(
+def leg_weight_values(
     *,
     asset_indices: np.ndarray,
     signal_values: np.ndarray,
@@ -58,7 +58,7 @@ def _leg_weight_values(
 
 
 
-def _filter_panel_group(
+def filter_panel_group(
     *,
     panel: pd.DataFrame,
     segment_columns: tuple[str, ...],

@@ -40,7 +40,7 @@ def write_annotations(
     )
     panel_spec = catalog.get(contract.primary_input_data_id)
     panel_root = materialization_io.processed_root(layout, panel_spec)
-    windows = materialization_planning._planned_session_windows(
+    windows = materialization_planning.planned_session_windows(
         sessions,
         time_window=time_window,
         policy=policy,
@@ -65,7 +65,7 @@ def write_annotations(
             )
             panel = processed_inputs[contract.primary_input_data_id]
             outputs = annotations.derive_annotations(panel, data_ids=(spec.data_id,))
-            yield materialization_planning._filter_output_sessions(
+            yield materialization_planning.filter_output_sessions(
                 outputs[spec.data_id],
                 window.core_sessions,
             )

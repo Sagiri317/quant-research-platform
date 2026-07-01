@@ -11,9 +11,13 @@ from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
+from quant_research_platform.contracts.predictions import (
+    MODEL_SELECTION_METRIC_DIRECTIONS,
+)
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import validate_prediction_input
-from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
+from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
@@ -27,8 +31,8 @@ from quant_research_platform.research.models.trial_selection import (
 )
 from quant_research_platform.research.predictions.outputs import (
     PredictionResult,
-    _prediction_callable,
     build_prediction_result_from_frames,
+    prediction_callable,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -70,7 +74,7 @@ def build_prediction_result_from_research_dataset(
         input_columns: tuple[str, ...],
     ) -> Iterable[pd.DataFrame]:
         return _validated_prediction_chunks(
-            _iter_research_dataset_chunks(
+            iter_research_dataset_chunks(
                 layout,
                 market_id=dataset_spec.market_id,
                 dataset_id=dataset_spec.data_id,
@@ -256,10 +260,8 @@ def _select_prediction_model_spec(
         )
     trial_metrics = pd.DataFrame.from_records(trial_metric_records)
     direction = (
-        True
-        if prediction_spec.model_selection_metric
-        in {"validation_ic", "validation_rankic"}
-        else False
+        MODEL_SELECTION_METRIC_DIRECTIONS[prediction_spec.model_selection_metric]
+        == "maximize"
     )
     selected_model_id = select_best_validation_trial(
         trial_metrics,
@@ -276,6 +278,7 @@ def _select_prediction_model_spec(
         selection_metric=prediction_spec.model_selection_metric,
         validation_start=prediction_spec.model_selection_validation_start,
         validation_end=prediction_spec.model_selection_validation_end,
+        selected_model_input_columns=model_catalog.get(selected_model_id).input_columns,
         trial_metrics=trial_metrics,
     )
     return model_catalog.get(selected_model_id), metadata
@@ -309,7 +312,7 @@ def _validation_prediction_frame(
     validation_start: pd.Timestamp,
     validation_end: pd.Timestamp,
 ) -> pd.DataFrame:
-    predictor = _prediction_callable(
+    predictor = prediction_callable(
         model_result.coefficients,
         candidate_spec.input_columns,
         model_result.prediction_model,
@@ -319,7 +322,15 @@ def _validation_prediction_frame(
         timestamps = _prediction_timestamps(chunk)
         validation = chunk.loc[
             (timestamps >= validation_start) & (timestamps <= validation_end)
-        ].dropna(subset=[*candidate_spec.input_columns, candidate_spec.label_column])
+        ]
+        validation, _filter_metadata = apply_filter_mode(
+            validation,
+            mode=prediction_spec.sample_filter_mode,
+            metadata_key="sample_filter_mode",
+        )
+        validation = validation.dropna(
+            subset=[*candidate_spec.input_columns, candidate_spec.label_column]
+        )
         if validation.empty:
             continue
         output = validation.loc[

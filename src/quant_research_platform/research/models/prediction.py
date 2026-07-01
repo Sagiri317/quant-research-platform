@@ -7,8 +7,8 @@ import pandas as pd
 
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models.rank_ensemble import (
-    _ICWeightedRankEnsemble,
-    _RankEnsemblePredictor,
+    ICWeightedRankEnsemble,
+    RankEnsemblePredictor,
 )
 
 
@@ -40,7 +40,7 @@ def _predict_scores(
 ) -> np.ndarray:
     if prediction_model is not None:
         predicted = prediction_model.predict(
-            _prediction_model_input_frame(
+            prediction_model_input_frame(
                 frame,
                 input_columns=input_columns,
                 prediction_model=prediction_model,
@@ -51,13 +51,13 @@ def _predict_scores(
     return np.asarray(float(coefficients[0]) + x @ coefficients[1:])
 
 
-def _prediction_model_input_frame(
+def prediction_model_input_frame(
     frame: pd.DataFrame,
     *,
     input_columns: tuple[str, ...],
     prediction_model: object,
 ) -> pd.DataFrame:
     columns = input_columns
-    if isinstance(prediction_model, (_RankEnsemblePredictor, _ICWeightedRankEnsemble)):
+    if isinstance(prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)):
         columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
     return frame.loc[:, list(columns)]

@@ -78,6 +78,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                 "handoff_package_path": f"{run_handoffs}/{slug}.zip",
                 "handoff_sidecar_path": f"{run_handoffs}/{slug}.json",
                 "handoff_evidence": {
+                    **_formal_handoff_evidence(),
                     "custom-note": {
                         "schema_id": "qrp-custom-note",
                         "status": "PASS",
@@ -166,6 +167,8 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert "handoff_evidence/generation.json" in names
     assert "handoff_evidence/source-tree-scan.json" in names
     assert "handoff_evidence/bundle-reconstruction.json" in names
+    assert "handoff_evidence/package-smoke.json" in names
+    assert "handoff_evidence/hard-scan-classification.json" in names
     assert "handoff_evidence/custom-note.json" in names
     assert "handoff_evidence/smoke-semantic-parity-compare.md" in names
     assert markdown_evidence == "# Smoke semantic parity compare\n\nstatus: PASS\n"
@@ -494,7 +497,11 @@ def test_build_handoff_package_rejects_one_forbidden_custom_evidence_key(
 def test_build_handoff_package_allows_empty_advisory_without_review_evidence(
     tmp_path: Path,
 ) -> None:
-    result, out_dir = _run_builder_with_handoff_evidence(tmp_path, {}, verify=True)
+    result, out_dir = _run_builder_with_handoff_evidence(
+        tmp_path,
+        _formal_handoff_evidence(),
+        verify=True,
+    )
 
     assert result.returncode == 0
     sidecar = json.loads((out_dir / "synthetic-handoff-negative.json").read_text())
@@ -506,7 +513,10 @@ def test_build_handoff_package_allows_review_evidence_with_advisory(
 ) -> None:
     result, out_dir = _run_builder_with_handoff_evidence(
         tmp_path,
-        {"subagent-review-reconciliation": _review_reconciliation_payload()},
+        {
+            **_formal_handoff_evidence(),
+            "subagent-review-reconciliation": _review_reconciliation_payload(),
+        },
         validation_checks=_review_validation_checks("PASS"),
         verify=True,
     )
@@ -701,6 +711,52 @@ def _review_reconciliation_payload() -> dict[str, object]:
                 "finding_id": "review-1",
                 "classification": "NO_FINDINGS",
                 "action": "none",
+            }
+        ],
+    }
+
+
+def _formal_handoff_evidence() -> dict[str, dict[str, object]]:
+    return {
+        "package-smoke": _package_smoke_evidence(),
+        "hard-scan-classification": _hard_scan_classification_evidence(),
+    }
+
+
+def _package_smoke_evidence() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-package-smoke-evidence",
+        "status": "PASS",
+        "build_command": "python -m build --sdist --wheel",
+        "wheel_filename": "quant_research_platform-0.0.0-py3-none-any.whl",
+        "wheel_sha256": "0" * 64,
+        "sdist_filename": "quant_research_platform-0.0.0.tar.gz",
+        "sdist_sha256": "1" * 64,
+        "install_target": "temporary isolated target; not included in handoff",
+        "import_command": "python -c import quant_research_platform",
+        "import_status": "PASS",
+        "content_scan": {
+            "no_run_dir": True,
+            "no_parquet_csv_pickle_feather_arrow": True,
+            "no_row_level_data": True,
+            "no_local_absolute_paths": True,
+        },
+    }
+
+
+def _hard_scan_classification_evidence() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-hard-scan-classification-evidence",
+        "scan_name": "handoff-fixture-hard-scan",
+        "command": "rg -n boundary-scan src tests",
+        "status": "PASS",
+        "raw_findings": [
+            {
+                "path": "tests/negative_fixture.py",
+                "line": 1,
+                "matched_text": "synthetic negative fixture",
+                "classification": "negative_test_fixture",
+                "reason": "synthetic fixture used only to exercise verifier shape",
             }
         ],
     }

@@ -14,7 +14,7 @@ from quant_research_platform.compute.dataframe.performance import (
     summarize_performance,
 )
 from quant_research_platform.compute.dataframe.portfolio_returns import (
-    _simulate_weighted_long_short_returns_and_cost_from_validated_panel,
+    simulate_weighted_long_short_returns_and_cost_from_validated_panel,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import (
@@ -76,7 +76,7 @@ def construct_portfolio_positions(
         asset_column="asset_id",
     )
     positions, turnover, portfolio_returns, diagnostics, cost_breakdown = (
-        _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
             panel,
             compute_spec,
             spec.weight_config,
@@ -201,7 +201,7 @@ def summarize_concentration(
     records: list[dict[str, object]] = []
     group_columns = [*segment_columns, "signal"]
     for group_key, group in period.groupby(group_columns, sort=True, dropna=False):
-        group_values = _normalize_group_key(group_key, group_columns)
+        group_values = normalize_group_key(group_key, group_columns)
         records.append(
             {
                 **{column: group_values[column] for column in segment_columns},
@@ -302,7 +302,7 @@ def _portfolio_panel(
     return panel
 
 
-def _normalize_group_key(
+def normalize_group_key(
     group_key: object,
     group_columns: list[str],
 ) -> dict[str, object]:

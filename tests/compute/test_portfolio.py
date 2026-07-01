@@ -308,7 +308,7 @@ def test_weighted_position_ranking_avoids_dataframe_signal_sort(
 
 
 def test_weighted_positions_pass_sparse_targets_to_tradability(monkeypatch) -> None:
-    original_apply = dataframe_position_math._apply_tradability_constraints
+    original_apply = dataframe_position_math.apply_tradability_constraints
 
     def assert_sparse_positions(*, positions, **kwargs):
         assert len(positions) == 2
@@ -316,7 +316,7 @@ def test_weighted_positions_pass_sparse_targets_to_tradability(monkeypatch) -> N
 
     monkeypatch.setattr(
         dataframe_position_math,
-        "_apply_tradability_constraints",
+        "apply_tradability_constraints",
         assert_sparse_positions,
     )
     panel = pd.DataFrame(
@@ -455,7 +455,7 @@ def test_tradability_ignores_previous_assets_missing_from_timestamp() -> None:
     )
     positions = {"A": 1.0}
 
-    adjusted = dataframe_constraints._apply_tradability_constraints(
+    adjusted = dataframe_constraints.apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
         spec=ComputePanelSpec(
@@ -543,7 +543,7 @@ def test_tradability_constraints_adjust_positions_in_place() -> None:
     )
     positions = {"A": 1.0, "B": -1.0}
 
-    adjusted = dataframe_constraints._apply_tradability_constraints(
+    adjusted = dataframe_constraints.apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
         spec=ComputePanelSpec(
@@ -576,7 +576,7 @@ def test_tradability_constraints_skip_entry_check_for_zero_targets(
     )
     positions = {"A": 0.0, "B": 0.0}
 
-    adjusted = dataframe_constraints._apply_tradability_constraints(
+    adjusted = dataframe_constraints.apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
         spec=ComputePanelSpec(
@@ -608,7 +608,7 @@ def test_tradability_constraints_skip_entry_check_for_same_sign_positions(
     )
     positions = {"A": 1.0}
 
-    adjusted = dataframe_constraints._apply_tradability_constraints(
+    adjusted = dataframe_constraints.apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
         spec=ComputePanelSpec(

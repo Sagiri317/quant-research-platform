@@ -14,7 +14,7 @@ from quant_research_platform.contracts.portfolios import (
 )
 
 
-def _normalize_group_key(
+def normalize_group_key(
     group_key: object,
     group_columns: list[str],
 ) -> dict[str, object]:
@@ -25,7 +25,7 @@ def _normalize_group_key(
     return dict(zip(group_columns, values, strict=True))
 
 
-def _select_signals(
+def select_signals(
     spec: ComputePanelSpec,
     portfolio_signals: tuple[str, ...] | None,
 ) -> tuple[str, ...]:
@@ -39,11 +39,11 @@ def _select_signals(
     return portfolio_signals
 
 
-def _selection_count(n_obs: int, quantile: float) -> int:
+def selection_count(n_obs: int, quantile: float) -> int:
     return max(1, floor(n_obs * quantile))
 
 
-def _validate_segment_columns(
+def validate_segment_columns(
     panel: pd.DataFrame,
     segment_columns: tuple[str, ...],
 ) -> None:
@@ -52,7 +52,7 @@ def _validate_segment_columns(
         raise ValueError(f"segment columns are missing: {missing_columns}.")
 
 
-def _validate_tradability_columns(
+def validate_tradability_columns(
     panel: pd.DataFrame,
     tradability_config: TradabilityConfig,
 ) -> None:
@@ -75,7 +75,7 @@ def _validate_tradability_columns(
             raise TypeError(f"tradability column {column!r} must be boolean.")
 
 
-def _validate_weight_columns(panel: pd.DataFrame, weight_config: WeightConfig) -> None:
+def validate_weight_columns(panel: pd.DataFrame, weight_config: WeightConfig) -> None:
     if weight_config.risk_column is None:
         return
     if weight_config.risk_column not in panel:
@@ -86,7 +86,7 @@ def _validate_weight_columns(panel: pd.DataFrame, weight_config: WeightConfig) -
         raise ValueError(f"risk column {weight_config.risk_column!r} must be positive.")
 
 
-def _cost_components(
+def cost_components(
     *,
     buy_turnover: float,
     sell_turnover: float,

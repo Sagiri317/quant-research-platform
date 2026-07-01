@@ -12,7 +12,7 @@ from .presets import (
     price_volume_factor_columns,
 )
 from .requirements import price_volume_factor_input_columns
-from .windows import _lookback_window, _required_windows
+from .windows import lookback_window, required_windows
 
 PRICE_VOLUME_FACTOR_FAMILY = "price_volume"
 
@@ -28,7 +28,7 @@ def price_volume_factor_definitions(
     definitions: list[FactorDefinition] = []
     for factor_id in price_volume_factor_columns(preset=preset):
         base_inputs = price_volume_factor_input_columns(factor_id)
-        lookback_window = _lookback_window(factor_id)
+        factor_lookback_window = lookback_window(factor_id)
         definitions.append(
             FactorDefinition(
                 factor_id=factor_id,
@@ -44,14 +44,14 @@ def price_volume_factor_definitions(
                     "factor catalog."
                 ),
                 family=PRICE_VOLUME_FACTOR_FAMILY,
-                required_windows=_required_windows(factor_id),
-                lookback_window=lookback_window,
+                required_windows=required_windows(factor_id),
+                lookback_window=factor_lookback_window,
                 grain=DataGrain.ASSET_TIMESTAMP,
                 timing_semantics="same_session_close_available_at_next_session",
                 null_policy="preserve_nulls_after_min_periods",
                 source_layer="processed",
                 required_input_data_id=required_input_data_id,
-                window=lookback_window,
+                window=factor_lookback_window,
             )
         )
     return tuple(definitions)

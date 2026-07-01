@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _cost_components,
+    cost_components,
 )
 from quant_research_platform.contracts.portfolios import CostConfig
 
@@ -23,13 +23,13 @@ def test_compute_costs_are_owned_by_cost_config() -> None:
         assert "cost_bps:" not in source
         assert "cost_bps=" not in source
 
-    zero = _cost_components(
+    zero = cost_components(
         buy_turnover=1.0,
         sell_turnover=1.0,
         turnover=2.0,
         cost_config=CostConfig(),
     )
-    detailed = _cost_components(
+    detailed = cost_components(
         buy_turnover=1.0,
         sell_turnover=2.0,
         turnover=3.0,

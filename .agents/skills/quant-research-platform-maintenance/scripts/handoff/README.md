@@ -38,6 +38,9 @@ list-heads, and the exact branch clone evidence in
 `handoff_evidence/bundle-reconstruction.json`; the verifier checks that
 evidence and still runs its own bundle reconstruction checks.
 
+正式 handoff 的 REVIEW_SAFE evidence 不能是 status-only 摘要；具体判定由
+verifier 和 tests 拥有。
+
 handoff 合同只由本目录 tracked scripts、schemas 和 templates 定义。
 
 ## 运行纪律

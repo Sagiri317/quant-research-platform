@@ -48,6 +48,10 @@ LOCAL_ONLY outputs 默认不进入 handoff。原因是共享边界、授权边�
 
 handoff 可以纳入完整 `run.json`，但必须校验 `schema_id` 并通过统一 safety verifier。handoff zip 内机器 evidence 统一放在 `handoff_evidence/`。
 
+正式 handoff 的 REVIEW_SAFE evidence 必须可由 verifier 审查：
+
+status-only 摘要不能作为完整 evidence；具体判定由 tracked verifier 和 tests 拥有。
+
 ## 4. Sidecar 规则
 
 sidecar 是机器可读 evidence summary，不是业务结论本身。sidecar PASS 只表示 sidecar 对应检查通过，不代表 full pytest、local private validation 或 business correctness。

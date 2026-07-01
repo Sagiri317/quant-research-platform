@@ -73,7 +73,7 @@ def summarize_period_ic(metrics: pd.DataFrame) -> pd.DataFrame:
     return summarize_ic(metrics)
 
 
-def _evaluation_diagnostics(
+def build_evaluation_diagnostics(
     *,
     spec: EvaluationSpec,
     filter_metadata: Mapping[str, object],
