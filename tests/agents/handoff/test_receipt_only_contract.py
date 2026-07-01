@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
 
-from tests.agents.handoff.conftest import (
-    _build_test_package,
-    _load_handoff_module,
-)
+try:
+    from tests.agents.handoff.conftest import (
+        _build_test_package,
+        _load_handoff_module,
+    )
+except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
+    from conftest import (  # type: ignore[no-redef]
+        _build_test_package,
+        _load_handoff_module,
+    )
 
 
 def test_run_check_writes_structured_pytest_counts(tmp_path: Path) -> None:
@@ -72,6 +80,31 @@ def test_package_smoke_receipt_requires_all_scanned_artifact_kinds() -> None:
     failures = verifier.verify_package_smoke_evidence(payload)
 
     assert "package_smoke_scanned_artifact_kinds_invalid" in failures
+
+
+def test_package_smoke_scans_wheel_for_forbidden_members(tmp_path: Path) -> None:
+    package_smoke = _load_handoff_module("run_package_smoke")
+    wheel = tmp_path / "demo.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("quant_research_platform/private/raw.csv", "forbidden\n")
+
+    findings = package_smoke.archive_content_scan(wheel, "wheel")
+
+    assert findings == ["wheel:quant_research_platform/private/raw.csv"]
+
+
+def test_package_smoke_scans_sdist_for_forbidden_members(tmp_path: Path) -> None:
+    package_smoke = _load_handoff_module("run_package_smoke")
+    sdist = tmp_path / "demo.tar.gz"
+    payload = b"forbidden\n"
+    info = tarfile.TarInfo("demo/private/raw.parquet")
+    info.size = len(payload)
+    with tarfile.open(sdist, "w:gz") as archive:
+        archive.addfile(info, io.BytesIO(payload))
+
+    findings = package_smoke.archive_content_scan(sdist, "sdist")
+
+    assert findings == ["sdist:demo/private/raw.parquet"]
 
 
 def test_builder_outputs_receipt_only_handoff_evidence(tmp_path: Path) -> None:
