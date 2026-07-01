@@ -18,7 +18,7 @@ handoff 至少包含：
 
 1. check runner：实际执行检查并生成 compact receipt。
 2. builder：只读取 task metadata、receipts-dir，构建 `final-branch.bundle`、manifest、sidecar 和 receipt evidence。
-3. verifier：唯一 handoff/package verifier，校验 bundle、manifest/hash、zip member、sidecar、receipt schema、source-tree scan 和 share-safety。
+3. verifier：唯一 handoff/package verifier，校验 bundle、manifest/hash、zip member、sidecar、receipt schema、hard-scan replay 和 share-safety。
 4. hard-scan replay：可从 `final-branch.bundle` 重放的检查只保存 receipt，verifier 在 bundle clone 中重放并比对 count/hash。
 5. policy share safety：文本、JSON、路径和 zip member 的共享安全规则来自 `policy/share_safety.py`。
 
@@ -61,8 +61,8 @@ handoff_evidence/hard-scan-receipt.json
 handoff_evidence/check-receipts.json
 handoff_evidence/private-smoke-status.json
 handoff_evidence/generation.json
-handoff_evidence/source-tree-scan.json
 handoff_evidence/bundle-reconstruction.json
+handoff_evidence/validation-summary.json
 ```
 
 `advisory-review-receipt.json` 是 optional。只有本轮声明 advisory/subagent review `PASS` 时才必须存在；未运行时 sidecar 写 `NOT_RUN` 或不声明 PASS。
@@ -71,7 +71,7 @@ handoff_evidence/bundle-reconstruction.json
 
 handoff 不打包 raw grep output、full pytest log、完整 stdout/stderr、完整 subagent transcript、完整文件清单、wheel/sdist、本地临时安装目录、`.run/local/**` 或 private/generated data。
 
-builder 必须拒绝 task JSON 中的 `handoff_evidence`、`handoff_markdown_evidence` 和 `validation_evidence`。`validation_evidence.json` 若存在于包内，只能由 builder 从 receipts 派生，不由 task 手写。
+builder 必须拒绝 task JSON 中的 `handoff_evidence`、`handoff_markdown_evidence` 和 `validation_evidence`。`validation_evidence.json`、`handoff_evidence/source-tree-scan.json`、`handoff_evidence/verification-matrix.json` 和旧 receipt 文件名不得恢复为 handoff 状态源；当前 validation 状态只由 builder 从 receipts 派生为 `handoff_evidence/validation-summary.json`。
 
 ## 4. Sidecar 规则
 

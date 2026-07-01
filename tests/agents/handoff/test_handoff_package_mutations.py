@@ -6,15 +6,26 @@ from pathlib import Path
 
 import pytest
 
-from tests.agents.handoff.conftest import (
-    MANDATORY_VALIDATION_CHECKS,
-    _copy_valid_package,
-    _generation_evidence,
-    _load_handoff_module,
-    _replace_generation_evidence,
-    _validation_checks,
-    _validation_payload,
-)
+try:
+    from tests.agents.handoff.conftest import (
+        MANDATORY_VALIDATION_CHECKS,
+        _copy_valid_package,
+        _generation_evidence,
+        _load_handoff_module,
+        _replace_generation_evidence,
+        _validation_checks,
+        _validation_payload,
+    )
+except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
+    from conftest import (  # type: ignore[no-redef]
+        MANDATORY_VALIDATION_CHECKS,
+        _copy_valid_package,
+        _generation_evidence,
+        _load_handoff_module,
+        _replace_generation_evidence,
+        _validation_checks,
+        _validation_payload,
+    )
 
 pytestmark = pytest.mark.mutation
 
@@ -26,9 +37,9 @@ def test_handoff_package_rejects_missing_mandatory_validation_check() -> None:
         row for row in _validation_checks("PASS") if row["name"] != missing_check
     ]
 
-    failures = verifier.verify_validation_evidence_schema(_validation_payload(checks))
+    failures = verifier.verify_validation_summary_schema(_validation_payload(checks))
 
-    assert f"validation_evidence_mandatory_check_missing: {missing_check}" in failures
+    assert f"validation_summary_mandatory_check_missing: {missing_check}" in failures
 
 
 def test_handoff_package_rejects_duplicate_validation_check() -> None:
@@ -39,9 +50,9 @@ def test_handoff_package_rejects_duplicate_validation_check() -> None:
         {"name": "tests", "status": "PASS", "evidence": "forged later pass"},
     ]
 
-    failures = verifier.verify_validation_evidence_schema(_validation_payload(checks))
+    failures = verifier.verify_validation_summary_schema(_validation_payload(checks))
 
-    assert "validation_evidence_duplicate_check: tests" in failures
+    assert "validation_summary_duplicate_check: tests" in failures
 
 
 def test_handoff_package_rejects_generation_validation_status_mismatch(

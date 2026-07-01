@@ -204,11 +204,12 @@ RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
     TextRule(
         "retired_result_run_level_path",
         (
-            r"(?:run_config\.json|run_manifest\.json|validation_summary\.json|"
-            r"evidence_summary\.json|timings\.json|timings\.csv|summary\.json|"
-            r"data/evidence|layer_manifest\.json|config/run_config\.json|"
-            r"manifests/run_manifest\.json|validations/validation_summary\.json|"
-            r"timings/timings\.json|\.qrp-local-verification\.json)"
+            r"(?<![A-Za-z0-9_-])(?:run_config\.json|run_manifest\.json|"
+            r"validation_summary\.json|evidence_summary\.json|timings\.json|"
+            r"timings\.csv|summary\.json|data/evidence|layer_manifest\.json|"
+            r"config/run_config\.json|manifests/run_manifest\.json|"
+            r"validations/validation_summary\.json|timings/timings\.json|"
+            r"\.qrp-local-verification\.json)(?![A-Za-z0-9_-])"
         ),
         re.IGNORECASE,
     ),
@@ -1091,22 +1092,6 @@ def _exact_line(*parts: str) -> str:
 
 SOURCE_TREE_ALLOWED_OCCURRENCES = (
     _source_tree_allowed_occurrence(
-        path=VERIFY_HANDOFF_PACKAGE_SCRIPT,
-        rule_id="retired_text:retired_review_safe_public_wording",
-        exact_line='if summary.get("public_safe") is not True:',
-        owner="handoff-package-verifier",
-        rationale=(
-            "verifier enforces the user-required portable_summary public_safe "
-            "boolean contract"
-        ),
-        lifecycle="remove only if portable_summary public_safe field is renamed",
-        covered_by=(
-            "tests/agents/handoff/test_handoff_tools.py::"
-            "test_verify_smoke_compare_rejects_weak_portable_summary_shape",
-        ),
-        py_owner="def:verify_smoke_compare_portable_summary",
-    ),
-    _source_tree_allowed_occurrence(
         path=Path("src/quant_research_platform/policy/share_safety.py"),
         rule_id="retired_text:forbidden_private_real",
         exact_line='"private_real",',
@@ -1296,6 +1281,72 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
                 ),
             ),
         )
+    ),
+)
+
+SOURCE_TREE_ALLOWED_OCCURRENCES += (
+    _source_tree_allowed_occurrence(
+        path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
+        rule_id="retired_text:retired_result_run_level_path",
+        exact_line='assert rule.search("summary.json")',
+        owner="architecture-governance-negative-tests",
+        rationale=(
+            "negative test proves the retired result path rule still catches "
+            "the exact summary JSON filename"
+        ),
+        lifecycle=(
+            "current negative fixture; remove if run-level retired path rule "
+            "changes"
+        ),
+        covered_by=(
+            "tests/architecture/test_governance_contract_rg_gate.py::"
+            "test_retired_run_level_path_rule_ignores_validation_summary_substring",
+        ),
+        py_owner=(
+            "def:test_retired_run_level_path_rule_ignores_validation_summary_substring"
+        ),
+    ),
+    _source_tree_allowed_occurrence(
+        path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
+        rule_id="retired_text:retired_result_run_level_path",
+        exact_line='assert rule.search("run/summary.json")',
+        owner="architecture-governance-negative-tests",
+        rationale=(
+            "negative test proves the retired result path rule still catches "
+            "the run-level summary JSON path"
+        ),
+        lifecycle=(
+            "current negative fixture; remove if run-level retired path rule "
+            "changes"
+        ),
+        covered_by=(
+            "tests/architecture/test_governance_contract_rg_gate.py::"
+            "test_retired_run_level_path_rule_ignores_validation_summary_substring",
+        ),
+        py_owner=(
+            "def:test_retired_run_level_path_rule_ignores_validation_summary_substring"
+        ),
+    ),
+    _source_tree_allowed_occurrence(
+        path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
+        rule_id="retired_text:retired_result_run_level_path",
+        exact_line='assert rule.search("summary.json.bak")',
+        owner="architecture-governance-negative-tests",
+        rationale=(
+            "negative test proves backup-suffixed retired result files stay "
+            "caught"
+        ),
+        lifecycle=(
+            "current negative fixture; remove if run-level retired path rule "
+            "changes"
+        ),
+        covered_by=(
+            "tests/architecture/test_governance_contract_rg_gate.py::"
+            "test_retired_run_level_path_rule_ignores_validation_summary_substring",
+        ),
+        py_owner=(
+            "def:test_retired_run_level_path_rule_ignores_validation_summary_substring"
+        ),
     ),
 )
 
@@ -1622,158 +1673,6 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
         "sensitive_negative_literals:sensitive_provider_marker",
         _exact_line('"vendor_', 'payload={}",'),
         "def:test_handoff_package_verifier_rejects_private_provider_markers",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"E', ":/repo/data/pr", 'ocessed/a_share/factor/demo",'),
-        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"E', ":/repo/data/r", 'esearch/a_share/demo",'),
-        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"E', ":/repo/reports/priv", 'ate_research/a_share/run",'),
-        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"/work', "space/qrp/data/pr", 'ocessed/a_share/factor/demo",'),
-        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"/work', "spaces/qrp/data/r", 'esearch/a_share/demo",'),
-        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"/mnt', "/data/reports/priv", 'ate_research/a_share/run",'),
-        "def:test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"leaked_zip_path": "E', ':/quant-workspace/private/handoff.zip",'),
-        "def:test_handoff_package_verifier_scans_external_json_sidecar",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"home_bad": "/h', 'ome/user/private/handoff.zip",'),
-        "def:test_handoff_package_verifier_scans_external_json_sidecar",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('[".run/priv', 'ate/s1", ".run\\\\\\\\priv', 'ate\\\\\\\\s1"],'),
-        "def:test_handoff_package_verifier_rejects_local_run_path_in_sidecar",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"/work', "space/qrp/data/r", 'esearch/a_share/demo",'),
-        "def:test_handoff_package_verifier_rejects_absolute_paths_with_local_only_segments",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"/work', "spaces/qrp/reports/priv", 'ate_research/a_share/run",'),
-        "def:test_handoff_package_verifier_rejects_absolute_paths_with_local_only_segments",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"old local example C', ":/Us", 'ers/name/private.txt",'),
-        "def:test_handoff_package_verifier_rejects_local_paths_in_plain_text",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line(
-            '"old workspace example /work', "space/qrp/data/r", 'esearch/a_share/demo",'
-        ),
-        "def:test_handoff_package_verifier_rejects_local_paths_in_plain_text",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line(
-            '("config", {"local_path": "C', ":/Us", 'ers/name/private/data"}),'
-        ),
-        "def:test_handoff_package_verifier_rejects_unsafe_complete_run_json",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"zip_path": "E', ':/quant-workspace/private/handoff.zip",'),
-        "def:test_verify_fails_when_sidecar_safety_fails",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"C', ':/private/run.json",'),
-        "def:test_verify_smoke_compare_rejects_invalid_source_artifact_path_shapes",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('r"E:', '\\priv', 'ate\\run.json",'),
-        "def:test_verify_smoke_compare_rejects_invalid_source_artifact_path_shapes",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"C', ':/private/run.json",'),
-        "def:test_verify_smoke_compare_rejects_unsafe_portable_result_fields",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line('"python verify.py --input C', ':/private/run.json",'),
-        "def:test_verify_smoke_compare_rejects_unsafe_portable_result_fields",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_local_only_path",
-        _exact_line(
-            '{"status": "PASS", "path": "E', ":/repo/data", '/raw/vendor.csv"},'
-        ),
-        "def:test_verify_smoke_compare_rejects_unsafe_portable_summary",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_provider_marker",
-        _exact_line('("checks", {"vendor', '_marker": "provider-internal"}),'),
-        "def:test_handoff_package_verifier_rejects_unsafe_complete_run_json",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_provider_marker",
-        _exact_line('"provider_name', '=raw-provider",'),
-        "def:test_verify_smoke_compare_rejects_unsafe_portable_result_fields",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_provider_marker",
-        _exact_line('"smoke_compare_status_field_unsafe: 0:scope:vendor', '_marker",'),
-        "def:test_verify_smoke_compare_rejects_unsafe_portable_result_fields",
-    ),
-    (
-        "tests/agents/handoff/test_handoff_tools.py",
-        "sensitive_negative_literals:sensitive_provider_marker",
-        _exact_line(
-            '"smoke_compare_status_portable_summary_unsafe: 0:vendor', '_marker",'
-        ),
-        "def:test_verify_smoke_compare_rejects_unsafe_portable_summary",
     ),
     (
         "tests/policy/test_share_safety.py",
@@ -3188,8 +3087,8 @@ def layer_boundary_import_rules() -> tuple[dict[str, object], ...]:
 # Handoff package contract, compact receipts, and source-tree scan ownership.
 VALID_STATUSES = set(VALID_STATUS_TOKENS)
 GENERATION_EVIDENCE = "handoff_evidence/generation.json"
-SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
-VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
+BUNDLE_RECONSTRUCTION_EVIDENCE = "handoff_evidence/bundle-reconstruction.json"
+VALIDATION_SUMMARY_EVIDENCE = "handoff_evidence/validation-summary.json"
 PACKAGE_SMOKE_EVIDENCE = "handoff_evidence/package-smoke-receipt.json"
 HARD_SCAN_CLASSIFICATION_EVIDENCE = "handoff_evidence/hard-scan-receipt.json"
 CHECK_RECEIPTS_EVIDENCE = "handoff_evidence/check-receipts.json"
@@ -3198,8 +3097,8 @@ ADVISORY_REVIEW_RECEIPT_EVIDENCE = "handoff_evidence/advisory-review-receipt.jso
 TEST_CHECKS_EVIDENCE = CHECK_RECEIPTS_EVIDENCE
 BUILDER_OWNED_HANDOFF_EVIDENCE = {
     GENERATION_EVIDENCE,
-    SOURCE_TREE_SCAN_EVIDENCE,
-    VERIFICATION_MATRIX_EVIDENCE,
+    BUNDLE_RECONSTRUCTION_EVIDENCE,
+    VALIDATION_SUMMARY_EVIDENCE,
 }
 TASK_REQUIRED_HANDOFF_EVIDENCE = frozenset(
     {
@@ -3216,6 +3115,9 @@ OLD_HANDOFF_EVIDENCE_PATHS = frozenset(
         "handoff_evidence/subagent-review-findings.json",
         "handoff_evidence/subagent-review-reconciliation.json",
         "handoff_evidence/test-checks.json",
+        "handoff_evidence/smoke-compare-status.json",
+        "handoff_evidence/source-tree-scan.json",
+        "handoff_evidence/verification-matrix.json",
     }
 )
 HARD_SCAN_CLASSIFICATIONS = frozenset(
@@ -3260,6 +3162,7 @@ TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS = RESERVED_HANDOFF_EVIDENCE_STEMS 
     "source-tree-scan",
     "task_metadata",
     "validation_evidence",
+    "validation-summary",
     "verification-matrix",
 }
 BLOCKED_PACKAGE_ENTRY_PARTS = {
@@ -3300,7 +3203,6 @@ TASK_METADATA_KEYS = {
     "not_run",
     "blocked",
     "commit_list",
-    "source_tree_scan",
 }
 TASK_INPUT_KEYS = TASK_METADATA_KEYS | TASK_CONTROL_KEYS
 BLOCKED_TASK_KEYS = {
@@ -3507,18 +3409,6 @@ def sha256_file(path: Path) -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
-    groups = source_tree_scan_groups(clone_dir)
-    return [
-        *groups["allowance_contract"]["findings"],
-        *groups["retired_text"]["findings"],
-        *groups["python_symbols"]["findings"],
-        *groups["synthesized_strings"]["findings"],
-        *groups["active_test_literals"]["findings"],
-        *groups["sensitive_negative_literals"]["findings"],
-    ]
 
 
 def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
@@ -4840,24 +4730,6 @@ def is_task_provided_handoff_evidence_blocked_path(name: str) -> bool:
     return False
 
 
-def normalized_handoff_evidence_path(raw_name: str) -> str:
-    name = _normalize_governance_zip_path(raw_name)
-    if not name.startswith("handoff_evidence/"):
-        name = "handoff_evidence/" + name
-    if not name.endswith(".json"):
-        name += ".json"
-    return name
-
-
-def normalized_handoff_markdown_evidence_path(raw_name: str) -> str:
-    name = _normalize_governance_zip_path(raw_name)
-    if not name.startswith("handoff_evidence/"):
-        name = "handoff_evidence/" + name
-    if not name.endswith(".md"):
-        name += ".md"
-    return name
-
-
 def handoff_evidence_blocked_key_failures(
     evidence_path: str,
     payload: Mapping[str, object],
@@ -4903,45 +4775,33 @@ def collect_handoff_evidence_blocked_key_failures(
             )
 
 
-def validation_with_status_overrides(
-    validation_evidence: dict[str, object],
+def validation_summary_with_status_overrides(
+    validation_summary: dict[str, object],
     overrides: dict[str, str],
 ) -> dict[str, object]:
-    payload = json.loads(_stable_governance_json(validation_evidence))
+    payload = json.loads(_stable_governance_json(validation_summary))
     rows = payload.get("checks")
     if not isinstance(rows, list):
-        raise SystemExit("validation_evidence_checks_must_be_list")
-    validate_validation_evidence_contract(payload, require_mandatory=False)
+        raise SystemExit("validation_summary_checks_must_be_list")
+    validate_validation_summary_contract(payload, require_mandatory=False)
     for check_name in BUILDER_OWNED_VALIDATION_CHECKS:
-        set_check_status(rows, check_name, overrides.get(check_name, "NOT_RUN"))
+        set_validation_summary_check_status(
+            rows,
+            check_name,
+            overrides.get(check_name, "NOT_RUN"),
+        )
     for check_name, status in overrides.items():
-        set_check_status(rows, check_name, status)
-    validate_validation_evidence_contract(payload)
+        set_validation_summary_check_status(rows, check_name, status)
+    validate_validation_summary_contract(payload)
     return payload
 
 
-def enrich_validation_evidence(
-    validation_evidence: dict[str, object],
-    *,
-    handoff_package_path: str,
-    handoff_sidecar_path: str,
-) -> dict[str, object]:
-    payload = json.loads(_stable_governance_json(validation_evidence))
-    validate_validation_evidence_contract(payload)
-    payload["handoff_package_path"] = handoff_package_path
-    payload["handoff_sidecar_path"] = handoff_sidecar_path
-    rows = payload.get("checks")
-    if not isinstance(rows, list):
-        raise SystemExit("validation_evidence_checks_must_be_list")
-    return payload
-
-
-def validate_validation_evidence_contract(
+def validate_validation_summary_contract(
     payload: dict[str, object],
     *,
     require_mandatory: bool = True,
 ) -> None:
-    failures = validation_evidence_contract_failures(
+    failures = validation_summary_contract_failures(
         payload,
         require_mandatory=require_mandatory,
     )
@@ -4949,35 +4809,36 @@ def validate_validation_evidence_contract(
         raise SystemExit(";".join(failures))
 
 
-def validation_evidence_contract_failures(
+def validation_summary_contract_failures(
     payload: dict[str, object],
     *,
     require_mandatory: bool = True,
 ) -> list[str]:
     failures: list[str] = []
-    if payload.get("schema_id") != "qrp-handoff-validation-evidence":
-        failures.append("validation_evidence_schema_id_invalid")
+    if payload.get("schema_id") != "qrp-handoff-validation-summary":
+        failures.append("validation_summary_schema_id_invalid")
     blocked = sorted(set(payload) & BLOCKED_VALIDATION_KEYS)
-    failures.extend(f"validation_evidence_forbidden_field: {key}" for key in blocked)
+    failures.extend(f"validation_summary_forbidden_field: {key}" for key in blocked)
     rows = payload.get("checks")
     if not isinstance(rows, list):
-        failures.append("validation_evidence_checks_must_be_list")
+        failures.append("validation_summary_checks_must_be_list")
         return failures
     seen: set[str] = set()
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
-            failures.append(f"validation_evidence_check_not_object: {index}")
+            failures.append(f"validation_summary_check_not_object: {index}")
             continue
         if "check" in row:
-            failures.append(f"validation_evidence_row_forbidden_field: {index}:check")
+            failures.append(f"validation_summary_row_forbidden_field: {index}:check")
         extra = sorted(set(row) - VALIDATION_ROW_KEYS)
         if extra:
             failures.append(
-                f"validation_evidence_row_unapproved_field: {index}:" + ",".join(extra)
+                f"validation_summary_row_unapproved_field: {index}:"
+                + ",".join(extra)
             )
         for key in ("name", "status", "evidence"):
             if key not in row:
-                failures.append(f"validation_evidence_row_missing: {index}:{key}")
+                failures.append(f"validation_summary_row_missing: {index}:{key}")
         name = row.get("name")
         if (
             not isinstance(name, str)
@@ -4985,30 +4846,30 @@ def validation_evidence_contract_failures(
             or name != name.strip()
             or name not in ALLOWED_VALIDATION_CHECKS
         ):
-            failures.append(f"validation_evidence_name_invalid: {index}")
+            failures.append(f"validation_summary_name_invalid: {index}")
         else:
             if name in seen:
-                failures.append(f"validation_evidence_duplicate_check: {name}")
+                failures.append(f"validation_summary_duplicate_check: {name}")
             seen.add(name)
         if "status" in row:
             status = row.get("status")
             if not isinstance(status, str) or status not in VALID_STATUSES:
                 failures.append(
-                    f"validation_evidence_status_invalid: {index}:{row.get('status')}"
+                    f"validation_summary_status_invalid: {index}:{row.get('status')}"
                 )
         if "evidence" in row:
             evidence = row.get("evidence")
             if not isinstance(evidence, str) or not evidence.strip():
-                failures.append(f"validation_evidence_evidence_invalid: {index}")
+                failures.append(f"validation_summary_evidence_invalid: {index}")
     if require_mandatory:
         missing = sorted(MANDATORY_VALIDATION_CHECKS - seen)
         failures.extend(
-            f"validation_evidence_mandatory_check_missing: {name}" for name in missing
+            f"validation_summary_mandatory_check_missing: {name}" for name in missing
         )
     return failures
 
 
-def set_check_status(
+def set_validation_summary_check_status(
     rows: list[object],
     check_name: str,
     status: str,
@@ -5023,10 +4884,10 @@ def set_check_status(
             current_status = raw_status if isinstance(raw_status, str) else ""
             current_evidence = str(row.get(details_key) or "")
             row["status"] = status
-            generated_missing_evidence = current_evidence.startswith(
-                "task validation_evidence missing; "
+            generated_summary = current_evidence.startswith(
+                "validation summary generated; "
             )
-            if current_status != status or not generated_missing_evidence:
+            if current_status != status or not generated_summary:
                 row[details_key] = validation_status_evidence(check_name, status)
             return
     rows.append(
@@ -5046,35 +4907,11 @@ def validation_status_evidence(check_name: str, status: str) -> str:
     return f"{check_name}={status}"
 
 
-def verification_matrix_payload(
-    validation_evidence: dict[str, object],
-) -> dict[str, object]:
-    status_map = validation_status_map(validation_evidence)
-    checks = []
-    for name in ("handoff_verify", "handoff_safety_scan"):
-        checks.append(
-            {
-                "name": name,
-                "required": True,
-                "deterministic": True,
-                "status": status_map.get(name, "NOT_RUN"),
-                "evidence": validation_status_evidence(
-                    name,
-                    status_map.get(name, "NOT_RUN"),
-                ),
-            }
-        )
-    return {
-        "schema_id": "qrp-handoff-verification-matrix",
-        "checks": checks,
-    }
-
-
-def validation_status_map(payload: dict[str, object]) -> dict[str, str]:
-    validate_validation_evidence_contract(payload)
+def validation_summary_status_map(payload: dict[str, object]) -> dict[str, str]:
+    validate_validation_summary_contract(payload)
     rows = payload["checks"]
     if not isinstance(rows, list):
-        raise SystemExit("validation_evidence_checks_must_be_list")
+        raise SystemExit("validation_summary_checks_must_be_list")
     result: dict[str, str] = {}
     for row in rows:
         name = str(row["name"]).strip()
@@ -5112,13 +4949,15 @@ def advisory_review_consistency_failures(
     return []
 
 
-def mandatory_validation_status_map(payload: dict[str, object]) -> dict[str, str]:
-    status_map = validation_status_map(payload)
+def mandatory_validation_summary_status_map(
+    payload: dict[str, object],
+) -> dict[str, str]:
+    status_map = validation_summary_status_map(payload)
     return {name: status_map[name] for name in sorted(MANDATORY_VALIDATION_CHECKS)}
 
 
-def aggregate_mandatory_validation_status(payload: dict[str, object]) -> str:
-    statuses = mandatory_validation_status_map(payload).values()
+def aggregate_mandatory_validation_summary_status(payload: dict[str, object]) -> str:
+    statuses = mandatory_validation_summary_status_map(payload).values()
     return aggregate_validation_matrix_status(statuses)
 
 

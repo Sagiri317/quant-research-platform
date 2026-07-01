@@ -21,8 +21,21 @@ OLD_NAMES = {
     "test-checks.json",
     "subagent-review-findings.json",
     "subagent-review-reconciliation.json",
+    "smoke-compare-status.json",
+    "source-tree-scan.json",
+    "verification-matrix.json",
 }
 FORBIDDEN_KEYS = {"stdout", "stderr", "raw_output", "raw_grep_output", "grep_hits"}
+COUNT_KEYS = {
+    "passed",
+    "failed",
+    "skipped",
+    "deselected",
+    "errors",
+    "xfailed",
+    "xpassed",
+    "collected",
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -100,10 +113,234 @@ def validate_receipts(root: Path) -> list[str]:
         schema_id = str(payload.get("schema_id") or "")
         if not schema_id.startswith("qrp-"):
             failures.append(f"receipt_schema_id_invalid: {path.name}")
-        if payload.get("status") not in VALID:
-            failures.append(f"receipt_status_invalid: {path.name}")
+        validator = {
+            "package-smoke-receipt.json": validate_package_smoke_receipt,
+            "hard-scan-receipt.json": validate_hard_scan_receipt,
+            "check-receipts.json": validate_check_receipts,
+            "private-smoke-status.json": validate_private_smoke_status,
+            "advisory-review-receipt.json": validate_advisory_review_receipt,
+        }.get(path.name, validate_generic_receipt)
+        failures.extend(validator(payload))
         failures.extend(forbidden_key_failures(path.name, payload))
     return failures
+
+
+def validate_generic_receipt(payload: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    if payload.get("status") not in VALID:
+        failures.append("receipt_status_invalid")
+    return failures
+
+
+def validate_package_smoke_receipt(payload: dict[str, object]) -> list[str]:
+    failures = _required(
+        payload,
+        (
+            "schema_id",
+            "status",
+            "wheel",
+            "sdist",
+            "install",
+            "import",
+            "content_scan",
+        ),
+        "package_smoke",
+    )
+    if payload.get("schema_id") != "qrp-package-smoke-receipt":
+        failures.append("package_smoke_schema_id_invalid")
+    if payload.get("status") not in VALID:
+        failures.append("package_smoke_status_invalid")
+    for key in ("wheel", "sdist"):
+        item = payload.get(key)
+        if not isinstance(item, dict):
+            failures.append(f"package_smoke_artifact_invalid: {key}")
+            continue
+        if not isinstance(item.get("filename"), str):
+            failures.append(f"package_smoke_filename_invalid: {key}")
+        if not _sha_or_empty(item.get("sha256")):
+            failures.append(f"package_smoke_sha256_invalid: {key}")
+    content_scan = payload.get("content_scan")
+    if not isinstance(content_scan, dict):
+        failures.append("package_smoke_content_scan_invalid")
+    else:
+        if content_scan.get("status") not in VALID:
+            failures.append("package_smoke_content_scan_status_invalid")
+        if not isinstance(content_scan.get("forbidden_member_count"), int):
+            failures.append("package_smoke_forbidden_member_count_invalid")
+        if set(content_scan.get("scanned_artifact_kinds") or ()) != {
+            "wheel",
+            "sdist",
+            "install_target",
+        }:
+            failures.append("package_smoke_scanned_artifact_kinds_invalid")
+    return failures
+
+
+def validate_hard_scan_receipt(payload: dict[str, object]) -> list[str]:
+    failures = _required(
+        payload,
+        (
+            "schema_id",
+            "status",
+            "scanned_head",
+            "scanner_source_sha256",
+            "scan_runs",
+            "classified_exceptions",
+        ),
+        "hard_scan",
+    )
+    if payload.get("schema_id") != "qrp-hard-scan-receipt":
+        failures.append("hard_scan_schema_id_invalid")
+    if payload.get("status") not in VALID:
+        failures.append("hard_scan_status_invalid")
+    if not _sha(payload.get("scanner_source_sha256")):
+        failures.append("hard_scan_scanner_source_sha256_invalid")
+    runs = payload.get("scan_runs")
+    if not isinstance(runs, list) or not runs:
+        failures.append("hard_scan_runs_invalid")
+    else:
+        for index, row in enumerate(runs):
+            if not isinstance(row, dict):
+                failures.append(f"hard_scan_run_invalid: {index}")
+                continue
+            for key in ("scan_id", "rule_set_id", "result_sha256"):
+                if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
+                    failures.append(f"hard_scan_run_missing: {index}:{key}")
+            if not _sha(row.get("result_sha256")):
+                failures.append(f"hard_scan_result_sha256_invalid: {index}")
+    if not isinstance(payload.get("classified_exceptions"), list):
+        failures.append("hard_scan_classified_exceptions_invalid")
+    return failures
+
+
+def validate_check_receipts(payload: dict[str, object]) -> list[str]:
+    failures = _required(payload, ("schema_id", "status", "checks"), "check_receipts")
+    if payload.get("schema_id") != "qrp-check-receipts":
+        failures.append("check_receipts_schema_id_invalid")
+    if payload.get("status") not in VALID:
+        failures.append("check_receipts_status_invalid")
+    checks = payload.get("checks")
+    if not isinstance(checks, list):
+        failures.append("check_receipts_checks_invalid")
+        return failures
+    for index, row in enumerate(checks):
+        if not isinstance(row, dict):
+            failures.append(f"check_receipt_invalid: {index}")
+            continue
+        for key in (
+            "schema_id",
+            "command_id",
+            "scope",
+            "command",
+            "status",
+            "exit_code",
+            "duration_seconds",
+            "counts",
+            "stdout_sha256",
+            "stderr_sha256",
+            "output_summary",
+            "failure_excerpt",
+        ):
+            if key not in row:
+                failures.append(f"check_receipt_missing: {index}:{key}")
+        if "test_count" in row:
+            failures.append(f"check_receipt_test_count_forbidden: {index}")
+        counts = row.get("counts")
+        if counts is not None:
+            if not isinstance(counts, dict) or set(counts) != COUNT_KEYS:
+                failures.append(f"check_receipt_counts_invalid: {index}")
+            elif any(
+                not isinstance(value, int) or value < 0
+                for value in counts.values()
+            ):
+                failures.append(f"check_receipt_counts_invalid: {index}")
+    return failures
+
+
+def validate_private_smoke_status(payload: dict[str, object]) -> list[str]:
+    failures = _required(
+        payload,
+        (
+            "schema_id",
+            "status",
+            "command_id",
+            "exit_code",
+            "run_level_overall",
+            "private_smoke_run_level",
+            "private_smoke_child_checks",
+            "compare",
+            "full_horizon",
+            "child_statuses",
+            "run_json_sha256",
+            "row_level_data_included",
+        ),
+        "private_smoke",
+    )
+    if payload.get("schema_id") != "qrp-private-smoke-status":
+        failures.append("private_smoke_schema_id_invalid")
+    for key in (
+        "status",
+        "run_level_overall",
+        "private_smoke_run_level",
+        "private_smoke_child_checks",
+        "compare",
+        "full_horizon",
+    ):
+        if payload.get(key) not in VALID:
+            failures.append(f"private_smoke_status_invalid: {key}")
+    if payload.get("row_level_data_included") is not False:
+        failures.append("private_smoke_row_level_data_included")
+    if payload.get("status") == "NOT_RUN" and not payload.get("not_run_reason"):
+        failures.append("private_smoke_not_run_reason_missing")
+    if payload.get("status") == "BLOCKED" and not payload.get("blocked_reason"):
+        failures.append("private_smoke_blocked_reason_missing")
+    return failures
+
+
+def validate_advisory_review_receipt(payload: dict[str, object]) -> list[str]:
+    failures = _required(
+        payload,
+        (
+            "schema_id",
+            "status",
+            "review_lanes",
+            "finding_count",
+            "true_issue_count",
+            "false_positive_count",
+            "re_review_status",
+            "findings",
+        ),
+        "advisory_review",
+    )
+    if payload.get("schema_id") != "qrp-advisory-review-receipt":
+        failures.append("advisory_review_schema_id_invalid")
+    if payload.get("status") not in VALID:
+        failures.append("advisory_review_status_invalid")
+    if payload.get("re_review_status") not in VALID:
+        failures.append("advisory_review_re_review_status_invalid")
+    if not isinstance(payload.get("findings"), list):
+        failures.append("advisory_review_findings_invalid")
+    return failures
+
+
+def _required(
+    payload: dict[str, object],
+    keys: tuple[str, ...],
+    prefix: str,
+) -> list[str]:
+    return [f"{prefix}_missing: {key}" for key in keys if key not in payload]
+
+
+def _sha(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def _sha_or_empty(value: object) -> bool:
+    return value == "" or _sha(value)
 
 
 def forbidden_key_failures(name: str, payload: object, prefix: str = "") -> list[str]:

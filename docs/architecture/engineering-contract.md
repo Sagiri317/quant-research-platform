@@ -85,4 +85,4 @@ python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<
 
 handoff tests 的具体执行入口统一使用 `tests/tools/run_profile.py`。测试位置按 owner layer 放置；详细 placement 规则由 maintenance references 和 architecture gates 拥有。
 
-handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。Builder 只接受 task metadata 和 receipts-dir；`validation_evidence.json` 若存在于包内，只能由 builder 从 receipts 派生。已退役的状态文件不恢复为状态源。
+handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。Builder 只接受 task metadata 和 receipts-dir；当前 validation 状态只由 builder 从 receipts 派生为 `handoff_evidence/validation-summary.json`。`validation_evidence.json`、`handoff_evidence/source-tree-scan.json`、`handoff_evidence/verification-matrix.json` 和旧 receipt 文件名不恢复为 handoff 状态源。

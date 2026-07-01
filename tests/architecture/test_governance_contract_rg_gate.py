@@ -250,6 +250,24 @@ def test_result_architecture_rules_cover_hard_cut_examples() -> None:
         assert patterns[name].search(example)
 
 
+def test_retired_run_level_path_rule_ignores_validation_summary_substring() -> None:
+    from governance_contract import RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
+
+    patterns = {
+        rule.name: rule.compile() for rule in RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
+    }
+    rule = patterns["retired_result_run_level_path"]
+
+    assert rule.search("summary.json")
+    assert rule.search("run/summary.json")
+    assert rule.search("summary.json.bak")
+    assert not rule.search("handoff_evidence/validation-summary.json")
+    assert not rule.search("validation-summary.json")
+    assert not rule.search("package-summary.json")
+    assert not rule.search("xsummary.json")
+    assert not rule.search("summary.jsonl")
+
+
 def test_profile_runner_retired_text_rules_are_contract_owned() -> None:
     from governance_contract import (
         PROFILE_RUNNER_RETIRED_LITERALS,

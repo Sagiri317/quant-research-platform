@@ -55,6 +55,14 @@
       "additionalProperties": false,
       "required": [
         "validation",
+        "tests",
+        "package_smoke",
+        "profile_smoke",
+        "private_smoke_run_level",
+        "private_smoke_child_checks",
+        "baseline_compare",
+        "governance",
+        "code_map",
         "handoff_verify",
         "handoff_safety",
         "blocked_count",
@@ -62,6 +70,30 @@
       ],
       "properties": {
         "validation": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "tests": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "package_smoke": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "profile_smoke": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "private_smoke_run_level": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "private_smoke_child_checks": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "baseline_compare": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "governance": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "code_map": {
           "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
         },
         "handoff_verify": {

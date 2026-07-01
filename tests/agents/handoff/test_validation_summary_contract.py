@@ -28,7 +28,7 @@ def _load_handoff_module(name: str):
     return module
 
 
-def _validation_evidence_payload(
+def _validation_summary_payload(
     *,
     evidence: object = "command completed with PASS",
     name: object = "tests",
@@ -53,70 +53,69 @@ def _validation_evidence_payload(
             }
         )
     return {
-        "schema_id": "qrp-handoff-validation-evidence",
+        "schema_id": "qrp-handoff-validation-summary",
         "checks": rows,
     }
 
 
 @pytest.mark.parametrize("evidence", ["", "   ", 123, [], {}])
-def test_validation_evidence_rejects_invalid_evidence_values(
+def test_validation_summary_rejects_invalid_evidence_values(
     evidence: object,
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
 
-    failures = verifier.verify_validation_evidence_schema(
-        _validation_evidence_payload(evidence=evidence)
+    failures = verifier.verify_validation_summary_schema(
+        _validation_summary_payload(evidence=evidence)
     )
 
-    assert "validation_evidence_evidence_invalid: 0" in failures
+    assert "validation_summary_evidence_invalid: 0" in failures
 
 
-def test_validation_evidence_accepts_non_empty_string_evidence() -> None:
+def test_validation_summary_accepts_non_empty_string_evidence() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
 
-    failures = verifier.verify_validation_evidence_schema(
-        _validation_evidence_payload(evidence="command completed with PASS")
+    failures = verifier.verify_validation_summary_schema(
+        _validation_summary_payload(evidence="command completed with PASS")
     )
 
     assert not any(
-        failure.startswith("validation_evidence_evidence_invalid")
+        failure.startswith("validation_summary_evidence_invalid")
         for failure in failures
     )
 
 
 @pytest.mark.parametrize("name", [" tests ", "\ttests", "tests\n", "", 123])
-def test_validation_evidence_rejects_invalid_check_names(name: object) -> None:
+def test_validation_summary_rejects_invalid_check_names(name: object) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
 
-    failures = verifier.verify_validation_evidence_schema(
-        _validation_evidence_payload(name=name)
+    failures = verifier.verify_validation_summary_schema(
+        _validation_summary_payload(name=name)
     )
 
-    assert "validation_evidence_name_invalid: 0" in failures
+    assert "validation_summary_name_invalid: 0" in failures
 
 
-def test_validation_evidence_accepts_exact_check_name() -> None:
+def test_validation_summary_accepts_exact_check_name() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
 
-    failures = verifier.verify_validation_evidence_schema(
-        _validation_evidence_payload(name="tests")
+    failures = verifier.verify_validation_summary_schema(
+        _validation_summary_payload(name="tests")
     )
 
     assert not any(
-        failure.startswith("validation_evidence_name_invalid")
-        for failure in failures
+        failure.startswith("validation_summary_name_invalid") for failure in failures
     )
 
 
 @pytest.mark.parametrize("status", ["pass", "PASS ", "", None, 123])
-def test_validation_evidence_rejects_invalid_status_values(status: object) -> None:
+def test_validation_summary_rejects_invalid_status_values(status: object) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
 
-    failures = verifier.verify_validation_evidence_schema(
-        _validation_evidence_payload(status=status)
+    failures = verifier.verify_validation_summary_schema(
+        _validation_summary_payload(status=status)
     )
 
-    assert f"validation_evidence_status_invalid: 0:{status}" in failures
+    assert f"validation_summary_status_invalid: 0:{status}" in failures
 
 
 @pytest.mark.parametrize(

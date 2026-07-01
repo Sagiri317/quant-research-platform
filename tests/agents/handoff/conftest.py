@@ -18,6 +18,7 @@ HANDOFF_TOOL_ROOT = (
     / "scripts"
     / "handoff"
 )
+HANDOFF_SKILL_ROOT = HANDOFF_TOOL_ROOT.parent.parent
 TEST_BRANCH = "feature/synthetic-handoff-review"
 
 
@@ -89,6 +90,31 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
 
 def _init_handoff_repo(repo: Path) -> tuple[str, str]:
     repo.mkdir()
+    support_root = repo / ".agents" / "skills" / "quant-research-platform-maintenance"
+    shutil.copytree(
+        HANDOFF_SKILL_ROOT / "scripts",
+        support_root / "scripts",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    shutil.copytree(
+        HANDOFF_SKILL_ROOT / "templates",
+        support_root / "templates",
+    )
+    shutil.copytree(
+        HANDOFF_SKILL_ROOT / "schemas",
+        support_root / "schemas",
+    )
+    package_root = repo / "src" / "quant_research_platform"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("", encoding="utf-8")
+    policy_root = package_root / "policy"
+    policy_root.mkdir()
+    (policy_root / "__init__.py").write_text("", encoding="utf-8")
+    for relative in ("check_status.py", "share_safety.py"):
+        shutil.copyfile(
+            Path("src") / "quant_research_platform" / "policy" / relative,
+            policy_root / relative,
+        )
     _git(repo, "init")
     _git(repo, "config", "user.email", "handoff-test@example.invalid")
     _git(repo, "config", "user.name", "Handoff Test")
@@ -146,7 +172,7 @@ def _validation_payload(
     checks: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     return {
-        "schema_id": "qrp-handoff-validation-evidence",
+        "schema_id": "qrp-handoff-validation-summary",
         "checks": checks if checks is not None else _validation_checks("PASS"),
     }
 
@@ -172,6 +198,8 @@ def _package_smoke_evidence() -> dict[str, object]:
         "content_scan": {
             "status": "PASS",
             "forbidden_member_count": 0,
+            "scanned_artifact_kinds": ["wheel", "sdist", "install_target"],
+            "examples": [],
         },
     }
 
@@ -199,46 +227,6 @@ def _hard_scan_classification_evidence() -> dict[str, object]:
     }
 
 
-def _subagent_review_findings_evidence() -> dict[str, object]:
-    return {
-        "schema_id": "qrp-subagent-review-findings",
-        "status": "PASS",
-        "findings": [
-            {
-                "review_lane": "governance_safety",
-                "finding_id": "review-1",
-                "severity": "INFO",
-                "file_or_symbol": "handoff-test-fixture",
-                "why_true_issue": "No unresolved issue in synthetic fixture.",
-                "classification": "no_findings",
-                "fix_action": "none",
-                "final_status": "NO_CHANGE",
-                "re_review_status": "PASS",
-            }
-        ],
-    }
-
-
-def _review_reconciliation_payload() -> dict[str, object]:
-    return {
-        "schema_id": "qrp-subagent-review-reconciliation",
-        "status": "PASS",
-        "rows": [
-            {
-                "review_lane": "governance_safety",
-                "finding_id": "review-1",
-                "severity": "INFO",
-                "file_or_symbol": "handoff-test-fixture",
-                "why_true_issue": "No unresolved issue in synthetic fixture.",
-                "classification": "no_findings",
-                "fix_action": "none",
-                "final_status": "NO_CHANGE",
-                "re_review_status": "PASS",
-            }
-        ],
-    }
-
-
 def _test_checks_evidence() -> dict[str, object]:
     return {
         "schema_id": "qrp-check-receipts",
@@ -251,7 +239,16 @@ def _test_checks_evidence() -> dict[str, object]:
                 "scope": "handoff verifier tests",
                 "status": "PASS",
                 "exit_code": 0,
-                "test_count": 1,
+                "counts": {
+                    "passed": 1,
+                    "failed": 0,
+                    "skipped": 0,
+                    "deselected": 0,
+                    "errors": 0,
+                    "xfailed": 0,
+                    "xpassed": 0,
+                    "collected": 1,
+                },
                 "duration_seconds": 1.0,
                 "stdout_sha256": "4" * 64,
                 "stderr_sha256": "5" * 64,
@@ -364,14 +361,14 @@ def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
     )
 
 
-def _replace_validation_evidence(
+def _replace_validation_summary(
     package: Path,
     sidecar: Path,
     payload: dict[str, object],
 ) -> None:
     _rewrite_package_member(
         package,
-        "validation_evidence.json",
+        "handoff_evidence/validation-summary.json",
         (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
     )
     _refresh_manifest_and_sidecar(package, sidecar)
@@ -398,6 +395,20 @@ def _replace_validation_evidence(
         validation_status = "FAIL"
     sidecar_payload["status_summary"] = {
         "validation": validation_status,
+        "tests": status_map.get("tests", "NOT_RUN"),
+        "package_smoke": status_map.get("package_smoke", "NOT_RUN"),
+        "profile_smoke": status_map.get("profile_smoke", "NOT_RUN"),
+        "private_smoke_run_level": status_map.get(
+            "private_smoke_run_level",
+            "NOT_RUN",
+        ),
+        "private_smoke_child_checks": status_map.get(
+            "private_smoke_child_checks",
+            "NOT_RUN",
+        ),
+        "baseline_compare": status_map.get("baseline_compare", "NOT_RUN"),
+        "governance": status_map.get("governance", "NOT_RUN"),
+        "code_map": status_map.get("code_map", "NOT_RUN"),
         "handoff_verify": status_map.get("handoff_verify", "NOT_RUN"),
         "handoff_safety": status_map.get("handoff_safety_scan", "NOT_RUN"),
         "blocked_count": sum(

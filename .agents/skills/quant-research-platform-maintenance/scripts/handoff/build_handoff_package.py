@@ -25,6 +25,7 @@ for candidate in (SCRIPT_DIR, SCRIPT_PARENT, SCRIPT_REPO_SRC):
 from governance_contract import (  # noqa: E402, I001
     ADVISORY_REVIEW_RECEIPT_EVIDENCE,
     ADVISORY_VALIDATION_CHECKS as ADVISORY_REVIEW_CHECKS,
+    BUNDLE_RECONSTRUCTION_EVIDENCE,
     CHECK_RECEIPTS_EVIDENCE,
     GENERATION_EVIDENCE,
     HANDOFF_TOOL_SOURCE_PATHS,
@@ -33,18 +34,15 @@ from governance_contract import (  # noqa: E402, I001
     OLD_HANDOFF_EVIDENCE_PATHS,
     PACKAGE_SMOKE_EVIDENCE,
     PRIVATE_SMOKE_STATUS_EVIDENCE,
-    SOURCE_TREE_SCAN_EVIDENCE,
     TASK_INPUT_KEYS,
     TASK_METADATA_KEYS,
     TASK_REJECTED_KEYS,
     TASK_REQUIRED_HANDOFF_EVIDENCE,
-    VERIFICATION_MATRIX_EVIDENCE,
+    VALIDATION_SUMMARY_EVIDENCE,
     advisory_review_consistency_failures,
-    aggregate_mandatory_validation_status,
-    source_tree_scan_payload,
-    validate_validation_evidence_contract,
-    validation_status_map,
-    verification_matrix_payload,
+    aggregate_mandatory_validation_summary_status,
+    validate_validation_summary_contract,
+    validation_summary_status_map,
 )
 from quant_research_platform.policy.check_status import (  # noqa: E402
     aggregate_validation_matrix_status,
@@ -52,7 +50,6 @@ from quant_research_platform.policy.check_status import (  # noqa: E402
 
 PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
 BUNDLE_MEMBER = "final-branch.bundle"
-BUNDLE_RECONSTRUCTION_EVIDENCE = "handoff_evidence/bundle-reconstruction.json"
 BUNDLE_RECONSTRUCTION_SCHEMA_ID = "qrp-bundle-reconstruction-evidence"
 
 
@@ -111,7 +108,7 @@ def build_handoff_package(
     if package_mode == "pr_closure" and not str(task.get("pr_url") or "").strip():
         raise SystemExit("task_pr_url_required_for_pr_closure")
     receipts = load_handoff_receipts(receipts_dir)
-    validation_evidence = validation_evidence_from_receipts(receipts)
+    validation_summary = validation_summary_from_receipts(receipts)
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_path = out_dir / f"{slug}.zip"
     json_path = out_dir / f"{slug}.json"
@@ -123,7 +120,7 @@ def build_handoff_package(
         json_path=json_path,
         task=task,
         receipts=receipts,
-        validation_evidence=validation_evidence,
+        validation_summary=validation_summary,
         branch=branch,
         base=base,
         final_head=final_head,
@@ -164,7 +161,7 @@ def build_once(
     json_path: Path,
     task: dict[str, object],
     receipts: dict[str, dict[str, object]],
-    validation_evidence: dict[str, object],
+    validation_summary: dict[str, object],
     branch: str,
     base: str,
     final_head: str,
@@ -194,15 +191,11 @@ def build_once(
                 )
             ),
         )
-        write_text(
-            stage_root / "validation_evidence.json",
-            stable_json(validation_evidence),
-        )
         write_text(stage_root / "git_status.txt", git_status_text(repo_root))
         stage_handoff_evidence(
             stage_root,
             receipts=receipts,
-            validation_evidence=validation_evidence,
+            validation_summary=validation_summary,
             bundle_path=stage_root / BUNDLE_MEMBER,
             bundle_reconstruction=bundle_reconstruction,
             task=task,
@@ -227,7 +220,7 @@ def build_once(
                 zip_path=zip_path,
                 json_path=json_path,
                 task=task,
-                validation_evidence=validation_evidence,
+                validation_summary=validation_summary,
                 branch=branch,
                 base=base,
                 final_head=final_head,
@@ -289,7 +282,7 @@ def stage_handoff_evidence(
     stage_root: Path,
     *,
     receipts: dict[str, dict[str, object]],
-    validation_evidence: dict[str, object],
+    validation_summary: dict[str, object],
     bundle_path: Path,
     bundle_reconstruction: dict[str, object],
     task: dict[str, object],
@@ -301,22 +294,22 @@ def stage_handoff_evidence(
 ) -> None:
     for name, payload in sorted(receipts.items()):
         write_text(stage_root / name, stable_json(payload))
+    write_text(
+        stage_root / VALIDATION_SUMMARY_EVIDENCE,
+        stable_json(validation_summary),
+    )
     review_failures = advisory_review_consistency_failures(
         tuple(receipts.keys()),
-        advisory_reviews_from_validation(validation_status_map(validation_evidence)),
+        advisory_reviews_from_validation(validation_summary_status_map(validation_summary)),
     )
     if review_failures:
         raise SystemExit(";".join(review_failures))
-    write_text(
-        stage_root / VERIFICATION_MATRIX_EVIDENCE,
-        stable_json(verification_matrix_payload(validation_evidence)),
-    )
     write_text(
         stage_root / GENERATION_EVIDENCE,
         stable_json(
             generation_payload(
                 task=task,
-                validation_evidence=validation_evidence,
+                validation_summary=validation_summary,
                 branch=branch,
                 base=base,
                 final_head=final_head,
@@ -327,22 +320,12 @@ def stage_handoff_evidence(
         ),
     )
     write_text(
-        stage_root / SOURCE_TREE_SCAN_EVIDENCE,
-        stable_json(
-            source_tree_scan_payload(
-                bundle_path=bundle_path,
-                branch=branch,
-                final_head=final_head,
-            )
-        ),
-    )
-    write_text(
         stage_root / BUNDLE_RECONSTRUCTION_EVIDENCE,
         stable_json(bundle_reconstruction),
     )
 
 
-def validation_evidence_from_receipts(
+def validation_summary_from_receipts(
     receipts: dict[str, dict[str, object]],
 ) -> dict[str, object]:
     package = receipts[PACKAGE_SMOKE_EVIDENCE]
@@ -407,8 +390,8 @@ def validation_evidence_from_receipts(
             ADVISORY_REVIEW_RECEIPT_EVIDENCE if advisory else "advisory review not run",
         )
     )
-    payload = {"schema_id": "qrp-handoff-validation-evidence", "checks": rows}
-    validate_validation_evidence_contract(payload)
+    payload = {"schema_id": "qrp-handoff-validation-summary", "checks": rows}
+    validate_validation_summary_contract(payload)
     return payload
 
 
@@ -436,7 +419,7 @@ def command_statuses(payload: dict[str, object]) -> dict[str, str]:
 def generation_payload(
     *,
     task: dict[str, object],
-    validation_evidence: dict[str, object],
+    validation_summary: dict[str, object],
     branch: str,
     base: str,
     final_head: str,
@@ -453,8 +436,10 @@ def generation_payload(
         "zip_filename": zip_filename,
         "zip_sha256_source": "sidecar",
         "bundle_sha256": sha256_file(bundle_path),
-        "source_tree_scan_path": SOURCE_TREE_SCAN_EVIDENCE,
-        "validation_status": aggregate_mandatory_validation_status(validation_evidence),
+        "hard_scan_receipt_path": HARD_SCAN_CLASSIFICATION_EVIDENCE,
+        "validation_status": aggregate_mandatory_validation_summary_status(
+            validation_summary
+        ),
     }
 
 
@@ -463,7 +448,7 @@ def sidecar_payload(
     zip_path: Path,
     json_path: Path,
     task: dict[str, object],
-    validation_evidence: dict[str, object],
+    validation_summary: dict[str, object],
     branch: str,
     base: str,
     final_head: str,
@@ -471,7 +456,7 @@ def sidecar_payload(
     handoff_sidecar_path: str,
 ) -> dict[str, object]:
     safety = handoff_zip_scan(zip_path)
-    status_map = validation_status_map(validation_evidence)
+    status_map = validation_summary_status_map(validation_summary)
     return {
         "schema_id": PACKAGE_SCHEMA_ID,
         "zip_filename": zip_path.name,
@@ -519,9 +504,23 @@ def status_summary_from_validation(
         for name, status in status_map.items()
         if name in MANDATORY_VALIDATION_CHECKS
     }
-    statuses["handoff_safety_scan"] = safety_status
+    validation_status = aggregate_validation_matrix_status(statuses.values())
     return {
-        "validation": aggregate_validation_matrix_status(statuses.values()),
+        "validation": validation_status,
+        "tests": statuses.get("tests", "NOT_RUN"),
+        "package_smoke": statuses.get("package_smoke", "NOT_RUN"),
+        "profile_smoke": statuses.get("profile_smoke", "NOT_RUN"),
+        "private_smoke_run_level": statuses.get(
+            "private_smoke_run_level",
+            "NOT_RUN",
+        ),
+        "private_smoke_child_checks": statuses.get(
+            "private_smoke_child_checks",
+            "NOT_RUN",
+        ),
+        "baseline_compare": statuses.get("baseline_compare", "NOT_RUN"),
+        "governance": statuses.get("governance", "NOT_RUN"),
+        "code_map": statuses.get("code_map", "NOT_RUN"),
         "handoff_verify": statuses.get("handoff_verify", "NOT_RUN"),
         "handoff_safety": safety_status,
         "blocked_count": sum(1 for status in statuses.values() if status == "BLOCKED"),

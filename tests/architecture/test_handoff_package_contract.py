@@ -44,13 +44,16 @@ def test_handoff_package_contract_uses_evidence_mode_outputs(
     assert "handoff_evidence/" in verifier
     contract = _load_governance_contract()
     assert contract.GENERATION_EVIDENCE == "handoff_evidence/generation.json"
-    assert contract.SOURCE_TREE_SCAN_EVIDENCE == (
-        "handoff_evidence/source-tree-scan.json"
+    assert contract.VALIDATION_SUMMARY_EVIDENCE == (
+        "handoff_evidence/validation-summary.json"
+    )
+    assert contract.BUNDLE_RECONSTRUCTION_EVIDENCE == (
+        "handoff_evidence/bundle-reconstruction.json"
     )
     assert "GENERATION_EVIDENCE" in builder
     assert "GENERATION_EVIDENCE" in verifier
-    assert "SOURCE_TREE_SCAN_EVIDENCE" in builder
-    assert "SOURCE_TREE_SCAN_EVIDENCE" in verifier
+    assert "VALIDATION_SUMMARY_EVIDENCE" in builder
+    assert "VALIDATION_SUMMARY_EVIDENCE" in verifier
     assert "TASK_REQUIRED_HANDOFF_EVIDENCE" in verifier
     assert contract.TASK_REQUIRED_HANDOFF_EVIDENCE == frozenset(
         {
@@ -63,6 +66,13 @@ def test_handoff_package_contract_uses_evidence_mode_outputs(
     assert contract.ADVISORY_REVIEW_RECEIPT_EVIDENCE == (
         "handoff_evidence/advisory-review-receipt.json"
     )
+    assert (
+        "handoff_evidence/source-tree-scan.json"
+        in contract.OLD_HANDOFF_EVIDENCE_PATHS
+    )
+    assert "handoff_evidence/verification-matrix.json" in (
+        contract.OLD_HANDOFF_EVIDENCE_PATHS
+    )
     assert "handoff_generation.json" not in builder
     assert "handoff_generation.json" not in verifier
     source_tree_scan = live_source_tree_scan
@@ -74,7 +84,8 @@ def test_handoff_package_contract_uses_evidence_mode_outputs(
     assert source_tree_scan["synthesized_strings"]["findings"] == []
     assert source_tree_scan["structured_keys"]["findings"] == []
     assert source_tree_scan["governance_truth"]["findings"] == []
-    assert "governance_truth" in verifier
+    assert "hard_scan_receipt_path" in builder
+    assert "source_tree_scan_path" not in builder
     assert '".run/handoffs"' in builder
     assert '"evidence"' in builder
     assert '"pr_closure"' in builder
@@ -91,27 +102,35 @@ def test_handoff_package_contract_uses_evidence_mode_outputs(
     assert "BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES" in verifier
 
 
-def test_handoff_verifier_requires_allowance_contract_group(
+def test_handoff_verifier_requires_replayable_hard_scan_run(
     live_source_tree_scan: dict[str, dict[str, object]],
 ) -> None:
     verifier = _load_handoff_verifier()
     payload = {
-        "schema_id": "qrp-source-tree-scan-result",
+        "schema_id": "qrp-hard-scan-receipt",
         "status": "PASS",
         "scanned_head": "abc123",
-        "expected_head": "abc123",
-        "scanned_tree": "final-branch.bundle clone",
-        "finding_count": 0,
-        "findings": [],
-        "scan_groups": dict(live_source_tree_scan),
+        "scanner_source_sha256": "0" * 64,
+        "scan_runs": [
+            {
+                "scan_id": "allowance_contract",
+                "rule_set_id": "source-tree:allowance_contract",
+                "match_count": 0,
+                "actual_violation_count": 0,
+                "deferred_count": 0,
+                "negative_fixture_count": 0,
+                "false_positive_count": 0,
+                "result_sha256": "1" * 64,
+                "replayable_from_bundle": False,
+            }
+        ],
+        "classified_exceptions": [],
     }
-    payload["scan_groups"].pop("allowance_contract", None)
-    sidecar = {"final_head": "abc123"}
 
-    failures = verifier.verify_source_tree_scan_evidence(payload, sidecar)
+    assert "allowance_contract" in live_source_tree_scan
+    failures = verifier.verify_hard_scan_classification_evidence(payload)
 
-    assert "source_tree_scan_groups_unexpected" in failures
-    assert "source_tree_scan_group_missing: allowance_contract" in failures
+    assert "hard_scan_receipt_not_replayable: 0" in failures
 
 
 def test_pr_closure_only_entries_are_not_required_for_evidence_mode() -> None:
@@ -302,7 +321,7 @@ def test_structured_source_tree_allowlist_coverage_points_to_current_tests() -> 
         for item in covered
     )
     assert any(
-        item.startswith("tests/agents/handoff/test_handoff_tools.py::")
+        item.startswith("tests/architecture/test_governance_contract_rg_gate.py::")
         for item in covered
     )
 
@@ -555,6 +574,9 @@ def test_handoff_source_tree_rules_import_governance_contract() -> None:
     builder_source = (HANDOFF_ROOT / "build_handoff_package.py").read_text(
         encoding="utf-8"
     )
+    verifier_source = (HANDOFF_ROOT / "verify_handoff_package.py").read_text(
+        encoding="utf-8"
+    )
     contract = _load_governance_contract()
 
     assert (
@@ -564,7 +586,8 @@ def test_handoff_source_tree_rules_import_governance_contract() -> None:
         )
         == contract.ACTIVE_GOVERNANCE_DOC_ROOTS
     )
-    assert "source_tree_scan_payload" in builder_source
+    assert "source_tree_scan_payload" not in builder_source
+    assert "hard_scan_receipt_from_clone" in verifier_source
     assert "source_tree_forbidden_patterns" not in builder_source
     assert "source_tree_sensitive_negative_patterns" not in builder_source
 
@@ -587,7 +610,8 @@ def test_handoff_builder_does_not_own_sensitive_negative_rules() -> None:
 
     assert local_owners == []
     assert "source_tree_sensitive_negative_patterns" not in source
-    assert "source_tree_scan_payload" in source
+    assert "source_tree_scan_payload" not in source
+    assert "HARD_SCAN_CLASSIFICATION_EVIDENCE" in source
     assert "from governance_contract import" in source
 
 
@@ -626,7 +650,7 @@ def test_handoff_mutation_package_helpers_are_shared_in_conftest() -> None:
         "_copy_valid_package",
         "_build_test_package",
         "_init_handoff_repo",
-        "_replace_validation_evidence",
+        "_replace_validation_summary",
         "_refresh_manifest_and_sidecar",
     ):
         assert f"def {helper_name}" in shared_source
@@ -643,7 +667,7 @@ def test_handoff_mutation_package_helpers_are_shared_in_conftest() -> None:
                 "_copy_valid_package",
                 "_build_test_package",
                 "_init_handoff_repo",
-                "_replace_validation_evidence",
+                "_replace_validation_summary",
                 "_refresh_manifest_and_sidecar",
             }:
                 duplicate_defs.append(f"{path}:{node.lineno}:{node.name}")

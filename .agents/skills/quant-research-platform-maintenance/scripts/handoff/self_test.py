@@ -14,8 +14,6 @@ SKILL_ROOT = SCRIPT_PARENT.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from verify_handoff_package import verify_smoke_compare_status  # noqa: E402
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run QRP handoff tool self-tests.")
@@ -58,16 +56,16 @@ def main() -> int:
     )
     if task_template.get("schema_id") != "qrp-handoff-task-metadata":
         return fail("task_metadata_template_schema_id_invalid")
-    smoke_compare_status = task_template.get("handoff_evidence", {}).get(
-        "smoke-compare-status"
-    )
-    if not isinstance(smoke_compare_status, dict):
-        return fail("task_metadata_template_smoke_compare_status_missing")
-    smoke_compare_failures = verify_smoke_compare_status(smoke_compare_status)
-    if smoke_compare_failures:
+    forbidden_task_keys = {
+        "handoff_evidence",
+        "handoff_markdown_evidence",
+        "validation_evidence",
+    }
+    present_forbidden = sorted(forbidden_task_keys & set(task_template))
+    if present_forbidden:
         return fail(
-            "task_metadata_template_smoke_compare_status_invalid="
-            + ",".join(smoke_compare_failures)
+            "task_metadata_template_manual_evidence="
+            + ",".join(present_forbidden),
         )
     sidecar_schema = json.loads(
         support_path(
@@ -80,7 +78,6 @@ def main() -> int:
     forbidden_tools = (
         "factor_chunk_diagnostic.py",
         "n2_artifact_validation.py",
-        "smoke_compare.py",
     )
     forbidden_present = sorted(
         name for name in forbidden_tools if (root / name).exists()

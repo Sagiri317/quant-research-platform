@@ -46,7 +46,7 @@ PROFILES: dict[str, Profile] = {
         name="contract",
         scopes=(
             "tests/contracts",
-            "tests/agents/handoff/test_validation_evidence_contract.py",
+            "tests/agents/handoff/test_validation_summary_contract.py",
             "tests/agents/handoff/test_handoff_package_verifier.py",
             "tests/architecture/test_handoff_package_contract.py",
         ),

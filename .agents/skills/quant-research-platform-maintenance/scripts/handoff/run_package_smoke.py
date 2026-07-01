@@ -10,10 +10,13 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
 
 FORBIDDEN_SUFFIXES = {".parquet", ".csv", ".pkl", ".pickle", ".feather", ".arrow"}
+SCANNED_ARTIFACT_KINDS = ("wheel", "sdist", "install_target")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -102,7 +105,11 @@ def run_package_smoke(repo: Path) -> dict[str, object]:
                     check=False,
                 )
                 import_status = "PASS" if probe.returncode == 0 else "FAIL"
-        forbidden = content_scan(target if target.exists() else repo)
+        forbidden = [
+            *archive_content_scan(wheel_path, "wheel"),
+            *archive_content_scan(sdist_path, "sdist"),
+            *install_target_content_scan(target),
+        ]
         content_status = "PASS" if not forbidden else "FAIL"
         status = aggregate_status(
             [
@@ -127,6 +134,8 @@ def run_package_smoke(repo: Path) -> dict[str, object]:
             "content_scan": {
                 "status": content_status,
                 "forbidden_member_count": len(forbidden),
+                "scanned_artifact_kinds": list(SCANNED_ARTIFACT_KINDS),
+                "examples": forbidden[:10],
             },
         }
 
@@ -142,14 +151,35 @@ def file_payload(path: Path | None) -> dict[str, object]:
     return {"filename": path.name, "sha256": sha256_file(path)}
 
 
-def content_scan(root: Path) -> list[str]:
+def install_target_content_scan(root: Path) -> list[str]:
     if not root.exists():
         return []
     return [
-        path.name
+        f"install_target:{path.relative_to(root).as_posix()}"
         for path in root.rglob("*")
         if path.is_file() and path.suffix.lower() in FORBIDDEN_SUFFIXES
     ]
+
+
+def archive_content_scan(path: Path | None, artifact_kind: str) -> list[str]:
+    if path is None:
+        return []
+    if path.suffix == ".whl":
+        with zipfile.ZipFile(path) as archive:
+            return [
+                f"{artifact_kind}:{name}"
+                for name in archive.namelist()
+                if Path(name).suffix.lower() in FORBIDDEN_SUFFIXES
+            ]
+    if path.name.endswith(".tar.gz"):
+        with tarfile.open(path, "r:gz") as archive:
+            return [
+                f"{artifact_kind}:{member.name}"
+                for member in archive.getmembers()
+                if member.isfile()
+                and Path(member.name).suffix.lower() in FORBIDDEN_SUFFIXES
+            ]
+    return []
 
 
 def sha256_file(path: Path) -> str:

@@ -32,6 +32,7 @@ from governance_contract import (  # noqa: E402, I001
     BLOCKED_PACKAGE_ENTRY_PARTS,
     BLOCKED_TASK_KEYS,
     BLOCKED_VALIDATION_KEYS,
+    BUNDLE_RECONSTRUCTION_EVIDENCE,
     CHECK_RECEIPTS_EVIDENCE,
     GENERATION_EVIDENCE,
     HANDOFF_TOOL_SOURCE_PATHS,
@@ -41,20 +42,18 @@ from governance_contract import (  # noqa: E402, I001
     PACKAGE_SMOKE_EVIDENCE,
     PRIVATE_SMOKE_STATUS_EVIDENCE,
     RESULT_ARCHITECTURE_RETIRED_TEXT_RULES,
-    SOURCE_TREE_SCAN_EVIDENCE,
     TASK_REQUIRED_HANDOFF_EVIDENCE,
     VALID_STATUS_TOKENS,
     VALIDATION_ROW_KEYS,
-    VERIFICATION_MATRIX_EVIDENCE,
     advisory_review_consistency_failures,
-    aggregate_mandatory_validation_status,
+    aggregate_mandatory_validation_summary_status,
     handoff_evidence_blocked_key_failures,
     hard_scan_receipt_from_clone,
     is_reserved_handoff_evidence_path,
-    mandatory_validation_status_map,
-    source_tree_scan_from_clone,
-    validation_evidence_contract_failures,
-    validation_status_map,
+    mandatory_validation_summary_status_map,
+    validation_summary_contract_failures,
+    validation_summary_status_map,
+    VALIDATION_SUMMARY_EVIDENCE,
 )
 from governance_contract import (  # noqa: E402
     is_scanner_definition_line as is_shared_scanner_definition_line,
@@ -68,7 +67,6 @@ from quant_research_platform.policy.check_status import (  # noqa: E402
 )
 from quant_research_platform.policy.share_safety import (  # noqa: E402
     evidence_json_unsafe_reason,
-    evidence_json_value_unsafe_reason,
     qrp_json_identity_reason,
     unsafe_for_share_reason,
 )
@@ -79,10 +77,7 @@ REQUIRED_ZIP_ENTRIES = {
     "final-branch.bundle",
     "git_status.txt",
     "task_metadata.json",
-    "validation_evidence.json",
 }
-SMOKE_COMPARE_STATUS_EVIDENCE = "handoff_evidence/smoke-compare-status.json"
-BUNDLE_RECONSTRUCTION_EVIDENCE = "handoff_evidence/bundle-reconstruction.json"
 BUNDLE_RECONSTRUCTION_SCHEMA_ID = "qrp-bundle-reconstruction-evidence"
 PORTABLE_STATUS_SUMMARY_SCHEMA_ID = "qrp-portable-status-summary"
 PORTABLE_STATUS_SUMMARY_TYPES = frozenset(
@@ -594,8 +589,8 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
             )
             for required_evidence in (
                 GENERATION_EVIDENCE,
-                SOURCE_TREE_SCAN_EVIDENCE,
-                VERIFICATION_MATRIX_EVIDENCE,
+                BUNDLE_RECONSTRUCTION_EVIDENCE,
+                VALIDATION_SUMMARY_EVIDENCE,
                 *sorted(TASK_REQUIRED_HANDOFF_EVIDENCE),
             ):
                 if required_evidence not in name_set:
@@ -662,6 +657,14 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
         return failures
     required_summary = {
         "validation",
+        "tests",
+        "package_smoke",
+        "profile_smoke",
+        "private_smoke_run_level",
+        "private_smoke_child_checks",
+        "baseline_compare",
+        "governance",
+        "code_map",
         "handoff_verify",
         "handoff_safety",
         "blocked_count",
@@ -669,7 +672,10 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
     }
     missing = sorted(required_summary - set(summary))
     failures.extend(f"sidecar_status_summary_missing: {key}" for key in missing)
-    for key in ("validation", "handoff_verify", "handoff_safety"):
+    extra_summary = sorted(set(summary) - required_summary)
+    failures.extend(f"sidecar_status_summary_forbidden: {key}" for key in extra_summary)
+    status_keys = required_summary - {"blocked_count", "fail_count"}
+    for key in status_keys:
         if key in summary and summary[key] not in VALID_STATUS_TOKENS:
             failures.append(f"sidecar_status_invalid: {key}")
     for key in ("blocked_count", "fail_count"):
@@ -770,15 +776,10 @@ def verify_metadata_entries(archive: ZipFile, sidecar: dict[str, object]) -> lis
     failures: list[str] = []
     try:
         task_payload = json.loads(archive.read("task_metadata.json").decode("utf-8"))
-        validation_payload = json.loads(
-            archive.read("validation_evidence.json").decode("utf-8")
-        )
     except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
         return ["metadata_json_decode_failed"]
     if not isinstance(task_payload, dict):
         failures.append("task_metadata_must_be_object")
-    if not isinstance(validation_payload, dict):
-        failures.append("validation_evidence_must_be_object")
     if isinstance(task_payload, dict):
         identity_reason = qrp_json_identity_reason(task_payload)
         if identity_reason is not None:
@@ -787,52 +788,39 @@ def verify_metadata_entries(archive: ZipFile, sidecar: dict[str, object]) -> lis
         failures.extend(
             metadata_consistency_failures("task_metadata", task_payload, sidecar)
         )
-    if isinstance(validation_payload, dict):
-        identity_reason = qrp_json_identity_reason(validation_payload)
-        if identity_reason is not None:
-            failures.append(f"validation_evidence_identity_invalid: {identity_reason}")
-        failures.extend(verify_validation_evidence_schema(validation_payload))
-        failures.extend(
-            metadata_consistency_failures(
-                "validation_evidence",
-                validation_payload,
-                sidecar,
-            )
-        )
-        failures.extend(validation_sidecar_status_failures(validation_payload, sidecar))
     return failures
 
 
-def verify_validation_evidence_schema(payload: dict[str, object]) -> list[str]:
+def verify_validation_summary_schema(payload: dict[str, object]) -> list[str]:
     failures: list[str] = []
-    if payload.get("schema_id") != "qrp-handoff-validation-evidence":
-        failures.append("validation_evidence_schema_id_mismatch")
+    if payload.get("schema_id") != "qrp-handoff-validation-summary":
+        failures.append("validation_summary_schema_id_mismatch")
     forbidden = BLOCKED_VALIDATION_KEYS.intersection(payload)
     failures.extend(
-        f"validation_evidence_forbidden_field: {key}" for key in sorted(forbidden)
+        f"validation_summary_forbidden_field: {key}" for key in sorted(forbidden)
     )
     rows = payload.get("checks")
     if not isinstance(rows, list):
-        failures.append("validation_evidence_checks_missing")
+        failures.append("validation_summary_checks_missing")
         return failures
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
-            failures.append(f"validation_evidence_check_not_object: {index}")
+            failures.append(f"validation_summary_check_not_object: {index}")
             continue
         extra = sorted(set(row) - VALIDATION_ROW_KEYS)
         failures.extend(
-            f"validation_evidence_row_forbidden_field: {index}:{key}" for key in extra
+            f"validation_summary_row_forbidden_field: {index}:{key}" for key in extra
         )
         for key in ("name", "status", "evidence"):
             if key not in row:
-                failures.append(f"validation_evidence_row_missing: {index}:{key}")
-    governance_failures = validation_evidence_contract_failures(payload)
+                failures.append(f"validation_summary_row_missing: {index}:{key}")
+    governance_failures = validation_summary_contract_failures(payload)
     for failure in governance_failures:
-        if failure == "validation_evidence_schema_id_invalid":
+        if failure == "validation_summary_schema_id_invalid":
             continue
         normalized = failure.replace(
-            "validation_evidence_row_unapproved_field:",
-            "validation_evidence_row_forbidden_field:",
+            "validation_summary_row_unapproved_field:",
+            "validation_summary_row_forbidden_field:",
         )
         if normalized not in failures:
             failures.append(normalized)
@@ -880,7 +868,7 @@ def metadata_consistency_failures(
 
 
 def validation_sidecar_status_failures(
-    validation_payload: dict[str, object],
+    validation_summary: dict[str, object],
     sidecar: dict[str, object],
 ) -> list[str]:
     failures: list[str] = []
@@ -888,15 +876,22 @@ def validation_sidecar_status_failures(
     if not isinstance(status_summary, dict):
         return failures
     try:
-        row_status = validation_status_map(validation_payload)
-        mandatory_statuses = mandatory_validation_status_map(validation_payload)
-        validation_status = aggregate_mandatory_validation_status(validation_payload)
+        row_status = validation_summary_status_map(validation_summary)
+        mandatory_statuses = mandatory_validation_summary_status_map(validation_summary)
+        validation_status = aggregate_mandatory_validation_summary_status(
+            validation_summary
+        )
     except SystemExit:
         row_status = {}
         mandatory_statuses = {}
         validation_status = "FAIL"
     if status_summary.get("validation") != validation_status:
         failures.append("validation_status_summary_mismatch")
+    for name, status in mandatory_statuses.items():
+        if name in {"handoff_safety_scan"}:
+            continue
+        if status_summary.get(name) != status:
+            failures.append(f"status_summary_check_mismatch: {name}")
     blocked_count = sum(
         1 for status in mandatory_statuses.values() if status == "BLOCKED"
     )
@@ -945,10 +940,9 @@ def verify_handoff_evidence_json(
         failures.extend(handoff_evidence_forbidden_field_failures(name, payload))
         if name == GENERATION_EVIDENCE:
             failures.extend(verify_generation_evidence(payload, sidecar, archive))
-        if name == SOURCE_TREE_SCAN_EVIDENCE:
-            failures.extend(verify_source_tree_scan_evidence(payload, sidecar))
-        if name == SMOKE_COMPARE_STATUS_EVIDENCE:
-            failures.extend(verify_smoke_compare_status(payload))
+        if name == VALIDATION_SUMMARY_EVIDENCE:
+            failures.extend(verify_validation_summary_schema(payload))
+            failures.extend(validation_sidecar_status_failures(payload, sidecar))
         if name == PACKAGE_SMOKE_EVIDENCE:
             failures.extend(verify_package_smoke_evidence(payload))
         if name == HARD_SCAN_CLASSIFICATION_EVIDENCE:
@@ -959,10 +953,6 @@ def verify_handoff_evidence_json(
             failures.extend(verify_private_smoke_status(payload))
         if name == ADVISORY_REVIEW_RECEIPT_EVIDENCE:
             failures.extend(verify_advisory_review_receipt(payload))
-        if name.endswith("verification-matrix.json"):
-            failures.extend(verify_verification_matrix(payload))
-    if VERIFICATION_MATRIX_EVIDENCE not in archive.namelist():
-        failures.append("verification_matrix_missing")
     return failures
 
 
@@ -1035,6 +1025,12 @@ def verify_package_smoke_evidence(payload: dict[str, object]) -> list[str]:
         failures.append("package_smoke_content_scan_status_invalid")
     if not isinstance(content_scan.get("forbidden_member_count"), int):
         failures.append("package_smoke_forbidden_member_count_invalid")
+    if set(content_scan.get("scanned_artifact_kinds") or ()) != {
+        "wheel",
+        "sdist",
+        "install_target",
+    }:
+        failures.append("package_smoke_scanned_artifact_kinds_invalid")
     child_statuses = []
     if isinstance(install, dict) and install.get("status") in VALID_STATUS_TOKENS:
         child_statuses.append(str(install["status"]))
@@ -1248,7 +1244,7 @@ def verify_test_checks_evidence(payload: dict[str, object]) -> list[str]:
             "scope",
             "status",
             "exit_code",
-            "test_count",
+            "counts",
             "duration_seconds",
             "stdout_sha256",
             "stderr_sha256",
@@ -1257,6 +1253,8 @@ def verify_test_checks_evidence(payload: dict[str, object]) -> list[str]:
                 failures.append(f"test_checks_row_missing: {index}:{key}")
         if "stdout" in row or "stderr" in row or "raw_output" in row:
             failures.append(f"test_checks_row_raw_output_present: {index}")
+        if "test_count" in row:
+            failures.append(f"test_checks_row_test_count_forbidden: {index}")
         if "failure_excerpt" in row and not isinstance(row["failure_excerpt"], str):
             failures.append(f"test_checks_row_failure_excerpt_invalid: {index}")
         if "output_summary" not in row:
@@ -1277,8 +1275,24 @@ def verify_test_checks_evidence(payload: dict[str, object]) -> list[str]:
             failures.append(f"test_checks_row_exit_code_status_mismatch: {index}")
         elif status == "FAIL" and row.get("exit_code") == 0:
             failures.append(f"test_checks_row_exit_code_status_mismatch: {index}")
-        if not isinstance(row.get("test_count"), int) or int(row.get("test_count")) < 0:
-            failures.append(f"test_checks_row_test_count_invalid: {index}")
+        counts = row.get("counts")
+        if counts is not None:
+            expected_count_keys = {
+                "passed",
+                "failed",
+                "skipped",
+                "deselected",
+                "errors",
+                "xfailed",
+                "xpassed",
+                "collected",
+            }
+            if not isinstance(counts, dict) or set(counts) != expected_count_keys:
+                failures.append(f"test_checks_row_counts_invalid: {index}")
+            elif any(
+                not isinstance(value, int) or value < 0 for value in counts.values()
+            ):
+                failures.append(f"test_checks_row_counts_invalid: {index}")
         duration = row.get("duration_seconds")
         if not isinstance(duration, (int, float)) or duration < 0:
             failures.append(f"test_checks_row_duration_invalid: {index}")
@@ -1379,7 +1393,7 @@ def verify_generation_evidence(
         "zip_filename",
         "zip_sha256_source",
         "bundle_sha256",
-        "source_tree_scan_path",
+        "hard_scan_receipt_path",
         "validation_status",
     }
     failures = [
@@ -1399,16 +1413,16 @@ def verify_generation_evidence(
             "validation_status"
         ) != status_summary.get("validation"):
             failures.append("generation_validation_status_sidecar_mismatch")
-        validation_status = validation_status_from_archive(archive)
+        validation_status = validation_summary_status_from_archive(archive)
         if (
             validation_status is not None
             and payload.get("validation_status") != validation_status
         ):
-            failures.append("generation_validation_status_validation_evidence_mismatch")
+            failures.append("generation_validation_status_validation_summary_mismatch")
     if payload.get("zip_sha256_source") != "sidecar":
         failures.append("generation_zip_sha256_source_mismatch")
-    if payload.get("source_tree_scan_path") != SOURCE_TREE_SCAN_EVIDENCE:
-        failures.append("generation_source_tree_scan_path_mismatch")
+    if payload.get("hard_scan_receipt_path") != HARD_SCAN_CLASSIFICATION_EVIDENCE:
+        failures.append("generation_hard_scan_receipt_path_mismatch")
     for key in ("base", "branch", "final_head", "zip_filename"):
         if payload.get(key) != sidecar.get(key):
             failures.append(f"generation_evidence_sidecar_mismatch: {key}")
@@ -1422,15 +1436,15 @@ def verify_generation_evidence(
     return failures
 
 
-def validation_status_from_archive(archive: ZipFile) -> str | None:
+def validation_summary_status_from_archive(archive: ZipFile) -> str | None:
     try:
-        payload = json.loads(archive.read("validation_evidence.json").decode("utf-8"))
+        payload = json.loads(archive.read(VALIDATION_SUMMARY_EVIDENCE).decode("utf-8"))
     except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(payload, dict):
         return None
     try:
-        return aggregate_mandatory_validation_status(payload)
+        return aggregate_mandatory_validation_summary_status(payload)
     except SystemExit:
         return None
 
@@ -1441,290 +1455,6 @@ def is_full_sha(value: object) -> bool:
 
 def is_sha256(value: object) -> bool:
     return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{64}", value))
-
-
-def verify_smoke_compare_status(payload: dict[str, object]) -> list[str]:
-    failures: list[str] = []
-    if not isinstance(payload, dict):
-        return ["smoke_compare_status_must_be_object"]
-    if payload.get("schema_id") != "qrp-status-result":
-        failures.append("smoke_compare_status_schema_id_mismatch")
-    if "status" in payload:
-        failures.append("smoke_compare_status_top_level_status_present")
-    if "record_status" not in payload:
-        failures.append("smoke_compare_status_record_status_missing")
-    elif payload.get("record_status") != "PASS":
-        failures.append("smoke_compare_status_record_status_invalid")
-    if "overall_smoke_compare_status" not in payload:
-        failures.append("smoke_compare_status_overall_missing")
-    elif payload.get("overall_smoke_compare_status") not in VALID_STATUS_TOKENS:
-        failures.append("smoke_compare_status_overall_invalid")
-    results = payload.get("results")
-    if not isinstance(results, list) or not results:
-        failures.append("smoke_compare_status_results_missing")
-        return failures
-    result_statuses: list[str] = []
-    for index, row in enumerate(results):
-        if not isinstance(row, dict):
-            failures.append(f"smoke_compare_status_result_not_object: {index}")
-            continue
-        status = row.get("status")
-        if status not in VALID_STATUS_TOKENS:
-            failures.append(f"smoke_compare_status_result_status_invalid: {index}")
-            continue
-        result_statuses.append(str(status))
-        for key in ("name", "reason"):
-            if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
-                failures.append(f"smoke_compare_status_result_missing: {index}:{key}")
-        if status == "PASS":
-            failures.extend(verify_pass_smoke_compare_result(row, index))
-        elif "portable_summary" in row:
-            summary_reason = evidence_json_value_unsafe_reason(row["portable_summary"])
-            if summary_reason is not None:
-                failures.append(
-                    f"smoke_compare_status_portable_summary_unsafe: "
-                    f"{index}:{summary_reason}"
-                )
-    expected_overall = aggregate_validation_matrix_status(result_statuses)
-    if payload.get("overall_smoke_compare_status") != expected_overall:
-        failures.append(f"smoke_compare_status_overall_mismatch: {expected_overall}")
-    return failures
-
-
-def verify_pass_smoke_compare_result(
-    row: dict[str, object],
-    index: int,
-) -> list[str]:
-    failures: list[str] = []
-    required_strings = (
-        "command",
-        "scope",
-        "source_artifact_path",
-        "source_artifact_sha256",
-        "raw_artifact_policy",
-    )
-    for key in required_strings:
-        if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
-            failures.append(f"smoke_compare_status_result_missing: {index}:{key}")
-            continue
-        reason = evidence_json_value_unsafe_reason(row[key])
-        if reason is not None:
-            failures.append(
-                f"smoke_compare_status_field_unsafe: {index}:{key}:{reason}"
-            )
-    sha = row.get("source_artifact_sha256")
-    if isinstance(sha, str) and not re.fullmatch(r"[0-9a-f]{64}", sha):
-        failures.append(f"smoke_compare_status_source_artifact_sha256_invalid: {index}")
-    source_path = row.get("source_artifact_path")
-    if isinstance(source_path, str) and not valid_source_artifact_path(source_path):
-        failures.append(f"smoke_compare_status_source_artifact_path_invalid: {index}")
-    if row.get("included_in_handoff") is not False:
-        failures.append(f"smoke_compare_status_included_in_handoff_invalid: {index}")
-    raw_policy = row.get("raw_artifact_policy")
-    if isinstance(raw_policy, str) and not raw_artifact_policy_valid(raw_policy):
-        failures.append(f"smoke_compare_status_raw_artifact_policy_invalid: {index}")
-    if "portable_summary" not in row:
-        failures.append(
-            f"smoke_compare_status_result_missing: {index}:portable_summary"
-        )
-    else:
-        failures.extend(
-            verify_smoke_compare_portable_summary(
-                row["portable_summary"],
-                row_status=str(row.get("status")),
-                index=index,
-            )
-        )
-    return failures
-
-
-def valid_source_artifact_path(value: str) -> bool:
-    if evidence_json_value_unsafe_reason(value) is not None:
-        return False
-    if "\\" in value or not value.startswith(".run/") or value.endswith("/"):
-        return False
-    if value.startswith("/") or (len(value) >= 3 and value[1] == ":"):
-        return False
-    parts = value.split("/")
-    if len(parts) != 3 or parts[0] != ".run":
-        return False
-    if any(part == "" for part in parts):
-        return False
-    if any(part in {".", ".."} for part in parts[1:]):
-        return False
-    run_id, artifact_file = parts[1], parts[2]
-    return (
-        PORTABLE_SOURCE_RUN_ID_RE.fullmatch(run_id) is not None
-        and PORTABLE_SOURCE_ARTIFACT_RE.fullmatch(artifact_file) is not None
-        and portable_source_segment_is_windows_safe(run_id)
-        and portable_source_segment_is_windows_safe(artifact_file.removesuffix(".json"))
-    )
-
-
-def portable_source_segment_is_windows_safe(value: str) -> bool:
-    if value.endswith(".") or ".." in value:
-        return False
-    return all(
-        part.upper() not in WINDOWS_RESERVED_PATH_PARTS for part in value.split(".")
-    )
-
-
-def raw_artifact_policy_valid(value: str) -> bool:
-    normalized = value.lower()
-    return "raw .run artifact" in normalized and "not included" in normalized
-
-
-def verify_smoke_compare_portable_summary(
-    summary: object,
-    *,
-    row_status: str,
-    index: int,
-) -> list[str]:
-    failures: list[str] = []
-    if not isinstance(summary, dict):
-        return [f"smoke_compare_status_portable_summary_invalid: {index}"]
-    schema_id = summary.get("schema_id")
-    if not isinstance(schema_id, str) or not schema_id.strip():
-        failures.append(
-            f"smoke_compare_status_portable_summary_missing: {index}:schema_id"
-        )
-    elif schema_id != PORTABLE_STATUS_SUMMARY_SCHEMA_ID:
-        failures.append(
-            f"smoke_compare_status_portable_summary_schema_id_invalid: {index}"
-        )
-    status = summary.get("status")
-    if not isinstance(status, str) or status == "":
-        failures.append(
-            f"smoke_compare_status_portable_summary_missing: {index}:status"
-        )
-    if "kind" in summary:
-        failures.append(f"smoke_compare_status_portable_summary_kind_present: {index}")
-    summary_type = summary.get("summary_type")
-    if not isinstance(summary_type, str) or not summary_type.strip():
-        failures.append(
-            f"smoke_compare_status_portable_summary_missing: {index}:summary_type"
-        )
-    elif summary_type not in PORTABLE_STATUS_SUMMARY_TYPES:
-        failures.append(f"smoke_compare_status_portable_summary_type_invalid: {index}")
-    if isinstance(status, str) and status != "":
-        if status not in VALID_STATUS_TOKENS:
-            failures.append(
-                f"smoke_compare_status_portable_summary_status_invalid: {index}"
-            )
-        elif status != row_status:
-            failures.append(
-                f"smoke_compare_status_portable_summary_status_mismatch: {index}"
-            )
-    if summary.get("public_safe") is not True:
-        failures.append(
-            f"smoke_compare_status_portable_summary_public_safe_invalid: {index}"
-        )
-    summary_reason = evidence_json_value_unsafe_reason(summary)
-    if summary_reason is not None:
-        failures.append(
-            f"smoke_compare_status_portable_summary_unsafe: {index}:{summary_reason}"
-        )
-    return failures
-
-
-def verify_source_tree_scan_evidence(
-    payload: dict[str, object],
-    sidecar: dict[str, object],
-) -> list[str]:
-    failures: list[str] = []
-    if payload.get("schema_id") != "qrp-source-tree-scan-result":
-        failures.append("source_tree_scan_schema_id_mismatch")
-    if payload.get("status") not in VALID_STATUS_TOKENS:
-        failures.append("source_tree_scan_status_invalid")
-    if payload.get("status") != "PASS":
-        failures.append("source_tree_scan_not_pass")
-    for key in (
-        "scanned_head",
-        "expected_head",
-        "finding_count",
-        "findings",
-        "scan_groups",
-    ):
-        if key not in payload:
-            failures.append(f"source_tree_scan_missing: {key}")
-    scan_groups = payload.get("scan_groups")
-    if not isinstance(scan_groups, dict):
-        failures.append("source_tree_scan_groups_invalid")
-    else:
-        expected_groups = {
-            "allowance_contract",
-            "retired_text",
-            "retired_governance_paths",
-            "retired_path_names",
-            "python_symbols",
-            "synthesized_strings",
-            "active_test_literals",
-            "structured_keys",
-            "governance_truth",
-            "sensitive_negative_literals",
-        }
-        actual_groups = set(scan_groups)
-        if actual_groups != expected_groups:
-            failures.append("source_tree_scan_groups_unexpected")
-        for group in expected_groups:
-            group_payload = scan_groups.get(group)
-            if not isinstance(group_payload, dict):
-                failures.append(f"source_tree_scan_group_missing: {group}")
-                continue
-            if (
-                "status" not in group_payload
-                or "finding_count" not in group_payload
-                or "findings" not in group_payload
-            ):
-                failures.append(f"source_tree_scan_group_shape_invalid: {group}")
-                continue
-            findings = group_payload.get("findings")
-            if not isinstance(findings, list):
-                failures.append(f"source_tree_scan_group_findings_invalid: {group}")
-                continue
-            if group_payload.get("status") != "PASS":
-                failures.append(f"source_tree_scan_group_not_pass: {group}")
-            if group_payload.get("finding_count") != len(findings):
-                failures.append(f"source_tree_scan_group_count_mismatch: {group}")
-            if group_payload.get("finding_count") != 0:
-                failures.append(f"source_tree_scan_group_findings_present: {group}")
-    if payload.get("scanned_head") != payload.get("expected_head"):
-        failures.append("source_tree_scan_head_mismatch")
-    final_head = sidecar.get("final_head")
-    if payload.get("expected_head") != final_head:
-        failures.append("source_tree_scan_sidecar_expected_head_mismatch")
-    if payload.get("scanned_head") != final_head:
-        failures.append("source_tree_scan_sidecar_scanned_head_mismatch")
-    if payload.get("scanned_tree") != "final-branch.bundle clone":
-        failures.append("source_tree_scan_tree_mismatch")
-    if payload.get("finding_count") != 0:
-        failures.append("source_tree_scan_findings_present")
-    findings = payload.get("findings")
-    if isinstance(findings, list) and payload.get("finding_count") != len(findings):
-        failures.append("source_tree_scan_finding_count_mismatch")
-    return failures
-
-
-def verify_verification_matrix(payload: dict[str, object]) -> list[str]:
-    if payload.get("schema_id") != "qrp-handoff-verification-matrix":
-        return ["verification_matrix_schema_id_mismatch"]
-    rows = payload.get("checks")
-    if not isinstance(rows, list):
-        return ["verification_matrix_checks_missing"]
-    by_name = {
-        row.get("name"): row
-        for row in rows
-        if isinstance(row, dict) and isinstance(row.get("name"), str)
-    }
-    failures: list[str] = []
-    for name in ("handoff_verify", "handoff_safety_scan"):
-        row = by_name.get(name)
-        if row is None:
-            failures.append(f"verification_matrix_required_missing: {name}")
-            continue
-        if row.get("required") is not True or row.get("deterministic") is not True:
-            failures.append(f"verification_matrix_required_flag_invalid: {name}")
-    return failures
 
 
 def verify_final_branch_bundle(
@@ -1760,18 +1490,6 @@ def verify_final_branch_bundle(
         if head != final_head or show_head != final_head:
             failures.append("bundle_clone_head_mismatch")
             return failures
-        scan = source_tree_scan_from_clone(clone_dir, final_head=final_head)
-        if scan.get("status") != "PASS":
-            failures.append("source_tree_scan_bundle_not_pass")
-        if scan.get("finding_count") != 0:
-            failures.append("source_tree_scan_bundle_findings_present")
-        findings = scan.get("findings")
-        if isinstance(findings, list):
-            for finding in findings:
-                if isinstance(finding, dict) and isinstance(finding.get("rule"), str):
-                    failures.append(f"source_tree_scan_bundle_rule: {finding['rule']}")
-        if scan.get("scanned_head") != final_head:
-            failures.append("source_tree_scan_bundle_head_mismatch")
         failures.extend(verify_hard_scan_replay(archive, clone_dir, final_head))
         subject = git_text(clone_dir, "show", "-s", "--format=%s", "HEAD").strip()
         if "synthetic" in subject.lower():

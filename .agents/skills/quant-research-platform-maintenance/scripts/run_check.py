@@ -11,6 +11,17 @@ import subprocess
 import time
 from pathlib import Path
 
+PYTEST_COUNT_KEYS = (
+    "passed",
+    "failed",
+    "skipped",
+    "deselected",
+    "errors",
+    "xfailed",
+    "xpassed",
+    "collected",
+)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
@@ -42,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": "PASS" if proc.returncode == 0 else "FAIL",
         "exit_code": proc.returncode,
         "duration_seconds": round(duration, 3),
-        "test_count": extract_test_count(proc.stdout + "\n" + proc.stderr),
+        "counts": extract_pytest_counts(proc.stdout + "\n" + proc.stderr),
         "stdout_sha256": sha256_text(proc.stdout),
         "stderr_sha256": sha256_text(proc.stderr),
         "output_summary": summarize_output(proc.stdout, proc.stderr),
@@ -62,9 +73,21 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
-def extract_test_count(text: str) -> int:
-    matches = re.findall(r"(\d+)\s+(?:passed|failed|skipped|deselected|error)", text)
-    return sum(int(value) for value in matches)
+def extract_pytest_counts(text: str) -> dict[str, int] | None:
+    counts = dict.fromkeys(PYTEST_COUNT_KEYS, 0)
+    found = False
+    for key in PYTEST_COUNT_KEYS:
+        label = "error" if key == "errors" else key
+        pattern = rf"(\d+)\s+{label}s?\b"
+        matches = re.findall(pattern, text)
+        if matches:
+            counts[key] = sum(int(value) for value in matches)
+            found = True
+    collected = re.search(r"collected\s+(\d+)\s+items?\b", text)
+    if collected:
+        counts["collected"] = int(collected.group(1))
+        found = True
+    return counts if found else None
 
 
 def summarize_output(stdout: str, stderr: str) -> str:
