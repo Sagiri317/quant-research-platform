@@ -86,7 +86,7 @@ python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 
 如果完整运行超时，必须写 `BLOCKED` 并记录超时，可以补充分段运行结果。
 
-Handoff receipt flow 的低成本 gate 放在 `tests/agents/handoff/`：覆盖 task 大 evidence 拒绝、status-only/placeholder/raw output 拒绝、generic smoke PASS 拒绝、advisory PASS 缺 receipt 拒绝、package/check receipt schema，以及从 bundle 重放 hard scan。
+Handoff receipt flow 的低成本 gate 放在 `tests/agents/handoff/`：覆盖唯一 builder 入口、sidecar zip envelope、exact zip layout、status-only/placeholder/raw output 拒绝、package/check/hard-scan receipt schema、package mutation、以及从 bundle clone 重放 public machine receipts。
 
 ## 4. Active-doc scan
 

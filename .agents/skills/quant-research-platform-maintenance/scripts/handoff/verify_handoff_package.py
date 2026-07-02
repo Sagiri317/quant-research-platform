@@ -1,4 +1,4 @@
-"""Verify a minimal QRP handoff zip with one external sidecar JSON."""
+"""Verify a replayable QRP handoff zip with one external sidecar JSON."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import json
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from zipfile import ZipFile
@@ -24,33 +23,33 @@ for candidate in (SCRIPT_DIR, SCRIPT_PARENT, SCRIPT_REPO_SRC):
 from governance_contract import (  # noqa: E402
     BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES,
     PACKAGE_FORBIDDEN_PATH_PARTS,
-    hard_scan_receipt_from_clone,
     is_scanner_definition_line as is_shared_scanner_definition_line,
     package_member_name_failures as shared_package_member_name_failures,
 )
 from handoff_contract import (  # noqa: E402
-    ADVISORY_REVIEW_RECEIPT_ENTRY,
     ARTIFACT_MANIFEST_ENTRY,
     CHECK_RECEIPTS_ENTRY,
     FINAL_BRANCH_BUNDLE_ENTRY,
     HARD_SCAN_RECEIPT_ENTRY,
     PACKAGE_SMOKE_RECEIPT_ENTRY,
-    REQUIRED_HANDOFF_ENTRIES,
     TASK_METADATA_ENTRY,
     VALIDATION_SUMMARY_ENTRY,
-    build_sidecar_status_summary,
+    build_validation_summary_from_receipts,
     posix_member_name_failures,
-    validate_handoff_package_layout,
-    validate_advisory_reviews_against_receipts,
     validate_artifact_manifest_contract,
+    validate_handoff_package_layout,
     validate_sidecar_contract,
     validate_task_metadata_contract,
-    validate_task_metadata_against_sidecar,
     validate_validation_summary_against_receipts,
     validate_validation_summary_contract,
-    validation_summary_status_map,
 )
-from receipt_contract import validate_receipt_payload  # noqa: E402
+from receipt_contract import (  # noqa: E402
+    compare_check_receipts,
+    compare_hard_scan_receipt,
+    compare_package_smoke_receipt,
+    validate_receipt_payload,
+)
+from replay_evidence import build_machine_receipts  # noqa: E402
 from quant_research_platform.policy.share_safety import (  # noqa: E402
     evidence_json_unsafe_reason,
     unsafe_for_share_reason,
@@ -92,7 +91,6 @@ class HandoffSafetyResult:
     bundle_member_count: int = 0
     bundle_text_like_count: int = 0
     sidecar_text_like_count: int = 0
-    duration_seconds: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -104,13 +102,12 @@ class HandoffSafetyResult:
 
     def to_text(self) -> str:
         lines = [
-            "share_safety_scan_status=" + ("PASS" if self.ok else "FAIL"),
+            "share_safety_status=" + ("PASS" if self.ok else "FAIL"),
             f"member_count={self.member_count}",
             f"text_like_count={self.text_like_count}",
             f"bundle_member_count={self.bundle_member_count}",
             f"bundle_text_like_count={self.bundle_text_like_count}",
             f"sidecar_text_like_count={self.sidecar_text_like_count}",
-            f"duration_seconds={self.duration_seconds:.3f}",
         ]
         lines.extend(self.failures)
         return "\n".join(lines) + "\n"
@@ -122,6 +119,8 @@ def main() -> int:
     parser.add_argument("--json", required=True)
     args = parser.parse_args()
     failures = verify_handoff_package(Path(args.zip), Path(args.json))
+    safety = scan_handoff_zip(Path(args.zip), json_path=Path(args.json))
+    print("share_safety_status=" + ("PASS" if safety.ok else "FAIL"))
     if failures:
         print("handoff_package_verify_status=FAIL")
         for failure in failures:
@@ -143,7 +142,7 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
     safety = scan_handoff_zip(zip_path, json_path=json_path)
     if not safety.ok:
         failures.extend(f"share_safety_{failure}" for failure in safety.failures)
-    failures.extend(verify_sidecar(sidecar, zip_path, json_path, safety=safety))
+    failures.extend(verify_sidecar(sidecar, zip_path, json_path))
     try:
         with ZipFile(zip_path) as archive:
             names = archive.namelist()
@@ -155,25 +154,14 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 failures.extend(f"{failure}: {name}" for failure in member_name_failures(name))
             if json_path.name in name_set:
                 failures.append("external_sidecar_in_zip")
-            failures.extend(verify_package_layout(names))
+            failures.extend(validate_handoff_package_layout(names))
             failures.extend(verify_manifest_hashes(archive))
             loaded = load_handoff_payloads(archive)
             failures.extend(loaded.failures)
             if loaded.task_metadata is not None:
                 failures.extend(validate_task_metadata_contract(loaded.task_metadata))
-                failures.extend(
-                    validate_task_metadata_against_sidecar(
-                        loaded.task_metadata,
-                        sidecar,
-                    )
-                )
             if loaded.validation_summary is not None:
-                failures.extend(
-                    verify_validation_summary_payload(
-                        loaded.validation_summary,
-                        sidecar,
-                    )
-                )
+                failures.extend(validate_validation_summary_contract(loaded.validation_summary))
                 failures.extend(
                     validate_validation_summary_against_receipts(
                         loaded.validation_summary,
@@ -182,22 +170,11 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 )
             for entry, payload in loaded.receipts.items():
                 failures.extend(validate_receipt_payload(Path(entry).name, payload))
-            advisory_reviews = sidecar.get("advisory_reviews")
-            if isinstance(advisory_reviews, dict):
-                failures.extend(
-                    validate_advisory_reviews_against_receipts(
-                        advisory_reviews,
-                        loaded.receipts,
-                    )
-                )
-            failures.extend(verify_final_branch_bundle(archive, sidecar))
+            if loaded.complete:
+                failures.extend(verify_bundle_replay(archive, loaded))
     except OSError as exc:
         failures.append(f"zip_read_failed: {exc}")
     return failures
-
-
-def verify_package_layout(names: list[str]) -> list[str]:
-    return validate_handoff_package_layout(names)
 
 
 def verify_manifest_hashes(archive: ZipFile) -> list[str]:
@@ -213,7 +190,9 @@ def verify_manifest_hashes(archive: ZipFile) -> list[str]:
     entries = payload.get("entries")
     if not isinstance(entries, list):
         return [*failures, "artifact_manifest_entries_invalid"]
-    actual_names = sorted(name for name in archive.namelist() if name != ARTIFACT_MANIFEST_ENTRY)
+    actual_names = sorted(
+        name for name in archive.namelist() if name != ARTIFACT_MANIFEST_ENTRY
+    )
     manifest_names: list[str] = []
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
@@ -242,92 +221,14 @@ def verify_sidecar(
     sidecar: dict[str, object],
     zip_path: Path,
     json_path: Path,
-    *,
-    safety: HandoffSafetyResult,
 ) -> list[str]:
     failures = validate_sidecar_contract(sidecar)
     if sidecar.get("zip_filename") != zip_path.name:
         failures.append("sidecar_zip_filename_mismatch")
     if sidecar.get("zip_sha256") != sha256_file(zip_path):
         failures.append("sidecar_zip_sha256_mismatch")
-    try:
-        manifest_hash = zip_member_sha256(zip_path, ARTIFACT_MANIFEST_ENTRY)
-    except KeyError:
-        manifest_hash = ""
-    if sidecar.get("artifact_manifest_sha256") != manifest_hash:
-        failures.append("sidecar_artifact_manifest_sha256_mismatch")
     if json_path.name == sidecar.get("zip_filename"):
         failures.append("sidecar_filename_conflicts_with_zip")
-    summary = sidecar.get("status_summary")
-    if isinstance(summary, dict):
-        expected_scan = "PASS" if safety.ok else "FAIL"
-        if summary.get("share_safety_scan") != expected_scan:
-            failures.append("sidecar_share_safety_scan_mismatch")
-        if summary.get("handoff_verify") != "PASS":
-            failures.append("sidecar_handoff_verify_not_pass")
-    return failures
-
-
-def verify_task_metadata(archive: ZipFile) -> list[str]:
-    try:
-        payload = json.loads(archive.read(TASK_METADATA_ENTRY).decode("utf-8"))
-    except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
-        return ["task_metadata_invalid"]
-    if not isinstance(payload, dict):
-        return ["task_metadata_must_be_object"]
-    return validate_task_metadata_contract(payload)
-
-
-def verify_validation_summary(
-    archive: ZipFile,
-    sidecar: dict[str, object],
-) -> list[str]:
-    try:
-        payload = json.loads(archive.read(VALIDATION_SUMMARY_ENTRY).decode("utf-8"))
-    except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
-        return ["validation_summary_invalid"]
-    if not isinstance(payload, dict):
-        return ["validation_summary_must_be_object"]
-    failures = validate_validation_summary_contract(payload)
-    if failures:
-        return failures
-    status_map = validation_summary_status_map(payload)
-    summary = sidecar.get("status_summary")
-    if isinstance(summary, dict):
-        expected = build_sidecar_status_summary(
-            status_map,
-            handoff_verify=str(summary.get("handoff_verify", "NOT_RUN")),
-            share_safety_scan=str(summary.get("share_safety_scan", "NOT_RUN")),
-        )
-        for key, value in expected.items():
-            if summary.get(key) != value:
-                failures.append(f"sidecar_status_summary_mismatch: {key}")
-    return failures
-
-
-def verify_receipts(archive: ZipFile) -> list[str]:
-    failures: list[str] = []
-    names = set(archive.namelist())
-    for entry in (
-        PACKAGE_SMOKE_RECEIPT_ENTRY,
-        HARD_SCAN_RECEIPT_ENTRY,
-        CHECK_RECEIPTS_ENTRY,
-        ADVISORY_REVIEW_RECEIPT_ENTRY,
-    ):
-        if entry not in names:
-            if entry == ADVISORY_REVIEW_RECEIPT_ENTRY:
-                continue
-            failures.append(f"receipt_missing: {entry}")
-            continue
-        try:
-            payload = json.loads(archive.read(entry).decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            failures.append(f"receipt_json_invalid: {entry}")
-            continue
-        if not isinstance(payload, dict):
-            failures.append(f"receipt_must_be_object: {entry}")
-            continue
-        failures.extend(validate_receipt_payload(Path(entry).name, payload))
     return failures
 
 
@@ -337,6 +238,15 @@ class LoadedHandoffPayloads:
     validation_summary: dict[str, object] | None
     receipts: dict[str, dict[str, object]]
     failures: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.task_metadata is not None
+            and self.validation_summary is not None
+            and set(self.receipts)
+            == {PACKAGE_SMOKE_RECEIPT_ENTRY, HARD_SCAN_RECEIPT_ENTRY, CHECK_RECEIPTS_ENTRY}
+        )
 
 
 def load_handoff_payloads(archive: ZipFile) -> LoadedHandoffPayloads:
@@ -348,12 +258,7 @@ def load_handoff_payloads(archive: ZipFile) -> LoadedHandoffPayloads:
         PACKAGE_SMOKE_RECEIPT_ENTRY,
         HARD_SCAN_RECEIPT_ENTRY,
         CHECK_RECEIPTS_ENTRY,
-        ADVISORY_REVIEW_RECEIPT_ENTRY,
     ):
-        if entry not in archive.namelist():
-            if entry != ADVISORY_REVIEW_RECEIPT_ENTRY:
-                failures.append(f"receipt_missing: {entry}")
-            continue
         payload = load_json_member(archive, entry, failures)
         if payload is not None:
             receipts[entry] = payload
@@ -384,38 +289,20 @@ def load_json_member(
     return payload
 
 
-def verify_validation_summary_payload(
-    payload: dict[str, object],
-    sidecar: dict[str, object],
-) -> list[str]:
-    failures = validate_validation_summary_contract(payload)
-    if failures:
-        return failures
-    status_map = validation_summary_status_map(payload)
-    summary = sidecar.get("status_summary")
-    if isinstance(summary, dict):
-        expected = build_sidecar_status_summary(
-            status_map,
-            handoff_verify=str(summary.get("handoff_verify", "NOT_RUN")),
-            share_safety_scan=str(summary.get("share_safety_scan", "NOT_RUN")),
-        )
-        for key, value in expected.items():
-            if summary.get(key) != value:
-                failures.append(f"sidecar_status_summary_mismatch: {key}")
-    return failures
-
-
-def verify_final_branch_bundle(
+def verify_bundle_replay(
     archive: ZipFile,
-    sidecar: dict[str, object],
+    loaded: LoadedHandoffPayloads,
 ) -> list[str]:
+    task = loaded.task_metadata
+    assert task is not None
     failures: list[str] = []
     try:
-        branch = str(sidecar["branch"])
-        final_head = str(sidecar["final_head"])
+        branch = str(task["branch"])
+        final_head = str(task["final_head"])
+        base = str(task["base"])
         raw_bundle = archive.read(FINAL_BRANCH_BUNDLE_ENTRY)
     except KeyError:
-        return ["final_branch_bundle_or_sidecar_context_missing"]
+        return ["final_branch_bundle_or_task_context_missing"]
     with tempfile.TemporaryDirectory(prefix="handoff-verify-") as temp:
         root = Path(temp)
         bundle = root / FINAL_BRANCH_BUNDLE_ENTRY
@@ -438,52 +325,40 @@ def verify_final_branch_bundle(
         )
         if clone.returncode != 0:
             return ["bundle_clone_failed"]
+        branch_in_clone = git_text(clone_dir, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        if branch_in_clone != branch:
+            failures.append("bundle_clone_branch_mismatch")
         head = git_text(clone_dir, "rev-parse", "HEAD").strip()
         if head != final_head:
             failures.append("bundle_clone_head_mismatch")
             return failures
+        ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", base, final_head],
+            cwd=clone_dir,
+            capture_output=True,
+            text=True,
+        )
+        if ancestor.returncode != 0:
+            failures.append("bundle_base_not_ancestor")
         if git_text(clone_dir, "status", "--porcelain").strip():
             failures.append("bundle_clone_worktree_not_clean")
-        failures.extend(verify_hard_scan_replay(archive, clone_dir, final_head))
-    return failures
-
-
-def verify_hard_scan_replay(
-    archive: ZipFile,
-    clone_dir: Path,
-    final_head: str,
-) -> list[str]:
-    try:
-        receipt = json.loads(archive.read(HARD_SCAN_RECEIPT_ENTRY).decode("utf-8"))
-    except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
-        return ["hard_scan_receipt_missing_for_replay"]
-    if not isinstance(receipt, dict):
-        return ["hard_scan_receipt_invalid_for_replay"]
-    replay = hard_scan_receipt_from_clone(clone_dir, final_head=final_head)
-    failures: list[str] = []
-    if receipt.get("scanned_head") != final_head:
-        failures.append("hard_scan_scanned_head_sidecar_mismatch")
-    if replay.get("scanned_head") is not None and replay.get("scanned_head") != final_head:
-        failures.append("hard_scan_replay_scanned_head_sidecar_mismatch")
-    if receipt.get("scanner_source_sha256") != replay.get("scanner_source_sha256"):
-        failures.append("hard_scan_replay_scanner_source_sha256_mismatch")
-    receipt_runs = keyed_scan_runs(receipt)
-    replay_runs = keyed_scan_runs(replay)
-    if set(receipt_runs) != set(replay_runs):
-        failures.append("hard_scan_replay_scan_ids_mismatch")
-    for scan_id in sorted(set(receipt_runs) & set(replay_runs)):
-        expected = replay_runs[scan_id]
-        actual = receipt_runs[scan_id]
-        for key in (
-            "rule_set_id",
-            "match_count",
-            "actual_violation_count",
-            "result_sha256",
-        ):
-            if actual.get(key) != expected.get(key):
-                failures.append(f"hard_scan_replay_{key}_mismatch: {scan_id}")
-        if actual.get("actual_violation_count") != 0:
-            failures.append(f"hard_scan_replay_actual_violation: {scan_id}")
+        replayed = build_machine_receipts(clone_dir, final_head)
+    failures.extend(compare_check_receipts(loaded.receipts[CHECK_RECEIPTS_ENTRY], replayed[CHECK_RECEIPTS_ENTRY]))
+    failures.extend(
+        compare_package_smoke_receipt(
+            loaded.receipts[PACKAGE_SMOKE_RECEIPT_ENTRY],
+            replayed[PACKAGE_SMOKE_RECEIPT_ENTRY],
+        )
+    )
+    failures.extend(
+        compare_hard_scan_receipt(
+            loaded.receipts[HARD_SCAN_RECEIPT_ENTRY],
+            replayed[HARD_SCAN_RECEIPT_ENTRY],
+        )
+    )
+    derived_summary = build_validation_summary_from_receipts(replayed)
+    if loaded.validation_summary != derived_summary:
+        failures.append("validation_summary_replay_mismatch")
     return failures
 
 
@@ -497,7 +372,6 @@ def scan_handoff_zip(
     bundle_member_count = 0
     bundle_text_like_count = 0
     sidecar_text_like_count = 0
-    started = time.perf_counter()
     with ZipFile(zip_path) as archive:
         members = archive.infolist()
         for member in members:
@@ -519,7 +393,8 @@ def scan_handoff_zip(
         sidecar_text_like_count = 1
         raw = Path(json_path).read_bytes()
         failures.extend(
-            f"sidecar_{failure}" for failure in text_blob_failures(raw, name="sidecar.json")
+            f"sidecar_{failure}"
+            for failure in text_blob_failures(raw, name="sidecar.json")
         )
     return HandoffSafetyResult(
         failures=tuple(failures),
@@ -528,7 +403,6 @@ def scan_handoff_zip(
         bundle_member_count=bundle_member_count,
         bundle_text_like_count=bundle_text_like_count,
         sidecar_text_like_count=sidecar_text_like_count,
-        duration_seconds=time.perf_counter() - started,
     )
 
 
@@ -536,7 +410,6 @@ def scan_git_bundle(raw: bytes, *, name: str) -> HandoffSafetyResult:
     failures: list[str] = []
     text_like_count = 0
     member_count = 0
-    started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="handoff-bundle-safety-") as temp:
         root = Path(temp)
         bundle = root / "bundle.bundle"
@@ -553,11 +426,11 @@ def scan_git_bundle(raw: bytes, *, name: str) -> HandoffSafetyResult:
             return HandoffSafetyResult((f"bundle_verify_failed: {name}",), 0, 0)
         branch = bundle_branch(bundle, verify_repo)
         clone_dir = root / "clone"
-        clone_cmd = ["git", "clone"]
+        clone_command = ["git", "clone"]
         if branch:
-            clone_cmd.extend(["--branch", branch])
-        clone_cmd.extend([str(bundle), str(clone_dir)])
-        clone = subprocess.run(clone_cmd, capture_output=True, text=True)
+            clone_command.extend(["--branch", branch])
+        clone_command.extend([str(bundle), str(clone_dir)])
+        clone = subprocess.run(clone_command, capture_output=True, text=True)
         if clone.returncode != 0:
             return HandoffSafetyResult((f"bundle_clone_failed: {name}",), 0, 0)
         files = git_text(clone_dir, "ls-files").splitlines()
@@ -573,13 +446,13 @@ def scan_git_bundle(raw: bytes, *, name: str) -> HandoffSafetyResult:
                 continue
             text_like_count += 1
             failures.extend(
-                f"bundle_{failure}" for failure in text_blob_failures(raw_file, name=f"bundle/{relative}")
+                f"bundle_{failure}"
+                for failure in text_blob_failures(raw_file, name=f"bundle/{relative}")
             )
     return HandoffSafetyResult(
         failures=tuple(failures),
         text_like_count=text_like_count,
         member_count=member_count,
-        duration_seconds=time.perf_counter() - started,
     )
 
 
@@ -673,17 +546,6 @@ def bundle_branch(bundle: Path, cwd: Path) -> str | None:
     return None
 
 
-def keyed_scan_runs(payload: dict[str, object]) -> dict[str, dict[str, object]]:
-    rows = payload.get("scan_runs")
-    if not isinstance(rows, list):
-        return {}
-    result: dict[str, dict[str, object]] = {}
-    for row in rows:
-        if isinstance(row, dict) and isinstance(row.get("scan_id"), str):
-            result[row["scan_id"]] = row
-    return result
-
-
 def git_text(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args],
@@ -701,11 +563,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def zip_member_sha256(zip_path: Path, name: str) -> str:
-    with ZipFile(zip_path) as archive:
-        return hashlib.sha256(archive.read(name)).hexdigest()
 
 
 if __name__ == "__main__":

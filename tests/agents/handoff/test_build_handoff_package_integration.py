@@ -1,118 +1,122 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
 try:
-    from tests.agents.handoff.conftest import (
-        _build_test_package,
-        _git,
-        _init_handoff_repo,
-        _load_handoff_module,
-        _write_receipts,
-    )
+    from tests.agents.handoff.conftest import _git, _init_handoff_repo, _load_handoff_module
 except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
-    from conftest import (  # type: ignore[no-redef]
-        _build_test_package,
-        _git,
-        _init_handoff_repo,
-        _load_handoff_module,
-        _write_receipts,
-    )
+    from conftest import _git, _init_handoff_repo, _load_handoff_module  # type: ignore[no-redef]
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 
-def test_build_handoff_package_minimal_layout_and_sidecar(
-    tmp_path: Path,
-) -> None:
-    repo, package, sidecar, _base, final_head = _build_test_package(tmp_path)
-    handoff_contract = _load_handoff_module("handoff_contract")
+def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _base, final_head = _init_handoff_repo(repo)
+    builder_path = (
+        repo
+        / ".agents"
+        / "skills"
+        / "quant-research-platform-maintenance"
+        / "scripts"
+        / "handoff"
+        / "build_handoff_package.py"
+    )
 
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(builder_path),
+            "--repo-root",
+            ".",
+            "--out-dir",
+            ".run/handoffs",
+            "--task-name",
+            "handoff-test",
+            "--base-ref",
+            "origin/main",
+            "--mode",
+            "evidence",
+            "--verify",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    package = repo / ".run" / "handoffs" / "handoff-test.zip"
+    sidecar = repo / ".run" / "handoffs" / "handoff-test.json"
+    assert package.is_file()
+    assert sidecar.is_file()
     with zipfile.ZipFile(package) as archive:
         names = set(archive.namelist())
+        task_metadata = json.loads(archive.read("task_metadata.json").decode("utf-8"))
         validation_summary = json.loads(
             archive.read("handoff_evidence/validation-summary.json").decode("utf-8")
         )
-        task_metadata = json.loads(archive.read("task_metadata.json").decode("utf-8"))
+        check_receipts = json.loads(
+            archive.read("handoff_evidence/check-receipts.json").decode("utf-8")
+        )
+        package_smoke = json.loads(
+            archive.read("handoff_evidence/package-smoke-receipt.json").decode("utf-8")
+        )
         manifest = json.loads(archive.read("artifact_manifest.json").decode("utf-8"))
-
     sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    handoff_contract = _load_handoff_module("handoff_contract")
 
     assert _git(repo, "rev-parse", "HEAD").strip() == final_head
     assert names == set(handoff_contract.REQUIRED_HANDOFF_ENTRIES)
-    assert set(sidecar_payload) == set(handoff_contract.ALLOWED_SIDECAR_KEYS)
-    assert set(sidecar_payload["status_summary"]) == set(
-        handoff_contract.ALLOWED_STATUS_SUMMARY_KEYS
-    )
-    assert "handoff_package_path" not in task_metadata
-    assert "handoff_sidecar_path" not in task_metadata
-    assert validation_summary["schema_id"] == "qrp-handoff-validation-summary"
-    assert {row["name"] for row in validation_summary["checks"]} == set(
+    assert set(sidecar_payload) == {"schema_id", "zip_filename", "zip_sha256"}
+    assert set(task_metadata) == {
+        "schema_id",
+        "task_name",
+        "mode",
+        "branch",
+        "base",
+        "final_head",
+    }
+    assert task_metadata["task_name"] == "handoff-test"
+    assert task_metadata["final_head"] == final_head
+    assert set(validation_summary) == {"schema_id", "rows"}
+    assert {row["name"] for row in validation_summary["rows"]} == set(
         handoff_contract.MANDATORY_VALIDATION_ROWS
     )
+    assert {row["status"] for row in validation_summary["rows"]} <= {
+        "PASS",
+        "FAIL",
+        "NOT_RUN",
+        "BLOCKED",
+    }
+    assert {row["command_id"] for row in check_receipts["checks"]} == {
+        "profile-smoke",
+        "code-map",
+    }
+    assert set(package_smoke) == {
+        "schema_id",
+        "status",
+        "build",
+        "install",
+        "import",
+        "content_scan",
+    }
     assert {entry["path"] for entry in manifest["entries"]} == names - {
         "artifact_manifest.json"
     }
-    for old_entry in handoff_contract.FORBIDDEN_HANDOFF_ENTRIES:
-        assert old_entry not in names
 
 
-def test_builder_rejects_manual_evidence_task_fields(
-    tmp_path: Path,
-) -> None:
+def test_builder_cli_has_no_external_task_or_receipts_args() -> None:
     builder = _load_handoff_module("build_handoff_package")
-    repo = tmp_path / "repo"
-    base, final_head = _init_handoff_repo(repo)
-    receipts_dir = tmp_path / "receipts"
-    _write_receipts(receipts_dir, repo=repo, final_head=final_head)
+    source = Path(builder.__file__).read_text(encoding="utf-8")
 
-    task = {
-        "schema_id": "qrp-handoff-task-metadata",
-        "mode": "evidence",
-        "slug": "manual-field",
-        "branch": "feature/synthetic-handoff-review",
-        "base": base,
-        "final_head": final_head,
-        "handoff_package_path": "handoffs/old.zip",
-    }
-
-    with pytest.raises(SystemExit, match="task_metadata_forbidden_field"):
-        builder.build_handoff_package(
-            repo_root=repo,
-            out_dir=tmp_path / "out",
-            receipts_dir=receipts_dir,
-            task=task,
-            verify=False,
-        )
-
-
-def test_builder_rejects_old_receipt_filename(tmp_path: Path) -> None:
-    builder = _load_handoff_module("build_handoff_package")
-    repo = tmp_path / "repo"
-    base, final_head = _init_handoff_repo(repo)
-    receipts_dir = tmp_path / "receipts"
-    _write_receipts(receipts_dir, repo=repo, final_head=final_head)
-    (receipts_dir / "private-smoke-status.json").write_text(
-        '{"schema_id":"qrp-old","status":"PASS"}\n',
-        encoding="utf-8",
-    )
-
-    with pytest.raises(SystemExit, match="forbidden_receipt_file"):
-        builder.build_handoff_package(
-            repo_root=repo,
-            out_dir=tmp_path / "out",
-            receipts_dir=receipts_dir,
-            task={
-                "schema_id": "qrp-handoff-task-metadata",
-                "mode": "evidence",
-                "slug": "old-name",
-                "branch": "feature/synthetic-handoff-review",
-                "base": base,
-                "final_head": final_head,
-            },
-            verify=False,
-        )
+    assert '"--task"' not in source
+    assert '"--receipts-dir"' not in source

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -110,10 +109,11 @@ def run_package_smoke(repo: Path) -> dict[str, object]:
             *archive_content_scan(sdist_path, "sdist"),
             *install_target_content_scan(target),
         ]
+        build_status = "PASS" if build.returncode == 0 else "FAIL"
         content_status = "PASS" if not forbidden else "FAIL"
         status = aggregate_status(
             [
-                "PASS" if build.returncode == 0 else "FAIL",
+                build_status,
                 install_status,
                 import_status,
                 content_status,
@@ -123,19 +123,23 @@ def run_package_smoke(repo: Path) -> dict[str, object]:
         return {
             "schema_id": "qrp-package-smoke-receipt",
             "status": status,
-            "wheel": file_payload(wheel_path),
-            "sdist": file_payload(sdist_path),
+            "build": {
+                "status": build_status,
+                "artifact_kinds": ["wheel", "sdist"],
+            },
             "install": {
-                "target_kind": "temporary isolated target",
+                "target_kind": "temporary_no_deps_install",
                 "no_deps": True,
                 "status": install_status,
             },
-            "import": {"status": import_status},
+            "import": {
+                "status": import_status,
+                "module": "quant_research_platform",
+            },
             "content_scan": {
                 "status": content_status,
                 "forbidden_member_count": len(forbidden),
                 "scanned_artifact_kinds": list(SCANNED_ARTIFACT_KINDS),
-                "examples": forbidden[:10],
             },
         }
 
@@ -143,12 +147,6 @@ def run_package_smoke(repo: Path) -> dict[str, object]:
 def first_file(root: Path, pattern: str) -> Path | None:
     matches = sorted(root.glob(pattern))
     return matches[0] if matches else None
-
-
-def file_payload(path: Path | None) -> dict[str, object]:
-    if path is None:
-        return {"filename": "", "sha256": ""}
-    return {"filename": path.name, "sha256": sha256_file(path)}
 
 
 def install_target_content_scan(root: Path) -> list[str]:
@@ -180,14 +178,6 @@ def archive_content_scan(path: Path | None, artifact_kind: str) -> list[str]:
                 and Path(member.name).suffix.lower() in FORBIDDEN_SUFFIXES
             ]
     return []
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def aggregate_status(statuses: list[str]) -> str:

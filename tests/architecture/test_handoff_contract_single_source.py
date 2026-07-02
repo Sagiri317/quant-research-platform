@@ -7,189 +7,160 @@ HANDOFF_ROOT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff"
 )
 SCRIPT_ROOT = Path(".agents/skills/quant-research-platform-maintenance/scripts")
+TEMPLATE_ROOT = Path(
+    ".agents/skills/quant-research-platform-maintenance/templates/handoff"
+)
 
 
 def _source(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_handoff_contract_modules_are_present_and_own_contracts() -> None:
-    handoff_contract = HANDOFF_ROOT / "handoff_contract.py"
-    receipt_contract = HANDOFF_ROOT / "receipt_contract.py"
-    governance_contract = SCRIPT_ROOT / "governance_contract.py"
-
-    assert handoff_contract.is_file()
-    assert receipt_contract.is_file()
-    assert "REQUIRED_HANDOFF_ENTRIES" in _source(handoff_contract)
-    assert "ALLOWED_SIDECAR_KEYS" in _source(handoff_contract)
-    assert "ARTIFACT_MANIFEST_KEYS" in _source(handoff_contract)
-    assert "validate_receipt_payload" in _source(receipt_contract)
-    assert "REQUIRED_RECEIPT_FILES" in _source(receipt_contract)
-    governance = _source(governance_contract)
-    assert "REQUIRED_HANDOFF_ENTRIES" not in governance
-    assert "ALLOWED_SIDECAR_KEYS" not in governance
-    assert "REQUIRED_RECEIPT_FILES" not in governance
-    assert "validate_receipt_payload" not in governance
-    assert "ARTIFACT_MANIFEST_KEYS" not in governance
+def _function_defs(path: Path) -> set[str]:
+    tree = ast.parse(_source(path), filename=str(path))
+    return {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
 
 
-def test_collector_builder_verifier_do_not_own_receipt_validators() -> None:
-    local_validator_names = {
-        "validate_package_smoke_receipt",
-        "validate_hard_scan_receipt",
-        "validate_check_receipts",
-        "validate_advisory_review_receipt",
-    }
-    offenders: list[str] = []
-    for path in (
-        HANDOFF_ROOT / "collect_handoff_receipts.py",
-        HANDOFF_ROOT / "build_handoff_package.py",
-        HANDOFF_ROOT / "verify_handoff_package.py",
+def _class_defs(path: Path) -> set[str]:
+    tree = ast.parse(_source(path), filename=str(path))
+    return {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+
+
+def _assigned_names(path: Path) -> set[str]:
+    tree = ast.parse(_source(path), filename=str(path))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
+def test_retired_handoff_files_are_absent() -> None:
+    assert not (HANDOFF_ROOT / "proof_contract.py").exists()
+    assert not (HANDOFF_ROOT / "collect_handoff_receipts.py").exists()
+    assert not (SCRIPT_ROOT / "run_check.py").exists()
+    assert not (TEMPLATE_ROOT / "task_metadata.template.json").exists()
+
+
+def test_builder_exposes_only_scripted_handoff_cli() -> None:
+    builder = _source(HANDOFF_ROOT / "build_handoff_package.py")
+
+    assert '"--task"' not in builder
+    assert '"--receipts-dir"' not in builder
+    for flag in (
+        "--repo-root",
+        "--out-dir",
+        "--task-name",
+        "--base-ref",
+        "--mode",
+        "--verify",
     ):
-        tree = ast.parse(_source(path), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name in local_validator_names:
-                offenders.append(f"{path}:{node.name}")
+        assert flag in builder
+
+
+def test_verifier_has_no_parallel_contract_functions() -> None:
+    verifier_defs = _function_defs(HANDOFF_ROOT / "verify_handoff_package.py")
+
+    assert "verify_receipts" not in verifier_defs
+    assert "verify_validation_summary_payload" not in verifier_defs
+
+
+def test_advisory_machine_contract_is_absent() -> None:
+    combined = "\n".join(
+        _source(path)
+        for path in (
+            HANDOFF_ROOT / "handoff_contract.py",
+            HANDOFF_ROOT / "receipt_contract.py",
+            HANDOFF_ROOT / "build_handoff_package.py",
+            HANDOFF_ROOT / "verify_handoff_package.py",
+            HANDOFF_ROOT / "replay_evidence.py",
+        )
+        if path.exists()
+    )
+
+    for retired in (
+        "advisory-review-receipt.json",
+        "advisory_reviews",
+        "ADVISORY_REVIEW",
+        "validate_advisory_review_receipt",
+        "validate_advisory_reviews_against_receipts",
+    ):
+        assert retired not in combined
+
+
+def test_proof_class_is_only_defined_by_handoff_contract() -> None:
+    offenders = [
+        path
+        for path in HANDOFF_ROOT.glob("*.py")
+        if path.name != "handoff_contract.py" and "class ProofClass" in _source(path)
+    ]
+
+    assert "class ProofClass" in _source(HANDOFF_ROOT / "handoff_contract.py")
+    assert offenders == []
+
+
+def test_replay_command_contract_is_only_handoff_contract_owned() -> None:
+    owner = HANDOFF_ROOT / "handoff_contract.py"
+    assert "REPLAY_COMMAND_CONTRACT" in _source(owner)
+    offenders = [
+        path
+        for path in (
+            HANDOFF_ROOT / "build_handoff_package.py",
+            HANDOFF_ROOT / "verify_handoff_package.py",
+            HANDOFF_ROOT / "replay_evidence.py",
+            HANDOFF_ROOT / "receipt_contract.py",
+        )
+        if "REPLAY_COMMAND_CONTRACT" in _source(path)
+    ]
 
     assert offenders == []
 
 
-def test_evidence_graph_source_contract_is_handoff_contract_owned() -> None:
-    handoff_contract = _source(HANDOFF_ROOT / "handoff_contract.py")
-    verifier = _source(HANDOFF_ROOT / "verify_handoff_package.py")
-
-    assert "VALIDATION_ROW_SOURCE_CONTRACT" in handoff_contract
-    assert "VALIDATION_ROW_SOURCE_CONTRACT" not in verifier
-
-
-def test_builder_and_verifier_call_evidence_graph_validator() -> None:
-    required_calls = {
-        "validate_validation_summary_against_receipts",
-        "validate_advisory_reviews_against_receipts",
-        "validate_task_metadata_against_sidecar",
-    }
-    builder_calls = _function_calls(HANDOFF_ROOT / "build_handoff_package.py")
-    verifier_calls = _function_calls(HANDOFF_ROOT / "verify_handoff_package.py")
-
-    assert "validate_validation_summary_against_receipts" in builder_calls
-    assert required_calls <= verifier_calls
-
-
-def test_verifier_uses_handoff_contract_for_artifact_manifest_schema() -> None:
-    handoff_contract = _source(HANDOFF_ROOT / "handoff_contract.py")
-    verifier_calls = _function_calls(HANDOFF_ROOT / "verify_handoff_package.py")
-
-    assert "ARTIFACT_MANIFEST_KEYS" in handoff_contract
-    assert "validate_artifact_manifest_contract" in handoff_contract
-    assert "validate_artifact_manifest_contract" in verifier_calls
-
-
-def test_receipt_contract_owns_receipt_invariants_not_builder_or_verifier() -> None:
-    receipt_contract = _source(HANDOFF_ROOT / "receipt_contract.py")
-    assert "check_receipts_empty_pass_invalid" in receipt_contract
-    assert "package_smoke_status_mismatch" in receipt_contract
-    assert "hard_scan_status_mismatch" in receipt_contract
-    assert "CHECK_RECEIPT_ROW_KEYS" in receipt_contract
-    assert "ADVISORY_FINDING_KEYS" in receipt_contract
-    assert "HARD_SCAN_CLASSIFIED_EXCEPTION_KEYS" in receipt_contract
+def test_receipt_field_specs_are_only_receipt_contract_owned() -> None:
+    receipt_contract = HANDOFF_ROOT / "receipt_contract.py"
+    assert "FieldSpec" in _class_defs(receipt_contract)
     for path in (
         HANDOFF_ROOT / "build_handoff_package.py",
         HANDOFF_ROOT / "verify_handoff_package.py",
+        HANDOFF_ROOT / "replay_evidence.py",
     ):
-        source = _source(path)
-        assert "check_receipts_empty_pass_invalid" not in source
-        assert "package_smoke_status_mismatch" not in source
-        assert "hard_scan_status_mismatch" not in source
+        assert "FieldSpec" not in _class_defs(path)
 
 
-def test_artifact_manifest_tool_source_claims_are_not_emitted_or_allowed() -> None:
-    execution_combined = "\n".join(
-        _source(path)
-        for path in (
-            HANDOFF_ROOT / "build_handoff_package.py",
-            HANDOFF_ROOT / "verify_handoff_package.py",
-        )
+def test_execution_modules_do_not_define_contract_tables() -> None:
+    disallowed_suffixes = (
+        "_KEYS",
+        "_FIELD_SPECS",
+        "_PROOF",
+        "_PROOFS",
+        "_RECEIPT_KEYS",
     )
-
-    assert "tool_source_final_head" not in execution_combined
-    assert "tool_source_repo_paths" not in execution_combined
-
-
-def test_retired_execution_symbols_are_absent_from_execution_path() -> None:
-    execution_paths = [
+    offenders: list[str] = []
+    for path in (
         HANDOFF_ROOT / "build_handoff_package.py",
-        HANDOFF_ROOT / "collect_handoff_receipts.py",
         HANDOFF_ROOT / "verify_handoff_package.py",
-        HANDOFF_ROOT / "self_test.py",
-    ]
-    retired_symbols = (
-        "GENERATION_EVIDENCE",
-        "BUNDLE_RECONSTRUCTION_EVIDENCE",
-        "PRIVATE_SMOKE_STATUS_EVIDENCE",
-        "PACKAGE_SMOKE_EVIDENCE",
-        "HARD_SCAN_CLASSIFICATION_EVIDENCE",
-        "TEST_CHECKS_EVIDENCE",
-        "BUILDER_OWNED_HANDOFF_EVIDENCE",
-        "verify_private_smoke_status",
-        "verify_test_checks_evidence",
-        "verify_generation_evidence",
-        "verify_bundle_reconstruction_evidence",
-        "verify_git_status",
-    )
-    found = [
-        f"{path}:{symbol}"
-        for path in execution_paths
-        for symbol in retired_symbols
-        if symbol in _source(path)
-    ]
-
-    assert found == []
-
-
-def test_retired_files_and_schema_contracts_are_absent() -> None:
-    assert not (HANDOFF_ROOT / "collect_private_smoke_status.py").exists()
-    assert not (
-        Path(".agents/skills/quant-research-platform-maintenance/schemas/handoff")
-        / "sidecar.schema.json"
-    ).exists()
-    assert not (
-        Path(".agents/skills/quant-research-platform-maintenance/schemas/handoff")
-        / "task_metadata.schema.json"
-    ).exists()
-    self_test = _source(HANDOFF_ROOT / "self_test.py")
-    assert "task_metadata.template.json" not in self_test
-    assert "handoff_package_path" not in self_test
-    assert "handoff_sidecar_path" not in self_test
-
-
-def test_retired_entry_names_are_only_contract_or_negative_test_owned() -> None:
-    handoff_contract = _source(HANDOFF_ROOT / "handoff_contract.py")
-    governance_contract = _source(SCRIPT_ROOT / "governance_contract.py")
-    assert "FORBIDDEN_HANDOFF_ENTRIES" in handoff_contract
-    assert "RETIRED_HANDOFF_ENTRY_NAMES" in governance_contract
-    execution_combined = "\n".join(
-        _source(path)
-        for path in (
-            HANDOFF_ROOT / "build_handoff_package.py",
-            HANDOFF_ROOT / "collect_handoff_receipts.py",
-            HANDOFF_ROOT / "verify_handoff_package.py",
-        )
-    )
-    for retired in (
-        "private-smoke-status.json",
-        "private-validation-status.json",
-        "generation.json",
-        "bundle-reconstruction.json",
-        "git_status.txt",
-        "receipt-index.json",
+        HANDOFF_ROOT / "replay_evidence.py",
     ):
-        assert retired not in execution_combined
+        for name in _assigned_names(path):
+            if name.endswith(disallowed_suffixes):
+                offenders.append(f"{path.name}:{name}")
+
+    assert offenders == []
 
 
-def _function_calls(path: Path) -> set[str]:
-    tree = ast.parse(_source(path), filename=str(path))
-    calls: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            calls.add(node.func.id)
-    return calls
+def test_contract_modules_own_their_respective_boundaries() -> None:
+    handoff_contract = _source(HANDOFF_ROOT / "handoff_contract.py")
+    receipt_contract = _source(HANDOFF_ROOT / "receipt_contract.py")
+
+    assert "EvidenceGraph" in handoff_contract
+    assert "VALIDATION_ROW_SOURCE_CONTRACT" in handoff_contract
+    assert "normalize_check_receipts" in receipt_contract
+    assert "compare_check_receipts" in receipt_contract
+    assert "normalize_package_smoke_receipt" in receipt_contract
+    assert "compare_package_smoke_receipt" in receipt_contract
+    assert "normalize_hard_scan_receipt" in receipt_contract
+    assert "compare_hard_scan_receipt" in receipt_contract

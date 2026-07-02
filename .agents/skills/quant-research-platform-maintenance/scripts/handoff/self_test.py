@@ -17,7 +17,7 @@ def main() -> int:
         "handoff_contract.py",
         "receipt_contract.py",
         "build_handoff_package.py",
-        "collect_handoff_receipts.py",
+        "replay_evidence.py",
         "verify_handoff_package.py",
         "run_package_smoke.py",
         "self_test.py",
@@ -29,6 +29,9 @@ def main() -> int:
     retired_collector = "collect_" + "private_" + "smoke_" + "status.py"
     absent = {
         SCRIPT_DIR / retired_collector,
+        SCRIPT_DIR / "collect_handoff_receipts.py",
+        SCRIPT_DIR.parent / "run_check.py",
+        SKILL_ROOT / "templates" / "handoff" / "task_metadata.template.json",
         SKILL_ROOT / "schemas" / "handoff" / "sidecar.schema.json",
         SKILL_ROOT / "schemas" / "handoff" / "task_metadata.schema.json",
     }
@@ -39,7 +42,7 @@ def main() -> int:
         ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
     execution_paths = [
         SCRIPT_DIR / "build_handoff_package.py",
-        SCRIPT_DIR / "collect_handoff_receipts.py",
+        SCRIPT_DIR / "replay_evidence.py",
         SCRIPT_DIR / "verify_handoff_package.py",
         SCRIPT_DIR / "self_test.py",
     ]

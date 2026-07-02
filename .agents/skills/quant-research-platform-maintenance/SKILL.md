@@ -100,7 +100,7 @@ handoff scripts 位于：
 
 `verify_handoff_package.py` 是唯一 handoff/package verifier。builder 只 build 并调用 verifier，不定义 sanitizer、package member safety、private regex 或状态聚合规则。handoff artifact 输出到 `.run/` 或用户指定输出目录，当前合同来自本轮实际生成和验证的 artifact。
 
-handoff package layout、sidecar、task metadata 和 validation summary 合同由 `handoff/handoff_contract.py` 拥有。receipt schema、receipt invariant 和 receipt 聚合由 `handoff/receipt_contract.py` 拥有。`governance_contract.py` 只拥有治理扫描、source-tree scan、共享安全路径和 status token 规则。
+handoff package layout、sidecar、task metadata 和 validation summary 合同由 `handoff/handoff_contract.py` 拥有。receipt schema、receipt invariant 和 receipt 聚合由 `handoff/receipt_contract.py` 拥有。public machine replay 由 `handoff/replay_evidence.py` 执行，但 replay 模块不定义合同或 compare 规则。`governance_contract.py` 只拥有治理扫描、source-tree scan、共享安全路径和 status token 规则。
 
 `.agents/` 只承载 governance、handoff 和 prompt tooling；runtime 业务逻辑必须留在 `src/quant_research_platform/` 的 owner layer。
 

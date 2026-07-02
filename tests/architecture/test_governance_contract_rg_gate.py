@@ -1615,7 +1615,6 @@ APPROVED_FIELD_SPEC_FILES = {
 }
 
 APPROVED_WRITER_MODULES = {
-    Path(".agents/skills/quant-research-platform-maintenance/scripts/run_check.py"),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/"
         "verify_governance.py"
@@ -1626,7 +1625,7 @@ APPROVED_WRITER_MODULES = {
     ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-        "collect_handoff_receipts.py"
+        "replay_evidence.py"
     ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
