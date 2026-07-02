@@ -5,14 +5,14 @@ from pathlib import Path
 
 POLICY_SHARE_SAFETY = Path("src/quant_research_platform/policy/share_safety.py")
 REPORT_SAFETY = Path("src/quant_research_platform/reports/verification_summary.py")
-HANDOFF_SAFETY = Path(
+HANDOFF_VERIFIER = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/"
     "handoff/verify_handoff_package.py"
 )
 
 
-def test_report_and_handoff_safety_do_not_own_text_privacy_regexes() -> None:
-    for path in (REPORT_SAFETY, HANDOFF_SAFETY):
+def test_report_and_handoff_verifier_do_not_own_text_privacy_regexes() -> None:
+    for path in (REPORT_SAFETY, HANDOFF_VERIFIER):
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
         local_unsafe_regex_owners = [
@@ -45,7 +45,7 @@ def test_policy_owns_required_text_safety_semantics() -> None:
 
 
 def test_handoff_member_path_rules_are_derived_from_governance_contract() -> None:
-    source = HANDOFF_SAFETY.read_text(encoding="utf-8")
+    source = HANDOFF_VERIFIER.read_text(encoding="utf-8")
 
     assert "member_name_failures" in source
     assert "package_member_name_failures" in source

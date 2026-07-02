@@ -30,7 +30,7 @@ def test_share_safety_does_not_treat_output_identifier_as_path() -> None:
 
 
 def test_share_safety_allows_review_safe_handoff_evidence_name() -> None:
-    assert zip_member_unsafe_reason("handoff_evidence/generation.json") is None
+    assert zip_member_unsafe_reason("handoff_evidence/validation-summary.json") is None
 
 
 def test_local_run_root_accepts_explicit_locations(tmp_path: Path) -> None:
