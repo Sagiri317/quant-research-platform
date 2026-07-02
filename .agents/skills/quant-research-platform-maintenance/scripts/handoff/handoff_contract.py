@@ -128,6 +128,8 @@ MANDATORY_VALIDATION_ROWS = frozenset(
     }
 )
 VALIDATION_ROW_KEYS = frozenset({"name", "status", "evidence"})
+ARTIFACT_MANIFEST_KEYS = frozenset({"schema_id", "entries"})
+ARTIFACT_MANIFEST_ENTRY_KEYS = frozenset({"path", "size", "sha256"})
 
 
 @dataclass(frozen=True)
@@ -196,20 +198,6 @@ TASK_REJECTED_KEYS = frozenset(
     }
 )
 
-HANDOFF_TOOL_SOURCE_PATHS = [
-    ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/run_check.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/collect_handoff_receipts.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/run_package_smoke.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py",
-    ".agents/skills/quant-research-platform-maintenance/templates/handoff/task_metadata.template.json",
-]
-
-
 def exact_package_member_set(*, include_advisory: bool) -> frozenset[str]:
     entries = set(REQUIRED_HANDOFF_ENTRIES)
     if include_advisory:
@@ -269,6 +257,46 @@ def validate_sidecar_contract(payload: Mapping[str, object]) -> list[str]:
         failures.append("sidecar_advisory_reviews_invalid")
     elif any(value not in VALID_STATUS_TOKENS for value in advisory_reviews.values()):
         failures.append("sidecar_advisory_reviews_status_invalid")
+    return failures
+
+
+def validate_artifact_manifest_contract(payload: Mapping[str, object]) -> list[str]:
+    failures: list[str] = []
+    missing = sorted(ARTIFACT_MANIFEST_KEYS - set(payload))
+    failures.extend(f"artifact_manifest_missing: {key}" for key in missing)
+    extra = sorted(set(payload) - ARTIFACT_MANIFEST_KEYS)
+    failures.extend(f"artifact_manifest_unapproved_field: {key}" for key in extra)
+    if payload.get("schema_id") != "qrp-handoff-artifact-manifest":
+        failures.append("artifact_manifest_schema_id_invalid")
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        failures.append("artifact_manifest_entries_invalid")
+        return failures
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, Mapping):
+            failures.append(f"artifact_manifest_entry_invalid: {index}")
+            continue
+        missing_entry = sorted(ARTIFACT_MANIFEST_ENTRY_KEYS - set(entry))
+        failures.extend(
+            f"artifact_manifest_entry_missing: {index}:{key}"
+            for key in missing_entry
+        )
+        extra_entry = sorted(set(entry) - ARTIFACT_MANIFEST_ENTRY_KEYS)
+        failures.extend(
+            f"artifact_manifest_entry_unapproved_field: {index}:{key}"
+            for key in extra_entry
+        )
+        if not isinstance(entry.get("path"), str) or not str(entry.get("path")).strip():
+            failures.append(f"artifact_manifest_path_invalid: {index}")
+        if not isinstance(entry.get("size"), int) or int(entry.get("size")) < 0:
+            failures.append(f"artifact_manifest_size_invalid: {index}")
+        sha_value = entry.get("sha256")
+        if not (
+            isinstance(sha_value, str)
+            and len(sha_value) == 64
+            and all(char in "0123456789abcdef" for char in sha_value)
+        ):
+            failures.append(f"artifact_manifest_sha256_invalid: {index}")
     return failures
 
 
@@ -501,18 +529,18 @@ def _validate_row_evidence_ref(
     if ref.reason_kind is not None:
         if not ref.reason:
             failures.append(f"validation_summary_evidence_reason_missing: {name}")
+        if not source.command_optional:
+            failures.append(f"validation_summary_evidence_source_mismatch: {name}")
         if status == "NOT_RUN" and ref.reason_kind != "not_run":
             failures.append(f"validation_summary_evidence_syntax_invalid: {name}")
         if status == "BLOCKED" and ref.reason_kind != "blocked":
             failures.append(f"validation_summary_evidence_syntax_invalid: {name}")
         if status in {"PASS", "FAIL"}:
             failures.append(f"validation_summary_evidence_syntax_invalid: {name}")
-        if source.command_id is not None and not source.command_optional:
-            failures.append(f"validation_summary_evidence_source_mismatch: {name}")
         if source.command_optional and source.command_id in check_rows:
             failures.append(f"validation_summary_evidence_source_mismatch: {name}")
         if source.command_optional and source.command_id not in check_rows:
-            if status != "NOT_RUN":
+            if status != "NOT_RUN" or ref.reason_kind != "not_run":
                 failures.append(
                     f"validation_summary_status_mismatch: {name}:{status}!=NOT_RUN"
                 )

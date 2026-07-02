@@ -42,6 +42,7 @@ from handoff_contract import (  # noqa: E402
     posix_member_name_failures,
     validate_handoff_package_layout,
     validate_advisory_reviews_against_receipts,
+    validate_artifact_manifest_contract,
     validate_sidecar_contract,
     validate_task_metadata_contract,
     validate_task_metadata_against_sidecar,
@@ -208,8 +209,7 @@ def verify_manifest_hashes(archive: ZipFile) -> list[str]:
         return ["artifact_manifest_invalid"]
     if not isinstance(payload, dict):
         return ["artifact_manifest_must_be_object"]
-    if payload.get("schema_id") != "qrp-handoff-artifact-manifest":
-        failures.append("artifact_manifest_schema_id_invalid")
+    failures.extend(validate_artifact_manifest_contract(payload))
     entries = payload.get("entries")
     if not isinstance(entries, list):
         return [*failures, "artifact_manifest_entries_invalid"]
@@ -263,6 +263,8 @@ def verify_sidecar(
         expected_scan = "PASS" if safety.ok else "FAIL"
         if summary.get("share_safety_scan") != expected_scan:
             failures.append("sidecar_share_safety_scan_mismatch")
+        if summary.get("handoff_verify") != "PASS":
+            failures.append("sidecar_handoff_verify_not_pass")
     return failures
 
 

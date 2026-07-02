@@ -95,6 +95,7 @@ code_map
 `scripted_checks` 只表示 `check-receipts.json` 聚合状态，不表示全量 tests。`private_validation` 不使用单独 status-only 文件；未运行或阻塞时，`evidence` 写明原因；实际 PASS/FAIL 时，`evidence` 引用 `handoff_evidence/check-receipts.json#private-validation`。
 
 `validation-summary.json` is a derived view. Every `PASS`, `FAIL`, or `BLOCKED` row must be backed by a receipt graph edge in `check-receipts.json`, `package-smoke-receipt.json`, or `hard-scan-receipt.json`.
+Mandatory receipt-backed rows may not use reason-only evidence; only optional command rows may be `NOT_RUN` with a `not_run:` reason when the command receipt is absent.
 
 ## 5. Receipt Invariants
 
@@ -124,6 +125,7 @@ receipt-index.json
 ## 7. Bundle and Manifest
 
 `artifact_manifest.json` 位于 zip 根部，记录除自身外所有 zip members 的 path、size 和 sha256；entries 必须与实际 zip members 精确一致。sidecar 的 `artifact_manifest_sha256` 和 `zip_sha256` 必须匹配原始字节 hash。
+`artifact_manifest.json` is exact-schema and only contains `schema_id` plus `entries`; verifier rejects tool source claim fields.
 
 `final-branch.bundle` 必须可 `git bundle verify`，可 clone 指定 branch，clone 后 HEAD 必须等于 sidecar `final_head`，working tree 必须 clean。verifier 直接复验 bundle，不依赖额外 reconstruction evidence。
 

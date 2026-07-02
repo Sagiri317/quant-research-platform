@@ -30,6 +30,10 @@ Builder and collector do not implement package-level verification, receipt valid
 
 `handoff_evidence/validation-summary.json` is a derived view. Every `PASS`, `FAIL`, or `BLOCKED` row must be backed by a receipt graph edge in `check-receipts.json`, `package-smoke-receipt.json`, or `hard-scan-receipt.json`.
 
+`artifact_manifest.json` is exact-schema and only contains `schema_id` plus `entries`; tool source claims are not persisted in the package.
+
+Receipt JSON payloads are exact-schema contracts. Extra fields in receipts or nested receipt rows are verifier failures.
+
 ## Bundle Verification
 
 `final-branch.bundle` must be directly verifiable:

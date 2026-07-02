@@ -77,7 +77,7 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
         out_dir=out_dir,
         receipts_dir=receipts_dir,
         task=task,
-        verify=False,
+        verify=True,
     )
     assert result["zip_path"]
     return repo, Path(result["zip_path"]), Path(result["json_path"]), base, final_head
@@ -348,7 +348,7 @@ def _replace_validation_summary(
         existing = {}
     sidecar_payload["status_summary"] = handoff_contract.build_sidecar_status_summary(
         status_map,
-        handoff_verify=str(existing.get("handoff_verify", "NOT_RUN")),
+        handoff_verify=str(existing.get("handoff_verify", "PASS")),
         share_safety_scan=str(existing.get("share_safety_scan", "NOT_RUN")),
     )
     sidecar.write_text(

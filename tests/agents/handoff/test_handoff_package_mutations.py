@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,26 @@ def _write_member_json(
         (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
     )
     _refresh_manifest_and_sidecar(package, sidecar)
+
+
+def _write_artifact_manifest_and_refresh_sidecar(
+    package: Path,
+    sidecar: Path,
+    payload: dict[str, Any],
+) -> None:
+    import zipfile
+
+    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    _rewrite_package_member(package, "artifact_manifest.json", data)
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_payload["artifact_manifest_sha256"] = hashlib.sha256(data).hexdigest()
+    sidecar_payload["zip_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
+    sidecar.write_text(
+        json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with zipfile.ZipFile(package) as archive:
+        assert archive.read("artifact_manifest.json") == data
 
 
 def _check_receipts(package: Path) -> dict[str, Any]:
@@ -136,6 +157,118 @@ def _set_sidecar_advisory_reviews(sidecar: Path, payload: dict[str, str]) -> Non
         json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _set_sidecar_handoff_verify(sidecar: Path, status: str | None) -> None:
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    summary = sidecar_payload["status_summary"]
+    assert isinstance(summary, dict)
+    if status is None:
+        summary.pop("handoff_verify", None)
+    else:
+        summary["handoff_verify"] = status
+    sidecar.write_text(
+        json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _advisory_finding(**updates: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "finding_id": "finding-1",
+        "classification": "true_issue",
+        "resolved": True,
+        "summary": "review-safe aggregate finding",
+    }
+    payload.update(updates)
+    return payload
+
+
+def _advisory_receipt(**updates: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_id": "qrp-advisory-review-receipt",
+        "status": "PASS",
+        "review_lanes": [],
+        "finding_count": 0,
+        "true_issue_count": 0,
+        "false_positive_count": 0,
+        "re_review_status": "PASS",
+        "findings": [],
+    }
+    payload.update(updates)
+    return payload
+
+
+def _add_advisory_receipt(
+    package: Path,
+    sidecar: Path,
+    payload: dict[str, Any],
+) -> None:
+    _write_member_json(
+        package,
+        sidecar,
+        "handoff_evidence/advisory-review-receipt.json",
+        payload,
+    )
+    _set_sidecar_advisory_reviews(sidecar, {"review_subagent": str(payload["status"])})
+
+
+@pytest.mark.parametrize(
+    ("row_name", "expected"),
+    (
+        ("scripted_checks", "validation_summary_evidence_source_mismatch: scripted_checks"),
+        ("package_smoke", "validation_summary_evidence_source_mismatch: package_smoke"),
+        ("governance", "validation_summary_evidence_source_mismatch: governance"),
+    ),
+)
+def test_handoff_package_rejects_reason_only_blocked_mandatory_rows(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+    row_name: str,
+    expected: str,
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _with_validation_row(
+        package,
+        sidecar,
+        row_name,
+        status="BLOCKED",
+        evidence="blocked: reason",
+    )
+
+    failures = _verify(package, sidecar)
+
+    assert expected in failures
+
+
+@pytest.mark.parametrize("field", ("tool_source_final_head", "tool_source_repo_paths"))
+def test_handoff_package_rejects_artifact_manifest_unapproved_tool_source_fields(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+    field: str,
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    payload = _read_member_json(package, "artifact_manifest.json")
+    payload[field] = "claim"
+    _write_artifact_manifest_and_refresh_sidecar(package, sidecar, payload)
+
+    failures = _verify(package, sidecar)
+
+    assert f"artifact_manifest_unapproved_field: {field}" in failures
+
+
+@pytest.mark.parametrize("status", ("FAIL", "NOT_RUN", "BLOCKED", None))
+def test_handoff_package_rejects_sidecar_handoff_verify_not_pass(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+    status: str | None,
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _set_sidecar_handoff_verify(sidecar, status)
+
+    failures = _verify(package, sidecar)
+
+    assert "sidecar_handoff_verify_not_pass" in failures
 
 
 def test_handoff_package_rejects_retired_entry_resurrection(
@@ -574,3 +707,309 @@ def test_handoff_package_rejects_blocked_row_without_blocked_reason_or_receipt(
     failures = _verify(package, sidecar)
 
     assert "validation_summary_evidence_syntax_invalid: private_validation" in failures
+
+
+def test_handoff_package_rejects_package_smoke_receipt_extra_field(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    payload = _package_smoke(package)
+    payload["extra_field"] = True
+    _replace_package_smoke(package, sidecar, payload)
+
+    failures = _verify(package, sidecar)
+
+    assert "package_smoke_unapproved_field: extra_field" in failures
+
+
+def test_handoff_package_rejects_check_row_extra_field(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    payload = _check_receipts(package)
+    checks = payload["checks"]
+    assert isinstance(checks, list)
+    checks[0]["extra_field"] = True
+    _replace_check_receipts(package, sidecar, payload)
+
+    failures = _verify(package, sidecar)
+
+    assert "check_receipt_unapproved_field: 0:extra_field" in failures
+
+
+def test_handoff_package_rejects_hard_scan_run_extra_field(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    payload = _read_member_json(package, "handoff_evidence/hard-scan-receipt.json")
+    payload["scan_runs"][0]["extra_field"] = True
+    _write_member_json(
+        package,
+        sidecar,
+        "handoff_evidence/hard-scan-receipt.json",
+        payload,
+    )
+
+    failures = _verify(package, sidecar)
+
+    assert "hard_scan_run_unapproved_field: 0:extra_field" in failures
+
+
+def test_handoff_package_rejects_hard_scan_classified_exception_extra_field(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    payload = _read_member_json(package, "handoff_evidence/hard-scan-receipt.json")
+    payload["classified_exceptions"] = [
+        {
+            "scan_id": "allowance_contract",
+            "classification": "false_positive",
+            "owner": "governance_contract.py",
+            "rationale": "review-safe exception",
+            "reference": "tests",
+            "extra_field": True,
+        }
+    ]
+    _write_member_json(
+        package,
+        sidecar,
+        "handoff_evidence/hard-scan-receipt.json",
+        payload,
+    )
+
+    failures = _verify(package, sidecar)
+
+    assert "hard_scan_classified_exception_unapproved_field: 0:extra_field" in failures
+
+
+def test_handoff_package_rejects_advisory_receipt_extra_field(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _add_advisory_receipt(sidecar=sidecar, package=package, payload=_advisory_receipt(extra_field=True))
+
+    failures = _verify(package, sidecar)
+
+    assert "advisory_review_unapproved_field: extra_field" in failures
+
+
+def test_handoff_package_rejects_advisory_finding_extra_field(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _add_advisory_receipt(
+        package,
+        sidecar,
+        _advisory_receipt(
+            finding_count=1,
+            true_issue_count=1,
+            findings=[_advisory_finding(extra_field=True)],
+        ),
+    )
+
+    failures = _verify(package, sidecar)
+
+    assert "advisory_finding_unapproved_field: 0:extra_field" in failures
+
+
+@pytest.mark.parametrize(
+    ("status", "field", "expected"),
+    (
+        ("NOT_RUN", "counts", "check_receipt_not_run_counts_invalid: 0"),
+        ("NOT_RUN", "exit_code", "check_receipt_not_run_exit_code_invalid: 0"),
+        ("BLOCKED", "exit_code", "check_receipt_blocked_exit_code_invalid: 0"),
+        ("BLOCKED", "counts", "check_receipt_blocked_counts_invalid: 0"),
+    ),
+)
+def test_handoff_package_rejects_not_run_blocked_check_success_traces(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+    status: str,
+    field: str,
+    expected: str,
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    payload = _check_receipts(package)
+    checks = payload["checks"]
+    assert isinstance(checks, list)
+    row = checks[0]
+    assert isinstance(row, dict)
+    row["status"] = status
+    row["exit_code"] = 0 if field == "exit_code" else None
+    row["counts"] = (
+        {
+            "passed": 1,
+            "failed": 0,
+            "skipped": 0,
+            "deselected": 0,
+            "errors": 0,
+            "xfailed": 0,
+            "xpassed": 0,
+            "collected": 1,
+        }
+        if field == "counts"
+        else None
+    )
+    if status == "NOT_RUN":
+        row["not_run_reason"] = "not run in mutation"
+    else:
+        row["blocked_reason"] = "blocked in mutation"
+    _replace_check_receipts(package, sidecar, payload)
+
+    failures = _verify(package, sidecar)
+
+    assert expected in failures
+
+
+def test_handoff_package_rejects_advisory_pass_with_failed_re_review(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _add_advisory_receipt(package, sidecar, _advisory_receipt(re_review_status="FAIL"))
+
+    failures = _verify(package, sidecar)
+
+    assert "advisory_review_pass_re_review_status_mismatch" in failures
+
+
+def test_handoff_package_rejects_advisory_finding_count_mismatch(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _add_advisory_receipt(
+        package,
+        sidecar,
+        _advisory_receipt(
+            finding_count=2,
+            true_issue_count=1,
+            findings=[_advisory_finding()],
+        ),
+    )
+
+    failures = _verify(package, sidecar)
+
+    assert "advisory_review_finding_count_mismatch" in failures
+
+
+def test_handoff_package_rejects_advisory_true_issue_count_mismatch(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _add_advisory_receipt(
+        package,
+        sidecar,
+        _advisory_receipt(
+            finding_count=1,
+            true_issue_count=0,
+            findings=[_advisory_finding()],
+        ),
+    )
+
+    failures = _verify(package, sidecar)
+
+    assert "advisory_review_true_issue_count_mismatch" in failures
+
+
+def test_handoff_package_rejects_advisory_false_positive_count_mismatch(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _add_advisory_receipt(
+        package,
+        sidecar,
+        _advisory_receipt(
+            finding_count=1,
+            false_positive_count=0,
+            findings=[_advisory_finding(classification="false_positive")],
+        ),
+    )
+
+    failures = _verify(package, sidecar)
+
+    assert "advisory_review_false_positive_count_mismatch" in failures
+
+
+def test_handoff_package_rejects_advisory_pass_with_unresolved_true_issue(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    _add_advisory_receipt(
+        package,
+        sidecar,
+        _advisory_receipt(
+            finding_count=1,
+            true_issue_count=1,
+            findings=[_advisory_finding(resolved=False)],
+        ),
+    )
+
+    failures = _verify(package, sidecar)
+
+    assert "advisory_review_pass_with_unresolved_true_issue" in failures
+
+
+def test_handoff_package_rejects_hard_scan_actual_violation_exception(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    payload = _read_member_json(package, "handoff_evidence/hard-scan-receipt.json")
+    payload["classified_exceptions"] = [
+        {
+            "scan_id": "allowance_contract",
+            "classification": "actual_violation",
+            "owner": "governance_contract.py",
+            "rationale": "actual violation cannot be accepted",
+            "reference": "tests",
+        }
+    ]
+    _write_member_json(
+        package,
+        sidecar,
+        "handoff_evidence/hard-scan-receipt.json",
+        payload,
+    )
+
+    failures = _verify(package, sidecar)
+
+    assert "hard_scan_classified_exception_actual_violation: 0" in failures
+
+
+def test_handoff_package_rejects_hard_scan_exception_missing_context(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    payload = _read_member_json(package, "handoff_evidence/hard-scan-receipt.json")
+    payload["classified_exceptions"] = [
+        {
+            "scan_id": "allowance_contract",
+            "classification": "false_positive",
+            "owner": "",
+            "rationale": "",
+            "reference": "",
+        }
+    ]
+    _write_member_json(
+        package,
+        sidecar,
+        "handoff_evidence/hard-scan-receipt.json",
+        payload,
+    )
+
+    failures = _verify(package, sidecar)
+
+    assert "hard_scan_classified_exception_string_invalid: 0:owner" in failures
+    assert "hard_scan_classified_exception_string_invalid: 0:rationale" in failures
+    assert "hard_scan_classified_exception_string_invalid: 0:reference" in failures

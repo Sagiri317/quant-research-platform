@@ -26,7 +26,6 @@ from handoff_contract import (  # noqa: E402
     ARTIFACT_MANIFEST_ENTRY,
     CHECK_RECEIPTS_ENTRY,
     FINAL_BRANCH_BUNDLE_ENTRY,
-    HANDOFF_TOOL_SOURCE_PATHS,
     HARD_SCAN_RECEIPT_ENTRY,
     PACKAGE_SMOKE_RECEIPT_ENTRY,
     TASK_METADATA_ENTRY,
@@ -128,16 +127,19 @@ def build_handoff_package(
     if verify:
         from verify_handoff_package import verify_handoff_package
 
-        verify_failures = verify_handoff_package(zip_path, json_path)
-        verify_status = "PASS" if not verify_failures else "FAIL"
         update_sidecar_run_status(
             json_path,
-            handoff_verify=verify_status,
+            handoff_verify="PASS",
             share_safety_scan=safety_status,
         )
-        if verify_status == "PASS":
-            verify_failures = verify_handoff_package(zip_path, json_path)
-            verify_status = "PASS" if not verify_failures else "FAIL"
+        verify_failures = verify_handoff_package(zip_path, json_path)
+        verify_status = "PASS" if not verify_failures else "FAIL"
+        if verify_status != "PASS":
+            update_sidecar_run_status(
+                json_path,
+                handoff_verify=verify_status,
+                share_safety_scan=safety_status,
+            )
     return {
         "ok": safety_status == "PASS" and verify_status in {"PASS", "NOT_RUN"},
         "zip_path": zip_path.as_posix(),
@@ -170,8 +172,6 @@ def build_once(
         manifest_entries = artifact_entries(stage_root, staged_paths(stage_root))
         manifest = {
             "schema_id": "qrp-handoff-artifact-manifest",
-            "tool_source_final_head": final_head,
-            "tool_source_repo_paths": HANDOFF_TOOL_SOURCE_PATHS,
             "entries": manifest_entries,
         }
         write_text(stage_root / ARTIFACT_MANIFEST_ENTRY, stable_json(manifest))

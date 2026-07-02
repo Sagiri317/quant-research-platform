@@ -22,6 +22,7 @@ def test_handoff_contract_modules_are_present_and_own_contracts() -> None:
     assert receipt_contract.is_file()
     assert "REQUIRED_HANDOFF_ENTRIES" in _source(handoff_contract)
     assert "ALLOWED_SIDECAR_KEYS" in _source(handoff_contract)
+    assert "ARTIFACT_MANIFEST_KEYS" in _source(handoff_contract)
     assert "validate_receipt_payload" in _source(receipt_contract)
     assert "REQUIRED_RECEIPT_FILES" in _source(receipt_contract)
     governance = _source(governance_contract)
@@ -29,6 +30,7 @@ def test_handoff_contract_modules_are_present_and_own_contracts() -> None:
     assert "ALLOWED_SIDECAR_KEYS" not in governance
     assert "REQUIRED_RECEIPT_FILES" not in governance
     assert "validate_receipt_payload" not in governance
+    assert "ARTIFACT_MANIFEST_KEYS" not in governance
 
 
 def test_collector_builder_verifier_do_not_own_receipt_validators() -> None:
@@ -73,11 +75,23 @@ def test_builder_and_verifier_call_evidence_graph_validator() -> None:
     assert required_calls <= verifier_calls
 
 
+def test_verifier_uses_handoff_contract_for_artifact_manifest_schema() -> None:
+    handoff_contract = _source(HANDOFF_ROOT / "handoff_contract.py")
+    verifier_calls = _function_calls(HANDOFF_ROOT / "verify_handoff_package.py")
+
+    assert "ARTIFACT_MANIFEST_KEYS" in handoff_contract
+    assert "validate_artifact_manifest_contract" in handoff_contract
+    assert "validate_artifact_manifest_contract" in verifier_calls
+
+
 def test_receipt_contract_owns_receipt_invariants_not_builder_or_verifier() -> None:
     receipt_contract = _source(HANDOFF_ROOT / "receipt_contract.py")
     assert "check_receipts_empty_pass_invalid" in receipt_contract
     assert "package_smoke_status_mismatch" in receipt_contract
     assert "hard_scan_status_mismatch" in receipt_contract
+    assert "CHECK_RECEIPT_ROW_KEYS" in receipt_contract
+    assert "ADVISORY_FINDING_KEYS" in receipt_contract
+    assert "HARD_SCAN_CLASSIFIED_EXCEPTION_KEYS" in receipt_contract
     for path in (
         HANDOFF_ROOT / "build_handoff_package.py",
         HANDOFF_ROOT / "verify_handoff_package.py",
@@ -86,6 +100,19 @@ def test_receipt_contract_owns_receipt_invariants_not_builder_or_verifier() -> N
         assert "check_receipts_empty_pass_invalid" not in source
         assert "package_smoke_status_mismatch" not in source
         assert "hard_scan_status_mismatch" not in source
+
+
+def test_artifact_manifest_tool_source_claims_are_not_emitted_or_allowed() -> None:
+    execution_combined = "\n".join(
+        _source(path)
+        for path in (
+            HANDOFF_ROOT / "build_handoff_package.py",
+            HANDOFF_ROOT / "verify_handoff_package.py",
+        )
+    )
+
+    assert "tool_source_final_head" not in execution_combined
+    assert "tool_source_repo_paths" not in execution_combined
 
 
 def test_retired_execution_symbols_are_absent_from_execution_path() -> None:

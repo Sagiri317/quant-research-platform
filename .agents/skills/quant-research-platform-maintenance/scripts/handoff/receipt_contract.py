@@ -62,6 +62,80 @@ FORBIDDEN_RECEIPT_FILES = frozenset(Path(entry).name for entry in FORBIDDEN_HAND
 FORBIDDEN_RECEIPT_KEYS = frozenset(
     {"stdout", "stderr", "raw_output", "raw_grep_output", "grep_hits"}
 )
+PACKAGE_SMOKE_RECEIPT_KEYS = frozenset(
+    {"schema_id", "status", "wheel", "sdist", "install", "import", "content_scan"}
+)
+PACKAGE_SMOKE_ARTIFACT_KEYS = frozenset({"filename", "sha256"})
+PACKAGE_SMOKE_INSTALL_KEYS = frozenset({"target_kind", "no_deps", "status"})
+PACKAGE_SMOKE_IMPORT_KEYS = frozenset({"status"})
+PACKAGE_SMOKE_CONTENT_SCAN_KEYS = frozenset(
+    {"status", "forbidden_member_count", "scanned_artifact_kinds", "examples"}
+)
+HARD_SCAN_RECEIPT_KEYS = frozenset(
+    {
+        "schema_id",
+        "status",
+        "scanned_head",
+        "scanner_source_sha256",
+        "scan_runs",
+        "classified_exceptions",
+    }
+)
+HARD_SCAN_RUN_KEYS = frozenset(
+    {
+        "scan_id",
+        "rule_set_id",
+        "match_count",
+        "actual_violation_count",
+        "deferred_count",
+        "negative_fixture_count",
+        "false_positive_count",
+        "result_sha256",
+        "replayable_from_bundle",
+    }
+)
+HARD_SCAN_CLASSIFIED_EXCEPTION_KEYS = frozenset(
+    {"scan_id", "classification", "owner", "rationale", "reference"}
+)
+HARD_SCAN_CLASSIFICATION_VALUES = frozenset(
+    {"false_positive", "deferred", "allowed_exception"}
+)
+CHECK_RECEIPTS_KEYS = frozenset({"schema_id", "status", "checks", "not_run_reason"})
+CHECK_RECEIPT_ROW_KEYS = frozenset(
+    {
+        "schema_id",
+        "command_id",
+        "scope",
+        "command",
+        "command_argv",
+        "status",
+        "exit_code",
+        "duration_seconds",
+        "counts",
+        "stdout_sha256",
+        "stderr_sha256",
+        "output_summary",
+        "failure_excerpt",
+        "not_run_reason",
+        "blocked_reason",
+    }
+)
+ADVISORY_REVIEW_RECEIPT_KEYS = frozenset(
+    {
+        "schema_id",
+        "status",
+        "review_lanes",
+        "finding_count",
+        "true_issue_count",
+        "false_positive_count",
+        "re_review_status",
+        "findings",
+    }
+)
+ADVISORY_FINDING_KEYS = frozenset(
+    {"finding_id", "classification", "resolved", "summary"}
+)
+ADVISORY_FINDING_CLASSIFICATIONS = frozenset({"true_issue", "false_positive"})
 COUNT_KEYS = frozenset(
     {
         "passed",
@@ -141,7 +215,7 @@ def validate_receipt_payload(name: str, payload: Mapping[str, object]) -> list[s
 
 
 def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
-    failures = required(payload, ("schema_id", "status", "wheel", "sdist", "install", "import", "content_scan"), "package_smoke")
+    failures = exact_keys(payload, PACKAGE_SMOKE_RECEIPT_KEYS, "package_smoke")
     if payload.get("schema_id") != "qrp-package-smoke-receipt":
         failures.append("package_smoke_schema_id_invalid")
     if payload.get("status") not in VALID_STATUS_TOKENS:
@@ -151,21 +225,45 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
         if not isinstance(item, Mapping):
             failures.append(f"package_smoke_artifact_invalid: {key}")
             continue
+        failures.extend(
+            exact_keys(item, PACKAGE_SMOKE_ARTIFACT_KEYS, f"package_smoke_{key}")
+        )
         if not isinstance(item.get("filename"), str):
             failures.append(f"package_smoke_filename_invalid: {key}")
         if not sha_or_empty(item.get("sha256")):
             failures.append(f"package_smoke_sha256_invalid: {key}")
     step_statuses: list[str] = []
-    for key in ("install", "import"):
-        item = payload.get(key)
-        if not isinstance(item, Mapping) or item.get("status") not in VALID_STATUS_TOKENS:
-            failures.append(f"package_smoke_step_status_invalid: {key}")
+    install = payload.get("install")
+    if not isinstance(install, Mapping):
+        failures.append("package_smoke_step_status_invalid: install")
+    else:
+        failures.extend(exact_keys(install, PACKAGE_SMOKE_INSTALL_KEYS, "package_smoke_install"))
+        if install.get("status") not in VALID_STATUS_TOKENS:
+            failures.append("package_smoke_step_status_invalid: install")
         else:
-            step_statuses.append(str(item.get("status")))
+            step_statuses.append(str(install.get("status")))
+        if not isinstance(install.get("target_kind"), str) or not str(
+            install.get("target_kind")
+        ).strip():
+            failures.append("package_smoke_install_target_kind_invalid")
+        if not isinstance(install.get("no_deps"), bool):
+            failures.append("package_smoke_install_no_deps_invalid")
+    imported = payload.get("import")
+    if not isinstance(imported, Mapping):
+        failures.append("package_smoke_step_status_invalid: import")
+    else:
+        failures.extend(exact_keys(imported, PACKAGE_SMOKE_IMPORT_KEYS, "package_smoke_import"))
+        if imported.get("status") not in VALID_STATUS_TOKENS:
+            failures.append("package_smoke_step_status_invalid: import")
+        else:
+            step_statuses.append(str(imported.get("status")))
     scan = payload.get("content_scan")
     if not isinstance(scan, Mapping):
         failures.append("package_smoke_content_scan_invalid")
     else:
+        failures.extend(
+            exact_keys(scan, PACKAGE_SMOKE_CONTENT_SCAN_KEYS, "package_smoke_content_scan")
+        )
         scan_status = scan.get("status")
         if scan_status not in VALID_STATUS_TOKENS:
             failures.append("package_smoke_content_scan_status_invalid")
@@ -181,6 +279,8 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
             "install_target",
         }:
             failures.append("package_smoke_scanned_artifact_kinds_invalid")
+        if not isinstance(scan.get("examples"), list):
+            failures.append("package_smoke_content_scan_examples_invalid")
     if (
         step_statuses
         and payload.get("status") in VALID_STATUS_TOKENS
@@ -191,18 +291,7 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
 
 
 def validate_hard_scan_receipt(payload: Mapping[str, object]) -> list[str]:
-    failures = required(
-        payload,
-        (
-            "schema_id",
-            "status",
-            "scanned_head",
-            "scanner_source_sha256",
-            "scan_runs",
-            "classified_exceptions",
-        ),
-        "hard_scan",
-    )
+    failures = exact_keys(payload, HARD_SCAN_RECEIPT_KEYS, "hard_scan")
     if payload.get("schema_id") != "qrp-hard-scan-receipt":
         failures.append("hard_scan_schema_id_invalid")
     if payload.get("status") not in VALID_STATUS_TOKENS:
@@ -222,9 +311,19 @@ def validate_hard_scan_receipt(payload: Mapping[str, object]) -> list[str]:
             if not isinstance(row, Mapping):
                 failures.append(f"hard_scan_run_invalid: {index}")
                 continue
+            failures.extend(exact_keys(row, HARD_SCAN_RUN_KEYS, f"hard_scan_run:{index}"))
             for key in ("scan_id", "rule_set_id", "result_sha256"):
                 if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
                     failures.append(f"hard_scan_run_missing: {index}:{key}")
+            for key in (
+                "match_count",
+                "actual_violation_count",
+                "deferred_count",
+                "negative_fixture_count",
+                "false_positive_count",
+            ):
+                if not isinstance(row.get(key), int) or int(row.get(key)) < 0:
+                    failures.append(f"hard_scan_run_count_invalid: {index}:{key}")
             if not sha(row.get("result_sha256")):
                 failures.append(f"hard_scan_result_sha256_invalid: {index}")
             if row.get("replayable_from_bundle") is not True:
@@ -235,15 +334,45 @@ def validate_hard_scan_receipt(payload: Mapping[str, object]) -> list[str]:
                 statuses.append("FAIL")
             else:
                 statuses.append("PASS")
-    if not isinstance(payload.get("classified_exceptions"), list):
+    exceptions = payload.get("classified_exceptions")
+    if not isinstance(exceptions, list):
         failures.append("hard_scan_classified_exceptions_invalid")
+    else:
+        for index, row in enumerate(exceptions):
+            if not isinstance(row, Mapping):
+                failures.append(f"hard_scan_classified_exception_invalid: {index}")
+                continue
+            failures.extend(
+                exact_keys(
+                    row,
+                    HARD_SCAN_CLASSIFIED_EXCEPTION_KEYS,
+                    f"hard_scan_classified_exception:{index}",
+                )
+            )
+            for key in HARD_SCAN_CLASSIFIED_EXCEPTION_KEYS:
+                if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
+                    failures.append(
+                        f"hard_scan_classified_exception_string_invalid: {index}:{key}"
+                    )
+            classification = row.get("classification")
+            if classification not in HARD_SCAN_CLASSIFICATION_VALUES:
+                failures.append(
+                    f"hard_scan_classified_exception_classification_invalid: {index}"
+                )
+            if classification == "actual_violation":
+                failures.append(f"hard_scan_classified_exception_actual_violation: {index}")
     if statuses and payload.get("status") != _aggregate_validation_matrix_status(statuses):
         failures.append("hard_scan_status_mismatch")
     return failures
 
 
 def validate_check_receipts(payload: Mapping[str, object]) -> list[str]:
-    failures = required(payload, ("schema_id", "status", "checks"), "check_receipts")
+    failures = exact_keys(
+        payload,
+        CHECK_RECEIPTS_KEYS,
+        "check_receipts",
+        required=frozenset({"schema_id", "status", "checks"}),
+    )
     if payload.get("schema_id") != "qrp-check-receipts":
         failures.append("check_receipts_schema_id_invalid")
     if payload.get("status") not in VALID_STATUS_TOKENS:
@@ -260,6 +389,8 @@ def validate_check_receipts(payload: Mapping[str, object]) -> list[str]:
         payload.get("not_run_reason") or ""
     ).strip():
         failures.append("check_receipts_empty_not_run_reason_missing")
+    if checks and "not_run_reason" in payload:
+        failures.append("check_receipts_not_run_reason_unexpected")
     statuses: list[str] = []
     seen: set[str] = set()
     for index, row in enumerate(checks):
@@ -285,24 +416,28 @@ def validate_check_receipt_row(
     *,
     index: int = 0,
 ) -> list[str]:
-    failures: list[str] = []
-    for key in (
-        "schema_id",
-        "command_id",
-        "scope",
-        "command",
-        "command_argv",
-        "status",
-        "exit_code",
-        "duration_seconds",
-        "counts",
-        "stdout_sha256",
-        "stderr_sha256",
-        "output_summary",
-        "failure_excerpt",
-    ):
-        if key not in row:
-            failures.append(f"check_receipt_missing: {index}:{key}")
+    failures = exact_keys(
+        row,
+        CHECK_RECEIPT_ROW_KEYS,
+        f"check_receipt:{index}",
+        required=frozenset(
+            {
+                "schema_id",
+                "command_id",
+                "scope",
+                "command",
+                "command_argv",
+                "status",
+                "exit_code",
+                "duration_seconds",
+                "counts",
+                "stdout_sha256",
+                "stderr_sha256",
+                "output_summary",
+                "failure_excerpt",
+            }
+        ),
+    )
     if row.get("schema_id") != "qrp-check-receipt":
         failures.append(f"check_receipt_schema_id_invalid: {index}")
     for key in ("command_id", "scope", "command"):
@@ -324,15 +459,27 @@ def validate_check_receipt_row(
     if status == "PASS":
         if exit_code != 0:
             failures.append(f"check_receipt_pass_exit_code_invalid: {index}")
+        if "not_run_reason" in row or "blocked_reason" in row:
+            failures.append(f"check_receipt_reason_unexpected: {index}")
     elif status == "FAIL":
         if not isinstance(exit_code, int) or exit_code == 0:
             failures.append(f"check_receipt_fail_exit_code_invalid: {index}")
+        if "not_run_reason" in row or "blocked_reason" in row:
+            failures.append(f"check_receipt_reason_unexpected: {index}")
     elif status == "NOT_RUN":
+        if exit_code is not None:
+            failures.append(f"check_receipt_not_run_exit_code_invalid: {index}")
         if not str(row.get("not_run_reason") or "").strip():
             failures.append(f"check_receipt_not_run_reason_missing: {index}")
+        if "blocked_reason" in row:
+            failures.append(f"check_receipt_reason_unexpected: {index}")
     elif status == "BLOCKED":
+        if exit_code is not None:
+            failures.append(f"check_receipt_blocked_exit_code_invalid: {index}")
         if not str(row.get("blocked_reason") or "").strip():
             failures.append(f"check_receipt_blocked_reason_missing: {index}")
+        if "not_run_reason" in row:
+            failures.append(f"check_receipt_reason_unexpected: {index}")
     counts = row.get("counts")
     if counts is not None:
         if not isinstance(counts, Mapping) or set(counts) != COUNT_KEYS:
@@ -349,6 +496,10 @@ def validate_check_receipt_row(
                 failures.append(f"check_receipt_counts_collected_mismatch: {index}")
             if status == "PASS" and (counts["failed"] != 0 or counts["errors"] != 0):
                 failures.append(f"check_receipt_pass_counts_invalid: {index}")
+            if status == "NOT_RUN" and any(int(value) != 0 for value in counts.values()):
+                failures.append(f"check_receipt_not_run_counts_invalid: {index}")
+            if status == "BLOCKED" and any(int(value) != 0 for value in counts.values()):
+                failures.append(f"check_receipt_blocked_counts_invalid: {index}")
     duration = row.get("duration_seconds")
     if not isinstance(duration, int | float) or duration < 0:
         failures.append(f"check_receipt_duration_invalid: {index}")
@@ -362,20 +513,7 @@ def validate_check_receipt_row(
 
 
 def validate_advisory_review_receipt(payload: Mapping[str, object]) -> list[str]:
-    failures = required(
-        payload,
-        (
-            "schema_id",
-            "status",
-            "review_lanes",
-            "finding_count",
-            "true_issue_count",
-            "false_positive_count",
-            "re_review_status",
-            "findings",
-        ),
-        "advisory_review",
-    )
+    failures = exact_keys(payload, ADVISORY_REVIEW_RECEIPT_KEYS, "advisory_review")
     if payload.get("schema_id") != "qrp-advisory-review-receipt":
         failures.append("advisory_review_schema_id_invalid")
     for key in ("status", "re_review_status"):
@@ -389,6 +527,46 @@ def validate_advisory_review_receipt(payload: Mapping[str, object]) -> list[str]
     findings = payload.get("findings")
     if not isinstance(findings, list):
         failures.append("advisory_review_findings_invalid")
+        return failures
+    true_issue_count = 0
+    false_positive_count = 0
+    unresolved_true_issue = False
+    for index, row in enumerate(findings):
+        if not isinstance(row, Mapping):
+            failures.append(f"advisory_finding_invalid: {index}")
+            continue
+        failures.extend(exact_keys(row, ADVISORY_FINDING_KEYS, f"advisory_finding:{index}"))
+        for key in ("finding_id", "summary"):
+            if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
+                failures.append(f"advisory_finding_string_invalid: {index}:{key}")
+        classification = row.get("classification")
+        if classification not in ADVISORY_FINDING_CLASSIFICATIONS:
+            failures.append(f"advisory_finding_classification_invalid: {index}")
+            continue
+        if not isinstance(row.get("resolved"), bool):
+            failures.append(f"advisory_finding_resolved_invalid: {index}")
+        if classification == "true_issue":
+            true_issue_count += 1
+            if row.get("resolved") is not True:
+                unresolved_true_issue = True
+        elif classification == "false_positive":
+            false_positive_count += 1
+    if isinstance(payload.get("finding_count"), int) and payload.get(
+        "finding_count"
+    ) != len(findings):
+        failures.append("advisory_review_finding_count_mismatch")
+    if isinstance(payload.get("true_issue_count"), int) and payload.get(
+        "true_issue_count"
+    ) != true_issue_count:
+        failures.append("advisory_review_true_issue_count_mismatch")
+    if isinstance(payload.get("false_positive_count"), int) and payload.get(
+        "false_positive_count"
+    ) != false_positive_count:
+        failures.append("advisory_review_false_positive_count_mismatch")
+    if payload.get("status") == "PASS" and payload.get("re_review_status") != "PASS":
+        failures.append("advisory_review_pass_re_review_status_mismatch")
+    if payload.get("status") == "PASS" and unresolved_true_issue:
+        failures.append("advisory_review_pass_with_unresolved_true_issue")
     return failures
 
 
@@ -439,6 +617,32 @@ def required(
     prefix: str,
 ) -> list[str]:
     return [f"{prefix}_missing: {key}" for key in keys if key not in payload]
+
+
+def exact_keys(
+    payload: Mapping[str, object],
+    allowed: frozenset[str],
+    prefix: str,
+    *,
+    required: frozenset[str] | None = None,
+) -> list[str]:
+    required_keys = allowed if required is None else required
+    if ":" in prefix:
+        label, _, index = prefix.partition(":")
+        failures = [
+            f"{label}_missing: {index}:{key}"
+            for key in sorted(required_keys - set(payload))
+        ]
+        failures.extend(
+            f"{label}_unapproved_field: {index}:{key}"
+            for key in sorted(set(payload) - allowed)
+        )
+        return failures
+    failures = [f"{prefix}_missing: {key}" for key in sorted(required_keys - set(payload))]
+    failures.extend(
+        f"{prefix}_unapproved_field: {key}" for key in sorted(set(payload) - allowed)
+    )
+    return failures
 
 
 def sha(value: object) -> bool:
