@@ -507,18 +507,6 @@ def scan_clone_tree_for_share_safety(
         failures.extend(
             f"{name_prefix}_{failure}" for failure in member_name_failures(relative)
         )
-        if Path(relative).suffix.lower() not in TEXT_LIKE_SUFFIXES:
-            continue
-        raw_file = (clone_dir / relative).read_bytes()
-        failures.extend(
-            f"{name_prefix}_{failure}"
-            for failure in text_file_failures(
-                raw_file,
-                relative=Path(relative),
-                actual_path=clone_dir / relative,
-                name=f"{name_prefix}/{relative}",
-            )
-        )
     for group_name, group_payload in sorted(source_tree_scan_groups(clone_dir).items()):
         findings = list(group_payload.get("findings") or [])
         failures.extend(
