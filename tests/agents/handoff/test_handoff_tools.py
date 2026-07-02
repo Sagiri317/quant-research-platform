@@ -101,7 +101,7 @@ def test_handoff_package_verifier_scans_json_sidecar_absolute_paths(
     result = module.scan_target(sidecar)
 
     assert not result.ok
-    assert any("local absolute path" in error for error in result.errors)
+    assert "sidecar_local_absolute_path_text: sidecar.json" in result.failures
 
 
 def test_handoff_package_verifier_allows_scanner_pattern_definitions(
@@ -131,7 +131,8 @@ def test_handoff_package_verifier_rejects_data_research_members_and_paths(
     result = module.scan_handoff_zip(package)
 
     assert not result.ok
-    assert any("forbidden_path_segment" in error for error in result.errors)
+    assert "forbidden_path_segment" in result.failures
+    assert "forbidden_path_segment: data/research" in result.failures
 
 
 @pytest.mark.parametrize(
@@ -154,7 +155,7 @@ def test_handoff_package_verifier_rejects_local_run_members(
     result = module.scan_handoff_zip(package)
 
     assert not result.ok
-    assert any("forbidden_path_segment" in error for error in result.errors)
+    assert "forbidden_path_segment" in result.failures
 
 
 @pytest.mark.parametrize(
@@ -182,7 +183,7 @@ def test_handoff_package_verifier_rejects_private_provider_markers(
     result = module.scan_handoff_zip(package)
 
     assert not result.ok
-    assert any("vendor marker" in error for error in result.errors)
+    assert "vendor_marker_text: handoff_evidence/leak.md" in result.failures
 
 
 def test_handoff_package_verifier_large_text_skip_is_fail_closed(
@@ -197,4 +198,4 @@ def test_handoff_package_verifier_large_text_skip_is_fail_closed(
     result = module.scan_handoff_zip(package)
 
     assert not result.ok
-    assert any("text scan exceeded maximum size" in error for error in result.errors)
+    assert "text scan exceeded maximum size: handoff_evidence/large.md" in result.failures

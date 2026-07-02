@@ -14,20 +14,9 @@ from pathlib import PurePosixPath
 try:
     from quant_research_platform.policy.check_status import (
         VALID_STATUS_TOKENS,
-        aggregate_validation_matrix_status as _aggregate_validation_matrix_status,
     )
 except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit src.
     VALID_STATUS_TOKENS = frozenset({"PASS", "FAIL", "NOT_RUN", "BLOCKED"})
-
-    def _aggregate_validation_matrix_status(statuses: Iterable[str]) -> str:
-        values = list(statuses)
-        if "FAIL" in values:
-            return "FAIL"
-        if "BLOCKED" in values:
-            return "BLOCKED"
-        if "NOT_RUN" in values:
-            return "NOT_RUN"
-        return "PASS"
 
 
 class ProofClass(str, Enum):
@@ -35,7 +24,6 @@ class ProofClass(str, Enum):
     DERIVED_FROM_REPLAY = "DERIVED_FROM_REPLAY"
     IDENTITY_BOUND = "IDENTITY_BOUND"
     METADATA_VALIDATED = "METADATA_VALIDATED"
-    ABSENCE_DECLARATION = "ABSENCE_DECLARATION"
 
 
 @dataclass(frozen=True)
@@ -49,7 +37,6 @@ class ValidationRowSource:
     proof_class: ProofClass
     receipt_entry: str | None = None
     command_id: str | None = None
-    fixed_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,7 +79,6 @@ SIDECAR_FIELD_SPECS = {
 TASK_METADATA_FIELD_SPECS = {
     "schema_id": FieldSpec(ProofClass.METADATA_VALIDATED),
     "task_name": FieldSpec(ProofClass.METADATA_VALIDATED),
-    "mode": FieldSpec(ProofClass.METADATA_VALIDATED),
     "branch": FieldSpec(ProofClass.IDENTITY_BOUND),
     "base": FieldSpec(ProofClass.IDENTITY_BOUND),
     "final_head": FieldSpec(ProofClass.IDENTITY_BOUND),
@@ -123,8 +109,6 @@ MANDATORY_VALIDATION_ROWS = (
     "scripted_checks",
     "package_smoke",
     "profile_smoke",
-    "private_validation",
-    "baseline_compare",
     "governance",
     "code_map",
 )
@@ -142,14 +126,6 @@ VALIDATION_ROW_SOURCE_CONTRACT = {
         ProofClass.DERIVED_FROM_REPLAY,
         receipt_entry=CHECK_RECEIPTS_ENTRY,
         command_id="profile-smoke",
-    ),
-    "private_validation": ValidationRowSource(
-        ProofClass.ABSENCE_DECLARATION,
-        fixed_status="NOT_RUN",
-    ),
-    "baseline_compare": ValidationRowSource(
-        ProofClass.ABSENCE_DECLARATION,
-        fixed_status="NOT_RUN",
     ),
     "governance": ValidationRowSource(
         ProofClass.DERIVED_FROM_REPLAY,
@@ -182,19 +158,6 @@ REPLAY_COMMAND_CONTRACT = {
 }
 
 
-class EvidenceGraph:
-    """Derive validation rows from canonical replay receipts."""
-
-    def __init__(self, receipts: Mapping[str, Mapping[str, object]]) -> None:
-        self._receipts = receipts
-
-    def status_map(self) -> dict[str, str]:
-        return expected_validation_status_map_from_receipts(self._receipts)
-
-    def validation_summary(self) -> dict[str, object]:
-        return build_validation_summary_from_receipts(self._receipts)
-
-
 def allowed_keys(specs: Mapping[str, FieldSpec]) -> frozenset[str]:
     return frozenset(specs)
 
@@ -222,17 +185,10 @@ def validate_sidecar_contract(payload: Mapping[str, object]) -> list[str]:
     return failures
 
 
-def validate_task_metadata_contract(
-    payload: Mapping[str, object],
-    *,
-    mode: str | None = None,
-) -> list[str]:
+def validate_task_metadata_contract(payload: Mapping[str, object]) -> list[str]:
     failures = exact_keys(payload, TASK_METADATA_FIELD_SPECS, "task_metadata")
     if payload.get("schema_id") != "qrp-handoff-task-metadata":
         failures.append("task_metadata_schema_id_invalid")
-    effective_mode = str(mode if mode is not None else payload.get("mode") or "")
-    if effective_mode not in {"evidence", "pr_closure"}:
-        failures.append(f"task_metadata_mode_invalid: {effective_mode}")
     for key in ("task_name", "branch", "base", "final_head"):
         if not isinstance(payload.get(key), str) or not str(payload.get(key)).strip():
             failures.append(f"task_metadata_required_string_missing: {key}")
@@ -324,9 +280,7 @@ def expected_validation_status_map_from_receipts(
     result: dict[str, str] = {}
     check_rows = check_rows_by_command_id(receipts.get(CHECK_RECEIPTS_ENTRY, {}))
     for row_name, source in VALIDATION_ROW_SOURCE_CONTRACT.items():
-        if source.fixed_status is not None:
-            result[row_name] = source.fixed_status
-        elif source.command_id is not None:
+        if source.command_id is not None:
             command_row = check_rows.get(source.command_id)
             result[row_name] = _status_or_not_run(command_row.get("status") if command_row else None)
         elif source.receipt_entry is not None:
@@ -376,24 +330,6 @@ def validate_validation_summary_against_receipts(
                     f"validation_summary_status_mismatch: {name}:{status}!={expected}"
                 )
     return failures
-
-
-def validation_summary_status_map(payload: Mapping[str, object]) -> dict[str, str]:
-    failures = validate_validation_summary_contract(payload)
-    if failures:
-        raise SystemExit(";".join(failures))
-    rows = payload["rows"]
-    assert isinstance(rows, list)
-    return {
-        str(row["name"]): str(row["status"])
-        for row in rows
-        if isinstance(row, Mapping)
-    }
-
-
-def aggregate_validation_summary_status(payload: Mapping[str, object]) -> str:
-    statuses = validation_summary_status_map(payload)
-    return _aggregate_validation_matrix_status(statuses.values())
 
 
 def check_rows_by_command_id(

@@ -20,8 +20,8 @@ QRP 是本地量化研究平台，不是生产交易系统，不是 live trading
 - 未运行写 `NOT_RUN`。
 - 环境、权限、依赖、超时阻塞写 `BLOCKED`。
 - 不允许把 sidecar PASS、single handoff verifier safety scan PASS、pytest PASS、compare PASS 互相替代。
-- formal handoff evidence 必须是 compact replayable receipts：可重放检查从 `final-branch.bundle` 重放并比对 count/hash；当前 machine handoff 中不可重放 private/local 检查只作为 `NOT_RUN` absence declaration。
-- Codex 不应手写 handoff evidence；正式 builder 只读取当前 Git state 和 `--repo-root`、`--out-dir`、`--task-name`、`--base-ref`、`--mode`、`--verify`，machine evidence 由 replay 自动生成。
+- formal handoff evidence 必须是 compact replayable receipts：machine validation rows 只来自 replay-backed receipts；verifier 从 `final-branch.bundle` 重放并比对 count/hash。
+- Codex 不应手写 handoff evidence；正式 builder 只读取当前 Git state 和 `--repo-root`、`--out-dir`、`--task-name`、`--base-ref`，machine evidence 由 replay 自动生成，且 builder 永远运行 verifier。
 - human/advisory review 是独立人类审查输出，不进入 machine handoff，不支撑 machine validation `PASS`。
 - sandbox 或 Codex 环境中，允许在边界内安装缺失依赖进行测试；缺依赖不是默认跳过理由。
 

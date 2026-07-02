@@ -23,6 +23,27 @@ def _assert_field_specs_have_proof(specs: Mapping[str, object]) -> None:
 def test_handoff_generated_fields_have_proof_classes() -> None:
     handoff_contract = _load_handoff_module("handoff_contract")
 
+    assert set(handoff_contract.ProofClass.__members__) == {
+        "REPLAYED",
+        "DERIVED_FROM_REPLAY",
+        "IDENTITY_BOUND",
+        "METADATA_VALIDATED",
+    }
+    assert set(handoff_contract.TASK_METADATA_FIELD_SPECS) == {
+        "schema_id",
+        "task_name",
+        "branch",
+        "base",
+        "final_head",
+    }
+    assert set(handoff_contract.MANDATORY_VALIDATION_ROWS) == {
+        "scripted_checks",
+        "package_smoke",
+        "profile_smoke",
+        "governance",
+        "code_map",
+    }
+
     for name in (
         "SIDECAR_FIELD_SPECS",
         "TASK_METADATA_FIELD_SPECS",
@@ -83,7 +104,6 @@ def test_status_pass_proof_classes_are_replayed_or_derived() -> None:
     }
     forbidden = {
         handoff_contract.ProofClass.METADATA_VALIDATED,
-        handoff_contract.ProofClass.ABSENCE_DECLARATION,
     }
     status_specs = [
         handoff_contract.VALIDATION_ROW_FIELD_SPECS["status"],
@@ -101,7 +121,6 @@ def test_status_pass_proof_classes_are_replayed_or_derived() -> None:
         assert spec.proof_class in allowed
         assert spec.proof_class not in forbidden
 
-    for source in handoff_contract.VALIDATION_ROW_SOURCE_CONTRACT.values():
-        if source.fixed_status == "PASS":
-            assert source.proof_class in allowed
-            assert source.proof_class not in forbidden
+    assert set(handoff_contract.VALIDATION_ROW_SOURCE_CONTRACT) == set(
+        handoff_contract.MANDATORY_VALIDATION_ROWS
+    )

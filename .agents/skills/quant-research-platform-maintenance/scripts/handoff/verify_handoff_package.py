@@ -96,22 +96,6 @@ class HandoffSafetyResult:
     def ok(self) -> bool:
         return not self.failures
 
-    @property
-    def errors(self) -> tuple[str, ...]:
-        return (*self.failures, *(failure.replace("_", " ") for failure in self.failures))
-
-    def to_text(self) -> str:
-        lines = [
-            "share_safety_status=" + ("PASS" if self.ok else "FAIL"),
-            f"member_count={self.member_count}",
-            f"text_like_count={self.text_like_count}",
-            f"bundle_member_count={self.bundle_member_count}",
-            f"bundle_text_like_count={self.bundle_text_like_count}",
-            f"sidecar_text_like_count={self.sidecar_text_like_count}",
-        ]
-        lines.extend(self.failures)
-        return "\n".join(lines) + "\n"
-
 
 def main() -> int:
     parser = argparse.ArgumentParser()

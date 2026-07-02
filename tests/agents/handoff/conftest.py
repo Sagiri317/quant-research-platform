@@ -58,7 +58,7 @@ def _copy_valid_package(source: tuple[Path, Path], target: Path) -> tuple[Path, 
     return package, sidecar
 
 
-def _build_test_package(tmp_path: Path, *, verify: bool = False) -> tuple[Path, Path, Path, str, str]:
+def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
     builder = _load_handoff_module("build_handoff_package")
     repo = tmp_path / "repo"
     base, final_head = _init_handoff_repo(repo)
@@ -67,8 +67,6 @@ def _build_test_package(tmp_path: Path, *, verify: bool = False) -> tuple[Path, 
         out_dir=tmp_path / "out",
         task_name="handoff-test",
         base_ref="origin/main",
-        mode="evidence",
-        verify=verify,
     )
     assert result["zip_path"]
     return repo, Path(result["zip_path"]), Path(result["json_path"]), base, final_head

@@ -3011,17 +3011,6 @@ RETIRED_HANDOFF_ENTRY_NAMES = frozenset(
         "handoff_evidence/subagent-review-reconciliation.json",
     }
 )
-SUBAGENT_REVIEW_SEVERITIES = frozenset({"P0", "P1", "P2", "P3", "INFO"})
-SUBAGENT_REVIEW_CLASSIFICATIONS = frozenset(
-    {
-        "true_issue_to_fix",
-        "false_positive",
-        "valuable_deferred_feature_no_change",
-        "existing_base_issue_no_change",
-        "blocked_approval",
-        "no_findings",
-    }
-)
 
 
 def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:

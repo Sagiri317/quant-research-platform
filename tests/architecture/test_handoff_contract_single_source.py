@@ -80,18 +80,19 @@ def test_builder_exposes_only_scripted_handoff_cli() -> None:
 
     assert '"--task"' not in builder
     assert '"--receipts-dir"' not in builder
+    assert '"--mode"' not in builder
+    assert '"--verify"' not in builder
+    assert "pr_closure" not in builder
     assert "--task" not in flags
     assert "--receipts-dir" not in flags
-    for flag in (
+    assert "--mode" not in flags
+    assert "--verify" not in flags
+    assert flags == {
         "--repo-root",
         "--out-dir",
         "--task-name",
         "--base-ref",
-        "--mode",
-        "--verify",
-    ):
-        assert flag in builder
-        assert flag in flags
+    }
 
 
 def test_receipt_contract_is_payload_only() -> None:
@@ -123,12 +124,15 @@ def test_governance_contract_does_not_construct_hard_scan_receipts() -> None:
     governance_contract = SCRIPT_ROOT / "governance_contract.py"
     defs = _function_defs(governance_contract)
     names = _assigned_names(governance_contract)
+    source = _source(governance_contract)
 
     assert "hard_scan_receipt_from_clone" not in defs
     assert "hard_scan_receipt_from_bundle" not in defs
     assert "source_tree_scan_payload" not in defs
     assert "source_tree_scan_from_clone" not in defs
     assert "HARD_SCAN_CLASSIFICATIONS" not in names
+    assert "SUBAGENT_REVIEW_SEVERITIES" not in source
+    assert "SUBAGENT_REVIEW_CLASSIFICATIONS" not in source
     assert "source_tree_scan_groups" in defs
 
 
@@ -185,9 +189,27 @@ def test_dev_dependencies_include_package_build_backend_frontend() -> None:
 
 def test_verifier_has_no_parallel_contract_functions() -> None:
     verifier_defs = _function_defs(HANDOFF_ROOT / "verify_handoff_package.py")
+    source = _source(HANDOFF_ROOT / "verify_handoff_package.py")
 
     assert "verify_receipts" not in verifier_defs
     assert "verify_validation_summary_payload" not in verifier_defs
+    assert "to_text" not in verifier_defs
+    assert "def errors" not in source
+
+
+def test_handoff_contract_has_no_retired_verified_path_surfaces() -> None:
+    handoff_contract = HANDOFF_ROOT / "handoff_contract.py"
+    defs = _function_defs(handoff_contract)
+    classes = _class_defs(handoff_contract)
+    source = _source(handoff_contract)
+
+    assert "pr_closure" not in source
+    assert "ABSENCE_DECLARATION" not in source
+    assert "EvidenceGraph" not in classes
+    assert "validation_summary_status_map" not in defs
+    assert "aggregate_validation_summary_status" not in defs
+    assert "private_validation" not in source
+    assert "baseline_compare" not in source
 
 
 def test_advisory_machine_contract_is_absent() -> None:
@@ -237,6 +259,15 @@ def test_current_docs_do_not_describe_retired_handoff_inputs() -> None:
     for retired in (
         "Builder 只接受 task metadata 和 receipts-dir",
         "builder 只读取 task metadata 和 receipts-dir",
+        "--mode evidence",
+        "pr_closure",
+        "task_metadata.mode",
+        "EvidenceGraph",
+        "ABSENCE_DECLARATION",
+        "private_validation",
+        "baseline_compare",
+        "SUBAGENT_REVIEW_SEVERITIES",
+        "SUBAGENT_REVIEW_CLASSIFICATIONS",
         "--hard-scan-suite",
         "--receipt-out",
         "advisory-review-receipt",
@@ -311,7 +342,7 @@ def test_contract_modules_own_their_respective_boundaries() -> None:
     handoff_contract = _source(HANDOFF_ROOT / "handoff_contract.py")
     receipt_contract = _source(HANDOFF_ROOT / "receipt_contract.py")
 
-    assert "EvidenceGraph" in handoff_contract
+    assert "EvidenceGraph" not in handoff_contract
     assert "VALIDATION_ROW_SOURCE_CONTRACT" in handoff_contract
     assert "normalize_check_receipts" in receipt_contract
     assert "compare_check_receipts" in receipt_contract

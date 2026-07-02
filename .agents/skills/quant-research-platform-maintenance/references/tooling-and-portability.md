@@ -1,5 +1,8 @@
 # Tooling and Portability
 
+Handoff builder 的 CLI 范围只允许 `--repo-root`、`--out-dir`、`--task-name`
+和 `--base-ref`；builder 必须先运行 verifier，package 才能视为成功生成。
+
 本文件定义治理脚本、外部工具和可移植性边界。
 
 ## 1. 脚本原则

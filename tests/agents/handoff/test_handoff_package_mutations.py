@@ -269,6 +269,7 @@ def test_validation_summary_status_tamper_fails(
     ("member", "path", "field", "value", "expected"),
     (
         ("task_metadata.json", (), "task_slug", "old", "task_metadata_unapproved_field: task_slug"),
+        ("task_metadata.json", (), "mode", "evidence", "task_metadata_unapproved_field: mode"),
         (
             "handoff_evidence/validation-summary.json",
             ("rows", 0),
@@ -348,3 +349,25 @@ def test_deleted_fields_fail_when_present(
     failures = _verify(package, sidecar, cached_replayed_receipts)
 
     assert expected in failures
+
+
+@pytest.mark.parametrize("row_name", ("private_validation", "baseline_compare"))
+def test_deleted_validation_summary_rows_fail_when_present(
+    tmp_path: Path,
+    valid_handoff_package: tuple[Path, Path],
+    cached_replayed_receipts: dict[str, dict[str, Any]],
+    row_name: str,
+) -> None:
+    package, sidecar = _copy(tmp_path, valid_handoff_package)
+    payload = _read_member_json(package, "handoff_evidence/validation-summary.json")
+    payload["rows"].append({"name": row_name, "status": "NOT_RUN"})
+    mutate_handoff_zip_and_refresh_hashes(
+        package,
+        sidecar,
+        "handoff_evidence/validation-summary.json",
+        payload,
+    )
+
+    failures = _verify(package, sidecar, cached_replayed_receipts)
+
+    assert any("validation_summary_name_invalid" in failure for failure in failures)

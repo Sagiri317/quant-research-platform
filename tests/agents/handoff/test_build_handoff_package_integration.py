@@ -41,9 +41,6 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
             "handoff-test",
             "--base-ref",
             "origin/main",
-            "--mode",
-            "evidence",
-            "--verify",
         ],
         cwd=repo,
         capture_output=True,
@@ -80,11 +77,11 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
     assert set(task_metadata) == {
         "schema_id",
         "task_name",
-        "mode",
         "branch",
         "base",
         "final_head",
     }
+    assert "mode" not in task_metadata
     assert task_metadata["task_name"] == "handoff-test"
     assert task_metadata["final_head"] == final_head
     assert set(validation_summary) == {"schema_id", "rows"}
@@ -120,3 +117,5 @@ def test_builder_cli_has_no_external_task_or_receipts_args() -> None:
 
     assert '"--task"' not in source
     assert '"--receipts-dir"' not in source
+    assert '"--mode"' not in source
+    assert '"--verify"' not in source

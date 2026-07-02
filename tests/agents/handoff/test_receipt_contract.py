@@ -97,6 +97,14 @@ def _hard_scan_payload(**overrides: object) -> dict[str, object]:
     return payload
 
 
+def _valid_validation_summary_rows() -> list[dict[str, str]]:
+    handoff_contract = _load_handoff_module("handoff_contract")
+    return [
+        {"name": name, "status": "PASS"}
+        for name in handoff_contract.MANDATORY_VALIDATION_ROWS
+    ]
+
+
 def _failures(row: dict[str, object]) -> list[str]:
     contract = _load_handoff_module("receipt_contract")
     return contract.validate_check_receipt_row(row)
@@ -322,6 +330,39 @@ def test_hard_scan_rejects_actual_violation_with_top_pass() -> None:
     failures = contract.validate_hard_scan_receipt(payload)
 
     assert "hard_scan_status_mismatch" in failures
+
+
+@pytest.mark.parametrize("row_name", ("private_validation", "baseline_compare"))
+def test_validation_summary_rejects_deleted_rows(row_name: str) -> None:
+    handoff_contract = _load_handoff_module("handoff_contract")
+    rows = [*_valid_validation_summary_rows(), {"name": row_name, "status": "NOT_RUN"}]
+    payload = {"schema_id": "qrp-handoff-validation-summary", "rows": rows}
+
+    failures = handoff_contract.validate_validation_summary_contract(payload)
+
+    assert f"validation_summary_name_invalid: {len(rows) - 1}" in failures
+
+
+def test_task_metadata_rejects_deleted_mode_field() -> None:
+    handoff_contract = _load_handoff_module("handoff_contract")
+    payload = {
+        "schema_id": "qrp-handoff-task-metadata",
+        "task_name": "handoff-test",
+        "mode": "evidence",
+        "branch": "feature/test",
+        "base": "1" * 40,
+        "final_head": "2" * 40,
+    }
+
+    failures = handoff_contract.validate_task_metadata_contract(payload)
+
+    assert "task_metadata_unapproved_field: mode" in failures
+
+
+def test_proof_class_has_no_absence_declaration() -> None:
+    handoff_contract = _load_handoff_module("handoff_contract")
+
+    assert "ABSENCE_DECLARATION" not in handoff_contract.ProofClass.__members__
 
 
 def test_compare_functions_detect_replay_drift() -> None:

@@ -102,7 +102,7 @@ handoff scripts 位于：
 
 handoff package layout、sidecar、task metadata 和 validation summary 合同由 `handoff/handoff_contract.py` 拥有。receipt schema、receipt invariant、normalize 和 compare 规则由 `handoff/receipt_contract.py` 拥有。public machine replay 和 hard-scan receipt payload construction 由 `handoff/replay_evidence.py` 执行，但 replay 模块不定义合同或 compare 规则。`governance_contract.py` 只拥有治理扫描、source-tree scan、共享安全路径和 status token 规则。
 
-当前 handoff 流程只通过 `build_handoff_package.py --task-name ... --base-ref ... --mode evidence --verify` 生成；builder 从 Git state 和 replay 自动生成 machine evidence，verifier 从 `final-branch.bundle` clone replay 并比较 receipts。
+当前 handoff 流程只通过 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>` 生成；builder 从 Git state 和 replay 自动生成 machine evidence，永远运行 verifier；verifier 从 `final-branch.bundle` clone replay 并比较 receipts。
 
 `.agents/` 只承载 governance、handoff 和 prompt tooling；runtime 业务逻辑必须留在 `src/quant_research_platform/` 的 owner layer。
 

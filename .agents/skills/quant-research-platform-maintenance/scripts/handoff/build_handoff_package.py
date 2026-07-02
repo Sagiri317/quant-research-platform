@@ -43,8 +43,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", default=".run/handoffs")
     parser.add_argument("--task-name", required=True)
     parser.add_argument("--base-ref", required=True)
-    parser.add_argument("--mode", choices=("evidence", "pr_closure"), required=True)
-    parser.add_argument("--verify", action="store_true")
     args = parser.parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
     result = build_handoff_package(
@@ -52,8 +50,6 @@ def main(argv: list[str] | None = None) -> int:
         out_dir=resolve_path(repo_root, args.out_dir),
         task_name=args.task_name,
         base_ref=args.base_ref,
-        mode=args.mode,
-        verify=args.verify,
     )
     print(f"zip={result['zip_path']}")
     print(f"json={result['json_path']}")
@@ -76,11 +72,7 @@ def build_handoff_package(
     out_dir: Path,
     task_name: str,
     base_ref: str,
-    mode: str,
-    verify: bool,
 ) -> dict[str, object]:
-    if mode not in {"evidence", "pr_closure"}:
-        raise SystemExit(f"unsupported_handoff_mode: {mode}")
     branch = current_branch(repo_root)
     assert_worktree_clean(repo_root)
     final_head = git_text(repo_root, "rev-parse", "HEAD").strip()
@@ -90,7 +82,6 @@ def build_handoff_package(
     validation_summary = build_validation_summary_from_receipts(receipts)
     task = task_metadata(
         task_name=task_name,
-        mode=mode,
         branch=branch,
         base=base,
         final_head=final_head,
@@ -109,15 +100,12 @@ def build_handoff_package(
         branch=branch,
     )
     safety_status = scan_status(zip_path, json_path=json_path)
-    verify_status = "NOT_RUN"
-    verify_failures: list[str] = []
-    if verify:
-        from verify_handoff_package import verify_handoff_package
+    from verify_handoff_package import verify_handoff_package
 
-        verify_failures = verify_handoff_package(zip_path, json_path)
-        verify_status = "PASS" if not verify_failures else "FAIL"
+    verify_failures = verify_handoff_package(zip_path, json_path)
+    verify_status = "PASS" if not verify_failures else "FAIL"
     return {
-        "ok": safety_status == "PASS" and verify_status in {"PASS", "NOT_RUN"},
+        "ok": safety_status == "PASS" and verify_status == "PASS",
         "zip_path": zip_path.as_posix(),
         "json_path": json_path.as_posix(),
         "zip_sha256": sha256_file(zip_path),
@@ -164,7 +152,6 @@ def build_once(
 def task_metadata(
     *,
     task_name: str,
-    mode: str,
     branch: str,
     base: str,
     final_head: str,
@@ -172,12 +159,11 @@ def task_metadata(
     payload = {
         "schema_id": "qrp-handoff-task-metadata",
         "task_name": task_name,
-        "mode": mode,
         "branch": branch,
         "base": base,
         "final_head": final_head,
     }
-    failures = validate_task_metadata_contract(payload, mode=mode)
+    failures = validate_task_metadata_contract(payload)
     if failures:
         raise SystemExit(";".join(failures))
     return payload

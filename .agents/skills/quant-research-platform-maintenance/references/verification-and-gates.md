@@ -65,8 +65,13 @@ handoff layout gate 由 `handoff/handoff_contract.py` 和 `handoff/verify_handof
 Hard-scan gate 由正式 handoff builder/verifier 闭合：
 
 ```bash
-python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref> --mode evidence --verify
+python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>
 ```
+
+builder 从 Git state 和 replay 自动生成 machine evidence，然后永远运行
+verifier。verifier 从 `final-branch.bundle` replay，并比较 packaged receipts 与
+replayed receipts。`verify_governance.py` 只运行 governance checks，不写 handoff
+receipts。
 
 builder 从 Git state 和 replay 自动生成 machine evidence。verifier 必须从 `final-branch.bundle` 重放 hard scan 并比对 `scan_id`、`rule_set_id`、count 和 `result_sha256`。
 `verify_governance.py` 只运行 governance checks，不写 handoff receipts；hard-scan receipt construction 只由 `handoff/replay_evidence.py` 执行。
