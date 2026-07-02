@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 try:
-    from tests.agents.handoff.conftest import _load_handoff_module
+    from tests.architecture.conftest import _load_handoff_module
 except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
     from conftest import _load_handoff_module  # type: ignore[no-redef]
 

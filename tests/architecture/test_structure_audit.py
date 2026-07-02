@@ -39,6 +39,15 @@ def test_structure_audit_json_gate_passes() -> None:
     assert payload["schema_id"] == "qrp-structure-audit"
     assert payload["status"] == "PASS"
     assert payload["checks"]
+    check_names = {check["name"] for check in payload["checks"]}
+    assert {
+        "mandatory_validation_all_pass_gate",
+        "synthetic_fixture_profile_runner",
+        "source_tree_scan_behavior_tests",
+        "profile_smoke_lightweight",
+        "validation_fail_packages_rejected",
+        "no_duplicate_source_tree_scanner_regex",
+    } <= check_names
 
 
 def test_negative_handoff_evidence_fields_are_semantic_specs() -> None:

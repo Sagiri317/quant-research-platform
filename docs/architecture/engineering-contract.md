@@ -34,6 +34,8 @@ package evidence 描述 handoff package 的成员、hash、manifest、sidecar �
 
 handoff 使用 compact replayable receipts：machine validation rows 只来自 replay-backed receipts；verifier result path 只做一次 zip inspection，并在需要 replay 时只 clone `final-branch.bundle` 一次，在同一个 clone 中完成 share-safety scan、receipt replay 和 count/hash comparison。Codex 不应手写 handoff evidence，也不应把 raw grep output、full pytest log、完整 stdout/stderr、wheel、sdist、完整 review transcript 或本地 `.run/local/**` 产物打入 handoff。
 
+正式 handoff success 还要求 mandatory validation rows 全部为 `PASS`。`validation-summary.json` 的顶层 status 只由 rows 聚合派生；任一 mandatory row 为 `FAIL`、`NOT_RUN`、`BLOCKED`、缺失、重复或未知状态时，builder 和 verifier 都必须返回失败。
+
 ## 代码修改原则
 
 - 最小修改。

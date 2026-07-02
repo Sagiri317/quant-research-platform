@@ -15,8 +15,20 @@ try:
     from quant_research_platform.policy.check_status import (
         VALID_STATUS_TOKENS,
     )
+    from quant_research_platform.policy.check_status import (
+        aggregate_validation_matrix_status as _aggregate_validation_matrix_status,
+    )
 except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit src.
     VALID_STATUS_TOKENS = frozenset({"PASS", "FAIL", "NOT_RUN", "BLOCKED"})
+
+    def _aggregate_validation_matrix_status(statuses: list[str]) -> str:
+        if "FAIL" in statuses:
+            return "FAIL"
+        if "BLOCKED" in statuses:
+            return "BLOCKED"
+        if "NOT_RUN" in statuses:
+            return "NOT_RUN"
+        return "PASS"
 
 
 class ProofClass(StrEnum):
@@ -42,6 +54,7 @@ class ReplayCommandSpec:
     command_id: str
     scope: str
     command_argv: tuple[str, ...]
+    timeout_seconds: int
 
     @property
     def command(self) -> str:
@@ -162,6 +175,7 @@ ARTIFACT_MANIFEST_ENTRY_FIELD_SPECS = {
 
 VALIDATION_SUMMARY_FIELD_SPECS = {
     "schema_id": FieldSpec(ProofClass.METADATA_VALIDATED),
+    "status": FieldSpec(ProofClass.DERIVED_FROM_REPLAY),
     "rows": FieldSpec(ProofClass.DERIVED_FROM_REPLAY),
 }
 
@@ -202,6 +216,7 @@ REPLAY_COMMAND_CONTRACT = {
     "profile-smoke": ReplayCommandSpec(
         command_id="profile-smoke",
         scope="profile-smoke",
+        timeout_seconds=900,
         command_argv=(
             "python",
             "tests/tools/run_profile.py",
@@ -214,6 +229,7 @@ REPLAY_COMMAND_CONTRACT = {
     "code-map": ReplayCommandSpec(
         command_id="code-map",
         scope="code-map",
+        timeout_seconds=300,
         command_argv=(
             "python",
             ".agents/skills/quant-research-platform-maintenance/scripts/"
@@ -303,6 +319,7 @@ def validate_validation_summary_contract(
         failures.append("validation_summary_rows_must_be_list")
         return failures
     seen: set[str] = set()
+    statuses: list[str] = []
     allowed_rows = set(MANDATORY_VALIDATION_ROWS)
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
@@ -328,11 +345,22 @@ def validate_validation_summary_contract(
         status = row.get("status")
         if status not in VALID_STATUS_TOKENS:
             failures.append(f"validation_summary_status_invalid: {index}:{status}")
+        else:
+            statuses.append(str(status))
     if require_mandatory:
         missing = [name for name in MANDATORY_VALIDATION_ROWS if name not in seen]
         failures.extend(
             f"validation_summary_mandatory_row_missing: {name}" for name in missing
         )
+    summary_status = payload.get("status")
+    if summary_status not in VALID_STATUS_TOKENS:
+        failures.append(f"validation_summary_status_invalid: {summary_status}")
+    elif statuses:
+        expected = _aggregate_validation_matrix_status(statuses)
+        if summary_status != expected:
+            failures.append(
+                f"validation_summary_status_mismatch: {summary_status}!={expected}"
+            )
     return failures
 
 
@@ -366,12 +394,58 @@ def build_validation_summary_from_receipts(
     ]
     payload: dict[str, object] = {
         "schema_id": "qrp-handoff-validation-summary",
+        "status": _aggregate_validation_matrix_status(
+            [str(row["status"]) for row in rows]
+        ),
         "rows": rows,
     }
     failures = validate_validation_summary_contract(payload)
     if failures:
         raise SystemExit(";".join(failures))
     return payload
+
+
+def mandatory_validation_failures(
+    validation_summary: Mapping[str, object],
+) -> list[str]:
+    failures: list[str] = []
+    rows = validation_summary.get("rows")
+    if not isinstance(rows, list):
+        return ["validation_summary_rows_must_be_list"]
+    by_name: dict[str, list[object]] = {name: [] for name in MANDATORY_VALIDATION_ROWS}
+    observed_statuses: list[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            failures.append(f"validation_summary_row_not_object: {index}")
+            continue
+        name = row.get("name")
+        status = row.get("status")
+        if not isinstance(name, str) or name not in MANDATORY_VALIDATION_ROWS:
+            failures.append(f"validation_summary_row_unknown: {index}:{name}")
+            continue
+        by_name.setdefault(name, []).append(status)
+        if status not in VALID_STATUS_TOKENS:
+            failures.append(f"validation_summary_row_unknown_status:{name}:{status}")
+            continue
+        observed_statuses.append(str(status))
+        if status != "PASS":
+            failures.append(f"validation_summary_row_not_pass:{name}:{status}")
+    for name in MANDATORY_VALIDATION_ROWS:
+        statuses = by_name.get(name, [])
+        if not statuses:
+            failures.append(f"validation_summary_row_missing:{name}")
+        if len(statuses) > 1:
+            failures.append(f"validation_summary_row_duplicate:{name}")
+    summary_status = validation_summary.get("status")
+    if summary_status not in VALID_STATUS_TOKENS:
+        failures.append(f"validation_summary_status_unknown:{summary_status}")
+    elif observed_statuses:
+        expected = _aggregate_validation_matrix_status(observed_statuses)
+        if summary_status != expected:
+            failures.append(
+                f"validation_summary_status_mismatch:{summary_status}!={expected}"
+            )
+    return failures
 
 
 def validate_validation_summary_against_receipts(

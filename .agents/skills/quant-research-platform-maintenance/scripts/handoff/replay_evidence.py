@@ -135,17 +135,36 @@ def _run_replay_command(repo_root: Path, command_id: str) -> dict[str, object]:
             repo_root / ".run" / "handoff-replay" / "profile-smoke", ignore_errors=True
         )
     started = perf_counter()
-    result = subprocess.run(
-        run_argv,
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            run_argv,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=spec.timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        duration_seconds = perf_counter() - started
+        return {
+            "schema_id": "qrp-check-receipt",
+            "command_id": command_id,
+            "scope": spec.scope,
+            "command_argv": command_argv,
+            "command": spec.command,
+            "status": "BLOCKED",
+            "exit_code": None,
+            "duration_seconds": round(duration_seconds, 6),
+            "counts": None,
+            "failure_class": "command_timeout",
+            "blocked_reason": "timeout",
+            "not_run_reason": None,
+            "timeout_seconds": spec.timeout_seconds,
+        }
     duration_seconds = perf_counter() - started
-    status = "PASS" if result.returncode == 0 else "FAIL"
+    status = _replay_status(repo_root, command_id, result)
     counts = (
         _profile_smoke_counts(repo_root, result)
         if command_id == "profile-smoke"
@@ -161,6 +180,12 @@ def _run_replay_command(repo_root: Path, command_id: str) -> dict[str, object]:
         "exit_code": result.returncode,
         "duration_seconds": round(duration_seconds, 6),
         "counts": counts,
+        "failure_class": None
+        if status == "PASS"
+        else _failure_class(command_id, result, counts),
+        "blocked_reason": None,
+        "not_run_reason": "no_tests_collected" if status == "NOT_RUN" else None,
+        "timeout_seconds": None,
     }
 
 
@@ -207,6 +232,50 @@ def _profile_smoke_counts(
             stdout_path.read_text(encoding="utf-8", errors="replace")
         )
     return parse_pytest_counts("\n".join((result.stdout or "", result.stderr or "")))
+
+
+def _replay_status(
+    repo_root: Path,
+    command_id: str,
+    result: subprocess.CompletedProcess[str],
+) -> str:
+    if result.returncode == 0:
+        return "PASS"
+    if command_id == "profile-smoke":
+        summary_path = (
+            repo_root
+            / ".run"
+            / "handoff-replay"
+            / "profile-smoke"
+            / Path("summary").with_suffix(".json")
+        )
+        if summary_path.exists():
+            try:
+                payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return "FAIL"
+            status = payload.get("status")
+            if status in {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}:
+                return str(status)
+    return "FAIL"
+
+
+def _failure_class(
+    command_id: str,
+    result: subprocess.CompletedProcess[str],
+    counts: dict[str, int] | None,
+) -> str:
+    combined = "\n".join((result.stdout or "", result.stderr or "")).lower()
+    if "modulenotfounderror" in combined or "no module named" in combined:
+        return "dependency_missing"
+    if command_id == "profile-smoke":
+        if result.returncode == 5:
+            return "runner_preflight_error"
+        if counts and counts.get("errors", 0):
+            return "pytest_collection_error"
+        if counts and counts.get("failed", 0):
+            return "pytest_failed"
+    return "unknown_nonzero_exit"
 
 
 def _build_replayed_package_smoke_receipt(repo_root: Path) -> dict[str, object]:

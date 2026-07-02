@@ -1890,6 +1890,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
         definition_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
             HANDOFF_CONTRACT_SCRIPT,
+            SHARE_SAFETY_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
             HANDOFF_SELF_TEST_SCRIPT,
@@ -1906,6 +1907,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
         definition_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
             HANDOFF_CONTRACT_SCRIPT,
+            SHARE_SAFETY_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
             HANDOFF_SELF_TEST_SCRIPT,
@@ -1923,6 +1925,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
         definition_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
             HANDOFF_CONTRACT_SCRIPT,
+            SHARE_SAFETY_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
             HANDOFF_SELF_TEST_SCRIPT,
@@ -2000,6 +2003,7 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "_LOCAL_RUN_PATH_RE",
         "_ENVIRONMENT_PATH_RE",
         "PRIVATE_FIELD_NAMES",
+        "evidence_text_unsafe_reason",
     },
     HANDOFF_SELF_TEST_SCRIPT: {"main"},
     VERIFY_HANDOFF_PACKAGE_SCRIPT: {
@@ -2218,11 +2222,19 @@ def _source_tree_retired_rule_definition_allowed(
     definition_contexts: dict[str, set[int]] | None = None,
 ) -> bool:
     del line_text, definition_contexts
+    if line_number is None or rule_definition_lines is None:
+        return False
+    sensitive_rules = {
+        rule_spec.name: rule_spec for rule_spec in SOURCE_TREE_SENSITIVE_NEGATIVE_RULES
+    }
+    if rule in sensitive_rules:
+        return (
+            relative in sensitive_rules[rule].definition_sources
+            and line_number in rule_definition_lines
+        )
     allowed_rules = SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST.get(relative, set())
     return (
         rule in allowed_rules
-        and line_number is not None
-        and rule_definition_lines is not None
         and line_number in rule_definition_lines
     )
 
@@ -3327,7 +3339,7 @@ def source_tree_allowed_occurrence_unreachable_reason(
             return "source_tree_allowed_occurrence_unreachable"
         return ""
     if scan_group == "sensitive_negative_literals":
-        if relative.parts[:1] not in {(".agents",), ("tests",)}:
+        if not source_tree_text_path_in_scope(relative):
             return "source_tree_allowed_occurrence_unreachable"
         if rule not in source_tree_sensitive_negative_patterns():
             return "source_tree_allowed_occurrence_unreachable"
@@ -4177,8 +4189,6 @@ def source_tree_sensitive_negative_literal_findings(
         else source_tree_tracked_text_files(clone_dir)
     )
     for relative in files:
-        if relative.parts[:1] not in {(".agents",), ("tests",)}:
-            continue
         path = clone_dir / relative
         if not path.exists():
             continue

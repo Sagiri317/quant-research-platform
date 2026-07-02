@@ -112,6 +112,13 @@ def test_source_tree_sensitive_scan_declares_required_tracked_text_roots() -> No
     assert REQUIRED_SOURCE_TREE_TEXT_ROOTS <= configured
 
 
+def test_source_tree_sensitive_scan_uses_configured_roots() -> None:
+    source = GOVERNANCE_CONTRACT.read_text(encoding="utf-8")
+
+    assert "for root in SOURCE_TREE_TEXT_ROOTS" in source
+    assert 'relative.parts[:1] not in {(".agents",), ("tests",)}' not in source
+
+
 def test_handoff_verifier_has_no_root_wide_bundle_content_exemptions() -> None:
     source = HANDOFF_VERIFIER.read_text(encoding="utf-8")
     root_exemptions = "_".join(("BUNDLE", "CONTENT", "SCAN", "EXEMPT", "ROOTS"))

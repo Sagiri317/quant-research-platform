@@ -30,6 +30,7 @@ from handoff_contract import (  # noqa: E402
     TASK_METADATA_ENTRY,
     VALIDATION_SUMMARY_ENTRY,
     build_validation_summary_from_receipts,
+    mandatory_validation_failures,
     validate_task_metadata_contract,
 )
 from replay_evidence import build_machine_receipts  # noqa: E402
@@ -81,6 +82,7 @@ def build_handoff_package(
     receipts = build_machine_receipts(repo_root, final_head)
     assert_worktree_clean(repo_root)
     validation_summary = build_validation_summary_from_receipts(receipts)
+    validation_failures = mandatory_validation_failures(validation_summary)
     task = task_metadata(
         task_name=task_name,
         branch=branch,
@@ -101,14 +103,15 @@ def build_handoff_package(
         branch=branch,
     )
     verification = verify_handoff_package_result(zip_path, json_path)
+    failures = [*validation_failures, *verification.failures]
     return {
-        "ok": verification.ok,
+        "ok": verification.ok and not validation_failures,
         "zip_path": zip_path.as_posix(),
         "json_path": json_path.as_posix(),
         "zip_sha256": verification.zip_sha256,
         "handoff_package_verify_status": verification.handoff_package_verify_status,
         "share_safety_status": verification.share_safety_status,
-        "verify_failures": list(verification.failures),
+        "verify_failures": failures,
     }
 
 

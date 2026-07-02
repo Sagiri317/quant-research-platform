@@ -92,7 +92,8 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
     assert "mode" not in task_metadata
     assert task_metadata["task_name"] == "handoff-test"
     assert task_metadata["final_head"] == final_head
-    assert set(validation_summary) == {"schema_id", "rows"}
+    assert set(validation_summary) == {"schema_id", "status", "rows"}
+    assert validation_summary["status"] == "PASS"
     assert {row["name"] for row in validation_summary["rows"]} == set(
         handoff_contract.MANDATORY_VALIDATION_ROWS
     )
@@ -141,3 +142,54 @@ def test_builder_cli_has_no_external_task_or_receipts_args() -> None:
     assert '"--receipts-dir"' not in source
     assert '"--mode"' not in source
     assert '"--verify"' not in source
+
+
+def test_builder_fails_when_replayed_validation_row_is_not_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_handoff_repo(repo)
+    builder = _load_handoff_module("build_handoff_package")
+    good_receipts = builder.build_machine_receipts(
+        repo, _git(repo, "rev-parse", "HEAD").strip()
+    )
+    check_receipts = good_receipts[builder.CHECK_RECEIPTS_ENTRY]
+    profile_smoke = next(
+        row
+        for row in check_receipts["checks"]
+        if row["command_id"] == "profile-smoke"
+    )
+    profile_smoke["status"] = "FAIL"
+    profile_smoke["exit_code"] = 1
+    profile_smoke["failure_class"] = "pytest_failed"
+    check_receipts["status"] = "FAIL"
+
+    class Verification:
+        ok = True
+        zip_sha256 = "0" * 64
+        handoff_package_verify_status = "PASS"
+        share_safety_status = "PASS"
+        failures: tuple[str, ...] = ()
+
+    monkeypatch.setattr(builder, "build_machine_receipts", lambda *_: good_receipts)
+    monkeypatch.setattr(
+        builder, "verify_handoff_package_result", lambda *_: Verification()
+    )
+
+    result = builder.build_handoff_package(
+        repo_root=repo,
+        out_dir=tmp_path / "out",
+        task_name="handoff-test",
+        base_ref="origin/main",
+    )
+
+    assert result["ok"] is False
+    assert (
+        "validation_summary_row_not_pass:scripted_checks:FAIL"
+        in result["verify_failures"]
+    )
+    assert (
+        "validation_summary_row_not_pass:profile_smoke:FAIL"
+        in result["verify_failures"]
+    )

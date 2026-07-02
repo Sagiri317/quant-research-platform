@@ -69,6 +69,19 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
         base_ref="origin/main",
     )
     assert result["zip_path"]
+    with zipfile.ZipFile(result["zip_path"]) as archive:
+        check_receipts = json.loads(
+            archive.read("handoff_evidence/check-receipts.json").decode("utf-8")
+        )
+        validation_summary = json.loads(
+            archive.read("handoff_evidence/validation-summary.json").decode("utf-8")
+        )
+    assert check_receipts["status"] == "PASS"
+    assert next(
+        row for row in check_receipts["checks"] if row["command_id"] == "profile-smoke"
+    )["status"] == "PASS"
+    assert validation_summary["status"] == "PASS"
+    assert {row["status"] for row in validation_summary["rows"]} == {"PASS"}
     return repo, Path(result["zip_path"]), Path(result["json_path"]), base, final_head
 
 
@@ -116,6 +129,7 @@ def _write_minimal_project_files(repo: Path) -> None:
             [
                 ".pytest_cache/",
                 "__pycache__/",
+                ".run/",
                 "*.pyc",
                 "build/",
                 "dist/",
@@ -169,6 +183,54 @@ def _write_minimal_project_files(repo: Path) -> None:
     smoke_test.write_text(
         "def test_smoke() -> None:\n    assert True\n", encoding="utf-8"
     )
+    runner = repo / "tests" / "tools" / "run_profile.py"
+    runner.parent.mkdir(parents=True)
+    runner.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import argparse",
+                "import json",
+                "from pathlib import Path",
+                "",
+                "",
+                "def main() -> int:",
+                "    parser = argparse.ArgumentParser()",
+                "    parser.add_argument('--profile', required=True)",
+                "    parser.add_argument('--run-dir', required=True)",
+                "    args = parser.parse_args()",
+                "    if args.profile != 'profile-smoke':",
+                "        return 2",
+                "    run_dir = Path(args.run_dir)",
+                "    run_dir.mkdir(parents=True, exist_ok=True)",
+                "    (run_dir / 'stdout.log').write_text(",
+                "        '1 passed in 0.01s\\n', encoding='utf-8'",
+                "    )",
+                "    (run_dir / 'stderr.log').write_text('', encoding='utf-8')",
+                "    summary = {",
+                "        'schema_id': 'qrp-test-profile-run',",
+                "        'profile': 'profile-smoke',",
+                "        'status': 'PASS',",
+                "        'return_code': 0,",
+                "        'run_dir': args.run_dir,",
+                "    }",
+                "    summary_name = Path('summary').with_suffix('.json')",
+                "    (run_dir / summary_name).write_text(",
+                "        json.dumps(summary, indent=2, sort_keys=True) + '\\n',",
+                "        encoding='utf-8',",
+                "    )",
+                "    print(json.dumps(summary, sort_keys=True))",
+                "    return 0",
+                "",
+                "",
+                "if __name__ == '__main__':",
+                "    raise SystemExit(main())",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -191,6 +253,7 @@ def _validation_payload(
 ) -> dict[str, object]:
     return {
         "schema_id": "qrp-handoff-validation-summary",
+        "status": "PASS",
         "rows": rows if rows is not None else _validation_rows("PASS"),
     }
 
@@ -231,6 +294,10 @@ def _check_receipt(
         "exit_code": 0 if status == "PASS" else 1,
         "duration_seconds": 0.1,
         "counts": counts,
+        "failure_class": None if status == "PASS" else "pytest_failed",
+        "blocked_reason": None,
+        "not_run_reason": None,
+        "timeout_seconds": None,
     }
 
 

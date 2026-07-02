@@ -44,6 +44,7 @@ templates/     机器输入模板
 - code-map gate：检查代码地图与当前合同一致。
 - handoff gate：检查 builder、verifier、source-tree scan 和 share-safety。
 - handoff evidence gate：检查 required evidence 存在、结构完整且不是 status-only。
+- validation all-PASS gate：正式 handoff 只有在 mandatory validation rows 全部为 `PASS` 时才成立；`FAIL`、`NOT_RUN`、`BLOCKED`、缺失、重复或未知状态都必须让 builder 和 verifier 失败。
 - structure audit gate：检查 profile scope、handoff smoke、pip 禁令、scanner 覆盖、test owner placement 和 retired helper 引用。
 - internal API gate：检查 owner-local internal API 和 private module 边界。
 - test placement gate：检查 tests 位于对应 owner 目录。

@@ -20,6 +20,7 @@ __all__ = (
     "module_to_path",
     "path_to_layer",
     "repo_python_files",
+    "_load_handoff_module",
 )
 
 
@@ -38,6 +39,26 @@ def _load_governance_contract():
         / "governance_contract.py"
     )
     spec = importlib.util.spec_from_file_location("governance_contract", script)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_handoff_module(name: str):
+    root = (
+        Path(".agents")
+        / "skills"
+        / "quant-research-platform-maintenance"
+        / "scripts"
+        / "handoff"
+    )
+    script = root / f"{name}.py"
+    if name == "governance_contract":
+        script = root.parent / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, script)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)

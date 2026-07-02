@@ -98,11 +98,17 @@ def run_audit(repo_root: Path) -> tuple[AuditCheck, ...]:
     return (
         _profile_scopes_exist(repo_root),
         _profile_smoke_uses_official_runner(repo_root),
+        _profile_smoke_is_lightweight(repo_root),
         _no_executable_pip_package_command(repo_root),
         _package_smoke_schema_closed(repo_root),
         _verifier_has_no_root_wide_exemptions(repo_root),
+        _mandatory_validation_all_pass_gate(repo_root),
+        _synthetic_fixture_profile_runner(repo_root),
         _source_tree_scan_roots_configured(),
+        _source_tree_scan_behavior_tests(repo_root),
         _test_owner_placement(repo_root),
+        _validation_fail_packages_rejected(repo_root),
+        _no_duplicate_source_tree_scanner_regex(repo_root),
         _negative_field_specs(repo_root),
         _active_open_issues_current_only(repo_root),
         _old_helper_references_absent(repo_root),
@@ -137,6 +143,21 @@ def _profile_smoke_uses_official_runner(repo_root: Path) -> AuditCheck:
     if tuple(spec.command_argv) != expected:
         findings = (f"profile-smoke:{spec.command}",)
     return _check("profile_smoke_official_runner", findings)
+
+
+def _profile_smoke_is_lightweight(repo_root: Path) -> AuditCheck:
+    findings: list[str] = []
+    for path in (repo_root / "tests" / "agents" / "handoff").glob("test_*.py"):
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        if "valid_handoff_package" not in source:
+            continue
+        if _module_has_excluded_marker(source):
+            continue
+        findings.extend(
+            f"{path.as_posix()}:{name}"
+            for name in _unmarked_valid_handoff_package_tests(source)
+        )
+    return _check("profile_smoke_lightweight", tuple(findings))
 
 
 def _no_executable_pip_package_command(repo_root: Path) -> AuditCheck:
@@ -179,6 +200,40 @@ def _verifier_has_no_root_wide_exemptions(repo_root: Path) -> AuditCheck:
     return _check("verifier_no_root_wide_exemptions", findings)
 
 
+def _mandatory_validation_all_pass_gate(repo_root: Path) -> AuditCheck:
+    contract = (repo_root / HANDOFF_ROOT / "handoff_contract.py").read_text(
+        encoding="utf-8"
+    )
+    builder = (repo_root / HANDOFF_ROOT / "build_handoff_package.py").read_text(
+        encoding="utf-8"
+    )
+    verifier = (repo_root / HANDOFF_ROOT / "verify_handoff_package.py").read_text(
+        encoding="utf-8"
+    )
+    findings = []
+    if "def mandatory_validation_failures(" not in contract:
+        findings.append("handoff_contract:mandatory_validation_failures_missing")
+    if "mandatory_validation_failures(validation_summary)" not in builder:
+        findings.append("builder:mandatory_validation_failures_not_called")
+    if "mandatory_validation_failures(loaded.validation_summary)" not in verifier:
+        findings.append("verifier:mandatory_validation_failures_not_called")
+    return _check("mandatory_validation_all_pass_gate", tuple(findings))
+
+
+def _synthetic_fixture_profile_runner(repo_root: Path) -> AuditCheck:
+    conftest = (
+        repo_root / "tests" / "agents" / "handoff" / "conftest.py"
+    ).read_text(encoding="utf-8")
+    findings = []
+    if '"tests" / "tools" / "run_profile.py"' not in conftest:
+        findings.append("synthetic_repo_missing_tests_tools_run_profile")
+    if "'profile-smoke'" not in conftest:
+        findings.append("synthetic_runner_missing_profile_smoke")
+    if "validation_summary[\"status\"] == \"PASS\"" not in conftest:
+        findings.append("synthetic_fixture_missing_validation_pass_assertion")
+    return _check("synthetic_fixture_profile_runner", tuple(findings))
+
+
 def _source_tree_scan_roots_configured() -> AuditCheck:
     configured = {
         Path(root).as_posix() for root in governance_contract.SOURCE_TREE_TEXT_ROOTS
@@ -187,6 +242,20 @@ def _source_tree_scan_roots_configured() -> AuditCheck:
         "source_tree_scan_roots",
         tuple(sorted(REQUIRED_SOURCE_TREE_TEXT_ROOTS - configured)),
     )
+
+
+def _source_tree_scan_behavior_tests(repo_root: Path) -> AuditCheck:
+    test_source = (
+        repo_root / "tests" / "agents" / "test_verify_governance.py"
+    ).read_text(encoding="utf-8")
+    required = (
+        "src/quant_research_platform/private_payload.py",
+        "docs/architecture/private-payload.md",
+        "README.md",
+        "source_tree_sensitive_negative_literal_findings(repo)",
+    )
+    findings = tuple(token for token in required if token not in test_source)
+    return _check("source_tree_scan_behavior_tests", findings)
 
 
 def _test_owner_placement(repo_root: Path) -> AuditCheck:
@@ -201,6 +270,47 @@ def _test_owner_placement(repo_root: Path) -> AuditCheck:
         if any(token in text for token in forbidden):
             findings.append(path.as_posix())
     return _check("test_owner_placement", tuple(findings))
+
+
+def _validation_fail_packages_rejected(repo_root: Path) -> AuditCheck:
+    verifier_tests = (
+        repo_root / "tests" / "agents" / "handoff" / "test_handoff_package_verifier.py"
+    ).read_text(encoding="utf-8")
+    builder_tests = (
+        repo_root
+        / "tests"
+        / "agents"
+        / "handoff"
+        / "test_build_handoff_package_integration.py"
+    ).read_text(encoding="utf-8")
+    findings = []
+    if (
+        "test_verifier_rejects_self_consistent_failed_validation_summary"
+        not in verifier_tests
+    ):
+        findings.append("verifier_self_consistent_fail_test_missing")
+    if (
+        "test_builder_fails_when_replayed_validation_row_is_not_pass"
+        not in builder_tests
+    ):
+        findings.append("builder_validation_fail_test_missing")
+    if "validation_summary_row_not_pass:profile_smoke:FAIL" not in (
+        verifier_tests + builder_tests
+    ):
+        findings.append("profile_smoke_not_pass_assertion_missing")
+    return _check("validation_fail_packages_rejected", tuple(findings))
+
+
+def _no_duplicate_source_tree_scanner_regex(repo_root: Path) -> AuditCheck:
+    verifier = (repo_root / HANDOFF_ROOT / "verify_handoff_package.py").read_text(
+        encoding="utf-8"
+    )
+    findings = []
+    if "def text_file_failures(" in verifier:
+        findings.append("verifier:text_file_failures")
+    if "SourceTreeSensitiveNegativeRule" in verifier:
+        findings.append("verifier:duplicate_sensitive_rule")
+    return _check("no_duplicate_source_tree_scanner_regex", tuple(findings))
 
 
 def _negative_field_specs(repo_root: Path) -> AuditCheck:
@@ -322,6 +432,47 @@ def _imports_handoff_integration_helper(source: str) -> bool:
                 and "test_build_handoff_package_integration" in arg.value
             ):
                 return True
+    return False
+
+
+def _module_has_excluded_marker(source: str) -> bool:
+    return any(
+        token in source
+        for token in (
+            "pytestmark = pytest.mark.integration",
+            "pytestmark = pytest.mark.mutation",
+            "pytestmark = [pytest.mark.integration",
+        )
+    )
+
+
+def _unmarked_valid_handoff_package_tests(source: str) -> tuple[str, ...]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ("syntax_error",)
+    findings: list[str] = []
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+            continue
+        arg_names = {arg.arg for arg in node.args.args}
+        if "valid_handoff_package" not in arg_names:
+            continue
+        if _function_has_excluded_marker(node):
+            continue
+        findings.append(node.name)
+    return tuple(findings)
+
+
+def _function_has_excluded_marker(node: ast.FunctionDef) -> bool:
+    for decorator in node.decorator_list:
+        text = ast.unparse(decorator)
+        if text in {
+            "pytest.mark.integration",
+            "pytest.mark.mutation",
+            "pytest.mark.slow",
+        }:
+            return True
     return False
 
 

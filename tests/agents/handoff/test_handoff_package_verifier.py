@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallbac
         _rewrite_package_member,
     )
 
+@pytest.mark.integration
 def test_verifier_accepts_minimal_package(
     valid_handoff_package: tuple[Path, Path],
 ) -> None:
@@ -30,6 +31,51 @@ def test_verifier_accepts_minimal_package(
     failures = verifier.verify_handoff_package_result(package, sidecar).failures
 
     assert failures == ()
+
+
+@pytest.mark.integration
+def test_verifier_rejects_self_consistent_failed_validation_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    with zipfile.ZipFile(package) as archive:
+        check_receipts = json.loads(
+            archive.read("handoff_evidence/check-receipts.json").decode("utf-8")
+        )
+        validation_summary = json.loads(
+            archive.read("handoff_evidence/validation-summary.json").decode("utf-8")
+        )
+    profile_smoke = next(
+        row for row in check_receipts["checks"] if row["command_id"] == "profile-smoke"
+    )
+    profile_smoke["status"] = "FAIL"
+    profile_smoke["exit_code"] = 1
+    profile_smoke["failure_class"] = "pytest_failed"
+    check_receipts["status"] = "FAIL"
+    for row in validation_summary["rows"]:
+        if row["name"] in {"scripted_checks", "profile_smoke"}:
+            row["status"] = "FAIL"
+    validation_summary["status"] = "FAIL"
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/check-receipts.json",
+        (json.dumps(check_receipts, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/validation-summary.json",
+        (json.dumps(validation_summary, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _refresh_manifest_and_sidecar(package, sidecar)
+    monkeypatch.setattr(verifier, "verify_bundle_and_replay_once", lambda *_: ([], []))
+
+    failures = verifier.verify_handoff_package_result(package, sidecar).failures
+
+    assert "validation_summary_row_not_pass:scripted_checks:FAIL" in failures
+    assert "validation_summary_row_not_pass:profile_smoke:FAIL" in failures
 
 
 def test_receipt_contract_rejects_status_only_package_smoke_receipt() -> None:
@@ -95,6 +141,7 @@ def test_receipt_contract_rejects_raw_output_in_hard_scan_receipt() -> None:
         "handoff_evidence/advisory-review-receipt.json",
     ),
 )
+@pytest.mark.integration
 def test_verifier_rejects_retired_handoff_entries(
     tmp_path: Path,
     valid_handoff_package: tuple[Path, Path],
@@ -114,6 +161,7 @@ def test_verifier_rejects_retired_handoff_entries(
     assert any(old_name in failure for failure in failures)
 
 
+@pytest.mark.integration
 def test_verifier_rejects_old_sidecar_status_surface(
     tmp_path: Path,
     valid_handoff_package: tuple[Path, Path],
@@ -131,6 +179,7 @@ def test_verifier_rejects_old_sidecar_status_surface(
     assert "sidecar_unapproved_field: advisory_reviews" in failures
 
 
+@pytest.mark.integration
 def test_verifier_replays_hard_scan_from_bundle(
     tmp_path: Path,
     valid_handoff_package: tuple[Path, Path],

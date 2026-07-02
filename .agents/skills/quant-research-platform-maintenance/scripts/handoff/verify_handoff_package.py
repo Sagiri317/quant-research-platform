@@ -23,7 +23,6 @@ for candidate in (SCRIPT_DIR, SCRIPT_PARENT, SCRIPT_REPO_SRC):
 
 from governance_contract import (  # noqa: E402
     PACKAGE_FORBIDDEN_PATH_PARTS,
-    source_tree_governance_rule_definition_lines,
     source_tree_scan_groups,
 )
 from governance_contract import (  # noqa: E402
@@ -41,6 +40,7 @@ from handoff_contract import (  # noqa: E402
     TASK_METADATA_ENTRY,
     VALIDATION_SUMMARY_ENTRY,
     build_validation_summary_from_receipts,
+    mandatory_validation_failures,
     posix_member_name_failures,
     validate_artifact_manifest_contract,
     validate_handoff_package_layout,
@@ -152,6 +152,7 @@ def verify_handoff_package_result(
                 loaded.receipts,
             )
         )
+        failures.extend(mandatory_validation_failures(loaded.validation_summary))
     for entry, payload in loaded.receipts.items():
         failures.extend(validate_receipt_payload(Path(entry).name, payload))
     if (
@@ -530,35 +531,6 @@ def text_blob_failures(raw: bytes, *, name: str) -> list[str]:
         return [f"non_utf8_text_artifact: {name}"]
     reason = unsafe_text_reason(text, name=name)
     return [f"{reason}_text: {name}"] if reason is not None else []
-
-
-def text_file_failures(
-    raw: bytes,
-    *,
-    relative: Path,
-    actual_path: Path,
-    name: str,
-) -> list[str]:
-    if len(raw) > BUNDLE_TEXT_SIZE_CAP_BYTES:
-        return [f"text scan exceeded maximum size: {name}"]
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return [f"non_utf8_text_artifact: {name}"]
-    definition_lines = source_tree_governance_rule_definition_lines(
-        relative,
-        actual_path,
-    )
-    failures: list[str] = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        if line_number in definition_lines:
-            continue
-        if is_scanner_definition_line(line, name=name):
-            continue
-        reason = unsafe_text_reason(line, name=name)
-        if reason is not None:
-            failures.append(f"{reason}_text: {name}")
-    return failures
 
 
 def unsafe_text_reason(text: str, *, name: str = "") -> str | None:

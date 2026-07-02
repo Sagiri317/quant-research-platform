@@ -50,6 +50,11 @@ sidecar，然后永远运行 verifier。verifier 不通过时，本次 build 不
 profile；validation summary 必须从 packaged/replayed receipts 派生，不允许手写
 `PASS`。
 
+正式 handoff success 的 validation 语义是 mandatory validation rows 全部为
+`PASS`。`FAIL`、`NOT_RUN`、`BLOCKED`、缺失、重复或未知状态都必须让 builder
+和 verifier 失败；package layout 或 receipt 自洽不能替代 mandatory rows 全
+PASS。validation summary 的顶层 status 只由 rows 聚合派生。
+
 ## 合同边界
 
 `handoff_contract.py` 拥有 package layout、sidecar schema、task metadata

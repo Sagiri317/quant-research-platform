@@ -136,6 +136,53 @@ def _unsafe_assignment_text() -> str:
     return f'credential = "{key}=unsafe"\n'
 
 
+def _git_repo_with_file(root: Path, relative: str, text: str) -> Path:
+    repo = root / relative.replace("/", "_").replace(".", "_")
+    path = repo / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+@pytest.mark.parametrize(
+    ("relative", "payload_parts", "expected_rule"),
+    (
+        (
+            "src/quant_research_platform/private_payload.py",
+            ("VALUE = '", "vendor_", "marker=raw-provider", "'\n"),
+            "sensitive_provider_marker",
+        ),
+        (
+            "docs/architecture/private-payload.md",
+            ("private ", "vendor_", "marker=raw-provider", "\n"),
+            "sensitive_provider_marker",
+        ),
+        (
+            "README.md",
+            ("sample ", "600", "000.SH", "\n"),
+            "sensitive_stock_code_sample",
+        ),
+    ),
+)
+def test_source_tree_sensitive_scan_covers_configured_text_roots(
+    tmp_path: Path,
+    relative: str,
+    payload_parts: tuple[str, ...],
+    expected_rule: str,
+) -> None:
+    contract = _load_contract_module()
+    repo = _git_repo_with_file(tmp_path, relative, "".join(payload_parts))
+
+    findings = contract.source_tree_sensitive_negative_literal_findings(repo)
+
+    assert any(
+        finding["path"] == relative and finding["rule"] == expected_rule
+        for finding in findings
+    ), findings
+
+
 def test_forged_retired_profile_env_does_not_skip_repo_file_negative_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

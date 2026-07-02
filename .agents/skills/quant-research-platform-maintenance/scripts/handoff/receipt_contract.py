@@ -67,6 +67,10 @@ CHECK_RECEIPT_ROW_FIELD_SPECS = {
     "exit_code": FieldSpec(ProofClass.REPLAYED),
     "duration_seconds": FieldSpec(ProofClass.REPLAYED),
     "counts": FieldSpec(ProofClass.REPLAYED),
+    "failure_class": FieldSpec(ProofClass.DERIVED_FROM_REPLAY),
+    "blocked_reason": FieldSpec(ProofClass.DERIVED_FROM_REPLAY),
+    "not_run_reason": FieldSpec(ProofClass.DERIVED_FROM_REPLAY),
+    "timeout_seconds": FieldSpec(ProofClass.REPLAYED),
 }
 
 PACKAGE_SMOKE_FIELD_SPECS = {
@@ -142,6 +146,16 @@ COUNT_FIELDS = frozenset(
     }
 )
 REQUIRED_CHECK_IDS = ("profile-smoke", "code-map")
+FAILURE_CLASSES = frozenset(
+    {
+        "pytest_failed",
+        "pytest_collection_error",
+        "runner_preflight_error",
+        "dependency_missing",
+        "command_timeout",
+        "unknown_nonzero_exit",
+    }
+)
 PACKAGE_ARTIFACT_KINDS = ("wheel", "sdist")
 PACKAGE_SCANNED_ARTIFACT_KINDS = ("wheel", "sdist", "wheel_extract")
 PACKAGE_WHEEL_EXTRACT_METHOD = "zipfile_extract"
@@ -368,7 +382,7 @@ def validate_check_receipt_row(
             if row.get("scope") != spec.scope:
                 failures.append(f"check_receipt_scope_mismatch: {command_id}")
     status = row.get("status")
-    if status not in {"PASS", "FAIL"}:
+    if status not in VALID_STATUS_TOKENS:
         failures.append(f"check_receipt_status_invalid: {index}")
     exit_code = row.get("exit_code")
     duration = row.get("duration_seconds")
@@ -382,10 +396,47 @@ def validate_check_receipt_row(
         failures.append(f"check_receipt_pass_exit_code_invalid: {index}")
     if status == "FAIL" and (not isinstance(exit_code, int) or exit_code == 0):
         failures.append(f"check_receipt_fail_exit_code_invalid: {index}")
+    if status in {"BLOCKED", "NOT_RUN"} and exit_code is not None:
+        failures.append(f"check_receipt_non_executed_exit_code_invalid: {index}")
+    failure_class = row.get("failure_class")
+    if status == "PASS":
+        if failure_class is not None:
+            failures.append(f"check_receipt_pass_failure_class_invalid: {index}")
+        for key in ("blocked_reason", "not_run_reason", "timeout_seconds"):
+            if row.get(key) is not None:
+                failures.append(f"check_receipt_pass_reason_invalid: {index}:{key}")
+    elif failure_class not in FAILURE_CLASSES:
+        failures.append(f"check_receipt_failure_class_required: {index}")
+    if status == "BLOCKED":
+        if not isinstance(row.get("blocked_reason"), str) or not row.get(
+            "blocked_reason"
+        ):
+            failures.append(f"check_receipt_blocked_reason_required: {index}")
+    elif row.get("blocked_reason") is not None:
+        failures.append(f"check_receipt_reason_invalid: {index}:blocked_reason")
+    if status == "NOT_RUN":
+        if not isinstance(row.get("not_run_reason"), str) or not row.get(
+            "not_run_reason"
+        ):
+            failures.append(f"check_receipt_not_run_reason_required: {index}")
+    elif row.get("not_run_reason") is not None:
+        failures.append(f"check_receipt_reason_invalid: {index}:not_run_reason")
+    timeout_seconds = row.get("timeout_seconds")
+    if status == "BLOCKED" and row.get("blocked_reason") == "timeout":
+        if (
+            not isinstance(timeout_seconds, int | float)
+            or isinstance(timeout_seconds, bool)
+            or timeout_seconds <= 0
+        ):
+            failures.append(f"check_receipt_timeout_seconds_invalid: {index}")
+    elif timeout_seconds is not None:
+        failures.append(f"check_receipt_reason_invalid: {index}:timeout_seconds")
     counts = row.get("counts")
-    if command_id == "profile-smoke":
+    if command_id == "profile-smoke" and status in {"PASS", "FAIL"}:
         failures.extend(validate_pytest_counts(counts, status=status, index=index))
     elif command_id == "code-map" and counts is not None:
+        failures.append(f"check_receipt_counts_invalid: {index}")
+    elif command_id == "profile-smoke" and counts is not None:
         failures.append(f"check_receipt_counts_invalid: {index}")
     return failures
 

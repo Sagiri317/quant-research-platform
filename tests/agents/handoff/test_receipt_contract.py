@@ -43,6 +43,10 @@ def _valid_row(
         "exit_code": 0,
         "duration_seconds": 0.1,
         "counts": _valid_counts() if command_id == "profile-smoke" else None,
+        "failure_class": None,
+        "blocked_reason": None,
+        "not_run_reason": None,
+        "timeout_seconds": None,
     }
     row.update(overrides)
     return row
@@ -146,13 +150,41 @@ def test_check_receipt_rejects_pass_with_failed_or_error_count() -> None:
     )
 
 
-def test_check_receipt_rejects_not_run_or_blocked_rows() -> None:
-    assert "check_receipt_status_invalid: 0" in _failures(
-        _valid_row(status="NOT_RUN", exit_code=None)
+def test_check_receipt_accepts_not_run_and_blocked_rows_with_reasons() -> None:
+    assert _failures(
+        _valid_row(
+            status="NOT_RUN",
+            exit_code=None,
+            counts=None,
+            failure_class="runner_preflight_error",
+            not_run_reason="no_tests_collected",
+        )
+    ) == []
+    assert _failures(
+        _valid_row(
+            status="BLOCKED",
+            exit_code=None,
+            counts=None,
+            failure_class="command_timeout",
+            blocked_reason="timeout",
+            timeout_seconds=1,
+        )
+    ) == []
+
+
+def test_check_receipt_requires_failure_class_for_non_pass_rows() -> None:
+    failures = _failures(_valid_row(status="FAIL", exit_code=1))
+
+    assert "check_receipt_failure_class_required: 0" in failures
+
+
+def test_check_receipt_rejects_pass_with_failure_class_or_reason() -> None:
+    failures = _failures(
+        _valid_row(failure_class="pytest_failed", blocked_reason="timeout")
     )
-    assert "check_receipt_status_invalid: 0" in _failures(
-        _valid_row(status="BLOCKED", exit_code=None)
-    )
+
+    assert "check_receipt_pass_failure_class_invalid: 0" in failures
+    assert "check_receipt_pass_reason_invalid: 0:blocked_reason" in failures
 
 
 def test_check_receipt_requires_duration_seconds() -> None:
@@ -171,8 +203,6 @@ def test_check_receipt_rejects_old_trace_fields() -> None:
             stderr_sha256="1" * 64,
             output_summary="old",
             failure_excerpt="old",
-            not_run_reason="old",
-            blocked_reason="old",
         )
     )
 
@@ -181,8 +211,6 @@ def test_check_receipt_rejects_old_trace_fields() -> None:
         "stderr_sha256",
         "output_summary",
         "failure_excerpt",
-        "not_run_reason",
-        "blocked_reason",
     ):
         assert f"check_receipt_unapproved_field: 0:{field}" in failures
 
@@ -378,6 +406,7 @@ def test_compare_functions_detect_replay_drift() -> None:
     replayed = _check_receipts()
     replayed["checks"][0]["exit_code"] = 1  # type: ignore[index]
     replayed["checks"][0]["status"] = "FAIL"  # type: ignore[index]
+    replayed["checks"][0]["failure_class"] = "pytest_failed"  # type: ignore[index]
     replayed["status"] = "FAIL"
 
     assert contract.compare_check_receipts(packaged, replayed) == [
@@ -441,6 +470,27 @@ def test_replay_command_executes_current_interpreter_but_records_canonical_pytho
     assert calls[0][0] == sys.executable
     assert row["command_argv"][0] == "python"
     assert str(row["command"]).startswith("python ")
+
+
+def test_replay_command_timeout_records_blocked_without_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay = _load_handoff_module("replay_evidence")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+
+    row = replay._run_replay_command(Path("."), "profile-smoke")
+
+    assert row["status"] == "BLOCKED"
+    assert row["exit_code"] is None
+    assert row["blocked_reason"] == "timeout"
+    assert row["failure_class"] == "command_timeout"
+    assert row["timeout_seconds"] == replay.replay_command_spec(
+        "profile-smoke"
+    ).timeout_seconds
 
 
 @pytest.mark.parametrize(
