@@ -83,27 +83,6 @@ REQUIRED_HANDOFF_ENTRIES = frozenset(
     }
 )
 
-FORBIDDEN_HANDOFF_ENTRIES = frozenset(
-    {
-        "git_status.txt",
-        "receipt-index.json",
-        "handoff_evidence/" + "advisory-review-" + "receipt.json",
-        "handoff_evidence/generation.json",
-        "handoff_evidence/bundle-reconstruction.json",
-        "handoff_evidence/private-smoke-status.json",
-        "handoff_evidence/private-validation-status.json",
-        "handoff_evidence/package-smoke.json",
-        "handoff_evidence/hard-scan-classification.json",
-        "handoff_evidence/test-checks.json",
-        "handoff_evidence/source-tree-scan.json",
-        "handoff_evidence/verification-matrix.json",
-        "handoff_evidence/smoke-compare-status.json",
-        "handoff_evidence/subagent-review-findings.json",
-        "handoff_evidence/subagent-review-reconciliation.json",
-    }
-)
-RETIRED_HANDOFF_ENTRY_NAMES = FORBIDDEN_HANDOFF_ENTRIES
-
 SIDECAR_FIELD_SPECS = {
     "schema_id": FieldSpec(ProofClass.METADATA_VALIDATED),
     "zip_filename": FieldSpec(ProofClass.IDENTITY_BOUND),
@@ -224,8 +203,6 @@ def validate_handoff_package_layout(names: Iterable[str]) -> list[str]:
     members = list(names)
     member_set = set(members)
     failures: list[str] = []
-    forbidden = sorted(member_set & FORBIDDEN_HANDOFF_ENTRIES)
-    failures.extend(f"forbidden_handoff_entry: {name}" for name in forbidden)
     missing = sorted(REQUIRED_HANDOFF_ENTRIES - member_set)
     failures.extend(f"missing_required_entry: {name}" for name in missing)
     extra = sorted(member_set - REQUIRED_HANDOFF_ENTRIES)

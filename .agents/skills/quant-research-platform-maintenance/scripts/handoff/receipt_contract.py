@@ -31,7 +31,6 @@ except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit 
 try:
     from handoff_contract import (
         CHECK_RECEIPTS_ENTRY,
-        FORBIDDEN_HANDOFF_ENTRIES,
         HARD_SCAN_RECEIPT_ENTRY,
         PACKAGE_SMOKE_RECEIPT_ENTRY,
         ProofClass,
@@ -40,7 +39,6 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - package import fallback.
     from .handoff_contract import (
         CHECK_RECEIPTS_ENTRY,
-        FORBIDDEN_HANDOFF_ENTRIES,
         HARD_SCAN_RECEIPT_ENTRY,
         PACKAGE_SMOKE_RECEIPT_ENTRY,
         ProofClass,
@@ -125,7 +123,6 @@ CHECK_RECEIPTS_NAME = Path(CHECK_RECEIPTS_ENTRY).name
 REQUIRED_RECEIPT_FILES = frozenset(
     {PACKAGE_SMOKE_RECEIPT_NAME, HARD_SCAN_RECEIPT_NAME, CHECK_RECEIPTS_NAME}
 )
-FORBIDDEN_RECEIPT_FILES = frozenset(Path(entry).name for entry in FORBIDDEN_HANDOFF_ENTRIES)
 FORBIDDEN_RECEIPT_FIELDS = frozenset(
     {
         "stdout",
@@ -163,10 +160,6 @@ def validate_receipt_file_set(root: Path) -> list[str]:
     if not root.is_dir():
         return [f"receipt_dir_missing: {root}"]
     names = {path.name for path in root.glob("*.json")}
-    failures.extend(
-        f"forbidden_receipt_file: {name}"
-        for name in sorted(names & FORBIDDEN_RECEIPT_FILES)
-    )
     failures.extend(
         f"required_receipt_missing: {name}"
         for name in sorted(REQUIRED_RECEIPT_FILES - names)
