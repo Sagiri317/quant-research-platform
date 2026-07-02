@@ -16,7 +16,7 @@ self_test.py
 
 ## Contract Owners
 
-- `handoff_contract.py` owns package layout, sidecar shape, task metadata shape, validation summary rows, allowed/required/forbidden zip entries, status summary aggregation, and exact package member sets.
+- `handoff_contract.py` owns package layout, sidecar shape, task metadata shape, validation summary rows, validation-summary evidence graph rules, allowed/required/forbidden zip entries, status summary aggregation, and exact package member sets.
 - `receipt_contract.py` owns package-smoke, hard-scan, check-receipts, advisory-review receipt schemas and validators.
 - `governance_contract.py` owns governance scans, source-tree scan rules, share-safety path rules, and status tokens.
 
@@ -27,6 +27,8 @@ self_test.py
 - `verify_handoff_package.py` is the only package-level trust boundary. It verifies exact zip members, duplicate/path safety, external sidecar shape, manifest hashes, task metadata, validation summary, receipts through `receipt_contract.py`, `final-branch.bundle`, hard-scan replay, and share-safety scan.
 
 Builder and collector do not implement package-level verification, receipt validators, share-safety regexes, or parallel status aggregation.
+
+`handoff_evidence/validation-summary.json` is a derived view. Every `PASS`, `FAIL`, or `BLOCKED` row must be backed by a receipt graph edge in `check-receipts.json`, `package-smoke-receipt.json`, or `hard-scan-receipt.json`.
 
 ## Bundle Verification
 

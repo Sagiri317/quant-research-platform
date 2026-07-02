@@ -139,12 +139,12 @@ def test_verifier_rejects_advisory_pass_without_receipt(
     verifier = _load_handoff_module("verify_handoff_package")
     package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
-    payload["advisory_reviews"] = {"advisory_review": "PASS"}
+    payload["advisory_reviews"] = {"review_subagent": "PASS"}
     sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     failures = verifier.verify_handoff_package(package, sidecar)
 
-    assert "advisory_reviews_pass_without_advisory_receipt" in failures
+    assert "advisory_reviews_mismatch" in failures
 
 
 def test_verifier_replays_hard_scan_from_bundle(

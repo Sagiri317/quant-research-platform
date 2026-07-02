@@ -94,6 +94,8 @@ code_map
 
 `scripted_checks` 只表示 `check-receipts.json` 聚合状态，不表示全量 tests。`private_validation` 不使用单独 status-only 文件；未运行或阻塞时，`evidence` 写明原因；实际 PASS/FAIL 时，`evidence` 引用 `handoff_evidence/check-receipts.json#private-validation`。
 
+`validation-summary.json` is a derived view. Every `PASS`, `FAIL`, or `BLOCKED` row must be backed by a receipt graph edge in `check-receipts.json`, `package-smoke-receipt.json`, or `hard-scan-receipt.json`.
+
 ## 5. Receipt Invariants
 
 receipt 必须是 compact REVIEW_SAFE JSON，不包含 stdout、stderr、raw output、raw grep output 或 grep hits。

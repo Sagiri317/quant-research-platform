@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 try:
@@ -118,6 +119,109 @@ def test_check_receipt_rejects_raw_output_fields() -> None:
     assert "receipt_forbidden_raw_field: check-receipts.json:checks.0.raw_output" in failures
     assert "receipt_forbidden_raw_field: check-receipts.json:checks.1.raw_grep_output" in failures
     assert "receipt_forbidden_raw_field: check-receipts.json:checks.1.grep_hits" in failures
+
+
+def test_check_receipts_rejects_empty_pass_checks() -> None:
+    contract = _load_handoff_module("receipt_contract")
+    payload = {"schema_id": "qrp-check-receipts", "status": "PASS", "checks": []}
+
+    failures = contract.validate_check_receipts(payload)
+
+    assert "check_receipts_empty_pass_invalid" in failures
+
+
+def test_check_receipts_rejects_top_level_status_mismatch() -> None:
+    contract = _load_handoff_module("receipt_contract")
+    payload = {
+        "schema_id": "qrp-check-receipts",
+        "status": "PASS",
+        "checks": [_valid_row(status="FAIL", exit_code=1, failure_excerpt="failed")],
+    }
+
+    failures = contract.validate_check_receipts(payload)
+
+    assert "check_receipts_status_mismatch" in failures
+
+
+def test_package_smoke_rejects_child_fail_with_top_pass() -> None:
+    contract = _load_handoff_module("receipt_contract")
+    payload = {
+        "schema_id": "qrp-package-smoke-receipt",
+        "status": "PASS",
+        "wheel": {"filename": "demo.whl", "sha256": "0" * 64},
+        "sdist": {"filename": "demo.tar.gz", "sha256": "1" * 64},
+        "install": {"status": "FAIL"},
+        "import": {"status": "PASS"},
+        "content_scan": {
+            "status": "PASS",
+            "forbidden_member_count": 0,
+            "scanned_artifact_kinds": ["wheel", "sdist", "install_target"],
+        },
+    }
+
+    failures = contract.validate_package_smoke_receipt(payload)
+
+    assert "package_smoke_status_mismatch" in failures
+
+
+def test_package_smoke_rejects_forbidden_member_count_with_pass_scan() -> None:
+    contract = _load_handoff_module("receipt_contract")
+    payload = {
+        "schema_id": "qrp-package-smoke-receipt",
+        "status": "PASS",
+        "wheel": {"filename": "demo.whl", "sha256": "0" * 64},
+        "sdist": {"filename": "demo.tar.gz", "sha256": "1" * 64},
+        "install": {"status": "PASS"},
+        "import": {"status": "PASS"},
+        "content_scan": {
+            "status": "PASS",
+            "forbidden_member_count": 1,
+            "scanned_artifact_kinds": ["wheel", "sdist", "install_target"],
+        },
+    }
+
+    failures = contract.validate_package_smoke_receipt(payload)
+
+    assert "package_smoke_content_scan_forbidden_members_mismatch" in failures
+
+
+def test_check_receipt_rejects_command_display_mismatch() -> None:
+    failures = _failures(_valid_row(command="python -m wrong"))
+
+    assert "check_receipt_command_mismatch: 0" in failures
+
+
+def test_check_receipts_rejects_duplicate_command_id() -> None:
+    contract = _load_handoff_module("receipt_contract")
+    payload = {
+        "schema_id": "qrp-check-receipts",
+        "status": "PASS",
+        "checks": [_valid_row(), _valid_row()],
+    }
+
+    failures = contract.validate_check_receipts(payload)
+
+    assert "check_receipt_duplicate_command_id: unit" in failures
+
+
+def test_check_receipt_rejects_missing_or_empty_command_argv() -> None:
+    assert "check_receipt_command_argv_invalid: 0" in _failures(
+        _valid_row(command_argv=[])
+    )
+    row = _valid_row()
+    row.pop("command_argv")
+
+    failures = _failures(row)
+
+    assert "check_receipt_missing: 0:command_argv" in failures
+    assert "check_receipt_command_argv_invalid: 0" in failures
+
+
+def test_check_receipt_accepts_shlex_joined_command() -> None:
+    row = _valid_row(command_argv=["python", "-c", "print('hello world')"])
+    row["command"] = shlex.join(row["command_argv"])
+
+    assert "check_receipt_command_mismatch: 0" not in _failures(row)
 
 
 def test_run_check_writes_command_argv_and_collected_sum(tmp_path: Path) -> None:

@@ -41,8 +41,11 @@ from handoff_contract import (  # noqa: E402
     build_sidecar_status_summary,
     posix_member_name_failures,
     validate_handoff_package_layout,
+    validate_advisory_reviews_against_receipts,
     validate_sidecar_contract,
     validate_task_metadata_contract,
+    validate_task_metadata_against_sidecar,
+    validate_validation_summary_against_receipts,
     validate_validation_summary_contract,
     validation_summary_status_map,
 )
@@ -151,18 +154,41 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 failures.extend(f"{failure}: {name}" for failure in member_name_failures(name))
             if json_path.name in name_set:
                 failures.append("external_sidecar_in_zip")
-            advisory_reviews = sidecar.get("advisory_reviews")
-            if (
-                isinstance(advisory_reviews, dict)
-                and any(value == "PASS" for value in advisory_reviews.values())
-                and ADVISORY_REVIEW_RECEIPT_ENTRY not in name_set
-            ):
-                failures.append("advisory_reviews_pass_without_advisory_receipt")
             failures.extend(verify_package_layout(names))
             failures.extend(verify_manifest_hashes(archive))
-            failures.extend(verify_task_metadata(archive))
-            failures.extend(verify_validation_summary(archive, sidecar))
-            failures.extend(verify_receipts(archive))
+            loaded = load_handoff_payloads(archive)
+            failures.extend(loaded.failures)
+            if loaded.task_metadata is not None:
+                failures.extend(validate_task_metadata_contract(loaded.task_metadata))
+                failures.extend(
+                    validate_task_metadata_against_sidecar(
+                        loaded.task_metadata,
+                        sidecar,
+                    )
+                )
+            if loaded.validation_summary is not None:
+                failures.extend(
+                    verify_validation_summary_payload(
+                        loaded.validation_summary,
+                        sidecar,
+                    )
+                )
+                failures.extend(
+                    validate_validation_summary_against_receipts(
+                        loaded.validation_summary,
+                        loaded.receipts,
+                    )
+                )
+            for entry, payload in loaded.receipts.items():
+                failures.extend(validate_receipt_payload(Path(entry).name, payload))
+            advisory_reviews = sidecar.get("advisory_reviews")
+            if isinstance(advisory_reviews, dict):
+                failures.extend(
+                    validate_advisory_reviews_against_receipts(
+                        advisory_reviews,
+                        loaded.receipts,
+                    )
+                )
             failures.extend(verify_final_branch_bundle(archive, sidecar))
     except OSError as exc:
         failures.append(f"zip_read_failed: {exc}")
@@ -303,6 +329,80 @@ def verify_receipts(archive: ZipFile) -> list[str]:
     return failures
 
 
+@dataclass(frozen=True)
+class LoadedHandoffPayloads:
+    task_metadata: dict[str, object] | None
+    validation_summary: dict[str, object] | None
+    receipts: dict[str, dict[str, object]]
+    failures: tuple[str, ...] = ()
+
+
+def load_handoff_payloads(archive: ZipFile) -> LoadedHandoffPayloads:
+    failures: list[str] = []
+    task_metadata = load_json_member(archive, TASK_METADATA_ENTRY, failures)
+    validation_summary = load_json_member(archive, VALIDATION_SUMMARY_ENTRY, failures)
+    receipts: dict[str, dict[str, object]] = {}
+    for entry in (
+        PACKAGE_SMOKE_RECEIPT_ENTRY,
+        HARD_SCAN_RECEIPT_ENTRY,
+        CHECK_RECEIPTS_ENTRY,
+        ADVISORY_REVIEW_RECEIPT_ENTRY,
+    ):
+        if entry not in archive.namelist():
+            if entry != ADVISORY_REVIEW_RECEIPT_ENTRY:
+                failures.append(f"receipt_missing: {entry}")
+            continue
+        payload = load_json_member(archive, entry, failures)
+        if payload is not None:
+            receipts[entry] = payload
+    return LoadedHandoffPayloads(
+        task_metadata=task_metadata,
+        validation_summary=validation_summary,
+        receipts=receipts,
+        failures=tuple(failures),
+    )
+
+
+def load_json_member(
+    archive: ZipFile,
+    entry: str,
+    failures: list[str],
+) -> dict[str, object] | None:
+    try:
+        payload = json.loads(archive.read(entry).decode("utf-8"))
+    except KeyError:
+        failures.append(f"json_member_missing: {entry}")
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        failures.append(f"json_member_invalid: {entry}")
+        return None
+    if not isinstance(payload, dict):
+        failures.append(f"json_member_must_be_object: {entry}")
+        return None
+    return payload
+
+
+def verify_validation_summary_payload(
+    payload: dict[str, object],
+    sidecar: dict[str, object],
+) -> list[str]:
+    failures = validate_validation_summary_contract(payload)
+    if failures:
+        return failures
+    status_map = validation_summary_status_map(payload)
+    summary = sidecar.get("status_summary")
+    if isinstance(summary, dict):
+        expected = build_sidecar_status_summary(
+            status_map,
+            handoff_verify=str(summary.get("handoff_verify", "NOT_RUN")),
+            share_safety_scan=str(summary.get("share_safety_scan", "NOT_RUN")),
+        )
+        for key, value in expected.items():
+            if summary.get(key) != value:
+                failures.append(f"sidecar_status_summary_mismatch: {key}")
+    return failures
+
+
 def verify_final_branch_bundle(
     archive: ZipFile,
     sidecar: dict[str, object],
@@ -359,6 +459,10 @@ def verify_hard_scan_replay(
         return ["hard_scan_receipt_invalid_for_replay"]
     replay = hard_scan_receipt_from_clone(clone_dir, final_head=final_head)
     failures: list[str] = []
+    if receipt.get("scanned_head") != final_head:
+        failures.append("hard_scan_scanned_head_sidecar_mismatch")
+    if replay.get("scanned_head") is not None and replay.get("scanned_head") != final_head:
+        failures.append("hard_scan_replay_scanned_head_sidecar_mismatch")
     if receipt.get("scanner_source_sha256") != replay.get("scanner_source_sha256"):
         failures.append("hard_scan_replay_scanner_source_sha256_mismatch")
     receipt_runs = keyed_scan_runs(receipt)

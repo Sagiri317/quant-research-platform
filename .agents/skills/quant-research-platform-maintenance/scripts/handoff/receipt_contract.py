@@ -6,6 +6,7 @@ This module is an internal tooling fact source. It is not a public API.
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -154,24 +155,38 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
             failures.append(f"package_smoke_filename_invalid: {key}")
         if not sha_or_empty(item.get("sha256")):
             failures.append(f"package_smoke_sha256_invalid: {key}")
+    step_statuses: list[str] = []
     for key in ("install", "import"):
         item = payload.get(key)
         if not isinstance(item, Mapping) or item.get("status") not in VALID_STATUS_TOKENS:
             failures.append(f"package_smoke_step_status_invalid: {key}")
+        else:
+            step_statuses.append(str(item.get("status")))
     scan = payload.get("content_scan")
     if not isinstance(scan, Mapping):
         failures.append("package_smoke_content_scan_invalid")
     else:
-        if scan.get("status") not in VALID_STATUS_TOKENS:
+        scan_status = scan.get("status")
+        if scan_status not in VALID_STATUS_TOKENS:
             failures.append("package_smoke_content_scan_status_invalid")
+        else:
+            step_statuses.append(str(scan_status))
         if not isinstance(scan.get("forbidden_member_count"), int):
             failures.append("package_smoke_forbidden_member_count_invalid")
+        elif scan.get("forbidden_member_count", 0) > 0 and scan_status == "PASS":
+            failures.append("package_smoke_content_scan_forbidden_members_mismatch")
         if set(scan.get("scanned_artifact_kinds") or ()) != {
             "wheel",
             "sdist",
             "install_target",
         }:
             failures.append("package_smoke_scanned_artifact_kinds_invalid")
+    if (
+        step_statuses
+        and payload.get("status") in VALID_STATUS_TOKENS
+        and payload.get("status") != _aggregate_validation_matrix_status(step_statuses)
+    ):
+        failures.append("package_smoke_status_mismatch")
     return failures
 
 
@@ -192,6 +207,10 @@ def validate_hard_scan_receipt(payload: Mapping[str, object]) -> list[str]:
         failures.append("hard_scan_schema_id_invalid")
     if payload.get("status") not in VALID_STATUS_TOKENS:
         failures.append("hard_scan_status_invalid")
+    if not isinstance(payload.get("scanned_head"), str) or not str(
+        payload.get("scanned_head")
+    ).strip():
+        failures.append("hard_scan_scanned_head_invalid")
     if not sha(payload.get("scanner_source_sha256")):
         failures.append("hard_scan_scanner_source_sha256_invalid")
     runs = payload.get("scan_runs")
@@ -233,6 +252,14 @@ def validate_check_receipts(payload: Mapping[str, object]) -> list[str]:
     if not isinstance(checks, list):
         failures.append("check_receipts_checks_invalid")
         return failures
+    if not checks and payload.get("status") == "PASS":
+        failures.append("check_receipts_empty_pass_invalid")
+    if not checks and payload.get("status") != "NOT_RUN":
+        failures.append("check_receipts_empty_status_invalid")
+    if not checks and payload.get("status") == "NOT_RUN" and not str(
+        payload.get("not_run_reason") or ""
+    ).strip():
+        failures.append("check_receipts_empty_not_run_reason_missing")
     statuses: list[str] = []
     seen: set[str] = set()
     for index, row in enumerate(checks):
@@ -288,6 +315,8 @@ def validate_check_receipt_row(
         isinstance(item, str) and item for item in command_argv
     ):
         failures.append(f"check_receipt_command_argv_invalid: {index}")
+    elif row.get("command") != shlex.join(command_argv):
+        failures.append(f"check_receipt_command_mismatch: {index}")
     status = row.get("status")
     if status not in VALID_STATUS_TOKENS:
         failures.append(f"check_receipt_status_invalid: {index}")

@@ -34,6 +34,7 @@ from handoff_contract import (  # noqa: E402
     aggregate_validation_summary_status,
     build_sidecar_status_summary,
     validate_task_metadata_contract,
+    validate_validation_summary_against_receipts,
     validate_validation_summary_contract,
     validation_row,
     validation_summary_status_map,
@@ -239,6 +240,7 @@ def build_validation_summary_from_receipts(
     ]
     payload = {"schema_id": "qrp-handoff-validation-summary", "checks": rows}
     failures = validate_validation_summary_contract(payload)
+    failures.extend(validate_validation_summary_against_receipts(payload, receipts))
     if failures:
         raise SystemExit(";".join(failures))
     return payload
@@ -252,14 +254,14 @@ def command_validation_row(
 ) -> dict[str, str]:
     row = command_rows.get(command_id)
     if row is None:
-        return validation_row(row_name, "NOT_RUN", f"{command_id} not run")
+        reason = f"{command_id} was not run"
+        if command_id == "private-validation":
+            reason = "private validation was not run"
+        elif command_id == "baseline-compare":
+            reason = "baseline compare was not run"
+        return validation_row(row_name, "NOT_RUN", f"not_run: {reason}")
     status = str(row.get("status", "NOT_RUN"))
-    if status == "NOT_RUN":
-        evidence = str(row.get("not_run_reason") or f"{command_id} not run")
-    elif status == "BLOCKED":
-        evidence = str(row.get("blocked_reason") or f"{command_id} blocked")
-    else:
-        evidence = f"{CHECK_RECEIPTS_ENTRY}#{command_id}"
+    evidence = f"{CHECK_RECEIPTS_ENTRY}#{command_id}"
     return validation_row(row_name, status, evidence)
 
 
@@ -328,7 +330,7 @@ def sidecar_payload(
     advisory_reviews = {}
     advisory = receipts.get(ADVISORY_REVIEW_RECEIPT_ENTRY)
     if advisory is not None:
-        advisory_reviews = {"advisory_review": str(advisory.get("status", "NOT_RUN"))}
+        advisory_reviews = {"review_subagent": str(advisory.get("status", "NOT_RUN"))}
     return {
         "schema_id": PACKAGE_SCHEMA_ID,
         "zip_filename": zip_path.name,

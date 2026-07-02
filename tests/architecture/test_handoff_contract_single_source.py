@@ -52,6 +52,42 @@ def test_collector_builder_verifier_do_not_own_receipt_validators() -> None:
     assert offenders == []
 
 
+def test_evidence_graph_source_contract_is_handoff_contract_owned() -> None:
+    handoff_contract = _source(HANDOFF_ROOT / "handoff_contract.py")
+    verifier = _source(HANDOFF_ROOT / "verify_handoff_package.py")
+
+    assert "VALIDATION_ROW_SOURCE_CONTRACT" in handoff_contract
+    assert "VALIDATION_ROW_SOURCE_CONTRACT" not in verifier
+
+
+def test_builder_and_verifier_call_evidence_graph_validator() -> None:
+    required_calls = {
+        "validate_validation_summary_against_receipts",
+        "validate_advisory_reviews_against_receipts",
+        "validate_task_metadata_against_sidecar",
+    }
+    builder_calls = _function_calls(HANDOFF_ROOT / "build_handoff_package.py")
+    verifier_calls = _function_calls(HANDOFF_ROOT / "verify_handoff_package.py")
+
+    assert "validate_validation_summary_against_receipts" in builder_calls
+    assert required_calls <= verifier_calls
+
+
+def test_receipt_contract_owns_receipt_invariants_not_builder_or_verifier() -> None:
+    receipt_contract = _source(HANDOFF_ROOT / "receipt_contract.py")
+    assert "check_receipts_empty_pass_invalid" in receipt_contract
+    assert "package_smoke_status_mismatch" in receipt_contract
+    assert "hard_scan_status_mismatch" in receipt_contract
+    for path in (
+        HANDOFF_ROOT / "build_handoff_package.py",
+        HANDOFF_ROOT / "verify_handoff_package.py",
+    ):
+        source = _source(path)
+        assert "check_receipts_empty_pass_invalid" not in source
+        assert "package_smoke_status_mismatch" not in source
+        assert "hard_scan_status_mismatch" not in source
+
+
 def test_retired_execution_symbols_are_absent_from_execution_path() -> None:
     execution_paths = [
         HANDOFF_ROOT / "build_handoff_package.py",
@@ -121,3 +157,12 @@ def test_retired_entry_names_are_only_contract_or_negative_test_owned() -> None:
         "receipt-index.json",
     ):
         assert retired not in execution_combined
+
+
+def _function_calls(path: Path) -> set[str]:
+    tree = ast.parse(_source(path), filename=str(path))
+    calls: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            calls.add(node.func.id)
+    return calls
