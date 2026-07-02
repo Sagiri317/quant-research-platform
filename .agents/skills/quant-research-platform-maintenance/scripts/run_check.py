@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -45,11 +46,13 @@ def main(argv: list[str] | None = None) -> int:
         check=False,
     )
     duration = time.perf_counter() - started
+    command_argv = list(command)
     receipt = {
         "schema_id": "qrp-check-receipt",
         "command_id": args.command_id,
         "scope": args.scope,
-        "command": " ".join(command),
+        "command_argv": command_argv,
+        "command": shlex.join(command_argv),
         "status": "PASS" if proc.returncode == 0 else "FAIL",
         "exit_code": proc.returncode,
         "duration_seconds": round(duration, 3),
@@ -76,7 +79,10 @@ def sha256_text(text: str) -> str:
 def extract_pytest_counts(text: str) -> dict[str, int] | None:
     counts = dict.fromkeys(PYTEST_COUNT_KEYS, 0)
     found = False
+    explicit_collected = False
     for key in PYTEST_COUNT_KEYS:
+        if key == "collected":
+            continue
         label = "error" if key == "errors" else key
         pattern = rf"(\d+)\s+{label}s?\b"
         matches = re.findall(pattern, text)
@@ -87,6 +93,20 @@ def extract_pytest_counts(text: str) -> dict[str, int] | None:
     if collected:
         counts["collected"] = int(collected.group(1))
         found = True
+        explicit_collected = True
+    if found and not explicit_collected:
+        counts["collected"] = sum(
+            counts[key]
+            for key in (
+                "passed",
+                "failed",
+                "skipped",
+                "errors",
+                "xfailed",
+                "xpassed",
+                "deselected",
+            )
+        )
     return counts if found else None
 
 

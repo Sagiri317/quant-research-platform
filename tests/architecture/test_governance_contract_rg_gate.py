@@ -53,7 +53,7 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/agents/handoff/test_handoff_package_verifier.py"),
     Path("tests/architecture/test_environment_contract.py"),
     Path("tests/architecture/test_factor_contract_terms.py"),
-    Path("tests/architecture/test_handoff_package_contract.py"),
+    Path("tests/architecture/test_handoff_contract_single_source.py"),
     Path("tests/architecture/test_package_scan_coverage.py"),
     Path("tests/policy/test_share_safety.py"),
     Path("tests/policy/test_share_safety_runtime_edges.py"),
@@ -85,7 +85,7 @@ RUN_OUTPUT_ARTIFACTS = Path("src/quant_research_platform/artifacts/outputs.py")
 RUNTIME_PROFILING = Path("src/quant_research_platform/runtime/profiling.py")
 GOVERNANCE_NEGATIVE_FIXTURE_FILES = (
     Path("tests/agents/test_verify_governance.py"),
-    Path("tests/architecture/test_handoff_package_contract.py"),
+    Path("tests/architecture/test_handoff_contract_single_source.py"),
     Path("tests/architecture/test_retired_surface_absent.py"),
     Path("tests/architecture/test_governance_contract_rg_gate.py"),
     Path("tests/helpers/governance_fixtures.py"),
@@ -1627,10 +1627,6 @@ APPROVED_WRITER_MODULES = {
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
         "collect_handoff_receipts.py"
-    ),
-    Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-        "collect_private_smoke_status.py"
     ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"

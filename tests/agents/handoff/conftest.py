@@ -35,8 +35,8 @@ def _load_handoff_module(name: str):
     return module
 
 
-MANDATORY_VALIDATION_CHECKS = tuple(
-    sorted(_load_handoff_module("governance_contract").MANDATORY_VALIDATION_CHECKS)
+MANDATORY_VALIDATION_ROWS = tuple(
+    sorted(_load_handoff_module("handoff_contract").MANDATORY_VALIDATION_ROWS)
 )
 
 
@@ -64,12 +64,7 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
     base, final_head = _init_handoff_repo(repo)
     out_dir = tmp_path / "out"
     receipts_dir = tmp_path / "receipts"
-    _write_receipts(
-        receipts_dir,
-        repo=repo,
-        final_head=final_head,
-        include_advisory=True,
-    )
+    _write_receipts(receipts_dir, repo=repo, final_head=final_head)
     task = {
         "slug": "handoff-test",
         "mode": "evidence",
@@ -100,10 +95,6 @@ def _init_handoff_repo(repo: Path) -> tuple[str, str]:
         HANDOFF_SKILL_ROOT / "templates",
         support_root / "templates",
     )
-    shutil.copytree(
-        HANDOFF_SKILL_ROOT / "schemas",
-        support_root / "schemas",
-    )
     package_root = repo / "src" / "quant_research_platform"
     package_root.mkdir(parents=True)
     (package_root / "__init__.py").write_text("", encoding="utf-8")
@@ -123,14 +114,13 @@ def _init_handoff_repo(repo: Path) -> tuple[str, str]:
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "base")
     base = _git(repo, "rev-parse", "HEAD").strip()
-    fixture = repo / "tests" / "negative_fixtures.py"
-    fixture.parent.mkdir()
-    fixture.write_text(
-        'LEAK_FIXTURE = "E:' + '/negative-fixture/not-real.txt"\n',
+    (repo / "tests" / "negative_fixtures.py").parent.mkdir()
+    (repo / "tests" / "negative_fixtures.py").write_text(
+        "NEGATIVE_FIXTURE = 'review-safe aggregate fixture'\n",
         encoding="utf-8",
     )
     _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "add negative fixture")
+    _git(repo, "commit", "-m", "add handoff fixture")
     final_head = _git(repo, "rev-parse", "HEAD").strip()
     return base, final_head
 
@@ -148,23 +138,8 @@ def _git(repo: Path, *args: str) -> str:
 
 def _validation_checks(status: str = "PASS") -> list[dict[str, str]]:
     return [
-        {
-            "name": name,
-            "status": status,
-            "evidence": f"{name} {status}",
-        }
-        for name in MANDATORY_VALIDATION_CHECKS
-    ]
-
-
-def _review_validation_checks(status: str = "PASS") -> list[dict[str, str]]:
-    return [
-        *_validation_checks(status),
-        {
-            "name": "review_subagent",
-            "status": status,
-            "evidence": f"review_subagent {status}",
-        },
+        {"name": name, "status": status, "evidence": f"{name} {status}"}
+        for name in MANDATORY_VALIDATION_ROWS
     ]
 
 
@@ -177,7 +152,7 @@ def _validation_payload(
     }
 
 
-def _package_smoke_evidence() -> dict[str, object]:
+def _package_smoke_receipt() -> dict[str, object]:
     return {
         "schema_id": "qrp-package-smoke-receipt",
         "status": "PASS",
@@ -204,42 +179,44 @@ def _package_smoke_evidence() -> dict[str, object]:
     }
 
 
-def _hard_scan_classification_evidence() -> dict[str, object]:
-    return {
-        "schema_id": "qrp-hard-scan-receipt",
-        "status": "PASS",
-        "scanned_head": "1" * 40,
-        "scanner_source_sha256": "2" * 64,
-        "scan_runs": [
-            {
-                "scan_id": "allowance_contract",
-                "rule_set_id": "source-tree:allowance_contract",
-                "match_count": 0,
-                "actual_violation_count": 0,
-                "deferred_count": 0,
-                "negative_fixture_count": 0,
-                "false_positive_count": 0,
-                "result_sha256": "3" * 64,
-                "replayable_from_bundle": True,
-            }
-        ],
-        "classified_exceptions": [],
+def _check_receipt(
+    command_id: str,
+    *,
+    status: str = "PASS",
+    counts: dict[str, int] | None = None,
+    not_run_reason: str | None = None,
+    blocked_reason: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_id": "qrp-check-receipt",
+        "command_id": command_id,
+        "scope": f"{command_id} scope",
+        "command_argv": ["python", "-m", command_id],
+        "command": f"python -m {command_id}",
+        "status": status,
+        "exit_code": 0 if status == "PASS" else (1 if status == "FAIL" else None),
+        "duration_seconds": 1.0,
+        "counts": counts,
+        "stdout_sha256": "4" * 64,
+        "stderr_sha256": "5" * 64,
+        "output_summary": f"{command_id} {status}",
+        "failure_excerpt": "" if status == "PASS" else f"{command_id} {status}",
     }
+    if not_run_reason:
+        payload["not_run_reason"] = not_run_reason
+    if blocked_reason:
+        payload["blocked_reason"] = blocked_reason
+    return payload
 
 
-def _test_checks_evidence() -> dict[str, object]:
+def _check_receipts() -> dict[str, object]:
     return {
         "schema_id": "qrp-check-receipts",
-        "status": "PASS",
+        "status": "NOT_RUN",
         "checks": [
-            {
-                "schema_id": "qrp-check-receipt",
-                "command_id": "handoff-tests",
-                "command": "pytest tests/agents/handoff -q",
-                "scope": "handoff verifier tests",
-                "status": "PASS",
-                "exit_code": 0,
-                "counts": {
+            _check_receipt(
+                "profile-smoke",
+                counts={
                     "passed": 1,
                     "failed": 0,
                     "skipped": 0,
@@ -249,43 +226,31 @@ def _test_checks_evidence() -> dict[str, object]:
                     "xpassed": 0,
                     "collected": 1,
                 },
-                "duration_seconds": 1.0,
-                "stdout_sha256": "4" * 64,
-                "stderr_sha256": "5" * 64,
-                "output_summary": "1 passed",
-                "failure_excerpt": "",
-            }
+            ),
+            _check_receipt(
+                "private-validation",
+                status="NOT_RUN",
+                not_run_reason="private validation not run in test fixture",
+            ),
+            _check_receipt(
+                "baseline-compare",
+                status="NOT_RUN",
+                not_run_reason="baseline compare not run in test fixture",
+            ),
+            _check_receipt("code-map"),
         ],
-    }
-
-
-def _private_smoke_status() -> dict[str, object]:
-    return {
-        "schema_id": "qrp-private-smoke-status",
-        "status": "NOT_RUN",
-        "command_id": "private-smoke",
-        "exit_code": None,
-        "run_level_overall": "NOT_RUN",
-        "private_smoke_run_level": "NOT_RUN",
-        "private_smoke_child_checks": "NOT_RUN",
-        "compare": "NOT_RUN",
-        "full_horizon": "NOT_RUN",
-        "child_statuses": {},
-        "run_json_sha256": "",
-        "row_level_data_included": False,
-        "not_run_reason": "private smoke not run in test fixture",
     }
 
 
 def _advisory_review_receipt() -> dict[str, object]:
     return {
         "schema_id": "qrp-advisory-review-receipt",
-        "status": "NOT_RUN",
+        "status": "PASS",
         "review_lanes": [],
         "finding_count": 0,
         "true_issue_count": 0,
         "false_positive_count": 0,
-        "re_review_status": "NOT_RUN",
+        "re_review_status": "PASS",
         "findings": [],
     }
 
@@ -300,13 +265,12 @@ def _write_receipts(
     governance = _load_handoff_module("governance_contract")
     receipts_dir.mkdir(parents=True, exist_ok=True)
     payloads = {
-        "package-smoke-receipt.json": _package_smoke_evidence(),
+        "package-smoke-receipt.json": _package_smoke_receipt(),
         "hard-scan-receipt.json": governance.hard_scan_receipt_from_clone(
             repo,
             final_head=final_head,
         ),
-        "check-receipts.json": _test_checks_evidence(),
-        "private-smoke-status.json": _private_smoke_status(),
+        "check-receipts.json": _check_receipts(),
     }
     if include_advisory:
         payloads["advisory-review-receipt.json"] = _advisory_review_receipt()
@@ -353,8 +317,8 @@ def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
     _rewrite_package_member(package, "artifact_manifest.json", manifest_bytes)
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
-    payload["zip_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
     payload["artifact_manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+    payload["zip_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
     sidecar.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -373,75 +337,22 @@ def _replace_validation_summary(
     )
     _refresh_manifest_and_sidecar(package, sidecar)
     sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
-    status_map = {}
-    for row in payload.get("checks", []):
-        if not isinstance(row, dict) or "name" not in row or "status" not in row:
-            continue
-        status = row["status"]
-        if isinstance(status, str):
-            status_map[str(row["name"])] = status
-    mandatory_statuses = [
-        status_map[name] for name in MANDATORY_VALIDATION_CHECKS if name in status_map
-    ]
-    if "FAIL" in mandatory_statuses:
-        validation_status = "FAIL"
-    elif "BLOCKED" in mandatory_statuses:
-        validation_status = "BLOCKED"
-    elif "NOT_RUN" in mandatory_statuses:
-        validation_status = "NOT_RUN"
-    elif len(mandatory_statuses) == len(MANDATORY_VALIDATION_CHECKS):
-        validation_status = "PASS"
-    else:
-        validation_status = "FAIL"
-    existing_summary = sidecar_payload.get("status_summary")
-    if not isinstance(existing_summary, dict):
-        existing_summary = {}
-    sidecar_payload["status_summary"] = {
-        "validation": validation_status,
-        "tests": status_map.get("tests", "NOT_RUN"),
-        "package_smoke": status_map.get("package_smoke", "NOT_RUN"),
-        "profile_smoke": status_map.get("profile_smoke", "NOT_RUN"),
-        "private_smoke_run_level": status_map.get(
-            "private_smoke_run_level",
-            "NOT_RUN",
-        ),
-        "private_smoke_child_checks": status_map.get(
-            "private_smoke_child_checks",
-            "NOT_RUN",
-        ),
-        "baseline_compare": status_map.get("baseline_compare", "NOT_RUN"),
-        "governance": status_map.get("governance", "NOT_RUN"),
-        "code_map": status_map.get("code_map", "NOT_RUN"),
-        "handoff_verify": existing_summary.get("handoff_verify", "NOT_RUN"),
-        "handoff_safety": existing_summary.get("handoff_safety", "NOT_RUN"),
-        "blocked_count": sum(
-            1 for status in mandatory_statuses if status == "BLOCKED"
-        ),
-        "fail_count": sum(1 for status in mandatory_statuses if status == "FAIL"),
+    status_map = {
+        str(row["name"]): str(row["status"])
+        for row in payload.get("checks", [])
+        if isinstance(row, dict) and "name" in row and "status" in row
     }
+    handoff_contract = _load_handoff_module("handoff_contract")
+    existing = sidecar_payload.get("status_summary")
+    if not isinstance(existing, dict):
+        existing = {}
+    sidecar_payload["status_summary"] = handoff_contract.build_sidecar_status_summary(
+        status_map,
+        handoff_verify=str(existing.get("handoff_verify", "NOT_RUN")),
+        share_safety_scan=str(existing.get("share_safety_scan", "NOT_RUN")),
+    )
     sidecar.write_text(
         json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-
-
-def _replace_generation_evidence(
-    package: Path,
-    sidecar: Path,
-    payload: dict[str, object],
-) -> None:
-    _rewrite_package_member(
-        package,
-        "handoff_evidence/generation.json",
-        (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
-    )
     _refresh_manifest_and_sidecar(package, sidecar)
-
-
-def _generation_evidence(package: Path) -> dict[str, object]:
-    with zipfile.ZipFile(package) as archive:
-        payload = json.loads(
-            archive.read("handoff_evidence/generation.json").decode("utf-8")
-        )
-    assert isinstance(payload, dict)
-    return payload

@@ -72,7 +72,7 @@ references/prompt-patterns.md
 .agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
 ```
 
-`verify_governance.py`、handoff source-tree scan、handoff verifier 和相关 tests 必须引用该事实源或由它派生规则。current-contract-only 规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 只从该事实源读取或派生。
+`verify_governance.py`、source-tree scan 和相关 tests 必须引用该事实源或由它派生规则。current-contract-only 规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 只从该事实源读取或派生。
 
 建议命令：
 
@@ -99,6 +99,8 @@ handoff scripts 位于：
 ```
 
 `verify_handoff_package.py` 是唯一 handoff/package verifier。builder 只 build 并调用 verifier，不定义 sanitizer、package member safety、private regex 或状态聚合规则。handoff artifact 输出到 `.run/` 或用户指定输出目录，当前合同来自本轮实际生成和验证的 artifact。
+
+handoff package layout、sidecar、task metadata 和 validation summary 合同由 `handoff/handoff_contract.py` 拥有。receipt schema、receipt invariant 和 receipt 聚合由 `handoff/receipt_contract.py` 拥有。`governance_contract.py` 只拥有治理扫描、source-tree scan、共享安全路径和 status token 规则。
 
 `.agents/` 只承载 governance、handoff 和 prompt tooling；runtime 业务逻辑必须留在 `src/quant_research_platform/` 的 owner layer。
 

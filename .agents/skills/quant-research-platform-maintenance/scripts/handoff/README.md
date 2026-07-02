@@ -1,48 +1,44 @@
 # Handoff Scripts
 
-本目录保存 tracked handoff tooling。所有 handoff 构建和验证必须使用这里的脚本，不得从 `.run/` 中复制或推断工具逻辑。治理规则从 `../governance_contract.py` 读取；该文件是共享规则事实源，不是 `.run/` 产物。
+本目录保存 tracked handoff tooling。所有 handoff 构建和验证必须使用这里的脚本，不得从 `.run/` 中复制或推断工具逻辑。
 
-## 文件
+## Files
 
 ```text
+handoff_contract.py
+receipt_contract.py
+collect_handoff_receipts.py
 build_handoff_package.py
 verify_handoff_package.py
+run_package_smoke.py
 self_test.py
 ```
 
-## 分层
+## Contract Owners
 
-- builder 只负责生成 bundle、manifest、sidecar、task metadata 和 evidence，并调用 verifier。
-- verifier 是唯一 handoff/package verifier，负责 bundle 合同、manifest/hash、zip member、sidecar、source-tree scan 和 share-safety 检查。
-- source-tree scan 规则来自 `governance_contract.py`。
-- share safety 规则来自 `src/quant_research_platform/policy/share_safety.py`。
+- `handoff_contract.py` owns package layout, sidecar shape, task metadata shape, validation summary rows, allowed/required/forbidden zip entries, status summary aggregation, and exact package member sets.
+- `receipt_contract.py` owns package-smoke, hard-scan, check-receipts, advisory-review receipt schemas and validators.
+- `governance_contract.py` owns governance scans, source-tree scan rules, share-safety path rules, and status tokens.
 
-这些 gate 互不替代。任何报告必须分别写出状态。
+## Tool Boundaries
 
-## 输出
+- `collect_handoff_receipts.py` reads an input directory, optionally wraps check JSONL into `check-receipts.json`, copies required/optional receipts, and calls `receipt_contract.validate_receipt_file_set()`.
+- `build_handoff_package.py` requires a clean current worktree and current branch HEAD matching task `final_head`, stages only the minimal handoff members, writes `artifact_manifest.json`, writes the external sidecar, and calls `verify_handoff_package.py` when requested.
+- `verify_handoff_package.py` is the only package-level trust boundary. It verifies exact zip members, duplicate/path safety, external sidecar shape, manifest hashes, task metadata, validation summary, receipts through `receipt_contract.py`, `final-branch.bundle`, hard-scan replay, and share-safety scan.
 
-handoff 输出应写到 `.run/` 或用户指定目录。`.run/` 是 output layer，不是工具事实源。
+Builder and collector do not implement package-level verification, receipt validators, share-safety regexes, or parallel status aggregation.
 
-`artifact_manifest.json` 是 package manifest anchor。它必须存在于 zip 根部，
-由 sidecar 记录 hash，但不列入自己的 `entries`；`entries` 只覆盖 manifest
-锚点之外的 package 成员。
+## Bundle Verification
 
-handoff package 内的 `final-branch.bundle` 应可用以下形式重建分支：
+`final-branch.bundle` must be directly verifiable:
 
 ```text
-git clone -b <branch-from-sidecar> final-branch.bundle review-repo
+git bundle verify final-branch.bundle
+git clone --branch <branch-from-sidecar> final-branch.bundle review-repo
 ```
 
-When `final-branch.bundle` is present, the builder records bundle verify,
-list-heads, and the exact branch clone evidence in
-`handoff_evidence/bundle-reconstruction.json`; the verifier checks that
-evidence and still runs its own bundle reconstruction checks.
+The verifier clones the bundle, checks HEAD against sidecar `final_head`, checks a clean working tree, and replays hard scan from the clone. No separate reconstruction evidence file is produced or trusted.
 
-正式 handoff 的 REVIEW_SAFE evidence 不能是 status-only 摘要；具体判定由
-verifier 和 tests 拥有。
+## Output
 
-handoff 合同只由本目录 tracked scripts、schemas 和 templates 定义。
-
-## 运行纪律
-
-运行前先确认 live git baseline。生成 bundle 后记录 hash、manifest、sidecar、source-tree scan、single verifier result、git bundle verify 和 list-heads。未运行项写 `NOT_RUN`，环境或超时阻塞写 `BLOCKED`。
+handoff output should be written to `.run/` or a user-specified directory. `.run/` is output/evidence storage, not a tooling fact source. Reports must keep `PASS`, `FAIL`, `NOT_RUN`, and `BLOCKED` scoped to the actual command or artifact.

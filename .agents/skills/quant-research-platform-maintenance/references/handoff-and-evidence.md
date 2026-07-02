@@ -1,8 +1,8 @@
 # Handoff and Evidence
 
-本文定义 handoff 和 evidence 的当前合同。
+本文定义 handoff 和 evidence 的当前合同。顶层 docs 只写 owner 原则；本文件可以列出具体 handoff layout。
 
-## 1. 工具位置
+## 1. 工具和 owner
 
 tracked handoff tooling 位于：
 
@@ -10,77 +10,121 @@ tracked handoff tooling 位于：
 .agents/skills/quant-research-platform-maintenance/scripts/handoff/
 ```
 
-`.run/` 只是 artifact output 位置。不要从 `.run/` 反推工具合同。
+`.run/` 只是 artifact output 位置，不是合同源。
 
-## 2. Handoff 分层
+- `handoff_contract.py` 拥有 zip layout、sidecar shape、task metadata shape、validation-summary rows、allowed/required/forbidden entries、sidecar status summary 和 exact package member set。
+- `receipt_contract.py` 拥有 package-smoke、hard-scan、check-receipts、advisory-review receipt schema、receipt invariant 和 receipt status aggregation。
+- `verify_handoff_package.py` 是唯一 package-level trust boundary。
+- `governance_contract.py` 只拥有治理扫描、source-tree scan、共享安全路径、status token 和 retired surface scanning rules。
 
-handoff 至少包含：
+## 2. Minimal Zip Layout
 
-1. check runner：实际执行检查并生成 compact receipt。
-2. builder：只读取 task metadata、receipts-dir，构建 `final-branch.bundle`、manifest、sidecar 和 receipt evidence。
-3. verifier：唯一 handoff/package verifier，校验 bundle、manifest/hash、zip member、sidecar、receipt schema、hard-scan replay 和 share-safety。
-4. hard-scan replay：可从 `final-branch.bundle` 重放的检查只保存 receipt，verifier 在 bundle clone 中重放并比对 count/hash。
-5. policy share safety：文本、JSON、路径和 zip member 的共享安全规则来自 `policy/share_safety.py`。
-
-这些结果不能互相替代。builder 应 fail fast，不能先写出非法 artifact 再依赖 verifier 补救。handoff gate 只依据本轮实际运行的独立检查。
-
-## 3. Evidence 规则
-
-REVIEW_SAFE evidence 可以包含：
-
-- command
-- status token
-- exit result
-- counts
-- schema hash
-- artifact hash
-- REVIEW_SAFE path structure
-
-REVIEW_SAFE evidence 不得包含：
-
-- private row-level data
-- vendor marker
-- local absolute path
-- stock-code sample
-- raw traceback
-- private-derived sample
-
-LOCAL_ONLY outputs 默认不进入 handoff。原因是共享边界、授权边界、体积边界和本地 path/provider/source 风险，而不是因为所有结果本身都必然是隐私。
-
-handoff 可以纳入完整 `run.json`，但必须校验 `schema_id` 并通过统一 safety verifier。handoff zip 内机器 evidence 统一放在 `handoff_evidence/`。
-
-正式 handoff 的 REVIEW_SAFE evidence 必须可由 verifier 审查。Codex 不应手写或搬运大段 handoff evidence JSON；检查由脚本运行，receipt 由脚本生成，builder 只打包 compact receipts。
-
-status-only 摘要不能作为完整 evidence；具体判定由 tracked verifier 和 tests 拥有。
-
-正式 handoff 必须包含以下机器 evidence：
+正式 handoff zip 只允许包含：
 
 ```text
+artifact_manifest.json
+final-branch.bundle
+task_metadata.json
+handoff_evidence/validation-summary.json
 handoff_evidence/package-smoke-receipt.json
 handoff_evidence/hard-scan-receipt.json
 handoff_evidence/check-receipts.json
-handoff_evidence/private-smoke-status.json
-handoff_evidence/generation.json
-handoff_evidence/bundle-reconstruction.json
-handoff_evidence/validation-summary.json
+handoff_evidence/advisory-review-receipt.json
 ```
 
-`advisory-review-receipt.json` 是 optional。只有本轮声明 advisory/subagent review `PASS` 时才必须存在；未运行时 sidecar 写 `NOT_RUN` 或不声明 PASS。
+`handoff_evidence/advisory-review-receipt.json` 是 optional，只有 advisory review 实际运行时才存在。未运行时不生成空 advisory receipt。
 
-`package-smoke-receipt.json` 只记录 wheel/sdist 文件名与 hash、临时 no-deps install/import 状态、content scan 状态和 forbidden count；wheel、sdist、临时 install target 不进入 handoff。`hard-scan-receipt.json` 不保存 raw grep output 或完整命中，只保存 scan id、rule set、count、result hash 和必要 classified exceptions。不可重放的 private/local 检查只保存 `private-smoke-status.json` 这种 REVIEW_SAFE 状态摘要，不保存 row-level data 或本地 raw artifact。
+## 3. Sidecar
 
-handoff 不打包 raw grep output、full pytest log、完整 stdout/stderr、完整 subagent transcript、完整文件清单、wheel/sdist、本地临时安装目录、`.run/local/**` 或 private/generated data。
+sidecar JSON 只允许包含：
 
-builder 必须拒绝 task JSON 中的 `handoff_evidence`、`handoff_markdown_evidence` 和 `validation_evidence`。`validation_evidence.json`、`handoff_evidence/source-tree-scan.json`、`handoff_evidence/verification-matrix.json` 和旧 receipt 文件名不得恢复为 handoff 状态源；当前 validation 状态只由 builder 从 receipts 派生为 `handoff_evidence/validation-summary.json`。
+```text
+schema_id
+zip_filename
+zip_sha256
+artifact_manifest_sha256
+branch
+base
+final_head
+generated_at_utc
+status_summary
+advisory_reviews
+```
 
-## 4. Sidecar 规则
+`status_summary` 只允许包含：
 
-sidecar 是机器可读 evidence summary，不是业务结论本身。sidecar PASS 只表示 sidecar 对应检查通过，不代表 full pytest、local private validation 或 business correctness。
+```text
+validation
+scripted_checks
+package_smoke
+profile_smoke
+private_validation
+baseline_compare
+governance
+code_map
+handoff_verify
+share_safety_scan
+validation_blocked_count
+validation_fail_count
+```
 
-sidecar status 必须拆分 `package_smoke`、`profile_smoke`、`private_smoke_run_level`、`private_smoke_child_checks`、`baseline_compare`、`handoff_verify`、`handoff_safety_scan` 等状态，不得使用 generic `smoke=PASS` 混淆 package/profile/private/compare。
+未运行 advisory review 时，`advisory_reviews` 使用 `{}`。sidecar PASS 不代表 pytest、business smoke、compare 或 private validation PASS；每个 status 只覆盖对应 evidence。
 
-## 5. Git Bundle
+## 4. Validation Summary
 
-handoff package 和 git bundle 是不同概念。handoff package 可以包含 REVIEW_SAFE reports、logs、manifest 和 evidence；git bundle 应能重建当前分支仓库状态。生成和验证时应记录 bundle hash、list-heads 和推荐 clone command。
+`handoff_evidence/validation-summary.json` 的 `schema_id` 必须是 `qrp-handoff-validation-summary`。每行只允许：
 
-verifier 必须从 `final-branch.bundle` clone 一次并重放可重放检查，例如 hard scan；不可重放检查只校验 review-safe receipt schema 和状态真实性。已退役的状态文件不应恢复为 handoff 状态源。
+```text
+name
+status
+evidence
+```
+
+mandatory rows：
+
+```text
+scripted_checks
+package_smoke
+profile_smoke
+private_validation
+baseline_compare
+governance
+code_map
+```
+
+`scripted_checks` 只表示 `check-receipts.json` 聚合状态，不表示全量 tests。`private_validation` 不使用单独 status-only 文件；未运行或阻塞时，`evidence` 写明原因；实际 PASS/FAIL 时，`evidence` 引用 `handoff_evidence/check-receipts.json#private-validation`。
+
+## 5. Receipt Invariants
+
+receipt 必须是 compact REVIEW_SAFE JSON，不包含 stdout、stderr、raw output、raw grep output 或 grep hits。
+
+`check-receipts.json` 包含 `qrp-check-receipt` rows。每行必须包含 `command_argv` list，`command` 只是由 argv 生成的人读展示字符串；`counts` key 必须存在，非 pytest 命令可为 `null`。`PASS` 必须 `exit_code == 0`，`FAIL` 必须 `exit_code != 0`。`PASS` 时 pytest counts 的 failed 和 errors 必须为 0；`collected=0` 但 outcome count 非零必须拒绝。`NOT_RUN` 必须有 not-run reason，`BLOCKED` 必须有 blocked reason。
+
+`hard-scan-receipt.json` 只保存 scan id、rule set、count、result hash 和 classified exceptions；verifier 必须从 `final-branch.bundle` 重放 hard scan 并比对。
+
+`package-smoke-receipt.json` 只保存 wheel/sdist 文件名与 hash、临时 no-deps install/import 状态、content scan 状态和 forbidden count；wheel、sdist、临时 install target 不进入 handoff。
+
+## 6. Forbidden Entries
+
+verifier 必须拒绝退役 handoff entry，包括：
+
+```text
+git_status.txt
+handoff_evidence/generation.json
+handoff_evidence/bundle-reconstruction.json
+handoff_evidence/private-smoke-status.json
+handoff_evidence/private-validation-status.json
+receipt-index.json
+```
+
+旧 entry 名称只能出现在 `handoff_contract.py` 或 `governance_contract.py` 的 retired/forbidden rule tuple，以及对应 negative tests。
+
+## 7. Bundle and Manifest
+
+`artifact_manifest.json` 位于 zip 根部，记录除自身外所有 zip members 的 path、size 和 sha256；entries 必须与实际 zip members 精确一致。sidecar 的 `artifact_manifest_sha256` 和 `zip_sha256` 必须匹配原始字节 hash。
+
+`final-branch.bundle` 必须可 `git bundle verify`，可 clone 指定 branch，clone 后 HEAD 必须等于 sidecar `final_head`，working tree 必须 clean。verifier 直接复验 bundle，不依赖额外 reconstruction evidence。
+
+## 8. Mutation Tests
+
+full package mutation tests 位于 `tests/agents/handoff/test_handoff_package_mutations.py`。Mutation 后必须刷新 `artifact_manifest.json`、sidecar `artifact_manifest_sha256` 和 sidecar `zip_sha256`，证明 verifier 是因 contract violation 失败，不是 hash mismatch 失败。

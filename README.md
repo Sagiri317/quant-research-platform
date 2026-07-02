@@ -61,7 +61,7 @@ data/        本地数据占位说明，不提交私有数据
 
 `run.json` 是唯一运行级机器事实源，`summary.md` 是唯一运行级人读摘要。dataset 保留 `spec.json` 与 `_manifest/manifest.json`。所有 QRP-owned JSON 顶层必须是 object，并使用不带版本后缀的 `schema_id`。
 
-compare 默认按 `output_id` 配对，并用 `output_definition_id` 与 metadata 校验语义；特殊映射由 pairs file 显式提供。handoff 可以纳入完整 `run.json`，但必须通过统一 safety verifier。状态聚合唯一 owner 是 `policy/check_status.py`；`governance_contract.py` 只定义治理扫描规则。
+compare 默认按 `output_id` 配对，并用 `output_definition_id` 与 metadata 校验语义；特殊映射由 pairs file 显式提供。handoff 是最小 REVIEW_SAFE reproducible package，具体布局由 tracked handoff tooling 文档和合同模块定义。状态聚合唯一 owner 是 `policy/check_status.py`；`governance_contract.py` 只定义治理扫描规则。
 
 ## 当前 public surface
 
@@ -93,7 +93,8 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 - open issues 只保存当前 open 或 deferred 问题。
 - `.agents` 是 tracked tooling source。
 - `.run` 是 output layer 和 evidence layer。
-- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、single handoff verifier safety scan 和 tests 的 current-contract-only 规则只从这里读取或派生。
+- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、source-tree scan、共享安全路径和 tests 的 current-contract-only 规则只从这里读取或派生。
+- handoff package contract 由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有；receipt contract 由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有。
 - 边界回归由 owner-layer negative tests 和治理 gate 记录为 `FAIL`，不靠文本关键词绕过。
 
 ## 验证原则
@@ -138,8 +139,7 @@ python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 正式 evidence 使用 `tests/tools/run_profile.py`，完整收口使用 runner 的
 `all` profile 显式选择。
 
-正式 handoff 的 REVIEW_SAFE evidence 完整性由 tracked verifier 和 tests
-强制执行；status-only 摘要不能作为完整 evidence。
+正式 handoff 的 REVIEW_SAFE evidence 完整性由 tracked builder、verifier、contract modules 和 tests 强制执行；status-only 摘要不能作为完整 evidence。
 
 ## 数据安全
 

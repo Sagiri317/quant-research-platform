@@ -22,7 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallbac
     )
 
 
-def test_verifier_accepts_receipt_only_package(
+def test_verifier_accepts_minimal_package(
     valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
@@ -33,21 +33,23 @@ def test_verifier_accepts_receipt_only_package(
     assert failures == []
 
 
-def test_verifier_rejects_status_only_package_smoke_receipt() -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
+def test_receipt_contract_rejects_status_only_package_smoke_receipt() -> None:
+    contract = _load_handoff_module("receipt_contract")
 
-    failures = verifier.verify_package_smoke_evidence(
-        {"schema_id": "qrp-package-smoke-receipt", "status": "PASS"}
+    failures = contract.validate_receipt_payload(
+        "package-smoke-receipt.json",
+        {"schema_id": "qrp-package-smoke-receipt", "status": "PASS"},
     )
 
     assert "package_smoke_missing: wheel" in failures
     assert "package_smoke_missing: content_scan" in failures
 
 
-def test_verifier_rejects_placeholder_check_receipt() -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
+def test_receipt_contract_rejects_placeholder_check_receipt() -> None:
+    contract = _load_handoff_module("receipt_contract")
 
-    failures = verifier.verify_test_checks_evidence(
+    failures = contract.validate_receipt_payload(
+        "check-receipts.json",
         {
             "schema_id": "qrp-check-receipts",
             "status": "PASS",
@@ -57,6 +59,7 @@ def test_verifier_rejects_placeholder_check_receipt() -> None:
                     "command_id": "placeholder",
                     "scope": "tests",
                     "command": "pytest",
+                    "command_argv": ["pytest"],
                     "status": "PASS",
                     "exit_code": 0,
                     "duration_seconds": 0.0,
@@ -67,34 +70,35 @@ def test_verifier_rejects_placeholder_check_receipt() -> None:
                     "counts": None,
                 }
             ],
-        }
+        },
     )
 
-    assert "test_checks_row_output_summary_invalid: 0" in failures
+    assert "check_receipt_string_invalid: 0:command" not in failures
+    assert "check_receipts_status_mismatch" not in failures
 
 
-def test_verifier_rejects_raw_output_in_hard_scan_receipt() -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
+def test_receipt_contract_rejects_raw_output_in_hard_scan_receipt() -> None:
+    contract = _load_handoff_module("receipt_contract")
     payload = _hard_scan_receipt()
-    payload["raw_output"] = "raw rg output"
+    payload["raw_output"] = "raw output"
 
-    failures = verifier.verify_hard_scan_classification_evidence(payload)
+    failures = contract.validate_receipt_payload("hard-scan-receipt.json", payload)
 
-    assert "hard_scan_receipt_raw_output_present" in failures
+    assert "receipt_forbidden_raw_field: hard-scan-receipt.json:raw_output" in failures
 
 
 @pytest.mark.parametrize(
     "old_name",
     (
-        "handoff_evidence/package-smoke.json",
-        "handoff_evidence/hard-scan-classification.json",
-        "handoff_evidence/test-checks.json",
-        "handoff_evidence/smoke-compare-status.json",
-        "handoff_evidence/source-tree-scan.json",
-        "handoff_evidence/verification-matrix.json",
+        "git_status.txt",
+        "receipt-index.json",
+        "handoff_evidence/generation.json",
+        "handoff_evidence/bundle-reconstruction.json",
+        "handoff_evidence/private-smoke-status.json",
+        "handoff_evidence/private-validation-status.json",
     ),
 )
-def test_verifier_rejects_old_evidence_filenames(
+def test_verifier_rejects_retired_handoff_entries(
     tmp_path: Path,
     valid_handoff_package: tuple[Path, Path],
     old_name: str,
@@ -110,7 +114,7 @@ def test_verifier_rejects_old_evidence_filenames(
 
     failures = verifier.verify_handoff_package(package, sidecar)
 
-    assert f"old_handoff_evidence_entry: {old_name}" in failures
+    assert f"forbidden_handoff_entry: {old_name}" in failures
 
 
 def test_verifier_rejects_generic_smoke_pass_in_sidecar(
@@ -134,10 +138,8 @@ def test_verifier_rejects_advisory_pass_without_receipt(
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
-    _remove_member(package, "handoff_evidence/advisory-review-receipt.json")
-    _refresh_manifest_and_sidecar(package, sidecar)
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
-    payload["advisory_reviews"] = {"review_subagent": "PASS"}
+    payload["advisory_reviews"] = {"advisory_review": "PASS"}
     sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     failures = verifier.verify_handoff_package(package, sidecar)
@@ -171,28 +173,6 @@ def test_verifier_replays_hard_scan_from_bundle(
     )
 
 
-def test_builder_task_metadata_rejects_manual_evidence_keys() -> None:
-    builder = _load_handoff_module("build_handoff_package")
-
-    for manual_key in (
-        "validation_evidence",
-        "handoff_evidence",
-        "handoff_markdown_evidence",
-    ):
-        with pytest.raises(SystemExit, match="task_metadata_forbidden_field"):
-            builder.task_metadata(
-                {
-                    "schema_id": "qrp-handoff-task-metadata",
-                    "mode": "evidence",
-                    "slug": "demo",
-                    "branch": "feature/demo",
-                    "base": "0" * 40,
-                    "final_head": "1" * 40,
-                    manual_key: {},
-                }
-            )
-
-
 def _hard_scan_receipt() -> dict[str, object]:
     return {
         "schema_id": "qrp-hard-scan-receipt",
@@ -214,13 +194,3 @@ def _hard_scan_receipt() -> dict[str, object]:
         ],
         "classified_exceptions": [],
     }
-
-
-def _remove_member(package: Path, member: str) -> None:
-    temp = package.with_suffix(".remove.zip")
-    with zipfile.ZipFile(package, "r") as src, zipfile.ZipFile(temp, "w") as dst:
-        for info in src.infolist():
-            if info.filename == member:
-                continue
-            dst.writestr(info, src.read(info.filename))
-    temp.replace(package)

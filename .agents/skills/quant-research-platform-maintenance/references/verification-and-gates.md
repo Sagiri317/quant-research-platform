@@ -60,7 +60,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_governa
 
 active doc roots、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 必须从这里读取或派生。
 
-handoff required receipt paths、hard-scan replay rules、advisory review consistency 和 status token 也必须从 `governance_contract.py` 读取或派生，不得在 builder、verifier 或 tests 中复制平行规则表。
+handoff layout gate 由 `handoff/handoff_contract.py` 和 `handoff/verify_handoff_package.py` 拥有。receipt invariant gate 由 `handoff/receipt_contract.py` 和 `tests/agents/handoff/` 拥有。source-tree retired surface gate 由 `governance_contract.py`、`verify_governance.py` 和 `tests/architecture/` 拥有。builder、collector、verifier 和 tests 不得复制平行 receipt validator 或 handoff layout 表。
 
 Hard-scan receipt gate 使用：
 
@@ -86,7 +86,7 @@ python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 
 如果完整运行超时，必须写 `BLOCKED` 并记录超时，可以补充分段运行结果。
 
-Handoff receipt flow 的低成本 gate 放在 `tests/agents/handoff/`：覆盖 task 大 evidence 拒绝、status-only/placeholder/raw output 拒绝、generic smoke PASS 拒绝、advisory PASS 缺 receipt 拒绝、package/private/check receipt schema，以及从 bundle 重放 hard scan。
+Handoff receipt flow 的低成本 gate 放在 `tests/agents/handoff/`：覆盖 task 大 evidence 拒绝、status-only/placeholder/raw output 拒绝、generic smoke PASS 拒绝、advisory PASS 缺 receipt 拒绝、package/check receipt schema，以及从 bundle 重放 hard scan。
 
 ## 4. Active-doc scan
 
@@ -128,6 +128,10 @@ parallel/stale implementation gate 扫描 legacy、compat、deprecated、migrati
 
 - architecture boundary tests 放 `tests/architecture/`。
 - handoff builder/verifier/evidence tests 放 `tests/agents/handoff/`。
+- receipt payload invariant 放 `tests/agents/handoff/test_receipt_contract.py`。
+- full zip mutation 放 `tests/agents/handoff/test_handoff_package_mutations.py`。
+- handoff single-source ownership 放 `tests/architecture/test_handoff_contract_single_source.py`。
+- source-tree retired-name gate 不放在 `tests/agents/handoff/`。
 - governance CLI/规则行为 tests 放 `tests/agents/`。
 - A 股 processed owner behavior tests 放 `tests/markets/a_share/`。
 - research behavior tests 放 `tests/research/`。
