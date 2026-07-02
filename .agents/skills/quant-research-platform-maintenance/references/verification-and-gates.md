@@ -62,13 +62,13 @@ active doc roots、current-contract-only 扫描规则、版本面规则、negati
 
 handoff layout gate 由 `handoff/handoff_contract.py` 和 `handoff/verify_handoff_package.py` 拥有。receipt invariant gate 由 `handoff/receipt_contract.py` 和 `tests/agents/handoff/` 拥有。source-tree retired surface gate 由 `governance_contract.py`、`verify_governance.py` 和 `tests/architecture/` 拥有。builder、collector、verifier 和 tests 不得复制平行 receipt validator 或 handoff layout 表。
 
-Hard-scan receipt gate 使用：
+Hard-scan gate 由正式 handoff builder/verifier 闭合：
 
 ```bash
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --hard-scan-suite --receipt-out .run/<purpose>/receipts/hard-scan-receipt.json
+python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref> --mode evidence --verify
 ```
 
-该模式只写 compact receipt，不写 raw grep output。verifier 必须从 `final-branch.bundle` 重放 hard scan 并比对 `scan_id`、`rule_set_id`、count 和 `result_sha256`。
+builder 从 Git state 和 replay 自动生成 machine evidence。verifier 必须从 `final-branch.bundle` 重放 hard scan 并比对 `scan_id`、`rule_set_id`、count 和 `result_sha256`。
 
 ### Code-map gate
 

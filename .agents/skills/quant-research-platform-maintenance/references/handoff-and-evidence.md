@@ -15,6 +15,7 @@ tracked handoff tooling 位于：
 - `handoff_contract.py` 拥有 zip layout、sidecar schema、task metadata schema、artifact manifest schema、validation-summary schema、`ProofClass`、validation row source contract、replay command contract 和 `EvidenceGraph`。
 - `receipt_contract.py` 拥有 receipt exact schema、receipt `FieldSpec`、field proof class、receipt invariant、normalize 和 compare rules。
 - `replay_evidence.py` 只从 repo root replay 并生成 canonical receipts；它不定义合同、不定义 allowed keys、不定义 validation rows、不定义 compare rules。
+- package-smoke 是 `replay_evidence.py` 内部 executable replay 的一部分，不提供独立 receipt writer 入口。
 - `verify_handoff_package.py` 只做 package-level orchestration 和 trust boundary。
 - `governance_contract.py` 拥有 governance scan、source-tree scan、share-safety path rules 和 status tokens。
 

@@ -5,7 +5,6 @@ This module is an internal tooling fact source. It is not a public API.
 
 from __future__ import annotations
 
-import json
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -120,9 +119,6 @@ HARD_SCAN_RUN_FIELD_SPECS = {
 PACKAGE_SMOKE_RECEIPT_NAME = Path(PACKAGE_SMOKE_RECEIPT_ENTRY).name
 HARD_SCAN_RECEIPT_NAME = Path(HARD_SCAN_RECEIPT_ENTRY).name
 CHECK_RECEIPTS_NAME = Path(CHECK_RECEIPTS_ENTRY).name
-REQUIRED_RECEIPT_FILES = frozenset(
-    {PACKAGE_SMOKE_RECEIPT_NAME, HARD_SCAN_RECEIPT_NAME, CHECK_RECEIPTS_NAME}
-)
 FORBIDDEN_RECEIPT_FIELDS = frozenset(
     {
         "stdout",
@@ -153,50 +149,6 @@ PACKAGE_IMPORT_MODULE = "quant_research_platform"
 
 def allowed_keys(specs: Mapping[str, FieldSpec]) -> frozenset[str]:
     return frozenset(specs)
-
-
-def validate_receipt_file_set(root: Path) -> list[str]:
-    failures: list[str] = []
-    if not root.is_dir():
-        return [f"receipt_dir_missing: {root}"]
-    names = {path.name for path in root.glob("*.json")}
-    failures.extend(
-        f"required_receipt_missing: {name}"
-        for name in sorted(REQUIRED_RECEIPT_FILES - names)
-    )
-    failures.extend(
-        f"unexpected_receipt_file: {name}"
-        for name in sorted(names - REQUIRED_RECEIPT_FILES)
-    )
-    for path in sorted(root.glob("*.json")):
-        if path.name not in REQUIRED_RECEIPT_FILES:
-            continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8-sig"))
-        except json.JSONDecodeError:
-            failures.append(f"receipt_json_invalid: {path.name}")
-            continue
-        if not isinstance(payload, dict):
-            failures.append(f"receipt_not_object: {path.name}")
-            continue
-        failures.extend(validate_receipt_payload(path.name, payload))
-    return failures
-
-
-def load_receipt_file_set(root: Path) -> dict[str, dict[str, object]]:
-    failures = validate_receipt_file_set(root)
-    if failures:
-        raise SystemExit(";".join(failures))
-    receipts: dict[str, dict[str, object]] = {}
-    for name, entry in (
-        (PACKAGE_SMOKE_RECEIPT_NAME, PACKAGE_SMOKE_RECEIPT_ENTRY),
-        (HARD_SCAN_RECEIPT_NAME, HARD_SCAN_RECEIPT_ENTRY),
-        (CHECK_RECEIPTS_NAME, CHECK_RECEIPTS_ENTRY),
-    ):
-        payload = json.loads((root / name).read_text(encoding="utf-8-sig"))
-        assert isinstance(payload, dict)
-        receipts[entry] = payload
-    return receipts
 
 
 def validate_receipt_payload(name: str, payload: Mapping[str, object]) -> list[str]:

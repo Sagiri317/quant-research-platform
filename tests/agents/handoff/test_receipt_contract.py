@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
 
 try:
     from tests.agents.handoff.conftest import _load_handoff_module
@@ -289,3 +294,45 @@ def test_compare_functions_detect_replay_drift() -> None:
     assert contract.compare_check_receipts(packaged, replayed) == [
         "check_receipts_replay_mismatch"
     ]
+
+
+def test_compare_functions_detect_pytest_count_drift() -> None:
+    contract = _load_handoff_module("receipt_contract")
+    packaged = _check_receipts()
+    replayed = _check_receipts()
+    replayed["checks"][0]["counts"]["passed"] += 1  # type: ignore[index]
+    replayed["checks"][0]["counts"]["collected"] += 1  # type: ignore[index]
+
+    assert contract.compare_check_receipts(packaged, replayed) == [
+        "check_receipts_replay_mismatch"
+    ]
+
+
+def test_parse_pytest_counts_counts_deselected_as_collected() -> None:
+    replay = _load_handoff_module("replay_evidence")
+
+    counts = replay.parse_pytest_counts("35 passed, 33 deselected in 0.86s")
+
+    assert counts["passed"] == 35
+    assert counts["deselected"] == 33
+    assert counts["collected"] == 68
+
+
+def test_replay_command_executes_current_interpreter_but_records_canonical_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay = _load_handoff_module("replay_evidence")
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s", "")
+
+    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+
+    row = replay._run_replay_command(Path("."), "profile-smoke")
+
+    assert calls
+    assert calls[0][0] == sys.executable
+    assert row["command_argv"][0] == "python"
+    assert str(row["command"]).startswith("python ")

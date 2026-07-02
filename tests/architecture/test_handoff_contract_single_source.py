@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import tomllib
 from pathlib import Path
 
 HANDOFF_ROOT = Path(
@@ -39,18 +40,48 @@ def _assigned_names(path: Path) -> set[str]:
     return names
 
 
+def _imported_modules(path: Path) -> set[str]:
+    tree = ast.parse(_source(path), filename=str(path))
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    return modules
+
+
+def _argparse_flags(path: Path) -> set[str]:
+    tree = ast.parse(_source(path), filename=str(path))
+    flags: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "add_argument":
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                if arg.value.startswith("--"):
+                    flags.add(arg.value)
+    return flags
+
+
 def test_retired_handoff_files_are_absent() -> None:
     assert not (HANDOFF_ROOT / "proof_contract.py").exists()
     assert not (HANDOFF_ROOT / "collect_handoff_receipts.py").exists()
+    assert not (HANDOFF_ROOT / "run_package_smoke.py").exists()
     assert not (SCRIPT_ROOT / "run_check.py").exists()
     assert not (TEMPLATE_ROOT / "task_metadata.template.json").exists()
 
 
 def test_builder_exposes_only_scripted_handoff_cli() -> None:
     builder = _source(HANDOFF_ROOT / "build_handoff_package.py")
+    flags = _argparse_flags(HANDOFF_ROOT / "build_handoff_package.py")
 
     assert '"--task"' not in builder
     assert '"--receipts-dir"' not in builder
+    assert "--task" not in flags
+    assert "--receipts-dir" not in flags
     for flag in (
         "--repo-root",
         "--out-dir",
@@ -60,6 +91,42 @@ def test_builder_exposes_only_scripted_handoff_cli() -> None:
         "--verify",
     ):
         assert flag in builder
+        assert flag in flags
+
+
+def test_receipt_contract_is_payload_only() -> None:
+    receipt_contract = HANDOFF_ROOT / "receipt_contract.py"
+    receipt_defs = _function_defs(receipt_contract)
+    source = _source(receipt_contract)
+
+    assert "validate_receipt_file_set" not in receipt_defs
+    assert "load_receipt_file_set" not in receipt_defs
+    assert "REQUIRED_RECEIPT_FILES" not in source
+    assert "receipt_dir_missing" not in source
+    assert 'glob("*.json")' not in source
+
+
+def test_replay_evidence_does_not_import_retired_package_smoke_cli() -> None:
+    replay = HANDOFF_ROOT / "replay_evidence.py"
+
+    assert "run_package_smoke" not in _imported_modules(replay)
+    assert "from run_package_smoke import" not in _source(replay)
+    assert "_build_package_artifacts" in _function_defs(replay)
+    assert "_install_package_smoke_target" in _function_defs(replay)
+    assert "_scan_package_artifacts" in _function_defs(replay)
+    assert "_build_replayed_package_smoke_receipt" in _function_defs(replay)
+
+
+def test_handoff_readme_does_not_list_retired_package_smoke_cli() -> None:
+    readme = _source(HANDOFF_ROOT / "README.md")
+
+    assert "run_package_smoke.py" not in readme
+
+
+def test_dev_dependencies_include_package_build_backend_frontend() -> None:
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "build>=1.5,<2" in pyproject["project"]["optional-dependencies"]["dev"]
 
 
 def test_verifier_has_no_parallel_contract_functions() -> None:

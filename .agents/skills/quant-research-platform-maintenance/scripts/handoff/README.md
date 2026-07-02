@@ -11,7 +11,6 @@ receipt_contract.py
 replay_evidence.py
 build_handoff_package.py
 verify_handoff_package.py
-run_package_smoke.py
 self_test.py
 README.md
 ```
