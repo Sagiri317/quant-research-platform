@@ -49,6 +49,7 @@ SCAN_ROOTS = (
 )
 RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/agents/handoff/test_build_handoff_package_integration.py"),
+    Path("tests/agents/handoff/conftest.py"),
     Path("tests/agents/handoff/test_handoff_tools.py"),
     Path("tests/agents/handoff/test_handoff_package_verifier.py"),
     Path("tests/architecture/test_environment_contract.py"),
@@ -1616,20 +1617,12 @@ APPROVED_FIELD_SPEC_FILES = {
 
 APPROVED_WRITER_MODULES = {
     Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/"
-        "verify_governance.py"
-    ),
-    Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
         "build_handoff_package.py"
     ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
         "replay_evidence.py"
-    ),
-    Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-        "run_package_smoke.py"
     ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
@@ -2363,6 +2356,33 @@ def test_business_logic_does_not_bypass_persistent_writers() -> None:
                     hits.append(f"{path}:{node.lineno}: open mode={mode!r}")
 
     assert hits == []
+
+
+def test_retired_handoff_receipt_writers_are_not_approved_writer_modules() -> None:
+    retired = {
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/"
+            "verify_governance.py"
+        ),
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+            "run_package_smoke.py"
+        ),
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+            "collect_handoff_receipts.py"
+        ),
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/"
+            "run_check.py"
+        ),
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+            "proof_contract.py"
+        ),
+    }
+
+    assert APPROVED_WRITER_MODULES.isdisjoint(retired)
 
 
 def _is_approved_writer_path(path: Path) -> bool:

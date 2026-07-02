@@ -31,9 +31,9 @@ PY
 
 允许使用 git、rg、python、pytest 和项目已有脚本。需要安装依赖时，优先使用用户允许的环境策略。无法安装时写 `BLOCKED`。
 
-## 4. Subagent 和 review-fix loop
+## 4. Human review 和 review-fix loop
 
-可以用 subagent 做只读扫描或分工 review，但 subagent review 是 advisory，不是每次 handoff 的 mandatory gate。用户明确要求或高风险重构时才运行。
+human/advisory review 是独立人类审查输出，不进入 machine handoff，也不作为 machine validation `PASS` 的来源。
 
 review-fix loop 应小步执行：scan → classify → patch → validate → rescan。重验证在 review-fix loop 完成后执行，不要在未确认 scope 前做大范围重构。
 

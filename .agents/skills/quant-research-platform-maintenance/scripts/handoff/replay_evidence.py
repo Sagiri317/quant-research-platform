@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import re
+import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,7 +22,8 @@ for candidate in (SCRIPT_DIR, SCRIPT_PARENT, SCRIPT_REPO_SRC):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from governance_contract import hard_scan_receipt_from_clone  # noqa: E402
+import governance_contract  # noqa: E402
+from governance_contract import source_tree_scan_groups  # noqa: E402
 from handoff_contract import (  # noqa: E402
     CHECK_RECEIPTS_ENTRY,
     HARD_SCAN_RECEIPT_ENTRY,
@@ -68,9 +71,38 @@ def build_replayed_hard_scan_receipt(
     repo_root: Path,
     final_head: str,
 ) -> dict[str, object]:
-    return normalize_hard_scan_receipt(
-        hard_scan_receipt_from_clone(repo_root, final_head=final_head)
-    )
+    scanned_head = _git_text(repo_root, "rev-parse", "HEAD").strip()
+    scan_runs: list[dict[str, object]] = []
+    for group_name, group_payload in sorted(source_tree_scan_groups(repo_root).items()):
+        findings = list(group_payload.get("findings") or [])
+        result_payload = {
+            "scan_id": group_name,
+            "finding_count": len(findings),
+            "findings": findings,
+        }
+        scan_runs.append(
+            {
+                "scan_id": group_name,
+                "rule_set_id": f"source-tree:{group_name}",
+                "match_count": len(findings),
+                "actual_violation_count": len(findings),
+                "result_sha256": _sha256_text(_stable_json(result_payload)),
+                "replayable_from_bundle": True,
+            }
+        )
+    payload = {
+        "schema_id": "qrp-hard-scan-receipt",
+        "status": "PASS"
+        if scanned_head == final_head
+        and all(run["actual_violation_count"] == 0 for run in scan_runs)
+        else "FAIL",
+        "scanned_head": scanned_head,
+        "scanner_source_sha256": _sha256_file(
+            Path(governance_contract.__file__).resolve()
+        ),
+        "scan_runs": scan_runs,
+    }
+    return normalize_hard_scan_receipt(payload)
 
 
 def build_machine_receipts(
@@ -211,10 +243,15 @@ def _build_package_artifacts(
         errors="replace",
         check=False,
     )
+    wheel_path, wheel_ok = _select_single_artifact(dist, "*.whl")
+    sdist_path, sdist_ok = _select_single_artifact(dist, "*.tar.gz")
+    build_status = (
+        "PASS" if build.returncode == 0 and wheel_ok and sdist_ok else "FAIL"
+    )
     return (
-        "PASS" if build.returncode == 0 else "FAIL",
-        _first_file(dist, "*.whl"),
-        _first_file(dist, "*.tar.gz"),
+        build_status,
+        wheel_path if wheel_ok else None,
+        sdist_path if sdist_ok else None,
     )
 
 
@@ -274,9 +311,11 @@ def _scan_package_artifacts(
     ]
 
 
-def _first_file(root: Path, pattern: str) -> Path | None:
+def _select_single_artifact(root: Path, pattern: str) -> tuple[Path | None, bool]:
     matches = sorted(root.glob(pattern))
-    return matches[0] if matches else None
+    if len(matches) != 1:
+        return None, False
+    return matches[0], True
 
 
 def _install_target_content_scan(root: Path) -> list[str]:
@@ -318,3 +357,30 @@ def _aggregate_status(statuses: list[str]) -> str:
     if "NOT_RUN" in statuses:
         return "NOT_RUN"
     return "PASS"
+
+
+def _git_text(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout
+
+
+def _stable_json(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

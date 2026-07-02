@@ -365,10 +365,19 @@ def validate_pytest_counts(
         return [f"check_receipt_counts_invalid: {index}"]
     if any(not isinstance(value, int) or value < 0 for value in counts.values()):
         return [f"check_receipt_counts_invalid: {index}"]
-    outcome_total = sum(
-        int(counts[key]) for key in COUNT_FIELDS if key not in {"collected", "deselected"}
+    expected_collected = sum(
+        int(counts[key])
+        for key in (
+            "passed",
+            "failed",
+            "skipped",
+            "errors",
+            "xfailed",
+            "xpassed",
+            "deselected",
+        )
     )
-    if counts["collected"] == 0 and outcome_total != 0:
+    if counts["collected"] != expected_collected:
         failures.append(f"check_receipt_counts_collected_mismatch: {index}")
     if status == "PASS" and (counts["failed"] != 0 or counts["errors"] != 0):
         failures.append(f"check_receipt_pass_counts_invalid: {index}")
@@ -402,6 +411,7 @@ def normalize_package_smoke_receipt(payload: Mapping[str, object]) -> dict[str, 
 
 
 def normalize_hard_scan_receipt(payload: Mapping[str, object]) -> dict[str, object]:
+    _raise_if_invalid(validate_hard_scan_receipt(payload))
     scan_runs = payload.get("scan_runs")
     normalized_runs: list[dict[str, object]] = []
     if isinstance(scan_runs, list):
@@ -425,7 +435,6 @@ def normalize_hard_scan_receipt(payload: Mapping[str, object]) -> dict[str, obje
         "scanner_source_sha256": payload.get("scanner_source_sha256"),
         "scan_runs": sorted(normalized_runs, key=lambda row: str(row.get("scan_id"))),
     }
-    _raise_if_invalid(validate_hard_scan_receipt(normalized))
     return normalized
 
 
@@ -463,19 +472,6 @@ def compare_hard_scan_receipt(
         replayed,
         "hard_scan",
     )
-
-
-def check_statuses_by_command_id(
-    check_receipts: Mapping[str, object],
-) -> dict[str, dict[str, object]]:
-    rows = check_receipts.get("checks")
-    if not isinstance(rows, list):
-        return {}
-    result: dict[str, dict[str, object]] = {}
-    for row in rows:
-        if isinstance(row, dict) and isinstance(row.get("command_id"), str):
-            result[row["command_id"]] = row
-    return result
 
 
 def forbidden_receipt_field_failures(

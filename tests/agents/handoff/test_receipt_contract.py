@@ -270,6 +270,47 @@ def test_hard_scan_rejects_old_classification_and_count_fields() -> None:
     assert "hard_scan_run_unapproved_field: 0:false_positive_count" in failures
 
 
+@pytest.mark.parametrize(
+    ("payload_overrides", "run_overrides", "expected"),
+    (
+        (
+            {"classified_exceptions": []},
+            {},
+            "hard_scan_unapproved_field: classified_exceptions",
+        ),
+        ({"extra": True}, {}, "hard_scan_unapproved_field: extra"),
+        ({}, {"deferred_count": 0}, "hard_scan_run_unapproved_field: 0:deferred_count"),
+        (
+            {},
+            {"negative_fixture_count": 0},
+            "hard_scan_run_unapproved_field: 0:negative_fixture_count",
+        ),
+        (
+            {},
+            {"false_positive_count": 0},
+            "hard_scan_run_unapproved_field: 0:false_positive_count",
+        ),
+        ({}, {"extra": True}, "hard_scan_run_unapproved_field: 0:extra"),
+    ),
+)
+def test_normalize_hard_scan_rejects_raw_extra_fields_before_projection(
+    payload_overrides: dict[str, object],
+    run_overrides: dict[str, object],
+    expected: str,
+) -> None:
+    contract = _load_handoff_module("receipt_contract")
+    run = {
+        **_hard_scan_payload()["scan_runs"][0],  # type: ignore[index]
+        **run_overrides,
+    }
+    payload = _hard_scan_payload(scan_runs=[run], **payload_overrides)
+
+    with pytest.raises(SystemExit) as excinfo:
+        contract.normalize_hard_scan_receipt(payload)
+
+    assert expected in str(excinfo.value)
+
+
 def test_hard_scan_rejects_actual_violation_with_top_pass() -> None:
     contract = _load_handoff_module("receipt_contract")
     run = {
@@ -294,6 +335,22 @@ def test_compare_functions_detect_replay_drift() -> None:
     assert contract.compare_check_receipts(packaged, replayed) == [
         "check_receipts_replay_mismatch"
     ]
+
+
+@pytest.mark.parametrize(
+    ("collected", "expected"),
+    (
+        (0, "check_receipt_counts_collected_mismatch: 0"),
+        (2, "check_receipt_counts_collected_mismatch: 0"),
+    ),
+)
+def test_profile_smoke_counts_collected_must_equal_outcome_total(
+    collected: int,
+    expected: str,
+) -> None:
+    failures = _failures(_valid_row(counts=_valid_counts(collected=collected)))
+
+    assert expected in failures
 
 
 def test_compare_functions_detect_pytest_count_drift() -> None:
@@ -336,3 +393,38 @@ def test_replay_command_executes_current_interpreter_but_records_canonical_pytho
     assert calls[0][0] == sys.executable
     assert row["command_argv"][0] == "python"
     assert str(row["command"]).startswith("python ")
+
+
+@pytest.mark.parametrize(
+    ("artifacts", "expected_status"),
+    (
+        (("demo-0.0.0.tar.gz",), "FAIL"),
+        (("demo-0.0.0-py3-none-any.whl", "demo-0.0.1-py3-none-any.whl", "demo-0.0.0.tar.gz"), "FAIL"),
+        (("demo-0.0.0-py3-none-any.whl",), "FAIL"),
+        (("demo-0.0.0-py3-none-any.whl", "demo-0.0.0.tar.gz", "demo-0.0.1.tar.gz"), "FAIL"),
+        (("demo-0.0.0-py3-none-any.whl", "demo-0.0.0.tar.gz"), "PASS"),
+    ),
+)
+def test_package_smoke_build_requires_exactly_one_wheel_and_sdist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifacts: tuple[str, ...],
+    expected_status: str,
+) -> None:
+    replay = _load_handoff_module("replay_evidence")
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        dist = Path(argv[-1])
+        dist.mkdir(parents=True, exist_ok=True)
+        for artifact in artifacts:
+            (dist / artifact).write_text("artifact", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+
+    build_status, _wheel_path, _sdist_path = replay._build_package_artifacts(
+        tmp_path,
+        tmp_path / "dist",
+    )
+
+    assert build_status == expected_status

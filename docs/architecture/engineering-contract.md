@@ -29,7 +29,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 
 package evidence 描述 handoff package 的成员、hash、manifest、sidecar 和 Git bundle。reviewer evidence 描述 review role、scope、files inspected、commands run、findings、fixes 和 limitations。二者必须分开记录；handoff layout 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有，receipt schema 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有，治理扫描规则由 `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 拥有。
 
-handoff 使用 compact replayable receipts：可从 `final-branch.bundle` 重放的检查只保存 receipt，verifier 从 bundle clone 中重放并比对 count/hash；不可重放的 private/local 检查通过 REVIEW_SAFE check receipt 表达实际状态和原因。Codex 不应手写 handoff evidence，也不应把 raw grep output、full pytest log、完整 stdout/stderr、wheel、sdist、完整 subagent transcript 或本地 `.run/local/**` 产物打入 handoff。
+handoff 使用 compact replayable receipts：可从 `final-branch.bundle` 重放的检查只保存 receipt，verifier 从 bundle clone 中重放并比对 count/hash；当前 machine handoff 中不可重放的 private/local 检查只表达为 `NOT_RUN` absence declaration。Codex 不应手写 handoff evidence，也不应把 raw grep output、full pytest log、完整 stdout/stderr、wheel、sdist、完整 review transcript 或本地 `.run/local/**` 产物打入 handoff。
 
 ## 代码修改原则
 
@@ -85,4 +85,4 @@ python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<
 
 handoff tests 的具体执行入口统一使用 `tests/tools/run_profile.py`。测试位置按 owner layer 放置；详细 placement 规则由 maintenance references 和 architecture gates 拥有。
 
-handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。Builder 只接受 task metadata 和 receipts-dir；当前 validation 状态只由 builder 从 receipts 派生为 `handoff_evidence/validation-summary.json`。Retired handoff entry 不恢复为 handoff 状态源；具体禁止集合由 handoff contract 和 verifier tests 拥有。
+handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。正式生成入口是 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref> --mode evidence --verify`；builder 只读取当前 Git state 和这些 CLI options，并通过 replay 自动生成 machine evidence。Verifier 从 `final-branch.bundle` clone replay 并比较 packaged receipts、validation summary 和 manifest。Retired handoff entry 不恢复为 handoff 状态源；具体禁止集合由 handoff contract、receipt contract 和 verifier tests 拥有。

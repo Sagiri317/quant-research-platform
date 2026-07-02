@@ -6,14 +6,12 @@ This module is an internal tooling fact source. It is not a public API.
 from __future__ import annotations
 
 import ast
-import hashlib
 import importlib.util
 import io
 import json
 import re
 import subprocess
 import sys
-import tempfile
 import tokenize
 import tomllib
 from collections.abc import Mapping
@@ -3013,17 +3011,6 @@ RETIRED_HANDOFF_ENTRY_NAMES = frozenset(
         "handoff_evidence/subagent-review-reconciliation.json",
     }
 )
-HARD_SCAN_CLASSIFICATIONS = frozenset(
-    {
-        "actual_violation",
-        "allowed_generated_evidence",
-        "negative_test_fixture",
-        "existing_base_issue",
-        "false_positive",
-        "valuable_deferred_feature_no_change",
-        "test_white_box_allowed",
-    }
-)
 SUBAGENT_REVIEW_SEVERITIES = frozenset({"P0", "P1", "P2", "P3", "INFO"})
 SUBAGENT_REVIEW_CLASSIFICATIONS = frozenset(
     {
@@ -3035,140 +3022,6 @@ SUBAGENT_REVIEW_CLASSIFICATIONS = frozenset(
         "no_findings",
     }
 )
-
-
-def source_tree_scan_payload(
-    *,
-    bundle_path: Path,
-    branch: str,
-    final_head: str,
-) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="handoff-source-tree-scan-") as temp:
-        clone_dir = Path(temp) / "repo"
-        subprocess.run(
-            ["git", "clone", "--branch", branch, str(bundle_path), str(clone_dir)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return source_tree_scan_from_clone(clone_dir, final_head=final_head)
-
-
-def source_tree_scan_from_clone(
-    clone_dir: Path,
-    *,
-    final_head: str,
-) -> dict[str, object]:
-    scanned_head = _governance_git_text(clone_dir, "rev-parse", "HEAD").strip()
-    scan_groups = source_tree_scan_groups(clone_dir)
-    findings = [
-        finding for group in scan_groups.values() for finding in group["findings"]
-    ]
-    failures = []
-    if scanned_head != final_head:
-        failures.append("source_tree_scan_head_mismatch")
-    failures.extend(finding["rule"] for finding in findings)
-    return {
-        "schema_id": "qrp-source-tree-scan-result",
-        "status": "PASS" if not failures else "FAIL",
-        "scanned_head": scanned_head,
-        "expected_head": final_head,
-        "scanned_tree": "final-branch.bundle clone",
-        "forbidden_rule_count": len(source_tree_forbidden_patterns()),
-        "finding_count": len(findings),
-        "findings": findings[:50],
-        "failures": failures[:50],
-        "scan_groups": {
-            group: {
-                **payload,
-                "findings": payload["findings"][:50],
-            }
-            for group, payload in scan_groups.items()
-        },
-    }
-
-
-def hard_scan_receipt_from_clone(
-    clone_dir: Path,
-    *,
-    final_head: str,
-) -> dict[str, object]:
-    scanned_head = _governance_git_text(clone_dir, "rev-parse", "HEAD").strip()
-    scan_groups = source_tree_scan_groups(clone_dir)
-    scan_runs: list[dict[str, object]] = []
-    classified_exceptions: list[dict[str, object]] = []
-    for group_name, group_payload in sorted(scan_groups.items()):
-        findings = list(group_payload["findings"])
-        actual_violations = len(findings)
-        result_payload = {
-            "scan_id": group_name,
-            "findings": findings,
-            "finding_count": len(findings),
-        }
-        scan_runs.append(
-            {
-                "scan_id": group_name,
-                "rule_set_id": f"source-tree:{group_name}",
-                "match_count": len(findings),
-                "actual_violation_count": actual_violations,
-                "deferred_count": 0,
-                "negative_fixture_count": 0,
-                "false_positive_count": 0,
-                "result_sha256": _sha256_text(_stable_governance_json(result_payload)),
-                "replayable_from_bundle": True,
-            }
-        )
-        for finding in findings:
-            if isinstance(finding, Mapping):
-                classified_exceptions.append(
-                    {
-                        "scan_id": group_name,
-                        "classification": "actual_violation",
-                        "owner": str(finding.get("path") or group_name),
-                        "rationale": str(finding.get("reason") or finding.get("rule")),
-                        "reference": "governance_contract.py",
-                    }
-                )
-    return {
-        "schema_id": "qrp-hard-scan-receipt",
-        "status": "PASS"
-        if scanned_head == final_head
-        and all(run["actual_violation_count"] == 0 for run in scan_runs)
-        else "FAIL",
-        "scanned_head": scanned_head,
-        "scanner_source_sha256": sha256_file(Path(__file__)),
-        "scan_runs": scan_runs,
-        "classified_exceptions": classified_exceptions,
-    }
-
-
-def hard_scan_receipt_from_bundle(
-    *,
-    bundle_path: Path,
-    branch: str,
-    final_head: str,
-) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="handoff-hard-scan-") as temp:
-        clone_dir = Path(temp) / "repo"
-        subprocess.run(
-            ["git", "clone", "--branch", branch, str(bundle_path), str(clone_dir)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return hard_scan_receipt_from_clone(clone_dir, final_head=final_head)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
@@ -4462,10 +4315,6 @@ def source_tree_path_allowed(
         )
         return rule in allowed_rules and in_governance_rule_definition
     raise ValueError(f"unsupported_source_tree_scan_group: {scan_group}")
-
-
-def _stable_governance_json(payload: object) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
 def _normalize_governance_zip_path(value: str) -> str:

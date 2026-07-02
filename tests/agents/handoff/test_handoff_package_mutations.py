@@ -304,6 +304,27 @@ def test_validation_summary_status_tamper_fails(
             [],
             "hard_scan_unapproved_field: classified_exceptions",
         ),
+        (
+            "handoff_evidence/hard-scan-receipt.json",
+            ("scan_runs", 0),
+            "false_positive_count",
+            0,
+            "hard_scan_run_unapproved_field: 0:false_positive_count",
+        ),
+        (
+            "handoff_evidence/hard-scan-receipt.json",
+            ("scan_runs", 0),
+            "deferred_count",
+            0,
+            "hard_scan_run_unapproved_field: 0:deferred_count",
+        ),
+        (
+            "handoff_evidence/hard-scan-receipt.json",
+            ("scan_runs", 0),
+            "negative_fixture_count",
+            0,
+            "hard_scan_run_unapproved_field: 0:negative_fixture_count",
+        ),
     ),
 )
 def test_deleted_fields_fail_when_present(

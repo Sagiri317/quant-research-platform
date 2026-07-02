@@ -45,7 +45,7 @@ handoff_evidence/hard-scan-receipt.json
 handoff_evidence/check-receipts.json
 ```
 
-不允许 status-only 摘要、receipt index、generation/reconstruction 文件、advisory receipt、raw logs、wheel、sdist、CSV、parquet、pickle、feather、arrow 或 private/generated data。
+不允许 status-only 摘要、receipt index、generation/reconstruction 文件、human review outputs、raw logs、wheel、sdist、CSV、parquet、pickle、feather、arrow 或 private/generated data。
 
 ## 4. Sidecar
 
@@ -129,6 +129,8 @@ baseline_compare -> NOT_RUN
 `package-smoke-receipt.json` 只保存 build/install/import/content_scan 的状态和固定 metadata；不保存 wheel/sdist 文件名、hash 或 content examples。
 
 `hard-scan-receipt.json` 只保存 `schema_id`、`status`、`scanned_head`、`scanner_source_sha256` 和 `scan_runs`。每个 scan run 只保存 scan id、rule set、counts、result hash 和 replayable marker；不保存人工分类或 false-positive/deferred 计数。
+
+human/advisory review 是独立人类审查输出，不进入 machine handoff，也不作为 machine validation `PASS` 的来源。
 
 ## 8. Verifier replay
 

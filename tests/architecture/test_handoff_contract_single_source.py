@@ -101,9 +101,35 @@ def test_receipt_contract_is_payload_only() -> None:
 
     assert "validate_receipt_file_set" not in receipt_defs
     assert "load_receipt_file_set" not in receipt_defs
+    assert "check_statuses_by_command_id" not in receipt_defs
     assert "REQUIRED_RECEIPT_FILES" not in source
     assert "receipt_dir_missing" not in source
     assert 'glob("*.json")' not in source
+
+
+def test_verify_governance_is_not_a_handoff_receipt_writer() -> None:
+    verifier = SCRIPT_ROOT / "verify_governance.py"
+    source = _source(verifier)
+    flags = _argparse_flags(verifier)
+
+    assert "--hard-scan-suite" not in flags
+    assert "--receipt-out" not in flags
+    assert "hard_scan_receipt_from_clone" not in source
+    assert "receipt_path.write_text" not in source
+    assert "qrp-hard-scan-receipt" not in source
+
+
+def test_governance_contract_does_not_construct_hard_scan_receipts() -> None:
+    governance_contract = SCRIPT_ROOT / "governance_contract.py"
+    defs = _function_defs(governance_contract)
+    names = _assigned_names(governance_contract)
+
+    assert "hard_scan_receipt_from_clone" not in defs
+    assert "hard_scan_receipt_from_bundle" not in defs
+    assert "source_tree_scan_payload" not in defs
+    assert "source_tree_scan_from_clone" not in defs
+    assert "HARD_SCAN_CLASSIFICATIONS" not in names
+    assert "source_tree_scan_groups" in defs
 
 
 def test_replay_evidence_does_not_import_retired_package_smoke_cli() -> None:
@@ -115,6 +141,34 @@ def test_replay_evidence_does_not_import_retired_package_smoke_cli() -> None:
     assert "_install_package_smoke_target" in _function_defs(replay)
     assert "_scan_package_artifacts" in _function_defs(replay)
     assert "_build_replayed_package_smoke_receipt" in _function_defs(replay)
+
+
+def test_replay_evidence_owns_hard_scan_receipt_construction() -> None:
+    replay = HANDOFF_ROOT / "replay_evidence.py"
+    source = _source(replay)
+
+    assert "hard_scan_receipt_from_clone" not in source
+    assert "source_tree_scan_groups" in source
+    assert "build_replayed_hard_scan_receipt" in _function_defs(replay)
+
+
+def test_normalize_hard_scan_receipt_validates_before_canonicalization() -> None:
+    receipt_contract = HANDOFF_ROOT / "receipt_contract.py"
+    source = _source(receipt_contract)
+    tree = ast.parse(source, filename=str(receipt_contract))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "normalize_hard_scan_receipt"
+    )
+    function_source = ast.get_source_segment(source, function)
+    assert function_source is not None
+
+    validation_index = function_source.index("validate_hard_scan_receipt(payload)")
+    canonical_index = function_source.index("normalized_runs")
+
+    assert validation_index < canonical_index
 
 
 def test_handoff_readme_does_not_list_retired_package_smoke_cli() -> None:
@@ -155,6 +209,40 @@ def test_advisory_machine_contract_is_absent() -> None:
         "ADVISORY_REVIEW",
         "validate_advisory_review_receipt",
         "validate_advisory_reviews_against_receipts",
+    ):
+        assert retired not in combined
+
+
+def test_current_docs_do_not_describe_retired_handoff_inputs() -> None:
+    docs = [
+        Path("docs/architecture/engineering-contract.md"),
+        Path(".agents/briefs/user-principles.md"),
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/references/"
+            "handoff-and-evidence.md"
+        ),
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/references/"
+            "verification-and-gates.md"
+        ),
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/references/"
+            "tooling-and-portability.md"
+        ),
+        Path(".agents/skills/quant-research-platform-maintenance/SKILL.md"),
+        HANDOFF_ROOT / "README.md",
+    ]
+    combined = "\n".join(_source(path) for path in docs)
+
+    for retired in (
+        "Builder 只接受 task metadata 和 receipts-dir",
+        "builder 只读取 task metadata 和 receipts-dir",
+        "--hard-scan-suite",
+        "--receipt-out",
+        "advisory-review-receipt",
+        "advisory_reviews",
+        "task metadata JSON 输入",
+        "receipts-dir 输入",
     ):
         assert retired not in combined
 

@@ -23,8 +23,10 @@ README.md
 - `receipt_contract.py` owns exact receipt schemas, receipt field specs,
   receipt invariants, normalization, and replay comparison.
 - `replay_evidence.py` runs public machine replay and returns canonical
-  receipts. It does not define schemas, allowed keys, proof classes, validation
-  rows, replay commands, or comparison rules.
+  receipts, including hard-scan receipt payload construction from
+  `governance_contract.source_tree_scan_groups()`. It does not define schemas,
+  allowed keys, proof classes, validation rows, replay commands, or comparison
+  rules.
 - `verify_handoff_package.py` is the package-level trust boundary. It reads the
   sidecar, validates the zip envelope, validates exact member payloads, clones
   `final-branch.bundle`, checks task metadata Git identity, replays public
@@ -88,6 +90,11 @@ from the sidecar.
 Receipt JSON payloads are exact-schema compact machine receipts. They must not
 include raw stdout/stderr, raw grep output, full pytest logs, local install
 paths, wheel/sdist files, or private/generated data.
+
+`hard-scan-receipt.json` contains only `schema_id`, `status`, `scanned_head`,
+`scanner_source_sha256`, and `scan_runs`. Each scan run contains only
+`scan_id`, `rule_set_id`, `match_count`, `actual_violation_count`,
+`result_sha256`, and `replayable_from_bundle`.
 
 Validation summary is derived from replayed receipts and contains only:
 
