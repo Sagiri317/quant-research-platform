@@ -432,7 +432,7 @@ RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {
     Path("tests/agents/handoff/test_handoff_package_verifier.py"),
     Path("tests/agents/handoff/test_handoff_tools.py"),
     Path("tests/architecture/test_governance_contract_rg_gate.py"),
-    Path("tests/architecture/test_handoff_package_contract.py"),
+    Path("tests/architecture/test_handoff_contract_single_source.py"),
     Path("tests/interfaces/test_private_cli_01.py"),
     Path("tests/policy/test_share_safety_runtime_edges.py"),
     Path("tests/storage/test_storage_01.py"),
@@ -442,7 +442,7 @@ RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {
 SOURCE_TREE_RETIRED_TEXT_NEGATIVE_TEST_SOURCES = {
     Path("tests/agents/test_verify_governance.py"),
     Path("tests/architecture/test_governance_contract_rg_gate.py"),
-    Path("tests/architecture/test_handoff_package_contract.py"),
+    Path("tests/architecture/test_handoff_contract_single_source.py"),
 }
 RUN_OUTPUT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = (
     ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
@@ -1460,62 +1460,6 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
         "def:test_structured_key_gate_fails_retired_keys_and_allows_values",
     ),
     (
-        "tests/architecture/test_handoff_package_contract.py",
-        "retired_text:clean_rewrite",
-        _exact_line(
-            'retired_component = rule_form(contract.RETIRED_NAME_RULES, "clean_',
-            'rewrite")',
-        ),
-        "def:test_source_tree_scan_rejects_retired_stage_path_names",
-    ),
-    (
-        "tests/architecture/test_handoff_package_contract.py",
-        "retired_text:clean_rewrite",
-        _exact_line('"rule": "clean_', 'rewrite",'),
-        "def:test_source_tree_scan_rejects_retired_stage_path_names",
-    ),
-    (
-        "tests/architecture/test_handoff_package_contract.py",
-        "retired_text:clean_rewrite",
-        _exact_line('"clean_', 'rewrite",'),
-        "def:test_source_tree_scan_rejects_retired_structured_keys",
-    ),
-    (
-        "tests/architecture/test_handoff_package_contract.py",
-        "retired_text:clean_rewrite",
-        _exact_line(
-            'contract.structured_key_forbidden_patterns()["clean_', 'rewrite"],'
-        ),
-        "def:test_source_tree_scan_rejects_retired_structured_keys",
-    ),
-    (
-        "tests/architecture/test_handoff_package_contract.py",
-        "retired_text:clean_rewrite",
-        _exact_line('"rule": "clean_', 'rewrite",'),
-        "def:test_source_tree_scan_rejects_retired_structured_keys",
-    ),
-    (
-        "tests/architecture/test_handoff_package_contract.py",
-        "retired_text:clean_rewrite",
-        _exact_line(
-            'retired_value = rule_form(contract.RETIRED_NAME_RULES, "clean_',
-            'rewrite")',
-        ),
-        "def:test_source_tree_scan_independently_rejects_synthesized_strings",
-    ),
-    (
-        "tests/architecture/test_handoff_package_contract.py",
-        "retired_text:clean_rewrite",
-        _exact_line('"clean_', 'rewrite",'),
-        "def:test_source_tree_scan_independently_rejects_python_symbols",
-    ),
-    (
-        "tests/architecture/test_handoff_package_contract.py",
-        "retired_text:clean_rewrite",
-        _exact_line('} == {("tools/hack_symbol.py", symbol, "clean_', 'rewrite")}'),
-        "def:test_source_tree_scan_independently_rejects_python_symbols",
-    ),
-    (
         "tests/architecture/test_governance_contract_rg_gate.py",
         "active_test_literals:retired_local_verification_evidence_range_surface",
         _exact_line(
@@ -1920,7 +1864,7 @@ SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
     Path("tests/architecture/test_governance_contract_rg_gate.py"): (
         _SOURCE_TREE_RETIRED_RULE_DEFINITION_RULES
     ),
-    Path("tests/architecture/test_handoff_package_contract.py"): (
+    Path("tests/architecture/test_handoff_contract_single_source.py"): (
         _SOURCE_TREE_RETIRED_RULE_DEFINITION_RULES
     ),
     Path("tests/architecture/test_retired_surface_absent.py"): {
@@ -2086,8 +2030,9 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "test_research_foundation_semantic_closure_terms_are_retired",
         "test_approved_writer_signatures_do_not_accept_arbitrary_physical_roots",
     },
-    Path("tests/architecture/test_handoff_package_contract.py"): {
-        "test_handoff_package_contract_uses_evidence_mode_outputs",
+    Path("tests/architecture/test_handoff_contract_single_source.py"): {
+        "test_retired_execution_symbols_are_absent_from_execution_path",
+        "test_retired_entry_names_are_only_contract_or_negative_test_owned",
     },
 }
 
