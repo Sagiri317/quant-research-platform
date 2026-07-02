@@ -454,6 +454,7 @@ def test_parse_pytest_counts_counts_deselected_as_collected() -> None:
 
 def test_replay_command_executes_current_interpreter_but_records_canonical_python(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     replay = _load_handoff_module("replay_evidence")
     calls: list[list[str]] = []
@@ -464,7 +465,7 @@ def test_replay_command_executes_current_interpreter_but_records_canonical_pytho
 
     monkeypatch.setattr(replay.subprocess, "run", fake_run)
 
-    row = replay._run_replay_command(Path("."), "profile-smoke")
+    row = replay._run_replay_command(tmp_path, "profile-smoke")
 
     assert calls
     assert calls[0][0] == sys.executable
@@ -474,6 +475,7 @@ def test_replay_command_executes_current_interpreter_but_records_canonical_pytho
 
 def test_replay_command_timeout_records_blocked_without_exit_code(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     replay = _load_handoff_module("replay_evidence")
 
@@ -482,7 +484,7 @@ def test_replay_command_timeout_records_blocked_without_exit_code(
 
     monkeypatch.setattr(replay.subprocess, "run", fake_run)
 
-    row = replay._run_replay_command(Path("."), "profile-smoke")
+    row = replay._run_replay_command(tmp_path, "profile-smoke")
 
     assert row["status"] == "BLOCKED"
     assert row["exit_code"] is None
