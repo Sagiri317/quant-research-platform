@@ -19,7 +19,7 @@ QRP 是本地量化研究平台，不是生产交易系统，不是 live trading
 
 - 未运行写 `NOT_RUN`。
 - 环境、权限、依赖、超时阻塞写 `BLOCKED`。
-- 不允许把 sidecar PASS、single handoff verifier safety scan PASS、pytest PASS、compare PASS 互相替代。
+- 不允许把 sidecar PASS、handoff verifier PASS、share-safety PASS、pytest PASS、compare PASS 互相替代。
 - formal handoff evidence 必须是 compact replayable receipts：machine validation rows 只来自 replay-backed receipts；verifier 从 `final-branch.bundle` 重放并比对 count/hash。
 - Codex 不应手写 handoff evidence；正式 builder 只读取当前 Git state 和 `--repo-root`、`--out-dir`、`--task-name`、`--base-ref`，machine evidence 由 replay 自动生成，且 builder 永远运行 verifier。
 - builder 的 verifier status、share-safety status 和 zip sha256 必须来自同一个

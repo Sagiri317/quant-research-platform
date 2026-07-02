@@ -98,13 +98,11 @@ handoff scripts 位于：
 .agents/skills/quant-research-platform-maintenance/scripts/handoff/
 ```
 
-`verify_handoff_package.py` 是唯一 handoff/package verifier。
-`verify_handoff_package_result()` 是唯一 package-level verifier function。
-builder 只 build 并通过该 result path 调用 verifier，不定义 sanitizer、package
-member safety、private regex 或状态聚合规则，也不单独运行第二条 safety scan。
-standalone verifier CLI 保留，但不是额外 Python wrapper；未经用户明确批准，不保留
+`verify_handoff_package.py` 是 handoff/package verifier owner。
+`verify_handoff_package_result()` 是唯一正式 package-level verifier result path。
+standalone verifier CLI 保留，但不是额外 Python wrapper。未经用户明确批准，不保留
 wrapper、alias、adapter 或 compatibility layer。handoff artifact 输出到 `.run/` 或
-用户指定输出目录，当前合同来自本轮实际生成和验证的 artifact。
+用户指定输出目录；`.run/` 不定义合同。
 
 handoff package layout、sidecar、task metadata、validation summary、`FieldSpec`、
 `allowed_keys()` 和 validation row source contract 由 `handoff/handoff_contract.py`
@@ -114,7 +112,7 @@ payload construction 由 `handoff/replay_evidence.py` 执行，但 replay 模块
 或 compare 规则。`governance_contract.py` 只拥有治理扫描、source-tree scan、共享安全
 路径和 status token 规则。
 
-当前 handoff 流程只通过 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>` 生成；builder 从 Git state 和 replay 自动生成 machine evidence，永远运行 verifier；verifier result path 只做一次 zip inspection，需要 replay 时只 clone `final-branch.bundle` 一次，并在同一个 clone 中执行 share-safety scan、receipt replay 和 receipt comparison。
+当前 handoff 流程只通过 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>` 生成；builder 从 Git state 和 replay 自动生成 machine evidence，并永远运行 verifier。具体字段、结构、replay 和 share-safety 细节以 executable contracts 和 verifier 实现为准，文档不复制代码合同。
 
 `.agents/` 只承载 governance、handoff 和 prompt tooling；runtime 业务逻辑必须留在 `src/quant_research_platform/` 的 owner layer。
 

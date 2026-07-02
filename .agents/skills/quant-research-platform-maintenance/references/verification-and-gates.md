@@ -19,7 +19,7 @@
 - governance script PASS
 - code-map flow PASS
 - handoff verifier PASS
-- single handoff verifier safety scan PASS
+- share-safety PASS
 - source-tree scan PASS
 - compare PASS
 - sidecar PASS
@@ -68,20 +68,13 @@ Hard-scan gate 由正式 handoff builder/verifier 闭合：
 python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>
 ```
 
-builder 从 Git state 和 replay 自动生成 machine evidence，然后永远运行
-verifier。verifier 从 `final-branch.bundle` replay，并比较 packaged receipts 与
-replayed receipts。`verify_governance.py` 只运行 governance checks，不写 handoff
-receipts。
+builder 从 Git state 和 replay 自动生成 machine evidence，然后永远运行 verifier。
 builder 通过 `verify_handoff_package_result()` 获取 verifier status、share-safety
-status 和 zip sha256；`verify_handoff_package_result()` 是唯一 package-level
-verifier function。不得再单独运行一条 safety scan。verifier result path 只做
-一次 zip inspection；需要 replay 时只 clone bundle 一次，并在同一个 clone 中执行
-share-safety scan 和 receipt replay。standalone verifier CLI 保留，但不是额外
-Python wrapper；未经用户明确批准，不保留 wrapper、alias、adapter 或 compatibility
-layer。
-
-builder 从 Git state 和 replay 自动生成 machine evidence。verifier 必须从 `final-branch.bundle` 重放 hard scan 并比对 `scan_id`、`rule_set_id`、count 和 `result_sha256`。
-`verify_governance.py` 只运行 governance checks，不写 handoff receipts；hard-scan receipt construction 只由 `handoff/replay_evidence.py` 执行。
+status 和 zip sha256；`verify_handoff_package_result()` 是唯一正式 package-level
+verifier result path。standalone verifier CLI 保留，但不是额外 Python wrapper。
+具体字段、结构、receipt replay、share-safety 和 hard-scan receipt construction
+以 executable contracts、`verify_handoff_package.py` 和 `replay_evidence.py` 为准。
+`verify_governance.py` 只运行 governance checks，不写 handoff receipts。
 
 ### Code-map gate
 

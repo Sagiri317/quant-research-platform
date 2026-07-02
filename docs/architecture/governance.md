@@ -41,7 +41,7 @@ templates/     机器输入模板
 - JSON gate：检查 QRP-owned JSON 的 object 顶层与 `schema_id`。
 - naming gate：检查 current-contract path、文件/路径名、Python symbol 和静态字符串拼接。
 - code-map gate：检查代码地图与当前合同一致。
-- handoff gate：检查 builder、verifier、source-tree scan、single handoff verifier safety scan。
+- handoff gate：检查 builder、verifier、source-tree scan 和 share-safety。
 - handoff evidence gate：检查 required evidence 存在、结构完整且不是 status-only。
 - internal API gate：检查 owner-local internal API 和 private module 边界。
 - test placement gate：检查 tests 位于对应 owner 目录。
