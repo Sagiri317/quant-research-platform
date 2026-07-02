@@ -127,7 +127,7 @@ def _verify_full(
     sidecar: Path,
 ) -> list[str]:
     verifier = _load_handoff_module("verify_handoff_package")
-    return verifier.verify_handoff_package(package, sidecar)
+    return list(verifier.verify_handoff_package_result(package, sidecar).failures)
 
 
 def _verify_fast(

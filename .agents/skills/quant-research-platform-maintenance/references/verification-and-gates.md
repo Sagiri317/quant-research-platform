@@ -73,9 +73,12 @@ verifier。verifier 从 `final-branch.bundle` replay，并比较 packaged receip
 replayed receipts。`verify_governance.py` 只运行 governance checks，不写 handoff
 receipts。
 builder 通过 `verify_handoff_package_result()` 获取 verifier status、share-safety
-status 和 zip sha256；不得再单独运行一条 safety scan。verifier result path 只做
+status 和 zip sha256；`verify_handoff_package_result()` 是唯一 package-level
+verifier function。不得再单独运行一条 safety scan。verifier result path 只做
 一次 zip inspection；需要 replay 时只 clone bundle 一次，并在同一个 clone 中执行
-share-safety scan 和 receipt replay。
+share-safety scan 和 receipt replay。standalone verifier CLI 保留，但不是额外
+Python wrapper；未经用户明确批准，不保留 wrapper、alias、adapter 或 compatibility
+layer。
 
 builder 从 Git state 和 replay 自动生成 machine evidence。verifier 必须从 `final-branch.bundle` 重放 hard scan 并比对 `scan_id`、`rule_set_id`、count 和 `result_sha256`。
 `verify_governance.py` 只运行 governance checks，不写 handoff receipts；hard-scan receipt construction 只由 `handoff/replay_evidence.py` 执行。

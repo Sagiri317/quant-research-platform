@@ -21,18 +21,15 @@ except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallbac
         _rewrite_package_member,
     )
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow]
-
-
 def test_verifier_accepts_minimal_package(
     valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     package, sidecar = valid_handoff_package
 
-    failures = verifier.verify_handoff_package(package, sidecar)
+    failures = verifier.verify_handoff_package_result(package, sidecar).failures
 
-    assert failures == []
+    assert failures == ()
 
 
 def test_receipt_contract_rejects_status_only_package_smoke_receipt() -> None:
@@ -111,7 +108,7 @@ def test_verifier_rejects_retired_handoff_entries(
     )
     _refresh_manifest_and_sidecar(package, sidecar)
 
-    failures = verifier.verify_handoff_package(package, sidecar)
+    failures = verifier.verify_handoff_package_result(package, sidecar).failures
 
     assert any(old_name in failure for failure in failures)
 
@@ -127,7 +124,7 @@ def test_verifier_rejects_old_sidecar_status_surface(
     payload["advisory_reviews"] = {"review_subagent": "PASS"}
     sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
-    failures = verifier.verify_handoff_package(package, sidecar)
+    failures = verifier.verify_handoff_package_result(package, sidecar).failures
 
     assert "sidecar_unapproved_field: status_summary" in failures
     assert "sidecar_unapproved_field: advisory_reviews" in failures
@@ -151,7 +148,7 @@ def test_verifier_replays_hard_scan_from_bundle(
     )
     _refresh_manifest_and_sidecar(package, sidecar)
 
-    failures = verifier.verify_handoff_package(package, sidecar)
+    failures = verifier.verify_handoff_package_result(package, sidecar).failures
 
     assert "hard_scan_replay_mismatch" in failures
 

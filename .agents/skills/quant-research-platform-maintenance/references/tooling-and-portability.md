@@ -16,9 +16,11 @@ share-safety status 和 zip sha256，不运行独立 safety scan。
 - 检查失败时返回非零 exit code。
 - Handoff builder 从 Git state 和 replay 自动生成 compact machine receipts；不要把 raw grep output、完整 pytest log、完整 stdout/stderr、wheel/sdist 或本地临时安装目录写入 handoff。
 - Builder 只读取当前 Git state 和正式 CLI options；`.run/` 只保存 output/evidence，不作为脚本来源。
-- Verifier result path 只做一次 zip inspection；需要 bundle replay 时只 clone
+- `verify_handoff_package_result()` 是唯一 package-level verifier function。
+  Verifier result path 只做一次 zip inspection；需要 bundle replay 时只 clone
   `final-branch.bundle` 一次，并在同一个 clone 中执行 share-safety scan 和
-  machine receipt replay。`scan_handoff_zip()` 与 `verify_handoff_package()` 是薄包装。
+  machine receipt replay。standalone verifier CLI 保留，但不是额外 Python wrapper。
+  未经用户明确批准，不保留 wrapper、alias、adapter 或 compatibility layer。
 
 ## 2. Python 检查
 

@@ -29,14 +29,15 @@ README.md
   `governance_contract.source_tree_scan_groups()` 构造。它不定义 schema、
   allowed keys、proof classes、validation rows、replay commands 或 comparison
   rules。
-- `verify_handoff_package.py` 是 package-level trust boundary。正式验证入口是
-  `verify_handoff_package_result()`；它只做一次 zip inspection，并在需要 replay
-  时只 clone `final-branch.bundle` 一次。`scan_handoff_zip()` 和
-  `verify_handoff_package()` 是兼容薄包装，不是独立实现。verifier 读取 sidecar，
-  验证 zip envelope 和 exact member payloads，检查 task metadata Git identity，
-  在同一个 clone 中执行 share-safety scan 和 public receipt replay，比较 packaged
-  receipts 与 replayed receipts，并比较 packaged validation summary 与
-  replay-derived summary。
+- `verify_handoff_package.py` 是 package-level trust boundary。
+  `verify_handoff_package_result()` 是唯一 package-level verifier function。
+  它只做一次 zip inspection，并在需要 replay 时只 clone `final-branch.bundle`
+  一次。standalone verifier CLI 保留，但不是额外 Python wrapper。未经用户明确
+  批准，不保留 wrapper、alias、adapter 或 compatibility layer。verifier 读取
+  sidecar，验证 zip envelope 和 exact member payloads，检查 task metadata Git
+  identity，在同一个 clone 中执行 share-safety scan 和 public receipt replay，
+  比较 packaged receipts 与 replayed receipts，并比较 packaged validation summary
+  与 replay-derived summary。
 
 ## Build Entry
 
@@ -56,40 +57,17 @@ verification result。verifier 不通过时，本次 build 不视为成功。
 builder 只读取当前 Git state 和上述 CLI options；所有 machine evidence 都由
 replay 自动生成。
 
-## Package Layout
+## Package Contract
 
-zip 必须只包含：
+Package layout、sidecar schema、task metadata schema、artifact manifest schema、
+validation summary schema、`ProofClass`、`FieldSpec`、`allowed_keys()`、
+validation row source contract 和 replay command contract 由
+`handoff_contract.py` 定义。Receipt schemas、invariants、normalization 和
+comparison 由 `receipt_contract.py` 定义。
 
-```text
-artifact_manifest.json
-final-branch.bundle
-task_metadata.json
-handoff_evidence/validation-summary.json
-handoff_evidence/package-smoke-receipt.json
-handoff_evidence/hard-scan-receipt.json
-handoff_evidence/check-receipts.json
-```
-
-external sidecar 只包含：
-
-```text
-schema_id
-zip_filename
-zip_sha256
-```
-
-task metadata 只包含：
-
-```text
-schema_id
-task_name
-branch
-base
-final_head
-```
-
-verifier 从 `task_metadata.json` 读取 branch、base 和 final head，不从 sidecar
-读取这些身份字段。
+本目录文档不得重复完整 zip entries、sidecar keys、task metadata keys、
+validation rows 或 receipt field lists。Verifier 从 task metadata 读取 branch、
+base 和 final head，不从 sidecar 读取这些身份字段。
 
 ## Receipt Rules
 
@@ -97,27 +75,8 @@ Receipt JSON payloads 是 exact-schema compact machine receipts。它们不得�
 stdout/stderr、raw grep output、完整 pytest logs、本地 install paths、wheel/sdist
 文件或 private/generated data。
 
-`hard-scan-receipt.json` 只包含 `schema_id`、`status`、`scanned_head`、
-`scanner_source_sha256` 和 `scan_runs`。每个 scan run 只包含 `scan_id`、
-`rule_set_id`、`match_count`、`actual_violation_count`、`result_sha256` 和
-`replayable_from_bundle`。
-
-validation summary 从 replayed receipts 派生，只包含：
-
-```text
-schema_id
-rows
-```
-
-每个 row 只包含 `name` 和 `status`。当前只允许这些 replay-backed rows：
-
-```text
-scripted_checks
-package_smoke
-profile_smoke
-governance
-code_map
-```
+Validation summary 从 replayed receipts 派生。Exact rows 和 fields 由
+`handoff_contract.py` 与 `receipt_contract.py` 拥有，不由本 README 定义。
 
 human/advisory review 是独立人类审查输出，不进入 machine handoff，也不支撑
 machine validation `PASS`。

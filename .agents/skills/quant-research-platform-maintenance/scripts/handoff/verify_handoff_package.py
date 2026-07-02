@@ -85,15 +85,6 @@ BUNDLE_TEXT_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True)
-class HandoffSafetyResult:
-    failures: tuple[str, ...]
-
-    @property
-    def ok(self) -> bool:
-        return not self.failures
-
-
-@dataclass(frozen=True)
 class HandoffVerificationResult:
     failures: tuple[str, ...]
     share_safety_failures: tuple[str, ...]
@@ -140,10 +131,6 @@ def main() -> int:
     print("handoff_package_verify_status=PASS")
     print(f"zip_sha256={result.zip_sha256}")
     return 0
-
-
-def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
-    return list(verify_handoff_package_result(zip_path, json_path).failures)
 
 
 def verify_handoff_package_result(zip_path: Path, json_path: Path) -> HandoffVerificationResult:
@@ -198,8 +185,6 @@ def verify_handoff_package_result(zip_path: Path, json_path: Path) -> HandoffVer
 def inspect_handoff_zip_once(
     zip_path: Path,
     json_path: Path | None,
-    *,
-    scan_bundle_safety: bool = False,
 ) -> HandoffZipInspection:
     failures: list[str] = []
     share_safety_failures: list[str] = []
@@ -253,10 +238,6 @@ def inspect_handoff_zip_once(
                     )
                 if name == FINAL_BRANCH_BUNDLE_ENTRY:
                     raw_bundle = raw
-                    if scan_bundle_safety:
-                        share_safety_failures.extend(
-                            scan_git_bundle(raw, name=name).failures
-                        )
                 if suffix in TEXT_LIKE_SUFFIXES:
                     share_safety_failures.extend(text_blob_failures(raw, name=name))
     except (BadZipFile, OSError) as exc:
@@ -290,11 +271,6 @@ def inspect_handoff_zip_once(
         sidecar_payload=sidecar_payload,
         zip_sha256=zip_digest,
     )
-
-
-def verify_manifest_hashes(archive: ZipFile) -> list[str]:
-    member_bytes = {name: archive.read(name) for name in archive.namelist()}
-    return verify_manifest_hashes_from_bytes(member_bytes, tuple(archive.namelist()))
 
 
 def verify_manifest_hashes_from_bytes(
@@ -375,12 +351,6 @@ class LoadedHandoffPayloads:
         )
 
 
-def load_handoff_payloads(archive: ZipFile) -> LoadedHandoffPayloads:
-    return load_handoff_payloads_from_bytes(
-        {name: archive.read(name) for name in archive.namelist()}
-    )
-
-
 def load_handoff_payloads_from_bytes(
     member_bytes: Mapping[str, bytes],
 ) -> LoadedHandoffPayloads:
@@ -406,19 +376,6 @@ def load_handoff_payloads_from_bytes(
         receipts=receipts,
         failures=tuple(failures),
     )
-
-
-def load_json_member(
-    archive: ZipFile,
-    entry: str,
-    failures: list[str],
-) -> dict[str, object] | None:
-    try:
-        raw = archive.read(entry)
-    except KeyError:
-        failures.append(f"json_member_missing: {entry}")
-        return None
-    return load_json_member_raw(raw, entry, failures)
 
 
 def load_json_member_from_bytes(
@@ -539,55 +496,6 @@ def verify_bundle_and_replay_once(
     return failures, share_safety_failures
 
 
-def scan_handoff_zip(
-    zip_path: str | Path,
-    *,
-    json_path: str | Path | None = None,
-) -> HandoffSafetyResult:
-    inspection = inspect_handoff_zip_once(
-        Path(zip_path),
-        Path(json_path) if json_path is not None else None,
-        scan_bundle_safety=True,
-    )
-    structural_read_failures = tuple(
-        failure
-        for failure in inspection.failures
-        if failure.startswith("zip_read_failed")
-    )
-    return HandoffSafetyResult(
-        failures=(*inspection.share_safety_failures, *structural_read_failures)
-    )
-
-
-def scan_git_bundle(raw: bytes, *, name: str) -> HandoffSafetyResult:
-    with tempfile.TemporaryDirectory(prefix="handoff-bundle-safety-") as temp:
-        root = Path(temp)
-        bundle = root / "bundle.bundle"
-        bundle.write_bytes(raw)
-        verify_repo = root / "verify-repo"
-        subprocess.run(["git", "init", "-q", str(verify_repo)], check=True)
-        verify = subprocess.run(
-            ["git", "bundle", "verify", str(bundle)],
-            cwd=verify_repo,
-            capture_output=True,
-            text=True,
-        )
-        if verify.returncode != 0:
-            return HandoffSafetyResult((f"bundle_verify_failed: {name}",))
-        branch = bundle_branch(bundle, verify_repo)
-        clone_dir = root / "clone"
-        clone_command = ["git", "clone"]
-        if branch:
-            clone_command.extend(["--branch", branch])
-        clone_command.extend([str(bundle), str(clone_dir)])
-        clone = subprocess.run(clone_command, capture_output=True, text=True)
-        if clone.returncode != 0:
-            return HandoffSafetyResult((f"bundle_clone_failed: {name}",))
-        return HandoffSafetyResult(
-            failures=tuple(scan_clone_tree_for_share_safety(clone_dir))
-        )
-
-
 def scan_clone_tree_for_share_safety(
     clone_dir: Path,
     *,
@@ -689,22 +597,6 @@ def is_bundle_content_scan_exempt(name: str) -> bool:
     if normalized in BUNDLE_CONTENT_SCAN_EXEMPT_FILES:
         return True
     return any(normalized.startswith(root) for root in BUNDLE_CONTENT_SCAN_EXEMPT_ROOTS)
-
-
-def bundle_branch(bundle: Path, cwd: Path) -> str | None:
-    result = subprocess.run(
-        ["git", "bundle", "list-heads", str(bundle)],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-    for line in result.stdout.splitlines():
-        _sha, _, ref = line.partition(" ")
-        if ref.startswith("refs/heads/"):
-            return ref.removeprefix("refs/heads/")
-    return None
 
 
 def git_text(repo: Path, *args: str) -> str:

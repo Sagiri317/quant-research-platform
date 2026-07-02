@@ -23,9 +23,10 @@ QRP 是本地量化研究平台，不是生产交易系统，不是 live trading
 - formal handoff evidence 必须是 compact replayable receipts：machine validation rows 只来自 replay-backed receipts；verifier 从 `final-branch.bundle` 重放并比对 count/hash。
 - Codex 不应手写 handoff evidence；正式 builder 只读取当前 Git state 和 `--repo-root`、`--out-dir`、`--task-name`、`--base-ref`，machine evidence 由 replay 自动生成，且 builder 永远运行 verifier。
 - builder 的 verifier status、share-safety status 和 zip sha256 必须来自同一个
-  `verify_handoff_package_result()`；verifier result path 只做一次 zip inspection，
-  需要 replay 时只 clone bundle 一次。`scan_handoff_zip()` 与
-  `verify_handoff_package()` 是薄包装，不是第二套实现。
+  `verify_handoff_package_result()`；这是唯一 package-level verifier function。
+  verifier result path 只做一次 zip inspection，需要 replay 时只 clone bundle 一次。
+  未经用户明确批准，不保留 wrapper、alias、adapter 或 compatibility layer。
+  standalone verifier CLI 保留，但它不是额外 Python wrapper。
 - human/advisory review 是独立人类审查输出，不进入 machine handoff，不支撑 machine validation `PASS`。
 - sandbox 或 Codex 环境中，允许在边界内安装缺失依赖进行测试；缺依赖不是默认跳过理由。
 

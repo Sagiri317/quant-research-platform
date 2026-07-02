@@ -1,7 +1,7 @@
 # Handoff and Evidence
 
-本文定义当前 `REVIEW_SAFE` machine handoff 合同。顶层文档只保留 owner
-原则；具体 layout、字段和验证语义放在本文和可执行合同中。
+本文定义当前 `REVIEW_SAFE` machine handoff 的 owner map 和执行边界。
+具体 layout、字段和验证语义只由可执行合同与 tests 定义。
 
 ## 工具 Owner
 
@@ -23,10 +23,11 @@ tracked handoff tooling 位于：
 - `replay_evidence.py` 执行 public machine replay，并构造 canonical
   receipts；hard-scan receipt 由
   `governance_contract.source_tree_scan_groups()` 的扫描结果构造。
-- `verify_handoff_package.py` 是 package trust boundary。正式 verifier result
-  path 由 `verify_handoff_package_result()` 承载；该路径只做一次 zip inspection，
-  只 clone `final-branch.bundle` 一次。`verify_handoff_package()` 和
-  `scan_handoff_zip()` 只是薄包装。
+- `verify_handoff_package.py` 是 package trust boundary。
+  `verify_handoff_package_result()` 是唯一 package-level verifier function。
+  verifier result path 只做一次 zip inspection，且需要 replay 时只 clone
+  `final-branch.bundle` 一次。standalone verifier CLI 保留，但不是额外 Python
+  wrapper。未经用户明确批准，不保留 wrapper、alias、adapter 或 compatibility layer。
 - `governance_contract.py` 拥有 governance scan、source-tree scan、
   share-safety path rules 和 status tokens。
 
@@ -43,84 +44,23 @@ builder 从当前 Git state 读取 branch 和 HEAD，要求 worktree clean，计
 evidence，写入 bundle、receipts、validation summary、manifest、zip 和 external
 sidecar，然后永远运行 verifier。verifier 不通过时，本次 build 不视为成功。
 
-## Zip Layout
+## 合同边界
 
-正式 handoff zip 只允许 7 个 entries：
+`handoff_contract.py` 拥有 package layout、sidecar schema、task metadata
+schema、artifact manifest schema、validation summary schema、`ProofClass`、
+`FieldSpec`、`allowed_keys()`、validation row source contract 和 replay command
+contract。
 
-```text
-artifact_manifest.json
-final-branch.bundle
-task_metadata.json
-handoff_evidence/validation-summary.json
-handoff_evidence/package-smoke-receipt.json
-handoff_evidence/hard-scan-receipt.json
-handoff_evidence/check-receipts.json
-```
+`receipt_contract.py` 拥有 receipt schemas、invariants、normalization 和
+comparison。
 
-zip 不允许包含 status-only summary、receipt index、manual review output、raw
-logs、raw stdout/stderr、wheel、sdist、CSV、parquet、pickle、feather、arrow、
-vendor raw data、private data 或 generated private output。
+`replay_evidence.py` 拥有 machine replay 和 canonical receipt construction。
 
-## Sidecar
+`verify_handoff_package.py` 拥有 verifier result path、zip inspection primitive、
+bundle replay primitive、replay comparison 和 clone tree share-safety scan。
 
-external sidecar 只是 zip envelope，只允许：
-
-```text
-schema_id
-zip_filename
-zip_sha256
-```
-
-sidecar 不重复 task metadata，不保存 status summary、verifier status 或
-share-safety status。
-
-## Task Metadata
-
-`task_metadata.json` 只允许：
-
-```text
-schema_id
-task_name
-branch
-base
-final_head
-```
-
-verifier 必须证明：
-
-```text
-final_head == bundle clone HEAD
-base is ancestor of final_head
-branch is the bundle clone target branch
-```
-
-## Validation Summary
-
-`handoff_evidence/validation-summary.json` 只允许 `schema_id` 和 `rows`。每个
-row 只允许 `name` 和 `status`。
-
-当前 rows 只保留 replay-backed 项：
-
-```text
-scripted_checks -> check-receipts.status
-package_smoke -> package-smoke-receipt.status
-profile_smoke -> check-receipts.profile-smoke.status
-governance -> hard-scan-receipt.status
-code_map -> check-receipts.code-map.status
-```
-
-## Receipt Invariants
-
-`check-receipts.json` 只包含 `profile-smoke` 和 `code-map` 两个 command rows。
-check rows 不表达 `NOT_RUN` 或 `BLOCKED`；replay 失败就是 `FAIL`。
-
-`package-smoke-receipt.json` 只保存 build/install/import/content_scan 的状态和
-固定 metadata，不保存 wheel 或 sdist 文件名、hash 或 content examples。
-
-`hard-scan-receipt.json` 只保存 `schema_id`、`status`、`scanned_head`、
-`scanner_source_sha256` 和 `scan_runs`。每个 scan run 只保存 `scan_id`、
-`rule_set_id`、`match_count`、`actual_violation_count`、`result_sha256` 和
-`replayable_from_bundle`。
+文档不得重复完整 zip entries、sidecar keys、task metadata keys、validation rows
+或 receipt field lists；字段事实源只使用上述可执行 owner modules。
 
 ## Verifier Replay
 

@@ -98,11 +98,13 @@ handoff scripts 位于：
 .agents/skills/quant-research-platform-maintenance/scripts/handoff/
 ```
 
-`verify_handoff_package.py` 是唯一 handoff/package verifier。builder 只 build 并通过
-`verify_handoff_package_result()` 调用 verifier，不定义 sanitizer、package member
-safety、private regex 或状态聚合规则，也不单独运行第二条 safety scan。handoff
-artifact 输出到 `.run/` 或用户指定输出目录，当前合同来自本轮实际生成和验证的
-artifact。
+`verify_handoff_package.py` 是唯一 handoff/package verifier。
+`verify_handoff_package_result()` 是唯一 package-level verifier function。
+builder 只 build 并通过该 result path 调用 verifier，不定义 sanitizer、package
+member safety、private regex 或状态聚合规则，也不单独运行第二条 safety scan。
+standalone verifier CLI 保留，但不是额外 Python wrapper；未经用户明确批准，不保留
+wrapper、alias、adapter 或 compatibility layer。handoff artifact 输出到 `.run/` 或
+用户指定输出目录，当前合同来自本轮实际生成和验证的 artifact。
 
 handoff package layout、sidecar、task metadata、validation summary、`FieldSpec`、
 `allowed_keys()` 和 validation row source contract 由 `handoff/handoff_contract.py`

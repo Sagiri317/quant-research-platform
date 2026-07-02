@@ -68,6 +68,10 @@ def _called_names_in_function(path: Path, function_name: str) -> set[str]:
     return calls
 
 
+def _name(*parts: str) -> str:
+    return "_".join(parts)
+
+
 def _assigned_names(path: Path) -> set[str]:
     tree = ast.parse(_source(path), filename=str(path))
     names: set[str] = set()
@@ -242,6 +246,7 @@ def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
     verifier = HANDOFF_ROOT / "verify_handoff_package.py"
     verifier_defs = _function_defs(verifier)
     classes = _class_defs(verifier)
+    source = _source(verifier)
 
     assert "HandoffVerificationResult" in classes
     assert "verify_handoff_package_result" in verifier_defs
@@ -249,34 +254,30 @@ def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
     assert "verify_bundle_and_replay_once" in verifier_defs
     assert "scan_clone_tree_for_share_safety" in verifier_defs
     assert "compare_replayed_handoff_payloads" in verifier_defs
+    assert "main" in verifier_defs
 
-    safety_source = _class_source(verifier, "HandoffSafetyResult")
-    for retired_field in (
-        "text_like_count",
-        "member_count",
-        "bundle_member_count",
-        "bundle_text_like_count",
-        "sidecar_text_like_count",
-        "errors",
-        "to_text",
+    for retired_class in ("Handoff" + "Safety" + "Result",):
+        assert retired_class not in classes
+        assert retired_class not in source
+
+    for retired in (
+        _name("verify", "handoff", "package"),
+        _name("scan", "handoff", "zip"),
+        _name("scan", "git", "bundle"),
+        _name("verify", "manifest", "hashes"),
+        _name("load", "handoff", "payloads"),
+        _name("load", "json", "member"),
     ):
-        assert retired_field not in safety_source
-
-    verify_source = _function_source(verifier, "verify_handoff_package")
-    assert (
-        "return list(verify_handoff_package_result(zip_path, json_path).failures)"
-        in verify_source
-    )
-
-    scan_source = _function_source(verifier, "scan_handoff_zip")
-    assert "inspect_handoff_zip_once" in scan_source
-    assert "ZipFile" not in scan_source
-    assert "scan_git_bundle" not in scan_source
+        assert retired not in verifier_defs
 
     result_calls = _called_names_in_function(verifier, "verify_handoff_package_result")
     assert "inspect_handoff_zip_once" in result_calls
-    assert "scan_handoff_zip" not in result_calls
-    assert "scan_git_bundle" not in result_calls
+    assert _name("scan", "handoff", "zip") not in result_calls
+    assert _name("scan", "git", "bundle") not in result_calls
+
+    inspection_source = _function_source(verifier, "inspect_handoff_zip_once")
+    assert _name("scan", "bundle", "safety") not in inspection_source
+    assert _name("scan", "git", "bundle") not in inspection_source
 
 
 def test_handoff_contract_has_no_retired_verified_path_surfaces() -> None:
@@ -354,6 +355,12 @@ def test_current_docs_do_not_describe_retired_handoff_inputs() -> None:
         "--receipt-out",
         "advisory-review-receipt",
         "advisory_reviews",
+        "薄" + "包" + "装",
+        "thin " + "wrapper",
+        "compatibility " + "wrapper",
+        "兼容" + "薄" + "包" + "装",
+        "只是" + "薄" + "包" + "装",
+        "wrapper " + "保留",
         "task metadata JSON 输入",
         "receipts-dir 输入",
     ):
@@ -459,7 +466,7 @@ def test_builder_uses_verifier_result_without_separate_scan_status() -> None:
 
     assert "scan_status" not in defs
     assert "verify_handoff_package_result" in source
-    assert "scan_handoff_zip" not in source
+    assert _name("scan", "handoff", "zip") not in source
 
 
 def test_mutation_tests_do_not_patch_global_replay_function() -> None:
