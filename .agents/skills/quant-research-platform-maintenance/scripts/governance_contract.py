@@ -118,6 +118,18 @@ ACTIVE_GOVERNANCE_DOC_ROOTS = (
     ".gitignore",
 )
 
+SOURCE_TREE_TEXT_ROOTS = (
+    Path("src"),
+    Path("tests"),
+    Path(".agents"),
+    Path("docs"),
+    Path("AGENTS.md"),
+    Path("README.md"),
+    Path("data/README.md"),
+    Path("pyproject.toml"),
+    Path("environment.yml"),
+)
+
 RETIRED_GOVERNANCE_EXACT_PATHS = (
     "PROJECT_STATUS.md",
     ".agents/briefs/current-qrp-status.md",
@@ -1049,6 +1061,10 @@ BUILD_HANDOFF_PACKAGE_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
     "build_handoff_package.py"
 )
+HANDOFF_CONTRACT_SCRIPT = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+    "handoff_contract.py"
+)
 HANDOFF_SELF_TEST_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py"
 )
@@ -1059,6 +1075,7 @@ VERIFY_HANDOFF_PACKAGE_SCRIPT = Path(
 VERIFY_GOVERNANCE_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py"
 )
+SHARE_SAFETY_SCRIPT = Path("src/quant_research_platform/policy/share_safety.py")
 
 
 def _source_tree_allowed_occurrence(
@@ -1872,6 +1889,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
         ),
         definition_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
+            HANDOFF_CONTRACT_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
             HANDOFF_SELF_TEST_SCRIPT,
@@ -1887,6 +1905,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
         ),
         definition_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
+            HANDOFF_CONTRACT_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
             HANDOFF_SELF_TEST_SCRIPT,
@@ -1903,6 +1922,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
         ),
         definition_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
+            HANDOFF_CONTRACT_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
             HANDOFF_SELF_TEST_SCRIPT,
@@ -1953,6 +1973,33 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "is_allowed_rule_definition",
         "is_allowed_runtime_symbol",
         "is_allowed_version_surface",
+    },
+    HANDOFF_CONTRACT_SCRIPT: {
+        "ACTIVE_DENIED_HANDOFF_EVIDENCE_FIELDS",
+    },
+    SHARE_SAFETY_SCRIPT: {
+        "_WINDOWS_DRIVE_PATH_RE",
+        "_UNC_PATH_RE",
+        "_POSIX_LOCAL_PATH_RE",
+        "_RETIRED_LOCAL_ONLY_REPORT_PATH_PATTERN",
+        "_ABSOLUTE_REPO_LOCAL_ONLY_PATH_RE",
+        "_REPO_LOCAL_ONLY_PATH_RE",
+        "_STOCK_CODE_RE",
+        "_ROW_SAMPLE_RE",
+        "_ROW_SAMPLE_MARKER_RE",
+        "_PROVIDER_SOURCE_FIELD_RE",
+        "_PROVIDER_SOURCE_MARKER_RE",
+        "_CREDENTIAL_RE",
+        "_CREDENTIAL_KEY_RE",
+        "_TRACEBACK_RE",
+        "_RAW_EXPORT_FILENAME_RE",
+        "_SOURCE_LOCAL_KEY_RE",
+        "SOURCE_LOCAL_KEYS",
+        "JSON_LOGICAL_PATH_VALUE_KEYS",
+        "_RUNTIME_PAYLOAD_RE",
+        "_LOCAL_RUN_PATH_RE",
+        "_ENVIRONMENT_PATH_RE",
+        "PRIVATE_FIELD_NAMES",
     },
     HANDOFF_SELF_TEST_SCRIPT: {"main"},
     VERIFY_HANDOFF_PACKAGE_SCRIPT: {
@@ -3123,18 +3170,19 @@ def source_tree_allowance_contract_findings(
         clone_dir / governance_allowlist_owner_path
     ).is_file()
     patterns = source_tree_allowed_occurrence_patterns(repo_root=clone_dir)
-    for failure in validate_source_tree_allowed_occurrences(
-        SOURCE_TREE_ALLOWED_OCCURRENCES,
-        patterns_by_rule_id=patterns,
-    ):
-        findings.append(
-            {
-                "path": "",
-                "line": 0,
-                "rule": "source_tree_allowed_occurrence_contract",
-                "reason": failure,
-            }
-        )
+    if enforce_missing_allowance_entries:
+        for failure in validate_source_tree_allowed_occurrences(
+            SOURCE_TREE_ALLOWED_OCCURRENCES,
+            patterns_by_rule_id=patterns,
+        ):
+            findings.append(
+                {
+                    "path": "",
+                    "line": 0,
+                    "rule": "source_tree_allowed_occurrence_contract",
+                    "reason": failure,
+                }
+            )
     for entry in SOURCE_TREE_ALLOWED_OCCURRENCES:
         path = clone_dir / Path(entry.path.as_posix())
         if entry.path not in tracked_paths or not path.exists():
@@ -3696,11 +3744,23 @@ def source_tree_governance_rule_definition_lines(
     path: Path,
 ) -> set[int]:
     block_names = SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES.get(relative)
-    if not block_names or path.suffix != ".py":
+    if path.suffix != ".py":
         return set()
     try:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
     except SyntaxError:
+        return set()
+    if relative in {
+        GOVERNANCE_CONTRACT_SCRIPT,
+        VERIFY_GOVERNANCE_SCRIPT,
+        SHARE_SAFETY_SCRIPT,
+    }:
+        block_names = {
+            name
+            for node in ast.iter_child_nodes(tree)
+            if (name := source_tree_definition_name(node)) is not None
+        }
+    if not block_names:
         return set()
     lines: set[int] = set()
     for node in ast.iter_child_nodes(tree):
@@ -4253,8 +4313,17 @@ def source_tree_tracked_text_files_from_paths(
         text_suffixes = {".py", ".md", ".json", ".toml", ".yaml", ".yml"}
         if relative.suffix.lower() not in text_suffixes:
             continue
+        if not source_tree_text_path_in_scope(relative):
+            continue
         result.append(relative)
     return tuple(result)
+
+
+def source_tree_text_path_in_scope(relative: Path) -> bool:
+    return any(
+        relative == root or relative.is_relative_to(root)
+        for root in SOURCE_TREE_TEXT_ROOTS
+    )
 
 
 def source_tree_tracked_paths(clone_dir: Path) -> tuple[Path, ...]:

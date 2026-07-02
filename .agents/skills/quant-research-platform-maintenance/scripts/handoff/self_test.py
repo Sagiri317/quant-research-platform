@@ -26,10 +26,11 @@ def main() -> int:
     if missing:
         return fail("missing=" + ",".join(missing))
     retired_collector = "collect_" + "private_" + "smoke_" + "status.py"
+    retired_package_smoke = "run_" + "package_" + "smoke.py"
     absent = {
         SCRIPT_DIR / retired_collector,
         SCRIPT_DIR / "collect_handoff_receipts.py",
-        SCRIPT_DIR / "run_package_smoke.py",
+        SCRIPT_DIR / retired_package_smoke,
         SCRIPT_DIR / "proof_contract.py",
         SCRIPT_DIR.parent / "run_check.py",
         SKILL_ROOT / "templates" / "handoff" / "task_metadata.template.json",

@@ -13,6 +13,7 @@ import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
+from time import perf_counter
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPT_PARENT = SCRIPT_DIR.parent
@@ -34,14 +35,21 @@ from receipt_contract import (  # noqa: E402
     COUNT_FIELDS,
     PACKAGE_ARTIFACT_KINDS,
     PACKAGE_IMPORT_MODULE,
-    PACKAGE_INSTALL_TARGET_KIND,
     PACKAGE_SCANNED_ARTIFACT_KINDS,
+    PACKAGE_WHEEL_EXTRACT_METHOD,
     normalize_hard_scan_receipt,
     normalize_package_smoke_receipt,
     validate_check_receipts,
 )
 
-FORBIDDEN_PACKAGE_SUFFIXES = {".parquet", ".csv", ".pkl", ".pickle", ".feather", ".arrow"}
+FORBIDDEN_PACKAGE_SUFFIXES = {
+    ".parquet",
+    ".csv",
+    ".pkl",
+    ".pickle",
+    ".feather",
+    ".arrow",
+}
 
 
 def build_replayed_check_receipts(repo_root: Path) -> dict[str, object]:
@@ -112,7 +120,9 @@ def build_machine_receipts(
     return {
         CHECK_RECEIPTS_ENTRY: build_replayed_check_receipts(repo_root),
         PACKAGE_SMOKE_RECEIPT_ENTRY: build_replayed_package_smoke_receipt(repo_root),
-        HARD_SCAN_RECEIPT_ENTRY: build_replayed_hard_scan_receipt(repo_root, final_head),
+        HARD_SCAN_RECEIPT_ENTRY: build_replayed_hard_scan_receipt(
+            repo_root, final_head
+        ),
     }
 
 
@@ -120,6 +130,11 @@ def _run_replay_command(repo_root: Path, command_id: str) -> dict[str, object]:
     spec = replay_command_spec(command_id)
     command_argv = list(spec.command_argv)
     run_argv = _runtime_command_argv(command_argv)
+    if command_id == "profile-smoke":
+        shutil.rmtree(
+            repo_root / ".run" / "handoff-replay" / "profile-smoke", ignore_errors=True
+        )
+    started = perf_counter()
     result = subprocess.run(
         run_argv,
         cwd=repo_root,
@@ -129,10 +144,13 @@ def _run_replay_command(repo_root: Path, command_id: str) -> dict[str, object]:
         errors="replace",
         check=False,
     )
+    duration_seconds = perf_counter() - started
     status = "PASS" if result.returncode == 0 else "FAIL"
-    counts = parse_pytest_counts(
-        "\n".join((result.stdout or "", result.stderr or ""))
-    ) if command_id == "profile-smoke" else None
+    counts = (
+        _profile_smoke_counts(repo_root, result)
+        if command_id == "profile-smoke"
+        else None
+    )
     return {
         "schema_id": "qrp-check-receipt",
         "command_id": command_id,
@@ -141,6 +159,7 @@ def _run_replay_command(repo_root: Path, command_id: str) -> dict[str, object]:
         "command": spec.command,
         "status": status,
         "exit_code": result.returncode,
+        "duration_seconds": round(duration_seconds, 6),
         "counts": counts,
     }
 
@@ -178,26 +197,37 @@ def _runtime_command_argv(command_argv: list[str]) -> list[str]:
     return command_argv
 
 
+def _profile_smoke_counts(
+    repo_root: Path,
+    result: subprocess.CompletedProcess[str],
+) -> dict[str, int]:
+    stdout_path = repo_root / ".run" / "handoff-replay" / "profile-smoke" / "stdout.log"
+    if stdout_path.exists():
+        return parse_pytest_counts(
+            stdout_path.read_text(encoding="utf-8", errors="replace")
+        )
+    return parse_pytest_counts("\n".join((result.stdout or "", result.stderr or "")))
+
+
 def _build_replayed_package_smoke_receipt(repo_root: Path) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="qrp-package-smoke-") as temp:
         root = Path(temp)
         dist = root / "dist"
-        target = root / "install-target"
+        wheel_extract = root / "wheel-extract"
         build_status, wheel_path, sdist_path = _build_package_artifacts(repo_root, dist)
-        install_status = "NOT_RUN"
+        extract_status = "NOT_RUN"
         import_status = "NOT_RUN"
         if build_status == "PASS" and wheel_path is not None:
-            install_status, import_status = _install_package_smoke_target(
+            extract_status, import_status = _extract_wheel_smoke_target(
                 repo_root,
                 wheel_path,
-                target,
+                wheel_extract,
             )
-        forbidden = _scan_package_artifacts(wheel_path, sdist_path, target)
+        forbidden = _scan_package_artifacts(wheel_path, sdist_path, wheel_extract)
         content_status = "PASS" if not forbidden else "FAIL"
         status = _aggregate_status(
-            [build_status, install_status, import_status, content_status]
+            [build_status, extract_status, import_status, content_status]
         )
-        shutil.rmtree(target, ignore_errors=True)
         return {
             "schema_id": "qrp-package-smoke-receipt",
             "status": status,
@@ -205,10 +235,9 @@ def _build_replayed_package_smoke_receipt(repo_root: Path) -> dict[str, object]:
                 "status": build_status,
                 "artifact_kinds": list(PACKAGE_ARTIFACT_KINDS),
             },
-            "install": {
-                "target_kind": PACKAGE_INSTALL_TARGET_KIND,
-                "no_deps": True,
-                "status": install_status,
+            "wheel_extract": {
+                "method": PACKAGE_WHEEL_EXTRACT_METHOD,
+                "status": extract_status,
             },
             "import": {
                 "status": import_status,
@@ -245,9 +274,7 @@ def _build_package_artifacts(
     )
     wheel_path, wheel_ok = _select_single_artifact(dist, "*.whl")
     sdist_path, sdist_ok = _select_single_artifact(dist, "*.tar.gz")
-    build_status = (
-        "PASS" if build.returncode == 0 and wheel_ok and sdist_ok else "FAIL"
-    )
+    build_status = "PASS" if build.returncode == 0 and wheel_ok and sdist_ok else "FAIL"
     return (
         build_status,
         wheel_path if wheel_ok else None,
@@ -255,31 +282,17 @@ def _build_package_artifacts(
     )
 
 
-def _install_package_smoke_target(
+def _extract_wheel_smoke_target(
     repo_root: Path,
     wheel_path: Path,
     target: Path,
 ) -> tuple[str, str]:
-    install = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--no-deps",
-            "--target",
-            str(target),
-            str(wheel_path),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    install_status = "PASS" if install.returncode == 0 else "FAIL"
-    if install.returncode != 0:
-        return install_status, "NOT_RUN"
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(wheel_path) as archive:
+            archive.extractall(target)
+    except (OSError, zipfile.BadZipFile):
+        return "FAIL", "NOT_RUN"
     env = os.environ.copy()
     env["PYTHONPATH"] = str(target)
     probe = subprocess.run(
@@ -296,18 +309,18 @@ def _install_package_smoke_target(
         errors="replace",
         check=False,
     )
-    return install_status, "PASS" if probe.returncode == 0 else "FAIL"
+    return "PASS", "PASS" if probe.returncode == 0 else "FAIL"
 
 
 def _scan_package_artifacts(
     wheel_path: Path | None,
     sdist_path: Path | None,
-    target: Path,
+    wheel_extract: Path,
 ) -> list[str]:
     return [
         *_archive_content_scan(wheel_path, "wheel"),
         *_archive_content_scan(sdist_path, "sdist"),
-        *_install_target_content_scan(target),
+        *_wheel_extract_content_scan(wheel_extract),
     ]
 
 
@@ -318,11 +331,11 @@ def _select_single_artifact(root: Path, pattern: str) -> tuple[Path | None, bool
     return matches[0], True
 
 
-def _install_target_content_scan(root: Path) -> list[str]:
+def _wheel_extract_content_scan(root: Path) -> list[str]:
     if not root.exists():
         return []
     return [
-        f"install_target:{path.relative_to(root).as_posix()}"
+        f"wheel_extract:{path.relative_to(root).as_posix()}"
         for path in root.rglob("*")
         if path.is_file() and path.suffix.lower() in FORBIDDEN_PACKAGE_SUFFIXES
     ]

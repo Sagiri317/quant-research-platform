@@ -8,7 +8,7 @@ from __future__ import annotations
 import shlex
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import PurePosixPath
 
 try:
@@ -19,7 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit 
     VALID_STATUS_TOKENS = frozenset({"PASS", "FAIL", "NOT_RUN", "BLOCKED"})
 
 
-class ProofClass(str, Enum):
+class ProofClass(StrEnum):
     REPLAYED = "REPLAYED"
     DERIVED_FROM_REPLAY = "DERIVED_FROM_REPLAY"
     IDENTITY_BOUND = "IDENTITY_BOUND"
@@ -46,6 +46,73 @@ class ReplayCommandSpec:
     @property
     def command(self) -> str:
         return shlex.join(self.command_argv)
+
+
+ACTIVE_DENIED_HANDOFF_EVIDENCE_FIELDS = (
+    {
+        "field_name": "stdout",
+        "owner": "handoff receipt contract",
+        "risk": "raw command output can expose local paths, private data, or secrets",
+        "lifecycle": "deny while REVIEW_SAFE handoff remains compact receipt based",
+        "acceptance_gate": "receipt payload validation rejects raw output fields",
+    },
+    {
+        "field_name": "stderr",
+        "owner": "handoff receipt contract",
+        "risk": "raw error output can expose tracebacks, local paths, or private data",
+        "lifecycle": "deny while REVIEW_SAFE handoff remains compact receipt based",
+        "acceptance_gate": "receipt payload validation rejects raw output fields",
+    },
+    {
+        "field_name": "raw_output",
+        "owner": "handoff receipt contract",
+        "risk": "unbounded output bypasses replayable summary contracts",
+        "lifecycle": "deny while machine evidence is derived from receipts",
+        "acceptance_gate": "receipt payload validation rejects raw output fields",
+    },
+    {
+        "field_name": "raw_log",
+        "owner": "handoff receipt contract",
+        "risk": "raw logs can contain local paths, row samples, and tracebacks",
+        "lifecycle": "deny while logs remain LOCAL_ONLY artifacts",
+        "acceptance_gate": "receipt payload validation rejects raw log fields",
+    },
+    {
+        "field_name": "local_absolute_path",
+        "owner": "share-safety scanner",
+        "risk": "local machine paths are not REVIEW_SAFE",
+        "lifecycle": "deny in handoff docs, receipts, sidecars, and bundle text",
+        "acceptance_gate": "share-safety and source-tree scans reject local paths",
+    },
+    {
+        "field_name": "row_level_private_data",
+        "owner": "share-safety scanner",
+        "risk": "row-level samples can disclose private research data",
+        "lifecycle": "deny in REVIEW_SAFE evidence",
+        "acceptance_gate": "share-safety and source-tree scans reject row samples",
+    },
+    {
+        "field_name": "provider_marker",
+        "owner": "share-safety scanner",
+        "risk": "provider markers can disclose vendor/source-private context",
+        "lifecycle": "deny in REVIEW_SAFE evidence",
+        "acceptance_gate": "share-safety and source-tree scans reject provider markers",
+    },
+    {
+        "field_name": "stock_code_like_sample",
+        "owner": "share-safety scanner",
+        "risk": "stock-code-like samples can disclose row-level market data examples",
+        "lifecycle": "deny in REVIEW_SAFE evidence",
+        "acceptance_gate": "share-safety and source-tree scans reject stock samples",
+    },
+    {
+        "field_name": "validation_status",
+        "owner": "handoff contract",
+        "risk": "hand-written validation status can diverge from replayed receipts",
+        "lifecycle": "deny outside validation summary rows derived from receipts",
+        "acceptance_gate": "validation summary replay comparison rejects status drift",
+    },
+)
 
 
 ARTIFACT_MANIFEST_ENTRY = "artifact_manifest.json"
@@ -134,8 +201,15 @@ VALIDATION_ROW_SOURCE_CONTRACT = {
 REPLAY_COMMAND_CONTRACT = {
     "profile-smoke": ReplayCommandSpec(
         command_id="profile-smoke",
-        scope="tests/agents/handoff",
-        command_argv=("python", "-m", "pytest", "tests/agents/handoff", "-q"),
+        scope="profile-smoke",
+        command_argv=(
+            "python",
+            "tests/tools/run_profile.py",
+            "--profile",
+            "profile-smoke",
+            "--run-dir",
+            ".run/handoff-replay/profile-smoke",
+        ),
     ),
     "code-map": ReplayCommandSpec(
         command_id="code-map",
@@ -235,7 +309,9 @@ def validate_validation_summary_contract(
             failures.append(f"validation_summary_row_not_object: {index}")
             continue
         failures.extend(
-            exact_keys(row, VALIDATION_ROW_FIELD_SPECS, f"validation_summary_row:{index}")
+            exact_keys(
+                row, VALIDATION_ROW_FIELD_SPECS, f"validation_summary_row:{index}"
+            )
         )
         name = row.get("name")
         if (
@@ -268,11 +344,15 @@ def expected_validation_status_map_from_receipts(
     for row_name, source in VALIDATION_ROW_SOURCE_CONTRACT.items():
         if source.command_id is not None:
             command_row = check_rows.get(source.command_id)
-            result[row_name] = _status_or_not_run(command_row.get("status") if command_row else None)
+            result[row_name] = _status_or_not_run(
+                command_row.get("status") if command_row else None
+            )
         else:
             assert source.receipt_entry is not None
             receipt = receipts.get(source.receipt_entry)
-            result[row_name] = _status_or_not_run(receipt.get("status") if receipt else None)
+            result[row_name] = _status_or_not_run(
+                receipt.get("status") if receipt else None
+            )
     return result
 
 
@@ -345,14 +425,18 @@ def exact_keys(
     allowed = allowed_keys(specs)
     if ":" in prefix:
         label, _, index = prefix.partition(":")
-        failures = [f"{label}_missing: {index}:{key}" for key in sorted(allowed - set(payload))]
+        failures = [
+            f"{label}_missing: {index}:{key}" for key in sorted(allowed - set(payload))
+        ]
         failures.extend(
             f"{label}_unapproved_field: {index}:{key}"
             for key in sorted(set(payload) - allowed)
         )
         return failures
     failures = [f"{prefix}_missing: {key}" for key in sorted(allowed - set(payload))]
-    failures.extend(f"{prefix}_unapproved_field: {key}" for key in sorted(set(payload) - allowed))
+    failures.extend(
+        f"{prefix}_unapproved_field: {key}" for key in sorted(set(payload) - allowed)
+    )
     return failures
 
 

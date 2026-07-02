@@ -28,7 +28,9 @@ def _valid_counts(**overrides: int) -> dict[str, int]:
     return counts
 
 
-def _valid_row(command_id: str = "profile-smoke", **overrides: object) -> dict[str, object]:
+def _valid_row(
+    command_id: str = "profile-smoke", **overrides: object
+) -> dict[str, object]:
     handoff_contract = _load_handoff_module("handoff_contract")
     spec = handoff_contract.replay_command_spec(command_id)
     row: dict[str, object] = {
@@ -39,6 +41,7 @@ def _valid_row(command_id: str = "profile-smoke", **overrides: object) -> dict[s
         "command": spec.command,
         "status": "PASS",
         "exit_code": 0,
+        "duration_seconds": 0.1,
         "counts": _valid_counts() if command_id == "profile-smoke" else None,
     }
     row.update(overrides)
@@ -60,16 +63,15 @@ def _package_smoke_payload(**overrides: object) -> dict[str, object]:
         "schema_id": "qrp-package-smoke-receipt",
         "status": "PASS",
         "build": {"status": "PASS", "artifact_kinds": ["wheel", "sdist"]},
-        "install": {
+        "wheel_extract": {
             "status": "PASS",
-            "target_kind": "temporary_no_deps_install",
-            "no_deps": True,
+            "method": "zipfile_extract",
         },
         "import": {"status": "PASS", "module": "quant_research_platform"},
         "content_scan": {
             "status": "PASS",
             "forbidden_member_count": 0,
-            "scanned_artifact_kinds": ["wheel", "sdist", "install_target"],
+            "scanned_artifact_kinds": ["wheel", "sdist", "wheel_extract"],
         },
     }
     payload.update(overrides)
@@ -153,10 +155,18 @@ def test_check_receipt_rejects_not_run_or_blocked_rows() -> None:
     )
 
 
+def test_check_receipt_requires_duration_seconds() -> None:
+    failures = _failures(_valid_row(duration_seconds="slow"))
+
+    assert "check_receipt_duration_seconds_invalid: 0" in failures
+    row = _valid_row()
+    row.pop("duration_seconds")
+    assert "check_receipt_missing: 0:duration_seconds" in _failures(row)
+
+
 def test_check_receipt_rejects_old_trace_fields() -> None:
     failures = _failures(
         _valid_row(
-            duration_seconds=1.0,
             stdout_sha256="0" * 64,
             stderr_sha256="1" * 64,
             output_summary="old",
@@ -167,7 +177,6 @@ def test_check_receipt_rejects_old_trace_fields() -> None:
     )
 
     for field in (
-        "duration_seconds",
         "stdout_sha256",
         "stderr_sha256",
         "output_summary",
@@ -208,10 +217,9 @@ def test_check_receipt_rejects_command_display_or_argv_mismatch() -> None:
 def test_package_smoke_rejects_child_fail_with_top_pass() -> None:
     contract = _load_handoff_module("receipt_contract")
     payload = _package_smoke_payload(
-        install={
+        wheel_extract={
             "status": "FAIL",
-            "target_kind": "temporary_no_deps_install",
-            "no_deps": True,
+            "method": "zipfile_extract",
         }
     )
 
@@ -242,10 +250,9 @@ def test_package_smoke_rejects_fixed_value_drift() -> None:
     contract = _load_handoff_module("receipt_contract")
     payload = _package_smoke_payload(
         build={"status": "PASS", "artifact_kinds": ["wheel"]},
-        install={
+        wheel_extract={
             "status": "PASS",
-            "target_kind": "temporary isolated target",
-            "no_deps": True,
+            "method": "copytree",
         },
     )
     payload["import"] = {"status": "PASS", "module": "other"}
@@ -253,7 +260,7 @@ def test_package_smoke_rejects_fixed_value_drift() -> None:
     failures = contract.validate_package_smoke_receipt(payload)
 
     assert "package_smoke_artifact_kinds_invalid" in failures
-    assert "package_smoke_install_target_kind_invalid" in failures
+    assert "package_smoke_wheel_extract_method_invalid" in failures
     assert "package_smoke_import_module_invalid" in failures
 
 
@@ -440,9 +447,19 @@ def test_replay_command_executes_current_interpreter_but_records_canonical_pytho
     ("artifacts", "expected_status"),
     (
         (("demo-0.0.0.tar.gz",), "FAIL"),
-        (("demo-0.0.0-py3-none-any.whl", "demo-0.0.1-py3-none-any.whl", "demo-0.0.0.tar.gz"), "FAIL"),
+        (
+            (
+                "demo-0.0.0-py3-none-any.whl",
+                "demo-0.0.1-py3-none-any.whl",
+                "demo-0.0.0.tar.gz",
+            ),
+            "FAIL",
+        ),
         (("demo-0.0.0-py3-none-any.whl",), "FAIL"),
-        (("demo-0.0.0-py3-none-any.whl", "demo-0.0.0.tar.gz", "demo-0.0.1.tar.gz"), "FAIL"),
+        (
+            ("demo-0.0.0-py3-none-any.whl", "demo-0.0.0.tar.gz", "demo-0.0.1.tar.gz"),
+            "FAIL",
+        ),
         (("demo-0.0.0-py3-none-any.whl", "demo-0.0.0.tar.gz"), "PASS"),
     ),
 )

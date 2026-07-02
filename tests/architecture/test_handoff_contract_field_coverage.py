@@ -17,7 +17,7 @@ def _specs(module: object, name: str) -> Mapping[str, object]:
 def _assert_field_specs_have_proof(specs: Mapping[str, object]) -> None:
     for field, spec in specs.items():
         assert field
-        assert getattr(spec, "proof_class")
+        assert spec.proof_class
         assert not hasattr(spec, "required")
 
 
@@ -58,22 +58,25 @@ def test_handoff_generated_fields_have_proof_classes() -> None:
     for row_name, source in handoff_contract.VALIDATION_ROW_SOURCE_CONTRACT.items():
         assert row_name in handoff_contract.MANDATORY_VALIDATION_ROWS
         assert source.receipt_entry
-        assert row_name in handoff_contract.expected_validation_status_map_from_receipts(
-            {
-                handoff_contract.CHECK_RECEIPTS_ENTRY: {
-                    "schema_id": "qrp-check-receipts",
-                    "status": "PASS",
-                    "checks": [],
-                },
-                handoff_contract.PACKAGE_SMOKE_RECEIPT_ENTRY: {
-                    "schema_id": "qrp-package-smoke-receipt",
-                    "status": "PASS",
-                },
-                handoff_contract.HARD_SCAN_RECEIPT_ENTRY: {
-                    "schema_id": "qrp-hard-scan-receipt",
-                    "status": "PASS",
-                },
-            }
+        assert (
+            row_name
+            in handoff_contract.expected_validation_status_map_from_receipts(
+                {
+                    handoff_contract.CHECK_RECEIPTS_ENTRY: {
+                        "schema_id": "qrp-check-receipts",
+                        "status": "PASS",
+                        "checks": [],
+                    },
+                    handoff_contract.PACKAGE_SMOKE_RECEIPT_ENTRY: {
+                        "schema_id": "qrp-package-smoke-receipt",
+                        "status": "PASS",
+                    },
+                    handoff_contract.HARD_SCAN_RECEIPT_ENTRY: {
+                        "schema_id": "qrp-hard-scan-receipt",
+                        "status": "PASS",
+                    },
+                }
+            )
         )
         assert not hasattr(source, "proof_class")
 
@@ -89,7 +92,7 @@ def test_receipt_generated_fields_have_proof_classes() -> None:
         "CHECK_RECEIPT_ROW_FIELD_SPECS",
         "PACKAGE_SMOKE_FIELD_SPECS",
         "PACKAGE_SMOKE_BUILD_FIELD_SPECS",
-        "PACKAGE_SMOKE_INSTALL_FIELD_SPECS",
+        "PACKAGE_SMOKE_WHEEL_EXTRACT_FIELD_SPECS",
         "PACKAGE_SMOKE_IMPORT_FIELD_SPECS",
         "PACKAGE_SMOKE_CONTENT_SCAN_FIELD_SPECS",
         "HARD_SCAN_FIELD_SPECS",
@@ -112,7 +115,7 @@ def test_receipt_allowed_keys_are_derived_from_field_specs() -> None:
         "CHECK_RECEIPT_ROW_FIELD_SPECS",
         "PACKAGE_SMOKE_FIELD_SPECS",
         "PACKAGE_SMOKE_BUILD_FIELD_SPECS",
-        "PACKAGE_SMOKE_INSTALL_FIELD_SPECS",
+        "PACKAGE_SMOKE_WHEEL_EXTRACT_FIELD_SPECS",
         "PACKAGE_SMOKE_IMPORT_FIELD_SPECS",
         "PACKAGE_SMOKE_CONTENT_SCAN_FIELD_SPECS",
         "HARD_SCAN_FIELD_SPECS",
@@ -139,7 +142,7 @@ def test_status_pass_proof_classes_are_replayed_or_derived() -> None:
         receipt_contract.CHECK_RECEIPT_ROW_FIELD_SPECS["status"],
         receipt_contract.PACKAGE_SMOKE_FIELD_SPECS["status"],
         receipt_contract.PACKAGE_SMOKE_BUILD_FIELD_SPECS["status"],
-        receipt_contract.PACKAGE_SMOKE_INSTALL_FIELD_SPECS["status"],
+        receipt_contract.PACKAGE_SMOKE_WHEEL_EXTRACT_FIELD_SPECS["status"],
         receipt_contract.PACKAGE_SMOKE_IMPORT_FIELD_SPECS["status"],
         receipt_contract.PACKAGE_SMOKE_CONTENT_SCAN_FIELD_SPECS["status"],
         receipt_contract.HARD_SCAN_FIELD_SPECS["status"],

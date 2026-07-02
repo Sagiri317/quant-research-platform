@@ -83,6 +83,18 @@ def test_profile_markers_are_declared_and_excluded_markers_have_profiles() -> No
     }
 
 
+def test_all_profile_scopes_exist() -> None:
+    runner = _load_runner()
+    missing = [
+        f"{name}:{scope}"
+        for name, profile in sorted(runner.PROFILES.items())
+        for scope in profile.scopes
+        if not (REPO_ROOT / scope).exists()
+    ]
+
+    assert missing == []
+
+
 def test_default_pytest_excludes_non_default_profiles_and_local_data() -> None:
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     addopts = pyproject["tool"]["pytest"]["ini_options"]["addopts"]
@@ -138,10 +150,10 @@ def test_default_run_dir_is_profile_scoped_under_run_root(
     assert "tests/agents" in command
     assert "--basetemp" in command
     basetemp = command[command.index("--basetemp") + 1]
-    assert basetemp.startswith(".run/test-profiles/")
+    assert basetemp.startswith(".run/profile-tmp/")
     basetemp_parts = PurePosixPath(basetemp).parts
     assert basetemp_parts[-1] == "tmp"
-    assert basetemp_parts[-2].split("-")[1] == "fast"
+    assert basetemp_parts[-2].startswith("fast-")
     assert "--durations=3" in command
     assert kwargs["cwd"] == tmp_path.resolve()
     assert kwargs["shell"] is False
@@ -155,7 +167,7 @@ def test_default_run_dir_is_profile_scoped_under_run_root(
     assert len(name_parts[0]) == 12
     assert (run_dir / "stdout.log").read_text() == "pytest ok\n"
     assert (run_dir / "stderr.log").read_text() == ""
-    assert (run_dir / "tmp").is_dir()
+    assert (tmp_path / basetemp).is_dir()
 
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["schema_id"] == "qrp-test-profile-run"
@@ -167,8 +179,8 @@ def test_default_run_dir_is_profile_scoped_under_run_root(
     assert summary["run_dir"] == run_dir.relative_to(tmp_path).as_posix()
     assert summary["stdout_path"] == f"{summary['run_dir']}/stdout.log"
     assert summary["stderr_path"] == f"{summary['run_dir']}/stderr.log"
-    assert summary["tmp_path"] == f"{summary['run_dir']}/tmp"
-    assert summary["pytest_basetemp"] == f"{summary['run_dir']}/tmp"
+    assert summary["tmp_path"] == basetemp
+    assert summary["pytest_basetemp"] == basetemp
     assert "reserved_profile" in summary
     assert summary["profile_marker"] == runner.FAST_EXCLUDES
     assert summary["profile_scopes"] == [
@@ -449,13 +461,12 @@ def test_profile_runner_adds_default_duration_summary_when_not_requested(
     )
     assert summary["profile"] == "profile-smoke"
     assert summary["profile_marker"] == runner.FAST_EXCLUDES
-    assert summary["scope_count"] == 5
+    assert summary["scope_count"] == 4
     assert summary["profile_scopes"] == [
         "tests/contracts",
         "tests/agents",
-        "tests/architecture/test_import_boundaries.py",
-        "tests/architecture/test_share_safe_evidence.py",
-        "tests/agents/handoff/test_handoff_package_verifier.py",
+        "tests/architecture",
+        "tests/tools/test_run_profile.py",
     ]
     assert summary["extra_pytest_args"] == ["--durations=10"]
 

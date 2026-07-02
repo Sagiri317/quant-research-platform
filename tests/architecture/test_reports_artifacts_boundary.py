@@ -100,6 +100,19 @@ def test_artifacts_outputs_root_delegates_to_owner_modules() -> None:
     assert non_delegating_writers == []
 
 
+def test_output_writer_uses_local_catalog_not_profile_bundle() -> None:
+    source = ARTIFACT_OUTPUTS.read_text(encoding="utf-8")
+    common_source = (
+        PROJECT_SRC / "artifacts" / "_output_common_validation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "quant_research_platform.profiles.research" not in source
+    assert "local_a_share_csmar_catalogs" not in source
+    assert "quant_research_platform.artifacts.definitions" not in source
+    assert "output_catalog(" not in source
+    assert "output_catalog(" in common_source
+
+
 def _function_body_is_single_call(function: ast.FunctionDef) -> bool:
     body = [
         node

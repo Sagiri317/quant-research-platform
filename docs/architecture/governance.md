@@ -14,6 +14,7 @@ QRP 的治理目标是让 agent 能在最少上下文下正确执行，并通过
 8. 边界回归由 owner-layer negative tests 和精确 allowlist 控制。
 9. QRP-owned JSON 必须使用不带版本后缀的 `schema_id`。
 10. 状态聚合唯一 owner 是 `policy/check_status.py`。
+11. 本地验证、构建和测试只使用 conda；package smoke 只表示 wheel 解压后的 import smoke。
 
 ## Agent 文件分层
 
@@ -43,6 +44,7 @@ templates/     机器输入模板
 - code-map gate：检查代码地图与当前合同一致。
 - handoff gate：检查 builder、verifier、source-tree scan 和 share-safety。
 - handoff evidence gate：检查 required evidence 存在、结构完整且不是 status-only。
+- structure audit gate：检查 profile scope、handoff smoke、pip 禁令、scanner 覆盖、test owner placement 和 retired helper 引用。
 - internal API gate：检查 owner-local internal API 和 private module 边界。
 - test placement gate：检查 tests 位于对应 owner 目录。
 - test gate：检查当前合同测试。
@@ -51,4 +53,4 @@ templates/     机器输入模板
 
 如果 Codex 或其他 agent 需要越过 current-contract-only 边界，必须停止并要求用户确认。
 
-active-doc scan 必须覆盖运行结果命名、运行级路径、JSON identity、compare 硬编码和状态 owner；allowlist 必须精确到规则和负向测试文件。scan classification 的细则由 maintenance references、governance contract 和 verifier tests 拥有。
+active-doc scan 必须覆盖运行结果命名、运行级路径、JSON identity、compare 硬编码和状态 owner；source-tree sensitive scan 和 bundle share-safety scan 统一复用 `governance_contract.py` 的规则源；allowlist 必须精确到规则和负向测试文件。scan classification 的细则由 maintenance references、governance contract 和 verifier tests 拥有。

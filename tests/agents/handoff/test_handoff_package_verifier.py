@@ -42,6 +42,7 @@ def test_receipt_contract_rejects_status_only_package_smoke_receipt() -> None:
 
     assert "package_smoke_missing: build" in failures
     assert "package_smoke_missing: content_scan" in failures
+    assert "package_smoke_missing: wheel_extract" in failures
 
 
 def test_receipt_contract_rejects_placeholder_check_receipt() -> None:

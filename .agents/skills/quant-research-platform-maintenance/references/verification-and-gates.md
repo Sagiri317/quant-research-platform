@@ -39,7 +39,7 @@ git diff --check
 ### Governance gate
 
 ```bash
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 ```
 
 这是官方 active-doc state gate。clean tree 也必须扫描非空 active docs；`checked_files=[]` 不得 `PASS`。
@@ -47,7 +47,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_governa
 Diff-only governance gate 使用：
 
 ```bash
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope changed-files --base-ref <base> --json
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope changed-files --base-ref <base> --json
 ```
 
 `--allow-active-docs` 和 `--scan-active-docs` 不是当前有效参数。
@@ -60,12 +60,15 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_governa
 
 active doc roots、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 必须从这里读取或派生。
 
+source-tree sensitive scan 和 bundle share-safety scan 统一复用该事实源；扫描
+边界使用精确规则定义行和明确 root 列表。
+
 handoff layout gate 由 `handoff/handoff_contract.py` 和 `handoff/verify_handoff_package.py` 拥有。`FieldSpec` 和 `allowed_keys()` 只由 `handoff_contract.py` 定义；`receipt_contract.py` 只拥有 receipt schema specs、invariants、normalization 和 comparison。source-tree retired surface gate 由 `governance_contract.py`、`verify_governance.py` 和 `tests/architecture/` 拥有。builder、collector、verifier 和 tests 不得复制平行 receipt validator 或 handoff layout 表。
 
 Hard-scan gate 由正式 handoff builder/verifier 闭合：
 
 ```bash
-python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>
 ```
 
 builder 从 Git state 和 replay 自动生成 machine evidence，然后永远运行 verifier。
@@ -76,10 +79,18 @@ verifier result path。standalone verifier CLI 保留，但不是额外 Python w
 以 executable contracts、`verify_handoff_package.py` 和 `replay_evidence.py` 为准。
 `verify_governance.py` 只运行 governance checks，不写 handoff receipts。
 
+package smoke receipt 使用 `wheel_extract` 语义：`python -m build` 产出 wheel 后，用标准库解压 wheel，并通过 `PYTHONPATH` 执行 import smoke。`profile_smoke` row 来自正式 profile runner 的 `profile-smoke` profile。
+
+结构性审计 gate：
+
+```bash
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py --repo-root . --json
+```
+
 ### Code-map gate
 
 ```bash
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 ```
 
 该 gate 验证当前代码地图和长期合同。
@@ -87,7 +98,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 ### Agent and architecture tests
 
 ```bash
-python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
+conda run -n <environment.yml name> python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 
 如果完整运行超时，必须写 `BLOCKED` 并记录超时，可以补充分段运行结果。
@@ -159,8 +170,8 @@ tests/contracts/test_platform_contracts.py
 handoff 测试分层入口：
 
 ```bash
-python tests/tools/run_profile.py --list-profiles
-python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<profile>
+conda run -n <environment.yml name> python tests/tools/run_profile.py --list-profiles
+conda run -n <environment.yml name> python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<profile>
 ```
 
 ## 6. Final report schema

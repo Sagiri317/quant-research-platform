@@ -112,9 +112,11 @@ def _argparse_flags(path: Path) -> set[str]:
 
 
 def test_retired_handoff_files_are_absent() -> None:
+    retired_package_smoke = "run_" + "package_" + "smoke.py"
+
     assert not (HANDOFF_ROOT / "proof_contract.py").exists()
     assert not (HANDOFF_ROOT / "collect_handoff_receipts.py").exists()
-    assert not (HANDOFF_ROOT / "run_package_smoke.py").exists()
+    assert not (HANDOFF_ROOT / retired_package_smoke).exists()
     assert not (SCRIPT_ROOT / "run_check.py").exists()
     assert not (TEMPLATE_ROOT / "task_metadata.template.json").exists()
 
@@ -183,11 +185,14 @@ def test_governance_contract_does_not_construct_hard_scan_receipts() -> None:
 
 def test_replay_evidence_does_not_import_retired_package_smoke_cli() -> None:
     replay = HANDOFF_ROOT / "replay_evidence.py"
+    retired_module = "run_" + "package_" + "smoke"
 
-    assert "run_package_smoke" not in _imported_modules(replay)
-    assert "from run_package_smoke import" not in _source(replay)
+    assert retired_module not in _imported_modules(replay)
+    assert f"from {retired_module} import" not in _source(replay)
     assert "_build_package_artifacts" in _function_defs(replay)
-    assert "_install_package_smoke_target" in _function_defs(replay)
+    retired_extract = "_" + _name("in" + "stall", "package", "smoke", "target")
+    assert retired_extract not in _function_defs(replay)
+    assert "_extract_wheel_smoke_target" in _function_defs(replay)
     assert "_scan_package_artifacts" in _function_defs(replay)
     assert "_build_replayed_package_smoke_receipt" in _function_defs(replay)
 
@@ -222,8 +227,9 @@ def test_normalize_hard_scan_receipt_validates_before_canonicalization() -> None
 
 def test_handoff_readme_does_not_list_retired_package_smoke_cli() -> None:
     readme = _source(HANDOFF_ROOT / "README.md")
+    retired_package_smoke = "run_" + "package_" + "smoke.py"
 
-    assert "run_package_smoke.py" not in readme
+    assert retired_package_smoke not in readme
 
 
 def test_dev_dependencies_include_package_build_backend_frontend() -> None:

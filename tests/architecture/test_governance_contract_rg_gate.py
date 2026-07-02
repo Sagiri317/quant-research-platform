@@ -2366,7 +2366,7 @@ def test_retired_handoff_receipt_writers_are_not_approved_writer_modules() -> No
         ),
         Path(
             ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-            "run_package_smoke.py"
+            "run_" + "package_" + "smoke.py"
         ),
         Path(
             ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"

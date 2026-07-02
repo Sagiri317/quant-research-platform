@@ -5,6 +5,24 @@ from pathlib import Path
 
 REPO_ROOT = Path(".")
 PROJECT_SRC = Path("src/quant_research_platform")
+GOVERNANCE_CONTRACT = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py"
+)
+HANDOFF_VERIFIER = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+    "verify_handoff_package.py"
+)
+REQUIRED_SOURCE_TREE_TEXT_ROOTS = {
+    "src",
+    "tests",
+    ".agents",
+    "docs",
+    "AGENTS.md",
+    "README.md",
+    "data/README.md",
+    "pyproject.toml",
+    "environment.yml",
+}
 BLOCKED_PACKAGE_PATH_PARTS = {
     ".run",
 }
@@ -86,6 +104,25 @@ def test_pyproject_does_not_add_runtime_data_to_package() -> None:
     assert hits == []
 
 
+def test_source_tree_sensitive_scan_declares_required_tracked_text_roots() -> None:
+    contract = _load_governance_contract()
+
+    configured = {Path(root).as_posix() for root in contract.SOURCE_TREE_TEXT_ROOTS}
+
+    assert REQUIRED_SOURCE_TREE_TEXT_ROOTS <= configured
+
+
+def test_handoff_verifier_has_no_root_wide_bundle_content_exemptions() -> None:
+    source = HANDOFF_VERIFIER.read_text(encoding="utf-8")
+    root_exemptions = "_".join(("BUNDLE", "CONTENT", "SCAN", "EXEMPT", "ROOTS"))
+    file_exemptions = "_".join(("BUNDLE", "CONTENT", "SCAN", "EXEMPT", "FILES"))
+    function_name = "_".join(("is", "bundle", "content", "scan", "exempt"))
+
+    assert root_exemptions not in source
+    assert file_exemptions not in source
+    assert function_name not in source
+
+
 def _contains_data_artifact_path(parts: tuple[str, ...]) -> bool:
     for index, part in enumerate(parts[:-1]):
         if part == "data" and parts[index + 1] in {
@@ -96,3 +133,19 @@ def _contains_data_artifact_path(parts: tuple[str, ...]) -> bool:
         }:
             return True
     return False
+
+
+def _load_governance_contract():
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "governance_contract",
+        GOVERNANCE_CONTRACT,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module

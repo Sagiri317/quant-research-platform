@@ -15,31 +15,29 @@ share-safety status 和 zip sha256，不运行独立 safety scan。
 - 输出应可被 human 和 machine 读取。
 - 检查失败时返回非零 exit code。
 - Handoff builder 从 Git state 和 replay 自动生成 compact machine receipts；不要把 raw grep output、完整 pytest log、完整 stdout/stderr、wheel/sdist 或本地临时安装目录写入 handoff。
+- 本地依赖、验证、构建和测试只使用 conda；环境名从 `environment.yml` 动态读取，不写死在代码、测试或文档中。
+- 如果 `pyproject.toml` 的 dev dependencies 需要 `build`，`environment.yml` 必须提供对应 conda 包 `python-build`。
+- package smoke 不安装 wheel；只允许用标准库解压 wheel，再用 `PYTHONPATH` 指向解压目录执行 import smoke。
 - Builder 只读取当前 Git state 和正式 CLI options；`.run/` 只保存 output/evidence，不作为脚本来源。
 - `verify_handoff_package_result()` 是唯一 package-level verifier function。
   Verifier result path 只做一次 zip inspection；需要 bundle replay 时只 clone
   `final-branch.bundle` 一次，并在同一个 clone 中执行 share-safety scan 和
-  machine receipt replay。standalone verifier CLI 保留，但不是额外 Python wrapper。
-  未经用户明确批准，不保留 wrapper、alias、adapter 或 compatibility layer。
+  machine receipt replay。standalone verifier CLI 保留为 verifier 的直接入口。
+  未经用户明确批准，不新增或保留 wrapper、alias、adapter 或 compatibility layer。
 
 ## 2. Python 检查
 
-检查脚本语法时应递归扫描：
+检查脚本语法时应通过 conda 环境递归扫描：
 
 ```bash
-python - <<'PY'
-from pathlib import Path
-import py_compile
-for path in Path('.agents/skills/quant-research-platform-maintenance/scripts').rglob('*.py'):
-    py_compile.compile(str(path), doraise=True)
-PY
+conda run -n <environment.yml name> python -m compileall -q src tests .agents
 ```
 
 不要只用 `glob('*.py')`，否则会漏掉 nested handoff scripts。
 
 ## 3. 外部工具
 
-允许使用 git、rg、python、pytest 和项目已有脚本。需要安装依赖时，优先使用用户允许的环境策略。无法安装时写 `BLOCKED`。
+允许使用 git、rg、conda-managed python、pytest 和项目已有脚本。需要变更依赖时，先更新 conda 合同并等待用户批准；无法满足环境时写 `BLOCKED`。
 
 ## 4. Human review 和 review-fix loop
 

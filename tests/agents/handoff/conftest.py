@@ -166,7 +166,9 @@ def _write_minimal_project_files(repo: Path) -> None:
     )
     smoke_test = repo / "tests" / "agents" / "handoff" / "test_smoke.py"
     smoke_test.parent.mkdir(parents=True)
-    smoke_test.write_text("def test_smoke() -> None:\n    assert True\n", encoding="utf-8")
+    smoke_test.write_text(
+        "def test_smoke() -> None:\n    assert True\n", encoding="utf-8"
+    )
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -198,16 +200,15 @@ def _package_smoke_receipt() -> dict[str, object]:
         "schema_id": "qrp-package-smoke-receipt",
         "status": "PASS",
         "build": {"status": "PASS", "artifact_kinds": ["wheel", "sdist"]},
-        "install": {
+        "wheel_extract": {
             "status": "PASS",
-            "target_kind": "temporary_no_deps_install",
-            "no_deps": True,
+            "method": "zipfile_extract",
         },
         "import": {"status": "PASS", "module": "quant_research_platform"},
         "content_scan": {
             "status": "PASS",
             "forbidden_member_count": 0,
-            "scanned_artifact_kinds": ["wheel", "sdist", "install_target"],
+            "scanned_artifact_kinds": ["wheel", "sdist", "wheel_extract"],
         },
     }
 
@@ -228,6 +229,7 @@ def _check_receipt(
         "command": spec.command,
         "status": status,
         "exit_code": 0 if status == "PASS" else 1,
+        "duration_seconds": 0.1,
         "counts": counts,
     }
 

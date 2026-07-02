@@ -28,7 +28,9 @@ QRP 是本地量化研究平台，不是生产交易系统，不是 live trading
   未经用户明确批准，不保留 wrapper、alias、adapter 或 compatibility layer。
   standalone verifier CLI 保留，但它不是额外 Python wrapper。
 - human/advisory review 是独立人类审查输出，不进入 machine handoff，不支撑 machine validation `PASS`。
-- sandbox 或 Codex 环境中，允许在边界内安装缺失依赖进行测试；缺依赖不是默认跳过理由。
+- 本地依赖、构建、测试和验证只使用 conda；环境名从 `environment.yml` 动态读取。
+- package smoke 由 wheel 解压后通过 `PYTHONPATH` 执行 import smoke 定义；receipt 字段使用 `wheel_extract`。
+- `profile_smoke` validation row 的 replay command 是 `tests/tools/run_profile.py --profile profile-smoke`。
 
 ## 文档偏好
 

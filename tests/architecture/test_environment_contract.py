@@ -36,12 +36,16 @@ RUNTIME_DEPENDENCIES = {
     "uvicorn",
 }
 DEV_DEPENDENCIES = {
+    "build",
     "coverage",
     "httpx",
     "hypothesis",
     "pytest",
     "pytest-cov",
     "ruff",
+}
+PYPROJECT_TO_CONDA_DEV_PACKAGES = {
+    "build": "python-build",
 }
 PRIVATE_DEPENDENCY_TOKENS = (
     ".run/",
@@ -79,6 +83,21 @@ def test_core_dependencies_have_version_boundaries() -> None:
     assert set(dev) == DEV_DEPENDENCIES
     assert _unbounded(runtime) == []
     assert _unbounded(dev) == []
+
+
+def test_pyproject_dev_dependencies_have_conda_environment_packages() -> None:
+    pyproject = _load_pyproject()
+    environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
+    dev = _dependency_specs(pyproject["project"]["optional-dependencies"]["dev"])
+    conda_packages = _environment_dependency_names(environment)
+
+    missing = {
+        pyproject_name: conda_name
+        for pyproject_name, conda_name in PYPROJECT_TO_CONDA_DEV_PACKAGES.items()
+        if pyproject_name in dev and conda_name not in conda_packages
+    }
+
+    assert missing == {}
 
 
 def test_engineering_contract_points_to_executable_environment_contracts() -> None:
@@ -199,6 +218,19 @@ def _environment_name(text: str) -> str:
         if line.startswith("name:"):
             return line.split(":", 1)[1].strip()
     return ""
+
+
+def _environment_dependency_names(text: str) -> set[str]:
+    names: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        spec = stripped[2:].strip()
+        if not spec or spec in {"conda-forge", "nodefaults"}:
+            continue
+        names.add(re.split(r"[<>=!~; ]", spec, maxsplit=1)[0])
+    return names
 
 
 def _dependency_specs(items: list[str]) -> dict[str, str]:

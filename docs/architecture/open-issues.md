@@ -39,7 +39,9 @@ Status: deferred
 Evidence: `tests/agents/handoff/test_build_handoff_package_integration.py` still keeps real builder subprocess coverage for handoff package contract and custom evidence negative cases.
 Next action: split lower-cost contract coverage from real package-build subprocess coverage only if the same malicious package and evidence rejection semantics remain covered.
 Acceptance gate: handoff integration and mutation profiles keep package-build, verifier, and malicious-input coverage with fewer repeated subprocess/package-build operations.
-Scope boundary: do not delete tests, skip tests, move tests out of their semantic profile, or change the public handoff schema to reduce runtime.
+Scope boundary: preserve handoff coverage, semantic profiles, and public handoff schema while reducing repeated subprocess/package-build work.
+
+## P3 Watchlist
 
 ID: windows-pytest-tmp-path-length
 Severity: P3
@@ -48,8 +50,4 @@ Status: deferred
 Evidence: Windows pytest runs can fail tests that create deeply nested data paths when the profile directory is long; the same tests pass with a shorter repo-relative run directory.
 Next action: keep profile directories short on Windows, and if this recurs, add a runner or documentation guardrail that preserves explicit repo-relative run paths without shell packaging scripts or absolute-path assumptions.
 Acceptance gate: full pytest profile passes on Windows with a path-length-safe tmp strategy while preserving all tests and profile coverage.
-Scope boundary: do not add `.ps1` or shell packaging scripts, do not skip tests, do not change business `src/**`, and do not hardcode machine-specific paths.
-
-## P3 Watchlist
-
-暂无。
+Scope boundary: preserve Python-only test entrypoints, test coverage, business `src/**` semantics, and machine-independent paths.

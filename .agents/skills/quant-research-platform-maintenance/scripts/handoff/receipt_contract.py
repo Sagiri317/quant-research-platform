@@ -12,6 +12,8 @@ from pathlib import Path
 try:
     from quant_research_platform.policy.check_status import (
         VALID_STATUS_TOKENS,
+    )
+    from quant_research_platform.policy.check_status import (
         aggregate_validation_matrix_status as _aggregate_validation_matrix_status,
     )
 except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit src.
@@ -26,6 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit 
             return "NOT_RUN"
         return "PASS"
 
+
 try:
     from handoff_contract import (
         CHECK_RECEIPTS_ENTRY,
@@ -34,7 +37,6 @@ try:
         FieldSpec,
         ProofClass,
         allowed_keys,
-        check_rows_by_command_id,
         replay_command_spec,
     )
 except ModuleNotFoundError:  # pragma: no cover - package import fallback.
@@ -45,7 +47,6 @@ except ModuleNotFoundError:  # pragma: no cover - package import fallback.
         FieldSpec,
         ProofClass,
         allowed_keys,
-        check_rows_by_command_id,
         replay_command_spec,
     )
 
@@ -64,6 +65,7 @@ CHECK_RECEIPT_ROW_FIELD_SPECS = {
     "command": FieldSpec(ProofClass.REPLAYED),
     "status": FieldSpec(ProofClass.REPLAYED),
     "exit_code": FieldSpec(ProofClass.REPLAYED),
+    "duration_seconds": FieldSpec(ProofClass.REPLAYED),
     "counts": FieldSpec(ProofClass.REPLAYED),
 }
 
@@ -71,7 +73,7 @@ PACKAGE_SMOKE_FIELD_SPECS = {
     "schema_id": FieldSpec(ProofClass.METADATA_VALIDATED),
     "status": FieldSpec(ProofClass.DERIVED_FROM_REPLAY),
     "build": FieldSpec(ProofClass.REPLAYED),
-    "install": FieldSpec(ProofClass.REPLAYED),
+    "wheel_extract": FieldSpec(ProofClass.REPLAYED),
     "import": FieldSpec(ProofClass.REPLAYED),
     "content_scan": FieldSpec(ProofClass.REPLAYED),
 }
@@ -81,10 +83,9 @@ PACKAGE_SMOKE_BUILD_FIELD_SPECS = {
     "artifact_kinds": FieldSpec(ProofClass.REPLAYED),
 }
 
-PACKAGE_SMOKE_INSTALL_FIELD_SPECS = {
+PACKAGE_SMOKE_WHEEL_EXTRACT_FIELD_SPECS = {
     "status": FieldSpec(ProofClass.REPLAYED),
-    "target_kind": FieldSpec(ProofClass.METADATA_VALIDATED),
-    "no_deps": FieldSpec(ProofClass.METADATA_VALIDATED),
+    "method": FieldSpec(ProofClass.METADATA_VALIDATED),
 }
 
 PACKAGE_SMOKE_IMPORT_FIELD_SPECS = {
@@ -123,6 +124,7 @@ FORBIDDEN_RECEIPT_FIELDS = frozenset(
         "stdout",
         "stderr",
         "raw_output",
+        "raw_log",
         "raw_grep_output",
         "grep_hits",
     }
@@ -141,8 +143,8 @@ COUNT_FIELDS = frozenset(
 )
 REQUIRED_CHECK_IDS = ("profile-smoke", "code-map")
 PACKAGE_ARTIFACT_KINDS = ("wheel", "sdist")
-PACKAGE_SCANNED_ARTIFACT_KINDS = ("wheel", "sdist", "install_target")
-PACKAGE_INSTALL_TARGET_KIND = "temporary_no_deps_install"
+PACKAGE_SCANNED_ARTIFACT_KINDS = ("wheel", "sdist", "wheel_extract")
+PACKAGE_WHEEL_EXTRACT_METHOD = "zipfile_extract"
 PACKAGE_IMPORT_MODULE = "quant_research_platform"
 
 
@@ -170,30 +172,45 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
     if not isinstance(build, Mapping):
         failures.append("package_smoke_build_invalid")
     else:
-        failures.extend(exact_keys(build, PACKAGE_SMOKE_BUILD_FIELD_SPECS, "package_smoke_build"))
-        _append_step_status(build.get("status"), step_statuses, failures, "package_smoke_build")
+        failures.extend(
+            exact_keys(build, PACKAGE_SMOKE_BUILD_FIELD_SPECS, "package_smoke_build")
+        )
+        _append_step_status(
+            build.get("status"), step_statuses, failures, "package_smoke_build"
+        )
         if list(build.get("artifact_kinds") or []) != list(PACKAGE_ARTIFACT_KINDS):
             failures.append("package_smoke_artifact_kinds_invalid")
-    install = payload.get("install")
-    if not isinstance(install, Mapping):
-        failures.append("package_smoke_install_invalid")
+    wheel_extract = payload.get("wheel_extract")
+    if not isinstance(wheel_extract, Mapping):
+        failures.append("package_smoke_wheel_extract_invalid")
     else:
         failures.extend(
-            exact_keys(install, PACKAGE_SMOKE_INSTALL_FIELD_SPECS, "package_smoke_install")
+            exact_keys(
+                wheel_extract,
+                PACKAGE_SMOKE_WHEEL_EXTRACT_FIELD_SPECS,
+                "package_smoke_wheel_extract",
+            )
         )
-        _append_step_status(install.get("status"), step_statuses, failures, "package_smoke_install")
-        if install.get("target_kind") != PACKAGE_INSTALL_TARGET_KIND:
-            failures.append("package_smoke_install_target_kind_invalid")
-        if install.get("no_deps") is not True:
-            failures.append("package_smoke_install_no_deps_invalid")
+        _append_step_status(
+            wheel_extract.get("status"),
+            step_statuses,
+            failures,
+            "package_smoke_wheel_extract",
+        )
+        if wheel_extract.get("method") != PACKAGE_WHEEL_EXTRACT_METHOD:
+            failures.append("package_smoke_wheel_extract_method_invalid")
     imported = payload.get("import")
     if not isinstance(imported, Mapping):
         failures.append("package_smoke_import_invalid")
     else:
         failures.extend(
-            exact_keys(imported, PACKAGE_SMOKE_IMPORT_FIELD_SPECS, "package_smoke_import")
+            exact_keys(
+                imported, PACKAGE_SMOKE_IMPORT_FIELD_SPECS, "package_smoke_import"
+            )
         )
-        _append_step_status(imported.get("status"), step_statuses, failures, "package_smoke_import")
+        _append_step_status(
+            imported.get("status"), step_statuses, failures, "package_smoke_import"
+        )
         if imported.get("module") != PACKAGE_IMPORT_MODULE:
             failures.append("package_smoke_import_module_invalid")
     scan = payload.get("content_scan")
@@ -208,7 +225,9 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
             )
         )
         scan_status = scan.get("status")
-        _append_step_status(scan_status, step_statuses, failures, "package_smoke_content_scan")
+        _append_step_status(
+            scan_status, step_statuses, failures, "package_smoke_content_scan"
+        )
         count = scan.get("forbidden_member_count")
         if not isinstance(count, int) or count < 0:
             failures.append("package_smoke_forbidden_member_count_invalid")
@@ -233,9 +252,10 @@ def validate_hard_scan_receipt(payload: Mapping[str, object]) -> list[str]:
         failures.append("hard_scan_schema_id_invalid")
     if payload.get("status") not in VALID_STATUS_TOKENS:
         failures.append("hard_scan_status_invalid")
-    if not isinstance(payload.get("scanned_head"), str) or not str(
-        payload.get("scanned_head")
-    ).strip():
+    if (
+        not isinstance(payload.get("scanned_head"), str)
+        or not str(payload.get("scanned_head")).strip()
+    ):
         failures.append("hard_scan_scanned_head_invalid")
     if not sha(payload.get("scanner_source_sha256")):
         failures.append("hard_scan_scanner_source_sha256_invalid")
@@ -248,7 +268,9 @@ def validate_hard_scan_receipt(payload: Mapping[str, object]) -> list[str]:
             if not isinstance(row, Mapping):
                 failures.append(f"hard_scan_run_invalid: {index}")
                 continue
-            failures.extend(exact_keys(row, HARD_SCAN_RUN_FIELD_SPECS, f"hard_scan_run:{index}"))
+            failures.extend(
+                exact_keys(row, HARD_SCAN_RUN_FIELD_SPECS, f"hard_scan_run:{index}")
+            )
             for key in ("scan_id", "rule_set_id", "result_sha256"):
                 if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
                     failures.append(f"hard_scan_run_missing: {index}:{key}")
@@ -263,7 +285,9 @@ def validate_hard_scan_receipt(payload: Mapping[str, object]) -> list[str]:
                 statuses.append("FAIL")
             else:
                 statuses.append("PASS")
-    if statuses and payload.get("status") != _aggregate_validation_matrix_status(statuses):
+    if statuses and payload.get("status") != _aggregate_validation_matrix_status(
+        statuses
+    ):
         failures.append("hard_scan_status_mismatch")
     return failures
 
@@ -293,11 +317,19 @@ def validate_check_receipts(payload: Mapping[str, object]) -> list[str]:
         status = row.get("status")
         if isinstance(status, str) and status in VALID_STATUS_TOKENS:
             statuses.append(status)
-    missing = [command_id for command_id in REQUIRED_CHECK_IDS if command_id not in rows_by_id]
-    failures.extend(f"check_receipts_missing_command: {command_id}" for command_id in missing)
+    missing = [
+        command_id for command_id in REQUIRED_CHECK_IDS if command_id not in rows_by_id
+    ]
+    failures.extend(
+        f"check_receipts_missing_command: {command_id}" for command_id in missing
+    )
     extra = sorted(set(rows_by_id) - set(REQUIRED_CHECK_IDS))
-    failures.extend(f"check_receipts_unapproved_command: {command_id}" for command_id in extra)
-    if statuses and payload.get("status") != _aggregate_validation_matrix_status(statuses):
+    failures.extend(
+        f"check_receipts_unapproved_command: {command_id}" for command_id in extra
+    )
+    if statuses and payload.get("status") != _aggregate_validation_matrix_status(
+        statuses
+    ):
         failures.append("check_receipts_status_mismatch")
     return failures
 
@@ -320,8 +352,10 @@ def validate_check_receipt_row(
         ):
             failures.append(f"check_receipt_string_invalid: {index}:{key}")
     command_argv = row.get("command_argv")
-    if not isinstance(command_argv, list) or not command_argv or not all(
-        isinstance(item, str) and item for item in command_argv
+    if (
+        not isinstance(command_argv, list)
+        or not command_argv
+        or not all(isinstance(item, str) and item for item in command_argv)
     ):
         failures.append(f"check_receipt_command_argv_invalid: {index}")
     else:
@@ -337,6 +371,13 @@ def validate_check_receipt_row(
     if status not in {"PASS", "FAIL"}:
         failures.append(f"check_receipt_status_invalid: {index}")
     exit_code = row.get("exit_code")
+    duration = row.get("duration_seconds")
+    if (
+        not isinstance(duration, int | float)
+        or isinstance(duration, bool)
+        or duration < 0
+    ):
+        failures.append(f"check_receipt_duration_seconds_invalid: {index}")
     if status == "PASS" and exit_code != 0:
         failures.append(f"check_receipt_pass_exit_code_invalid: {index}")
     if status == "FAIL" and (not isinstance(exit_code, int) or exit_code == 0):
@@ -387,7 +428,7 @@ def normalize_check_receipts(payload: Mapping[str, object]) -> dict[str, object]
         "schema_id": "qrp-check-receipts",
         "status": str(payload["status"]),
         "checks": sorted(
-            (dict(row) for row in checks if isinstance(row, Mapping)),
+            (_normalized_check_row(row) for row in checks if isinstance(row, Mapping)),
             key=lambda row: str(row["command_id"]),
         ),
     }
@@ -399,7 +440,7 @@ def normalize_package_smoke_receipt(payload: Mapping[str, object]) -> dict[str, 
         "schema_id": "qrp-package-smoke-receipt",
         "status": str(payload["status"]),
         "build": dict(payload["build"]),  # type: ignore[arg-type]
-        "install": dict(payload["install"]),  # type: ignore[arg-type]
+        "wheel_extract": dict(payload["wheel_extract"]),  # type: ignore[arg-type]
         "import": dict(payload["import"]),  # type: ignore[arg-type]
         "content_scan": dict(payload["content_scan"]),  # type: ignore[arg-type]
     }
@@ -484,7 +525,9 @@ def forbidden_receipt_field_failures(
             failures.extend(forbidden_receipt_field_failures(name, value, dotted))
     elif isinstance(payload, list):
         for index, value in enumerate(payload):
-            failures.extend(forbidden_receipt_field_failures(name, value, f"{prefix}.{index}"))
+            failures.extend(
+                forbidden_receipt_field_failures(name, value, f"{prefix}.{index}")
+            )
     return failures
 
 
@@ -496,14 +539,18 @@ def exact_keys(
     allowed = allowed_keys(specs)
     if ":" in prefix:
         label, _, index = prefix.partition(":")
-        failures = [f"{label}_missing: {index}:{key}" for key in sorted(allowed - set(payload))]
+        failures = [
+            f"{label}_missing: {index}:{key}" for key in sorted(allowed - set(payload))
+        ]
         failures.extend(
             f"{label}_unapproved_field: {index}:{key}"
             for key in sorted(set(payload) - allowed)
         )
         return failures
     failures = [f"{prefix}_missing: {key}" for key in sorted(allowed - set(payload))]
-    failures.extend(f"{prefix}_unapproved_field: {key}" for key in sorted(set(payload) - allowed))
+    failures.extend(
+        f"{prefix}_unapproved_field: {key}" for key in sorted(set(payload) - allowed)
+    )
     return failures
 
 
@@ -544,6 +591,14 @@ def _compare_receipts(
     if packaged_normalized != replayed_normalized:
         return [f"{label}_replay_mismatch"]
     return []
+
+
+def _normalized_check_row(row: Mapping[str, object]) -> dict[str, object]:
+    normalized = dict(row)
+    duration = normalized.get("duration_seconds")
+    if isinstance(duration, int | float) and not isinstance(duration, bool):
+        normalized["duration_seconds"] = 0.0
+    return normalized
 
 
 def _raise_if_invalid(failures: list[str]) -> None:

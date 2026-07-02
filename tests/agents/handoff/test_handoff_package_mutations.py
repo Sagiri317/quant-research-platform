@@ -167,8 +167,14 @@ def _verify_fast(
             )
         )
     for entry, payload in loaded.receipts.items():
-        failures.extend(receipt_contract.validate_receipt_payload(Path(entry).name, payload))
-    if loaded.complete:
+        failures.extend(
+            receipt_contract.validate_receipt_payload(Path(entry).name, payload)
+        )
+    if loaded.validation_summary is not None and set(loaded.receipts) == {
+        verifier.PACKAGE_SMOKE_RECEIPT_ENTRY,
+        verifier.HARD_SCAN_RECEIPT_ENTRY,
+        verifier.CHECK_RECEIPTS_ENTRY,
+    }:
         failures.extend(
             verifier.compare_replayed_handoff_payloads(
                 loaded,
@@ -187,7 +193,9 @@ def _read_member_json(package: Path, member: str) -> dict[str, Any]:
     return payload
 
 
-def _copy(tmp_path: Path, valid_handoff_package: tuple[Path, Path]) -> tuple[Path, Path]:
+def _copy(
+    tmp_path: Path, valid_handoff_package: tuple[Path, Path]
+) -> tuple[Path, Path]:
     return _copy_valid_package(valid_handoff_package, tmp_path)
 
 
@@ -245,9 +253,19 @@ def test_code_map_command_tamper_fails(
     ("step", "field", "value", "expected"),
     (
         ("build", "artifact_kinds", ["wheel"], "package_smoke_artifact_kinds_invalid"),
-        ("install", "target_kind", "temporary isolated target", "package_smoke_install_target_kind_invalid"),
+        (
+            "wheel_extract",
+            "method",
+            "copytree",
+            "package_smoke_wheel_extract_method_invalid",
+        ),
         ("import", "module", "other", "package_smoke_import_module_invalid"),
-        ("content_scan", "forbidden_member_count", 1, "package_smoke_content_scan_forbidden_members_mismatch"),
+        (
+            "content_scan",
+            "forbidden_member_count",
+            1,
+            "package_smoke_content_scan_forbidden_members_mismatch",
+        ),
     ),
 )
 def test_package_smoke_step_tamper_fails(
@@ -301,7 +319,9 @@ def test_sidecar_zip_hash_tamper_fails(
     package, sidecar = _copy(tmp_path, valid_handoff_package)
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     payload["zip_sha256"] = "0" * 64
-    sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    sidecar.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     failures = _verify_full(package, sidecar)
 
     assert "sidecar_zip_sha256_mismatch" in failures
@@ -314,7 +334,9 @@ def test_task_metadata_base_non_ancestor_fails(
     package, sidecar = _copy(tmp_path, valid_handoff_package)
     payload = _read_member_json(package, "task_metadata.json")
     payload["base"] = "f" * 40
-    mutate_handoff_zip_and_refresh_hashes(package, sidecar, "task_metadata.json", payload)
+    mutate_handoff_zip_and_refresh_hashes(
+        package, sidecar, "task_metadata.json", payload
+    )
 
     failures = _verify_full(package, sidecar)
 
@@ -328,7 +350,8 @@ def test_validation_summary_status_tamper_fails(
 ) -> None:
     package, sidecar = _copy(tmp_path, valid_handoff_package)
     payload = _read_member_json(package, "handoff_evidence/validation-summary.json")
-    payload["rows"][0]["status"] = "FAIL"
+    row = next(row for row in payload["rows"] if row["status"] == "PASS")
+    row["status"] = "FAIL"
     mutate_handoff_zip_and_refresh_hashes(
         package,
         sidecar,
@@ -344,21 +367,26 @@ def test_validation_summary_status_tamper_fails(
 @pytest.mark.parametrize(
     ("member", "path", "field", "value", "expected"),
     (
-        ("task_metadata.json", (), "task_slug", "old", "task_metadata_unapproved_field: task_slug"),
-        ("task_metadata.json", (), "mode", "evidence", "task_metadata_unapproved_field: mode"),
+        (
+            "task_metadata.json",
+            (),
+            "task_slug",
+            "old",
+            "task_metadata_unapproved_field: task_slug",
+        ),
+        (
+            "task_metadata.json",
+            (),
+            "mode",
+            "evidence",
+            "task_metadata_unapproved_field: mode",
+        ),
         (
             "handoff_evidence/validation-summary.json",
             ("rows", 0),
             "evidence",
             "manual",
             "validation_summary_row_unapproved_field: 0:evidence",
-        ),
-        (
-            "handoff_evidence/check-receipts.json",
-            ("checks", 0),
-            "duration_seconds",
-            1.0,
-            "check_receipt_unapproved_field: 0:duration_seconds",
         ),
         (
             "handoff_evidence/check-receipts.json",

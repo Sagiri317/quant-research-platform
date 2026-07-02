@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -46,9 +47,10 @@ PROFILES: dict[str, Profile] = {
         name="contract",
         scopes=(
             "tests/contracts",
-            "tests/agents/handoff/test_validation_summary_contract.py",
+            "tests/agents/handoff/test_receipt_contract.py",
             "tests/agents/handoff/test_handoff_package_verifier.py",
-            "tests/architecture/test_handoff_package_contract.py",
+            "tests/architecture/test_handoff_contract_field_coverage.py",
+            "tests/architecture/test_handoff_contract_single_source.py",
         ),
         marker=FAST_EXCLUDES,
     ),
@@ -62,9 +64,8 @@ PROFILES: dict[str, Profile] = {
         scopes=(
             "tests/contracts",
             "tests/agents",
-            "tests/architecture/test_import_boundaries.py",
-            "tests/architecture/test_share_safe_evidence.py",
-            "tests/agents/handoff/test_handoff_package_verifier.py",
+            "tests/architecture",
+            "tests/tools/test_run_profile.py",
         ),
         marker=FAST_EXCLUDES,
     ),
@@ -153,7 +154,7 @@ def run_profile(
     pytest_args: tuple[str, ...] = (),
 ) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
-    pytest_basetemp = run_dir / "tmp"
+    pytest_basetemp = _pytest_basetemp(repo_root, run_dir, profile.name)
     pytest_basetemp.mkdir(parents=True, exist_ok=True)
     stdout_path = run_dir / "stdout.log"
     stderr_path = run_dir / "stderr.log"
@@ -268,6 +269,12 @@ def _resolve_run_dir(repo_root: Path, value: str | None, *, profile_name: str) -
 
 def _repo_relative(repo_root: Path, path: Path) -> str:
     return PurePosixPath(path.resolve().relative_to(repo_root)).as_posix()
+
+
+def _pytest_basetemp(repo_root: Path, run_dir: Path, profile_name: str) -> Path:
+    run_dir_key = _repo_relative(repo_root, run_dir)
+    digest = hashlib.sha256(run_dir_key.encode("utf-8")).hexdigest()[:12]
+    return repo_root / ".run" / "profile-tmp" / f"{profile_name}-{digest}" / "tmp"
 
 
 def _with_default_durations(pytest_args: tuple[str, ...]) -> tuple[str, ...]:

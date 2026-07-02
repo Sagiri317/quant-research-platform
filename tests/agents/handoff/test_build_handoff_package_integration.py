@@ -9,9 +9,17 @@ from pathlib import Path
 import pytest
 
 try:
-    from tests.agents.handoff.conftest import _git, _init_handoff_repo, _load_handoff_module
+    from tests.agents.handoff.conftest import (
+        _git,
+        _init_handoff_repo,
+        _load_handoff_module,
+    )
 except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
-    from conftest import _git, _init_handoff_repo, _load_handoff_module  # type: ignore[no-redef]
+    from conftest import (  # type: ignore[no-redef]
+        _git,
+        _init_handoff_repo,
+        _load_handoff_module,
+    )
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -102,10 +110,24 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
         "schema_id",
         "status",
         "build",
-        "install",
+        "wheel_extract",
         "import",
         "content_scan",
     }
+    profile_smoke = next(
+        row
+        for row in check_receipts["checks"]
+        if row["command_id"] == "profile-smoke"
+    )
+    assert profile_smoke["command_argv"] == [
+        "python",
+        "tests/tools/run_profile.py",
+        "--profile",
+        "profile-smoke",
+        "--run-dir",
+        ".run/handoff-replay/profile-smoke",
+    ]
+    assert isinstance(profile_smoke["duration_seconds"], float)
     assert {entry["path"] for entry in manifest["entries"]} == names - {
         "artifact_manifest.json"
     }

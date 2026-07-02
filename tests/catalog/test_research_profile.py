@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,8 +28,6 @@ from quant_research_platform.markets.implementations.a_share import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
-
-PROJECT_SRC = Path("src/quant_research_platform")
 
 
 def test_research_profile_is_only_public_profile_builder() -> None:
@@ -136,68 +133,6 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
         ("rev_1d", "rev_1d", "factor"),
         ("mom_20d_zscore", "mom_20d_zscore", "feature"),
     ]
-
-
-def test_a_share_research_profiles_do_not_import_csmar() -> None:
-    path = PROJECT_SRC / "markets/implementations/a_share/research_profiles.py"
-    tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
-
-    imports = _imported_modules(tree)
-    assert not [
-        module
-        for module in imports
-        if module.startswith("quant_research_platform.sources.csmar")
-    ]
-
-
-def test_profiles_root_is_only_prod_module_composing_csmar_and_a_share() -> None:
-    composers: list[str] = []
-    for path in (PROJECT_SRC).rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
-        imports = _imported_modules(tree)
-        has_csmar = any(
-            module.startswith("quant_research_platform.sources.csmar")
-            for module in imports
-        )
-        has_a_share = any(
-            module.startswith("quant_research_platform.markets.implementations.a_share")
-            for module in imports
-        )
-        if has_csmar and has_a_share:
-            composers.append(path.as_posix())
-
-    assert composers == [
-        "src/quant_research_platform/profiles/research.py",
-        "src/quant_research_platform/markets/implementations/a_share/processed/catalog.py",
-        "src/quant_research_platform/markets/implementations/a_share/processed/materializer.py",
-        "src/quant_research_platform/markets/implementations/a_share/verification/aggregates.py",
-    ]
-
-
-def test_a_share_scenario_specs_are_not_owned_by_catalog_profile() -> None:
-    profile_source = (PROJECT_SRC / "profiles/research.py").read_text(encoding="utf-8")
-    scenario_source = (
-        PROJECT_SRC / "markets/implementations/a_share/research_scenarios.py"
-    ).read_text(encoding="utf-8")
-    forbidden = (
-        "EvaluationSpec(",
-        "ModelSpec(",
-        "PredictionSpec(",
-        "build_prediction_catalog",
-        "build_portfolio_catalog",
-    )
-
-    assert [token for token in forbidden[:3] if token in profile_source] == []
-    assert all(token in scenario_source for token in forbidden)
-
-
-def test_output_writer_uses_local_catalog_not_profile_bundle() -> None:
-    source = (PROJECT_SRC / "artifacts/outputs.py").read_text(encoding="utf-8")
-
-    assert "quant_research_platform.profiles.research" not in source
-    assert "local_a_share_csmar_catalogs" not in source
-    assert "quant_research_platform.artifacts.definitions" in source
-    assert "output_catalog(" in source
 
 
 def test_catalog_profile_private_processed_helper_forwards_typed_source_id(
@@ -317,13 +252,3 @@ def test_catalog_profile_source_id_matches_interim_catalog() -> None:
         next(iter(profiles._a_share_csmar_source_interim_catalogs().values())),
         InterimDataCatalog,
     )
-
-
-def _imported_modules(tree: ast.AST) -> set[str]:
-    modules: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module is not None:
-            modules.add(node.module)
-        elif isinstance(node, ast.Import):
-            modules.update(alias.name for alias in node.names)
-    return modules

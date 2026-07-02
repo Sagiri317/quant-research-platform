@@ -127,7 +127,9 @@ def build_once(
         write_bundle(repo_root, stage_root / FINAL_BRANCH_BUNDLE_ENTRY, branch)
         write_text(stage_root / TASK_METADATA_ENTRY, stable_json(task))
         stage_receipts(stage_root, receipts)
-        write_text(stage_root / VALIDATION_SUMMARY_ENTRY, stable_json(validation_summary))
+        write_text(
+            stage_root / VALIDATION_SUMMARY_ENTRY, stable_json(validation_summary)
+        )
         payload_paths = staged_paths(stage_root)
         manifest = {
             "schema_id": "qrp-handoff-artifact-manifest",

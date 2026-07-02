@@ -4,7 +4,9 @@
 
 ## Python 与依赖
 
-项目合同以 `pyproject.toml` 和 `environment.yml` 为准。文档不写用户本地解释器路径或个人环境路径。缺依赖时，应在允许范围内安装依赖并记录；无法安装写 `BLOCKED`。
+项目合同以 `pyproject.toml` 和 `environment.yml` 为准。文档不写用户本地解释器路径、个人环境路径或固定 conda 环境名。本地依赖、构建、测试和验证只使用 conda；环境名从 `environment.yml` 动态读取。无法满足环境时写 `BLOCKED`。
+
+如果 `pyproject.toml` dev dependencies 包含 `build`，`environment.yml` 必须包含对应 conda 包 `python-build`。package smoke 不执行安装，只允许 wheel 解压后通过 `PYTHONPATH` import smoke。
 
 ## 运行与验证
 
@@ -12,9 +14,10 @@
 
 ```bash
 git diff --check
-python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py --repo-root . --json
+conda run -n <environment.yml name> python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 ```
 
 ## 状态 token
@@ -56,7 +59,8 @@ handoff 使用 compact replayable receipts：machine validation rows 只来自 r
 slowest tests/files 和 before/after 对比，不写硬编码秒数阈值，不新增独立性能门禁文件。
 
 正式 profile runner 位于 `tests/tools/run_profile.py`。执行示例：
-`python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast`。
+`conda run -n <environment.yml name> python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast`。
+`profile_smoke` handoff validation row 只来自 runner 的 `profile-smoke` profile。
 
 `.run/` 只保存输出、profile、临时文件和 handoff/review artifacts，不作为
 tracked tool source。普通 `python -m pytest` 是开发者默认非重型 suite，
@@ -66,7 +70,7 @@ tracked tool source。普通 `python -m pytest` 是开发者默认非重型 suit
 
 ## 治理规则事实源
 
-`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。`verify_governance.py`、source-tree scan、共享安全路径规则和相关 tests 只从这里读取或派生 current-contract-only 规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token。
+`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。`verify_governance.py`、source-tree scan、bundle share-safety scan、共享安全路径规则和相关 tests 只从这里读取或派生 current-contract-only 规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token。
 
 边界回归由 owner-layer negative tests 和治理 gate 记录为 `FAIL`，不依赖文案关键词。
 
@@ -79,10 +83,10 @@ compare 按 `output_id` 配对，并使用 `output_definition_id` 与 metadata �
 REVIEW_SAFE evidence tests 分为纯 synthetic fast gate 和 data/parquet contract gate：
 
 ```bash
-python tests/tools/run_profile.py --list-profiles
-python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<profile>
+conda run -n <environment.yml name> python tests/tools/run_profile.py --list-profiles
+conda run -n <environment.yml name> python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<profile>
 ```
 
 handoff tests 的具体执行入口统一使用 `tests/tools/run_profile.py`。测试位置按 owner layer 放置；详细 placement 规则由 maintenance references 和 architecture gates 拥有。
 
-handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。正式生成入口是 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>`；builder 只读取当前 Git state 和这些 CLI options，并通过 replay 自动生成 machine evidence，然后永远通过 `verify_handoff_package_result()` 运行 verifier。`verify_handoff_package_result()` 是唯一 package-level verifier function；standalone verifier CLI 保留，但不是额外 Python wrapper。builder 不运行独立 safety scan；share-safety status、handoff verifier status 和 zip sha256 来自同一个 verification result。Verifier 从 `final-branch.bundle` clone replay 并比较 packaged receipts、validation summary 和 manifest。Retired handoff entry 不恢复为 handoff 状态源；具体 layout、schema、receipt 和禁止集合由 executable contracts、verifier 和 tests 拥有。
+handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。正式生成入口是 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>`；builder 只读取当前 Git state 和这些 CLI options，并通过 replay 自动生成 machine evidence，然后永远通过 `verify_handoff_package_result()` 运行 verifier。`verify_handoff_package_result()` 是唯一 package-level verifier function；standalone verifier CLI 保留为 verifier 的直接入口，未经用户明确批准不新增 wrapper、alias、adapter 或 compatibility layer。builder 不运行独立 safety scan；share-safety status、handoff verifier status 和 zip sha256 来自同一个 verification result。Verifier 从 `final-branch.bundle` clone replay 并比较 packaged receipts、validation summary 和 manifest。具体 layout、schema、receipt 和 active denied semantics 由 executable contracts、verifier 和 tests 拥有。

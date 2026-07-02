@@ -43,6 +43,8 @@ git branch -a
 
 `.agents` handoff verifier 必须校验正式 handoff 的 REVIEW_SAFE evidence 完整性，并拒绝 status-only 摘要。handoff package layout、sidecar shape、task metadata shape 和 validation summary 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有；receipt schema、receipt invariant 和 receipt 聚合由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有；governance scan、source-tree scan、共享安全路径和 status token 规则由 `governance_contract.py` 拥有。handoff 使用 compact replayable receipts：machine validation 只来自 REVIEW_SAFE replay-backed receipts；private/local 检查不得支撑 machine validation `PASS`，无法公开复验时在 reviewer evidence 或 final report 中诚实记录 `NOT_RUN` 或 `BLOCKED`。当前 validation 状态由 builder 从 receipts 派生为 `handoff_evidence/validation-summary.json`。Codex 不应手写 handoff evidence，也不应把 raw grep output、完整 pytest log、完整 stdout/stderr、wheel、sdist、完整 subagent transcript 或本地临时安装目录打入 handoff。
 
+package smoke 由 wheel 解压后的 `PYTHONPATH` import smoke 定义。`profile_smoke` validation row 的 replay command 是正式 profile runner 的 `profile-smoke` profile。
+
 `.run/` 只是 output layer 和 evidence layer。它可以保存运行产物、handoff zip、manifest、logs、reports、temporary evidence，但不能反向定义架构、合同、工具入口或当前状态。
 
 正式 pytest profile runner 位于 `tests/tools/run_profile.py`。`.run/` 只保存输出、临时文件、profile 和 handoff/review artifacts。测试入口保持 Python-only；`.ps1` 和 `.sh` 不属于官方测试入口层。测试 profile 的输出路径和临时路径必须通过参数指定，未运行项状态为 `NOT_RUN`。
@@ -94,13 +96,14 @@ Current-contract path rules are owned by `governance_contract.py` and enforced b
 
 ## 10. 推荐验证命令
 
-按任务范围选择最小充分命令，不要把未运行项写成 PASS：
+按任务范围选择最小充分命令，不要把未运行项写成 PASS。项目 Python 验证、构建和测试使用 `conda run -n <environment.yml name>`；环境名从 `environment.yml` 动态读取，不写死在文档或脚本中：
 
 ```bash
 git diff --check
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
-python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py --repo-root . --json
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
+conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
+conda run -n <environment.yml name> python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 
 如果完整测试因环境或超时不可行，必须分段运行并明确写 `BLOCKED` 或 `NOT_RUN`。

@@ -22,9 +22,14 @@ for candidate in (SCRIPT_DIR, SCRIPT_PARENT, SCRIPT_REPO_SRC):
         sys.path.insert(0, str(candidate))
 
 from governance_contract import (  # noqa: E402
-    BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES,
     PACKAGE_FORBIDDEN_PATH_PARTS,
+    source_tree_governance_rule_definition_lines,
+    source_tree_scan_groups,
+)
+from governance_contract import (  # noqa: E402
     is_scanner_definition_line as is_shared_scanner_definition_line,
+)
+from governance_contract import (  # noqa: E402
     package_member_name_failures as shared_package_member_name_failures,
 )
 from handoff_contract import (  # noqa: E402
@@ -51,6 +56,7 @@ from receipt_contract import (  # noqa: E402
     validate_receipt_payload,
 )
 from replay_evidence import build_machine_receipts  # noqa: E402
+
 from quant_research_platform.policy.share_safety import (  # noqa: E402
     evidence_json_unsafe_reason,
     unsafe_for_share_reason,
@@ -66,20 +72,6 @@ TEXT_LIKE_SUFFIXES = {
     ".txt",
     ".yaml",
     ".yml",
-}
-BUNDLE_CONTENT_SCAN_EXEMPT_ROOTS = (
-    ".agents/",
-    "code/",
-    "docs/",
-    "src/",
-    "tests/",
-)
-BUNDLE_CONTENT_SCAN_EXEMPT_FILES = {
-    "AGENTS.md",
-    "README.md",
-    "data/README.md",
-    "environment.yml",
-    "pyproject.toml",
 }
 BUNDLE_TEXT_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
@@ -108,7 +100,7 @@ class HandoffZipInspection:
     names: tuple[str, ...]
     duplicates: tuple[str, ...]
     raw_bundle: bytes | None
-    loaded: "LoadedHandoffPayloads"
+    loaded: LoadedHandoffPayloads
     failures: tuple[str, ...]
     share_safety_failures: tuple[str, ...]
     sidecar_payload: dict[str, object] | None
@@ -133,7 +125,9 @@ def main() -> int:
     return 0
 
 
-def verify_handoff_package_result(zip_path: Path, json_path: Path) -> HandoffVerificationResult:
+def verify_handoff_package_result(
+    zip_path: Path, json_path: Path
+) -> HandoffVerificationResult:
     inspection = inspect_handoff_zip_once(zip_path, json_path)
     failures: list[str] = []
     share_safety_failures = list(inspection.share_safety_failures)
@@ -289,9 +283,7 @@ def verify_manifest_hashes_from_bytes(
     entries = payload.get("entries")
     if not isinstance(entries, list):
         return [*failures, "artifact_manifest_entries_invalid"]
-    actual_names = sorted(
-        name for name in names if name != ARTIFACT_MANIFEST_ENTRY
-    )
+    actual_names = sorted(name for name in names if name != ARTIFACT_MANIFEST_ENTRY)
     manifest_names: list[str] = []
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
@@ -347,7 +339,11 @@ class LoadedHandoffPayloads:
             self.task_metadata is not None
             and self.validation_summary is not None
             and set(self.receipts)
-            == {PACKAGE_SMOKE_RECEIPT_ENTRY, HARD_SCAN_RECEIPT_ENTRY, CHECK_RECEIPTS_ENTRY}
+            == {
+                PACKAGE_SMOKE_RECEIPT_ENTRY,
+                HARD_SCAN_RECEIPT_ENTRY,
+                CHECK_RECEIPTS_ENTRY,
+            }
         )
 
 
@@ -355,7 +351,9 @@ def load_handoff_payloads_from_bytes(
     member_bytes: Mapping[str, bytes],
 ) -> LoadedHandoffPayloads:
     failures: list[str] = []
-    task_metadata = load_json_member_from_bytes(member_bytes, TASK_METADATA_ENTRY, failures)
+    task_metadata = load_json_member_from_bytes(
+        member_bytes, TASK_METADATA_ENTRY, failures
+    )
     validation_summary = load_json_member_from_bytes(
         member_bytes,
         VALIDATION_SUMMARY_ENTRY,
@@ -471,7 +469,9 @@ def verify_bundle_and_replay_once(
         )
         if clone.returncode != 0:
             return ["bundle_clone_failed"], []
-        branch_in_clone = git_text(clone_dir, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        branch_in_clone = git_text(
+            clone_dir, "rev-parse", "--abbrev-ref", "HEAD"
+        ).strip()
         if branch_in_clone != branch:
             failures.append("bundle_clone_branch_mismatch")
         head = git_text(clone_dir, "rev-parse", "HEAD").strip()
@@ -505,22 +505,30 @@ def scan_clone_tree_for_share_safety(
     files = git_text(clone_dir, "ls-files").splitlines()
     for relative in files:
         failures.extend(
-            f"{name_prefix}_{failure}"
-            for failure in member_name_failures(relative)
+            f"{name_prefix}_{failure}" for failure in member_name_failures(relative)
         )
-        if is_bundle_content_scan_exempt(relative):
-            continue
         if Path(relative).suffix.lower() not in TEXT_LIKE_SUFFIXES:
             continue
         raw_file = (clone_dir / relative).read_bytes()
-        if len(raw_file) > BUNDLE_TEXT_SIZE_CAP_BYTES:
-            continue
         failures.extend(
             f"{name_prefix}_{failure}"
-            for failure in text_blob_failures(
+            for failure in text_file_failures(
                 raw_file,
+                relative=Path(relative),
+                actual_path=clone_dir / relative,
                 name=f"{name_prefix}/{relative}",
             )
+        )
+    for group_name, group_payload in sorted(source_tree_scan_groups(clone_dir).items()):
+        findings = list(group_payload.get("findings") or [])
+        failures.extend(
+            (
+                f"{name_prefix}_source_tree_scan:{group_name}:"
+                f"{finding.get('path')}:{finding.get('line', 0)}:"
+                f"{finding.get('rule')}"
+            )
+            for finding in findings
+            if isinstance(finding, Mapping)
         )
     return failures
 
@@ -534,6 +542,35 @@ def text_blob_failures(raw: bytes, *, name: str) -> list[str]:
         return [f"non_utf8_text_artifact: {name}"]
     reason = unsafe_text_reason(text, name=name)
     return [f"{reason}_text: {name}"] if reason is not None else []
+
+
+def text_file_failures(
+    raw: bytes,
+    *,
+    relative: Path,
+    actual_path: Path,
+    name: str,
+) -> list[str]:
+    if len(raw) > BUNDLE_TEXT_SIZE_CAP_BYTES:
+        return [f"text scan exceeded maximum size: {name}"]
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return [f"non_utf8_text_artifact: {name}"]
+    definition_lines = source_tree_governance_rule_definition_lines(
+        relative,
+        actual_path,
+    )
+    failures: list[str] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if line_number in definition_lines:
+            continue
+        if is_scanner_definition_line(line, name=name):
+            continue
+        reason = unsafe_text_reason(line, name=name)
+        if reason is not None:
+            failures.append(f"{reason}_text: {name}")
+    return failures
 
 
 def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
@@ -566,7 +603,9 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
     if name.lower().endswith(".json"):
         json_reason = evidence_json_unsafe_reason(scan_text)
         if json_reason is not None:
-            return "local_absolute_path" if json_reason == "absolute_path" else json_reason
+            return (
+                "local_absolute_path" if json_reason == "absolute_path" else json_reason
+            )
     return None
 
 
@@ -580,23 +619,20 @@ def member_name_failures(name: str) -> list[str]:
 
 
 def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
+    normalized_name = name.removeprefix("bundle/")
     if name.endswith(
         (
+            "governance_contract.py",
             "handoff_contract.py",
             "receipt_contract.py",
+            "share_safety.py",
+            "structure_audit.py",
             "verify_handoff_package.py",
             "verify_governance.py",
         )
     ):
-        return is_shared_scanner_definition_line(name, line)
+        return is_shared_scanner_definition_line(normalized_name, line)
     return False
-
-
-def is_bundle_content_scan_exempt(name: str) -> bool:
-    normalized = name.replace("\\", "/")
-    if normalized in BUNDLE_CONTENT_SCAN_EXEMPT_FILES:
-        return True
-    return any(normalized.startswith(root) for root in BUNDLE_CONTENT_SCAN_EXEMPT_ROOTS)
 
 
 def git_text(repo: Path, *args: str) -> str:

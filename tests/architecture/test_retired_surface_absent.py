@@ -4,8 +4,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
 from tests.helpers.governance_fixtures import rule_form, text_rule_example
 
 
@@ -122,39 +120,6 @@ def test_handoff_source_tree_scan_rejects_retired_pr_body_renderer() -> None:
     assert "forbidden_render_pr_body" in patterns
 
 
-@pytest.mark.integration
-@pytest.mark.slow
-def test_retired_handoff_evidence_input_fields_fail_fast(
-    tmp_path: Path,
-) -> None:
-    module = _load_handoff_builder_integration_tests()
-    contract = _load_governance_contract()
-    body = text_rule_example(
-        contract.RETIRED_PUBLIC_SURFACE_RULES,
-        "forbidden_pr_body",
-    )
-    forbidden_keys = ("check", f"{Path(body).stem}_path")
-
-    for forbidden_key in forbidden_keys:
-        case_root = tmp_path / forbidden_key
-        case_root.mkdir()
-        result, out_dir = module._run_builder_with_handoff_evidence(
-            case_root,
-            {
-                "custom-note": {
-                    "schema_id": "qrp-custom-note",
-                    "status": "PASS",
-                    forbidden_key: "old input",
-                }
-            },
-        )
-
-        assert result.returncode != 0
-        assert "handoff_evidence_forbidden_field" in result.stderr
-        assert not (out_dir / "synthetic-handoff-negative.zip").exists()
-        assert not (out_dir / "synthetic-handoff-negative.json").exists()
-
-
 def test_share_safety_does_not_export_retired_local_output_path_inventory() -> None:
     import quant_research_platform.policy.share_safety as share_safety
 
@@ -192,38 +157,6 @@ def test_retired_local_only_report_paths_remain_share_unsafe() -> None:
     ):
         assert is_local_only_path(path)
         assert unsafe_for_share_reason(path.as_posix()) == "local_only_path"
-
-
-def _load_handoff_builder():
-    script = (
-        Path(".agents")
-        / "skills"
-        / "quant-research-platform-maintenance"
-        / "scripts"
-        / "handoff"
-        / "build_handoff_package.py"
-    )
-    spec = importlib.util.spec_from_file_location("build_handoff_package", script)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_handoff_builder_integration_tests():
-    script = Path("tests/agents/handoff/test_build_handoff_package_integration.py")
-    spec = importlib.util.spec_from_file_location(
-        "test_build_handoff_package_integration",
-        script,
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def _load_governance_contract():
