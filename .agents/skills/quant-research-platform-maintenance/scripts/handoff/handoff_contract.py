@@ -29,12 +29,10 @@ class ProofClass(str, Enum):
 @dataclass(frozen=True)
 class FieldSpec:
     proof_class: ProofClass
-    required: bool = True
 
 
 @dataclass(frozen=True)
 class ValidationRowSource:
-    proof_class: ProofClass
     receipt_entry: str | None = None
     command_id: str | None = None
 
@@ -115,24 +113,19 @@ MANDATORY_VALIDATION_ROWS = (
 
 VALIDATION_ROW_SOURCE_CONTRACT = {
     "scripted_checks": ValidationRowSource(
-        ProofClass.DERIVED_FROM_REPLAY,
         receipt_entry=CHECK_RECEIPTS_ENTRY,
     ),
     "package_smoke": ValidationRowSource(
-        ProofClass.DERIVED_FROM_REPLAY,
         receipt_entry=PACKAGE_SMOKE_RECEIPT_ENTRY,
     ),
     "profile_smoke": ValidationRowSource(
-        ProofClass.DERIVED_FROM_REPLAY,
         receipt_entry=CHECK_RECEIPTS_ENTRY,
         command_id="profile-smoke",
     ),
     "governance": ValidationRowSource(
-        ProofClass.DERIVED_FROM_REPLAY,
         receipt_entry=HARD_SCAN_RECEIPT_ENTRY,
     ),
     "code_map": ValidationRowSource(
-        ProofClass.DERIVED_FROM_REPLAY,
         receipt_entry=CHECK_RECEIPTS_ENTRY,
         command_id="code-map",
     ),
@@ -259,13 +252,6 @@ def validate_validation_summary_contract(
         status = row.get("status")
         if status not in VALID_STATUS_TOKENS:
             failures.append(f"validation_summary_status_invalid: {index}:{status}")
-        source = VALIDATION_ROW_SOURCE_CONTRACT.get(str(name))
-        if status == "PASS" and source is not None:
-            if source.proof_class not in {
-                ProofClass.REPLAYED,
-                ProofClass.DERIVED_FROM_REPLAY,
-            }:
-                failures.append(f"validation_summary_pass_proof_invalid: {name}")
     if require_mandatory:
         missing = [name for name in MANDATORY_VALIDATION_ROWS if name not in seen]
         failures.extend(
@@ -283,11 +269,10 @@ def expected_validation_status_map_from_receipts(
         if source.command_id is not None:
             command_row = check_rows.get(source.command_id)
             result[row_name] = _status_or_not_run(command_row.get("status") if command_row else None)
-        elif source.receipt_entry is not None:
+        else:
+            assert source.receipt_entry is not None
             receipt = receipts.get(source.receipt_entry)
             result[row_name] = _status_or_not_run(receipt.get("status") if receipt else None)
-        else:
-            result[row_name] = "NOT_RUN"
     return result
 
 

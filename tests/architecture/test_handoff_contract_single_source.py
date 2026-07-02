@@ -27,6 +27,47 @@ def _class_defs(path: Path) -> set[str]:
     return {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
 
 
+def _class_source(path: Path, class_name: str) -> str:
+    source = _source(path)
+    tree = ast.parse(source, filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            class_source = ast.get_source_segment(source, node)
+            assert class_source is not None
+            return class_source
+    raise AssertionError(f"class not found: {class_name}")
+
+
+def _function_source(path: Path, function_name: str) -> str:
+    source = _source(path)
+    tree = ast.parse(source, filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            function_source = ast.get_source_segment(source, node)
+            assert function_source is not None
+            return function_source
+    raise AssertionError(f"function not found: {function_name}")
+
+
+def _called_names_in_function(path: Path, function_name: str) -> set[str]:
+    source = _source(path)
+    tree = ast.parse(source, filename=str(path))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == function_name
+    )
+    calls: set[str] = set()
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            calls.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            calls.add(node.func.attr)
+    return calls
+
+
 def _assigned_names(path: Path) -> set[str]:
     tree = ast.parse(_source(path), filename=str(path))
     names: set[str] = set()
@@ -197,6 +238,47 @@ def test_verifier_has_no_parallel_contract_functions() -> None:
     assert "def errors" not in source
 
 
+def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
+    verifier = HANDOFF_ROOT / "verify_handoff_package.py"
+    verifier_defs = _function_defs(verifier)
+    classes = _class_defs(verifier)
+
+    assert "HandoffVerificationResult" in classes
+    assert "verify_handoff_package_result" in verifier_defs
+    assert "inspect_handoff_zip_once" in verifier_defs
+    assert "verify_bundle_and_replay_once" in verifier_defs
+    assert "scan_clone_tree_for_share_safety" in verifier_defs
+    assert "compare_replayed_handoff_payloads" in verifier_defs
+
+    safety_source = _class_source(verifier, "HandoffSafetyResult")
+    for retired_field in (
+        "text_like_count",
+        "member_count",
+        "bundle_member_count",
+        "bundle_text_like_count",
+        "sidecar_text_like_count",
+        "errors",
+        "to_text",
+    ):
+        assert retired_field not in safety_source
+
+    verify_source = _function_source(verifier, "verify_handoff_package")
+    assert (
+        "return list(verify_handoff_package_result(zip_path, json_path).failures)"
+        in verify_source
+    )
+
+    scan_source = _function_source(verifier, "scan_handoff_zip")
+    assert "inspect_handoff_zip_once" in scan_source
+    assert "ZipFile" not in scan_source
+    assert "scan_git_bundle" not in scan_source
+
+    result_calls = _called_names_in_function(verifier, "verify_handoff_package_result")
+    assert "inspect_handoff_zip_once" in result_calls
+    assert "scan_handoff_zip" not in result_calls
+    assert "scan_git_bundle" not in result_calls
+
+
 def test_handoff_contract_has_no_retired_verified_path_surfaces() -> None:
     handoff_contract = HANDOFF_ROOT / "handoff_contract.py"
     defs = _function_defs(handoff_contract)
@@ -289,6 +371,34 @@ def test_proof_class_is_only_defined_by_handoff_contract() -> None:
     assert offenders == []
 
 
+def test_field_spec_and_allowed_keys_are_only_handoff_contract_owned() -> None:
+    handoff_contract = HANDOFF_ROOT / "handoff_contract.py"
+    receipt_contract = HANDOFF_ROOT / "receipt_contract.py"
+
+    assert "FieldSpec" in _class_defs(handoff_contract)
+    assert "required" not in _class_source(handoff_contract, "FieldSpec")
+    assert "FieldSpec" not in _class_defs(receipt_contract)
+    assert "def allowed_keys" in _source(handoff_contract)
+    assert "def allowed_keys" not in _source(receipt_contract)
+
+    for path in (
+        HANDOFF_ROOT / "build_handoff_package.py",
+        HANDOFF_ROOT / "verify_handoff_package.py",
+        HANDOFF_ROOT / "replay_evidence.py",
+    ):
+        assert "FieldSpec" not in _class_defs(path)
+        assert "def allowed_keys" not in _source(path)
+
+
+def test_validation_row_source_is_receipt_entry_only() -> None:
+    handoff_contract = HANDOFF_ROOT / "handoff_contract.py"
+    source = _class_source(handoff_contract, "ValidationRowSource")
+
+    assert "proof_class" not in source
+    assert "receipt_entry" in source
+    assert "command_id" in source
+
+
 def test_replay_command_contract_is_only_handoff_contract_owned() -> None:
     owner = HANDOFF_ROOT / "handoff_contract.py"
     assert "REPLAY_COMMAND_CONTRACT" in _source(owner)
@@ -304,17 +414,6 @@ def test_replay_command_contract_is_only_handoff_contract_owned() -> None:
     ]
 
     assert offenders == []
-
-
-def test_receipt_field_specs_are_only_receipt_contract_owned() -> None:
-    receipt_contract = HANDOFF_ROOT / "receipt_contract.py"
-    assert "FieldSpec" in _class_defs(receipt_contract)
-    for path in (
-        HANDOFF_ROOT / "build_handoff_package.py",
-        HANDOFF_ROOT / "verify_handoff_package.py",
-        HANDOFF_ROOT / "replay_evidence.py",
-    ):
-        assert "FieldSpec" not in _class_defs(path)
 
 
 def test_execution_modules_do_not_define_contract_tables() -> None:
@@ -344,9 +443,37 @@ def test_contract_modules_own_their_respective_boundaries() -> None:
 
     assert "EvidenceGraph" not in handoff_contract
     assert "VALIDATION_ROW_SOURCE_CONTRACT" in handoff_contract
+    assert "FieldSpec" not in _class_defs(HANDOFF_ROOT / "receipt_contract.py")
     assert "normalize_check_receipts" in receipt_contract
     assert "compare_check_receipts" in receipt_contract
     assert "normalize_package_smoke_receipt" in receipt_contract
     assert "compare_package_smoke_receipt" in receipt_contract
     assert "normalize_hard_scan_receipt" in receipt_contract
     assert "compare_hard_scan_receipt" in receipt_contract
+
+
+def test_builder_uses_verifier_result_without_separate_scan_status() -> None:
+    builder = HANDOFF_ROOT / "build_handoff_package.py"
+    source = _source(builder)
+    defs = _function_defs(builder)
+
+    assert "scan_status" not in defs
+    assert "verify_handoff_package_result" in source
+    assert "scan_handoff_zip" not in source
+
+
+def test_mutation_tests_do_not_patch_global_replay_function() -> None:
+    source = _source(Path("tests/agents/handoff/test_handoff_package_mutations.py"))
+
+    assert ".build_machine_receipts =" not in source
+    assert "monkeypatch.setattr(verifier, \"build_machine_receipts\"" not in source
+
+
+def test_mutation_manifest_refresh_reads_each_member_once() -> None:
+    source = _function_source(
+        Path("tests/agents/handoff/test_handoff_package_mutations.py"),
+        "mutate_handoff_zip_and_refresh_hashes",
+    )
+
+    assert "raw = archive.read(name)" in source
+    assert source.count("archive.read(name)") == 1

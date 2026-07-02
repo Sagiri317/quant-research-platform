@@ -15,13 +15,18 @@ tracked handoff tooling 位于：
 
 - `handoff_contract.py` 拥有 zip layout、sidecar schema、task metadata
   schema、artifact manifest schema、validation summary schema、`ProofClass`、
-  validation row source contract 和 replay command contract。
-- `receipt_contract.py` 拥有 exact receipt schema、receipt `FieldSpec`、
-  receipt invariant、normalization 和 comparison。
+  `FieldSpec`、`allowed_keys()`、validation row source contract 和 replay
+  command contract。
+- `receipt_contract.py` 拥有 exact receipt schema specs、receipt invariant、
+  normalization 和 comparison。receipt specs 使用 `handoff_contract.py` 的共享
+  `FieldSpec`；不得在 receipt 层定义第二套 `FieldSpec` 或 allowed-key helper。
 - `replay_evidence.py` 执行 public machine replay，并构造 canonical
   receipts；hard-scan receipt 由
   `governance_contract.source_tree_scan_groups()` 的扫描结果构造。
-- `verify_handoff_package.py` 是 package trust boundary。
+- `verify_handoff_package.py` 是 package trust boundary。正式 verifier result
+  path 由 `verify_handoff_package_result()` 承载；该路径只做一次 zip inspection，
+  只 clone `final-branch.bundle` 一次。`verify_handoff_package()` 和
+  `scan_handoff_zip()` 只是薄包装。
 - `governance_contract.py` 拥有 governance scan、source-tree scan、
   share-safety path rules 和 status tokens。
 
@@ -120,10 +125,12 @@ check rows 不表达 `NOT_RUN` 或 `BLOCKED`；replay 失败就是 `FAIL`。
 ## Verifier Replay
 
 verifier 从 zip 中取出 `final-branch.bundle`，clone task metadata 指定的
-branch，检查 final head 和 base ancestor，然后在 clone 中调用
-`replay_evidence.build_machine_receipts()`。packaged receipts 必须与 replayed
-receipts 的 normalized form 一致；packaged validation summary 必须与 replayed
-receipts 派生结果一致。
+branch，检查 final head 和 base ancestor，然后在同一个 clone 中执行
+share-safety scan 和 `replay_evidence.build_machine_receipts()`。packaged receipts
+必须与 replayed receipts 的 normalized form 一致；packaged validation summary
+必须与 replayed receipts 派生结果一致。payload/schema mutation tests 使用
+`compare_replayed_handoff_payloads()` 的 fast path；完整 bundle replay 保留给
+valid package smoke 和 Git identity 变异。
 
 human/advisory review 是独立人类审查输出，不进入 machine handoff，也不支撑
 machine validation `PASS`。

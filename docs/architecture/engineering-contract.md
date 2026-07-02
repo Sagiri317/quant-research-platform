@@ -27,9 +27,9 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 
 公开文档和 evidence 使用 repo-relative path。用户本地绝对路径、临时私有目录和供应商私有路径留在 LOCAL_ONLY 边界内。
 
-package evidence 描述 handoff package 的成员、hash、manifest、sidecar 和 Git bundle。reviewer evidence 描述 review role、scope、files inspected、commands run、findings、fixes 和 limitations。二者必须分开记录；handoff layout 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有，receipt schema 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有，治理扫描规则由 `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 拥有。
+package evidence 描述 handoff package 的成员、hash、manifest、sidecar 和 Git bundle。reviewer evidence 描述 review role、scope、files inspected、commands run、findings、fixes 和 limitations。二者必须分开记录；handoff layout、sidecar、task metadata、validation summary、`FieldSpec` 和 `allowed_keys()` 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有，receipt schema specs、invariants、normalization 和 comparison 由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有，治理扫描规则由 `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 拥有。
 
-handoff 使用 compact replayable receipts：machine validation rows 只来自 replay-backed receipts；verifier 从 `final-branch.bundle` clone 中重放并比对 count/hash。Codex 不应手写 handoff evidence，也不应把 raw grep output、full pytest log、完整 stdout/stderr、wheel、sdist、完整 review transcript 或本地 `.run/local/**` 产物打入 handoff。
+handoff 使用 compact replayable receipts：machine validation rows 只来自 replay-backed receipts；verifier result path 只做一次 zip inspection，并在需要 replay 时只 clone `final-branch.bundle` 一次，在同一个 clone 中完成 share-safety scan、receipt replay 和 count/hash comparison。Codex 不应手写 handoff evidence，也不应把 raw grep output、full pytest log、完整 stdout/stderr、wheel、sdist、完整 review transcript 或本地 `.run/local/**` 产物打入 handoff。
 
 ## 代码修改原则
 
@@ -85,4 +85,4 @@ python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<
 
 handoff tests 的具体执行入口统一使用 `tests/tools/run_profile.py`。测试位置按 owner layer 放置；详细 placement 规则由 maintenance references 和 architecture gates 拥有。
 
-handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。正式生成入口是 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>`；builder 只读取当前 Git state 和这些 CLI options，并通过 replay 自动生成 machine evidence，然后永远运行 verifier。Verifier 从 `final-branch.bundle` clone replay 并比较 packaged receipts、validation summary 和 manifest。Retired handoff entry 不恢复为 handoff 状态源；具体禁止集合由 handoff contract、receipt contract 和 verifier tests 拥有。
+handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。正式生成入口是 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>`；builder 只读取当前 Git state 和这些 CLI options，并通过 replay 自动生成 machine evidence，然后永远通过 `verify_handoff_package_result()` 运行 verifier。builder 不运行独立 safety scan；share-safety status、handoff verifier status 和 zip sha256 来自同一个 verification result。`scan_handoff_zip()` 和 `verify_handoff_package()` 是薄包装。Verifier 从 `final-branch.bundle` clone replay 并比较 packaged receipts、validation summary 和 manifest。Retired handoff entry 不恢复为 handoff 状态源；具体禁止集合由 handoff contract、receipt contract 和 verifier tests 拥有。

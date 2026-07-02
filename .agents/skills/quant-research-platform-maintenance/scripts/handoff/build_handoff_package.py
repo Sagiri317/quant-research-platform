@@ -33,6 +33,7 @@ from handoff_contract import (  # noqa: E402
     validate_task_metadata_contract,
 )
 from replay_evidence import build_machine_receipts  # noqa: E402
+from verify_handoff_package import verify_handoff_package_result  # noqa: E402
 
 PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
 
@@ -99,19 +100,15 @@ def build_handoff_package(
         validation_summary=validation_summary,
         branch=branch,
     )
-    safety_status = scan_status(zip_path, json_path=json_path)
-    from verify_handoff_package import verify_handoff_package
-
-    verify_failures = verify_handoff_package(zip_path, json_path)
-    verify_status = "PASS" if not verify_failures else "FAIL"
+    verification = verify_handoff_package_result(zip_path, json_path)
     return {
-        "ok": safety_status == "PASS" and verify_status == "PASS",
+        "ok": verification.ok,
         "zip_path": zip_path.as_posix(),
         "json_path": json_path.as_posix(),
-        "zip_sha256": sha256_file(zip_path),
-        "handoff_package_verify_status": verify_status,
-        "share_safety_status": safety_status,
-        "verify_failures": verify_failures,
+        "zip_sha256": verification.zip_sha256,
+        "handoff_package_verify_status": verification.handoff_package_verify_status,
+        "share_safety_status": verification.share_safety_status,
+        "verify_failures": list(verification.failures),
     }
 
 
@@ -131,12 +128,13 @@ def build_once(
         write_text(stage_root / TASK_METADATA_ENTRY, stable_json(task))
         stage_receipts(stage_root, receipts)
         write_text(stage_root / VALIDATION_SUMMARY_ENTRY, stable_json(validation_summary))
+        payload_paths = staged_paths(stage_root)
         manifest = {
             "schema_id": "qrp-handoff-artifact-manifest",
-            "entries": artifact_entries(stage_root, staged_paths(stage_root)),
+            "entries": artifact_entries(stage_root, payload_paths),
         }
         write_text(stage_root / ARTIFACT_MANIFEST_ENTRY, stable_json(manifest))
-        write_zip(zip_path, stage_root, staged_paths(stage_root, include_manifest=True))
+        write_zip(zip_path, stage_root, (*payload_paths, ARTIFACT_MANIFEST_ENTRY))
     write_text(
         json_path,
         stable_json(
@@ -209,30 +207,26 @@ def safe_task_filename(task_name: str) -> str:
     return text
 
 
-def scan_status(zip_path: Path, *, json_path: Path) -> str:
-    from verify_handoff_package import scan_handoff_zip
-
-    return "PASS" if scan_handoff_zip(zip_path, json_path=json_path).ok else "FAIL"
-
-
 def artifact_entries(root: Path, paths: Iterable[str]) -> list[dict[str, object]]:
-    return [
-        {
-            "path": relative,
-            "size": (root / relative).stat().st_size,
-            "sha256": sha256_file(root / relative),
-        }
-        for relative in sorted(paths)
-    ]
+    entries: list[dict[str, object]] = []
+    for relative in sorted(paths):
+        raw = (root / relative).read_bytes()
+        entries.append(
+            {
+                "path": relative,
+                "size": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+    return entries
 
 
-def staged_paths(root: Path, *, include_manifest: bool = False) -> tuple[str, ...]:
+def staged_paths(root: Path) -> tuple[str, ...]:
     return tuple(
         sorted(
             path.relative_to(root).as_posix()
             for path in root.rglob("*")
-            if path.is_file()
-            and (include_manifest or path.name != ARTIFACT_MANIFEST_ENTRY)
+            if path.is_file() and path.name != ARTIFACT_MANIFEST_ENTRY
         )
     )
 

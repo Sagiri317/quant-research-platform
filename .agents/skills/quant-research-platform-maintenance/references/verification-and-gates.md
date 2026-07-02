@@ -60,7 +60,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_governa
 
 active doc roots、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 必须从这里读取或派生。
 
-handoff layout gate 由 `handoff/handoff_contract.py` 和 `handoff/verify_handoff_package.py` 拥有。receipt invariant gate 由 `handoff/receipt_contract.py` 和 `tests/agents/handoff/` 拥有。source-tree retired surface gate 由 `governance_contract.py`、`verify_governance.py` 和 `tests/architecture/` 拥有。builder、collector、verifier 和 tests 不得复制平行 receipt validator 或 handoff layout 表。
+handoff layout gate 由 `handoff/handoff_contract.py` 和 `handoff/verify_handoff_package.py` 拥有。`FieldSpec` 和 `allowed_keys()` 只由 `handoff_contract.py` 定义；`receipt_contract.py` 只拥有 receipt schema specs、invariants、normalization 和 comparison。source-tree retired surface gate 由 `governance_contract.py`、`verify_governance.py` 和 `tests/architecture/` 拥有。builder、collector、verifier 和 tests 不得复制平行 receipt validator 或 handoff layout 表。
 
 Hard-scan gate 由正式 handoff builder/verifier 闭合：
 
@@ -72,6 +72,10 @@ builder 从 Git state 和 replay 自动生成 machine evidence，然后永远运
 verifier。verifier 从 `final-branch.bundle` replay，并比较 packaged receipts 与
 replayed receipts。`verify_governance.py` 只运行 governance checks，不写 handoff
 receipts。
+builder 通过 `verify_handoff_package_result()` 获取 verifier status、share-safety
+status 和 zip sha256；不得再单独运行一条 safety scan。verifier result path 只做
+一次 zip inspection；需要 replay 时只 clone bundle 一次，并在同一个 clone 中执行
+share-safety scan 和 receipt replay。
 
 builder 从 Git state 和 replay 自动生成 machine evidence。verifier 必须从 `final-branch.bundle` 重放 hard scan 并比对 `scan_id`、`rule_set_id`、count 和 `result_sha256`。
 `verify_governance.py` 只运行 governance checks，不写 handoff receipts；hard-scan receipt construction 只由 `handoff/replay_evidence.py` 执行。
@@ -92,7 +96,7 @@ python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 
 如果完整运行超时，必须写 `BLOCKED` 并记录超时，可以补充分段运行结果。
 
-Handoff receipt flow 的低成本 gate 放在 `tests/agents/handoff/`：覆盖唯一 builder 入口、sidecar zip envelope、exact zip layout、status-only/placeholder/raw output 拒绝、package/check/hard-scan receipt schema、package mutation、以及从 bundle clone 重放 public machine receipts。
+Handoff receipt flow 的低成本 gate 放在 `tests/agents/handoff/`：覆盖唯一 builder 入口、sidecar zip envelope、exact zip layout、status-only/placeholder/raw output 拒绝、package/check/hard-scan receipt schema、package mutation、以及从 bundle clone 重放 public machine receipts。mutation tests 对 payload/schema/replay mismatch 使用 `compare_replayed_handoff_payloads()` fast path；完整 bundle verifier 只保留给 valid package smoke、Git identity 和 sidecar envelope 变异。
 
 ## 4. Active-doc scan
 

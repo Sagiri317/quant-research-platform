@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 
 try:
@@ -32,7 +31,10 @@ try:
         CHECK_RECEIPTS_ENTRY,
         HARD_SCAN_RECEIPT_ENTRY,
         PACKAGE_SMOKE_RECEIPT_ENTRY,
+        FieldSpec,
         ProofClass,
+        allowed_keys,
+        check_rows_by_command_id,
         replay_command_spec,
     )
 except ModuleNotFoundError:  # pragma: no cover - package import fallback.
@@ -40,15 +42,12 @@ except ModuleNotFoundError:  # pragma: no cover - package import fallback.
         CHECK_RECEIPTS_ENTRY,
         HARD_SCAN_RECEIPT_ENTRY,
         PACKAGE_SMOKE_RECEIPT_ENTRY,
+        FieldSpec,
         ProofClass,
+        allowed_keys,
+        check_rows_by_command_id,
         replay_command_spec,
     )
-
-
-@dataclass(frozen=True)
-class FieldSpec:
-    proof_class: ProofClass
-    required: bool = True
 
 
 CHECK_RECEIPTS_FIELD_SPECS = {
@@ -145,10 +144,6 @@ PACKAGE_ARTIFACT_KINDS = ("wheel", "sdist")
 PACKAGE_SCANNED_ARTIFACT_KINDS = ("wheel", "sdist", "install_target")
 PACKAGE_INSTALL_TARGET_KIND = "temporary_no_deps_install"
 PACKAGE_IMPORT_MODULE = "quant_research_platform"
-
-
-def allowed_keys(specs: Mapping[str, FieldSpec]) -> frozenset[str]:
-    return frozenset(specs)
 
 
 def validate_receipt_payload(name: str, payload: Mapping[str, object]) -> list[str]:

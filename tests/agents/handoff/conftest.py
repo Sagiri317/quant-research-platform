@@ -274,14 +274,16 @@ def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
         names = sorted(
             name for name in archive.namelist() if name != "artifact_manifest.json"
         )
-        entries = [
-            {
-                "path": name,
-                "size": len(archive.read(name)),
-                "sha256": hashlib.sha256(archive.read(name)).hexdigest(),
-            }
-            for name in names
-        ]
+        entries = []
+        for name in names:
+            raw = archive.read(name)
+            entries.append(
+                {
+                    "path": name,
+                    "size": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                }
+            )
     manifest = {
         "schema_id": "qrp-handoff-artifact-manifest",
         "entries": entries,

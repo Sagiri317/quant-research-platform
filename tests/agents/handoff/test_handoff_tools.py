@@ -15,7 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallbac
 
 def _load_verifier_for_scanner_tests():
     module = _load_handoff_module("verify_handoff_package")
-    module.scan_git_bundle = lambda raw, *, name: module.HandoffSafetyResult((), 0, 0)
+    module.scan_git_bundle = lambda raw, *, name: module.HandoffSafetyResult(())
 
     def scan_target(path, allow_nested_packages=False):
         target = Path(path)
@@ -131,8 +131,10 @@ def test_handoff_package_verifier_rejects_data_research_members_and_paths(
     result = module.scan_handoff_zip(package)
 
     assert not result.ok
-    assert "forbidden_path_segment" in result.failures
-    assert "forbidden_path_segment: data/research" in result.failures
+    assert (
+        "forbidden_path_segment: data/research: "
+        "data/research/a_share/demo/manifest.json"
+    ) in result.failures
 
 
 @pytest.mark.parametrize(
@@ -155,7 +157,7 @@ def test_handoff_package_verifier_rejects_local_run_members(
     result = module.scan_handoff_zip(package)
 
     assert not result.ok
-    assert "forbidden_path_segment" in result.failures
+    assert f"forbidden_path_segment: {member}" in result.failures
 
 
 @pytest.mark.parametrize(
