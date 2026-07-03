@@ -43,7 +43,7 @@ git branch -a
 
 `.agents` handoff verifier 必须校验正式 handoff 的 REVIEW_SAFE evidence 完整性，并拒绝 status-only 摘要。handoff package layout、sidecar shape、task metadata shape 和 validation summary 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有；receipt schema、receipt invariant 和 receipt 聚合由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有；governance scan、source-tree scan、共享安全路径和 status token 规则由 `governance_contract.py` 拥有。handoff 使用 compact replayable receipts：machine validation 只来自 REVIEW_SAFE replay-backed receipts；private/local 检查不得支撑 machine validation `PASS`，无法公开复验时在 reviewer evidence 或 final report 中诚实记录 `NOT_RUN` 或 `BLOCKED`。当前 validation 状态由 builder 从 receipts 派生为 `handoff_evidence/validation-summary.json`。Codex 不应手写 handoff evidence，也不应把 raw grep output、完整 pytest log、完整 stdout/stderr、wheel、sdist、完整 subagent transcript 或本地临时安装目录打入 handoff。
 
-package smoke 由 wheel 解压后的 `PYTHONPATH` import smoke 定义。`profile_smoke` validation row 的 replay command 是正式 profile runner 的 `profile-smoke` profile。
+package smoke 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`；构建后端依赖由 `environment.yml` 显式提供。package smoke 由 wheel 解压后的 `PYTHONPATH` import smoke 定义。`profile_smoke` validation row 的 replay command 是正式 profile runner 的 `profile-smoke` profile。
 
 `.run/` 只是 output layer 和 evidence layer。它可以保存运行产物、handoff zip、manifest、logs、reports、temporary evidence，但不能反向定义架构、合同、工具入口或当前状态。
 

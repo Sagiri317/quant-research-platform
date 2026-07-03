@@ -28,14 +28,16 @@ from governance_contract import source_tree_scan_groups  # noqa: E402
 from handoff_contract import (  # noqa: E402
     CHECK_RECEIPTS_ENTRY,
     HARD_SCAN_RECEIPT_ENTRY,
+    PACKAGE_BUILD_TIMEOUT_SECONDS,
+    PACKAGE_IMPORT_TIMEOUT_SECONDS,
     PACKAGE_SMOKE_RECEIPT_ENTRY,
+    aggregate_handoff_status,
     replay_command_spec,
 )
 from receipt_contract import (  # noqa: E402
     COUNT_FIELDS,
     PACKAGE_ARTIFACT_KINDS,
     PACKAGE_IMPORT_MODULE,
-    PACKAGE_SCANNED_ARTIFACT_KINDS,
     PACKAGE_WHEEL_EXTRACT_METHOD,
     normalize_hard_scan_receipt,
     normalize_package_smoke_receipt,
@@ -57,7 +59,7 @@ def build_replayed_check_receipts(repo_root: Path) -> dict[str, object]:
         _run_replay_command(repo_root, "profile-smoke"),
         _run_replay_command(repo_root, "code-map"),
     ]
-    status = _aggregate_status([str(row["status"]) for row in rows])
+    status = aggregate_handoff_status(str(row["status"]) for row in rows)
     payload = {
         "schema_id": "qrp-check-receipts",
         "status": status,
@@ -286,15 +288,21 @@ def _build_replayed_package_smoke_receipt(repo_root: Path) -> dict[str, object]:
         build_status, wheel_path, sdist_path = _build_package_artifacts(repo_root, dist)
         extract_status = "NOT_RUN"
         import_status = "NOT_RUN"
+        content_status = "NOT_RUN"
+        forbidden: list[str] = []
+        scanned_artifact_kinds: list[str] = []
         if build_status == "PASS" and wheel_path is not None:
             extract_status, import_status = _extract_wheel_smoke_target(
                 repo_root,
                 wheel_path,
                 wheel_extract,
             )
-        forbidden = _scan_package_artifacts(wheel_path, sdist_path, wheel_extract)
-        content_status = "PASS" if not forbidden else "FAIL"
-        status = _aggregate_status(
+        if build_status == "PASS" and extract_status == "PASS":
+            forbidden, scanned_artifact_kinds = _scan_package_artifacts(
+                wheel_path, sdist_path, wheel_extract
+            )
+            content_status = "PASS" if not forbidden else "FAIL"
+        status = aggregate_handoff_status(
             [build_status, extract_status, import_status, content_status]
         )
         return {
@@ -302,7 +310,9 @@ def _build_replayed_package_smoke_receipt(repo_root: Path) -> dict[str, object]:
             "status": status,
             "build": {
                 "status": build_status,
-                "artifact_kinds": list(PACKAGE_ARTIFACT_KINDS),
+                "artifact_kinds": list(PACKAGE_ARTIFACT_KINDS)
+                if build_status == "PASS"
+                else [],
             },
             "wheel_extract": {
                 "method": PACKAGE_WHEEL_EXTRACT_METHOD,
@@ -315,7 +325,7 @@ def _build_replayed_package_smoke_receipt(repo_root: Path) -> dict[str, object]:
             "content_scan": {
                 "status": content_status,
                 "forbidden_member_count": len(forbidden),
-                "scanned_artifact_kinds": list(PACKAGE_SCANNED_ARTIFACT_KINDS),
+                "scanned_artifact_kinds": scanned_artifact_kinds,
             },
         }
 
@@ -324,23 +334,28 @@ def _build_package_artifacts(
     repo_root: Path,
     dist: Path,
 ) -> tuple[str, Path | None, Path | None]:
-    build = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "build",
-            "--sdist",
-            "--wheel",
-            "--outdir",
-            str(dist),
-        ],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        build = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "build",
+                "--no-isolation",
+                "--sdist",
+                "--wheel",
+                "--outdir",
+                str(dist),
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=PACKAGE_BUILD_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return "BLOCKED", None, None
     wheel_path, wheel_ok = _select_single_artifact(dist, "*.whl")
     sdist_path, sdist_ok = _select_single_artifact(dist, "*.tar.gz")
     build_status = "PASS" if build.returncode == 0 and wheel_ok and sdist_ok else "FAIL"
@@ -364,20 +379,28 @@ def _extract_wheel_smoke_target(
         return "FAIL", "NOT_RUN"
     env = os.environ.copy()
     env["PYTHONPATH"] = str(target)
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            f"import {PACKAGE_IMPORT_MODULE}; print({PACKAGE_IMPORT_MODULE}.__name__)",
-        ],
-        cwd=repo_root,
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        probe_code = (
+            f"import {PACKAGE_IMPORT_MODULE}; "
+            f"print({PACKAGE_IMPORT_MODULE}.__name__)"
+        )
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                probe_code,
+            ],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=PACKAGE_IMPORT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return "PASS", "BLOCKED"
     return "PASS", "PASS" if probe.returncode == 0 else "FAIL"
 
 
@@ -385,12 +408,19 @@ def _scan_package_artifacts(
     wheel_path: Path | None,
     sdist_path: Path | None,
     wheel_extract: Path,
-) -> list[str]:
-    return [
-        *_archive_content_scan(wheel_path, "wheel"),
-        *_archive_content_scan(sdist_path, "sdist"),
-        *_wheel_extract_content_scan(wheel_extract),
-    ]
+) -> tuple[list[str], list[str]]:
+    findings: list[str] = []
+    scanned_artifact_kinds: list[str] = []
+    if wheel_path is not None:
+        findings.extend(_archive_content_scan(wheel_path, "wheel"))
+        scanned_artifact_kinds.append("wheel")
+    if sdist_path is not None:
+        findings.extend(_archive_content_scan(sdist_path, "sdist"))
+        scanned_artifact_kinds.append("sdist")
+    if wheel_extract.exists():
+        findings.extend(_wheel_extract_content_scan(wheel_extract))
+        scanned_artifact_kinds.append("wheel_extract")
+    return findings, scanned_artifact_kinds
 
 
 def _select_single_artifact(root: Path, pattern: str) -> tuple[Path | None, bool]:
@@ -429,16 +459,6 @@ def _archive_content_scan(path: Path | None, artifact_kind: str) -> list[str]:
                 and Path(member.name).suffix.lower() in FORBIDDEN_PACKAGE_SUFFIXES
             ]
     return []
-
-
-def _aggregate_status(statuses: list[str]) -> str:
-    if "FAIL" in statuses:
-        return "FAIL"
-    if "BLOCKED" in statuses:
-        return "BLOCKED"
-    if "NOT_RUN" in statuses:
-        return "NOT_RUN"
-    return "PASS"
 
 
 def _git_text(repo: Path, *args: str) -> str:

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=80,<81", "wheel>=0.45,<1"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "quant-research-platform"
 version = "0.1.0"

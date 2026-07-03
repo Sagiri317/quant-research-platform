@@ -78,6 +78,58 @@ def test_verifier_rejects_self_consistent_failed_validation_summary(
     assert "validation_summary_row_not_pass:profile_smoke:FAIL" in failures
 
 
+@pytest.mark.integration
+def test_verifier_rejects_self_consistent_blocked_package_smoke_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    with zipfile.ZipFile(package) as archive:
+        package_smoke = json.loads(
+            archive.read("handoff_evidence/package-smoke-receipt.json").decode("utf-8")
+        )
+        validation_summary = json.loads(
+            archive.read("handoff_evidence/validation-summary.json").decode("utf-8")
+        )
+    package_smoke["status"] = "BLOCKED"
+    package_smoke["build"] = {"status": "BLOCKED", "artifact_kinds": []}
+    package_smoke["wheel_extract"] = {
+        "status": "NOT_RUN",
+        "method": "zipfile_extract",
+    }
+    package_smoke["import"] = {
+        "status": "NOT_RUN",
+        "module": "quant_research_platform",
+    }
+    package_smoke["content_scan"] = {
+        "status": "NOT_RUN",
+        "forbidden_member_count": 0,
+        "scanned_artifact_kinds": [],
+    }
+    for row in validation_summary["rows"]:
+        if row["name"] == "package_smoke":
+            row["status"] = "BLOCKED"
+    validation_summary["status"] = "BLOCKED"
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/package-smoke-receipt.json",
+        (json.dumps(package_smoke, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/validation-summary.json",
+        (json.dumps(validation_summary, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _refresh_manifest_and_sidecar(package, sidecar)
+    monkeypatch.setattr(verifier, "verify_bundle_and_replay_once", lambda *_: ([], []))
+
+    failures = verifier.verify_handoff_package_result(package, sidecar).failures
+
+    assert "validation_summary_row_not_pass:package_smoke:BLOCKED" in failures
+
+
 def test_receipt_contract_rejects_status_only_package_smoke_receipt() -> None:
     contract = _load_handoff_module("receipt_contract")
 

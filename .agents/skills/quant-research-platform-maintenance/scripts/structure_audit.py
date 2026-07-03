@@ -8,6 +8,7 @@ import importlib.util
 import json
 import re
 import sys
+import tomllib
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -101,6 +102,11 @@ def run_audit(repo_root: Path) -> tuple[AuditCheck, ...]:
         _profile_smoke_is_lightweight(repo_root),
         _no_executable_pip_package_command(repo_root),
         _package_smoke_schema_closed(repo_root),
+        _package_build_no_isolation(repo_root),
+        _package_build_timeout(repo_root),
+        _package_import_timeout(repo_root),
+        _conda_build_backend_contract(repo_root),
+        _package_content_scan_truthfulness(repo_root),
         _verifier_has_no_root_wide_exemptions(repo_root),
         _mandatory_validation_all_pass_gate(repo_root),
         _synthetic_fixture_profile_runner(repo_root),
@@ -190,6 +196,101 @@ def _package_smoke_schema_closed(repo_root: Path) -> AuditCheck:
     )
     findings = tuple(token for token in retired_tokens if token in combined)
     return _check("package_smoke_wheel_extract_only", findings)
+
+
+def _package_build_no_isolation(repo_root: Path) -> AuditCheck:
+    replay = _handoff_file_text(repo_root, "replay_evidence.py")
+    findings: list[str] = []
+    if "--no-isolation" not in replay:
+        findings.append("replay_evidence:package_build_missing_no_isolation")
+    if "--installer" in replay:
+        findings.append("replay_evidence:package_build_forbidden_installer")
+    if "--skip-dependency-check" in replay:
+        findings.append(
+            "replay_evidence:package_build_forbidden_skip_dependency_check"
+        )
+    return _check("package_build_no_isolation", tuple(findings))
+
+
+def _package_build_timeout(repo_root: Path) -> AuditCheck:
+    replay = _handoff_file_text(repo_root, "replay_evidence.py")
+    contract = _handoff_file_text(repo_root, "handoff_contract.py")
+    findings: list[str] = []
+    if "PACKAGE_BUILD_TIMEOUT_SECONDS" not in contract:
+        findings.append("handoff_contract:package_build_timeout_constant_missing")
+    if "timeout=PACKAGE_BUILD_TIMEOUT_SECONDS" not in replay:
+        findings.append("replay_evidence:package_build_timeout_constant_not_used")
+    return _check("package_build_timeout", tuple(findings))
+
+
+def _package_import_timeout(repo_root: Path) -> AuditCheck:
+    replay = _handoff_file_text(repo_root, "replay_evidence.py")
+    contract = _handoff_file_text(repo_root, "handoff_contract.py")
+    findings: list[str] = []
+    if "PACKAGE_IMPORT_TIMEOUT_SECONDS" not in contract:
+        findings.append("handoff_contract:package_import_timeout_constant_missing")
+    if "timeout=PACKAGE_IMPORT_TIMEOUT_SECONDS" not in replay:
+        findings.append("replay_evidence:package_import_timeout_constant_not_used")
+    return _check("package_import_timeout", tuple(findings))
+
+
+def _conda_build_backend_contract(repo_root: Path) -> AuditCheck:
+    pyproject_path = repo_root / "pyproject.toml"
+    environment_path = repo_root / "environment.yml"
+    findings: list[str] = []
+    if not pyproject_path.exists():
+        return _check("conda_build_backend_contract", ("pyproject.toml:missing",))
+    if not environment_path.exists():
+        return _check("conda_build_backend_contract", ("environment.yml:missing",))
+    with pyproject_path.open("rb") as handle:
+        pyproject = tomllib.load(handle)
+    build_requires = _dependency_specs(
+        pyproject.get("build-system", {}).get("requires", [])
+    )
+    dev = _dependency_specs(
+        pyproject.get("project", {})
+        .get("optional-dependencies", {})
+        .get("dev", [])
+    )
+    environment_specs = _environment_dependency_specs(
+        environment_path.read_text(encoding="utf-8")
+    )
+    if "build" not in dev:
+        findings.append("pyproject.toml:missing_dev_dependency:build")
+    if "python-build" not in environment_specs:
+        findings.append("environment.yml:missing_build_frontend:python-build")
+    for package_name in ("setuptools", "wheel"):
+        if package_name not in build_requires:
+            findings.append(
+                f"pyproject.toml:missing_build_backend_dependency:{package_name}"
+            )
+            continue
+        if package_name not in environment_specs:
+            findings.append(
+                f"environment.yml:missing_build_backend_dependency:{package_name}"
+            )
+            continue
+        if not _conda_spec_is_same_or_stricter(
+            environment_specs[package_name], build_requires[package_name]
+        ):
+            findings.append(
+                f"environment.yml:loose_build_backend_dependency:{package_name}"
+            )
+    return _check("conda_build_backend_contract", tuple(findings))
+
+
+def _package_content_scan_truthfulness(repo_root: Path) -> AuditCheck:
+    replay = _handoff_file_text(repo_root, "replay_evidence.py")
+    findings: list[str] = []
+    if "content_status = \"NOT_RUN\"" not in replay:
+        findings.append("replay_evidence:content_scan_not_run_guard_missing")
+    if "if build_status == \"PASS\"" not in replay:
+        findings.append("replay_evidence:content_scan_build_pass_guard_missing")
+    if "\"scanned_artifact_kinds\": scanned_artifact_kinds" not in replay:
+        findings.append("replay_evidence:content_scan_actual_scanned_kinds_missing")
+    if "list(PACKAGE_SCANNED_ARTIFACT_KINDS)" in replay:
+        findings.append("replay_evidence:content_scan_fixed_scanned_kinds")
+    return _check("package_content_scan_truthfulness", tuple(findings))
 
 
 def _verifier_has_no_root_wide_exemptions(repo_root: Path) -> AuditCheck:
@@ -399,6 +500,47 @@ def _handoff_source(repo_root: Path) -> str:
         path.read_text(encoding="utf-8", errors="ignore")
         for path in (repo_root / HANDOFF_ROOT).glob("*.py")
     )
+
+
+def _handoff_file_text(repo_root: Path, name: str) -> str:
+    return (repo_root / HANDOFF_ROOT / name).read_text(
+        encoding="utf-8", errors="ignore"
+    )
+
+
+def _environment_dependency_specs(text: str) -> dict[str, str]:
+    specs: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        spec = stripped[2:].strip()
+        if not spec or spec in {"conda-forge", "nodefaults"}:
+            continue
+        name = re.split(r"[<>=!~; ]", spec, maxsplit=1)[0]
+        specs[name] = spec
+    return specs
+
+
+def _dependency_specs(items: Iterable[str]) -> dict[str, str]:
+    specs: dict[str, str] = {}
+    for item in items:
+        name = re.split(r"[<>=!~; ]", str(item), maxsplit=1)[0]
+        specs[name] = str(item)
+    return specs
+
+
+def _conda_spec_is_same_or_stricter(conda_spec: str, pyproject_spec: str) -> bool:
+    pyproject_bounds = _bounds(pyproject_spec)
+    conda_bounds = _bounds(conda_spec)
+    return bool(pyproject_bounds) and pyproject_bounds <= conda_bounds
+
+
+def _bounds(spec: str) -> set[tuple[str, str]]:
+    return {
+        (operator, version)
+        for operator, version in re.findall(r"(>=|<=|<|>|==)\s*([0-9][^,;\s]*)", spec)
+    }
 
 
 def _load_module(path: Path):

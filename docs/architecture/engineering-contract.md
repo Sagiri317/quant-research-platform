@@ -6,7 +6,7 @@
 
 项目合同以 `pyproject.toml` 和 `environment.yml` 为准。文档不写用户本地解释器路径、个人环境路径或固定 conda 环境名。本地依赖、构建、测试和验证只使用 conda；环境名从 `environment.yml` 动态读取。无法满足环境时写 `BLOCKED`。
 
-如果 `pyproject.toml` dev dependencies 包含 `build`，`environment.yml` 必须包含对应 conda 包 `python-build`。package smoke 不执行安装，只允许 wheel 解压后通过 `PYTHONPATH` import smoke。
+如果 `pyproject.toml` dev dependencies 包含 `build`，`environment.yml` 必须包含对应 conda 包 `python-build`。`pyproject.toml` 必须显式声明 `[build-system]`，且 `environment.yml` 必须显式提供对应构建后端依赖。package smoke 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`；package smoke 不执行安装，只允许 wheel 解压后通过 `PYTHONPATH` import smoke。
 
 ## 运行与验证
 

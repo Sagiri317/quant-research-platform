@@ -240,9 +240,16 @@ REPLAY_COMMAND_CONTRACT = {
     ),
 }
 
+PACKAGE_BUILD_TIMEOUT_SECONDS = 300
+PACKAGE_IMPORT_TIMEOUT_SECONDS = 120
+
 
 def allowed_keys(specs: Mapping[str, FieldSpec]) -> frozenset[str]:
     return frozenset(specs)
+
+
+def aggregate_handoff_status(statuses: Iterable[str]) -> str:
+    return _aggregate_validation_matrix_status(list(statuses))
 
 
 def validate_handoff_package_layout(names: Iterable[str]) -> list[str]:
@@ -356,7 +363,7 @@ def validate_validation_summary_contract(
     if summary_status not in VALID_STATUS_TOKENS:
         failures.append(f"validation_summary_status_invalid: {summary_status}")
     elif statuses:
-        expected = _aggregate_validation_matrix_status(statuses)
+        expected = aggregate_handoff_status(statuses)
         if summary_status != expected:
             failures.append(
                 f"validation_summary_status_mismatch: {summary_status}!={expected}"
@@ -394,9 +401,7 @@ def build_validation_summary_from_receipts(
     ]
     payload: dict[str, object] = {
         "schema_id": "qrp-handoff-validation-summary",
-        "status": _aggregate_validation_matrix_status(
-            [str(row["status"]) for row in rows]
-        ),
+        "status": aggregate_handoff_status(str(row["status"]) for row in rows),
         "rows": rows,
     }
     failures = validate_validation_summary_contract(payload)
@@ -440,7 +445,7 @@ def mandatory_validation_failures(
     if summary_status not in VALID_STATUS_TOKENS:
         failures.append(f"validation_summary_status_unknown:{summary_status}")
     elif observed_statuses:
-        expected = _aggregate_validation_matrix_status(observed_statuses)
+        expected = aggregate_handoff_status(observed_statuses)
         if summary_status != expected:
             failures.append(
                 f"validation_summary_status_mismatch:{summary_status}!={expected}"

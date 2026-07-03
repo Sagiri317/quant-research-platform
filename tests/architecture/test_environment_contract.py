@@ -47,6 +47,11 @@ DEV_DEPENDENCIES = {
 PYPROJECT_TO_CONDA_DEV_PACKAGES = {
     "build": "python-build",
 }
+BUILD_SYSTEM_TO_CONDA_PACKAGES = {
+    "build": "python-build",
+    "setuptools": "setuptools",
+    "wheel": "wheel",
+}
 PRIVATE_DEPENDENCY_TOKENS = (
     ".run/",
     ".run\\",
@@ -98,6 +103,42 @@ def test_pyproject_dev_dependencies_have_conda_environment_packages() -> None:
     }
 
     assert missing == {}
+
+
+def test_build_system_requires_conda_managed_frontend_and_backend() -> None:
+    pyproject = _load_pyproject()
+    environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
+    conda_specs = _environment_dependency_specs(environment)
+    build_system_requires = _dependency_specs(pyproject["build-system"]["requires"])
+    dev = _dependency_specs(pyproject["project"]["optional-dependencies"]["dev"])
+
+    missing = {}
+    if "build" not in dev or "python-build" not in conda_specs:
+        missing["build"] = "python-build"
+    missing.update(
+        {
+            pyproject_name: conda_name
+            for pyproject_name, conda_name in BUILD_SYSTEM_TO_CONDA_PACKAGES.items()
+            if pyproject_name != "build"
+            and (
+                pyproject_name not in build_system_requires
+                or conda_name not in conda_specs
+            )
+        }
+    )
+    loose_bounds = {
+        pyproject_name: conda_name
+        for pyproject_name, conda_name in BUILD_SYSTEM_TO_CONDA_PACKAGES.items()
+        if pyproject_name in build_system_requires
+        and conda_name in conda_specs
+        and not _conda_spec_is_same_or_stricter(
+            conda_specs[conda_name], build_system_requires[pyproject_name]
+        )
+    }
+
+    assert "build" in dev
+    assert missing == {}
+    assert loose_bounds == {}
 
 
 def test_engineering_contract_points_to_executable_environment_contracts() -> None:
@@ -221,7 +262,11 @@ def _environment_name(text: str) -> str:
 
 
 def _environment_dependency_names(text: str) -> set[str]:
-    names: set[str] = set()
+    return set(_environment_dependency_specs(text))
+
+
+def _environment_dependency_specs(text: str) -> dict[str, str]:
+    specs: dict[str, str] = {}
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped.startswith("- "):
@@ -229,8 +274,9 @@ def _environment_dependency_names(text: str) -> set[str]:
         spec = stripped[2:].strip()
         if not spec or spec in {"conda-forge", "nodefaults"}:
             continue
-        names.add(re.split(r"[<>=!~; ]", spec, maxsplit=1)[0])
-    return names
+        name = re.split(r"[<>=!~; ]", spec, maxsplit=1)[0]
+        specs[name] = spec
+    return specs
 
 
 def _dependency_specs(items: list[str]) -> dict[str, str]:
@@ -247,6 +293,24 @@ def _unbounded(specs: dict[str, str]) -> list[str]:
         for name, spec in specs.items()
         if ">=" not in spec or "<" not in spec
     )
+
+
+def _conda_spec_is_same_or_stricter(conda_spec: str, pyproject_spec: str) -> bool:
+    pyproject_bounds = _bounds(pyproject_spec)
+    conda_bounds = _bounds(conda_spec)
+    if not pyproject_bounds:
+        return False
+    for operator, version in pyproject_bounds:
+        if (operator, version) not in conda_bounds:
+            return False
+    return True
+
+
+def _bounds(spec: str) -> set[tuple[str, str]]:
+    return {
+        (operator, version)
+        for operator, version in re.findall(r"(>=|<=|<|>|==)\s*([0-9][^,;\s]*)", spec)
+    }
 
 
 def _code_blocks(text: str) -> list[str]:

@@ -143,7 +143,7 @@ def _write_minimal_project_files(repo: Path) -> None:
         "\n".join(
             [
                 "[build-system]",
-                'requires = ["setuptools>=80"]',
+                'requires = ["setuptools>=80,<81", "wheel>=0.45,<1"]',
                 'build-backend = "setuptools.build_meta"',
                 "",
                 "[project]",

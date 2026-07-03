@@ -16,6 +16,8 @@ dependencies:
   - uvicorn>=0.49,<1
   - pytest>=9,<10
   - python-build>=1.5,<2
+  - setuptools>=80,<81
+  - wheel>=0.45,<1
   - ruff>=0.15,<0.16
   - pytest-cov>=7,<8
   - coverage>=7.14,<8

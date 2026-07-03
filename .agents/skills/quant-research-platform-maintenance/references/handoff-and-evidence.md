@@ -23,7 +23,7 @@ tracked handoff tooling 位于：
 - `replay_evidence.py` 执行 public machine replay，并构造 canonical
   receipts；hard-scan receipt 由
   `governance_contract.source_tree_scan_groups()` 的扫描结果构造。
-  package smoke 只通过 wheel 解压和 `PYTHONPATH` import smoke 构造，不执行安装。
+  package smoke 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`；构建后端依赖由 `environment.yml` 显式提供。package smoke 只通过 wheel 解压和 `PYTHONPATH` import smoke 构造，不执行安装。
 - `verify_handoff_package.py` 是 package trust boundary。
   `verify_handoff_package_result()` 是唯一 package-level verifier function。
   verifier result path 只做一次 zip inspection，且需要 replay 时只 clone

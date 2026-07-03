@@ -193,3 +193,56 @@ def test_builder_fails_when_replayed_validation_row_is_not_pass(
         "validation_summary_row_not_pass:profile_smoke:FAIL"
         in result["verify_failures"]
     )
+
+
+def test_builder_fails_when_package_smoke_timeout_blocks_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_handoff_repo(repo)
+    builder = _load_handoff_module("build_handoff_package")
+    receipts = builder.build_machine_receipts(
+        repo, _git(repo, "rev-parse", "HEAD").strip()
+    )
+    package_smoke = receipts[builder.PACKAGE_SMOKE_RECEIPT_ENTRY]
+    package_smoke["status"] = "BLOCKED"
+    package_smoke["build"] = {"status": "BLOCKED", "artifact_kinds": []}
+    package_smoke["wheel_extract"] = {
+        "status": "NOT_RUN",
+        "method": "zipfile_extract",
+    }
+    package_smoke["import"] = {
+        "status": "NOT_RUN",
+        "module": "quant_research_platform",
+    }
+    package_smoke["content_scan"] = {
+        "status": "NOT_RUN",
+        "forbidden_member_count": 0,
+        "scanned_artifact_kinds": [],
+    }
+
+    class Verification:
+        ok = True
+        zip_sha256 = "0" * 64
+        handoff_package_verify_status = "PASS"
+        share_safety_status = "PASS"
+        failures: tuple[str, ...] = ()
+
+    monkeypatch.setattr(builder, "build_machine_receipts", lambda *_: receipts)
+    monkeypatch.setattr(
+        builder, "verify_handoff_package_result", lambda *_: Verification()
+    )
+
+    result = builder.build_handoff_package(
+        repo_root=repo,
+        out_dir=tmp_path / "out",
+        task_name="handoff-test",
+        base_ref="origin/main",
+    )
+
+    assert result["ok"] is False
+    assert (
+        "validation_summary_row_not_pass:package_smoke:BLOCKED"
+        in result["verify_failures"]
+    )

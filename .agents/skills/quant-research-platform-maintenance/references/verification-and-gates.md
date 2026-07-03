@@ -79,13 +79,14 @@ verifier result path。standalone verifier CLI 保留，但不是额外 Python w
 以 executable contracts、`verify_handoff_package.py` 和 `replay_evidence.py` 为准。
 `verify_governance.py` 只运行 governance checks，不写 handoff receipts。
 
-package smoke receipt 使用 `wheel_extract` 语义：`python -m build` 产出 wheel 后，用标准库解压 wheel，并通过 `PYTHONPATH` 执行 import smoke。`profile_smoke` row 来自正式 profile runner 的 `profile-smoke` profile。
+package smoke receipt 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`。构建后端依赖由 `environment.yml` 显式提供；构建产出 wheel 后，用标准库解压 wheel，并通过 `PYTHONPATH` 执行 import smoke。`profile_smoke` row 来自正式 profile runner 的 `profile-smoke` profile。
 
 结构性审计 gate：
 
 ```bash
 conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py --repo-root . --json
 ```
+该 gate 覆盖 package build 必须使用 `--no-isolation`、不得使用 installer 或 skip-dependency fallback、package build/import subprocess timeout、build-system 到 conda backend dependency 映射，以及 content_scan 失败路径不得伪造 `PASS`。
 
 ### Code-map gate
 

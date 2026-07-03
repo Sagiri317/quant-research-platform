@@ -14,7 +14,7 @@ QRP 的治理目标是让 agent 能在最少上下文下正确执行，并通过
 8. 边界回归由 owner-layer negative tests 和精确 allowlist 控制。
 9. QRP-owned JSON 必须使用不带版本后缀的 `schema_id`。
 10. 状态聚合唯一 owner 是 `policy/check_status.py`。
-11. 本地验证、构建和测试只使用 conda；package smoke 只表示 wheel 解压后的 import smoke。
+11. 本地验证、构建和测试只使用 conda；package smoke 使用 `python -m build --no-isolation --sdist --wheel --outdir <dist>`，构建后端依赖由 `environment.yml` 显式提供，并且只表示 wheel 解压后的 import smoke。
 
 ## Agent 文件分层
 
@@ -45,7 +45,7 @@ templates/     机器输入模板
 - handoff gate：检查 builder、verifier、source-tree scan 和 share-safety。
 - handoff evidence gate：检查 required evidence 存在、结构完整且不是 status-only。
 - validation all-PASS gate：正式 handoff 只有在 mandatory validation rows 全部为 `PASS` 时才成立；`FAIL`、`NOT_RUN`、`BLOCKED`、缺失、重复或未知状态都必须让 builder 和 verifier 失败。
-- structure audit gate：检查 profile scope、handoff smoke、pip 禁令、scanner 覆盖、test owner placement 和 retired helper 引用。
+- structure audit gate：检查 profile scope、handoff smoke、non-isolated package build、package timeout、conda build backend、content scan truthfulness、pip 禁令、scanner 覆盖、test owner placement 和 retired helper 引用。
 - internal API gate：检查 owner-local internal API 和 private module 边界。
 - test placement gate：检查 tests 位于对应 owner 目录。
 - test gate：检查当前合同测试。

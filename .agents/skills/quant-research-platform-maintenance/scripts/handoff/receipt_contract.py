@@ -10,32 +10,14 @@ from collections.abc import Mapping
 from pathlib import Path
 
 try:
-    from quant_research_platform.policy.check_status import (
-        VALID_STATUS_TOKENS,
-    )
-    from quant_research_platform.policy.check_status import (
-        aggregate_validation_matrix_status as _aggregate_validation_matrix_status,
-    )
-except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit src.
-    VALID_STATUS_TOKENS = frozenset({"PASS", "FAIL", "NOT_RUN", "BLOCKED"})
-
-    def _aggregate_validation_matrix_status(statuses: list[str]) -> str:
-        if "FAIL" in statuses:
-            return "FAIL"
-        if "BLOCKED" in statuses:
-            return "BLOCKED"
-        if "NOT_RUN" in statuses:
-            return "NOT_RUN"
-        return "PASS"
-
-
-try:
     from handoff_contract import (
         CHECK_RECEIPTS_ENTRY,
         HARD_SCAN_RECEIPT_ENTRY,
         PACKAGE_SMOKE_RECEIPT_ENTRY,
+        VALID_STATUS_TOKENS,
         FieldSpec,
         ProofClass,
+        aggregate_handoff_status,
         allowed_keys,
         replay_command_spec,
     )
@@ -44,8 +26,10 @@ except ModuleNotFoundError:  # pragma: no cover - package import fallback.
         CHECK_RECEIPTS_ENTRY,
         HARD_SCAN_RECEIPT_ENTRY,
         PACKAGE_SMOKE_RECEIPT_ENTRY,
+        VALID_STATUS_TOKENS,
         FieldSpec,
         ProofClass,
+        aggregate_handoff_status,
         allowed_keys,
         replay_command_spec,
     )
@@ -192,7 +176,12 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
         _append_step_status(
             build.get("status"), step_statuses, failures, "package_smoke_build"
         )
-        if list(build.get("artifact_kinds") or []) != list(PACKAGE_ARTIFACT_KINDS):
+        artifact_kinds = list(build.get("artifact_kinds") or [])
+        if build.get("status") == "PASS":
+            expected_artifact_kinds = list(PACKAGE_ARTIFACT_KINDS)
+        else:
+            expected_artifact_kinds = []
+        if artifact_kinds != expected_artifact_kinds:
             failures.append("package_smoke_artifact_kinds_invalid")
     wheel_extract = payload.get("wheel_extract")
     if not isinstance(wheel_extract, Mapping):
@@ -247,14 +236,29 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
             failures.append("package_smoke_forbidden_member_count_invalid")
         elif count > 0 and scan_status == "PASS":
             failures.append("package_smoke_content_scan_forbidden_members_mismatch")
-        if list(scan.get("scanned_artifact_kinds") or []) != list(
-            PACKAGE_SCANNED_ARTIFACT_KINDS
-        ):
+        scanned_artifact_kinds = list(scan.get("scanned_artifact_kinds") or [])
+        build_status = build.get("status") if isinstance(build, Mapping) else None
+        extract_status = (
+            wheel_extract.get("status") if isinstance(wheel_extract, Mapping) else None
+        )
+        if build_status == "PASS" and extract_status == "PASS":
+            expected_scanned_artifact_kinds = list(PACKAGE_SCANNED_ARTIFACT_KINDS)
+            if scan_status == "NOT_RUN":
+                failures.append("package_smoke_content_scan_run_required")
+        else:
+            expected_scanned_artifact_kinds = []
+            if (
+                scan_status != "NOT_RUN"
+                or count != 0
+                or scanned_artifact_kinds != []
+            ):
+                failures.append("package_smoke_content_scan_not_run_required")
+        if scanned_artifact_kinds != expected_scanned_artifact_kinds:
             failures.append("package_smoke_scanned_artifact_kinds_invalid")
     if (
         step_statuses
         and payload.get("status") in VALID_STATUS_TOKENS
-        and payload.get("status") != _aggregate_validation_matrix_status(step_statuses)
+        and payload.get("status") != aggregate_handoff_status(step_statuses)
     ):
         failures.append("package_smoke_status_mismatch")
     return failures
@@ -299,9 +303,7 @@ def validate_hard_scan_receipt(payload: Mapping[str, object]) -> list[str]:
                 statuses.append("FAIL")
             else:
                 statuses.append("PASS")
-    if statuses and payload.get("status") != _aggregate_validation_matrix_status(
-        statuses
-    ):
+    if statuses and payload.get("status") != aggregate_handoff_status(statuses):
         failures.append("hard_scan_status_mismatch")
     return failures
 
@@ -341,9 +343,7 @@ def validate_check_receipts(payload: Mapping[str, object]) -> list[str]:
     failures.extend(
         f"check_receipts_unapproved_command: {command_id}" for command_id in extra
     )
-    if statuses and payload.get("status") != _aggregate_validation_matrix_status(
-        statuses
-    ):
+    if statuses and payload.get("status") != aggregate_handoff_status(statuses):
         failures.append("check_receipts_status_mismatch")
     return failures
 
