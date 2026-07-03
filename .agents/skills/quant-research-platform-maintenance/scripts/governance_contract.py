@@ -454,7 +454,6 @@ RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {
 }
 SOURCE_TREE_RETIRED_TEXT_NEGATIVE_TEST_SOURCES = {
     Path("tests/agents/test_verify_governance.py"),
-    Path("tests/architecture/test_governance_active_docs.py"),
     Path("tests/architecture/test_governance_profile_runner_contract.py"),
     Path("tests/architecture/test_governance_source_tree_scan_contract.py"),
     Path("tests/architecture/test_handoff_contract_single_source.py"),
@@ -1304,72 +1303,6 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
     ),
 )
 
-SOURCE_TREE_ALLOWED_OCCURRENCES += (
-    _source_tree_allowed_occurrence(
-        path=Path("tests/architecture/test_governance_active_docs.py"),
-        rule_id="retired_text:retired_result_run_level_path",
-        exact_line='assert rule.search("summary.json")',
-        owner="architecture-governance-negative-tests",
-        rationale=(
-            "negative test proves the retired result path rule still catches "
-            "the exact summary JSON filename"
-        ),
-        lifecycle=(
-            "current negative fixture; remove if run-level retired path rule "
-            "changes"
-        ),
-        covered_by=(
-            "tests/architecture/test_governance_active_docs.py::"
-            "test_retired_run_level_path_rule_ignores_validation_summary_substring",
-        ),
-        py_owner=(
-            "def:test_retired_run_level_path_rule_ignores_validation_summary_substring"
-        ),
-    ),
-    _source_tree_allowed_occurrence(
-        path=Path("tests/architecture/test_governance_active_docs.py"),
-        rule_id="retired_text:retired_result_run_level_path",
-        exact_line='assert rule.search("run/summary.json")',
-        owner="architecture-governance-negative-tests",
-        rationale=(
-            "negative test proves the retired result path rule still catches "
-            "the run-level summary JSON path"
-        ),
-        lifecycle=(
-            "current negative fixture; remove if run-level retired path rule "
-            "changes"
-        ),
-        covered_by=(
-            "tests/architecture/test_governance_active_docs.py::"
-            "test_retired_run_level_path_rule_ignores_validation_summary_substring",
-        ),
-        py_owner=(
-            "def:test_retired_run_level_path_rule_ignores_validation_summary_substring"
-        ),
-    ),
-    _source_tree_allowed_occurrence(
-        path=Path("tests/architecture/test_governance_active_docs.py"),
-        rule_id="retired_text:retired_result_run_level_path",
-        exact_line='assert rule.search("summary.json.bak")',
-        owner="architecture-governance-negative-tests",
-        rationale=(
-            "negative test proves backup-suffixed retired result files stay "
-            "caught"
-        ),
-        lifecycle=(
-            "current negative fixture; remove if run-level retired path rule "
-            "changes"
-        ),
-        covered_by=(
-            "tests/architecture/test_governance_active_docs.py::"
-            "test_retired_run_level_path_rule_ignores_validation_summary_substring",
-        ),
-        py_owner=(
-            "def:test_retired_run_level_path_rule_ignores_validation_summary_substring"
-        ),
-    ),
-)
-
 _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
     (
         "tests/architecture/test_governance_profile_runner_contract.py",
@@ -1501,7 +1434,7 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
         "def:test_active_docs_reject_retired_review_safety_names",
     ),
     (
-        "tests/architecture/test_governance_active_docs.py",
+        "tests/architecture/test_governance_local_verification_contract.py",
         "active_test_literals:retired_local_verification_evidence_range_surface",
         "\"    label = 'evidence_range'\",",
         "def:test_source_tree_rejects_retired_local_verification_surface_terms",
@@ -1525,13 +1458,13 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
         "def:test_active_docs_reject_retired_review_safety_names",
     ),
     (
-        "tests/architecture/test_governance_active_docs.py",
+        "tests/architecture/test_governance_local_verification_contract.py",
         "active_test_literals:retired_local_verification_output_surface",
         "\"    run_root = Path('verification-output/s1')\",",
         "def:test_source_tree_rejects_retired_local_verification_surface_terms",
     ),
     (
-        "tests/architecture/test_governance_active_docs.py",
+        "tests/architecture/test_governance_local_verification_contract.py",
         "active_test_literals:retired_local_verification_output_surface",
         "\"    run_id = 'verification_output'\",",
         "def:test_source_tree_rejects_retired_local_verification_surface_terms",

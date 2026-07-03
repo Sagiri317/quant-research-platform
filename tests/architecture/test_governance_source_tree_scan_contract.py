@@ -240,7 +240,7 @@ def test_source_tree_path_allowed_does_not_consume_literal_occurrences() -> None
             Path("tests/agents/test_verify_governance.py"),
             scan_group=scan_group,
             rule="profile_runner_retired_qrp_managed_repo_roots",
-            line_text='x = "QRP_MANAGED_REPO_ROOTS"',
+            line_text="x = retired_literal",
             line_number=1,
             rule_definition_lines={1},
             definition_contexts={"def:test_func": {1}},
