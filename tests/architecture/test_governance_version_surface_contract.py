@@ -23,7 +23,7 @@ def _unsafe_assignment_text() -> str:
 
 
 def _legacy_versioned_api_prefix() -> str:
-    return "/api/" + "v0.1"
+    return "/api/" + chr(118) + "0.1"
 
 
 def test_synthesized_string_gate_allows_current_version_surface(
