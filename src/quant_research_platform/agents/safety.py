@@ -1,4 +1,4 @@
-"""Safety checks for proposal-only agent boundaries."""
+"""Safety checks for agent-assisted research payloads."""
 
 from __future__ import annotations
 

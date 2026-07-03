@@ -96,9 +96,8 @@ PROFILES: dict[str, Profile] = {
     ),
     "performance": Profile(
         name="performance",
-        scopes=("tests",),
+        scopes=("tests/performance",),
         marker="performance",
-        reserved=True,
     ),
     "slow": Profile(
         name="slow",

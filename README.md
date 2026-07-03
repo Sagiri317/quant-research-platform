@@ -108,9 +108,9 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 `integration`、`mutation`、`slow`、`performance` 和
 `requires_local_data` 必须由对应 profile 或 `all` profile 显式选择。
 `slow` 只表示运行慢，`requires_local_data` 只表示需要本地数据或本地环境；
-两者彼此正交。`performance` 是预留 profile；没有 performance tests 时
-0 collected 记为 `NOT_RUN`，不能记为 `PASS`。性能收口依据实际耗时画像、
-slowest tests/files 和 before/after 对比，不使用硬编码秒数阈值或独立性能门禁文件。
+两者彼此正交。`performance` 是轻量性能和治理工具运行时护栏 profile。
+性能收口依据实际耗时画像、slowest tests/files 和 before/after 对比，不使用
+硬编码秒数阈值或独立性能门禁文件。
 
 常用治理验证：
 

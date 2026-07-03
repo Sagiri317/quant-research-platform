@@ -20,7 +20,7 @@ workflows  -> research -> diagnostics payload -> reports -> artifacts 编排
 storage    -> dataset IO、manifest、fingerprint、compare、data layout
 runtime    -> resources、logging、workflow records、metrics payload
 interfaces -> 已批准的 API、CLI、service adapter
-agents     -> proposal-only agent
+agents     -> agent-assisted research helpers
 .agents    -> governance、handoff、prompt tooling
 ```
 

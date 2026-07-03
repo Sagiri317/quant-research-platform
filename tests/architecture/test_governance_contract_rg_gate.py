@@ -614,25 +614,28 @@ def test_profile_runner_retired_literals_are_not_allowed_by_unrelated_context(
         Path("tests/architecture/test_governance_contract_rg_gate.py"),
         Path("tests/agents/test_verify_governance.py"),
     )
+    unrelated_lines = "\n".join(
+        f"# unrelated {rule.example}" for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
+    )
     for target_index, target in enumerate(targets):
-        for rule_index, rule in enumerate(PROFILE_RUNNER_RETIRED_TEXT_RULES):
-            repo = tmp_path / f"repo-{target_index}-{rule_index}"
-            repo_file = repo / target
-            repo_file.parent.mkdir(parents=True)
-            repo_file.write_text(
-                target.read_text(encoding="utf-8") + f"\n# unrelated {rule.example}\n",
-                encoding="utf-8",
-            )
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(
-                ["git", "add", "."],
-                cwd=repo,
-                check=True,
-                capture_output=True,
-            )
+        repo = tmp_path / f"repo-{target_index}"
+        repo_file = repo / target
+        repo_file.parent.mkdir(parents=True)
+        repo_file.write_text(
+            target.read_text(encoding="utf-8") + f"\n{unrelated_lines}\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
 
-            findings = source_tree_retired_text_findings(repo)
+        findings = source_tree_retired_text_findings(repo)
 
+        for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES:
             assert any(
                 finding["path"] == target.as_posix() and finding["rule"] == rule.name
                 for finding in findings
@@ -651,19 +654,23 @@ def test_profile_runner_retired_literals_are_not_allowed_inside_owner_context(
     source = GOVERNANCE_CONTRACT_SCRIPT.read_text(encoding="utf-8")
     marker = "PROFILE_RUNNER_RETIRED_TEXT_RULES = (\n"
     assert marker in source
-    for rule_index, rule in enumerate(PROFILE_RUNNER_RETIRED_TEXT_RULES):
-        repo = tmp_path / f"owner-context-{rule_index}"
-        repo_file = repo / GOVERNANCE_CONTRACT_SCRIPT
-        repo_file.parent.mkdir(parents=True)
-        repo_file.write_text(
-            source.replace(marker, marker + f"    # unrelated {rule.example}\n"),
-            encoding="utf-8",
-        )
-        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    owner_context_lines = "".join(
+        f"    # unrelated {rule.example}\n"
+        for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
+    )
+    repo = tmp_path / "owner-context"
+    repo_file = repo / GOVERNANCE_CONTRACT_SCRIPT
+    repo_file.parent.mkdir(parents=True)
+    repo_file.write_text(
+        source.replace(marker, marker + owner_context_lines),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
 
-        findings = source_tree_retired_text_findings(repo)
+    findings = source_tree_retired_text_findings(repo)
 
+    for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES:
         assert any(
             finding["path"] == GOVERNANCE_CONTRACT_SCRIPT.as_posix()
             and finding["rule"] == rule.name

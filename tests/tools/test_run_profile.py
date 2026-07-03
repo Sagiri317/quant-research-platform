@@ -389,17 +389,19 @@ def test_unknown_profile_fails_before_running_pytest(
     assert exit_code == 2
 
 
-def test_profile_with_no_collected_tests_returns_non_zero_not_run_summary(
+def test_performance_profile_runs_active_lightweight_scope(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     runner = _load_runner()
+    calls = []
 
     def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
         return subprocess.CompletedProcess(
             args=command,
-            returncode=runner.NO_TESTS_COLLECTED,
-            stdout="no tests collected\n",
+            returncode=0,
+            stdout="performance ok\n",
             stderr="",
         )
 
@@ -416,12 +418,19 @@ def test_profile_with_no_collected_tests_returns_non_zero_not_run_summary(
         ]
     )
 
+    assert exit_code == 0
+    command, _kwargs = calls[0]
+    assert "tests/performance" in command
+    assert "tests" not in command[3 : command.index("-q")]
+    marker_index = len(command) - 1 - list(reversed(command)).index("-m")
+    assert command[marker_index + 1] == "performance"
     summary = json.loads(
         (tmp_path / ".run" / "manual" / "performance" / "summary.json").read_text()
     )
-    assert exit_code == runner.NO_TESTS_COLLECTED
-    assert summary["status"] == "NOT_RUN"
-    assert summary["reserved_profile"] is True
+    assert summary["status"] == "PASS"
+    assert summary["profile_scopes"] == ["tests/performance"]
+    assert summary["scope_count"] == 1
+    assert summary["reserved_profile"] is False
 
 
 def test_profile_runner_adds_default_duration_summary_when_not_requested(
