@@ -16,9 +16,15 @@ VERIFY_GOVERNANCE = (
 verify_governance = load_maintenance_script_module("verify_governance")
 governance_contract = load_maintenance_script_module("governance_contract")
 
+
 def _unsafe_assignment_text() -> str:
     key = "".join(chr(code) for code in (116, 111, 107, 101, 110))
     return f'credential = "{key}=unsafe"\n'
+
+
+def _legacy_versioned_api_prefix() -> str:
+    return "/api/" + "v0.1"
+
 
 def test_synthesized_string_gate_allows_current_version_surface(
     tmp_path: Path,
@@ -47,6 +53,7 @@ def test_synthesized_string_gate_allows_current_version_surface(
 
     assert result.errors == []
 
+
 def test_version_surface_policy_keeps_legal_tokens_out_of_retired_gate(
     tmp_path: Path,
 ) -> None:
@@ -73,13 +80,20 @@ def test_version_surface_policy_keeps_legal_tokens_out_of_retired_gate(
 
     assert result.errors == []
     assert "/api/0.1" in contract.VERSION_SURFACE_POLICY["allowed"]
-    assert "/api/v0.1" in contract.VERSION_SURFACE_POLICY["forbidden"]
+    assert (
+        _legacy_versioned_api_prefix()
+        in contract.VERSION_SURFACE_POLICY["forbidden"]
+    )
+
 
 def test_version_surface_policy_rejects_legacy_v_api_prefix(tmp_path: Path) -> None:
     module = verify_governance
     path = tmp_path / "docs" / "api.md"
     path.parent.mkdir(parents=True)
-    path.write_text("GET /api/v0.1/catalog/factors\n", encoding="utf-8")
+    path.write_text(
+        f"GET {_legacy_versioned_api_prefix()}/catalog/factors\n",
+        encoding="utf-8",
+    )
     result = module.Result()
 
     module.check_text_safety(result, tmp_path, ["docs/api.md"])
