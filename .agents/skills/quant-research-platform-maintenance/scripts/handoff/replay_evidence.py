@@ -12,6 +12,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from time import perf_counter
 
@@ -80,10 +81,15 @@ def build_replayed_package_smoke_receipt(repo_root: Path) -> dict[str, object]:
 def build_replayed_hard_scan_receipt(
     repo_root: Path,
     final_head: str,
+    *,
+    source_tree_scan_groups_payload: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     scanned_head = _git_text(repo_root, "rev-parse", "HEAD").strip()
     scan_runs: list[dict[str, object]] = []
-    for group_name, group_payload in sorted(source_tree_scan_groups(repo_root).items()):
+    scan_groups = source_tree_scan_groups_payload
+    if scan_groups is None:
+        scan_groups = source_tree_scan_groups(repo_root)
+    for group_name, group_payload in sorted(scan_groups.items()):
         findings = list(group_payload.get("findings") or [])
         result_payload = {
             "scan_id": group_name,
@@ -118,12 +124,16 @@ def build_replayed_hard_scan_receipt(
 def build_machine_receipts(
     repo_root: Path,
     final_head: str,
+    *,
+    source_tree_scan_groups_payload: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, dict[str, object]]:
     return {
         CHECK_RECEIPTS_ENTRY: build_replayed_check_receipts(repo_root),
         PACKAGE_SMOKE_RECEIPT_ENTRY: build_replayed_package_smoke_receipt(repo_root),
         HARD_SCAN_RECEIPT_ENTRY: build_replayed_hard_scan_receipt(
-            repo_root, final_head
+            repo_root,
+            final_head,
+            source_tree_scan_groups_payload=source_tree_scan_groups_payload,
         ),
     }
 

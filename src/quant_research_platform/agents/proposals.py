@@ -1,4 +1,4 @@
-"""Human-approved proposal objects for agent-driven research planning."""
+"""Agent-assisted research payload contracts."""
 
 from __future__ import annotations
 

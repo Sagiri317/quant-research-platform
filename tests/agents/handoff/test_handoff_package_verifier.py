@@ -255,6 +255,57 @@ def test_verifier_replays_hard_scan_from_bundle(
     assert "hard_scan_replay_mismatch" in failures
 
 
+@pytest.mark.integration
+def test_verifier_reuses_clone_source_tree_scan_for_share_safety_and_hard_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    valid_handoff_package: tuple[Path, Path],
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package, sidecar = valid_handoff_package
+    inspection = verifier.inspect_handoff_zip_once(package, sidecar)
+    assert inspection.raw_bundle is not None
+    assert inspection.loaded.task_metadata is not None
+    calls = 0
+    scan_payload = {
+        "allowance_contract": {
+            "findings": [],
+        }
+    }
+    received_payloads: list[object] = []
+
+    def fake_source_tree_scan_groups(_repo_root: Path) -> dict[str, dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        return scan_payload
+
+    def fake_build_machine_receipts(
+        _repo_root: Path,
+        _final_head: str,
+        *,
+        source_tree_scan_groups_payload: object | None = None,
+    ) -> dict[str, dict[str, object]]:
+        received_payloads.append(source_tree_scan_groups_payload)
+        return inspection.loaded.receipts
+
+    monkeypatch.setattr(
+        verifier,
+        "source_tree_scan_groups",
+        fake_source_tree_scan_groups,
+    )
+    monkeypatch.setattr(verifier, "build_machine_receipts", fake_build_machine_receipts)
+
+    failures, share_safety_failures = verifier.verify_bundle_and_replay_once(
+        inspection.raw_bundle,
+        inspection.loaded.task_metadata,
+        inspection.loaded,
+    )
+
+    assert failures == []
+    assert share_safety_failures == []
+    assert calls == 1
+    assert received_payloads == [scan_payload]
+
+
 def _hard_scan_receipt() -> dict[str, object]:
     return {
         "schema_id": "qrp-hard-scan-receipt",

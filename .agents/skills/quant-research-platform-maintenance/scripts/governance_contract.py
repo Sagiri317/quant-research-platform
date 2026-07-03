@@ -441,7 +441,10 @@ RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {
     Path("tests/agents/test_verify_governance.py"),
     Path("tests/agents/handoff/test_handoff_package_verifier.py"),
     Path("tests/agents/handoff/test_handoff_tools.py"),
-    Path("tests/architecture/test_governance_contract_rg_gate.py"),
+    Path("tests/architecture/test_governance_active_docs.py"),
+    Path("tests/architecture/test_governance_local_verification_contract.py"),
+    Path("tests/architecture/test_governance_profile_runner_contract.py"),
+    Path("tests/architecture/test_governance_source_tree_scan_contract.py"),
     Path("tests/architecture/test_handoff_contract_single_source.py"),
     Path("tests/interfaces/test_private_cli_01.py"),
     Path("tests/policy/test_share_safety_runtime_edges.py"),
@@ -451,7 +454,9 @@ RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {
 }
 SOURCE_TREE_RETIRED_TEXT_NEGATIVE_TEST_SOURCES = {
     Path("tests/agents/test_verify_governance.py"),
-    Path("tests/architecture/test_governance_contract_rg_gate.py"),
+    Path("tests/architecture/test_governance_active_docs.py"),
+    Path("tests/architecture/test_governance_profile_runner_contract.py"),
+    Path("tests/architecture/test_governance_source_tree_scan_contract.py"),
     Path("tests/architecture/test_handoff_contract_single_source.py"),
 }
 RUN_OUTPUT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = (
@@ -851,7 +856,7 @@ NEGATIVE_TEST_SYMBOL_ALLOWLIST: dict[Path, dict[str, set[str]]] = {}
 
 STALE_GOVERNANCE_TRUTH_TEST_SOURCES = (
     "tests/agents/test_verify_governance.py",
-    "tests/architecture/test_governance_contract_rg_gate.py",
+    "tests/architecture/test_governance_active_docs.py",
 )
 
 RULE_DEFINITION_ALLOWLIST = (
@@ -1153,7 +1158,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
             rationale="profile runner retired literal inventory line is owned here",
             lifecycle="current hard-cutover rule; remove only if rule is retired",
             covered_by=(
-                "tests/architecture/test_governance_contract_rg_gate.py::"
+                "tests/architecture/test_governance_profile_runner_contract.py::"
                 "test_profile_runner_retired_text_rules_are_contract_owned",
             ),
             py_owner="assign:PROFILE_RUNNER_RETIRED_LITERALS",
@@ -1169,7 +1174,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
             rationale="profile runner retired regex rule line is owned here",
             lifecycle="current hard-cutover rule; remove only if rule is retired",
             covered_by=(
-                "tests/architecture/test_governance_contract_rg_gate.py::"
+                "tests/architecture/test_governance_profile_runner_contract.py::"
                 "test_profile_runner_retired_text_rules_are_contract_owned",
             ),
             py_owner="assign:PROFILE_RUNNER_RETIRED_TEXT_RULES",
@@ -1185,7 +1190,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
             rationale="profile runner retired example line is owned here",
             lifecycle="current hard-cutover rule; remove only if rule is retired",
             covered_by=(
-                "tests/architecture/test_governance_contract_rg_gate.py::"
+                "tests/architecture/test_governance_profile_runner_contract.py::"
                 "test_profile_runner_retired_text_rules_are_contract_owned",
             ),
             py_owner="assign:PROFILE_RUNNER_RETIRED_TEXT_RULES",
@@ -1214,13 +1219,13 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
     ),
     *(
         _source_tree_allowed_occurrence(
-            path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
+            path=Path("tests/architecture/test_governance_profile_runner_contract.py"),
             rule_id=f"retired_text:{rule_name}",
             exact_line=line_text,
             owner="architecture-governance-negative-tests",
             rationale="architecture gate carries an exact retired fixture line",
             lifecycle="current negative fixture; update with profile runner rule",
-            covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+            covered_by=("tests/architecture/test_governance_profile_runner_contract.py",),
             py_owner=f"def:{function_name}",
         )
         for rule_name, literal, function_name, line_text in (
@@ -1301,7 +1306,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
 
 SOURCE_TREE_ALLOWED_OCCURRENCES += (
     _source_tree_allowed_occurrence(
-        path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
+        path=Path("tests/architecture/test_governance_active_docs.py"),
         rule_id="retired_text:retired_result_run_level_path",
         exact_line='assert rule.search("summary.json")',
         owner="architecture-governance-negative-tests",
@@ -1314,7 +1319,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES += (
             "changes"
         ),
         covered_by=(
-            "tests/architecture/test_governance_contract_rg_gate.py::"
+            "tests/architecture/test_governance_active_docs.py::"
             "test_retired_run_level_path_rule_ignores_validation_summary_substring",
         ),
         py_owner=(
@@ -1322,7 +1327,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES += (
         ),
     ),
     _source_tree_allowed_occurrence(
-        path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
+        path=Path("tests/architecture/test_governance_active_docs.py"),
         rule_id="retired_text:retired_result_run_level_path",
         exact_line='assert rule.search("run/summary.json")',
         owner="architecture-governance-negative-tests",
@@ -1335,7 +1340,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES += (
             "changes"
         ),
         covered_by=(
-            "tests/architecture/test_governance_contract_rg_gate.py::"
+            "tests/architecture/test_governance_active_docs.py::"
             "test_retired_run_level_path_rule_ignores_validation_summary_substring",
         ),
         py_owner=(
@@ -1343,7 +1348,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES += (
         ),
     ),
     _source_tree_allowed_occurrence(
-        path=Path("tests/architecture/test_governance_contract_rg_gate.py"),
+        path=Path("tests/architecture/test_governance_active_docs.py"),
         rule_id="retired_text:retired_result_run_level_path",
         exact_line='assert rule.search("summary.json.bak")',
         owner="architecture-governance-negative-tests",
@@ -1356,7 +1361,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES += (
             "changes"
         ),
         covered_by=(
-            "tests/architecture/test_governance_contract_rg_gate.py::"
+            "tests/architecture/test_governance_active_docs.py::"
             "test_retired_run_level_path_rule_ignores_validation_summary_substring",
         ),
         py_owner=(
@@ -1367,13 +1372,13 @@ SOURCE_TREE_ALLOWED_OCCURRENCES += (
 
 _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_profile_runner_contract.py",
         "synthesized_strings:profile_runner_retired_qrp_managed_repo_roots",
         '"\\n".join(',
         "def:test_retired_profile_literal_allowlist_is_context_scoped_in_python_file",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_profile_runner_contract.py",
         "synthesized_strings:profile_runner_retired_qrp_managed_repo_roots",
         (
             "'    monkeypatch.setenv("
@@ -1475,7 +1480,7 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
         "def:test_structured_key_gate_fails_retired_keys_and_allows_values",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_local_verification_evidence_range_surface",
         _exact_line(
             '"retired_local_verification_evidence_range_surface": ',
@@ -1484,61 +1489,61 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
         "def:test_result_architecture_rules_cover_hard_cut_examples",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_local_verification_evidence_range_surface",
         '"outside_evidence_range",',
         "def:test_active_docs_reject_retired_review_safety_names",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_local_verification_evidence_range_surface",
         '"evidence_range",',
         "def:test_active_docs_reject_retired_review_safety_names",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_local_verification_evidence_range_surface",
         "\"    label = 'evidence_range'\",",
         "def:test_source_tree_rejects_retired_local_verification_surface_terms",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_local_verification_output_surface",
         '"retired_local_verification_output_surface": "verification-output",',
         "def:test_result_architecture_rules_cover_hard_cut_examples",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_local_verification_output_surface",
         '"verification-output",',
         "def:test_active_docs_reject_retired_review_safety_names",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_local_verification_output_surface",
         '"verification_output",',
         "def:test_active_docs_reject_retired_review_safety_names",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_local_verification_output_surface",
         "\"    run_root = Path('verification-output/s1')\",",
         "def:test_source_tree_rejects_retired_local_verification_surface_terms",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_local_verification_output_surface",
         "\"    run_id = 'verification_output'\",",
         "def:test_source_tree_rejects_retired_local_verification_surface_terms",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_result_evidence_root_text",
         '"retired_result_evidence_root_text": "evidence root",',
         "def:test_result_architecture_rules_cover_hard_cut_examples",
     ),
     (
-        "tests/architecture/test_governance_contract_rg_gate.py",
+        "tests/architecture/test_governance_active_docs.py",
         "active_test_literals:retired_result_evidence_root_text",
         '"evidence root",',
         "def:test_active_docs_reject_retired_review_safety_names",
@@ -1810,7 +1815,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES += tuple(
         owner="source-tree-exact-occurrence-migration",
         rationale="migrated literal fixture from path-level source-tree allowance",
         lifecycle="current exact occurrence fixture; update when fixture line changes",
-        covered_by=("tests/architecture/test_governance_contract_rg_gate.py",),
+        covered_by=("tests/architecture/test_governance_profile_runner_contract.py",),
         py_owner=py_owner,
     )
     for (
@@ -1819,6 +1824,80 @@ SOURCE_TREE_ALLOWED_OCCURRENCES += tuple(
         exact_line,
         py_owner,
     ) in _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS
+)
+
+SOURCE_TREE_ALLOWED_OCCURRENCES += (
+    _source_tree_allowed_occurrence(
+        path=Path("tests/architecture/test_governance_active_docs.py"),
+        rule_id="synthesized_strings:retired_model_family",
+        exact_line='model_family_term = "".join(("Model", "Family"))',
+        owner="architecture-governance-negative-tests",
+        rationale="negative test fixture for retired research foundation term",
+        lifecycle="current exact occurrence fixture; update when fixture line changes",
+        covered_by=(
+            "tests/architecture/test_governance_active_docs.py::"
+            "test_research_foundation_semantic_closure_terms_are_retired",
+        ),
+        py_owner="def:test_research_foundation_semantic_closure_terms_are_retired",
+    ),
+    _source_tree_allowed_occurrence(
+        path=Path("tests/architecture/test_governance_active_docs.py"),
+        rule_id="synthesized_strings:retired_prediction_bundle",
+        exact_line='prediction_bundle_term = "".join(("Prediction", "Bundle"))',
+        owner="architecture-governance-negative-tests",
+        rationale="negative test fixture for retired research foundation term",
+        lifecycle="current exact occurrence fixture; update when fixture line changes",
+        covered_by=(
+            "tests/architecture/test_governance_active_docs.py::"
+            "test_research_foundation_semantic_closure_terms_are_retired",
+        ),
+        py_owner="def:test_research_foundation_semantic_closure_terms_are_retired",
+    ),
+    _source_tree_allowed_occurrence(
+        path=Path("tests/architecture/test_governance_local_verification_contract.py"),
+        rule_id="synthesized_strings:retired_local_verification_evidence_range_surface",
+        exact_line='"\\n".join(',
+        owner="architecture-governance-negative-tests",
+        rationale="negative test fixture for retired local verification term",
+        lifecycle="current exact occurrence fixture; update when fixture line changes",
+        covered_by=(
+            "tests/architecture/test_governance_local_verification_contract.py::"
+            "test_source_tree_rejects_retired_local_verification_surface_terms",
+        ),
+        py_owner=(
+            "def:test_source_tree_rejects_retired_local_verification_surface_terms"
+        ),
+    ),
+    _source_tree_allowed_occurrence(
+        path=Path("tests/architecture/test_governance_local_verification_contract.py"),
+        rule_id="synthesized_strings:retired_local_verification_output_surface",
+        exact_line='"\\n".join(',
+        owner="architecture-governance-negative-tests",
+        rationale="negative test fixture for retired local verification term",
+        lifecycle="current exact occurrence fixture; update when fixture line changes",
+        covered_by=(
+            "tests/architecture/test_governance_local_verification_contract.py::"
+            "test_source_tree_rejects_retired_local_verification_surface_terms",
+        ),
+        py_owner=(
+            "def:test_source_tree_rejects_retired_local_verification_surface_terms"
+        ),
+    ),
+    _source_tree_allowed_occurrence(
+        path=Path("tests/architecture/test_governance_writer_boundary_contract.py"),
+        rule_id="synthesized_strings:retired_result_local_output_root",
+        exact_line='assert "".join(("output_", "root")) not in arg_names',
+        owner="architecture-governance-negative-tests",
+        rationale="negative test fixture for retired writer boundary term",
+        lifecycle="current exact occurrence fixture; update when fixture line changes",
+        covered_by=(
+            "tests/architecture/test_governance_writer_boundary_contract.py::"
+            "test_approved_writer_signatures_do_not_accept_arbitrary_physical_roots",
+        ),
+        py_owner=(
+            "def:test_approved_writer_signatures_do_not_accept_arbitrary_physical_roots"
+        ),
+    ),
 )
 
 _SOURCE_TREE_RETIRED_RULE_DEFINITION_RULES = {
@@ -1840,7 +1919,7 @@ SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
     Path("tests/agents/test_verify_governance.py"): (
         _SOURCE_TREE_RETIRED_RULE_DEFINITION_RULES
     ),
-    Path("tests/architecture/test_governance_contract_rg_gate.py"): (
+    Path("tests/architecture/test_governance_profile_runner_contract.py"): (
         _SOURCE_TREE_RETIRED_RULE_DEFINITION_RULES
     ),
     Path("tests/architecture/test_handoff_contract_single_source.py"): (
@@ -2029,18 +2108,26 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "test_version_surface_policy_keeps_legal_tokens_out_of_retired_gate",
         "test_version_surface_policy_rejects_legacy_v_api_prefix",
     },
-    Path("tests/architecture/test_governance_contract_rg_gate.py"): {
+    Path("tests/architecture/test_governance_active_docs.py"): {
         "ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST",
-        "test_source_tree_path_allowed_does_not_consume_literal_occurrences",
         "test_active_tree_has_no_retired_terms",
         "test_active_tree_has_no_stale_qrp_owned_version_tokens",
         "test_result_architecture_rules_cover_hard_cut_examples",
         "test_active_docs_reject_retired_review_safety_names",
+        "test_research_foundation_semantic_closure_terms_are_retired",
+    },
+    Path("tests/architecture/test_governance_scan_roots.py"): {
         "test_verify_governance_uses_current_local_only_roots",
         "test_gitignore_is_active_doc_scanned_for_retired_result_paths",
         "test_gitignore_rejects_outputs_local_layout",
+    },
+    Path("tests/architecture/test_governance_source_tree_scan_contract.py"): {
+        "test_source_tree_path_allowed_does_not_consume_literal_occurrences",
+    },
+    Path("tests/architecture/test_governance_local_verification_contract.py"): {
         "test_source_tree_rejects_retired_local_verification_surface_terms",
-        "test_research_foundation_semantic_closure_terms_are_retired",
+    },
+    Path("tests/architecture/test_governance_writer_boundary_contract.py"): {
         "test_approved_writer_signatures_do_not_accept_arbitrary_physical_roots",
     },
     Path("tests/architecture/test_handoff_contract_single_source.py"): {
@@ -3176,7 +3263,7 @@ def source_tree_allowance_contract_findings(
         _source_tree_posix_path(path) for path in source_tree_tracked_paths(clone_dir)
     }
     governance_allowlist_owner_path = Path(
-        "tests/architecture/test_governance_contract_rg_gate.py"
+        "tests/architecture/test_governance_source_tree_scan_contract.py"
     )
     enforce_missing_allowance_entries = (
         clone_dir / governance_allowlist_owner_path

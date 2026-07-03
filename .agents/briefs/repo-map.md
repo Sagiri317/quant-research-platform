@@ -37,7 +37,7 @@ workflows/       orchestrate research -> reports -> artifacts
 storage/         dataset IO, manifest, fingerprint, compare, data layout
 runtime/         resources, logging, workflow records, execution metrics payload
 interfaces/      approved API, CLI, service adapters
-agents/          workflow planning and proposal components
+agents/          agent-assisted research helpers
 ```
 
 ## 运行结果布局

@@ -256,6 +256,7 @@ def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
 
     assert "HandoffVerificationResult" in classes
     assert "verify_handoff_package_result" in verifier_defs
+    assert "_inspect_handoff_package_envelope" in verifier_defs
     assert "inspect_handoff_zip_once" in verifier_defs
     assert "verify_bundle_and_replay_once" in verifier_defs
     assert "scan_clone_tree_for_share_safety" in verifier_defs
@@ -277,9 +278,14 @@ def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
         assert retired not in verifier_defs
 
     result_calls = _called_names_in_function(verifier, "verify_handoff_package_result")
-    assert "inspect_handoff_zip_once" in result_calls
+    assert "_verify_handoff_package_result" in result_calls
     assert _name("scan", "handoff", "zip") not in result_calls
     assert _name("scan", "git", "bundle") not in result_calls
+
+    internal_result_calls = _called_names_in_function(
+        verifier, "_verify_handoff_package_result"
+    )
+    assert "inspect_handoff_zip_once" in internal_result_calls
 
     inspection_source = _function_source(verifier, "inspect_handoff_zip_once")
     assert _name("scan", "bundle", "safety") not in inspection_source
@@ -471,7 +477,8 @@ def test_builder_uses_verifier_result_without_separate_scan_status() -> None:
     defs = _function_defs(builder)
 
     assert "scan_status" not in defs
-    assert "verify_handoff_package_result" in source
+    assert "_inspect_handoff_package_envelope" in source
+    assert "verify_handoff_package_result" not in source
     assert _name("scan", "handoff", "zip") not in source
 
 

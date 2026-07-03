@@ -1,9 +1,9 @@
 # Tooling and Portability
 
 Handoff builder 的 CLI 范围只允许 `--repo-root`、`--out-dir`、`--task-name`
-和 `--base-ref`；builder 必须先运行 verifier，package 才能视为成功生成。
-builder 使用 `verify_handoff_package_result()` 获取 handoff verify status、
-share-safety status 和 zip sha256，不运行独立 safety scan。
+和 `--base-ref`；builder 必须完成 bundle-clone receipt generation 和 package
+inspection，package 才能视为成功生成。builder 从同一个 package inspection result
+获取 share-safety status 和 zip sha256，不运行独立 safety scan。
 
 本文件定义治理脚本、外部工具和可移植性边界。
 

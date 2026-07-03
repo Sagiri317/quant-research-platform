@@ -14,7 +14,10 @@ ACTIVE_SCAN_ROOTS = (
 )
 PROJECT_SRC = Path("src/quant_research_platform")
 NEGATIVE_GATE_FILES = {
-    Path("tests/architecture/test_governance_contract_rg_gate.py"),
+    Path("tests/architecture/governance_scan_helpers.py"),
+    Path("tests/architecture/test_governance_active_docs.py"),
+    Path("tests/architecture/test_governance_profile_runner_contract.py"),
+    Path("tests/architecture/test_governance_source_tree_scan_contract.py"),
     Path("tests/architecture/test_data_layer_boundaries.py"),
 }
 # Only local verification run fixture residue may name the source here.

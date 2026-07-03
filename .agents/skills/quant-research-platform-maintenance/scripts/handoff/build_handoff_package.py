@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,7 +35,7 @@ from handoff_contract import (  # noqa: E402
     validate_task_metadata_contract,
 )
 from replay_evidence import build_machine_receipts  # noqa: E402
-from verify_handoff_package import verify_handoff_package_result  # noqa: E402
+from verify_handoff_package import _inspect_handoff_package_envelope  # noqa: E402
 
 PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
 
@@ -79,10 +80,6 @@ def build_handoff_package(
     assert_worktree_clean(repo_root)
     final_head = git_text(repo_root, "rev-parse", "HEAD").strip()
     base = git_text(repo_root, "merge-base", "HEAD", base_ref).strip()
-    receipts = build_machine_receipts(repo_root, final_head)
-    assert_worktree_clean(repo_root)
-    validation_summary = build_validation_summary_from_receipts(receipts)
-    validation_failures = mandatory_validation_failures(validation_summary)
     task = task_metadata(
         task_name=task_name,
         branch=branch,
@@ -93,16 +90,34 @@ def build_handoff_package(
     slug = safe_task_filename(task_name)
     zip_path = out_dir / f"{slug}.zip"
     json_path = out_dir / f"{slug}.json"
-    build_once(
-        repo_root=repo_root,
-        zip_path=zip_path,
-        json_path=json_path,
-        task=task,
-        receipts=receipts,
-        validation_summary=validation_summary,
-        branch=branch,
+    with tempfile.TemporaryDirectory(prefix="qrp-handoff-build-") as temp:
+        root = Path(temp)
+        bundle_path = root / FINAL_BRANCH_BUNDLE_ENTRY
+        clone_dir = root / "clone"
+        write_bundle(repo_root, bundle_path, branch)
+        clone_bundle(bundle_path, clone_dir, branch)
+        clone_head = git_text(clone_dir, "rev-parse", "HEAD").strip()
+        if clone_head != final_head:
+            raise SystemExit("bundle_clone_head_mismatch")
+        receipts = build_machine_receipts(clone_dir, final_head)
+        assert_worktree_clean(repo_root)
+        validation_summary = build_validation_summary_from_receipts(receipts)
+        validation_failures = mandatory_validation_failures(validation_summary)
+        build_once(
+            repo_root=repo_root,
+            zip_path=zip_path,
+            json_path=json_path,
+            task=task,
+            receipts=receipts,
+            validation_summary=validation_summary,
+            branch=branch,
+            bundle_path=bundle_path,
+        )
+    verification = _inspect_handoff_package_envelope(
+        zip_path,
+        json_path,
+        expected_receipts=receipts,
     )
-    verification = verify_handoff_package_result(zip_path, json_path)
     failures = [*validation_failures, *verification.failures]
     return {
         "ok": verification.ok and not validation_failures,
@@ -124,10 +139,14 @@ def build_once(
     receipts: dict[str, dict[str, object]],
     validation_summary: dict[str, object],
     branch: str,
+    bundle_path: Path | None = None,
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="qrp-handoff-stage-") as temp:
         stage_root = Path(temp)
-        write_bundle(repo_root, stage_root / FINAL_BRANCH_BUNDLE_ENTRY, branch)
+        if bundle_path is None:
+            write_bundle(repo_root, stage_root / FINAL_BRANCH_BUNDLE_ENTRY, branch)
+        else:
+            shutil.copyfile(bundle_path, stage_root / FINAL_BRANCH_BUNDLE_ENTRY)
         write_text(stage_root / TASK_METADATA_ENTRY, stable_json(task))
         stage_receipts(stage_root, receipts)
         write_text(
@@ -192,6 +211,16 @@ def write_bundle(repo_root: Path, bundle_path: Path, branch: str) -> None:
         ["git", "bundle", "create", str(bundle_path), branch],
         cwd=repo_root,
         check=True,
+    )
+
+
+def clone_bundle(bundle_path: Path, clone_dir: Path, branch: str) -> None:
+    subprocess.run(
+        ["git", "clone", "--branch", branch, str(bundle_path), str(clone_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     )
 
 

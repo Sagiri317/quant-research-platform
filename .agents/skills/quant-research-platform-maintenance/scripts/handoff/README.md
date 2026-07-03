@@ -49,11 +49,15 @@ python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_
 ```
 
 builder 读取当前 Git state，要求 clean worktree，计算
-`base = git merge-base HEAD <base-ref>`，写入 `final-branch.bundle`，运行
-machine replay，写入 canonical receipts，派生 validation summary，写入 manifest、
-zip 和 external sidecar，然后永远通过 `verify_handoff_package_result()` 运行
-verifier。builder 不再运行独立 safety scan；share-safety status 来自同一个
-verification result。verifier 不通过时，本次 build 不视为成功。
+`base = git merge-base HEAD <base-ref>`，写入 `final-branch.bundle`，从该 bundle
+clone 运行 machine replay，写入 canonical receipts，派生 validation summary，写入
+manifest、zip 和 external sidecar，然后检查 package envelope、schema、hash 和
+share-safety。builder 不运行独立于 package flow 的 safety scan；share-safety
+status 来自同一个 package inspection result。检查不通过时，本次 build 不视为成功。
+
+standalone verifier 仍是完整 bundle replay 和 receipt comparison 的正式入口；它从
+`final-branch.bundle` clone，一次性复用 source-tree scan 结果执行 share-safety 和
+hard-scan receipt replay，并比较 packaged receipts 与 replayed receipts。
 
 builder 只读取当前 Git state 和上述 CLI options；所有 machine evidence 都由
 replay 自动生成。

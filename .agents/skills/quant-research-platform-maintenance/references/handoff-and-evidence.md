@@ -42,9 +42,11 @@ python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_
 ```
 
 builder 从当前 Git state 读取 branch 和 HEAD，要求 worktree clean，计算
-`base = git merge-base HEAD <base-ref>`，通过 replay 自动生成 machine
-evidence，写入 bundle、receipts、validation summary、manifest、zip 和 external
-sidecar，然后永远运行 verifier。verifier 不通过时，本次 build 不视为成功。
+`base = git merge-base HEAD <base-ref>`，写入 bundle，从 bundle clone 自动生成
+machine receipts 和 validation summary，写入 manifest、zip 和 external sidecar，
+然后检查 package envelope、schema、hash 和 share-safety。检查不通过时，本次 build
+不视为成功。standalone verifier 仍是完整 bundle replay 和 receipt comparison 的正式
+入口。
 
 `profile_smoke` validation row 只代表正式 profile runner 的 `profile-smoke`
 profile；validation summary 必须从 packaged/replayed receipts 派生，不允许手写

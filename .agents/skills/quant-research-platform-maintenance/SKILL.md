@@ -112,7 +112,7 @@ payload construction 由 `handoff/replay_evidence.py` 执行，但 replay 模块
 或 compare 规则。`governance_contract.py` 只拥有治理扫描、source-tree scan、共享安全
 路径和 status token 规则。
 
-当前 handoff 流程只通过 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>` 生成；builder 从 Git state 和 replay 自动生成 machine evidence，并永远运行 verifier。具体字段、结构、replay 和 share-safety 细节以 executable contracts 和 verifier 实现为准，文档不复制代码合同。
+当前 handoff 流程只通过 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>` 生成；builder 从 clean Git state 写入 bundle，从 bundle clone 生成 machine receipts 和 validation summary，再检查 package envelope、schema、hash 和 share-safety。standalone verifier 仍是完整 bundle replay 和 receipt comparison 的正式入口。具体字段、结构、replay 和 share-safety 细节以 executable contracts 和 verifier 实现为准，文档不复制代码合同。
 
 `.agents/` 只承载 governance、handoff 和 prompt tooling；runtime 业务逻辑必须留在 `src/quant_research_platform/` 的 owner layer。
 

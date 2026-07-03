@@ -62,7 +62,9 @@ handoff 使用 compact replayable receipts：machine validation rows 只来自 r
 
 正式 profile runner 位于 `tests/tools/run_profile.py`。执行示例：
 `conda run -n <environment.yml name> python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast`。
-`profile_smoke` handoff validation row 只来自 runner 的 `profile-smoke` profile。
+`profile_smoke` handoff validation row 只来自 runner 的 `profile-smoke` profile；
+该 profile 是 handoff mandatory smoke 范围，不代表完整 architecture 或 agents
+sweep。
 
 `.run/` 只保存输出、profile、临时文件和 handoff/review artifacts，不作为
 tracked tool source。普通 `python -m pytest` 是开发者默认非重型 suite，
@@ -91,4 +93,4 @@ conda run -n <environment.yml name> python tests/tools/run_profile.py --profile 
 
 handoff tests 的具体执行入口统一使用 `tests/tools/run_profile.py`。测试位置按 owner layer 放置；详细 placement 规则由 maintenance references 和 architecture gates 拥有。
 
-handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。正式生成入口是 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>`；builder 只读取当前 Git state 和这些 CLI options，并通过 replay 自动生成 machine evidence，然后永远通过 `verify_handoff_package_result()` 运行 verifier。`verify_handoff_package_result()` 是唯一 package-level verifier function；standalone verifier CLI 保留为 verifier 的直接入口，未经用户明确批准不新增 wrapper、alias、adapter 或 compatibility layer。builder 不运行独立 safety scan；share-safety status、handoff verifier status 和 zip sha256 来自同一个 verification result。Verifier 从 `final-branch.bundle` clone replay 并比较 packaged receipts、validation summary 和 manifest。具体 layout、schema、receipt 和 active denied semantics 由 executable contracts、verifier 和 tests 拥有。
+handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。正式生成入口是 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>`；builder 只读取当前 clean Git state 和这些 CLI options，写入 bundle，从 bundle clone 自动生成 machine receipts 和 validation summary，再检查 package envelope、schema、hash 和 share-safety。`verify_handoff_package_result()` 是唯一 package-level verifier function；standalone verifier CLI 保留为完整 bundle replay 和 receipt comparison 的直接入口，未经用户明确批准不新增 wrapper、alias、adapter 或 compatibility layer。builder 不运行独立 safety scan；share-safety status 和 zip sha256 来自同一个 package inspection result。Standalone verifier 从 `final-branch.bundle` clone replay，一次性复用 source-tree scan 结果执行 share-safety 和 hard-scan receipt replay，并比较 packaged receipts、validation summary 和 manifest。具体 layout、schema、receipt 和 active denied semantics 由 executable contracts、verifier 和 tests 拥有。

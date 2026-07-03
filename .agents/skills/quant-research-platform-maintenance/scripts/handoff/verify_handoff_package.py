@@ -128,6 +128,34 @@ def main() -> int:
 def verify_handoff_package_result(
     zip_path: Path, json_path: Path
 ) -> HandoffVerificationResult:
+    return _verify_handoff_package_result(
+        zip_path,
+        json_path,
+        replay_bundle=True,
+    )
+
+
+def _inspect_handoff_package_envelope(
+    zip_path: Path,
+    json_path: Path,
+    *,
+    expected_receipts: Mapping[str, Mapping[str, object]] | None = None,
+) -> HandoffVerificationResult:
+    return _verify_handoff_package_result(
+        zip_path,
+        json_path,
+        replay_bundle=False,
+        expected_receipts=expected_receipts,
+    )
+
+
+def _verify_handoff_package_result(
+    zip_path: Path,
+    json_path: Path,
+    *,
+    replay_bundle: bool,
+    expected_receipts: Mapping[str, Mapping[str, object]] | None = None,
+) -> HandoffVerificationResult:
     inspection = inspect_handoff_zip_once(zip_path, json_path)
     failures: list[str] = []
     share_safety_failures = list(inspection.share_safety_failures)
@@ -155,7 +183,11 @@ def verify_handoff_package_result(
         failures.extend(mandatory_validation_failures(loaded.validation_summary))
     for entry, payload in loaded.receipts.items():
         failures.extend(validate_receipt_payload(Path(entry).name, payload))
+    if expected_receipts is not None and loaded.complete:
+        failures.extend(compare_replayed_handoff_payloads(loaded, expected_receipts))
     if (
+        replay_bundle
+        and
         not failures
         and not share_safety_failures
         and loaded.complete
@@ -489,10 +521,20 @@ def verify_bundle_and_replay_once(
             failures.append("bundle_base_not_ancestor")
         if git_text(clone_dir, "status", "--porcelain").strip():
             failures.append("bundle_clone_worktree_not_clean")
-        share_safety_failures.extend(scan_clone_tree_for_share_safety(clone_dir))
+        scan_groups = source_tree_scan_groups(clone_dir)
+        share_safety_failures.extend(
+            scan_clone_tree_for_share_safety(
+                clone_dir,
+                source_tree_scan_groups_payload=scan_groups,
+            )
+        )
         if failures:
             return failures, share_safety_failures
-        replayed = build_machine_receipts(clone_dir, final_head)
+        replayed = build_machine_receipts(
+            clone_dir,
+            final_head,
+            source_tree_scan_groups_payload=scan_groups,
+        )
     failures.extend(compare_replayed_handoff_payloads(loaded, replayed))
     return failures, share_safety_failures
 
@@ -501,6 +543,7 @@ def scan_clone_tree_for_share_safety(
     clone_dir: Path,
     *,
     name_prefix: str = "bundle",
+    source_tree_scan_groups_payload: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[str]:
     failures: list[str] = []
     files = git_text(clone_dir, "ls-files").splitlines()
@@ -508,7 +551,10 @@ def scan_clone_tree_for_share_safety(
         failures.extend(
             f"{name_prefix}_{failure}" for failure in member_name_failures(relative)
         )
-    for group_name, group_payload in sorted(source_tree_scan_groups(clone_dir).items()):
+    scan_groups = source_tree_scan_groups_payload
+    if scan_groups is None:
+        scan_groups = source_tree_scan_groups(clone_dir)
+    for group_name, group_payload in sorted(scan_groups.items()):
         findings = list(group_payload.get("findings") or [])
         failures.extend(
             (

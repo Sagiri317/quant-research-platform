@@ -10,15 +10,19 @@ import pytest
 
 try:
     from tests.agents.handoff.conftest import (
+        _check_receipts,
         _git,
         _init_handoff_repo,
         _load_handoff_module,
+        _package_smoke_receipt,
     )
 except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
     from conftest import (  # type: ignore[no-redef]
+        _check_receipts,
         _git,
         _init_handoff_repo,
         _load_handoff_module,
+        _package_smoke_receipt,
     )
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -144,6 +148,55 @@ def test_builder_cli_has_no_external_task_or_receipts_args() -> None:
     assert '"--verify"' not in source
 
 
+def test_builder_generates_machine_receipts_from_bundle_clone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_handoff_repo(repo)
+    builder = _load_handoff_module("build_handoff_package")
+    receipt_roots: list[Path] = []
+
+    class Verification:
+        ok = True
+        zip_sha256 = "0" * 64
+        handoff_package_verify_status = "PASS"
+        share_safety_status = "PASS"
+        failures: tuple[str, ...] = ()
+
+    def fake_build_machine_receipts(
+        receipt_root: Path,
+        final_head: str,
+        **_kwargs: object,
+    ) -> dict[str, dict[str, object]]:
+        receipt_roots.append(receipt_root)
+        assert receipt_root != repo
+        assert (receipt_root / ".git").is_dir()
+        assert _git(receipt_root, "rev-parse", "HEAD").strip() == final_head
+        return {
+            builder.CHECK_RECEIPTS_ENTRY: _check_receipts(),
+            builder.PACKAGE_SMOKE_RECEIPT_ENTRY: _package_smoke_receipt(),
+            builder.HARD_SCAN_RECEIPT_ENTRY: _hard_scan_receipt(final_head),
+        }
+
+    monkeypatch.setattr(builder, "build_machine_receipts", fake_build_machine_receipts)
+    monkeypatch.setattr(
+        builder,
+        "_inspect_handoff_package_envelope",
+        lambda *_args, **_kwargs: Verification(),
+    )
+
+    result = builder.build_handoff_package(
+        repo_root=repo,
+        out_dir=tmp_path / "out",
+        task_name="handoff-test",
+        base_ref="origin/main",
+    )
+
+    assert result["ok"] is True
+    assert len(receipt_roots) == 1
+
+
 def test_builder_fails_when_replayed_validation_row_is_not_pass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -174,7 +227,9 @@ def test_builder_fails_when_replayed_validation_row_is_not_pass(
 
     monkeypatch.setattr(builder, "build_machine_receipts", lambda *_: good_receipts)
     monkeypatch.setattr(
-        builder, "verify_handoff_package_result", lambda *_: Verification()
+        builder,
+        "_inspect_handoff_package_envelope",
+        lambda *_args, **_kwargs: Verification(),
     )
 
     result = builder.build_handoff_package(
@@ -231,7 +286,9 @@ def test_builder_fails_when_package_smoke_timeout_blocks_validation(
 
     monkeypatch.setattr(builder, "build_machine_receipts", lambda *_: receipts)
     monkeypatch.setattr(
-        builder, "verify_handoff_package_result", lambda *_: Verification()
+        builder,
+        "_inspect_handoff_package_envelope",
+        lambda *_args, **_kwargs: Verification(),
     )
 
     result = builder.build_handoff_package(
@@ -246,3 +303,22 @@ def test_builder_fails_when_package_smoke_timeout_blocks_validation(
         "validation_summary_row_not_pass:package_smoke:BLOCKED"
         in result["verify_failures"]
     )
+
+
+def _hard_scan_receipt(final_head: str) -> dict[str, object]:
+    return {
+        "schema_id": "qrp-hard-scan-receipt",
+        "status": "PASS",
+        "scanned_head": final_head,
+        "scanner_source_sha256": "2" * 64,
+        "scan_runs": [
+            {
+                "scan_id": "allowance_contract",
+                "rule_set_id": "source-tree:allowance_contract",
+                "match_count": 0,
+                "actual_violation_count": 0,
+                "result_sha256": "3" * 64,
+                "replayable_from_bundle": True,
+            }
+        ],
+    }

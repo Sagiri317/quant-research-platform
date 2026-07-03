@@ -1,4 +1,4 @@
-"""Proposal-only label factory boundary."""
+"""Agent-assisted label research helpers."""
 
 from quant_research_platform.agents.proposals import LabelProposal
 from quant_research_platform.agents.safety import assert_proposal_is_share_safe

@@ -1,4 +1,4 @@
-"""Proposal-only workflow planner boundary."""
+"""Agent-assisted workflow planning helpers."""
 
 from quant_research_platform.agents.proposals import WorkflowProposal
 from quant_research_platform.agents.safety import assert_proposal_is_share_safe

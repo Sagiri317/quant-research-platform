@@ -71,12 +71,14 @@ Hard-scan gate 由正式 handoff builder/verifier 闭合：
 conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>
 ```
 
-builder 从 Git state 和 replay 自动生成 machine evidence，然后永远运行 verifier。
-builder 通过 `verify_handoff_package_result()` 获取 verifier status、share-safety
-status 和 zip sha256；`verify_handoff_package_result()` 是唯一正式 package-level
-verifier result path。standalone verifier CLI 保留，但不是额外 Python wrapper。
-具体字段、结构、receipt replay、share-safety 和 hard-scan receipt construction
-以 executable contracts、`verify_handoff_package.py` 和 `replay_evidence.py` 为准。
+builder 从 clean Git state 写入 bundle，从 bundle clone 自动生成 machine receipts
+和 validation summary，再检查 package envelope、schema、hash 和 share-safety。
+`verify_handoff_package_result()` 是唯一正式 package-level verifier result path；
+standalone verifier CLI 保留为完整 bundle replay 和 receipt comparison 的直接入口，
+但不是额外 Python wrapper。Standalone verifier 在同一个 bundle clone 中复用
+source-tree scan 结果执行 share-safety 和 hard-scan receipt replay。具体字段、
+结构、receipt replay、share-safety 和 hard-scan receipt construction 以 executable
+contracts、`verify_handoff_package.py` 和 `replay_evidence.py` 为准。
 `verify_governance.py` 只运行 governance checks，不写 handoff receipts。
 
 package smoke receipt 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`。构建后端依赖由 `environment.yml` 显式提供；构建产出 wheel 后，用标准库解压 wheel，并通过 `PYTHONPATH` 执行 import smoke。`profile_smoke` row 来自正式 profile runner 的 `profile-smoke` profile。
@@ -167,7 +169,10 @@ A 股 owner-local naming gate 禁止 `markets/implementations/a_share/**` 内部
 
 ```text
 tests/agents/test_verify_governance.py
-tests/architecture/test_governance_contract_rg_gate.py
+tests/architecture/test_governance_scan_roots.py
+tests/architecture/test_governance_active_docs.py
+tests/architecture/test_governance_profile_runner_contract.py
+tests/architecture/test_governance_source_tree_scan_contract.py
 tests/architecture/test_share_safe_evidence.py
 tests/architecture/test_share_safe_evidence_data_contract.py
 tests/architecture/test_platform_topology.py

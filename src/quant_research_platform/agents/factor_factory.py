@@ -1,4 +1,4 @@
-"""Proposal-only Factor Factory boundary."""
+"""Agent-assisted factor research helpers."""
 
 from quant_research_platform.agents.proposals import FactorProposal
 from quant_research_platform.agents.safety import assert_proposal_is_share_safe

@@ -1,4 +1,4 @@
-"""Proposal-only research dataset planner boundary."""
+"""Agent-assisted research dataset planning helpers."""
 
 from quant_research_platform.agents.proposals import ResearchDatasetProposal
 from quant_research_platform.agents.safety import assert_proposal_is_share_safe
