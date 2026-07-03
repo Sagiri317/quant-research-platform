@@ -14,48 +14,57 @@ REPORT_SIGNAL_COLUMN = price_volume_window_column("mom", 20)
 REPORT_LABEL_COLUMN = forward_return_label_column(20)
 
 
-def make_prediction_output_frame(
+def make_report_prediction_output_frame(
     *,
-    scenario: str = "reports",
     with_metadata: bool = True,
     row_count: int = 1,
 ) -> pd.DataFrame:
-    if scenario == "reports":
-        frame = _reports_prediction_frame(row_count=row_count)
-        if with_metadata:
-            frame.attrs["model_metadata"] = _reports_model_metadata()
-            frame.attrs["prediction_metadata"] = {
-                **_reports_prediction_metadata(),
-                "prediction_rows": row_count,
-            }
-        return frame
-    if scenario == "artifacts":
-        frame = _artifacts_prediction_frame()
-        if with_metadata:
-            frame.attrs["model_metadata"] = _artifacts_model_metadata()
-            frame.attrs["prediction_metadata"] = _artifacts_prediction_metadata()
-        return frame
-    raise ValueError(f"unknown_prediction_output_frame_scenario: {scenario}")
+    frame = _reports_prediction_frame(row_count=row_count)
+    if with_metadata:
+        frame.attrs["model_metadata"] = _reports_model_metadata()
+        frame.attrs["prediction_metadata"] = {
+            **_reports_prediction_metadata(),
+            "prediction_rows": row_count,
+        }
+    return frame
 
 
-def make_report_signal_spec(*, scenario: str = "reports") -> SignalSpec:
-    if scenario == "reports":
-        return SignalSpec(
-            signal_id=REPORT_SIGNAL_COLUMN,
-            source_column=REPORT_SIGNAL_COLUMN,
-            source_kind="factor",
-        )
-    if scenario == "artifacts":
-        return SignalSpec(
-            signal_id="signal",
-            source_column="feature",
-            source_kind="feature",
-        )
-    raise ValueError(f"unknown_report_signal_spec_scenario: {scenario}")
+def make_artifact_prediction_output_frame(
+    *,
+    with_metadata: bool = True,
+) -> pd.DataFrame:
+    frame = _artifacts_prediction_frame()
+    if with_metadata:
+        frame.attrs["model_metadata"] = _artifacts_model_metadata()
+        frame.attrs["prediction_metadata"] = _artifacts_prediction_metadata()
+    return frame
 
 
-def make_evaluation_metrics_frame(*, scenario: str = "reports") -> pd.DataFrame:
-    values = _evaluation_values(scenario)
+def make_report_signal_spec() -> SignalSpec:
+    return SignalSpec(
+        signal_id=REPORT_SIGNAL_COLUMN,
+        source_column=REPORT_SIGNAL_COLUMN,
+        source_kind="factor",
+    )
+
+
+def make_artifact_signal_spec() -> SignalSpec:
+    return SignalSpec(
+        signal_id="signal",
+        source_column="feature",
+        source_kind="feature",
+    )
+
+
+def make_report_evaluation_metrics_frame() -> pd.DataFrame:
+    return _evaluation_metrics_frame_from_values(_reports_evaluation_values())
+
+
+def make_artifact_evaluation_metrics_frame() -> pd.DataFrame:
+    return _evaluation_metrics_frame_from_values(_artifacts_evaluation_values())
+
+
+def _evaluation_metrics_frame_from_values(values: dict[str, object]) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": [values["timestamp"]],
@@ -68,11 +77,22 @@ def make_evaluation_metrics_frame(*, scenario: str = "reports") -> pd.DataFrame:
     )
 
 
-def make_evaluation_grouped_label_values_frame(
-    *,
-    scenario: str = "reports",
+def make_report_evaluation_grouped_label_values_frame(
 ) -> pd.DataFrame:
-    values = _evaluation_values(scenario)
+    return _evaluation_grouped_label_values_frame_from_values(
+        _reports_evaluation_values()
+    )
+
+
+def make_artifact_evaluation_grouped_label_values_frame() -> pd.DataFrame:
+    return _evaluation_grouped_label_values_frame_from_values(
+        _artifacts_evaluation_values()
+    )
+
+
+def _evaluation_grouped_label_values_frame_from_values(
+    values: dict[str, object],
+) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": [values["timestamp"]],
@@ -85,8 +105,15 @@ def make_evaluation_grouped_label_values_frame(
     )
 
 
-def make_evaluation_ic_summary_frame(*, scenario: str = "reports") -> pd.DataFrame:
-    values = _evaluation_values(scenario)
+def make_report_evaluation_ic_summary_frame() -> pd.DataFrame:
+    return _evaluation_ic_summary_frame_from_values(_reports_evaluation_values())
+
+
+def make_artifact_evaluation_ic_summary_frame() -> pd.DataFrame:
+    return _evaluation_ic_summary_frame_from_values(_artifacts_evaluation_values())
+
+
+def _evaluation_ic_summary_frame_from_values(values: dict[str, object]) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "signal": [values["signal"]],
@@ -105,11 +132,22 @@ def make_evaluation_ic_summary_frame(*, scenario: str = "reports") -> pd.DataFra
     )
 
 
-def make_evaluation_group_spread_summary_frame(
-    *,
-    scenario: str = "reports",
+def make_report_evaluation_group_spread_summary_frame(
 ) -> pd.DataFrame:
-    values = _evaluation_values(scenario)
+    return _evaluation_group_spread_summary_frame_from_values(
+        _reports_evaluation_values()
+    )
+
+
+def make_artifact_evaluation_group_spread_summary_frame() -> pd.DataFrame:
+    return _evaluation_group_spread_summary_frame_from_values(
+        _artifacts_evaluation_values()
+    )
+
+
+def _evaluation_group_spread_summary_frame_from_values(
+    values: dict[str, object],
+) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "signal": [values["signal"]],
@@ -253,19 +291,19 @@ def _artifacts_prediction_metadata() -> dict[str, object]:
     }
 
 
-def _evaluation_values(scenario: str) -> dict[str, object]:
-    if scenario == "reports":
-        return {
-            "timestamp": pd.Timestamp("2014-01-03"),
-            "signal": REPORT_SIGNAL_COLUMN,
-            "label": REPORT_LABEL_COLUMN,
-            "mean_label_value": 0.01,
-        }
-    if scenario == "artifacts":
-        return {
-            "timestamp": pd.Timestamp("2024-01-02"),
-            "signal": "signal",
-            "label": "label",
-            "mean_label_value": 0.1,
-        }
-    raise ValueError(f"unknown_evaluation_frame_scenario: {scenario}")
+def _reports_evaluation_values() -> dict[str, object]:
+    return {
+        "timestamp": pd.Timestamp("2014-01-03"),
+        "signal": REPORT_SIGNAL_COLUMN,
+        "label": REPORT_LABEL_COLUMN,
+        "mean_label_value": 0.01,
+    }
+
+
+def _artifacts_evaluation_values() -> dict[str, object]:
+    return {
+        "timestamp": pd.Timestamp("2024-01-02"),
+        "signal": "signal",
+        "label": "label",
+        "mean_label_value": 0.1,
+    }

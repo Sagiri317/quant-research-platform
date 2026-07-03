@@ -7,17 +7,10 @@ import pandas as pd
 
 def make_cross_section_compute_panel(
     *,
-    scenario: str = "default",
     dates: Sequence[str] = ("2024-01-02", "2024-01-03"),
     include_alt_signal: bool = True,
     timestamps_as_datetime: bool = True,
 ) -> pd.DataFrame:
-    if scenario == "perfect":
-        dates = ("2026-01-01", "2026-01-02")
-        include_alt_signal = False
-        timestamps_as_datetime = False
-    elif scenario != "default":
-        raise ValueError(f"unknown_cross_section_compute_panel_scenario: {scenario}")
     repeated_dates = [date for date in dates for _ in ("A", "B", "C")]
     timestamps: object = (
         pd.to_datetime(repeated_dates) if timestamps_as_datetime else repeated_dates
@@ -31,6 +24,14 @@ def make_cross_section_compute_panel(
     if include_alt_signal:
         data["factor_alt"] = [3.0, 2.0, 1.0, 1.0, 2.0, 3.0]
     return pd.DataFrame(data)
+
+
+def make_perfect_cross_section_compute_panel() -> pd.DataFrame:
+    return make_cross_section_compute_panel(
+        dates=("2026-01-01", "2026-01-02"),
+        include_alt_signal=False,
+        timestamps_as_datetime=False,
+    )
 
 
 def make_two_asset_portfolio_compute_panel() -> pd.DataFrame:

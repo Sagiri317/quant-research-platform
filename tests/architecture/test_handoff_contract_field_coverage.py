@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from tests.helpers.maintenance_script_loader import (
-    load_handoff_script_module as _load_handoff_module,
-)
+from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 
 def _specs(module: object, name: str) -> Mapping[str, object]:
@@ -21,7 +19,7 @@ def _assert_field_specs_have_proof(specs: Mapping[str, object]) -> None:
 
 
 def test_handoff_generated_fields_have_proof_classes() -> None:
-    handoff_contract = _load_handoff_module("handoff_contract")
+    handoff_contract = load_handoff_script_module("handoff_contract")
 
     assert set(handoff_contract.ProofClass.__members__) == {
         "REPLAYED",
@@ -81,8 +79,8 @@ def test_handoff_generated_fields_have_proof_classes() -> None:
 
 
 def test_receipt_generated_fields_have_proof_classes() -> None:
-    handoff_contract = _load_handoff_module("handoff_contract")
-    receipt_contract = _load_handoff_module("receipt_contract")
+    handoff_contract = load_handoff_script_module("handoff_contract")
+    receipt_contract = load_handoff_script_module("receipt_contract")
 
     assert receipt_contract.FieldSpec is handoff_contract.FieldSpec
 
@@ -104,8 +102,8 @@ def test_receipt_generated_fields_have_proof_classes() -> None:
 
 
 def test_receipt_allowed_keys_are_derived_from_field_specs() -> None:
-    handoff_contract = _load_handoff_module("handoff_contract")
-    receipt_contract = _load_handoff_module("receipt_contract")
+    handoff_contract = load_handoff_script_module("handoff_contract")
+    receipt_contract = load_handoff_script_module("receipt_contract")
 
     assert receipt_contract.allowed_keys is handoff_contract.allowed_keys
 
@@ -125,8 +123,8 @@ def test_receipt_allowed_keys_are_derived_from_field_specs() -> None:
 
 
 def test_status_pass_proof_classes_are_replayed_or_derived() -> None:
-    handoff_contract = _load_handoff_module("handoff_contract")
-    receipt_contract = _load_handoff_module("receipt_contract")
+    handoff_contract = load_handoff_script_module("handoff_contract")
+    receipt_contract = load_handoff_script_module("receipt_contract")
 
     allowed = {
         handoff_contract.ProofClass.REPLAYED,

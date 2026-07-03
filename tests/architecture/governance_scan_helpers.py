@@ -60,7 +60,11 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/policy/test_share_safety_runtime_edges.py"),
     Path("tests/tools/run_profile.py"),
     Path("tests/tools/test_run_profile.py"),
-    Path("tests/workflows/test_local_verification.py"),
+    Path("tests/workflows/test_local_verification_artifacts.py"),
+    Path("tests/workflows/test_local_verification_config.py"),
+    Path("tests/workflows/test_local_verification_outputs.py"),
+    Path("tests/workflows/test_local_verification_processed_inputs.py"),
+    Path("tests/workflows/test_local_verification_records.py"),
     Path("tests/workflows/test_local_verification_contract.py"),
 } | GOVERNANCE_SCAN_TEST_FILES | {
     Path(path) for path in PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES
@@ -87,7 +91,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_OUTPUT_ARTIFACTS = Path("src/quant_research_platform/artifacts/outputs.py")
 RUNTIME_PROFILING = Path("src/quant_research_platform/runtime/profiling.py")
 GOVERNANCE_NEGATIVE_FIXTURE_FILES = (
-    Path("tests/agents/test_verify_governance.py"),
+    Path("tests/agents/test_verify_governance_active_docs.py"),
+    Path("tests/architecture/test_governance_source_tree_scan_contract.py"),
+    Path("tests/architecture/test_governance_version_surface_contract.py"),
     Path("tests/architecture/test_handoff_contract_single_source.py"),
     Path("tests/architecture/test_retired_surface_absent.py"),
     *tuple(sorted(GOVERNANCE_SCAN_TEST_FILES)),
@@ -134,7 +140,7 @@ ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST = {
             "core_long_period",
             "smoke_minimal",
         },
-        Path("tests/agents/test_verify_governance.py"): {
+        Path("tests/architecture/test_governance_version_surface_contract.py"): {
             "/api/v0.1",
         },
     },
@@ -143,7 +149,9 @@ ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST = {
             ".agents/skills/quant-research-platform-maintenance/scripts/"
             "verify_code_map_flow.py"
         ): {"/api/v0.1"},
-        Path("tests/agents/test_verify_governance.py"): {"/api/v0.1"},
+        Path("tests/architecture/test_governance_version_surface_contract.py"): {
+            "/api/v0.1"
+        },
     },
 }
 APPROVED_FIELD_SPEC_FILES = {

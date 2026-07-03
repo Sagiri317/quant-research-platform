@@ -280,11 +280,42 @@ def load_handoff_package_payload(
         failures.append(f"zip_read_failed: {exc}")
     if member_bytes:
         failures.extend(verify_manifest_hashes_from_bytes(member_bytes, names))
-        json_payloads = load_handoff_json_payloads_from_bytes(member_bytes)
-        task_metadata = json_payloads.task_metadata
-        validation_summary = json_payloads.validation_summary
-        receipts = json_payloads.receipts
-        failures.extend(json_payloads.failures)
+        for entry, target in (
+            (TASK_METADATA_ENTRY, "task_metadata"),
+            (VALIDATION_SUMMARY_ENTRY, "validation_summary"),
+        ):
+            try:
+                payload = json.loads(member_bytes[entry].decode("utf-8"))
+            except KeyError:
+                failures.append(f"json_member_missing: {entry}")
+                continue
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                failures.append(f"json_member_invalid: {entry}")
+                continue
+            if not isinstance(payload, dict):
+                failures.append(f"json_member_must_be_object: {entry}")
+                continue
+            if target == "task_metadata":
+                task_metadata = payload
+            else:
+                validation_summary = payload
+        for entry in (
+            PACKAGE_SMOKE_RECEIPT_ENTRY,
+            HARD_SCAN_RECEIPT_ENTRY,
+            CHECK_RECEIPTS_ENTRY,
+        ):
+            try:
+                payload = json.loads(member_bytes[entry].decode("utf-8"))
+            except KeyError:
+                failures.append(f"json_member_missing: {entry}")
+                continue
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                failures.append(f"json_member_invalid: {entry}")
+                continue
+            if not isinstance(payload, dict):
+                failures.append(f"json_member_must_be_object: {entry}")
+                continue
+            receipts[entry] = payload
     if json_path is not None:
         try:
             raw_sidecar = json_path.read_bytes()
@@ -373,72 +404,6 @@ def verify_sidecar(
     if json_path.name == sidecar.get("zip_filename"):
         failures.append("sidecar_filename_conflicts_with_zip")
     return failures
-
-
-@dataclass(frozen=True)
-class HandoffJsonPayloads:
-    task_metadata: dict[str, object] | None
-    validation_summary: dict[str, object] | None
-    receipts: dict[str, dict[str, object]]
-    failures: tuple[str, ...] = ()
-
-
-def load_handoff_json_payloads_from_bytes(
-    member_bytes: Mapping[str, bytes],
-) -> HandoffJsonPayloads:
-    failures: list[str] = []
-    task_metadata = load_json_member_from_bytes(
-        member_bytes, TASK_METADATA_ENTRY, failures
-    )
-    validation_summary = load_json_member_from_bytes(
-        member_bytes,
-        VALIDATION_SUMMARY_ENTRY,
-        failures,
-    )
-    receipts: dict[str, dict[str, object]] = {}
-    for entry in (
-        PACKAGE_SMOKE_RECEIPT_ENTRY,
-        HARD_SCAN_RECEIPT_ENTRY,
-        CHECK_RECEIPTS_ENTRY,
-    ):
-        payload = load_json_member_from_bytes(member_bytes, entry, failures)
-        if payload is not None:
-            receipts[entry] = payload
-    return HandoffJsonPayloads(
-        task_metadata=task_metadata,
-        validation_summary=validation_summary,
-        receipts=receipts,
-        failures=tuple(failures),
-    )
-
-
-def load_json_member_from_bytes(
-    member_bytes: Mapping[str, bytes],
-    entry: str,
-    failures: list[str],
-) -> dict[str, object] | None:
-    try:
-        raw = member_bytes[entry]
-    except KeyError:
-        failures.append(f"json_member_missing: {entry}")
-        return None
-    return load_json_member_raw(raw, entry, failures)
-
-
-def load_json_member_raw(
-    raw: bytes,
-    entry: str,
-    failures: list[str],
-) -> dict[str, object] | None:
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        failures.append(f"json_member_invalid: {entry}")
-        return None
-    if not isinstance(payload, dict):
-        failures.append(f"json_member_must_be_object: {entry}")
-        return None
-    return payload
 
 
 def compare_replayed_handoff_payloads(

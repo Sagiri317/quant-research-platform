@@ -10,8 +10,6 @@ from tests.helpers.governance_git_repos import run_governance_script
 
 pytestmark = pytest.mark.performance
 
-GOVERNANCE_TOOLING_RUNTIME_BUDGET_SECONDS = 120.0
-
 
 @dataclass(frozen=True)
 class ToolRuntime:
@@ -21,7 +19,7 @@ class ToolRuntime:
     stderr: str
 
 
-def test_structure_audit_runtime_guardrail() -> None:
+def test_structure_audit_runtime_evidence(record_property) -> None:
     result = _run_tool(
         "python",
         ".agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py",
@@ -30,11 +28,11 @@ def test_structure_audit_runtime_guardrail() -> None:
         "--json",
     )
 
-    assert result.duration_seconds <= GOVERNANCE_TOOLING_RUNTIME_BUDGET_SECONDS
+    _record_runtime(record_property, "structure_audit", result)
     assert '"status": "PASS"' in result.stdout
 
 
-def test_verify_governance_active_docs_runtime_guardrail() -> None:
+def test_verify_governance_active_docs_runtime_evidence(record_property) -> None:
     result = _run_tool(
         "python",
         ".agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py",
@@ -46,11 +44,11 @@ def test_verify_governance_active_docs_runtime_guardrail() -> None:
         "--json",
     )
 
-    assert result.duration_seconds <= GOVERNANCE_TOOLING_RUNTIME_BUDGET_SECONDS
+    _record_runtime(record_property, "verify_governance_active_docs", result)
     assert '"status": "PASS"' in result.stdout
 
 
-def test_verify_code_map_flow_runtime_guardrail() -> None:
+def test_verify_code_map_flow_runtime_evidence(record_property) -> None:
     result = _run_tool(
         "python",
         ".agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py",
@@ -58,11 +56,11 @@ def test_verify_code_map_flow_runtime_guardrail() -> None:
         ".",
     )
 
-    assert result.duration_seconds <= GOVERNANCE_TOOLING_RUNTIME_BUDGET_SECONDS
+    _record_runtime(record_property, "verify_code_map_flow", result)
     assert result.stdout
 
 
-def test_source_tree_scan_runtime_guardrail() -> None:
+def test_source_tree_scan_runtime_evidence(record_property) -> None:
     governance_contract_path = (
         ".agents/skills/quant-research-platform-maintenance/scripts/"
         "governance_contract.py"
@@ -81,8 +79,13 @@ def test_source_tree_scan_runtime_guardrail() -> None:
     )
     result = _run_tool("python", "-c", code)
 
-    assert result.duration_seconds <= GOVERNANCE_TOOLING_RUNTIME_BUDGET_SECONDS
+    _record_runtime(record_property, "source_tree_scan_groups", result)
     assert result.stdout.strip().isdigit()
+
+
+def _record_runtime(record_property, name: str, result: ToolRuntime) -> None:
+    record_property(f"{name}_duration_seconds", result.duration_seconds)
+    print(f"{name}_duration_seconds={result.duration_seconds:.6f}")
 
 
 def _run_tool(*command: str) -> ToolRuntime:

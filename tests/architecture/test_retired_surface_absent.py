@@ -4,13 +4,11 @@ import importlib.util
 from pathlib import Path
 
 from tests.helpers.governance_fixtures import rule_form, text_rule_example
-from tests.helpers.maintenance_script_loader import (
-    load_governance_contract_module as _load_governance_contract,
-)
+from tests.helpers.maintenance_script_loader import load_maintenance_script_module
 
 
 def test_retired_owner_local_function_names_are_absent() -> None:
-    contract = _load_governance_contract()
+    contract = load_maintenance_script_module("governance_contract")
     patterns = contract.python_symbol_forbidden_patterns()
     modules = (
         "quant_research_platform.markets.implementations.a_share.definition",
@@ -34,7 +32,7 @@ def test_retired_owner_local_function_names_are_absent() -> None:
 
 
 def test_retired_workflow_run_module_is_absent() -> None:
-    contract = _load_governance_contract()
+    contract = load_maintenance_script_module("governance_contract")
     retired_module = "quant_research_platform." + text_rule_example(
         contract.RETIRED_PUBLIC_SURFACE_RULES,
         "retired_workflow_module",
@@ -51,7 +49,7 @@ def test_retired_public_constant_aliases_are_absent() -> None:
     )
     from quant_research_platform.sources.csmar import ids as source_ids
 
-    contract = _load_governance_contract()
+    contract = load_maintenance_script_module("governance_contract")
     cases = (
         (
             contracts_models,
@@ -69,7 +67,7 @@ def test_retired_public_constant_aliases_are_absent() -> None:
 
 
 def test_retired_constant_fixtures_are_derived_from_governance_contract() -> None:
-    contract = _load_governance_contract()
+    contract = load_maintenance_script_module("governance_contract")
 
     assert rule_form(
         contract.RETIRED_PUBLIC_SURFACE_RULES,
@@ -92,7 +90,7 @@ def test_retired_handoff_evidence_names_are_absent(
 
 
 def test_retired_pr_body_renderer_is_absent() -> None:
-    contract = _load_governance_contract()
+    contract = load_maintenance_script_module("governance_contract")
     renderer = text_rule_example(
         contract.RETIRED_PUBLIC_SURFACE_RULES,
         "forbidden_render_pr_body",
@@ -114,7 +112,7 @@ def test_retired_pr_body_renderer_is_absent() -> None:
 
 
 def test_handoff_source_tree_scan_rejects_retired_pr_body_renderer() -> None:
-    contract = _load_governance_contract()
+    contract = load_maintenance_script_module("governance_contract")
 
     patterns = contract.source_tree_forbidden_patterns()
 
@@ -138,7 +136,7 @@ def test_active_source_has_no_retired_local_output_inventory_name() -> None:
 
 
 def test_retired_local_only_report_paths_remain_share_unsafe() -> None:
-    contract = _load_governance_contract()
+    contract = load_maintenance_script_module("governance_contract")
     from quant_research_platform.policy.share_safety import (
         is_local_only_path,
         unsafe_for_share_reason,

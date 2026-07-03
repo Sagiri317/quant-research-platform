@@ -27,11 +27,11 @@ from quant_research_platform.runtime.profiling import ProfileConfig, StageProfil
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.report_output_frames import (
-    make_evaluation_group_spread_summary_frame,
-    make_evaluation_grouped_label_values_frame,
-    make_evaluation_ic_summary_frame,
-    make_evaluation_metrics_frame,
-    make_prediction_output_frame,
+    make_report_evaluation_group_spread_summary_frame,
+    make_report_evaluation_grouped_label_values_frame,
+    make_report_evaluation_ic_summary_frame,
+    make_report_evaluation_metrics_frame,
+    make_report_prediction_output_frame,
     make_report_signal_spec,
 )
 
@@ -161,7 +161,7 @@ def test_output_writers_do_not_accept_output_dir() -> None:
 
 
 def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) -> None:
-    frame = make_prediction_output_frame(row_count=2)
+    frame = make_report_prediction_output_frame(row_count=2)
     materialized_root = write_prediction_outputs(
         frame,
         spec=_prediction_spec(),
@@ -188,7 +188,7 @@ def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) ->
 
 
 def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> None:
-    frame = make_prediction_output_frame()
+    frame = make_report_prediction_output_frame()
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
         prediction_outputs._write_prediction_output_chunks(
             (frame.copy(), frame.copy()),
@@ -258,7 +258,7 @@ def test_prediction_outputs_reject_existing_output_bundle_without_writes(
 
     with pytest.raises(OutputAlreadyExistsError):
         write_prediction_outputs(
-            make_prediction_output_frame(),
+            make_report_prediction_output_frame(),
             spec=_prediction_spec(),
             output_spec=_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -279,10 +279,10 @@ def test_evaluation_outputs_reject_existing_output_bundle_without_writes(
 
     with pytest.raises(OutputAlreadyExistsError):
         write_evaluation_outputs(
-            make_evaluation_metrics_frame(),
-            make_evaluation_grouped_label_values_frame(),
-            ic_summary=make_evaluation_ic_summary_frame(),
-            group_spread_summary=make_evaluation_group_spread_summary_frame(),
+            make_report_evaluation_metrics_frame(),
+            make_report_evaluation_grouped_label_values_frame(),
+            ic_summary=make_report_evaluation_ic_summary_frame(),
+            group_spread_summary=make_report_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=_evaluation_spec(),
             output_spec=_evaluation_outputs_spec(),
@@ -341,7 +341,7 @@ def test_prediction_outputs_clean_temp_root_after_mid_write_failure(
 
     with pytest.raises(RuntimeError, match="simulated_prediction_failure"):
         write_prediction_outputs(
-            make_prediction_output_frame(),
+            make_report_prediction_output_frame(),
             spec=_prediction_spec(),
             output_spec=_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -375,10 +375,10 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
 
     with pytest.raises(RuntimeError, match="simulated_evaluation_failure"):
         write_evaluation_outputs(
-            make_evaluation_metrics_frame(),
-            make_evaluation_grouped_label_values_frame(),
-            ic_summary=make_evaluation_ic_summary_frame(),
-            group_spread_summary=make_evaluation_group_spread_summary_frame(),
+            make_report_evaluation_metrics_frame(),
+            make_report_evaluation_grouped_label_values_frame(),
+            ic_summary=make_report_evaluation_ic_summary_frame(),
+            group_spread_summary=make_report_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=_evaluation_spec(),
             output_spec=_evaluation_outputs_spec(),

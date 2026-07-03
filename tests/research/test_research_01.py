@@ -54,11 +54,13 @@ from quant_research_platform.research.predictions import (
 )
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from tests.helpers.research_inputs import (
-    make_processed_catalog,
+from tests.helpers.research_processed_inputs import (
+    make_demo_processed_catalog,
+    write_processed_inputs,
+)
+from tests.helpers.research_specs import (
     make_research_dataset_catalog,
     make_signal_spec,
-    write_processed_inputs,
 )
 from tests.research.prediction_output_helpers import (
     write_prediction_output_and_read,
@@ -155,7 +157,7 @@ def _research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
 
 def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     dataset_catalog = make_research_dataset_catalog(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
@@ -211,7 +213,7 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(
         ResearchDatasetSpec(
@@ -316,7 +318,7 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
     )
     default_layout = StorageLayout(project_root=tmp_path / "default")
     tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     dataset_catalog = make_research_dataset_catalog(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
@@ -382,7 +384,7 @@ def test_sparse_research_dataset_left_joins_missing_non_base_input_key(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     dataset_catalog = make_research_dataset_catalog(
         key_coverage={"demo_labels": "sparse"},
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
@@ -417,7 +419,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(
         ResearchDatasetSpec(
@@ -467,7 +469,7 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
     expected_error: str,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     spec_kwargs = {
         "factor_columns": ("mom_20d",),
@@ -567,7 +569,7 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     dataset_catalog = make_research_dataset_catalog(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     write_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
         layout=layout,
@@ -636,7 +638,7 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
     dataset_catalog = make_research_dataset_catalog(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     write_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
         layout=layout,
@@ -695,7 +697,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     dataset_catalog = make_research_dataset_catalog(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     write_processed_inputs(layout, processed_catalog, frame=frame)
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
     assemble_research_dataset(
@@ -802,7 +804,7 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
     dataset_catalog = make_research_dataset_catalog(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     write_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
         layout=layout,
@@ -862,7 +864,7 @@ def test_evaluation_runner_streams_research_chunks(
     dataset_catalog = make_research_dataset_catalog(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
-    processed_catalog = make_processed_catalog()
+    processed_catalog = make_demo_processed_catalog()
     write_processed_inputs(layout, processed_catalog, frame=frame)
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
     assemble_research_dataset(

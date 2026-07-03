@@ -15,10 +15,12 @@ from quant_research_platform.research.predictions.runner import (
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from tests.helpers.research_inputs import (
+from tests.helpers.research_prediction_inputs import (
     make_prediction_frame,
+)
+from tests.helpers.research_specs import (
+    make_demo_research_dataset_spec,
     make_research_dataset_catalog,
-    make_research_dataset_spec,
 )
 from tests.research.prediction_output_helpers import write_prediction_result
 
@@ -28,7 +30,7 @@ def test_prediction_runner_selects_model_using_validation_metric(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = make_research_dataset_catalog(
-        make_research_dataset_spec(
+        make_demo_research_dataset_spec(
             data_id="research_demo",
             input_data_ids=("processed_demo",),
             base_input_data_id="processed_demo",
@@ -60,7 +62,7 @@ def test_prediction_runner_selects_model_using_validation_metric(
     write_dataset(
         layout.research_dataset_root(MarketId("a_share"), "research_demo"),
         make_prediction_frame(),
-        spec=make_research_dataset_spec(
+        spec=make_demo_research_dataset_spec(
             data_id="research_demo",
             input_data_ids=("processed_demo",),
             base_input_data_id="processed_demo",
@@ -95,7 +97,7 @@ def test_prediction_runner_applies_sample_filter_to_validation_metrics(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = make_research_dataset_catalog(
-        make_research_dataset_spec(
+        make_demo_research_dataset_spec(
             data_id="research_demo",
             input_data_ids=("processed_demo",),
             base_input_data_id="processed_demo",
@@ -128,7 +130,7 @@ def test_prediction_runner_applies_sample_filter_to_validation_metrics(
     write_dataset(
         layout.research_dataset_root(MarketId("a_share"), "research_demo"),
         make_prediction_frame(filter_flip=True),
-        spec=make_research_dataset_spec(
+        spec=make_demo_research_dataset_spec(
             data_id="research_demo",
             input_data_ids=("processed_demo",),
             base_input_data_id="processed_demo",
@@ -159,7 +161,7 @@ def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = make_research_dataset_catalog(
-        make_research_dataset_spec(
+        make_demo_research_dataset_spec(
             data_id="research_demo",
             input_data_ids=("processed_demo",),
             base_input_data_id="processed_demo",
@@ -189,7 +191,7 @@ def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
     write_dataset(
         layout.research_dataset_root(MarketId("a_share"), "research_demo"),
         make_prediction_frame().assign(other_label=1.0),
-        spec=make_research_dataset_spec(
+        spec=make_demo_research_dataset_spec(
             data_id="research_demo",
             input_data_ids=("processed_demo",),
             base_input_data_id="processed_demo",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.helpers.maintenance_script_loader import load_governance_contract_module
+from tests.helpers.maintenance_script_loader import load_maintenance_script_module
 
 ROOTS_TO_SCAN = (
     Path("src"),
@@ -26,7 +26,7 @@ ACTIVE_DOC_ROOTS = (
 
 
 def test_run_output_architecture_retired_paths_are_absent() -> None:
-    contract = load_governance_contract_module()
+    contract = load_maintenance_script_module("governance_contract")
 
     existing = [
         path
@@ -38,7 +38,7 @@ def test_run_output_architecture_retired_paths_are_absent() -> None:
 
 
 def test_retired_run_output_names_are_absent() -> None:
-    contract = load_governance_contract_module()
+    contract = load_maintenance_script_module("governance_contract")
     patterns = contract.retired_run_output_architecture_name_patterns()
     hits: list[str] = []
 

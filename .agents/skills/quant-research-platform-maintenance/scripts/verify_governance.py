@@ -32,12 +32,12 @@ from governance_contract import (  # noqa: E402
     iter_path_name_findings,
     iter_python_symbol_findings,
     iter_structured_key_findings,
+    iter_synthesized_string_findings_from_source,
     retired_governance_path_findings,
     source_tree_allowlist_definition_lines,
     source_tree_forbidden_patterns,
     source_tree_governance_rule_definition_lines,
     source_tree_python_owner_ranges,
-    source_tree_synthesized_string_findings,
 )
 
 BASE_GOVERNANCE_PREFIXES = (
@@ -418,7 +418,7 @@ def check_synthesized_strings(
             path,
         )
         owner_ranges = source_tree_python_owner_ranges(path)
-        for finding in source_tree_synthesized_string_findings(
+        for finding in iter_synthesized_string_findings_from_source(
             relative,
             path,
             tuple(lines),

@@ -13,9 +13,7 @@ from tests.agents.handoff.conftest import (
     _package_smoke_receipt,
 )
 from tests.helpers.governance_git_repos import run_governance_script
-from tests.helpers.maintenance_script_loader import (
-    load_handoff_script_module as _load_handoff_module,
-)
+from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -65,7 +63,7 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
         )
         manifest = json.loads(archive.read("artifact_manifest.json").decode("utf-8"))
     sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
-    handoff_contract = _load_handoff_module("handoff_contract")
+    handoff_contract = load_handoff_script_module("handoff_contract")
 
     assert _git(repo, "rev-parse", "HEAD").strip() == final_head
     assert names == set(handoff_contract.REQUIRED_HANDOFF_ENTRIES)
@@ -123,7 +121,7 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
 
 
 def test_builder_cli_has_no_external_task_or_receipts_args() -> None:
-    builder = _load_handoff_module("build_handoff_package")
+    builder = load_handoff_script_module("build_handoff_package")
     source = Path(builder.__file__).read_text(encoding="utf-8")
 
     assert '"--task"' not in source
@@ -138,7 +136,7 @@ def test_builder_generates_machine_receipts_from_bundle_clone(
 ) -> None:
     repo = tmp_path / "repo"
     _init_handoff_repo(repo)
-    builder = _load_handoff_module("build_handoff_package")
+    builder = load_handoff_script_module("build_handoff_package")
     receipt_roots: list[Path] = []
 
     class Verification:
@@ -187,7 +185,7 @@ def test_builder_fails_when_replayed_validation_row_is_not_pass(
 ) -> None:
     repo = tmp_path / "repo"
     _init_handoff_repo(repo)
-    builder = _load_handoff_module("build_handoff_package")
+    builder = load_handoff_script_module("build_handoff_package")
     good_receipts = builder.build_machine_receipts(
         repo, _git(repo, "rev-parse", "HEAD").strip()
     )
@@ -240,7 +238,7 @@ def test_builder_fails_when_package_smoke_timeout_blocks_validation(
 ) -> None:
     repo = tmp_path / "repo"
     _init_handoff_repo(repo)
-    builder = _load_handoff_module("build_handoff_package")
+    builder = load_handoff_script_module("build_handoff_package")
     receipts = builder.build_machine_receipts(
         repo, _git(repo, "rev-parse", "HEAD").strip()
     )

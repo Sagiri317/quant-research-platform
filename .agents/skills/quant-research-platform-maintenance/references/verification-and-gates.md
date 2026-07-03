@@ -165,7 +165,8 @@ parallel/stale implementation gate 扫描 legacy、compat、deprecated、migrati
 
 - architecture boundary tests 放 `tests/architecture/`。
 - handoff builder/verifier/evidence tests 放 `tests/agents/handoff/`。
-- receipt payload invariant 放 `tests/agents/handoff/test_receipt_contract.py`。
+- receipt payload invariant 放 `tests/agents/handoff/test_*_receipt_contract.py`
+  和 `tests/agents/handoff/test_validation_summary_contract.py`。
 - full zip mutation 放 `tests/agents/handoff/test_handoff_package_mutations.py`。
 - handoff single-source ownership 放 `tests/architecture/test_handoff_contract_single_source.py`。
 - source-tree retired-name gate 不放在 `tests/agents/handoff/`。
@@ -179,14 +180,19 @@ A 股 owner-local naming gate 禁止 `markets/implementations/a_share/**` 内部
 关键测试入口：
 
 ```text
-tests/agents/test_verify_governance.py
+tests/agents/test_verify_governance_active_docs.py
+tests/agents/test_verify_governance_changed_files.py
+tests/agents/test_verify_governance_cli.py
 tests/architecture/test_governance_scan_roots.py
 tests/architecture/test_governance_active_docs.py
 tests/architecture/test_governance_profile_runner_contract.py
 tests/architecture/test_governance_source_tree_scan_contract.py
 tests/architecture/test_share_safe_evidence.py
 tests/architecture/test_share_safe_evidence_data_contract.py
-tests/architecture/test_platform_topology.py
+tests/architecture/test_platform_topology_compute_module.py
+tests/architecture/test_platform_topology_csmar_source.py
+tests/architecture/test_platform_topology_platform_package.py
+tests/architecture/test_platform_topology_public_interface.py
 tests/contracts/test_platform_contracts.py
 ```
 

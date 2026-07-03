@@ -655,21 +655,25 @@ def test_simulate_long_short_returns_applies_turnover_costs() -> None:
     assert result["net_portfolio_return"].round(6).tolist() == [0.018, 0.016]
 
 
-def test_portfolio_construction_requires_explicit_return_source_column() -> None:
+@pytest.mark.parametrize("construction_path", ["dataframe", "tensor"])
+def test_portfolio_construction_requires_explicit_return_source_column(
+    construction_path: str,
+) -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
     with pytest.raises(ValueError, match="portfolio_return_source_column_required"):
-        simulate_weighted_long_short_returns(
-            _ranking_panel(),
-            spec,
-            WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
-        )
-    with pytest.raises(ValueError, match="portfolio_return_source_column_required"):
-        tensor_construction.build_tensor_portfolio_artifacts(
-            _ranking_panel(),
-            spec,
-            WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
-        )
+        if construction_path == "dataframe":
+            simulate_weighted_long_short_returns(
+                _ranking_panel(),
+                spec,
+                WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+            )
+        else:
+            tensor_construction.build_tensor_portfolio_artifacts(
+                _ranking_panel(),
+                spec,
+                WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+            )
 
 
 def test_simulate_weighted_returns_keeps_long_only_rows_without_short_leg() -> None:

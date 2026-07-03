@@ -29,7 +29,7 @@
 修 verify_governance.py，使其支持 state-based active-doc scan。
 clean tree 下也必须扫描 active docs。
 checked_files 为空不能 PASS。
-补 tests/agents/test_verify_governance.py。
+补 tests/agents/test_verify_governance_active_docs.py、tests/agents/test_verify_governance_changed_files.py 和 tests/agents/test_verify_governance_cli.py。
 ```
 
 ## 4. Handoff package

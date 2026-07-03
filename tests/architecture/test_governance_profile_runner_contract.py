@@ -32,6 +32,7 @@ def test_profile_runner_retired_text_rules_are_contract_owned() -> None:
         assert active_doc_patterns[rule.name].search(rule.example)
         assert source_tree_patterns[rule.name].search(rule.example)
 
+
 def test_profile_runner_retired_text_allowlist_is_precise() -> None:
     from governance_contract import (
         GOVERNANCE_CONTRACT_SCRIPT,
@@ -51,7 +52,7 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
     assert {entry.path.as_posix() for entry in entries} <= {
         GOVERNANCE_CONTRACT_SCRIPT.as_posix(),
         "docs/architecture/governance.md",
-        "tests/agents/test_verify_governance.py",
+        "tests/agents/test_verify_governance_active_docs.py",
         "tests/architecture/test_governance_profile_runner_contract.py",
     }
     assert "tests/tools/test_run_profile.py" not in {
@@ -69,7 +70,7 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
     agent_entries = [
         entry
         for entry in entries
-        if entry.path.as_posix() == "tests/agents/test_verify_governance.py"
+        if entry.path.as_posix() == "tests/agents/test_verify_governance_active_docs.py"
     ]
     assert {
         entry.rule_id.split(":", 1)[1] for entry in agent_entries
@@ -89,6 +90,7 @@ def test_profile_runner_retired_text_allowlist_is_precise() -> None:
     assert all(entry.py_owner.startswith("def:") for entry in architecture_entries)
     assert all(entry.exact_line for entry in architecture_entries)
 
+
 def test_profile_runner_retired_literals_are_not_allowed_by_unrelated_context(
     tmp_path: Path,
 ) -> None:
@@ -102,7 +104,7 @@ def test_profile_runner_retired_literals_are_not_allowed_by_unrelated_context(
     targets = (
         GOVERNANCE_CONTRACT_SCRIPT,
         Path("tests/architecture/test_governance_profile_runner_contract.py"),
-        Path("tests/agents/test_verify_governance.py"),
+        Path("tests/agents/test_verify_governance_active_docs.py"),
     )
     unrelated_lines = "\n".join(
         f"# unrelated {rule.example}" for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES
@@ -128,6 +130,7 @@ def test_profile_runner_retired_literals_are_not_allowed_by_unrelated_context(
                 finding["path"] == target.as_posix() and finding["rule"] == rule.name
                 for finding in findings
             ), (target, rule.name, findings)
+
 
 def test_profile_runner_retired_literals_are_not_allowed_inside_owner_context(
     tmp_path: Path,
@@ -168,6 +171,7 @@ def test_profile_runner_retired_literals_are_not_allowed_inside_owner_context(
             for finding in findings
         ), (rule.name, findings)
 
+
 def test_profile_runner_retired_literals_remain_allowed_in_authorized_contexts(
     tmp_path: Path,
 ) -> None:
@@ -181,7 +185,7 @@ def test_profile_runner_retired_literals_remain_allowed_in_authorized_contexts(
     targets = (
         GOVERNANCE_CONTRACT_SCRIPT,
         Path("tests/architecture/test_governance_profile_runner_contract.py"),
-        Path("tests/agents/test_verify_governance.py"),
+        Path("tests/agents/test_verify_governance_active_docs.py"),
     )
     expected_rules = {rule.name for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES}
     for target_index, target in enumerate(targets):
@@ -203,6 +207,7 @@ def test_profile_runner_retired_literals_remain_allowed_in_authorized_contexts(
             if finding["path"] == target.as_posix()
         }.isdisjoint(expected_rules), (target, findings)
 
+
 def test_retired_profile_allowlist_rejects_duplicate_exact_occurrence(
     tmp_path: Path,
 ) -> None:
@@ -215,7 +220,7 @@ def test_retired_profile_allowlist_rejects_duplicate_exact_occurrence(
     rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
     env_line = f'    monkeypatch.setenv("{rule.example}", "forge-managed-root")'
     repo = tmp_path / "repo"
-    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path = repo / "tests" / "agents" / "test_verify_governance_active_docs.py"
     path.parent.mkdir(parents=True)
     path.write_text(
         "\n".join(
@@ -234,19 +239,24 @@ def test_retired_profile_allowlist_rejects_duplicate_exact_occurrence(
     )
     init_governance_git_repo(
         repo,
-        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+        {
+            "tests/agents/test_verify_governance_active_docs.py": path.read_text(
+                encoding="utf-8"
+            )
+        },
     )
 
     scan_input = build_source_tree_scan_input(repo)
     findings = source_tree_retired_text_findings(scan_input)
 
     assert any(
-        finding["path"] == "tests/agents/test_verify_governance.py"
+        finding["path"] == "tests/agents/test_verify_governance_active_docs.py"
         and finding["line"] == 3
         and finding["rule"] == rule.name
         and finding.get("reason") == "source_tree_allowed_occurrence_overmatched"
         for finding in findings
     ), findings
+
 
 def test_retired_profile_rule_source_duplicate_exact_occurrence_overmatches(
     tmp_path: Path,
@@ -284,6 +294,7 @@ def test_retired_profile_rule_source_duplicate_exact_occurrence_overmatches(
         for finding in findings
     ), findings
 
+
 def test_retired_profile_allowlist_rejects_stale_exact_occurrence(
     tmp_path: Path,
     monkeypatch,
@@ -300,7 +311,7 @@ def test_retired_profile_allowlist_rejects_stale_exact_occurrence(
     env_line = f'    monkeypatch.setenv("{rule.example}", "forge-managed-root")'
     missing_env_line = f'monkeypatch.setenv("{rule.example}", "missing-value")'
     repo = tmp_path / "repo"
-    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path = repo / "tests" / "agents" / "test_verify_governance_active_docs.py"
     path.parent.mkdir(parents=True)
     path.write_text(
         "\n".join(
@@ -317,7 +328,7 @@ def test_retired_profile_allowlist_rejects_stale_exact_occurrence(
         encoding="utf-8",
     )
     stale = SourceTreeAllowedOccurrence(
-        path=Path("tests/agents/test_verify_governance.py"),
+        path=Path("tests/agents/test_verify_governance_active_docs.py"),
         rule_id=f"retired_text:{rule.name}",
         exact_line=missing_env_line,
         owner="architecture-governance-negative-tests",
@@ -337,18 +348,23 @@ def test_retired_profile_allowlist_rejects_stale_exact_occurrence(
     )
     init_governance_git_repo(
         repo,
-        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+        {
+            "tests/agents/test_verify_governance_active_docs.py": path.read_text(
+                encoding="utf-8"
+            )
+        },
     )
 
     scan_input = build_source_tree_scan_input(repo)
     findings = source_tree_allowance_contract_findings(scan_input)
 
     assert any(
-        finding["path"] == "tests/agents/test_verify_governance.py"
+        finding["path"] == "tests/agents/test_verify_governance_active_docs.py"
         and finding["rule"] == stale.rule_id
         and finding.get("reason") == "source_tree_allowed_occurrence_stale"
         for finding in findings
     ), findings
+
 
 def test_allowance_contract_rejects_unreachable_synthesized_occurrence(
     tmp_path: Path,
@@ -362,7 +378,7 @@ def test_allowance_contract_rejects_unreachable_synthesized_occurrence(
     )
 
     repo = tmp_path / "repo"
-    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path = repo / "tests" / "agents" / "test_verify_governance_active_docs.py"
     path.parent.mkdir(parents=True)
     path.write_text(
         "\n".join(
@@ -375,7 +391,7 @@ def test_allowance_contract_rejects_unreachable_synthesized_occurrence(
         encoding="utf-8",
     )
     entry = SourceTreeAllowedOccurrence(
-        path=Path("tests/agents/test_verify_governance.py"),
+        path=Path("tests/agents/test_verify_governance_active_docs.py"),
         rule_id="synthesized_strings:retired_private_summary_symbol",
         exact_line='_BAD = "public_" "path"',
         owner="architecture-governance-negative-tests",
@@ -391,18 +407,23 @@ def test_allowance_contract_rejects_unreachable_synthesized_occurrence(
     )
     init_governance_git_repo(
         repo,
-        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+        {
+            "tests/agents/test_verify_governance_active_docs.py": path.read_text(
+                encoding="utf-8"
+            )
+        },
     )
 
     scan_input = build_source_tree_scan_input(repo)
     findings = source_tree_allowance_contract_findings(scan_input)
 
     assert any(
-        finding["path"] == "tests/agents/test_verify_governance.py"
+        finding["path"] == "tests/agents/test_verify_governance_active_docs.py"
         and finding["rule"] == entry.rule_id
         and finding.get("reason") == "source_tree_allowed_occurrence_unreachable"
         for finding in findings
     ), findings
+
 
 def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
     tmp_path: Path,
@@ -413,7 +434,7 @@ def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
     )
 
     repo = tmp_path / "repo"
-    path = repo / "tests" / "agents" / "test_verify_governance.py"
+    path = repo / "tests" / "agents" / "test_verify_governance_active_docs.py"
     path.parent.mkdir(parents=True)
     path.write_text(
         "\n".join(
@@ -433,7 +454,11 @@ def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
     )
     init_governance_git_repo(
         repo,
-        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+        {
+            "tests/agents/test_verify_governance_active_docs.py": path.read_text(
+                encoding="utf-8"
+            )
+        },
     )
 
     scan_input = build_source_tree_scan_input(repo)
@@ -444,16 +469,17 @@ def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
     }
     assert {
         (
-            "tests/agents/test_verify_governance.py",
+            "tests/agents/test_verify_governance_active_docs.py",
             2,
             "profile_runner_retired_qrp_managed_repo_roots",
         ),
         (
-            "tests/agents/test_verify_governance.py",
+            "tests/agents/test_verify_governance_active_docs.py",
             5,
             "profile_runner_retired_qrp_managed_repo_roots",
         ),
     } <= finding_keys
+
 
 def test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context(
     tmp_path: Path,
@@ -516,6 +542,7 @@ def test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context(
         if finding.get("line") == 1
     }
 
+
 def test_retired_profile_allowlist_rejects_ambiguous_python_owner(
     tmp_path: Path,
     monkeypatch,
@@ -560,17 +587,19 @@ def test_retired_profile_allowlist_rejects_ambiguous_python_owner(
 
     for name, source, ast_owner, exact_line in cases:
         repo = tmp_path / name
-        path = repo / "tests" / "agents" / "test_verify_governance.py"
+        path = repo / "tests" / "agents" / "test_verify_governance_active_docs.py"
         path.parent.mkdir(parents=True)
         path.write_text(source, encoding="utf-8")
         entry = SourceTreeAllowedOccurrence(
-            path=Path("tests/agents/test_verify_governance.py"),
+            path=Path("tests/agents/test_verify_governance_active_docs.py"),
             rule_id=f"retired_text:{rule.name}",
             exact_line=exact_line,
             owner="architecture-governance-negative-tests",
             rationale="test-only ambiguous owner fixture",
             lifecycle="test-only",
-            covered_by=("tests/architecture/test_governance_profile_runner_contract.py",),
+            covered_by=(
+                "tests/architecture/test_governance_profile_runner_contract.py",
+            ),
             py_owner=ast_owner,
         )
         monkeypatch.setattr(
@@ -581,7 +610,7 @@ def test_retired_profile_allowlist_rejects_ambiguous_python_owner(
         init_governance_git_repo(
             repo,
             {
-                "tests/agents/test_verify_governance.py": path.read_text(
+                "tests/agents/test_verify_governance_active_docs.py": path.read_text(
                     encoding="utf-8",
                 ),
             },
@@ -591,12 +620,13 @@ def test_retired_profile_allowlist_rejects_ambiguous_python_owner(
         findings = source_tree_allowance_contract_findings(scan_input)
 
         assert any(
-            finding["path"] == "tests/agents/test_verify_governance.py"
+            finding["path"] == "tests/agents/test_verify_governance_active_docs.py"
             and finding["rule"] == entry.rule_id
             and finding.get("reason")
             == "source_tree_allowed_occurrence_ambiguous_owner"
             for finding in findings
         ), (name, findings)
+
 
 def test_retired_profile_allowlist_rejects_global_stale_entries(
     tmp_path: Path,
@@ -612,7 +642,7 @@ def test_retired_profile_allowlist_rejects_global_stale_entries(
 
     rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
     base = {
-        "path": Path("tests/agents/test_verify_governance.py"),
+        "path": Path("tests/agents/test_verify_governance_active_docs.py"),
         "rule_id": f"retired_text:{rule.name}",
         "py_owner": "def:test_func",
         "exact_line": f'x = "{rule.example}"',
@@ -640,12 +670,18 @@ def test_retired_profile_allowlist_rejects_global_stale_entries(
 
     for name, overrides, actions in cases:
         repo = tmp_path / name
-        path = repo / "tests" / "agents" / "test_verify_governance.py"
-        owner_path = repo / "tests" / "architecture" / (
-            "test_governance_profile_runner_contract.py"
+        path = repo / "tests" / "agents" / "test_verify_governance_active_docs.py"
+        owner_path = (
+            repo
+            / "tests"
+            / "architecture"
+            / ("test_governance_profile_runner_contract.py")
         )
-        allowance_owner_path = repo / "tests" / "architecture" / (
-            "test_governance_source_tree_scan_contract.py"
+        allowance_owner_path = (
+            repo
+            / "tests"
+            / "architecture"
+            / ("test_governance_source_tree_scan_contract.py")
         )
         init_governance_git_repo(
             repo,
@@ -684,6 +720,7 @@ def test_retired_profile_allowlist_rejects_global_stale_entries(
             for finding in findings
         ), (name, findings)
 
+
 def test_profile_runner_retired_cli_flags_are_rejected() -> None:
     runner = Path("tests/tools/run_profile.py")
 
@@ -700,6 +737,7 @@ def test_profile_runner_retired_cli_flags_are_rejected() -> None:
         assert result.returncode == 2
         assert "unrecognized arguments" in result.stderr
         assert flag in result.stderr
+
 
 def test_profile_runner_env_is_not_forwarded_to_pytest_subprocess(
     tmp_path: Path,

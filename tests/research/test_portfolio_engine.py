@@ -26,9 +26,9 @@ from quant_research_platform.research.portfolios import (
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
-from tests.helpers.research_inputs import (
+from tests.helpers.research_specs import (
+    make_portfolio_research_dataset_spec,
     make_research_dataset_catalog,
-    make_research_dataset_spec,
     make_signal_spec,
 )
 
@@ -286,7 +286,7 @@ def test_portfolio_spec_rejects_unsupported_rebalance_frequency() -> None:
 def test_portfolio_runner_writes_private_outputs(tmp_path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = make_research_dataset_catalog(
-        make_research_dataset_spec(scenario="portfolio")
+        make_portfolio_research_dataset_spec()
     )
     portfolio_catalog = PortfolioCatalog()
     portfolio_catalog.register(_portfolio_spec())
@@ -294,7 +294,7 @@ def test_portfolio_runner_writes_private_outputs(tmp_path) -> None:
     write_dataset(
         dataset_root,
         _portfolio_frame(),
-        spec=make_research_dataset_spec(scenario="portfolio"),
+        spec=make_portfolio_research_dataset_spec(),
     )
 
     result = build_portfolio_result_from_research_dataset(
@@ -340,7 +340,7 @@ def test_portfolio_runner_rejects_empty_time_window_before_artifact_write(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = make_research_dataset_catalog(
-        make_research_dataset_spec(scenario="portfolio")
+        make_portfolio_research_dataset_spec()
     )
     portfolio_catalog = PortfolioCatalog()
     portfolio_catalog.register(_portfolio_spec())
@@ -348,7 +348,7 @@ def test_portfolio_runner_rejects_empty_time_window_before_artifact_write(
     write_dataset(
         dataset_root,
         _portfolio_frame(),
-        spec=make_research_dataset_spec(scenario="portfolio"),
+        spec=make_portfolio_research_dataset_spec(),
     )
 
     result = build_portfolio_result_from_research_dataset(
@@ -444,7 +444,7 @@ def _portfolio_frame() -> pd.DataFrame:
 def _run_demo_portfolio(project_root) -> Path:
     layout = StorageLayout(project_root=project_root)
     dataset_catalog = make_research_dataset_catalog(
-        make_research_dataset_spec(scenario="portfolio")
+        make_portfolio_research_dataset_spec()
     )
     portfolio_catalog = PortfolioCatalog()
     portfolio_catalog.register(_portfolio_spec())
@@ -452,7 +452,7 @@ def _run_demo_portfolio(project_root) -> Path:
     write_dataset(
         dataset_root,
         _portfolio_frame(),
-        spec=make_research_dataset_spec(scenario="portfolio"),
+        spec=make_portfolio_research_dataset_spec(),
     )
     result = build_portfolio_result_from_research_dataset(
         layout=layout,

@@ -653,24 +653,25 @@ def test_price_volume_compute_fails_closed_when_required_input_missing() -> None
         calculate_price_volume_factors(panel, factor_columns=("amihud_20d",))
 
 
-def test_price_volume_compute_fails_closed_for_unsupported_factor_suffix() -> None:
+@pytest.mark.parametrize(
+    ("factor_columns", "error_match"),
+    [
+        (("mom_2m",), "unsupported_price_volume_factors: mom_2m"),
+        (
+            ("log_float_market_cap_20d", "rev_1d_2d"),
+            "unsupported_price_volume_factors: log_float_market_cap_20d, rev_1d_2d",
+        ),
+    ],
+)
+def test_price_volume_compute_fails_closed_for_unsupported_factor_names(
+    factor_columns: tuple[str, ...],
+    error_match: str,
+) -> None:
     panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5))
 
-    assert unsupported_price_volume_factors(("mom_2m",)) == ("mom_2m",)
-    with pytest.raises(ValueError, match="unsupported_price_volume_factors: mom_2m"):
-        calculate_price_volume_factors(panel, factor_columns=("mom_2m",))
-
-
-def test_price_volume_compute_fails_closed_for_malformed_factor_names() -> None:
-    panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5))
-    malformed = ("log_float_market_cap_20d", "rev_1d_2d")
-
-    assert unsupported_price_volume_factors(malformed) == malformed
-    with pytest.raises(
-        ValueError,
-        match="unsupported_price_volume_factors: log_float_market_cap_20d, rev_1d_2d",
-    ):
-        calculate_price_volume_factors(panel, factor_columns=malformed)
+    assert unsupported_price_volume_factors(factor_columns) == factor_columns
+    with pytest.raises(ValueError, match=error_match):
+        calculate_price_volume_factors(panel, factor_columns=factor_columns)
 
 
 def test_price_volume_largest_lookback_is_derived_from_requested_columns() -> None:

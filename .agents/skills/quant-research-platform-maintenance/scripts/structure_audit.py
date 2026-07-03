@@ -349,9 +349,18 @@ def _source_tree_scan_roots_configured() -> AuditCheck:
 
 
 def _source_tree_scan_behavior_tests(repo_root: Path) -> AuditCheck:
-    test_source = (
-        repo_root / "tests" / "agents" / "test_verify_governance.py"
-    ).read_text(encoding="utf-8")
+    test_sources = (
+        (
+            repo_root / "tests" / "agents" / "test_verify_governance_active_docs.py"
+        ).read_text(encoding="utf-8"),
+        (
+            repo_root
+            / "tests"
+            / "architecture"
+            / "test_governance_source_tree_scan_contract.py"
+        ).read_text(encoding="utf-8"),
+    )
+    test_source = "\n".join(test_sources)
     required = (
         "src/quant_research_platform/private_payload.py",
         "docs/architecture/private-payload.md",
@@ -456,8 +465,8 @@ def _old_helper_references_absent(repo_root: Path) -> AuditCheck:
 
 
 def _no_duplicate_validation_or_command_ids(repo_root: Path) -> AuditCheck:
-    handoff_contract = _load_handoff_module(repo_root, "handoff_contract")
-    receipt_contract = _load_handoff_module(repo_root, "receipt_contract")
+    handoff_contract = _load_handoff_script_module(repo_root, "handoff_contract")
+    receipt_contract = _load_handoff_script_module(repo_root, "receipt_contract")
     row_counts = Counter(handoff_contract.MANDATORY_VALIDATION_ROWS)
     command_counts = Counter(receipt_contract.REQUIRED_CHECK_IDS)
     findings = [
@@ -622,7 +631,7 @@ def _function_has_excluded_marker(node: ast.FunctionDef) -> bool:
     return False
 
 
-def _load_handoff_module(repo_root: Path, name: str):
+def _load_handoff_script_module(repo_root: Path, name: str):
     path = repo_root / HANDOFF_ROOT / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None

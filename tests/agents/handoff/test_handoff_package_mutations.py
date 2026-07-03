@@ -14,9 +14,7 @@ from tests.agents.handoff.conftest import (
     _init_handoff_repo,
     _rewrite_package_member,
 )
-from tests.helpers.maintenance_script_loader import (
-    load_handoff_script_module as _load_handoff_module,
-)
+from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 pytestmark = pytest.mark.mutation
 
@@ -28,7 +26,7 @@ def mutation_handoff_package(
     root = tmp_path_factory.mktemp("mutation-handoff-package")
     repo = root / "repo"
     base, final_head = _init_handoff_repo(repo)
-    builder = _load_handoff_module("build_handoff_package")
+    builder = load_handoff_script_module("build_handoff_package")
     receipts = builder.build_machine_receipts(repo, final_head)
     validation_summary = builder.build_validation_summary_from_receipts(receipts)
     task = builder.task_metadata(
@@ -119,7 +117,7 @@ def _verify_full(
     package: Path,
     sidecar: Path,
 ) -> list[str]:
-    verifier = _load_handoff_module("verify_handoff_package")
+    verifier = load_handoff_script_module("verify_handoff_package")
     return list(verifier.verify_handoff_package_result(package, sidecar).failures)
 
 
@@ -128,7 +126,7 @@ def _verify_fast(
     sidecar: Path,
     cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
 ) -> list[str]:
-    verifier = _load_handoff_module("verify_handoff_package")
+    verifier = load_handoff_script_module("verify_handoff_package")
     package_payload = verifier.load_handoff_package_payload(package, sidecar)
     result = verifier._validate_handoff_package_payload(
         package_payload,

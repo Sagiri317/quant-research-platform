@@ -6,13 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers.maintenance_script_loader import (
-    load_handoff_script_module as _load_handoff_module,
-)
+from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 
 def _load_verifier_for_scanner_tests():
-    module = _load_handoff_module("verify_handoff_package")
+    module = load_handoff_script_module("verify_handoff_package")
     return module
 
 

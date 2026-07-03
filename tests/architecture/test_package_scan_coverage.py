@@ -3,9 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from tests.helpers.maintenance_script_loader import (
-    load_governance_contract_module as _load_governance_contract,
-)
+from tests.helpers.maintenance_script_loader import load_maintenance_script_module
 
 REPO_ROOT = Path(".")
 PROJECT_SRC = Path("src/quant_research_platform")
@@ -109,7 +107,7 @@ def test_pyproject_does_not_add_runtime_data_to_package() -> None:
 
 
 def test_source_tree_sensitive_scan_declares_required_tracked_text_roots() -> None:
-    contract = _load_governance_contract()
+    contract = load_maintenance_script_module("governance_contract")
 
     configured = {Path(root).as_posix() for root in contract.SOURCE_TREE_TEXT_ROOTS}
 

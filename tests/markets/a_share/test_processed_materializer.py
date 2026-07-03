@@ -464,107 +464,75 @@ def test_factor_materializer_requires_family_contract_input_declared_by_spec(
         )
 
 
-def test_factor_materializer_unknown_family_fails_closed(
+@pytest.mark.parametrize(
+    (
+        "definition_owner",
+        "catalog_name",
+        "families",
+        "data_ids",
+        "error_match",
+    ),
+    [
+        (
+            materialize_factors.factor_definitions,
+            "factor_catalog",
+            ("alternative_price_family",),
+            ("price_volume",),
+            "unknown_factor_family: alternative_price_family",
+        ),
+        (
+            materialize_factors.factor_definitions,
+            "factor_catalog",
+            ("price_volume", "other_factor"),
+            ("price_volume",),
+            "mixed_factor_families: price_volume, other_factor",
+        ),
+        (
+            materialize_labels.label_definitions,
+            "label_catalog",
+            ("alternative_label_family",),
+            ("forward_returns",),
+            "unknown_label_family: alternative_label_family",
+        ),
+        (
+            materialize_labels.label_definitions,
+            "label_catalog",
+            ("forward_return", "other_label"),
+            ("forward_returns",),
+            "mixed_label_families: forward_return, other_label",
+        ),
+    ],
+)
+def test_materializer_family_contract_failures_are_closed(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    definition_owner,
+    catalog_name: str,
+    families: tuple[str, ...],
+    data_ids: tuple[str, ...],
+    error_match: str,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     write_synthetic_interim_inputs(
         layout, SYNTHETIC_SOURCE_ID, market_bars_data_id=MARKET_BARS_DATA_ID
     )
+    catalog_builder = (
+        _factor_catalog_with_families
+        if catalog_name == "factor_catalog"
+        else _label_catalog_with_families
+    )
     monkeypatch.setattr(
-        materialize_factors.factor_definitions,
-        "factor_catalog",
-        lambda: _factor_catalog_with_families(("alternative_price_family",)),
+        definition_owner,
+        catalog_name,
+        lambda: catalog_builder(families),
     )
 
-    with pytest.raises(
-        ValueError,
-        match="unknown_factor_family: alternative_price_family",
-    ):
+    with pytest.raises(ValueError, match=error_match):
         materializer.materialize_processed_data(
             layout=layout,
             source_id=SYNTHETIC_SOURCE_ID,
             time_window=TimeWindow("2014-01-02", "2014-01-03"),
-            data_ids=("price_volume",),
-        )
-
-
-def test_factor_materializer_mixed_families_fail_closed(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    write_synthetic_interim_inputs(
-        layout, SYNTHETIC_SOURCE_ID, market_bars_data_id=MARKET_BARS_DATA_ID
-    )
-    monkeypatch.setattr(
-        materialize_factors.factor_definitions,
-        "factor_catalog",
-        lambda: _factor_catalog_with_families(("price_volume", "other_factor")),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="mixed_factor_families: price_volume, other_factor",
-    ):
-        materializer.materialize_processed_data(
-            layout=layout,
-            source_id=SYNTHETIC_SOURCE_ID,
-            time_window=TimeWindow("2014-01-02", "2014-01-03"),
-            data_ids=("price_volume",),
-        )
-
-
-def test_label_materializer_unknown_family_fails_closed(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    write_synthetic_interim_inputs(
-        layout, SYNTHETIC_SOURCE_ID, market_bars_data_id=MARKET_BARS_DATA_ID
-    )
-    monkeypatch.setattr(
-        materialize_labels.label_definitions,
-        "label_catalog",
-        lambda: _label_catalog_with_families(("alternative_label_family",)),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="unknown_label_family: alternative_label_family",
-    ):
-        materializer.materialize_processed_data(
-            layout=layout,
-            source_id=SYNTHETIC_SOURCE_ID,
-            time_window=TimeWindow("2014-01-02", "2014-01-03"),
-            data_ids=("forward_returns",),
-        )
-
-
-def test_label_materializer_mixed_families_fail_closed(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    write_synthetic_interim_inputs(
-        layout, SYNTHETIC_SOURCE_ID, market_bars_data_id=MARKET_BARS_DATA_ID
-    )
-    monkeypatch.setattr(
-        materialize_labels.label_definitions,
-        "label_catalog",
-        lambda: _label_catalog_with_families(("forward_return", "other_label")),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="mixed_label_families: forward_return, other_label",
-    ):
-        materializer.materialize_processed_data(
-            layout=layout,
-            source_id=SYNTHETIC_SOURCE_ID,
-            time_window=TimeWindow("2014-01-02", "2014-01-03"),
-            data_ids=("forward_returns",),
+            data_ids=data_ids,
         )
 
 

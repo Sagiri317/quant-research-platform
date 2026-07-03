@@ -20,34 +20,112 @@ def _parse_source(path: Path) -> ast.Module:
     return ast.parse(_read_source(path), filename=str(path))
 
 
-def test_platform_topology_has_required_packages() -> None:
-    required = {
-        "contracts",
-        "storage",
-        "catalog",
-        "sources",
-        "markets",
-        "research",
-        "workflows",
-        "compute",
-        "agents",
-        "interfaces",
-        "reports",
-        "runtime",
-        "artifacts",
-        "policy",
-        "profiles",
-    }
+def _top_level_defined_names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            names.add(node.name)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+    return names
 
-    existing = {
-        path.name
-        for path in SOURCE_ROOT.iterdir()
-        if path.is_dir() and path.name != "__pycache__"
-    }
+def _is_dunder_main_guard(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Compare):
+        return False
+    if not (
+        isinstance(node.left, ast.Name)
+        and node.left.id == "__name__"
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.Eq)
+        and len(node.comparators) == 1
+    ):
+        return False
+    comparator = node.comparators[0]
+    return isinstance(comparator, ast.Constant) and comparator.value == "__main__"
 
-    assert existing == required
+
+def _ast_calls(tree: ast.Module) -> list[ast.Call]:
+    return [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
 
 
+def _is_app_route_decorator(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "app"
+        and node.func.attr in {"get", "post", "put", "patch", "delete"}
+    )
+
+
+def _is_add_typer_call(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_typer"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "app"
+    )
+
+
+def _is_typer_command_decorator(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "command"
+        and isinstance(node.func.value, ast.Name)
+    )
+
+
+def _decorator_owner_name(node: ast.Call) -> str:
+    if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+        return node.func.value.id
+    raise AssertionError("decorator_owner_missing")
+
+
+def _first_string_arg(node: ast.Call) -> str:
+    if node.args and isinstance(node.args[0], ast.Constant):
+        value = node.args[0].value
+        if isinstance(value, str):
+            return value
+    raise AssertionError("first_string_arg_missing")
+
+
+def _keyword_string(node: ast.Call, keyword_name: str) -> str:
+    for keyword in node.keywords:
+        if keyword.arg == keyword_name and isinstance(keyword.value, ast.Constant):
+            value = keyword.value.value
+            if isinstance(value, str):
+                return value
+    raise AssertionError(f"keyword_string_missing: {keyword_name}")
+
+
+def _is_typer_echo_call(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "typer"
+        and node.func.attr == "echo"
+    )
+
+
+def _is_sanitize_shared_text_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "sanitize_shared_text"
+    )
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 def test_retired_top_level_source_packages_are_absent() -> None:
     retired = {
         "datasets",
@@ -67,129 +145,6 @@ def test_retired_top_level_source_packages_are_absent() -> None:
     }
 
     assert existing.isdisjoint(retired)
-
-
-def test_platform_target_files_exist() -> None:
-    required_files = {
-        "contracts/ids.py",
-        "contracts/time.py",
-        "contracts/columns.py",
-        "contracts/data.py",
-        "contracts/factors.py",
-        "contracts/labels.py",
-        "contracts/datasets.py",
-        "contracts/evaluations.py",
-        "contracts/models.py",
-        "contracts/predictions.py",
-        "contracts/portfolios.py",
-        "contracts/outputs.py",
-        "contracts/workflows.py",
-        "contracts/validation.py",
-        "storage/layout.py",
-        "storage/datasets.py",
-        "storage/manifests.py",
-        "storage/checksums.py",
-        "catalog/processed.py",
-        "catalog/factors.py",
-        "catalog/labels.py",
-        "catalog/datasets.py",
-        "catalog/evaluations.py",
-        "catalog/models.py",
-        "catalog/predictions.py",
-        "catalog/workflows.py",
-        "markets/base.py",
-        "markets/session_windows.py",
-        "workflows/planner.py",
-        "workflows/executor.py",
-        "workflows/checkpoints.py",
-        "workflows/local_verification.py",
-        "agents/factor_factory.py",
-        "agents/label_factory.py",
-        "agents/dataset_planner.py",
-        "agents/workflow_planner.py",
-        "agents/proposals.py",
-        "agents/safety.py",
-        "reports/execution_metrics.py",
-        "reports/schema_inventory.py",
-        "reports/verification_summary.py",
-        "artifacts/definitions.py",
-        "artifacts/evidence.py",
-        "artifacts/layout.py",
-        "artifacts/outputs.py",
-        "policy/check_status.py",
-        "policy/identifiers.py",
-        "policy/share_safety.py",
-        "profiles/research.py",
-        "runtime/logging.py",
-        "runtime/profiling.py",
-        "runtime/errors.py",
-        "runtime/execution_metrics.py",
-        "compute/dataframe/construction.py",
-        "compute/dataframe/constraints.py",
-        "compute/dataframe/turnover.py",
-        "compute/dataframe/exposure.py",
-        "compute/dataframe/portfolio_returns.py",
-        "compute/tensor/construction.py",
-        "compute/tensor/constraints.py",
-        "compute/tensor/turnover.py",
-        "compute/tensor/exposure.py",
-        "compute/tensor/portfolio_returns.py",
-        "sources/csmar/ids.py",
-        "sources/csmar/raw_schemas.py",
-        "sources/csmar/field_mappings.py",
-        "sources/csmar/checksums.py",
-        "sources/csmar/interim.py",
-        "markets/implementations/a_share/processed/annotations.py",
-        "markets/implementations/a_share/processed/materialization_io.py",
-        "markets/implementations/a_share/processed/materializer.py",
-        "markets/implementations/a_share/processed/panels.py",
-        "markets/implementations/a_share/factors/definitions.py",
-        "markets/implementations/a_share/factors/calculations.py",
-        "markets/implementations/a_share/labels/definitions.py",
-        "markets/implementations/a_share/labels/calculations.py",
-        "markets/implementations/a_share/verification/aggregates.py",
-        "research/labels/forward_returns.py",
-        "interfaces/private_cli.py",
-    }
-
-    missing = [
-        path for path in sorted(required_files) if not (SOURCE_ROOT / path).is_file()
-    ]
-
-    assert missing == []
-
-
-def test_removed_root_directories_are_absent() -> None:
-    retired_roots = {"config", "scripts", "web"}
-    existing = {path.name for path in Path(".").iterdir() if path.is_dir()}
-
-    assert existing.isdisjoint(retired_roots)
-
-
-def test_compute_portfolio_compatibility_facades_are_absent() -> None:
-    retired = (
-        SOURCE_ROOT / "compute/dataframe/portfolio.py",
-        SOURCE_ROOT / "compute/dataframe/helpers.py",
-        SOURCE_ROOT / "compute/dataframe" / ("report" + "ing.py"),
-        SOURCE_ROOT / "compute/tensor/portfolio.py",
-        SOURCE_ROOT / "compute/tensor" / ("report" + "ing.py"),
-    )
-
-    assert [str(path) for path in retired if path.exists()] == []
-
-
-def test_report_placeholder_and_retired_research_modules_are_absent() -> None:
-    retired = (
-        SOURCE_ROOT / "reports/bundles.py",
-        SOURCE_ROOT / "reports/index.py",
-        SOURCE_ROOT / "reports/manifests.py",
-        SOURCE_ROOT / "reports/summaries.py",
-        SOURCE_ROOT / "research/models" / ("base" + "line.py"),
-        SOURCE_ROOT / "research/predictions/bundle.py",
-        SOURCE_ROOT / "research/predictions/handoff.py",
-    )
-
-    assert [str(path) for path in retired if path.exists()] == []
 
 
 def test_active_source_has_no_broad_artifact_report_diagnostics_abstractions() -> None:
@@ -218,66 +173,6 @@ def test_active_source_has_no_broad_artifact_report_diagnostics_abstractions() -
     assert hits == []
 
 
-def test_compute_split_modules_own_implementations() -> None:
-    split_modules = (
-        SOURCE_ROOT / "compute/dataframe/construction.py",
-        SOURCE_ROOT / "compute/dataframe/constraints.py",
-        SOURCE_ROOT / "compute/dataframe/turnover.py",
-        SOURCE_ROOT / "compute/dataframe/exposure.py",
-        SOURCE_ROOT / "compute/dataframe/portfolio_returns.py",
-        SOURCE_ROOT / "compute/tensor/construction.py",
-        SOURCE_ROOT / "compute/tensor/constraints.py",
-        SOURCE_ROOT / "compute/tensor/turnover.py",
-        SOURCE_ROOT / "compute/tensor/exposure.py",
-        SOURCE_ROOT / "compute/tensor/portfolio_returns.py",
-    )
-    missing: list[str] = []
-    reverse_imports: list[str] = []
-    for path in split_modules:
-        text = _read_source(path)
-        tree = ast.parse(text, filename=str(path))
-        has_impl = any(
-            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
-            for node in tree.body
-        )
-        if not has_impl:
-            missing.append(str(path))
-        if ".portfolio import" in text:
-            reverse_imports.append(str(path))
-
-    assert missing == []
-    assert reverse_imports == []
-
-
-def test_compute_constraint_helpers_are_not_owned_by_portfolio_helpers() -> None:
-    forbidden = {
-        SOURCE_ROOT / "compute/dataframe/portfolio_helpers.py": {
-            "apply_tradability_constraints",
-            "build_tradability_context",
-            "_is_entry_blocked",
-            "_is_exit_blocked",
-            "tradability_diagnostic_counts",
-            "validate_tradability_columns",
-        },
-        SOURCE_ROOT / "compute/tensor/portfolio_helpers.py": {
-            "apply_array_tradability_constraints",
-            "optional_bool_array",
-            "previous_position_vector",
-            "ranked_asset_indices",
-        },
-    }
-    hits: list[str] = []
-    for path, names in forbidden.items():
-        tree = _parse_source(path)
-        hits.extend(
-            f"{path}:{node.lineno}: {node.name}"
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name in names
-        )
-
-    assert hits == []
-
-
 def test_retired_csmar_compatibility_entrypoints_are_absent() -> None:
     retired = (
         SOURCE_ROOT / "sources/csmar/contracts.py",
@@ -295,11 +190,6 @@ def test_retired_csmar_compatibility_entrypoints_are_absent() -> None:
     )
 
     assert [str(path) for path in retired if path.exists()] == []
-
-
-def test_a_share_factor_builder_has_no_legacy_partition_fallback() -> None:
-    path = SOURCE_ROOT / "markets/implementations/a_share/factors/build_factors.py"
-    assert not path.exists()
 
 
 def test_a_share_source_to_dataset_old_helpers_are_absent() -> None:
@@ -436,140 +326,6 @@ def test_csmar_package_init_does_not_reexport_convenience_functions() -> None:
     forbidden = {"build" + "_interim_frame", "import_" + "interim_data"}
     assert exported_names.isdisjoint(forbidden)
     assert imported_names.isdisjoint(forbidden)
-
-
-def test_package_inits_do_not_forward_storage_or_cli_owner_symbols() -> None:
-    hits: list[str] = []
-    for path in (
-        SOURCE_ROOT / "storage/__init__.py",
-        SOURCE_ROOT / "interfaces/cli/__init__.py",
-    ):
-        tree = _parse_source(path)
-        for node in tree.body:
-            if isinstance(node, ast.ImportFrom | ast.Import):
-                hits.append(f"{path}:{node.lineno}: import")
-            elif isinstance(node, ast.FunctionDef) and node.name == "__getattr__":
-                hits.append(f"{path}:{node.lineno}: __getattr__")
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id == "__all__":
-                        hits.append(f"{path}:{node.lineno}: __all__")
-
-    assert hits == []
-
-
-def test_reviewed_package_inits_do_not_reexport_convenience_symbols() -> None:
-    hits: list[str] = []
-    for path in (
-        SOURCE_ROOT / "research/evaluations/__init__.py",
-        SOURCE_ROOT / "compute/tensor/__init__.py",
-    ):
-        tree = _parse_source(path)
-        for node in tree.body:
-            if isinstance(node, ast.ImportFrom | ast.Import):
-                hits.append(f"{path}:{node.lineno}: import")
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id == "__all__":
-                        hits.append(f"{path}:{node.lineno}: __all__")
-
-    assert hits == []
-
-
-def test_non_interface_source_modules_do_not_define_hidden_cli_entrypoints() -> None:
-    allowed_cli_root = SOURCE_ROOT / "interfaces/cli"
-    allowed_private_cli = SOURCE_ROOT / "interfaces/private_cli.py"
-    hits: list[str] = []
-    for path in python_files_under((SOURCE_ROOT,)):
-        tree = _parse_source(path)
-        if path == allowed_private_cli or _is_relative_to(path, allowed_cli_root):
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == "argparse":
-                        hits.append(f"{path}:{node.lineno}: argparse")
-            elif isinstance(node, ast.ImportFrom) and node.module == "argparse":
-                hits.append(f"{path}:{node.lineno}: argparse")
-            elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and (
-                node.name == "main"
-            ):
-                hits.append(f"{path}:{node.lineno}: main")
-            elif isinstance(node, ast.Call):
-                if (
-                    isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "Typer"
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "typer"
-                ):
-                    hits.append(f"{path}:{node.lineno}: typer.Typer")
-            elif isinstance(node, ast.If) and _is_dunder_main_guard(node.test):
-                hits.append(f"{path}:{node.lineno}: __main__")
-
-    assert hits == []
-
-
-def test_public_api_routes_match_approved_inventory() -> None:
-    tree = _parse_source(API_APP)
-    routes = sorted(
-        _first_string_arg(decorator)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef)
-        for decorator in node.decorator_list
-        if _is_app_route_decorator(decorator)
-    )
-
-    assert routes == [
-        "/api/0.1/catalog/factors",
-        "/api/0.1/catalog/labels",
-        "/api/0.1/research-datasets/{dataset_id}/requirements",
-    ]
-
-
-def test_public_cli_commands_match_approved_inventory() -> None:
-    tree = _parse_source(PUBLIC_CLI)
-    groups = sorted(
-        _keyword_string(call, "name")
-        for call in _ast_calls(tree)
-        if _is_add_typer_call(call)
-    )
-    commands = sorted(
-        (
-            _decorator_owner_name(decorator),
-            _first_string_arg(decorator),
-        )
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef)
-        for decorator in node.decorator_list
-        if _is_typer_command_decorator(decorator)
-    )
-
-    assert groups == ["catalog", "research-datasets"]
-    assert commands == [
-        ("catalog_app", "factors"),
-        ("catalog_app", "labels"),
-        ("research_datasets_app", "requirements"),
-    ]
-
-
-def test_private_cli_stdout_and_stderr_are_sanitized() -> None:
-    tree = _parse_source(PRIVATE_CLI)
-    unsafe_echoes = []
-    safe_literal_tokens = {"output_already_exists"}
-    for call in _ast_calls(tree):
-        if not _is_typer_echo_call(call):
-            continue
-        if not call.args:
-            unsafe_echoes.append("missing_echo_payload")
-            continue
-        payload = call.args[0]
-        if _is_sanitize_shared_text_call(payload):
-            continue
-        if isinstance(payload, ast.Constant) and payload.value in safe_literal_tokens:
-            continue
-        unsafe_echoes.append(f"line {call.lineno}")
-
-    assert unsafe_echoes == []
 
 
 def test_csmar_source_package_does_not_own_market_interim_contracts() -> None:
@@ -834,30 +590,6 @@ def test_platform_core_does_not_hardcode_csmar_raw_fields_or_tables() -> None:
     assert hits == []
 
 
-def test_public_interfaces_remain_provider_neutral() -> None:
-    checked_roots = (
-        SOURCE_ROOT / "interfaces/api",
-        SOURCE_ROOT / "interfaces/cli",
-        SOURCE_ROOT / "interfaces/services.py",
-    )
-    forbidden = (
-        "/csmar/",
-        "/provider/",
-        "/source/",
-        "qrp csmar",
-        "qrp provider",
-        "qrp source",
-    )
-    hits: list[str] = []
-    for path in python_files_under(checked_roots):
-        text = path.read_text(encoding="utf-8")
-        for term in forbidden:
-            if term in text:
-                hits.append(f"{path}: {term}")
-
-    assert hits == []
-
-
 def test_csmar_data_additions_are_source_local_by_default() -> None:
     """CSMAR additions must not require new API or CLI route families by default."""
 
@@ -880,109 +612,3 @@ def test_csmar_data_additions_are_source_local_by_default() -> None:
     )
 
 
-def _top_level_defined_names(tree: ast.Module) -> set[str]:
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-            names.add(node.name)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
-    return names
-
-def _is_dunder_main_guard(node: ast.AST) -> bool:
-    if not isinstance(node, ast.Compare):
-        return False
-    if not (
-        isinstance(node.left, ast.Name)
-        and node.left.id == "__name__"
-        and len(node.ops) == 1
-        and isinstance(node.ops[0], ast.Eq)
-        and len(node.comparators) == 1
-    ):
-        return False
-    comparator = node.comparators[0]
-    return isinstance(comparator, ast.Constant) and comparator.value == "__main__"
-
-
-def _ast_calls(tree: ast.Module) -> list[ast.Call]:
-    return [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-
-
-def _is_app_route_decorator(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "app"
-        and node.func.attr in {"get", "post", "put", "patch", "delete"}
-    )
-
-
-def _is_add_typer_call(node: ast.Call) -> bool:
-    return (
-        isinstance(node.func, ast.Attribute)
-        and node.func.attr == "add_typer"
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "app"
-    )
-
-
-def _is_typer_command_decorator(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "command"
-        and isinstance(node.func.value, ast.Name)
-    )
-
-
-def _decorator_owner_name(node: ast.Call) -> str:
-    if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-        return node.func.value.id
-    raise AssertionError("decorator_owner_missing")
-
-
-def _first_string_arg(node: ast.Call) -> str:
-    if node.args and isinstance(node.args[0], ast.Constant):
-        value = node.args[0].value
-        if isinstance(value, str):
-            return value
-    raise AssertionError("first_string_arg_missing")
-
-
-def _keyword_string(node: ast.Call, keyword_name: str) -> str:
-    for keyword in node.keywords:
-        if keyword.arg == keyword_name and isinstance(keyword.value, ast.Constant):
-            value = keyword.value.value
-            if isinstance(value, str):
-                return value
-    raise AssertionError(f"keyword_string_missing: {keyword_name}")
-
-
-def _is_typer_echo_call(node: ast.Call) -> bool:
-    return (
-        isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "typer"
-        and node.func.attr == "echo"
-    )
-
-
-def _is_sanitize_shared_text_call(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "sanitize_shared_text"
-    )
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True

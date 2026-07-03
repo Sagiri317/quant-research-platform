@@ -287,7 +287,12 @@ def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
     ):
         assert f"    {field_name}:" in payload_class_source
 
-    for retired_class in ("Handoff" + "Safety" + "Result",):
+    for retired_class in (
+        "Handoff" + "Safety" + "Result",
+        "Handoff" + "Json" + "Payloads",
+        "Handoff" + "Zip" + "Inspection",
+        "Loaded" + "Handoff" + "Payloads",
+    ):
         assert retired_class not in classes
         assert retired_class not in source
 
@@ -297,6 +302,8 @@ def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
         _name("scan", "git", "bundle"),
         _name("verify", "manifest", "hashes"),
         _name("load", "handoff", "payloads"),
+        _name("load", "handoff", "json", "payloads", "from", "bytes"),
+        _name("load", "handoff", "payloads", "from", "bytes"),
         _name("load", "json", "member"),
         _name("inspect", "handoff", "zip", "once"),
         "_" + _name("inspect", "handoff", "package", "envelope"),

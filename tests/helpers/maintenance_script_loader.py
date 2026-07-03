@@ -14,17 +14,12 @@ MAINTENANCE_SCRIPT_ROOT = (
 HANDOFF_SCRIPT_ROOT = MAINTENANCE_SCRIPT_ROOT / "handoff"
 
 
-def load_governance_contract_module() -> ModuleType:
-    return _load_script_module(
-        "governance_contract",
-        MAINTENANCE_SCRIPT_ROOT / "governance_contract.py",
-    )
+def load_maintenance_script_module(name: str) -> ModuleType:
+    return _load_script_module(name, MAINTENANCE_SCRIPT_ROOT / f"{name}.py")
 
 
 def load_handoff_script_module(name: str) -> ModuleType:
     script = HANDOFF_SCRIPT_ROOT / f"{name}.py"
-    if name == "governance_contract":
-        script = MAINTENANCE_SCRIPT_ROOT / f"{name}.py"
     return _load_script_module(name, script)
 
 

@@ -60,9 +60,9 @@ handoff 使用 compact replayable receipts：machine validation rows 只来自 r
 `integration`、`mutation`、`slow`、`performance` 和
 `requires_local_data` 必须由对应 profile 或 `all` profile 显式选择。
 `slow` 只表示运行慢，`requires_local_data` 只表示需要本地数据或本地环境；
-两者彼此正交。`performance` 是轻量性能和治理工具运行时护栏 profile。
+两者彼此正交。`performance` 是轻量性能和治理工具 runtime evidence profile。
 性能优化依据实际耗时画像、slowest tests/files 和 before/after 对比，不写
-硬编码秒数阈值，不新增独立性能门禁文件。
+硬编码秒数阈值，不新增独立性能 gate 文件。
 
 正式 profile runner 位于 `tests/tools/run_profile.py`。执行示例：
 `conda run -n <environment.yml name> python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast`。

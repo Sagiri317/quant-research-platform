@@ -11,7 +11,7 @@ from tests.helpers.import_graph import (
     path_to_layer,
     repo_python_files,
 )
-from tests.helpers.maintenance_script_loader import load_governance_contract_module
+from tests.helpers.maintenance_script_loader import load_maintenance_script_module
 
 __all__ = (
     "ast_trees",
@@ -24,5 +24,5 @@ __all__ = (
 
 @pytest.fixture(scope="session")
 def live_source_tree_scan() -> dict[str, dict[str, object]]:
-    contract = load_governance_contract_module()
+    contract = load_maintenance_script_module("governance_contract")
     return contract.source_tree_scan_groups(Path("."))
