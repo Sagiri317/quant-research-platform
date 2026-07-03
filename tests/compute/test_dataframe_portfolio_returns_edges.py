@@ -10,11 +10,12 @@ from quant_research_platform.compute.dataframe.portfolio_returns import (
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import WeightConfig
+from tests.helpers.compute_inputs import make_two_asset_portfolio_compute_panel
 
 
 def test_dataframe_portfolio_returns_calculates_returns_from_positions() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="label")
-    panel = _panel()
+    panel = make_two_asset_portfolio_compute_panel()
     positions = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
@@ -92,15 +93,3 @@ def test_dataframe_portfolio_return_timestamp_label_lookup_uses_asset_strings() 
     )
 
     assert _timestamp_label_lookup(frame, spec, "label") == {"1": 0.1, "2": 0.2}
-
-
-def _panel() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-            "asset": ["A", "B"],
-            "factor": [1.0, 2.0],
-            "label": [0.01, -0.02],
-            "segment": ["s1", "s1"],
-        }
-    )

@@ -23,10 +23,17 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.runtime.profiling import ProfileConfig, StageProfiler
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.report_output_frames import (
+    make_evaluation_group_spread_summary_frame,
+    make_evaluation_grouped_label_values_frame,
+    make_evaluation_ic_summary_frame,
+    make_evaluation_metrics_frame,
+    make_prediction_output_frame,
+    make_report_signal_spec,
+)
 
 
 def test_stage_profile_outputs_write_only_inside_local_output_boundary(
@@ -154,7 +161,7 @@ def test_output_writers_do_not_accept_output_dir() -> None:
 
 
 def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) -> None:
-    frame = _two_row_prediction_frame()
+    frame = make_prediction_output_frame(row_count=2)
     materialized_root = write_prediction_outputs(
         frame,
         spec=_prediction_spec(),
@@ -181,7 +188,7 @@ def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) ->
 
 
 def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> None:
-    frame = _prediction_frame()
+    frame = make_prediction_output_frame()
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
         prediction_outputs._write_prediction_output_chunks(
             (frame.copy(), frame.copy()),
@@ -251,7 +258,7 @@ def test_prediction_outputs_reject_existing_output_bundle_without_writes(
 
     with pytest.raises(OutputAlreadyExistsError):
         write_prediction_outputs(
-            _prediction_frame(),
+            make_prediction_output_frame(),
             spec=_prediction_spec(),
             output_spec=_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -272,10 +279,10 @@ def test_evaluation_outputs_reject_existing_output_bundle_without_writes(
 
     with pytest.raises(OutputAlreadyExistsError):
         write_evaluation_outputs(
-            _evaluation_metrics_frame(),
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_metrics_frame(),
+            make_evaluation_grouped_label_values_frame(),
+            ic_summary=make_evaluation_ic_summary_frame(),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=_evaluation_spec(),
             output_spec=_evaluation_outputs_spec(),
@@ -334,7 +341,7 @@ def test_prediction_outputs_clean_temp_root_after_mid_write_failure(
 
     with pytest.raises(RuntimeError, match="simulated_prediction_failure"):
         write_prediction_outputs(
-            _prediction_frame(),
+            make_prediction_output_frame(),
             spec=_prediction_spec(),
             output_spec=_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -368,10 +375,10 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
 
     with pytest.raises(RuntimeError, match="simulated_evaluation_failure"):
         write_evaluation_outputs(
-            _evaluation_metrics_frame(),
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_metrics_frame(),
+            make_evaluation_grouped_label_values_frame(),
+            ic_summary=make_evaluation_ic_summary_frame(),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=_evaluation_spec(),
             output_spec=_evaluation_outputs_spec(),
@@ -425,94 +432,13 @@ def _prediction_report_spec() -> OutputSpec:
     )
 
 
-def _prediction_frame() -> pd.DataFrame:
-    frame = pd.DataFrame(
-        {
-            "asset_id": ["asset-a"],
-            "timestamp": pd.to_datetime(["2014-01-03"]),
-            "prediction_score": [0.25],
-        }
-    )
-    frame.attrs["model_metadata"] = {
-        "contract_version": "0.1",
-        "model_algorithm": "linear_regression",
-        "sample_filter_mode": "eligible",
-        "filter_columns_used": ["eligible"],
-        "filter_definition": "eligible == True",
-        "rows_input": 2,
-        "rows_after_filter_mode": 2,
-        "rows_after_input_label_dropna": 2,
-        "train_start": "2014-01-02",
-        "train_end": "2014-01-02",
-        "test_start": "2014-01-03",
-        "test_end": "2014-01-03",
-        "oos_start": "2014-01-03",
-        "oos_end": "2014-01-03",
-        "input_factor_columns": ["mom_20d"],
-        "input_feature_columns": [],
-        "input_columns": ["mom_20d"],
-        "input_count": 1,
-        "label_column": "forward_return_20d",
-        "hyperparameters": {},
-        "random_seed": None,
-        "max_train_rows": None,
-        "purge_gap_steps": 0,
-        "dependency_status": {"status": "available", "package": "sklearn"},
-        "coefficient_count": 2,
-        "feature_importance": {"mom_20d": 1.0},
-    }
-    frame.attrs["prediction_metadata"] = {
-        "contract_version": "0.1",
-        "prediction_mode": "minimal_oos",
-        "sample_filter_mode": "eligible",
-        "filter_columns_used": ["eligible"],
-        "filter_definition": "eligible == True",
-        "rows_input": 2,
-        "rows_after_filter_mode": 2,
-        "rows_after_input_dropna": 2,
-        "prediction_rows": 1,
-        "train_end": "2014-01-02",
-        "test_start": "2014-01-03",
-        "requested_test_end": "2014-01-03",
-        "effective_test_end": "2014-01-03",
-        "is_oos": True,
-        "is_final_oos_window": False,
-        "input_columns": ["mom_20d"],
-        "input_count": 1,
-        "prediction_column": "prediction_score",
-    }
-    return frame
-
-
-def _two_row_prediction_frame() -> pd.DataFrame:
-    first = _prediction_frame()
-    second = first.copy()
-    second["asset_id"] = ["asset-b"]
-    second["prediction_score"] = [0.35]
-    frame = pd.concat([first, second], ignore_index=True)
-    frame.attrs["model_metadata"] = dict(first.attrs["model_metadata"])
-    frame.attrs["prediction_metadata"] = {
-        **first.attrs["prediction_metadata"],
-        "prediction_rows": 2,
-    }
-    return frame
-
-
 def _evaluation_spec() -> EvaluationSpec:
     return EvaluationSpec(
         run_id="eval-run",
         market_id=MarketId("a_share"),
         research_dataset_id="demo",
-        signals=(_signal_spec(),),
+        signals=(make_report_signal_spec(),),
         label_columns=("forward_return_20d",),
-    )
-
-
-def _signal_spec() -> SignalSpec:
-    return SignalSpec(
-        signal_id="mom_20d",
-        source_column="mom_20d",
-        source_kind="factor",
     )
 
 
@@ -524,65 +450,6 @@ def _evaluation_outputs_spec() -> OutputSpec:
         market_id=MarketId("a_share"),
         run_type="evaluation",
         scope=OutputScope.LOCAL_ONLY,
-    )
-
-
-def _evaluation_metrics_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2014-01-03"]),
-            "signal": ["mom_20d"],
-            "label": ["forward_return_20d"],
-            "ic": [0.1],
-            "rankic": [0.2],
-            "n_obs": [2],
-        }
-    )
-
-
-def _evaluation_grouped_label_values_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2014-01-03"]),
-            "signal": ["mom_20d"],
-            "label": ["forward_return_20d"],
-            "group": [1],
-            "mean_label_value": [0.01],
-            "n_obs": [2],
-        }
-    )
-
-
-def _evaluation_ic_summary_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "signal": ["mom_20d"],
-            "label": ["forward_return_20d"],
-            "mean_ic": [0.1],
-            "std_ic": [0.0],
-            "icir": [0.0],
-            "positive_ic_rate": [1.0],
-            "valid_ic_count": [1],
-            "mean_rankic": [0.2],
-            "std_rankic": [0.0],
-            "rankicir": [0.0],
-            "positive_rankic_rate": [1.0],
-            "valid_rankic_count": [1],
-        }
-    )
-
-
-def _evaluation_group_spread_summary_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "signal": ["mom_20d"],
-            "label": ["forward_return_20d"],
-            "top_group_mean_label_value": [0.01],
-            "bottom_group_mean_label_value": [0.0],
-            "top_bottom_label_value_spread_mean": [0.01],
-            "top_bottom_label_value_spread_hit_rate": [1.0],
-            "group_monotonicity_score": [1.0],
-        }
     )
 
 

@@ -36,6 +36,7 @@ from governance_contract import (  # noqa: E402
     source_tree_allowlist_definition_lines,
     source_tree_forbidden_patterns,
     source_tree_governance_rule_definition_lines,
+    source_tree_python_owner_ranges,
     source_tree_synthesized_string_findings,
 )
 
@@ -416,19 +417,24 @@ def check_synthesized_strings(
             relative,
             path,
         )
+        owner_ranges = source_tree_python_owner_ranges(path)
         for finding in source_tree_synthesized_string_findings(
             relative,
             path,
-            lines,
-            skip_lines,
-            rule_definition_lines,
+            tuple(lines),
+            frozenset(skip_lines),
+            frozenset(rule_definition_lines),
+            source=source,
+            owner_ranges=owner_ranges,
             scan_group="synthesized_strings",
             patterns=patterns,
         ):
+            finding_detail = finding.get("scan_mode") or finding.get("reason")
+            finding_detail = finding_detail or "unknown"
             result.errors.append(
                 "retired_synthesized_string: "
                 f"{finding['path']}:{finding['line']}:"
-                f"{finding['rule']}:{finding['scan_mode']}"
+                f"{finding['rule']}:{finding_detail}"
             )
 
 

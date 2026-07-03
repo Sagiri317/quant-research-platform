@@ -5,6 +5,8 @@ import io
 import tokenize
 from pathlib import Path
 
+from tests.helpers.import_graph import python_files_under
+
 PROJECT_SRC = Path("src/quant_research_platform")
 SCAN_ROOTS = (Path("src"), Path("tests"))
 OLD_PANEL_NAME = "Panel" + "Spec"
@@ -39,7 +41,7 @@ def test_compute_ownership_symbols_live_in_owner_modules() -> None:
 
 def test_active_code_does_not_import_compute_protocols_or_old_exact_names() -> None:
     hits: list[str] = []
-    for path in _python_files(SCAN_ROOTS):
+    for path in python_files_under(SCAN_ROOTS):
         tree = _parse(path)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module == OLD_PROTOCOL_MODULE:
@@ -69,7 +71,7 @@ def test_compute_modules_do_not_import_platform_layers() -> None:
         "quant_research_platform.storage",
     )
     hits: list[str] = []
-    for path in _python_files((PROJECT_SRC / "compute",)):
+    for path in python_files_under((PROJECT_SRC / "compute",)):
         tree = _parse(path)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
@@ -126,7 +128,7 @@ def test_evaluation_group_artifact_names_are_label_value_neutral() -> None:
         "evaluation_grouped_returns",
         "grouped_returns.parquet",
     )
-    for path in _python_files(roots):
+    for path in python_files_under(roots):
         text = path.read_text(encoding="utf-8")
         for term in forbidden_terms:
             if term in text:
@@ -178,7 +180,7 @@ def test_prediction_outputs_report_writer_use_specific_metadata_attrs() -> None:
 
 def test_tensor_modules_do_not_import_dataframe_private_helpers() -> None:
     hits: list[str] = []
-    for path in _python_files((PROJECT_SRC / "compute/tensor",)):
+    for path in python_files_under((PROJECT_SRC / "compute/tensor",)):
         tree = _parse(path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom) or node.module is None:
@@ -196,7 +198,7 @@ def test_tensor_modules_do_not_import_dataframe_private_helpers() -> None:
 
 def test_compute_docstrings_do_not_contain_garbled_question_mark_terms() -> None:
     hits: list[str] = []
-    for path in _python_files((PROJECT_SRC / "compute",)):
+    for path in python_files_under((PROJECT_SRC / "compute",)):
         text = path.read_text(encoding="utf-8")
         tree = ast.parse(text, filename=str(path))
         for node in ast.walk(tree):
@@ -217,14 +219,6 @@ def test_compute_docstrings_do_not_contain_garbled_question_mark_terms() -> None
 
 def _parse(path: Path) -> ast.AST:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-
-
-def _python_files(roots: tuple[Path, ...]) -> tuple[Path, ...]:
-    files: list[Path] = []
-    for root in roots:
-        files.extend(path for path in root.rglob("*.py") if path.is_file())
-    return tuple(sorted(files))
-
 
 def _top_level_classes(tree: ast.AST) -> set[str]:
     return {node.name for node in tree.body if isinstance(node, ast.ClassDef)}

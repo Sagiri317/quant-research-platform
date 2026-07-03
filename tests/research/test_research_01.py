@@ -21,13 +21,10 @@ from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
-from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
-    ProcessedDataKind,
-    ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
@@ -40,7 +37,6 @@ from quant_research_platform.contracts.predictions import (
     PREDICTION_SCORE_COLUMN,
     PredictionSpec,
 )
-from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import (
     assemble_research_dataset,
@@ -56,8 +52,14 @@ from quant_research_platform.research.models import fit_model_result
 from quant_research_platform.research.predictions import (
     build_prediction_result_from_research_dataset,
 )
-from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
+from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.research_inputs import (
+    make_processed_catalog,
+    make_research_dataset_catalog,
+    make_signal_spec,
+    write_processed_inputs,
+)
 from tests.research.prediction_output_helpers import (
     write_prediction_output_and_read,
 )
@@ -113,14 +115,6 @@ def _write_evaluation_result(layout: StorageLayout, result) -> Path:
     )
 
 
-def _signal(column: str, *, source_kind: str = "factor") -> SignalSpec:
-    return SignalSpec(
-        signal_id=column,
-        source_column=column,
-        source_kind=source_kind,
-    )
-
-
 def _research_rows() -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -159,106 +153,13 @@ def _research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _processed_catalog() -> ProcessedDataCatalog:
-    catalog = ProcessedDataCatalog()
-    catalog.register(
-        ProcessedDataSpec(
-            data_id="demo_factors",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.FACTOR,
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "mom_20d": ColumnRole.FACTOR,
-            },
-            primary_key=platform_entity_time_key(),
-            partition_columns=("year",),
-        )
-    )
-    catalog.register(
-        ProcessedDataSpec(
-            data_id="demo_labels",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.LABEL,
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "forward_return_20d": ColumnRole.LABEL,
-            },
-            primary_key=platform_entity_time_key(),
-            partition_columns=("year",),
-        )
-    )
-    catalog.register(
-        ProcessedDataSpec(
-            data_id="demo_annotations",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.ANNOTATION,
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "eligible": ColumnRole.UNIVERSE,
-                "can_enter": ColumnRole.MASK,
-                "can_exit": ColumnRole.MASK,
-                "market_type": ColumnRole.CONTEXT,
-            },
-            primary_key=platform_entity_time_key(),
-            partition_columns=("year",),
-        )
-    )
-    return catalog
-
-
-def _research_dataset_catalog(
-    *,
-    key_coverage: dict[str, str] | None = None,
-) -> ResearchDatasetCatalog:
-    catalog = ResearchDatasetCatalog()
-    catalog.register(
-        ResearchDatasetSpec(
-            data_id="demo",
-            market_id=MarketId("a_share"),
-            input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
-            base_input_data_id="demo_annotations",
-            factor_columns=("mom_20d",),
-            label_columns=("forward_return_20d",),
-            filter_columns=("eligible", "can_enter", "can_exit"),
-            context_columns=("market_type",),
-            key_coverage=key_coverage or {},
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.RESEARCH_ROW,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "mom_20d": ColumnRole.FACTOR,
-                "forward_return_20d": ColumnRole.LABEL,
-                "eligible": ColumnRole.UNIVERSE,
-                "can_enter": ColumnRole.MASK,
-                "can_exit": ColumnRole.MASK,
-                "market_type": ColumnRole.CONTEXT,
-            },
-            primary_key=platform_entity_time_key(),
-            partition_columns=("year",),
-        )
-    )
-    return catalog
-
-
 def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = _processed_catalog()
-    dataset_catalog = _research_dataset_catalog()
-    _write_processed_inputs(layout, processed_catalog)
+    processed_catalog = make_processed_catalog()
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    write_processed_inputs(layout, processed_catalog)
 
     root = assemble_research_dataset(
         layout=layout,
@@ -310,7 +211,7 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = _processed_catalog()
+    processed_catalog = make_processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(
         ResearchDatasetSpec(
@@ -349,7 +250,7 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
             partition_columns=("year",),
         )
     )
-    _write_processed_inputs(layout, processed_catalog)
+    write_processed_inputs(layout, processed_catalog)
 
     assemble_research_dataset(
         layout=layout,
@@ -415,10 +316,12 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
     )
     default_layout = StorageLayout(project_root=tmp_path / "default")
     tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
-    processed_catalog = _processed_catalog()
-    dataset_catalog = _research_dataset_catalog()
-    _write_processed_inputs(default_layout, processed_catalog, frame=frame)
-    _write_processed_inputs(tiny_layout, processed_catalog, frame=frame)
+    processed_catalog = make_processed_catalog()
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    write_processed_inputs(default_layout, processed_catalog, frame=frame)
+    write_processed_inputs(tiny_layout, processed_catalog, frame=frame)
 
     default_root = assemble_research_dataset(
         layout=default_layout,
@@ -479,13 +382,14 @@ def test_sparse_research_dataset_left_joins_missing_non_base_input_key(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = _processed_catalog()
-    dataset_catalog = _research_dataset_catalog(
+    processed_catalog = make_processed_catalog()
+    dataset_catalog = make_research_dataset_catalog(
         key_coverage={"demo_labels": "sparse"},
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
     frame = _research_rows()
     labels = frame.drop(index=frame.index[-1]).reset_index(drop=True)
-    _write_processed_inputs(layout, processed_catalog, label_frame=labels)
+    write_processed_inputs(layout, processed_catalog, label_frame=labels)
 
     assemble_research_dataset(
         layout=layout,
@@ -513,7 +417,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = _processed_catalog()
+    processed_catalog = make_processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(
         ResearchDatasetSpec(
@@ -536,7 +440,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
             partition_columns=("year",),
         )
     )
-    _write_processed_inputs(layout, processed_catalog)
+    write_processed_inputs(layout, processed_catalog)
 
     with pytest.raises(ValueError, match="invalid_research_factor_columns"):
         assemble_research_dataset(
@@ -563,7 +467,7 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
     expected_error: str,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = _processed_catalog()
+    processed_catalog = make_processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     spec_kwargs = {
         "factor_columns": ("mom_20d",),
@@ -597,7 +501,7 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
                 partition_columns=("year",),
             )
         )
-        _write_processed_inputs(layout, processed_catalog)
+        write_processed_inputs(layout, processed_catalog)
         assemble_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
@@ -613,7 +517,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         run_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="demo",
-        signals=(_signal("mom_20d"),),
+        signals=(make_signal_spec("mom_20d"),),
         label_columns=("forward_return_20d",),
     )
     model_spec = ModelSpec(
@@ -660,9 +564,11 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = _research_dataset_catalog()
-    processed_catalog = _processed_catalog()
-    _write_processed_inputs(layout, processed_catalog)
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    processed_catalog = make_processed_catalog()
+    write_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -727,9 +633,11 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = _research_dataset_catalog()
-    processed_catalog = _processed_catalog()
-    _write_processed_inputs(layout, processed_catalog)
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    processed_catalog = make_processed_catalog()
+    write_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -784,9 +692,11 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         ]
     )
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = _research_dataset_catalog()
-    processed_catalog = _processed_catalog()
-    _write_processed_inputs(layout, processed_catalog, frame=frame)
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    processed_catalog = make_processed_catalog()
+    write_processed_inputs(layout, processed_catalog, frame=frame)
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
     assemble_research_dataset(
         layout=layout,
@@ -889,9 +799,11 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = _research_dataset_catalog()
-    processed_catalog = _processed_catalog()
-    _write_processed_inputs(layout, processed_catalog)
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    processed_catalog = make_processed_catalog()
+    write_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -905,7 +817,7 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
             run_id="eval_demo",
             market_id=MarketId("a_share"),
             research_dataset_id="demo",
-            signals=(_signal("mom_20d"),),
+            signals=(make_signal_spec("mom_20d"),),
             label_columns=("forward_return_20d",),
         )
     )
@@ -947,9 +859,11 @@ def test_evaluation_runner_streams_research_chunks(
         ]
     )
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = _research_dataset_catalog()
-    processed_catalog = _processed_catalog()
-    _write_processed_inputs(layout, processed_catalog, frame=frame)
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    processed_catalog = make_processed_catalog()
+    write_processed_inputs(layout, processed_catalog, frame=frame)
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
     assemble_research_dataset(
         layout=layout,
@@ -964,7 +878,7 @@ def test_evaluation_runner_streams_research_chunks(
             run_id="eval_demo",
             market_id=MarketId("a_share"),
             research_dataset_id="demo",
-            signals=(_signal("mom_20d"),),
+            signals=(make_signal_spec("mom_20d"),),
             label_columns=("forward_return_20d",),
         )
     )
@@ -993,42 +907,3 @@ def test_evaluation_runner_streams_research_chunks(
     assert (output_bundle / "metrics.parquet").is_file()
     assert len([rows for rows in read_chunk_rows if rows]) > 1
     assert max(read_chunk_rows) < len(frame)
-
-
-def _write_processed_inputs(
-    layout: StorageLayout,
-    processed_catalog: ProcessedDataCatalog,
-    *,
-    frame: pd.DataFrame | None = None,
-    label_frame: pd.DataFrame | None = None,
-) -> None:
-    frame = _research_rows() if frame is None else frame
-    labels = frame if label_frame is None else label_frame
-    columns_by_id = {
-        "demo_factors": ["market_id", "asset_id", "timestamp", "mom_20d"],
-        "demo_annotations": [
-            "market_id",
-            "asset_id",
-            "timestamp",
-            "eligible",
-            "can_enter",
-            "can_exit",
-            "market_type",
-        ],
-    }
-    for data_id, columns in columns_by_id.items():
-        spec = processed_catalog.get(data_id)
-        write_dataset(
-            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
-            frame.loc[:, columns],
-            spec=spec,
-        )
-    spec = processed_catalog.get("demo_labels")
-    write_dataset(
-        layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
-        labels.loc[
-            :,
-            ["market_id", "asset_id", "timestamp", "forward_return_20d"],
-        ],
-        spec=spec,
-    )

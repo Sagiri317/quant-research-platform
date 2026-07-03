@@ -1,29 +1,21 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
-try:
-    from tests.agents.handoff.conftest import (
-        _check_receipts,
-        _git,
-        _init_handoff_repo,
-        _load_handoff_module,
-        _package_smoke_receipt,
-    )
-except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
-    from conftest import (  # type: ignore[no-redef]
-        _check_receipts,
-        _git,
-        _init_handoff_repo,
-        _load_handoff_module,
-        _package_smoke_receipt,
-    )
+from tests.agents.handoff.conftest import (
+    _check_receipts,
+    _git,
+    _init_handoff_repo,
+    _package_smoke_receipt,
+)
+from tests.helpers.governance_git_repos import run_governance_script
+from tests.helpers.maintenance_script_loader import (
+    load_handoff_script_module as _load_handoff_module,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -41,25 +33,17 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
         / "build_handoff_package.py"
     )
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(builder_path),
-            "--repo-root",
-            ".",
-            "--out-dir",
-            ".run/handoffs",
-            "--task-name",
-            "handoff-test",
-            "--base-ref",
-            "origin/main",
-        ],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
+    result = run_governance_script(
+        repo,
+        str(builder_path),
+        "--repo-root",
+        ".",
+        "--out-dir",
+        ".run/handoffs",
+        "--task-name",
+        "handoff-test",
+        "--base-ref",
+        "origin/main",
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -182,7 +166,7 @@ def test_builder_generates_machine_receipts_from_bundle_clone(
     monkeypatch.setattr(builder, "build_machine_receipts", fake_build_machine_receipts)
     monkeypatch.setattr(
         builder,
-        "_inspect_handoff_package_envelope",
+        "_validate_handoff_package_payload",
         lambda *_args, **_kwargs: Verification(),
     )
 
@@ -228,7 +212,7 @@ def test_builder_fails_when_replayed_validation_row_is_not_pass(
     monkeypatch.setattr(builder, "build_machine_receipts", lambda *_: good_receipts)
     monkeypatch.setattr(
         builder,
-        "_inspect_handoff_package_envelope",
+        "_validate_handoff_package_payload",
         lambda *_args, **_kwargs: Verification(),
     )
 
@@ -287,7 +271,7 @@ def test_builder_fails_when_package_smoke_timeout_blocks_validation(
     monkeypatch.setattr(builder, "build_machine_receipts", lambda *_: receipts)
     monkeypatch.setattr(
         builder,
-        "_inspect_handoff_package_envelope",
+        "_validate_handoff_package_payload",
         lambda *_args, **_kwargs: Verification(),
     )
 

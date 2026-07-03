@@ -17,6 +17,13 @@ from quant_research_platform.markets.implementations.a_share.processed.panels im
     _first_static_stock_value,
     compute_market_panel,
 )
+from tests.helpers.synthetic_a_share import (
+    make_synthetic_a_share_market_cap,
+    make_synthetic_a_share_stock_master,
+    make_synthetic_a_share_trading_calendar,
+    make_synthetic_market_bars_daily,
+    make_synthetic_market_bars_daily_row,
+)
 
 
 def test_a_share_calendar_helpers_use_source_normalized_calendar() -> None:
@@ -89,10 +96,10 @@ def test_a_share_calendar_warmup_start_uses_open_sessions() -> None:
 
 def test_compute_market_panel_maps_source_assets_to_a_share_assets() -> None:
     panel = compute_market_panel(
-        _market_bars_daily_frame(["2014-01-02", "2014-01-03"]),
-        stock_master=_stock_master_frame(),
-        market_cap=_market_cap_frame(),
-        trading_calendar=_trading_calendar_frame(
+        make_synthetic_market_bars_daily(["2014-01-02", "2014-01-03"]),
+        stock_master=make_synthetic_a_share_stock_master(),
+        market_cap=make_synthetic_a_share_market_cap(),
+        trading_calendar=make_synthetic_a_share_trading_calendar(
             pd.date_range("2010-01-01", "2014-01-03", freq="D")
         ),
     )
@@ -118,18 +125,16 @@ def test_compute_market_panel_filters_non_a_share_market_types() -> None:
     panel = compute_market_panel(
         pd.DataFrame(
             [
-                _market_bars_daily_row("2014-01-02", market_type=4),
-                _market_bars_daily_row("2014-01-03", market_type=32),
-                _market_bars_daily_row("2014-01-06", market_type=64),
-                _market_bars_daily_row("2014-01-07", market_type=2),
+                make_synthetic_market_bars_daily_row("2014-01-02", market_type=4),
+                make_synthetic_market_bars_daily_row("2014-01-03", market_type=32),
+                make_synthetic_market_bars_daily_row("2014-01-06", market_type=64),
+                make_synthetic_market_bars_daily_row("2014-01-07", market_type=2),
             ]
         ),
-        stock_master=_stock_master_frame(),
-        market_cap=_market_cap_frame(),
-        trading_calendar=_trading_calendar_frame(
-            pd.to_datetime(
-                ["2014-01-02", "2014-01-03", "2014-01-06", "2014-01-07"]
-            )
+        stock_master=make_synthetic_a_share_stock_master(),
+        market_cap=make_synthetic_a_share_market_cap(),
+        trading_calendar=make_synthetic_a_share_trading_calendar(
+            pd.to_datetime(["2014-01-02", "2014-01-03", "2014-01-06", "2014-01-07"])
         ),
     )
 
@@ -140,10 +145,10 @@ def test_compute_market_panel_filters_non_a_share_market_types() -> None:
 
 def test_compute_market_panel_preserves_listing_age_closed_boundary() -> None:
     panel = compute_market_panel(
-        _market_bars_daily_frame(["2020-01-01", "2020-01-02"]),
-        stock_master=_stock_master_frame(listing_date="2020-01-01"),
-        market_cap=_market_cap_frame(share_change_date="2020-01-01"),
-        trading_calendar=_trading_calendar_frame(
+        make_synthetic_market_bars_daily(["2020-01-01", "2020-01-02"]),
+        stock_master=make_synthetic_a_share_stock_master(listing_date="2020-01-01"),
+        market_cap=make_synthetic_a_share_market_cap(share_change_date="2020-01-01"),
+        trading_calendar=make_synthetic_a_share_trading_calendar(
             pd.to_datetime(["2020-01-01", "2020-01-02"]),
             is_trading_day=True,
         ),
@@ -159,10 +164,12 @@ def test_compute_market_panel_preserves_listing_age_closed_boundary() -> None:
 
 def test_compute_market_panel_zero_float_shares_make_turnover_missing() -> None:
     panel = compute_market_panel(
-        _market_bars_daily_frame(["2020-01-02"]),
-        stock_master=_stock_master_frame(),
-        market_cap=_market_cap_frame(a_float_shares=0.0),
-        trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+        make_synthetic_market_bars_daily(["2020-01-02"]),
+        stock_master=make_synthetic_a_share_stock_master(),
+        market_cap=make_synthetic_a_share_market_cap(a_float_shares=0.0),
+        trading_calendar=make_synthetic_a_share_trading_calendar(
+            pd.to_datetime(["2020-01-02"])
+        ),
     )
 
     assert pd.isna(panel.loc[0, "turnover"])
@@ -176,10 +183,14 @@ def test_compute_market_panel_zero_float_shares_make_turnover_missing() -> None:
 
 def test_compute_market_panel_preserves_missing_limit_status_context() -> None:
     panel = compute_market_panel(
-        pd.DataFrame([_market_bars_daily_row("2020-01-02", limit_status=pd.NA)]),
-        stock_master=_stock_master_frame(),
-        market_cap=_market_cap_frame(),
-        trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+        pd.DataFrame(
+            [make_synthetic_market_bars_daily_row("2020-01-02", limit_status=pd.NA)]
+        ),
+        stock_master=make_synthetic_a_share_stock_master(),
+        market_cap=make_synthetic_a_share_market_cap(),
+        trading_calendar=make_synthetic_a_share_trading_calendar(
+            pd.to_datetime(["2020-01-02"])
+        ),
     )
 
     assert pd.isna(panel.loc[0, "limit_status"])
@@ -190,17 +201,21 @@ def test_compute_market_panel_preserves_missing_limit_status_context() -> None:
 def test_compute_market_panel_rejects_invalid_limit_status_context() -> None:
     with pytest.raises(ValueError, match="invalid_limit_status"):
         compute_market_panel(
-            pd.DataFrame([_market_bars_daily_row("2020-01-02", limit_status=2)]),
-            stock_master=_stock_master_frame(),
-            market_cap=_market_cap_frame(),
-            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+            pd.DataFrame(
+                [make_synthetic_market_bars_daily_row("2020-01-02", limit_status=2)]
+            ),
+            stock_master=make_synthetic_a_share_stock_master(),
+            market_cap=make_synthetic_a_share_market_cap(),
+            trading_calendar=make_synthetic_a_share_trading_calendar(
+                pd.to_datetime(["2020-01-02"])
+            ),
         )
 
 
 def test_annotations_mask_only_next_bar_one_word_limits() -> None:
     rows = [
-        _market_bars_daily_row("2020-01-01"),
-        _market_bars_daily_row(
+        make_synthetic_market_bars_daily_row("2020-01-01"),
+        make_synthetic_market_bars_daily_row(
             "2020-01-02",
             limit_status=1,
             open_price=11.0,
@@ -208,7 +223,7 @@ def test_annotations_mask_only_next_bar_one_word_limits() -> None:
             low=11.0,
             close=11.0,
         ),
-        _market_bars_daily_row(
+        make_synthetic_market_bars_daily_row(
             "2020-01-03",
             limit_status=1,
             open_price=10.8,
@@ -216,7 +231,7 @@ def test_annotations_mask_only_next_bar_one_word_limits() -> None:
             low=10.7,
             close=10.9,
         ),
-        _market_bars_daily_row(
+        make_synthetic_market_bars_daily_row(
             "2020-01-06",
             limit_status=-1,
             open_price=9.0,
@@ -224,7 +239,7 @@ def test_annotations_mask_only_next_bar_one_word_limits() -> None:
             low=9.0,
             close=9.0,
         ),
-        _market_bars_daily_row(
+        make_synthetic_market_bars_daily_row(
             "2020-01-07",
             limit_status=-1,
             open_price=9.2,
@@ -236,9 +251,9 @@ def test_annotations_mask_only_next_bar_one_word_limits() -> None:
 
     panel = compute_market_panel(
         pd.DataFrame(rows),
-        stock_master=_stock_master_frame(),
-        market_cap=_market_cap_frame(),
-        trading_calendar=_trading_calendar_frame(
+        stock_master=make_synthetic_a_share_stock_master(),
+        market_cap=make_synthetic_a_share_market_cap(),
+        trading_calendar=make_synthetic_a_share_trading_calendar(
             pd.to_datetime(
                 ["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"]
             )
@@ -257,12 +272,13 @@ def test_annotations_mask_only_next_bar_one_word_limits() -> None:
     assert bool(execution.loc[pd.Timestamp("2020-01-07"), "can_exit"]) is False
 
 
-def test_compute_market_panel_fails_closed_on_conflicting_reference_duplicates(
-) -> None:
+def test_compute_market_panel_fails_closed_on_conflicting_reference_duplicates() -> (
+    None
+):
     duplicate_stocks = pd.concat(
         [
-            _stock_master_frame(),
-            _stock_master_frame().assign(company_status="watched"),
+            make_synthetic_a_share_stock_master(),
+            make_synthetic_a_share_stock_master().assign(company_status="watched"),
         ],
         ignore_index=True,
     )
@@ -272,38 +288,50 @@ def test_compute_market_panel_fails_closed_on_conflicting_reference_duplicates(
         match="conflicting_panel_join_duplicate_keys: stock_master",
     ):
         compute_market_panel(
-            _market_bars_daily_frame(["2020-01-02"]),
+            make_synthetic_market_bars_daily(["2020-01-02"]),
             stock_master=duplicate_stocks,
-            market_cap=_market_cap_frame(),
-            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+            market_cap=make_synthetic_a_share_market_cap(),
+            trading_calendar=make_synthetic_a_share_trading_calendar(
+                pd.to_datetime(["2020-01-02"])
+            ),
         )
 
 
 def test_compute_market_panel_fails_closed_on_missing_source_keys() -> None:
     with pytest.raises(ValueError, match="missing_source_asset_id"):
         compute_market_panel(
-            _market_bars_daily_frame(["2020-01-02"]).drop(columns=["source_asset_id"]),
-            stock_master=_stock_master_frame(),
-            market_cap=_market_cap_frame(),
-            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+            make_synthetic_market_bars_daily(["2020-01-02"]).drop(
+                columns=["source_asset_id"]
+            ),
+            stock_master=make_synthetic_a_share_stock_master(),
+            market_cap=make_synthetic_a_share_market_cap(),
+            trading_calendar=make_synthetic_a_share_trading_calendar(
+                pd.to_datetime(["2020-01-02"])
+            ),
         )
 
     with pytest.raises(ValueError, match="missing_source_timestamp"):
         compute_market_panel(
-            _market_bars_daily_frame(["2020-01-02"]).drop(columns=["timestamp"]),
-            stock_master=_stock_master_frame(),
-            market_cap=_market_cap_frame(),
-            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+            make_synthetic_market_bars_daily(["2020-01-02"]).drop(
+                columns=["timestamp"]
+            ),
+            stock_master=make_synthetic_a_share_stock_master(),
+            market_cap=make_synthetic_a_share_market_cap(),
+            trading_calendar=make_synthetic_a_share_trading_calendar(
+                pd.to_datetime(["2020-01-02"])
+            ),
         )
 
 
 def test_compute_market_panel_fails_closed_on_missing_reference_dates() -> None:
     with pytest.raises(ValueError, match="missing_market_cap_panel_timestamp"):
         compute_market_panel(
-            _market_bars_daily_frame(["2020-01-02"]),
-            stock_master=_stock_master_frame(),
-            market_cap=_market_cap_frame().assign(timestamp=pd.NaT),
-            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+            make_synthetic_market_bars_daily(["2020-01-02"]),
+            stock_master=make_synthetic_a_share_stock_master(),
+            market_cap=make_synthetic_a_share_market_cap().assign(timestamp=pd.NaT),
+            trading_calendar=make_synthetic_a_share_trading_calendar(
+                pd.to_datetime(["2020-01-02"])
+            ),
         )
 
     with pytest.raises(
@@ -311,22 +339,26 @@ def test_compute_market_panel_fails_closed_on_missing_reference_dates() -> None:
         match="missing_stock_master_panel_effective_timestamp",
     ):
         compute_market_panel(
-            _market_bars_daily_frame(["2020-01-02"]),
-            stock_master=_stock_master_frame().assign(
+            make_synthetic_market_bars_daily(["2020-01-02"]),
+            stock_master=make_synthetic_a_share_stock_master().assign(
                 listing_date=pd.NaT,
                 status_change_date=pd.NaT,
             ),
-            market_cap=_market_cap_frame(),
-            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+            market_cap=make_synthetic_a_share_market_cap(),
+            trading_calendar=make_synthetic_a_share_trading_calendar(
+                pd.to_datetime(["2020-01-02"])
+            ),
         )
 
 
 def test_compute_market_panel_uses_missing_reference_defaults() -> None:
     panel = compute_market_panel(
-        _market_bars_daily_frame(["2020-01-02"]),
-        stock_master=_stock_master_frame(),
-        market_cap=_market_cap_frame().iloc[0:0],
-        trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+        make_synthetic_market_bars_daily(["2020-01-02"]),
+        stock_master=make_synthetic_a_share_stock_master(),
+        market_cap=make_synthetic_a_share_market_cap().iloc[0:0],
+        trading_calendar=make_synthetic_a_share_trading_calendar(
+            pd.to_datetime(["2020-01-02"])
+        ),
     )
 
     assert pd.isna(panel.loc[0, "share_change_date"])
@@ -363,10 +395,12 @@ def test_compute_market_panel_fails_closed_on_missing_canonical_after_mapping(
         match="market_bars_interim_missing_canonical_columns: missing_canonical",
     ):
         compute_market_panel(
-            _market_bars_daily_frame(["2020-01-02"]),
-            stock_master=_stock_master_frame(),
-            market_cap=_market_cap_frame(),
-            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+            make_synthetic_market_bars_daily(["2020-01-02"]),
+            stock_master=make_synthetic_a_share_stock_master(),
+            market_cap=make_synthetic_a_share_market_cap(),
+            trading_calendar=make_synthetic_a_share_trading_calendar(
+                pd.to_datetime(["2020-01-02"])
+            ),
         )
 
 
@@ -391,114 +425,3 @@ def test_panel_asof_stock_master_fills_missing_stock_columns() -> None:
 
     assert pd.isna(joined.loc[0, "stock_name"])
     assert _first_static_stock_value(stocks, "missing_column") == {}
-
-
-def _market_bars_daily_frame(dates: list[str]) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            _market_bars_daily_row(
-                value,
-                open_price=10.0 + offset,
-                high=10.5 + offset,
-                low=9.8 + offset,
-                close=10.2 + offset,
-                volume=1000.0 + offset,
-                amount=10200.0 + offset,
-            )
-            for offset, value in enumerate(dates, start=1)
-        ]
-    )
-
-
-def _market_bars_daily_row(
-    value: str,
-    *,
-    market_type: int = 4,
-    limit_status: int = 0,
-    open_price: float = 10.0,
-    high: float = 10.5,
-    low: float = 9.8,
-    close: float = 10.2,
-    volume: float = 1000.0,
-    amount: float = 10200.0,
-) -> dict[str, object]:
-    timestamp = pd.Timestamp(value)
-    return {
-        "source_asset_id": "000001",
-        "timestamp": timestamp,
-        "trade_date": timestamp,
-        "market_type": market_type,
-        "trading_status_code": 1,
-        "filling_flag": "0",
-        "open": open_price,
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": volume,
-        "amount": amount,
-        "prev_close": 9.9,
-        "limit_status": limit_status,
-        "period_return": 0.01,
-        "adj_close": close,
-        "adj_open": open_price,
-        "float_market_cap": 100000.0,
-        "total_market_cap": 200000.0,
-        "turnover": 0.01,
-    }
-
-
-def _stock_master_frame(listing_date: str = "2010-01-01") -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "source_asset_id": "000001",
-                "timestamp": pd.Timestamp(listing_date),
-                "stock_name": "demo",
-                "listing_date": pd.Timestamp(listing_date),
-                "delisting_date": pd.NaT,
-                "company_status": "normal",
-                "csrc_2012_industry_code": "I",
-                "csrc_2012_industry_name": "industry",
-                "status_change_date": pd.Timestamp(listing_date),
-            }
-        ]
-    )
-
-
-def _market_cap_frame(
-    share_change_date: str = "2010-01-01",
-    *,
-    a_float_shares: float = 500.0,
-) -> pd.DataFrame:
-    timestamp = pd.Timestamp(share_change_date)
-    return pd.DataFrame(
-        [
-            {
-                "source_asset_id": "000001",
-                "timestamp": timestamp,
-                "share_change_date": timestamp,
-                "total_shares": 1000.0,
-                "a_float_shares": a_float_shares,
-            }
-        ]
-    )
-
-
-def _trading_calendar_frame(
-    dates,
-    *,
-    is_trading_day: bool = True,
-) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "timestamp": pd.Timestamp(date),
-                "calendar_date": pd.Timestamp(date),
-                "source_market_type": 4,
-                "is_trading_day": is_trading_day,
-                "source_day_of_week": pd.Timestamp(date).dayofweek + 1,
-                "source_state": "O" if is_trading_day else "C",
-            }
-            for date in dates
-        ]
-    )

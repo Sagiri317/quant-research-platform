@@ -4,6 +4,8 @@ import ast
 import re
 from pathlib import Path
 
+from tests.helpers.import_graph import python_files_under
+
 PROJECT_SRC = Path("src/quant_research_platform")
 CATALOG_INIT = PROJECT_SRC / "catalog" / "__init__.py"
 RESEARCH_PROFILE = PROJECT_SRC / "profiles" / "research.py"
@@ -25,7 +27,7 @@ def test_profiles_root_init_does_not_export_retired_entrypoints() -> None:
 
 def test_profiles_root_retired_entrypoints_not_imported_from_root() -> None:
     root_import_hits: list[str] = []
-    for path in _python_files(SCAN_ROOTS):
+    for path in python_files_under(SCAN_ROOTS):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom):
@@ -282,14 +284,6 @@ def _module_all_names(tree: ast.AST) -> tuple[str, ...]:
 
 def _is_def(node: ast.AST) -> bool:
     return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-
-
-def _python_files(roots: tuple[Path, ...]) -> tuple[Path, ...]:
-    files: list[Path] = []
-    for root in roots:
-        files.extend(path for path in root.rglob("*.py") if path.is_file())
-    return tuple(sorted(files))
-
 
 def _imported_modules(tree: ast.AST) -> set[str]:
     modules: set[str] = set()

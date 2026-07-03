@@ -21,9 +21,16 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec, WeightConfig
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
+from tests.helpers.report_output_frames import (
+    make_evaluation_group_spread_summary_frame,
+    make_evaluation_grouped_label_values_frame,
+    make_evaluation_ic_summary_frame,
+    make_evaluation_metrics_frame,
+    make_prediction_output_frame,
+    make_report_signal_spec,
+)
 
 
 @pytest.mark.parametrize(
@@ -95,7 +102,7 @@ def test_prediction_output_validation_rejects_bad_frames(
         "prediction",
     )
     layout = StorageLayout(project_root=tmp_path)
-    valid = _prediction_frame(with_metadata=True)
+    valid = make_prediction_output_frame(scenario="artifacts")
 
     with pytest.raises(ValueError, match="missing_prediction_output_columns"):
         outputs.write_prediction_outputs(
@@ -133,14 +140,19 @@ def test_prediction_outputs_require_standard_metadata_attrs(
 
     with pytest.raises(ValueError, match="missing_model_metadata"):
         outputs.write_prediction_outputs(
-            _prediction_frame(with_metadata=False),
+            make_prediction_output_frame(scenario="artifacts", with_metadata=False),
             spec=spec,
             output_spec=report_spec,
             layout=layout,
         )
 
-    model_only = _prediction_frame(with_metadata=False)
-    model_only.attrs["model_metadata"] = _model_metadata()
+    model_only = make_prediction_output_frame(
+        scenario="artifacts",
+        with_metadata=False,
+    )
+    model_only.attrs["model_metadata"] = make_prediction_output_frame(
+        scenario="artifacts"
+    ).attrs["model_metadata"]
     with pytest.raises(ValueError, match="missing_prediction_metadata"):
         outputs.write_prediction_outputs(
             model_only,
@@ -149,8 +161,13 @@ def test_prediction_outputs_require_standard_metadata_attrs(
             layout=layout,
         )
 
-    generic_metadata = _prediction_frame(with_metadata=False)
-    generic_metadata.attrs["model_metadata"] = _model_metadata()
+    generic_metadata = make_prediction_output_frame(
+        scenario="artifacts",
+        with_metadata=False,
+    )
+    generic_metadata.attrs["model_metadata"] = make_prediction_output_frame(
+        scenario="artifacts"
+    ).attrs["model_metadata"]
     generic_metadata.attrs["metadata"] = {"contract_version": "0.1"}
     with pytest.raises(ValueError, match="missing_prediction_metadata"):
         outputs.write_prediction_outputs(
@@ -160,7 +177,7 @@ def test_prediction_outputs_require_standard_metadata_attrs(
             layout=layout,
         )
 
-    incomplete_model = _prediction_frame(with_metadata=True)
+    incomplete_model = make_prediction_output_frame(scenario="artifacts")
     incomplete_model.attrs["model_metadata"] = {"contract_version": "0.1"}
     with pytest.raises(ValueError, match="invalid_model_metadata"):
         outputs.write_prediction_outputs(
@@ -170,7 +187,7 @@ def test_prediction_outputs_require_standard_metadata_attrs(
             layout=layout,
         )
 
-    incomplete_prediction = _prediction_frame(with_metadata=True)
+    incomplete_prediction = make_prediction_output_frame(scenario="artifacts")
     incomplete_prediction.attrs["prediction_metadata"] = {"contract_version": "0.1"}
     with pytest.raises(ValueError, match="invalid_prediction_metadata"):
         outputs.write_prediction_outputs(
@@ -192,9 +209,11 @@ def test_prediction_outputs_reject_inconsistent_metadata(
     )
     layout = StorageLayout(project_root=tmp_path)
 
-    bad_rows = _prediction_frame(with_metadata=True)
+    bad_rows = make_prediction_output_frame(scenario="artifacts")
     bad_rows.attrs["prediction_metadata"] = {
-        **_prediction_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs[
+            "prediction_metadata"
+        ],
         "prediction_rows": 2,
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -205,9 +224,11 @@ def test_prediction_outputs_reject_inconsistent_metadata(
             layout=layout,
         )
 
-    bad_window = _prediction_frame(with_metadata=True)
+    bad_window = make_prediction_output_frame(scenario="artifacts")
     bad_window.attrs["prediction_metadata"] = {
-        **_prediction_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs[
+            "prediction_metadata"
+        ],
         "test_start": "2024-01-03",
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -218,9 +239,11 @@ def test_prediction_outputs_reject_inconsistent_metadata(
             layout=layout,
         )
 
-    bad_train_end = _prediction_frame(with_metadata=True)
+    bad_train_end = make_prediction_output_frame(scenario="artifacts")
     bad_train_end.attrs["prediction_metadata"] = {
-        **_prediction_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs[
+            "prediction_metadata"
+        ],
         "train_end": "2024-01-02",
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -231,9 +254,9 @@ def test_prediction_outputs_reject_inconsistent_metadata(
             layout=layout,
         )
 
-    bad_model = _prediction_frame(with_metadata=True)
+    bad_model = make_prediction_output_frame(scenario="artifacts")
     bad_model.attrs["model_metadata"] = {
-        **_model_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs["model_metadata"],
         "coefficient_count": 0,
     }
     with pytest.raises(ValueError, match="invalid_model_metadata"):
@@ -244,9 +267,11 @@ def test_prediction_outputs_reject_inconsistent_metadata(
             layout=layout,
         )
 
-    bad_feature_columns = _prediction_frame(with_metadata=True)
+    bad_feature_columns = make_prediction_output_frame(scenario="artifacts")
     bad_feature_columns.attrs["prediction_metadata"] = {
-        **_prediction_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs[
+            "prediction_metadata"
+        ],
         "input_columns": ["factor", "other_input"],
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -276,11 +301,11 @@ def test_prediction_outputs_reject_tampered_selected_model_input_columns(
         spec.prediction_id,
         "prediction",
     )
-    tampered = _prediction_frame(with_metadata=True).assign(
+    tampered = make_prediction_output_frame(scenario="artifacts").assign(
         timestamp=pd.to_datetime(["2024-01-03"])
     )
     tampered.attrs["model_metadata"] = {
-        **_model_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs["model_metadata"],
         "test_start": "2024-01-03",
         "oos_start": "2024-01-03",
         "oos_end": "2024-01-03",
@@ -314,7 +339,9 @@ def test_prediction_outputs_reject_tampered_selected_model_input_columns(
         },
     }
     tampered.attrs["prediction_metadata"] = {
-        **_prediction_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs[
+            "prediction_metadata"
+        ],
         "test_start": "2024-01-03",
         "effective_test_end": "2024-01-03",
     }
@@ -346,11 +373,11 @@ def test_prediction_outputs_reject_tampered_model_selection_direction(
         spec.prediction_id,
         "prediction",
     )
-    tampered = _prediction_frame(with_metadata=True).assign(
+    tampered = make_prediction_output_frame(scenario="artifacts").assign(
         timestamp=pd.to_datetime(["2024-01-03"])
     )
     tampered.attrs["model_metadata"] = {
-        **_model_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs["model_metadata"],
         "test_start": "2024-01-03",
         "oos_start": "2024-01-03",
         "oos_end": "2024-01-03",
@@ -384,7 +411,9 @@ def test_prediction_outputs_reject_tampered_model_selection_direction(
         },
     }
     tampered.attrs["prediction_metadata"] = {
-        **_prediction_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs[
+            "prediction_metadata"
+        ],
         "test_start": "2024-01-03",
         "effective_test_end": "2024-01-03",
     }
@@ -409,9 +438,11 @@ def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
     )
     layout = StorageLayout(project_root=tmp_path)
 
-    bad_prediction_counts = _prediction_frame(with_metadata=True)
+    bad_prediction_counts = make_prediction_output_frame(scenario="artifacts")
     bad_prediction_counts.attrs["prediction_metadata"] = {
-        **_prediction_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs[
+            "prediction_metadata"
+        ],
         "rows_after_input_dropna": 0,
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -422,9 +453,9 @@ def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
             layout=layout,
         )
 
-    bad_model_counts = _prediction_frame(with_metadata=True)
+    bad_model_counts = make_prediction_output_frame(scenario="artifacts")
     bad_model_counts.attrs["model_metadata"] = {
-        **_model_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs["model_metadata"],
         "rows_after_filter_mode": 1,
     }
     with pytest.raises(ValueError, match="model_metadata_inconsistent"):
@@ -435,9 +466,11 @@ def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
             layout=layout,
         )
 
-    bad_prediction_filter = _prediction_frame(with_metadata=True)
+    bad_prediction_filter = make_prediction_output_frame(scenario="artifacts")
     bad_prediction_filter.attrs["prediction_metadata"] = {
-        **_prediction_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs[
+            "prediction_metadata"
+        ],
         "filter_columns_used": [],
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -448,9 +481,9 @@ def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
             layout=layout,
         )
 
-    bad_model_filter = _prediction_frame(with_metadata=True)
+    bad_model_filter = make_prediction_output_frame(scenario="artifacts")
     bad_model_filter.attrs["model_metadata"] = {
-        **_model_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs["model_metadata"],
         "filter_definition": "no eligible/can_enter/can_exit filter",
     }
     with pytest.raises(ValueError, match="model_metadata_inconsistent"):
@@ -471,9 +504,11 @@ def test_prediction_outputs_reject_bad_effective_test_end(
         spec.prediction_id,
         "prediction",
     )
-    bad_effective_end = _prediction_frame(with_metadata=True)
+    bad_effective_end = make_prediction_output_frame(scenario="artifacts")
     bad_effective_end.attrs["prediction_metadata"] = {
-        **_prediction_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs[
+            "prediction_metadata"
+        ],
         "effective_test_end": "2024-01-03",
     }
 
@@ -495,7 +530,7 @@ def test_prediction_outputs_reject_unparseable_prediction_timestamp(
         spec.prediction_id,
         "prediction",
     )
-    bad_timestamp = _prediction_frame(with_metadata=True)
+    bad_timestamp = make_prediction_output_frame(scenario="artifacts")
     bad_timestamp["timestamp"] = ["bad-date"]
 
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -523,16 +558,18 @@ def test_prediction_outputs_reject_effective_test_end_after_requested_end(
         spec.prediction_id,
         "prediction",
     )
-    late_prediction = _prediction_frame(with_metadata=True).assign(
+    late_prediction = make_prediction_output_frame(scenario="artifacts").assign(
         timestamp=pd.to_datetime(["2024-01-03"])
     )
     late_prediction.attrs["model_metadata"] = {
-        **_model_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs["model_metadata"],
         "test_end": "2024-01-02",
         "oos_end": "2024-01-02",
     }
     late_prediction.attrs["prediction_metadata"] = {
-        **_prediction_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs[
+            "prediction_metadata"
+        ],
         "requested_test_end": "2024-01-02",
         "effective_test_end": "2024-01-03",
         "is_final_oos_window": False,
@@ -556,9 +593,9 @@ def test_prediction_outputs_reject_model_train_window_after_spec_train_end(
         spec.prediction_id,
         "prediction",
     )
-    bad_model_window = _prediction_frame(with_metadata=True)
+    bad_model_window = make_prediction_output_frame(scenario="artifacts")
     bad_model_window.attrs["model_metadata"] = {
-        **_model_metadata(),
+        **make_prediction_output_frame(scenario="artifacts").attrs["model_metadata"],
         "train_start": "2024-01-02",
         "train_end": "2024-01-02",
     }
@@ -625,7 +662,7 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
         run_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
-        signals=(_signal_spec(),),
+        signals=(make_report_signal_spec(scenario="artifacts"),),
         label_columns=("label",),
     )
     report_spec = _report_spec("evaluation_outputs", spec.run_id, "evaluation")
@@ -633,9 +670,11 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="missing_evaluation_metrics_columns"):
         outputs.write_evaluation_outputs(
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=spec,
             output_spec=report_spec,
@@ -644,10 +683,12 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="missing_evaluation_ic_summary_columns"):
         outputs.write_evaluation_outputs(
-            _evaluation_metrics_frame(),
-            _evaluation_grouped_label_values_frame(),
+            make_evaluation_metrics_frame(scenario="artifacts"),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
             ic_summary=pd.DataFrame({"signal": ["signal"]}),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=spec,
             output_spec=report_spec,
@@ -656,9 +697,9 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="missing_evaluation_group_spread_summary"):
         outputs.write_evaluation_outputs(
-            _evaluation_metrics_frame(),
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
+            make_evaluation_metrics_frame(scenario="artifacts"),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
             group_spread_summary=pd.DataFrame({"signal": ["signal"]}),
             evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=spec,
@@ -672,7 +713,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
         run_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
-        signals=(_signal_spec(),),
+        signals=(make_report_signal_spec(scenario="artifacts"),),
         label_columns=("label",),
     )
     report_spec = _report_spec("evaluation_outputs", spec.run_id, "evaluation")
@@ -681,10 +722,12 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
     bad_metric_rows = replace(build_evaluation_diagnostics(), metric_rows=2)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
-            _evaluation_metrics_frame(),
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_metrics_frame(scenario="artifacts"),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=bad_metric_rows,
             spec=spec,
             output_spec=report_spec,
@@ -694,10 +737,12 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
     bad_filter_mode = replace(build_evaluation_diagnostics(), filter_mode="unfiltered")
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
-            _evaluation_metrics_frame(),
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_metrics_frame(scenario="artifacts"),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=bad_filter_mode,
             spec=spec,
             output_spec=report_spec,
@@ -707,31 +752,39 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
     bad_timestamp_count = replace(build_evaluation_diagnostics(), timestamp_count=2)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
-            _evaluation_metrics_frame(),
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_metrics_frame(scenario="artifacts"),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=bad_timestamp_count,
             spec=spec,
             output_spec=report_spec,
             layout=layout,
         )
 
-    skipped_metrics = _evaluation_metrics_frame().assign(n_obs=[1])
+    skipped_metrics = make_evaluation_metrics_frame(scenario="artifacts").assign(
+        n_obs=[1]
+    )
     bad_skipped = replace(build_evaluation_diagnostics(), skipped_timestamp_count=0)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
             skipped_metrics,
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=bad_skipped,
             spec=spec,
             output_spec=report_spec,
             layout=layout,
         )
 
-    bad_timestamp_metrics = _evaluation_metrics_frame().assign(timestamp=["bad-date"])
+    bad_timestamp_metrics = make_evaluation_metrics_frame(
+        scenario="artifacts"
+    ).assign(timestamp=["bad-date"])
     bad_timestamp_diagnostics = replace(
         build_evaluation_diagnostics(),
         timestamp_count=0,
@@ -741,9 +794,11 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
             bad_timestamp_metrics,
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=bad_timestamp_diagnostics,
             spec=spec,
             output_spec=report_spec,
@@ -758,14 +813,17 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
         run_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
-        signals=(_signal_spec(),),
+        signals=(make_report_signal_spec(scenario="artifacts"),),
         label_columns=("label",),
     )
     report_spec = _report_spec("evaluation_outputs", spec.run_id, "evaluation")
     layout = StorageLayout(project_root=tmp_path)
 
     duplicate_metrics = pd.concat(
-        [_evaluation_metrics_frame(), _evaluation_metrics_frame()],
+        [
+            make_evaluation_metrics_frame(scenario="artifacts"),
+            make_evaluation_metrics_frame(scenario="artifacts"),
+        ],
         ignore_index=True,
     )
     duplicate_diagnostics = replace(
@@ -776,35 +834,45 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
     with pytest.raises(ValueError, match="duplicate_evaluation_metrics_keys"):
         outputs.write_evaluation_outputs(
             duplicate_metrics,
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=duplicate_diagnostics,
             spec=spec,
             output_spec=report_spec,
             layout=layout,
         )
 
-    bad_feature_metrics = _evaluation_metrics_frame().assign(signal="other")
+    bad_feature_metrics = make_evaluation_metrics_frame(
+        scenario="artifacts"
+    ).assign(signal="other")
     with pytest.raises(ValueError, match="evaluation_artifact_signal_label_mismatch"):
         outputs.write_evaluation_outputs(
             bad_feature_metrics,
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=spec,
             output_spec=report_spec,
             layout=layout,
         )
 
-    bad_group = _evaluation_grouped_label_values_frame().assign(group=3)
+    bad_group = make_evaluation_grouped_label_values_frame(
+        scenario="artifacts"
+    ).assign(group=3)
     with pytest.raises(ValueError, match="evaluation_group_out_of_range"):
         outputs.write_evaluation_outputs(
-            _evaluation_metrics_frame(),
+            make_evaluation_metrics_frame(scenario="artifacts"),
             bad_group,
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=build_evaluation_diagnostics(),
             spec=spec,
             output_spec=report_spec,
@@ -814,10 +882,12 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
     bad_row_chain = replace(build_evaluation_diagnostics(), rows_after_filter_mode=1)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
         outputs.write_evaluation_outputs(
-            _evaluation_metrics_frame(),
-            _evaluation_grouped_label_values_frame(),
-            ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            make_evaluation_metrics_frame(scenario="artifacts"),
+            make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+            ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+            group_spread_summary=make_evaluation_group_spread_summary_frame(
+                scenario="artifacts"
+            ),
             evaluation_diagnostics=bad_row_chain,
             spec=spec,
             output_spec=report_spec,
@@ -830,16 +900,18 @@ def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> 
         run_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
-        signals=(_signal_spec(),),
+        signals=(make_report_signal_spec(scenario="artifacts"),),
         label_columns=("label",),
     )
     report_spec = _report_spec("evaluation_outputs", spec.run_id, "evaluation")
 
     output_bundle = outputs.write_evaluation_outputs(
-        _evaluation_metrics_frame(),
-        _evaluation_grouped_label_values_frame(),
-        ic_summary=_evaluation_ic_summary_frame(),
-        group_spread_summary=_evaluation_group_spread_summary_frame(),
+        make_evaluation_metrics_frame(scenario="artifacts"),
+        make_evaluation_grouped_label_values_frame(scenario="artifacts"),
+        ic_summary=make_evaluation_ic_summary_frame(scenario="artifacts"),
+        group_spread_summary=make_evaluation_group_spread_summary_frame(
+            scenario="artifacts"
+        ),
         evaluation_diagnostics=build_evaluation_diagnostics(),
         spec=spec,
         output_spec=report_spec,
@@ -1085,7 +1157,7 @@ def _portfolio_spec() -> PortfolioSpec:
         portfolio_id="portfolio_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
-        signals=(_signal_spec(),),
+        signals=(make_report_signal_spec(scenario="artifacts"),),
         return_source_column="label",
         rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
         execution_lag_steps=0,
@@ -1324,82 +1396,6 @@ def _portfolio_row_artifact_names() -> tuple[str, ...]:
     )
 
 
-def _prediction_frame(*, with_metadata: bool) -> pd.DataFrame:
-    frame = pd.DataFrame(
-        {
-            "asset_id": ["asset_a"],
-            "timestamp": pd.to_datetime(["2024-01-02"]),
-            "prediction_score": [0.1],
-        }
-    )
-    if with_metadata:
-        frame.attrs["model_metadata"] = _model_metadata()
-        frame.attrs["prediction_metadata"] = _prediction_metadata()
-    return frame
-
-
-def _model_metadata() -> dict[str, object]:
-    return {
-        "contract_version": "0.1",
-        "model_algorithm": "linear_regression",
-        "sample_filter_mode": "eligible",
-        "filter_columns_used": ["eligible"],
-        "filter_definition": "eligible == True",
-        "rows_input": 2,
-        "rows_after_filter_mode": 2,
-        "rows_after_input_label_dropna": 2,
-        "train_start": "2024-01-01",
-        "train_end": "2024-01-01",
-        "test_start": "2024-01-02",
-        "test_end": None,
-        "oos_start": "2024-01-02",
-        "oos_end": "2024-01-02",
-        "input_factor_columns": ["factor"],
-        "input_feature_columns": ["feature"],
-        "input_columns": ["factor", "feature"],
-        "input_count": 2,
-        "label_column": "label",
-        "hyperparameters": {},
-        "random_seed": None,
-        "max_train_rows": None,
-        "purge_gap_steps": 0,
-        "dependency_status": {"status": "available", "package": "sklearn"},
-        "coefficient_count": 3,
-        "feature_importance": {"factor": 0.1, "feature": 0.2},
-    }
-
-
-def _prediction_metadata() -> dict[str, object]:
-    return {
-        "contract_version": "0.1",
-        "prediction_mode": "minimal_oos",
-        "sample_filter_mode": "eligible",
-        "filter_columns_used": ["eligible"],
-        "filter_definition": "eligible == True",
-        "rows_input": 2,
-        "rows_after_filter_mode": 2,
-        "rows_after_input_dropna": 2,
-        "prediction_rows": 1,
-        "train_end": "2024-01-01",
-        "test_start": "2024-01-02",
-        "requested_test_end": None,
-        "effective_test_end": "2024-01-02",
-        "is_oos": True,
-        "is_final_oos_window": True,
-        "input_columns": ["factor", "feature"],
-        "input_count": 2,
-        "prediction_column": "prediction_score",
-    }
-
-
-def _signal_spec() -> SignalSpec:
-    return SignalSpec(
-        signal_id="signal",
-        source_column="feature",
-        source_kind="feature",
-    )
-
-
 def _report_spec(
     output_definition_id: str,
     run_id: str,
@@ -1412,65 +1408,6 @@ def _report_spec(
         market_id=MarketId("a_share"),
         run_type=run_type,
         scope=OutputScope.LOCAL_ONLY,
-    )
-
-
-def _evaluation_metrics_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2024-01-02")],
-            "signal": ["signal"],
-            "label": ["label"],
-            "ic": [0.1],
-            "rankic": [0.2],
-            "n_obs": [2],
-        }
-    )
-
-
-def _evaluation_grouped_label_values_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2024-01-02")],
-            "signal": ["signal"],
-            "label": ["label"],
-            "group": [1],
-            "mean_label_value": [0.1],
-            "n_obs": [2],
-        }
-    )
-
-
-def _evaluation_ic_summary_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "signal": ["signal"],
-            "label": ["label"],
-            "mean_ic": [0.1],
-            "std_ic": [0.0],
-            "icir": [0.0],
-            "positive_ic_rate": [1.0],
-            "valid_ic_count": [1],
-            "mean_rankic": [0.2],
-            "std_rankic": [0.0],
-            "rankicir": [0.0],
-            "positive_rankic_rate": [1.0],
-            "valid_rankic_count": [1],
-        }
-    )
-
-
-def _evaluation_group_spread_summary_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "signal": ["signal"],
-            "label": ["label"],
-            "top_group_mean_label_value": [0.1],
-            "bottom_group_mean_label_value": [0.0],
-            "top_bottom_label_value_spread_mean": [0.1],
-            "top_bottom_label_value_spread_hit_rate": [1.0],
-            "group_monotonicity_score": [1.0],
-        }
     )
 
 

@@ -3,6 +3,10 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from tests.helpers.maintenance_script_loader import (
+    load_governance_contract_module as _load_governance_contract,
+)
+
 REPO_ROOT = Path(".")
 PROJECT_SRC = Path("src/quant_research_platform")
 GOVERNANCE_CONTRACT = Path(
@@ -140,19 +144,3 @@ def _contains_data_artifact_path(parts: tuple[str, ...]) -> bool:
         }:
             return True
     return False
-
-
-def _load_governance_contract():
-    import importlib.util
-    import sys
-
-    spec = importlib.util.spec_from_file_location(
-        "governance_contract",
-        GOVERNANCE_CONTRACT,
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module

@@ -2,8 +2,8 @@
 
 Handoff builder 的 CLI 范围只允许 `--repo-root`、`--out-dir`、`--task-name`
 和 `--base-ref`；builder 必须完成 bundle-clone receipt generation 和 package
-inspection，package 才能视为成功生成。builder 从同一个 package inspection result
-获取 share-safety status 和 zip sha256，不运行独立 safety scan。
+payload validation，package 才能视为成功生成。builder 从同一个 package payload
+validation result 获取 share-safety status 和 zip sha256，不运行独立 safety scan。
 
 本文件定义治理脚本、外部工具和可移植性边界。
 
@@ -17,13 +17,17 @@ inspection，package 才能视为成功生成。builder 从同一个 package ins
 - Handoff builder 从 Git state 和 replay 自动生成 compact machine receipts；不要把 raw grep output、完整 pytest log、完整 stdout/stderr、wheel/sdist 或本地临时安装目录写入 handoff。
 - 本地依赖、验证、构建和测试只使用 conda；环境名从 `environment.yml` 动态读取，不写死在代码、测试或文档中。
 - 如果 `pyproject.toml` 的 dev dependencies 需要 `build`，`environment.yml` 必须提供对应 conda 包 `python-build`。
+- `pytest-xdist>=3.8,<4` 是已批准 dev-only speed-gate 依赖，必须同时出现在
+  `pyproject.toml` dev dependencies 和 `environment.yml`；不得进入
+  `build-system.requires` 或 runtime dependencies。
 - package smoke 不安装 wheel；只允许用标准库解压 wheel，再用 `PYTHONPATH` 指向解压目录执行 import smoke。
 - Builder 只读取当前 Git state 和正式 CLI options；`.run/` 只保存 output/evidence，不作为脚本来源。
 - `verify_handoff_package_result()` 是唯一 package-level verifier function。
-  Verifier result path 只做一次 zip inspection；需要 bundle replay 时只 clone
-  `final-branch.bundle` 一次，并在同一个 clone 中执行 share-safety scan 和
-  machine receipt replay。standalone verifier CLI 保留为 verifier 的直接入口。
-  未经用户明确批准，不新增或保留 wrapper、alias、adapter 或 compatibility layer。
+  Verifier result path 使用 single `HandoffPackagePayload` load 和 package payload
+  validation；需要 bundle replay 时只 clone `final-branch.bundle` 一次，并在同一个
+  clone 中执行 share-safety scan 和 machine receipt replay。standalone verifier
+  CLI 保留为 verifier 的直接入口。未经用户明确批准，不新增或保留 wrapper、alias、
+  adapter 或 compatibility layer。
 
 ## 2. Python 检查
 

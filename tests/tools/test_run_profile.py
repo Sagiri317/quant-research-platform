@@ -486,6 +486,65 @@ def test_profile_runner_adds_default_duration_summary_when_not_requested(
     assert summary["extra_pytest_args"] == ["--durations=10"]
 
 
+def test_profile_runner_passes_xdist_speed_gate_args_through(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="pytest ok\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    exit_code = runner.main(
+        [
+            "--profile",
+            "all",
+            "--repo-root",
+            str(tmp_path),
+            "--run-dir",
+            ".run/manual/all-xdist",
+            "--",
+            "-n",
+            "4",
+            "--dist",
+            "loadfile",
+            "--durations=100",
+        ]
+    )
+
+    assert exit_code == 0
+    command, _kwargs = calls[0]
+    assert command[:5] == [
+        runner.sys.executable,
+        "-m",
+        "pytest",
+        "-o",
+        "addopts=--import-mode=importlib",
+    ]
+    assert command[-5:] == ["-n", "4", "--dist", "loadfile", "--durations=100"]
+    summary = json.loads(
+        (tmp_path / ".run" / "manual" / "all-xdist" / "summary.json").read_text()
+    )
+    assert summary["profile"] == "all"
+    assert summary["profile_scopes"] == ["tests"]
+    assert summary["extra_pytest_args"] == [
+        "-n",
+        "4",
+        "--dist",
+        "loadfile",
+        "--durations=100",
+    ]
+
+
 def test_profile_summary_sanitizes_absolute_paths_in_pytest_args(
     tmp_path: Path,
     monkeypatch,

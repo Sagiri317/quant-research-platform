@@ -42,10 +42,12 @@ DEV_DEPENDENCIES = {
     "hypothesis",
     "pytest",
     "pytest-cov",
+    "pytest-xdist",
     "ruff",
 }
 PYPROJECT_TO_CONDA_DEV_PACKAGES = {
     "build": "python-build",
+    "pytest-xdist": "pytest-xdist",
 }
 BUILD_SYSTEM_TO_CONDA_PACKAGES = {
     "build": "python-build",
@@ -103,6 +105,20 @@ def test_pyproject_dev_dependencies_have_conda_environment_packages() -> None:
     }
 
     assert missing == {}
+
+
+def test_pytest_xdist_is_dev_only_speed_gate_dependency() -> None:
+    pyproject = _load_pyproject()
+    environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
+    runtime = _dependency_specs(pyproject["project"]["dependencies"])
+    dev = _dependency_specs(pyproject["project"]["optional-dependencies"]["dev"])
+    build_system_requires = _dependency_specs(pyproject["build-system"]["requires"])
+    conda_packages = _environment_dependency_specs(environment)
+
+    assert dev["pytest-xdist"] == "pytest-xdist>=3.8,<4"
+    assert conda_packages["pytest-xdist"] == "pytest-xdist>=3.8,<4"
+    assert "pytest-xdist" not in runtime
+    assert "pytest-xdist" not in build_system_requires
 
 
 def test_build_system_requires_conda_managed_frontend_and_backend() -> None:
@@ -165,6 +181,17 @@ def test_engineering_contract_includes_current_formal_commands() -> None:
         "python tests/tools/run_profile.py --profile fast "
         "--run-dir .run/<purpose>/fast"
     ) in text
+    assert (
+        "python tests/tools/run_profile.py --profile all "
+        "--run-dir .run/<purpose>/all -- --durations=100"
+    ) in text
+    assert (
+        "python tests/tools/run_profile.py --profile all "
+        "--run-dir .run/<purpose>/all-xdist -- -n 4 --dist loadfile "
+        "--durations=100"
+    ) in text
+    assert "pytest-xdist>=3.8,<4" in text
+    assert "speed gate" in text
     assert " --run-dir .run/<purpose>/fast" in text
     assert (
         "verify_governance.py --governance-only --scan-scope active-docs" in text

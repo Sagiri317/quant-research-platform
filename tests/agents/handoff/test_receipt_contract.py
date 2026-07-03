@@ -7,10 +7,9 @@ from pathlib import Path
 
 import pytest
 
-try:
-    from tests.agents.handoff.conftest import _load_handoff_module
-except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
-    from conftest import _load_handoff_module  # type: ignore[no-redef]
+from tests.helpers.maintenance_script_loader import (
+    load_handoff_script_module as _load_handoff_module,
+)
 
 
 def _valid_counts(**overrides: int) -> dict[str, int]:
@@ -141,35 +140,45 @@ def test_check_receipt_rejects_fail_with_zero_exit_code() -> None:
     )
 
 
-def test_check_receipt_rejects_pass_with_failed_or_error_count() -> None:
+@pytest.mark.parametrize(
+    "count_overrides",
+    (
+        {"failed": 1, "collected": 2},
+        {"errors": 1, "collected": 2},
+    ),
+)
+def test_check_receipt_rejects_pass_with_failed_or_error_count(
+    count_overrides: dict[str, int],
+) -> None:
     assert "check_receipt_pass_counts_invalid: 0" in _failures(
-        _valid_row(counts=_valid_counts(failed=1, collected=2))
-    )
-    assert "check_receipt_pass_counts_invalid: 0" in _failures(
-        _valid_row(counts=_valid_counts(errors=1, collected=2))
+        _valid_row(counts=_valid_counts(**count_overrides))
     )
 
 
-def test_check_receipt_accepts_not_run_and_blocked_rows_with_reasons() -> None:
-    assert _failures(
-        _valid_row(
-            status="NOT_RUN",
-            exit_code=None,
-            counts=None,
-            failure_class="runner_preflight_error",
-            not_run_reason="no_tests_collected",
-        )
-    ) == []
-    assert _failures(
-        _valid_row(
-            status="BLOCKED",
-            exit_code=None,
-            counts=None,
-            failure_class="command_timeout",
-            blocked_reason="timeout",
-            timeout_seconds=1,
-        )
-    ) == []
+@pytest.mark.parametrize(
+    "row_overrides",
+    (
+        {
+            "status": "NOT_RUN",
+            "exit_code": None,
+            "counts": None,
+            "failure_class": "runner_preflight_error",
+            "not_run_reason": "no_tests_collected",
+        },
+        {
+            "status": "BLOCKED",
+            "exit_code": None,
+            "counts": None,
+            "failure_class": "command_timeout",
+            "blocked_reason": "timeout",
+            "timeout_seconds": 1,
+        },
+    ),
+)
+def test_check_receipt_accepts_not_run_and_blocked_rows_with_reasons(
+    row_overrides: dict[str, object],
+) -> None:
+    assert _failures(_valid_row(**row_overrides)) == []
 
 
 def test_check_receipt_requires_failure_class_for_non_pass_rows() -> None:
@@ -256,34 +265,35 @@ def test_package_smoke_rejects_child_fail_with_top_pass() -> None:
     assert "package_smoke_status_mismatch" in failures
 
 
-def test_package_smoke_accepts_build_fail_with_content_scan_not_run() -> None:
-    contract = _load_handoff_module("receipt_contract")
-    payload = _package_smoke_payload(
-        status="FAIL",
-        build={"status": "FAIL", "artifact_kinds": []},
-        wheel_extract={"status": "NOT_RUN", "method": "zipfile_extract"},
-        content_scan={
-            "status": "NOT_RUN",
-            "forbidden_member_count": 0,
-            "scanned_artifact_kinds": [],
+@pytest.mark.parametrize(
+    "payload_overrides",
+    (
+        {
+            "status": "FAIL",
+            "build": {"status": "FAIL", "artifact_kinds": []},
+            "wheel_extract": {"status": "NOT_RUN", "method": "zipfile_extract"},
+            "content_scan": {
+                "status": "NOT_RUN",
+                "forbidden_member_count": 0,
+                "scanned_artifact_kinds": [],
+            },
         },
-    )
-    payload["import"] = {"status": "NOT_RUN", "module": "quant_research_platform"}
-
-    assert contract.validate_package_smoke_receipt(payload) == []
-
-
-def test_package_smoke_accepts_extract_fail_with_content_scan_not_run() -> None:
-    contract = _load_handoff_module("receipt_contract")
-    payload = _package_smoke_payload(
-        status="FAIL",
-        wheel_extract={"status": "FAIL", "method": "zipfile_extract"},
-        content_scan={
-            "status": "NOT_RUN",
-            "forbidden_member_count": 0,
-            "scanned_artifact_kinds": [],
+        {
+            "status": "FAIL",
+            "wheel_extract": {"status": "FAIL", "method": "zipfile_extract"},
+            "content_scan": {
+                "status": "NOT_RUN",
+                "forbidden_member_count": 0,
+                "scanned_artifact_kinds": [],
+            },
         },
-    )
+    ),
+)
+def test_package_smoke_accepts_failed_step_with_content_scan_not_run(
+    payload_overrides: dict[str, object],
+) -> None:
+    contract = _load_handoff_module("receipt_contract")
+    payload = _package_smoke_payload(**payload_overrides)
     payload["import"] = {"status": "NOT_RUN", "module": "quant_research_platform"}
 
     assert contract.validate_package_smoke_receipt(payload) == []

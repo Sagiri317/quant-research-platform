@@ -316,7 +316,10 @@ def _mandatory_validation_all_pass_gate(repo_root: Path) -> AuditCheck:
         findings.append("handoff_contract:mandatory_validation_failures_missing")
     if "mandatory_validation_failures(validation_summary)" not in builder:
         findings.append("builder:mandatory_validation_failures_not_called")
-    if "mandatory_validation_failures(loaded.validation_summary)" not in verifier:
+    if (
+        "mandatory_validation_failures(package_payload.validation_summary)"
+        not in verifier
+    ):
         findings.append("verifier:mandatory_validation_failures_not_called")
     return _check("mandatory_validation_all_pass_gate", tuple(findings))
 
@@ -353,7 +356,8 @@ def _source_tree_scan_behavior_tests(repo_root: Path) -> AuditCheck:
         "src/quant_research_platform/private_payload.py",
         "docs/architecture/private-payload.md",
         "README.md",
-        "source_tree_sensitive_negative_literal_findings(repo)",
+        "build_source_tree_scan_input(repo)",
+        "source_tree_sensitive_negative_literal_findings(scan_input)",
     )
     findings = tuple(token for token in required if token not in test_source)
     return _check("source_tree_scan_behavior_tests", findings)

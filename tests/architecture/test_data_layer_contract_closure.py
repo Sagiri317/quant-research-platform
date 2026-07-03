@@ -4,6 +4,8 @@ import ast
 import re
 from pathlib import Path
 
+from tests.helpers.import_graph import import_edges_for_roots, python_files_under
+
 ACTIVE_SCAN_ROOTS = (
     Path("src"),
     Path("tests/architecture"),
@@ -60,9 +62,9 @@ def test_old_catalog_entrypoints_are_not_active_imports() -> None:
         "quant_research_platform.markets.implementations.a_share.catalog",
     }
     hits = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(ACTIVE_SCAN_ROOTS)
-        if module in forbidden
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_for_roots(ACTIVE_SCAN_ROOTS)
+        if edge.module in forbidden
     ]
 
     assert hits == []
@@ -87,7 +89,7 @@ def test_active_source_has_no_old_catalog_or_defaults_entrypoints() -> None:
         "validation\\research_panel.py",
     )
     hits: list[str] = []
-    for path in _python_files((Path("src"),)):
+    for path in python_files_under((Path("src"),)):
         source = path.read_text(encoding="utf-8")
         for token in forbidden:
             if token in source:
@@ -157,10 +159,10 @@ def test_source_market_storage_research_import_boundaries_are_closed() -> None:
     )
     for root, error_name, prefixes in checks:
         hits = [
-            f"{path}:{lineno} imports {module}"
-            for path, lineno, module in _iter_imports((root,))
-            if module.startswith(prefixes)
-            and (path, module) not in A_SHARE_CSMAR_ID_IMPORTS
+            f"{edge.path}:{edge.lineno} imports {edge.module}"
+            for edge in import_edges_for_roots((root,))
+            if edge.module.startswith(prefixes)
+            and (edge.path, edge.module) not in A_SHARE_CSMAR_ID_IMPORTS
         ]
         assert hits == [], f"{error_name}: " + "; ".join(hits)
 
@@ -176,14 +178,14 @@ def test_interfaces_workflows_agents_use_profile_not_direct_implementations() ->
         "quant_research_platform.sources.csmar",
     )
     hits = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(roots)
-        if module.startswith(forbidden_prefixes)
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_for_roots(roots)
+        if edge.module.startswith(forbidden_prefixes)
     ]
     profile_users = [
-        path.as_posix()
-        for path, _lineno, module in _iter_imports(roots)
-        if module == "quant_research_platform.profiles.research"
+        edge.path.as_posix()
+        for edge in import_edges_for_roots(roots)
+        if edge.module == "quant_research_platform.profiles.research"
     ]
 
     assert hits == []
@@ -204,7 +206,7 @@ def test_deep_layers_do_not_build_default_research_profile() -> None:
         PROJECT_SRC / "agents",
         PROJECT_SRC / "workflows",
     )
-    for path in _python_files(roots):
+    for path in python_files_under(roots):
         source = path.read_text(encoding="utf-8")
         for token in forbidden:
             if token in source:
@@ -266,9 +268,9 @@ def test_evaluation_model_prediction_do_not_import_a_share_annotation_rules() ->
         PROJECT_SRC / "research/predictions",
     )
     hits = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(roots)
-        if module.startswith(
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_for_roots(roots)
+        if edge.module.startswith(
             "quant_research_platform.markets.implementations.a_share.processed.annotations"
         )
     ]
@@ -312,10 +314,14 @@ def test_panel_layer_has_no_annotation_rule_terms() -> None:
 
 
 def test_deleted_panel_helper_names_only_appear_in_negative_gates() -> None:
+    current_file = Path(__file__).resolve()
     allowed_gate_files = {
-        Path(__file__),
-        Path("tests/markets/a_share/test_annotation_ownership.py"),
-        PROJECT_SRC / "markets/implementations/a_share/processed/annotations.py",
+        current_file,
+        Path("tests/markets/a_share/test_annotation_ownership.py").resolve(),
+        (
+            PROJECT_SRC
+            / "markets/implementations/a_share/processed/annotations.py"
+        ).resolve(),
     }
     forbidden = (
         "_add_one_word_limit_masks",
@@ -323,10 +329,10 @@ def test_deleted_panel_helper_names_only_appear_in_negative_gates() -> None:
         "_bool_like_column",
     )
     hits: list[str] = []
-    for path in _python_files(ACTIVE_SCAN_ROOTS):
+    for path in python_files_under(ACTIVE_SCAN_ROOTS):
         source = path.read_text(encoding="utf-8")
         for token in forbidden:
-            if token in source and path not in allowed_gate_files:
+            if token in source and path.resolve() not in allowed_gate_files:
                 hits.append(f"{path}:{token}")
 
     assert hits == []
@@ -385,8 +391,9 @@ def test_active_code_has_no_retired_data_layer_terms() -> None:
         r"pandas fallback",
     )
     hits: list[str] = []
-    for path in _python_files(ACTIVE_SCAN_ROOTS):
-        if path == Path(__file__) or path in NEGATIVE_GATE_FILES:
+    current_file = Path(__file__).resolve()
+    for path in python_files_under(ACTIVE_SCAN_ROOTS):
+        if path.resolve() == current_file or path in NEGATIVE_GATE_FILES:
             continue
         source = path.read_text(encoding="utf-8")
         for pattern in forbidden_patterns:
@@ -394,33 +401,6 @@ def test_active_code_has_no_retired_data_layer_terms() -> None:
                 hits.append(f"{path}:{pattern}")
 
     assert hits == []
-
-
-def _iter_imports(roots: tuple[Path, ...]) -> tuple[tuple[Path, int, str], ...]:
-    imports: list[tuple[Path, int, str]] = []
-    for path in _python_files(roots):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module is not None:
-                imports.append((path, node.lineno, node.module))
-            elif isinstance(node, ast.Import):
-                imports.extend((path, node.lineno, alias.name) for alias in node.names)
-    return tuple(imports)
-
-
-def _python_files(roots: tuple[Path, ...]) -> tuple[Path, ...]:
-    files: list[Path] = []
-    for root in roots:
-        if not root.exists():
-            raise AssertionError(f"python_scan_root_missing: {root}")
-        if root.is_file():
-            files.append(root)
-        else:
-            files.extend(path for path in root.rglob("*.py") if path.is_file())
-    return tuple(
-        sorted(path for path in files if path.resolve() != Path(__file__).resolve())
-    )
-
 
 def _module_all_names(tree: ast.AST) -> tuple[str, ...]:
     names: list[str] = []

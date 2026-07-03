@@ -2,33 +2,11 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from collections.abc import Iterable
-from pathlib import Path
 from typing import Any
 
 from quant_research_platform.policy.share_safety import LOCAL_ONLY_ROOTS
-
-
-def load_governance_contract() -> Any:
-    """Load the tracked governance contract module used as test fact source."""
-
-    path = (
-        Path(".agents")
-        / "skills"
-        / "quant-research-platform-maintenance"
-        / "scripts"
-        / "governance_contract.py"
-    )
-    spec = importlib.util.spec_from_file_location("governance_contract_for_tests", path)
-    if spec is None or spec.loader is None:
-        raise AssertionError("governance_contract_loader_missing")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def representative_name_forms(rules: Iterable[Any]) -> dict[str, str]:

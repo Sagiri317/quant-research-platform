@@ -1,7 +1,27 @@
-# ruff: noqa: F403,F405
 from __future__ import annotations
 
-from tests.architecture.governance_scan_helpers import *
+import re
+from pathlib import Path
+
+from tests.architecture.governance_scan_helpers import (
+    ACTIVE_DOC_FORBIDDEN_PATTERNS,
+    ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST,
+    DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS,
+    RETIRED_DATA_LAYER_STRUCTURE_PATTERNS,
+    RETIRED_DATA_PRODUCT_ALLOWED_NEGATIVE_TESTS,
+    RETIRED_DATA_PRODUCT_ID,
+    RETIRED_NAME_RULES,
+    _iter_active_governance_doc_files,
+    _iter_active_structure_files,
+    _iter_text_files,
+    _public_surface_scan_text,
+    is_retired_path_policy_line,
+)
+from tests.helpers import frequency_ids
+from tests.helpers.governance_fixtures import (
+    representative_name_forms,
+    text_rule_example,
+)
 
 
 def test_active_governance_docs_do_not_publish_retired_state_truth() -> None:

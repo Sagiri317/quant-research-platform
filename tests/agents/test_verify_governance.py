@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +16,10 @@ from tests.helpers.governance_fixtures import (
     structured_value_document,
     synthesized_string_assignment,
     text_rule_example,
+)
+from tests.helpers.governance_git_repos import (
+    init_governance_git_repo,
+    run_governance_script,
 )
 
 REPO_ROOT = Path.cwd()
@@ -136,16 +139,6 @@ def _unsafe_assignment_text() -> str:
     return f'credential = "{key}=unsafe"\n'
 
 
-def _git_repo_with_file(root: Path, relative: str, text: str) -> Path:
-    repo = root / relative.replace("/", "_").replace(".", "_")
-    path = repo / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-    return repo
-
-
 @pytest.mark.parametrize(
     ("relative", "payload_parts", "expected_rule"),
     (
@@ -173,9 +166,11 @@ def test_source_tree_sensitive_scan_covers_configured_text_roots(
     expected_rule: str,
 ) -> None:
     contract = _load_contract_module()
-    repo = _git_repo_with_file(tmp_path, relative, "".join(payload_parts))
+    repo = tmp_path / relative.replace("/", "_").replace(".", "_")
+    init_governance_git_repo(repo, {relative: "".join(payload_parts)})
 
-    findings = contract.source_tree_sensitive_negative_literal_findings(repo)
+    scan_input = contract.build_source_tree_scan_input(repo)
+    findings = contract.source_tree_sensitive_negative_literal_findings(scan_input)
 
     assert any(
         finding["path"] == relative and finding["rule"] == expected_rule
@@ -224,20 +219,15 @@ def test_unmanaged_repo_file_negative_payload_is_still_detected(tmp_path: Path) 
 @pytest.mark.integration
 @pytest.mark.slow
 def test_active_doc_scan_cli_collects_non_empty_clean_tree_file_set() -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VERIFY_GOVERNANCE),
-            "--governance-only",
-            "--scan-scope",
-            "active-docs",
-            "--json",
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
+    result = run_governance_script(
+        REPO_ROOT,
+        str(VERIFY_GOVERNANCE),
+        "--governance-only",
+        "--scan-scope",
+        "active-docs",
+        "--json",
     )
+    result.check_returncode()
 
     payload = __import__("json").loads(result.stdout)
 
@@ -249,17 +239,11 @@ def test_active_doc_scan_cli_collects_non_empty_clean_tree_file_set() -> None:
 
 @pytest.mark.integration
 def test_governance_only_requires_explicit_scan_scope() -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VERIFY_GOVERNANCE),
-            "--governance-only",
-            "--json",
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
+    result = run_governance_script(
+        REPO_ROOT,
+        str(VERIFY_GOVERNANCE),
+        "--governance-only",
+        "--json",
     )
 
     assert result.returncode != 0
@@ -269,20 +253,14 @@ def test_governance_only_requires_explicit_scan_scope() -> None:
 @pytest.mark.integration
 def test_removed_active_doc_flags_are_not_accepted() -> None:
     for flag in ("--allow-active-docs", "--scan-active-docs"):
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(VERIFY_GOVERNANCE),
-                "--governance-only",
-                "--scan-scope",
-                "active-docs",
-                flag,
-                "--json",
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
+        result = run_governance_script(
+            REPO_ROOT,
+            str(VERIFY_GOVERNANCE),
+            "--governance-only",
+            "--scan-scope",
+            "active-docs",
+            flag,
+            "--json",
         )
 
         assert result.returncode != 0
@@ -446,34 +424,7 @@ def test_changed_files_only_and_active_doc_scan_use_distinct_inputs() -> None:
 @pytest.mark.integration
 def test_changed_files_with_base_ref_includes_untracked_files(tmp_path: Path) -> None:
     module = _load_governance_module()
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "governance@example.invalid"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Governance Test"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "base"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-    base = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    base = init_governance_git_repo(tmp_path, {"README.md": "base\n"})
     new_file = tmp_path / "tests" / "architecture" / "new_gate.py"
     new_file.parent.mkdir(parents=True)
     new_file.write_text("VALUE = 1\n", encoding="utf-8")
@@ -522,7 +473,8 @@ def test_path_name_gate_fails_retired_stage_paths(tmp_path: Path) -> None:
 def test_source_tree_retired_scan_is_clean_for_current_worktree() -> None:
     contract = _load_contract_module()
 
-    assert contract.source_tree_retired_text_findings(Path(".")) == []
+    scan_input = contract.build_source_tree_scan_input(Path("."))
+    assert contract.source_tree_retired_text_findings(scan_input) == []
 
 
 def test_broad_retired_occurrence_allowlist_cannot_hide_literal(
@@ -555,10 +507,13 @@ def test_broad_retired_occurrence_allowlist_cannot_hide_literal(
             covered_by=("tests/agents/test_verify_governance.py",),
             py_owner="def:test_func",
         )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+    )
 
-    findings = contract.source_tree_retired_text_findings(repo)
+    scan_input = contract.build_source_tree_scan_input(repo)
+    findings = contract.source_tree_retired_text_findings(scan_input)
 
     assert any(
         finding["path"] == "tests/agents/test_verify_governance.py"
@@ -598,10 +553,13 @@ def test_retired_occurrence_duplicate_exact_line_overmatches(
         "SOURCE_TREE_ALLOWED_OCCURRENCES",
         contract.SOURCE_TREE_ALLOWED_OCCURRENCES + (entry,),
     )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+    )
 
-    findings = contract.source_tree_retired_text_findings(repo)
+    scan_input = contract.build_source_tree_scan_input(repo)
+    findings = contract.source_tree_retired_text_findings(scan_input)
 
     assert any(
         finding["path"] == "tests/agents/test_verify_governance.py"
@@ -641,10 +599,13 @@ def test_retired_occurrence_stale_exact_line_is_reported(
         "SOURCE_TREE_ALLOWED_OCCURRENCES",
         contract.SOURCE_TREE_ALLOWED_OCCURRENCES + (stale,),
     )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+    )
 
-    findings = contract.source_tree_retired_text_findings(repo)
+    scan_input = contract.build_source_tree_scan_input(repo)
+    findings = contract.source_tree_retired_text_findings(scan_input)
 
     assert any(
         finding["path"] == "tests/agents/test_verify_governance.py"
@@ -670,10 +631,13 @@ def test_source_tree_retired_text_negative_sources_scan_all_retired_rules(
         "\n".join(f"# {literal}" for literal in direct_literals.values()) + "\n",
         encoding="utf-8",
     )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+    )
 
-    findings = contract.source_tree_retired_text_findings(repo)
+    scan_input = contract.build_source_tree_scan_input(repo)
+    findings = contract.source_tree_retired_text_findings(scan_input)
 
     observed = {(finding["path"], finding["rule"]) for finding in findings}
     assert {

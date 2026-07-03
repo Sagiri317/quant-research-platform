@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 
 import pytest
+
+from tests.helpers.governance_git_repos import run_governance_script
 
 pytestmark = pytest.mark.performance
 
@@ -86,19 +86,9 @@ def test_source_tree_scan_runtime_guardrail() -> None:
 
 
 def _run_tool(*command: str) -> ToolRuntime:
-    run_command = tuple(
-        sys.executable if item == "python" else item for item in command
-    )
+    assert command[0] == "python"
     started = perf_counter()
-    result = subprocess.run(
-        run_command,
-        cwd=Path("."),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    result = run_governance_script(Path("."), *command[1:])
     duration_seconds = perf_counter() - started
     assert result.returncode == 0, result.stdout + result.stderr
     return ToolRuntime(

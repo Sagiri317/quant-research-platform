@@ -93,8 +93,8 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 - open issues 只保存当前 open 或 deferred 问题。
 - `.agents` 是 tracked tooling source。
 - `.run` 是 output layer 和 evidence layer。
-- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、source-tree scan、共享安全路径和 tests 的 current-contract-only 规则只从这里读取或派生。
-- handoff package contract 由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有；receipt contract 由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有。
+- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、`SourceTreeScanInput` 驱动的 source-tree scan、共享安全路径和 tests 的 current-contract-only 规则只从这里读取或派生。
+- handoff package contract 由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有；receipt contract 由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有；package load path 由 `verify_handoff_package.py` 的 `HandoffPackagePayload` 拥有。
 - 边界回归由 owner-layer negative tests 和治理 gate 记录为 `FAIL`，不靠文本关键词绕过。
 
 ## 验证原则
@@ -138,6 +138,15 @@ python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 `integration`、`mutation`、`slow`、`performance` 和 `requires_local_data`；
 正式 evidence 使用 `tests/tools/run_profile.py`，完整收口使用 runner 的
 `all` profile 显式选择。
+
+`pytest-xdist`（pytest 并行执行插件）只作为 dev-only speed gate（开发依赖速度门禁）。
+sequential `all` profile（串行全量运行配置）仍是 truth gate（正确性事实门禁）；
+`all-xdist` 不能替代 `all`，只能作为同一 scope 的耗时辅助信号。
+
+```bash
+python tests/tools/run_profile.py --profile all --run-dir .run/<purpose>/all -- --durations=100
+python tests/tools/run_profile.py --profile all --run-dir .run/<purpose>/all-xdist -- -n 4 --dist loadfile --durations=100
+```
 
 正式 handoff 的 REVIEW_SAFE evidence 完整性由 tracked builder、verifier、contract modules 和 tests 强制执行；status-only 摘要不能作为完整 evidence。
 

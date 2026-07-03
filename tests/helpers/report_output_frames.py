@@ -1,0 +1,271 @@
+from __future__ import annotations
+
+import pandas as pd
+
+from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.research.factors.price_volume import (
+    price_volume_window_column,
+)
+from quant_research_platform.research.labels.forward_returns import (
+    forward_return_label_column,
+)
+
+REPORT_SIGNAL_COLUMN = price_volume_window_column("mom", 20)
+REPORT_LABEL_COLUMN = forward_return_label_column(20)
+
+
+def make_prediction_output_frame(
+    *,
+    scenario: str = "reports",
+    with_metadata: bool = True,
+    row_count: int = 1,
+) -> pd.DataFrame:
+    if scenario == "reports":
+        frame = _reports_prediction_frame(row_count=row_count)
+        if with_metadata:
+            frame.attrs["model_metadata"] = _reports_model_metadata()
+            frame.attrs["prediction_metadata"] = {
+                **_reports_prediction_metadata(),
+                "prediction_rows": row_count,
+            }
+        return frame
+    if scenario == "artifacts":
+        frame = _artifacts_prediction_frame()
+        if with_metadata:
+            frame.attrs["model_metadata"] = _artifacts_model_metadata()
+            frame.attrs["prediction_metadata"] = _artifacts_prediction_metadata()
+        return frame
+    raise ValueError(f"unknown_prediction_output_frame_scenario: {scenario}")
+
+
+def make_report_signal_spec(*, scenario: str = "reports") -> SignalSpec:
+    if scenario == "reports":
+        return SignalSpec(
+            signal_id=REPORT_SIGNAL_COLUMN,
+            source_column=REPORT_SIGNAL_COLUMN,
+            source_kind="factor",
+        )
+    if scenario == "artifacts":
+        return SignalSpec(
+            signal_id="signal",
+            source_column="feature",
+            source_kind="feature",
+        )
+    raise ValueError(f"unknown_report_signal_spec_scenario: {scenario}")
+
+
+def make_evaluation_metrics_frame(*, scenario: str = "reports") -> pd.DataFrame:
+    values = _evaluation_values(scenario)
+    return pd.DataFrame(
+        {
+            "timestamp": [values["timestamp"]],
+            "signal": [values["signal"]],
+            "label": [values["label"]],
+            "ic": [0.1],
+            "rankic": [0.2],
+            "n_obs": [2],
+        }
+    )
+
+
+def make_evaluation_grouped_label_values_frame(
+    *,
+    scenario: str = "reports",
+) -> pd.DataFrame:
+    values = _evaluation_values(scenario)
+    return pd.DataFrame(
+        {
+            "timestamp": [values["timestamp"]],
+            "signal": [values["signal"]],
+            "label": [values["label"]],
+            "group": [1],
+            "mean_label_value": [values["mean_label_value"]],
+            "n_obs": [2],
+        }
+    )
+
+
+def make_evaluation_ic_summary_frame(*, scenario: str = "reports") -> pd.DataFrame:
+    values = _evaluation_values(scenario)
+    return pd.DataFrame(
+        {
+            "signal": [values["signal"]],
+            "label": [values["label"]],
+            "mean_ic": [0.1],
+            "std_ic": [0.0],
+            "icir": [0.0],
+            "positive_ic_rate": [1.0],
+            "valid_ic_count": [1],
+            "mean_rankic": [0.2],
+            "std_rankic": [0.0],
+            "rankicir": [0.0],
+            "positive_rankic_rate": [1.0],
+            "valid_rankic_count": [1],
+        }
+    )
+
+
+def make_evaluation_group_spread_summary_frame(
+    *,
+    scenario: str = "reports",
+) -> pd.DataFrame:
+    values = _evaluation_values(scenario)
+    return pd.DataFrame(
+        {
+            "signal": [values["signal"]],
+            "label": [values["label"]],
+            "top_group_mean_label_value": [values["mean_label_value"]],
+            "bottom_group_mean_label_value": [0.0],
+            "top_bottom_label_value_spread_mean": [values["mean_label_value"]],
+            "top_bottom_label_value_spread_hit_rate": [1.0],
+            "group_monotonicity_score": [1.0],
+        }
+    )
+
+
+def _reports_prediction_frame(*, row_count: int) -> pd.DataFrame:
+    assets = ["asset-a", "asset-b"][:row_count]
+    scores = [0.25, 0.35][:row_count]
+    return pd.DataFrame(
+        {
+            "asset_id": assets,
+            "timestamp": pd.to_datetime(["2014-01-03"] * row_count),
+            "prediction_score": scores,
+        }
+    )
+
+
+def _artifacts_prediction_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "asset_id": ["asset_a"],
+            "timestamp": pd.to_datetime(["2024-01-02"]),
+            "prediction_score": [0.1],
+        }
+    )
+
+
+def _reports_model_metadata() -> dict[str, object]:
+    return {
+        "contract_version": "0.1",
+        "model_algorithm": "linear_regression",
+        "sample_filter_mode": "eligible",
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+        "rows_after_input_label_dropna": 2,
+        "train_start": "2014-01-02",
+        "train_end": "2014-01-02",
+        "test_start": "2014-01-03",
+        "test_end": "2014-01-03",
+        "oos_start": "2014-01-03",
+        "oos_end": "2014-01-03",
+        "input_factor_columns": [REPORT_SIGNAL_COLUMN],
+        "input_feature_columns": [],
+        "input_columns": [REPORT_SIGNAL_COLUMN],
+        "input_count": 1,
+        "label_column": REPORT_LABEL_COLUMN,
+        "hyperparameters": {},
+        "random_seed": None,
+        "max_train_rows": None,
+        "purge_gap_steps": 0,
+        "dependency_status": {"status": "available", "package": "sklearn"},
+        "coefficient_count": 2,
+        "feature_importance": {REPORT_SIGNAL_COLUMN: 1.0},
+    }
+
+
+def _reports_prediction_metadata() -> dict[str, object]:
+    return {
+        "contract_version": "0.1",
+        "prediction_mode": "minimal_oos",
+        "sample_filter_mode": "eligible",
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+        "rows_after_input_dropna": 2,
+        "prediction_rows": 1,
+        "train_end": "2014-01-02",
+        "test_start": "2014-01-03",
+        "requested_test_end": "2014-01-03",
+        "effective_test_end": "2014-01-03",
+        "is_oos": True,
+        "is_final_oos_window": False,
+        "input_columns": [REPORT_SIGNAL_COLUMN],
+        "input_count": 1,
+        "prediction_column": "prediction_score",
+    }
+
+
+def _artifacts_model_metadata() -> dict[str, object]:
+    return {
+        "contract_version": "0.1",
+        "model_algorithm": "linear_regression",
+        "sample_filter_mode": "eligible",
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+        "rows_after_input_label_dropna": 2,
+        "train_start": "2024-01-01",
+        "train_end": "2024-01-01",
+        "test_start": "2024-01-02",
+        "test_end": None,
+        "oos_start": "2024-01-02",
+        "oos_end": "2024-01-02",
+        "input_factor_columns": ["factor"],
+        "input_feature_columns": ["feature"],
+        "input_columns": ["factor", "feature"],
+        "input_count": 2,
+        "label_column": "label",
+        "hyperparameters": {},
+        "random_seed": None,
+        "max_train_rows": None,
+        "purge_gap_steps": 0,
+        "dependency_status": {"status": "available", "package": "sklearn"},
+        "coefficient_count": 3,
+        "feature_importance": {"factor": 0.1, "feature": 0.2},
+    }
+
+
+def _artifacts_prediction_metadata() -> dict[str, object]:
+    return {
+        "contract_version": "0.1",
+        "prediction_mode": "minimal_oos",
+        "sample_filter_mode": "eligible",
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+        "rows_after_input_dropna": 2,
+        "prediction_rows": 1,
+        "train_end": "2024-01-01",
+        "test_start": "2024-01-02",
+        "requested_test_end": None,
+        "effective_test_end": "2024-01-02",
+        "is_oos": True,
+        "is_final_oos_window": True,
+        "input_columns": ["factor", "feature"],
+        "input_count": 2,
+        "prediction_column": "prediction_score",
+    }
+
+
+def _evaluation_values(scenario: str) -> dict[str, object]:
+    if scenario == "reports":
+        return {
+            "timestamp": pd.Timestamp("2014-01-03"),
+            "signal": REPORT_SIGNAL_COLUMN,
+            "label": REPORT_LABEL_COLUMN,
+            "mean_label_value": 0.01,
+        }
+    if scenario == "artifacts":
+        return {
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "signal": "signal",
+            "label": "label",
+            "mean_label_value": 0.1,
+        }
+    raise ValueError(f"unknown_evaluation_frame_scenario: {scenario}")

@@ -8,6 +8,8 @@
 
 如果 `pyproject.toml` dev dependencies 包含 `build`，`environment.yml` 必须包含对应 conda 包 `python-build`。`pyproject.toml` 必须显式声明 `[build-system]`，且 `environment.yml` 必须显式提供对应构建后端依赖。package smoke 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`；package smoke 不执行安装，只允许 wheel 解压后通过 `PYTHONPATH` import smoke。
 
+`pytest-xdist>=3.8,<4` 只属于 dev dependencies 和 `environment.yml`，用于 `all-xdist` speed gate（速度门禁）；它不得进入 runtime dependencies、`build-system.requires` 或 package smoke runtime。
+
 ## 运行与验证
 
 常用命令：
@@ -16,6 +18,8 @@
 git diff --check
 conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py --repo-root . --json
 conda run -n <environment.yml name> python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
+conda run -n <environment.yml name> python tests/tools/run_profile.py --profile all --run-dir .run/<purpose>/all -- --durations=100
+conda run -n <environment.yml name> python tests/tools/run_profile.py --profile all --run-dir .run/<purpose>/all-xdist -- -n 4 --dist loadfile --durations=100
 conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 ```
@@ -32,7 +36,7 @@ conda run -n <environment.yml name> python .agents/skills/quant-research-platfor
 
 package evidence 描述 handoff package 的成员、hash、manifest、sidecar 和 Git bundle。reviewer evidence 描述 review role、scope、files inspected、commands run、findings、fixes 和 limitations。二者必须分开记录；handoff layout、sidecar、task metadata、validation summary、`FieldSpec` 和 `allowed_keys()` 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有，receipt schema specs、invariants、normalization 和 comparison 由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有，治理扫描规则由 `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 拥有。
 
-handoff 使用 compact replayable receipts：machine validation rows 只来自 replay-backed receipts；verifier result path 只做一次 zip inspection，并在需要 replay 时只 clone `final-branch.bundle` 一次，在同一个 clone 中完成 share-safety scan、receipt replay 和 count/hash comparison。Codex 不应手写 handoff evidence，也不应把 raw grep output、full pytest log、完整 stdout/stderr、wheel、sdist、完整 review transcript 或本地 `.run/local/**` 产物打入 handoff。
+handoff 使用 compact replayable receipts：machine validation rows 只来自 replay-backed receipts；verifier result path 使用 single `HandoffPackagePayload` load 和 package payload validation，并在需要 replay 时只 clone `final-branch.bundle` 一次，在同一个 clone 中完成 share-safety scan、receipt replay 和 count/hash comparison。Codex 不应手写 handoff evidence，也不应把 raw grep output、full pytest log、完整 stdout/stderr、wheel、sdist、完整 review transcript 或本地 `.run/local/**` 产物打入 handoff。
 
 正式 handoff success 还要求 mandatory validation rows 全部为 `PASS`。`validation-summary.json` 的顶层 status 只由 rows 聚合派生；任一 mandatory row 为 `FAIL`、`NOT_RUN`、`BLOCKED`、缺失、重复或未知状态时，builder 和 verifier 都必须返回失败。
 
@@ -72,6 +76,10 @@ tracked tool source。普通 `python -m pytest` 是开发者默认非重型 suit
 `requires_local_data`；正式 evidence 使用 `tests/tools/run_profile.py`，
 完整收口使用 runner 的 `all` profile 显式选择。
 
+sequential `all` profile（串行全量运行配置）是正式 correctness truth gate（正确性事实门禁）。
+`all-xdist` 通过透传 bounded `-n 4 --dist loadfile` 使用 `pytest-xdist`，只作为 dev-only speed gate；
+它不替代 sequential `all`，也不改变 profile scope、marker 或 validation status 语义。
+
 ## 治理规则事实源
 
 `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。`verify_governance.py`、source-tree scan、bundle share-safety scan、共享安全路径规则和相关 tests 只从这里读取或派生 current-contract-only 规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token。
@@ -93,4 +101,4 @@ conda run -n <environment.yml name> python tests/tools/run_profile.py --profile 
 
 handoff tests 的具体执行入口统一使用 `tests/tools/run_profile.py`。测试位置按 owner layer 放置；详细 placement 规则由 maintenance references 和 architecture gates 拥有。
 
-handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。正式生成入口是 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>`；builder 只读取当前 clean Git state 和这些 CLI options，写入 bundle，从 bundle clone 自动生成 machine receipts 和 validation summary，再检查 package envelope、schema、hash 和 share-safety。`verify_handoff_package_result()` 是唯一 package-level verifier function；standalone verifier CLI 保留为完整 bundle replay 和 receipt comparison 的直接入口，未经用户明确批准不新增 wrapper、alias、adapter 或 compatibility layer。builder 不运行独立 safety scan；share-safety status 和 zip sha256 来自同一个 package inspection result。Standalone verifier 从 `final-branch.bundle` clone replay，一次性复用 source-tree scan 结果执行 share-safety 和 hard-scan receipt replay，并比较 packaged receipts、validation summary 和 manifest。具体 layout、schema、receipt 和 active denied semantics 由 executable contracts、verifier 和 tests 拥有。
+handoff builder/verifier 位于 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`。正式生成入口是 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>`；builder 只读取当前 clean Git state 和这些 CLI options，写入 bundle，从 bundle clone 自动生成 machine receipts 和 validation summary，再通过 package payload validation 检查 schema、hash 和 share-safety。`verify_handoff_package_result()` 是唯一 package-level verifier function；standalone verifier CLI 保留为完整 bundle replay 和 receipt comparison 的直接入口，未经用户明确批准不新增 wrapper、alias、adapter 或 compatibility layer。builder 不运行独立 safety scan；share-safety status 和 zip sha256 来自同一个 package payload validation result。Standalone verifier 从 `final-branch.bundle` clone replay，一次性复用 `SourceTreeScanInput` 驱动的 source-tree scan 结果执行 share-safety 和 hard-scan receipt replay，并比较 packaged receipts、validation summary 和 manifest。具体 layout、schema、receipt 和 active denied semantics 由 executable contracts、verifier 和 tests 拥有。

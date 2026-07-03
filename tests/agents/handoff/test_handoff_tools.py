@@ -6,10 +6,9 @@ from pathlib import Path
 
 import pytest
 
-try:
-    from tests.agents.handoff.conftest import _load_handoff_module
-except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
-    from conftest import _load_handoff_module  # type: ignore[no-redef]
+from tests.helpers.maintenance_script_loader import (
+    load_handoff_script_module as _load_handoff_module,
+)
 
 
 def _load_verifier_for_scanner_tests():
@@ -24,7 +23,7 @@ def test_handoff_verifier_allows_final_branch_bundle_by_default(tmp_path: Path) 
         archive.writestr("final-branch.bundle", b"not a real bundle for path policy")
         archive.writestr("task_metadata.json", "{}\n")
 
-    inspection = module.inspect_handoff_zip_once(package, None)
+    inspection = module.load_handoff_package_payload(package, None)
 
     assert inspection.share_safety_failures == ()
 
@@ -46,9 +45,9 @@ def test_handoff_package_verifier_rejects_tampered_zip_member_paths(
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(member, "{}\n")
 
-    inspection = module.inspect_handoff_zip_once(package, None)
+    inspection = module.load_handoff_package_payload(package, None)
 
-    assert inspection.failures or inspection.share_safety_failures
+    assert inspection.load_failures or inspection.share_safety_failures
 
 
 def test_handoff_verifier_rejects_other_nested_packages_by_default(
@@ -59,7 +58,7 @@ def test_handoff_verifier_rejects_other_nested_packages_by_default(
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("handoff_evidence/old.bundle", b"opaque package")
 
-    inspection = module.inspect_handoff_zip_once(package, None)
+    inspection = module.load_handoff_package_payload(package, None)
 
     assert inspection.share_safety_failures == (
         "nested package/bundle not allowed by default: handoff_evidence/old.bundle",
@@ -86,7 +85,7 @@ def test_handoff_package_verifier_scans_json_sidecar_absolute_paths(
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("task_metadata.json", "{}\n")
-    inspection = module.inspect_handoff_zip_once(package, sidecar)
+    inspection = module.load_handoff_package_payload(package, sidecar)
 
     assert "sidecar_local_absolute_path_text: sidecar.json" in (
         inspection.share_safety_failures
@@ -104,7 +103,7 @@ def test_handoff_package_verifier_allows_scanner_pattern_definitions(
             'LOCAL_PATH_PATTERN = re.compile(r"E:/|/mnt/data|site-packages")\n',
         )
 
-    inspection = module.inspect_handoff_zip_once(package, None)
+    inspection = module.load_handoff_package_payload(package, None)
 
     assert inspection.share_safety_failures == ()
 
@@ -117,7 +116,7 @@ def test_handoff_package_verifier_rejects_data_research_members_and_paths(
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("data/research/a_share/demo/manifest.json", "{}\n")
 
-    inspection = module.inspect_handoff_zip_once(package, None)
+    inspection = module.load_handoff_package_payload(package, None)
 
     assert (
         "forbidden_path_segment: data/research: "
@@ -142,7 +141,7 @@ def test_handoff_package_verifier_rejects_local_run_members(
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(member, "{}\n")
 
-    inspection = module.inspect_handoff_zip_once(package, None)
+    inspection = module.load_handoff_package_payload(package, None)
 
     assert f"forbidden_path_segment: {member}" in inspection.share_safety_failures
 
@@ -169,7 +168,7 @@ def test_handoff_package_verifier_rejects_private_provider_markers(
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("handoff_evidence/leak.md", text)
 
-    inspection = module.inspect_handoff_zip_once(package, None)
+    inspection = module.load_handoff_package_payload(package, None)
 
     assert (
         "vendor_marker_text: handoff_evidence/leak.md"
@@ -186,7 +185,7 @@ def test_handoff_package_verifier_large_text_skip_is_fail_closed(
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("handoff_evidence/large.md", large_text)
 
-    inspection = module.inspect_handoff_zip_once(package, None)
+    inspection = module.load_handoff_package_payload(package, None)
 
     assert (
         "text scan exceeded maximum size: handoff_evidence/large.md"

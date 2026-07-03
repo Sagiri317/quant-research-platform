@@ -1,21 +1,9 @@
-# ruff: noqa: F401,I001
 from __future__ import annotations
 
 import ast
-import os as os
 import re
-import subprocess as subprocess
 import sys
-from dataclasses import fields as fields
-from pathlib import Path, PurePosixPath
-
-import pytest as pytest
-from tests.helpers import frequency_ids as frequency_ids
-from tests.helpers.governance_fixtures import (
-    representative_name_forms as representative_name_forms,
-    source_tree_sensitive_rule_summary as source_tree_sensitive_rule_summary,
-    text_rule_example as text_rule_example,
-)
+from pathlib import Path
 
 GOVERNANCE_SCRIPT_DIR = (
     Path(__file__).resolve().parents[2]
@@ -26,15 +14,17 @@ GOVERNANCE_SCRIPT_DIR = (
 )
 if str(GOVERNANCE_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(GOVERNANCE_SCRIPT_DIR))
-from governance_contract import (  # noqa: E402
-    ACTIVE_GOVERNANCE_DOC_ROOTS as CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS,
+import governance_contract as _governance_contract  # noqa: E402
+
+CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS = (
+    _governance_contract.ACTIVE_GOVERNANCE_DOC_ROOTS
 )
-from governance_contract import (  # noqa: E402
-    PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES,
-    RETIRED_NAME_RULES,
-    active_doc_forbidden_patterns,
-    is_retired_path_policy_line,
+PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES = (
+    _governance_contract.PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES
 )
+RETIRED_NAME_RULES = _governance_contract.RETIRED_NAME_RULES
+active_doc_forbidden_patterns = _governance_contract.active_doc_forbidden_patterns
+is_retired_path_policy_line = _governance_contract.is_retired_path_policy_line
 
 SCAN_ROOTS = (
     Path("src"),
@@ -485,5 +475,3 @@ def _class_field_names(path: Path, class_name: str) -> set[str]:
     raise AssertionError(f"class not found: {class_name}")
 def _is_write_mode(mode: str) -> bool:
     return any(flag in mode for flag in ("w", "a", "x", "+"))
-
-__all__ = tuple(name for name in globals() if not name.startswith("__"))

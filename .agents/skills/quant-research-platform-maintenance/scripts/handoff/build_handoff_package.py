@@ -35,7 +35,10 @@ from handoff_contract import (  # noqa: E402
     validate_task_metadata_contract,
 )
 from replay_evidence import build_machine_receipts  # noqa: E402
-from verify_handoff_package import _inspect_handoff_package_envelope  # noqa: E402
+from verify_handoff_package import (  # noqa: E402
+    _validate_handoff_package_payload,
+    load_handoff_package_payload,
+)
 
 PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
 
@@ -113,10 +116,14 @@ def build_handoff_package(
             branch=branch,
             bundle_path=bundle_path,
         )
-    verification = _inspect_handoff_package_envelope(
+    package_payload = load_handoff_package_payload(
         zip_path,
         json_path,
+    )
+    verification = _validate_handoff_package_payload(
+        package_payload,
         expected_receipts=receipts,
+        replay_bundle=False,
     )
     failures = [*validation_failures, *verification.failures]
     return {

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import shutil
 import subprocess
-import sys
 import zipfile
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 HANDOFF_TOOL_ROOT = (
     Path(".agents")
@@ -22,26 +22,13 @@ HANDOFF_SKILL_ROOT = HANDOFF_TOOL_ROOT.parent.parent
 TEST_BRANCH = "feature/synthetic-handoff-review"
 
 
-def _load_handoff_module(name: str):
-    script = HANDOFF_TOOL_ROOT / f"{name}.py"
-    if name == "governance_contract":
-        script = HANDOFF_TOOL_ROOT.parent / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, script)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 MANDATORY_VALIDATION_ROWS = tuple(
-    _load_handoff_module("handoff_contract").MANDATORY_VALIDATION_ROWS
+    load_handoff_script_module("handoff_contract").MANDATORY_VALIDATION_ROWS
 )
 
 
 @pytest.fixture(scope="session")
-def valid_handoff_package(
+def full_valid_handoff_package(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> tuple[Path, Path]:
     root = tmp_path_factory.mktemp("valid-handoff-package")
@@ -59,7 +46,7 @@ def _copy_valid_package(source: tuple[Path, Path], target: Path) -> tuple[Path, 
 
 
 def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
-    builder = _load_handoff_module("build_handoff_package")
+    builder = load_handoff_script_module("build_handoff_package")
     repo = tmp_path / "repo"
     base, final_head = _init_handoff_repo(repo)
     result = builder.build_handoff_package(
@@ -282,7 +269,7 @@ def _check_receipt(
     status: str = "PASS",
     counts: dict[str, int] | None = None,
 ) -> dict[str, object]:
-    handoff_contract = _load_handoff_module("handoff_contract")
+    handoff_contract = load_handoff_script_module("handoff_contract")
     spec = handoff_contract.replay_command_spec(command_id)
     return {
         "schema_id": "qrp-check-receipt",

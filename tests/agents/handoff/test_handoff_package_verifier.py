@@ -6,27 +6,22 @@ from pathlib import Path
 
 import pytest
 
-try:
-    from tests.agents.handoff.conftest import (
-        _copy_valid_package,
-        _load_handoff_module,
-        _refresh_manifest_and_sidecar,
-        _rewrite_package_member,
-    )
-except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
-    from conftest import (  # type: ignore[no-redef]
-        _copy_valid_package,
-        _load_handoff_module,
-        _refresh_manifest_and_sidecar,
-        _rewrite_package_member,
-    )
+from tests.agents.handoff.conftest import (
+    _copy_valid_package,
+    _refresh_manifest_and_sidecar,
+    _rewrite_package_member,
+)
+from tests.helpers.maintenance_script_loader import (
+    load_handoff_script_module as _load_handoff_module,
+)
+
 
 @pytest.mark.integration
 def test_verifier_accepts_minimal_package(
-    valid_handoff_package: tuple[Path, Path],
+    full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    package, sidecar = valid_handoff_package
+    package, sidecar = full_valid_handoff_package
 
     failures = verifier.verify_handoff_package_result(package, sidecar).failures
 
@@ -37,10 +32,10 @@ def test_verifier_accepts_minimal_package(
 def test_verifier_rejects_self_consistent_failed_validation_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    valid_handoff_package: tuple[Path, Path],
+    full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    package, sidecar = _copy_valid_package(full_valid_handoff_package, tmp_path)
     with zipfile.ZipFile(package) as archive:
         check_receipts = json.loads(
             archive.read("handoff_evidence/check-receipts.json").decode("utf-8")
@@ -82,10 +77,10 @@ def test_verifier_rejects_self_consistent_failed_validation_summary(
 def test_verifier_rejects_self_consistent_blocked_package_smoke_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    valid_handoff_package: tuple[Path, Path],
+    full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    package, sidecar = _copy_valid_package(full_valid_handoff_package, tmp_path)
     with zipfile.ZipFile(package) as archive:
         package_smoke = json.loads(
             archive.read("handoff_evidence/package-smoke-receipt.json").decode("utf-8")
@@ -196,11 +191,11 @@ def test_receipt_contract_rejects_raw_output_in_hard_scan_receipt() -> None:
 @pytest.mark.integration
 def test_verifier_rejects_retired_handoff_entries(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
+    full_valid_handoff_package: tuple[Path, Path],
     old_name: str,
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    package, sidecar = _copy_valid_package(full_valid_handoff_package, tmp_path)
     _rewrite_package_member(
         package,
         old_name,
@@ -216,10 +211,10 @@ def test_verifier_rejects_retired_handoff_entries(
 @pytest.mark.integration
 def test_verifier_rejects_old_sidecar_status_surface(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
+    full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    package, sidecar = _copy_valid_package(full_valid_handoff_package, tmp_path)
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     payload["status_summary"] = {"smoke": "PASS"}
     payload["advisory_reviews"] = {"review_subagent": "PASS"}
@@ -234,10 +229,10 @@ def test_verifier_rejects_old_sidecar_status_surface(
 @pytest.mark.integration
 def test_verifier_replays_hard_scan_from_bundle(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
+    full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(valid_handoff_package, tmp_path)
+    package, sidecar = _copy_valid_package(full_valid_handoff_package, tmp_path)
     with zipfile.ZipFile(package) as archive:
         receipt = json.loads(
             archive.read("handoff_evidence/hard-scan-receipt.json").decode("utf-8")
@@ -258,13 +253,13 @@ def test_verifier_replays_hard_scan_from_bundle(
 @pytest.mark.integration
 def test_verifier_reuses_clone_source_tree_scan_for_share_safety_and_hard_scan(
     monkeypatch: pytest.MonkeyPatch,
-    valid_handoff_package: tuple[Path, Path],
+    full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    package, sidecar = valid_handoff_package
-    inspection = verifier.inspect_handoff_zip_once(package, sidecar)
-    assert inspection.raw_bundle is not None
-    assert inspection.loaded.task_metadata is not None
+    package, sidecar = full_valid_handoff_package
+    package_payload = verifier.load_handoff_package_payload(package, sidecar)
+    assert package_payload.raw_bundle is not None
+    assert package_payload.task_metadata is not None
     calls = 0
     scan_payload = {
         "allowance_contract": {
@@ -273,7 +268,9 @@ def test_verifier_reuses_clone_source_tree_scan_for_share_safety_and_hard_scan(
     }
     received_payloads: list[object] = []
 
-    def fake_source_tree_scan_groups(_repo_root: Path) -> dict[str, dict[str, object]]:
+    def fake_source_tree_scan_groups(
+        _repo_root: Path,
+    ) -> dict[str, dict[str, object]]:
         nonlocal calls
         calls += 1
         return scan_payload
@@ -285,7 +282,7 @@ def test_verifier_reuses_clone_source_tree_scan_for_share_safety_and_hard_scan(
         source_tree_scan_groups_payload: object | None = None,
     ) -> dict[str, dict[str, object]]:
         received_payloads.append(source_tree_scan_groups_payload)
-        return inspection.loaded.receipts
+        return package_payload.receipts
 
     monkeypatch.setattr(
         verifier,
@@ -295,9 +292,9 @@ def test_verifier_reuses_clone_source_tree_scan_for_share_safety_and_hard_scan(
     monkeypatch.setattr(verifier, "build_machine_receipts", fake_build_machine_receipts)
 
     failures, share_safety_failures = verifier.verify_bundle_and_replay_once(
-        inspection.raw_bundle,
-        inspection.loaded.task_metadata,
-        inspection.loaded,
+        package_payload.raw_bundle,
+        package_payload.task_metadata,
+        package_payload,
     )
 
     assert failures == []

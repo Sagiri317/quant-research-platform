@@ -255,13 +255,37 @@ def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
     source = _source(verifier)
 
     assert "HandoffVerificationResult" in classes
+    assert "HandoffPackagePayload" in classes
     assert "verify_handoff_package_result" in verifier_defs
-    assert "_inspect_handoff_package_envelope" in verifier_defs
-    assert "inspect_handoff_zip_once" in verifier_defs
+    assert _name("verify", "handoff", "package", "envelope", "result") not in (
+        verifier_defs
+    )
+    assert "load_handoff_package_payload" in verifier_defs
+    assert _name("load", "handoff", "package", "payload", "once") not in (
+        verifier_defs
+    )
+    assert "_validate_handoff_package_payload" in verifier_defs
     assert "verify_bundle_and_replay_once" in verifier_defs
     assert "scan_clone_tree_for_share_safety" in verifier_defs
     assert "compare_replayed_handoff_payloads" in verifier_defs
     assert "main" in verifier_defs
+
+    payload_class_source = _class_source(verifier, "HandoffPackagePayload")
+    for field_name in (
+        "zip_path",
+        "json_path",
+        "zip_sha256",
+        "member_names",
+        "duplicate_member_names",
+        "raw_bundle",
+        "sidecar_payload",
+        "task_metadata",
+        "validation_summary",
+        "receipts",
+        "load_failures",
+        "share_safety_failures",
+    ):
+        assert f"    {field_name}:" in payload_class_source
 
     for retired_class in ("Handoff" + "Safety" + "Result",):
         assert retired_class not in classes
@@ -274,22 +298,25 @@ def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
         _name("verify", "manifest", "hashes"),
         _name("load", "handoff", "payloads"),
         _name("load", "json", "member"),
+        _name("inspect", "handoff", "zip", "once"),
+        "_" + _name("inspect", "handoff", "package", "envelope"),
     ):
         assert retired not in verifier_defs
 
     result_calls = _called_names_in_function(verifier, "verify_handoff_package_result")
-    assert "_verify_handoff_package_result" in result_calls
+    assert "load_handoff_package_payload" in result_calls
+    assert "_validate_handoff_package_payload" in result_calls
     assert _name("scan", "handoff", "zip") not in result_calls
     assert _name("scan", "git", "bundle") not in result_calls
 
-    internal_result_calls = _called_names_in_function(
-        verifier, "_verify_handoff_package_result"
+    validator_calls = _called_names_in_function(
+        verifier, "_validate_handoff_package_payload"
     )
-    assert "inspect_handoff_zip_once" in internal_result_calls
+    assert "verify_bundle_and_replay_once" in validator_calls
 
-    inspection_source = _function_source(verifier, "inspect_handoff_zip_once")
-    assert _name("scan", "bundle", "safety") not in inspection_source
-    assert _name("scan", "git", "bundle") not in inspection_source
+    payload_source = _function_source(verifier, "load_handoff_package_payload")
+    assert _name("scan", "bundle", "safety") not in payload_source
+    assert _name("scan", "git", "bundle") not in payload_source
 
 
 def test_handoff_contract_has_no_retired_verified_path_surfaces() -> None:
@@ -477,7 +504,9 @@ def test_builder_uses_verifier_result_without_separate_scan_status() -> None:
     defs = _function_defs(builder)
 
     assert "scan_status" not in defs
-    assert "_inspect_handoff_package_envelope" in source
+    assert "_validate_handoff_package_payload" in source
+    assert "load_handoff_package_payload" in source
+    assert _name("verify", "handoff", "package", "envelope", "result") not in source
     assert "verify_handoff_package_result" not in source
     assert _name("scan", "handoff", "zip") not in source
 

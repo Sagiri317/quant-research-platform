@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.helpers.governance_fixtures import load_governance_contract
 from tests.helpers.import_graph import ImportEdge, import_edges_under
+from tests.helpers.maintenance_script_loader import load_governance_contract_module
 
 PROJECT_SRC = Path("src/quant_research_platform")
 
@@ -11,7 +11,7 @@ PROJECT_SRC = Path("src/quant_research_platform")
 def test_owner_layer_import_boundaries_are_enforced_from_governance_contract(
     import_edges: tuple[ImportEdge, ...],
 ) -> None:
-    contract = load_governance_contract()
+    contract = load_governance_contract_module()
     hits: list[str] = []
 
     for rule in contract.layer_boundary_import_rules():

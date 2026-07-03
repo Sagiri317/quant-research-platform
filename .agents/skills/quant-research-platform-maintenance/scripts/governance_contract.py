@@ -98,6 +98,27 @@ def _source_tree_posix_path(path: str | Path | PurePosixPath) -> PurePosixPath:
 
 
 @dataclass(frozen=True)
+class SourceTreeTextFile:
+    relative: Path
+    absolute: Path
+    text: str
+    lines: tuple[str, ...]
+    ast_tree: ast.AST | None
+    allowlist_definition_lines: frozenset[int]
+    governance_rule_definition_lines: frozenset[int]
+    python_owner_ranges: Mapping[str, tuple[frozenset[int], ...]]
+
+
+@dataclass(frozen=True)
+class SourceTreeScanInput:
+    clone_dir: Path
+    tracked_paths: tuple[Path, ...]
+    tracked_text_files: tuple[Path, ...]
+    text_files: Mapping[Path, SourceTreeTextFile]
+    active_test_literal_patterns: Mapping[str, re.Pattern[str]]
+
+
+@dataclass(frozen=True)
 class NameRule:
     name: str
     forms: tuple[str, ...]
@@ -3092,12 +3113,56 @@ RETIRED_HANDOFF_ENTRY_NAMES = frozenset(
 )
 
 
-def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
-    tracked_paths = source_tree_tracked_paths(clone_dir)
+def build_source_tree_scan_input(repo_root: Path) -> SourceTreeScanInput:
+    tracked_paths = source_tree_tracked_paths(repo_root)
     tracked_text_files = source_tree_tracked_text_files_from_paths(tracked_paths)
-    retired_text_findings = source_tree_retired_text_findings(
-        clone_dir,
+    text_files: dict[Path, SourceTreeTextFile] = {}
+    for relative in tracked_text_files:
+        absolute = repo_root / relative
+        if not absolute.exists():
+            continue
+        text = absolute.read_text(encoding="utf-8", errors="ignore")
+        lines = tuple(text.splitlines())
+        tree: ast.AST | None = None
+        if relative.suffix.lower() == ".py":
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                tree = None
+        text_files[relative] = SourceTreeTextFile(
+            relative=relative,
+            absolute=absolute,
+            text=text,
+            lines=lines,
+            ast_tree=tree,
+            allowlist_definition_lines=frozenset(
+                source_tree_allowlist_definition_lines_from_tree(relative, tree)
+            ),
+            governance_rule_definition_lines=frozenset(
+                source_tree_governance_rule_definition_lines_from_tree(relative, tree)
+            ),
+            python_owner_ranges=source_tree_python_owner_ranges_from_tree(tree),
+        )
+    return SourceTreeScanInput(
+        clone_dir=repo_root,
+        tracked_paths=tracked_paths,
         tracked_text_files=tracked_text_files,
+        text_files=text_files,
+        active_test_literal_patterns=source_tree_active_test_literal_patterns(repo_root),
+    )
+
+
+def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
+    return _source_tree_scan_groups_from_input(build_source_tree_scan_input(clone_dir))
+
+
+def _source_tree_scan_groups_from_input(
+    scan_input: SourceTreeScanInput,
+) -> dict[str, dict[str, object]]:
+    clone_dir = scan_input.clone_dir
+    tracked_paths = scan_input.tracked_paths
+    retired_text_findings = source_tree_retired_text_findings(
+        scan_input,
     )
     retired_governance_path_findings_ = source_tree_retired_governance_path_findings(
         clone_dir,
@@ -3108,32 +3173,26 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
         tracked_paths=tracked_paths,
     )
     python_symbol_findings = source_tree_python_symbol_findings(
-        clone_dir,
-        tracked_text_files=tracked_text_files,
+        scan_input,
     )
     synthesized_string_findings = source_tree_synthesized_string_scan_findings(
-        clone_dir,
-        tracked_text_files=tracked_text_files,
+        scan_input,
     )
     active_test_literal_findings = source_tree_active_test_literal_findings(
-        clone_dir,
-        tracked_text_files=tracked_text_files,
+        scan_input,
     )
     structured_key_findings = source_tree_structured_key_findings(
-        clone_dir,
-        tracked_text_files=tracked_text_files,
+        scan_input,
     )
     governance_truth_findings = source_tree_governance_truth_findings(
-        clone_dir,
-        tracked_text_files=tracked_text_files,
+        scan_input,
     )
     sensitive_negative_literal_findings = (
         source_tree_sensitive_negative_literal_findings(
-            clone_dir,
-            tracked_text_files=tracked_text_files,
+            scan_input,
         )
     )
-    allowance_contract_findings = source_tree_allowance_contract_findings(clone_dir)
+    allowance_contract_findings = source_tree_allowance_contract_findings(scan_input)
     return {
         "allowance_contract": {
             "status": "PASS" if not allowance_contract_findings else "FAIL",
@@ -3189,12 +3248,11 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
 
 
 def source_tree_allowance_contract_findings(
-    clone_dir: Path,
+    scan_input: SourceTreeScanInput,
 ) -> list[dict[str, object]]:
+    clone_dir = scan_input.clone_dir
     findings: list[dict[str, object]] = []
-    tracked_paths = {
-        _source_tree_posix_path(path) for path in source_tree_tracked_paths(clone_dir)
-    }
+    tracked_paths = {_source_tree_posix_path(path) for path in scan_input.tracked_paths}
     governance_allowlist_owner_path = Path(
         "tests/architecture/test_governance_source_tree_scan_contract.py"
     )
@@ -3216,8 +3274,8 @@ def source_tree_allowance_contract_findings(
                 }
             )
     for entry in SOURCE_TREE_ALLOWED_OCCURRENCES:
-        path = clone_dir / Path(entry.path.as_posix())
-        if entry.path not in tracked_paths or not path.exists():
+        text_file = scan_input.text_files.get(Path(entry.path.as_posix()))
+        if entry.path not in tracked_paths or text_file is None:
             if not enforce_missing_allowance_entries:
                 continue
             findings.append(
@@ -3229,8 +3287,8 @@ def source_tree_allowance_contract_findings(
                 }
             )
             continue
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        owner_ranges = source_tree_python_owner_ranges(path)
+        lines = text_file.lines
+        owner_ranges = text_file.python_owner_ranges
         if entry.py_owner:
             ranges = owner_ranges.get(entry.py_owner, ())
             if len(ranges) > 1:
@@ -3281,9 +3339,9 @@ def source_tree_allowance_contract_findings(
             )
             continue
         unreachable_reason = source_tree_allowed_occurrence_unreachable_reason(
-            clone_dir,
+            scan_input,
             entry,
-            path,
+            text_file,
             lines,
             next(iter(exact_lines)),
             owner_ranges,
@@ -3301,12 +3359,12 @@ def source_tree_allowance_contract_findings(
 
 
 def source_tree_allowed_occurrence_unreachable_reason(
-    clone_dir: Path,
+    scan_input: SourceTreeScanInput,
     entry: SourceTreeAllowedOccurrence,
-    path: Path,
-    lines: list[str],
+    text_file: SourceTreeTextFile,
+    lines: tuple[str, ...],
     line_number: int,
-    owner_ranges: dict[str, tuple[frozenset[int], ...]],
+    owner_ranges: Mapping[str, tuple[frozenset[int], ...]],
 ) -> str:
     if ":" not in entry.rule_id:
         return "source_tree_allowed_occurrence_unreachable"
@@ -3320,13 +3378,12 @@ def source_tree_allowed_occurrence_unreachable_reason(
     if scan_group == "synthesized_strings":
         if entry.path.suffix != ".py":
             return "source_tree_allowed_occurrence_unreachable"
-        source = path.read_text(encoding="utf-8", errors="ignore")
         pattern = source_tree_forbidden_patterns().get(rule)
         if pattern is None:
             return "source_tree_allowed_occurrence_unreachable"
         candidates = iter_synthesized_string_findings(
             relative,
-            source,
+            text_file.text,
             patterns={rule: pattern},
             skip_rule_definition=False,
         )
@@ -3355,7 +3412,7 @@ def source_tree_allowed_occurrence_unreachable_reason(
             "build_handoff_package.py"
         ):
             return "source_tree_allowed_occurrence_unreachable"
-        if rule not in source_tree_active_test_literal_patterns(clone_dir):
+        if rule not in scan_input.active_test_literal_patterns:
             return "source_tree_allowed_occurrence_unreachable"
         return ""
     if scan_group == "sensitive_negative_literals":
@@ -3395,62 +3452,35 @@ def source_tree_retired_path_name_findings(
 
 
 def source_tree_python_symbol_findings(
-    clone_dir: Path,
-    *,
-    tracked_text_files: tuple[Path, ...] | None = None,
+    scan_input: SourceTreeScanInput,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    files = (
-        tracked_text_files
-        if tracked_text_files is not None
-        else source_tree_tracked_text_files(clone_dir)
-    )
-    for relative in files:
+    for relative, text_file in scan_input.text_files.items():
         if relative.suffix.lower() != ".py":
             continue
-        path = clone_dir / relative
-        if not path.exists():
-            continue
-        source = path.read_text(encoding="utf-8", errors="ignore")
-        findings.extend(iter_python_symbol_findings(relative, source))
+        findings.extend(iter_python_symbol_findings(relative, text_file.text))
     return findings
 
 
 def source_tree_structured_key_findings(
-    clone_dir: Path,
-    *,
-    tracked_text_files: tuple[Path, ...] | None = None,
+    scan_input: SourceTreeScanInput,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    files = (
-        tracked_text_files
-        if tracked_text_files is not None
-        else source_tree_tracked_text_files(clone_dir)
-    )
-    for relative in files:
+    for relative, text_file in scan_input.text_files.items():
         if relative.suffix.lower() not in {".json", ".toml", ".yaml", ".yml"}:
             continue
-        path = clone_dir / relative
-        if not path.exists():
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        findings.extend(iter_structured_key_findings(relative, text))
+        findings.extend(iter_structured_key_findings(relative, text_file.text))
     return findings
 
 
 def source_tree_retired_text_findings(
-    clone_dir: Path,
-    *,
-    tracked_text_files: tuple[Path, ...] | None = None,
+    scan_input: SourceTreeScanInput,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    files = (
-        tracked_text_files
-        if tracked_text_files is not None
-        else source_tree_tracked_text_files(clone_dir)
-    )
     known_patterns = source_tree_forbidden_patterns()
-    scanned_files = {_source_tree_posix_path(path) for path in files}
+    scanned_files = {
+        _source_tree_posix_path(path) for path in scan_input.tracked_text_files
+    }
     occurrence_entries = {
         entry: 0
         for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
@@ -3460,18 +3490,12 @@ def source_tree_retired_text_findings(
             and entry.rule_id.split(":", 1)[1] in known_patterns
         )
     }
-    for relative in files:
+    for relative, text_file in scan_input.text_files.items():
         patterns = source_tree_retired_text_patterns_for(relative)
-        path = clone_dir / relative
-        if not path.exists():
-            continue
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
-        rule_definition_lines = source_tree_governance_rule_definition_lines(
-            relative,
-            path,
-        )
-        owner_ranges = source_tree_python_owner_ranges(path)
+        lines = text_file.lines
+        skip_lines = text_file.allowlist_definition_lines
+        rule_definition_lines = text_file.governance_rule_definition_lines
+        owner_ranges = text_file.python_owner_ranges
         for rule, pattern in patterns.items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
@@ -3579,36 +3603,22 @@ def source_tree_retired_text_patterns_for(
 
 
 def source_tree_synthesized_string_scan_findings(
-    clone_dir: Path,
-    *,
-    tracked_text_files: tuple[Path, ...] | None = None,
+    scan_input: SourceTreeScanInput,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    files = (
-        tracked_text_files
-        if tracked_text_files is not None
-        else source_tree_tracked_text_files(clone_dir)
-    )
-    for relative in files:
+    for relative, text_file in scan_input.text_files.items():
         if relative.suffix.lower() != ".py":
             continue
-        path = clone_dir / relative
-        if not path.exists():
-            continue
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
-        rule_definition_lines = source_tree_governance_rule_definition_lines(
-            relative,
-            path,
-        )
         findings.extend(
             source_tree_synthesized_string_findings(
                 relative,
-                path,
-                lines,
-                skip_lines,
-                rule_definition_lines,
+                text_file.absolute,
+                text_file.lines,
+                text_file.allowlist_definition_lines,
+                text_file.governance_rule_definition_lines,
                 None,
+                source=text_file.text,
+                owner_ranges=text_file.python_owner_ranges,
                 scan_group="synthesized_strings",
                 patterns=source_tree_forbidden_patterns(),
             )
@@ -3619,9 +3629,9 @@ def source_tree_synthesized_string_scan_findings(
 def source_tree_split_string_findings(
     relative: Path,
     path: Path,
-    lines: list[str],
-    skip_lines: set[int],
-    rule_definition_lines: set[int],
+    lines: tuple[str, ...],
+    skip_lines: frozenset[int],
+    rule_definition_lines: frozenset[int],
 ) -> list[dict[str, object]]:
     return source_tree_synthesized_string_findings(
         relative,
@@ -3630,6 +3640,8 @@ def source_tree_split_string_findings(
         skip_lines,
         rule_definition_lines,
         None,
+        source="\n".join(lines) + "\n",
+        owner_ranges={},
         scan_group="synthesized_strings",
         patterns=source_tree_forbidden_patterns(),
     )
@@ -3638,11 +3650,13 @@ def source_tree_split_string_findings(
 def source_tree_synthesized_string_findings(
     relative: Path,
     path: Path,
-    lines: list[str],
-    skip_lines: set[int],
-    rule_definition_lines: set[int],
+    lines: tuple[str, ...],
+    skip_lines: frozenset[int],
+    rule_definition_lines: frozenset[int],
     definition_contexts: dict[str, set[int]] | None = None,
     *,
+    source: str,
+    owner_ranges: Mapping[str, tuple[frozenset[int], ...]],
     scan_group: str,
     patterns: dict[str, re.Pattern[str]],
     occurrence_entries: dict[SourceTreeAllowedOccurrence, int] | None = None,
@@ -3651,9 +3665,7 @@ def source_tree_synthesized_string_findings(
 ) -> list[dict[str, object]]:
     if path.suffix != ".py":
         return []
-    source = path.read_text(encoding="utf-8", errors="ignore")
     findings: list[dict[str, object]] = []
-    owner_ranges = source_tree_python_owner_ranges(path)
     if occurrence_entries is None:
         relative_key = _source_tree_posix_path(relative)
         occurrence_entries = {
@@ -3775,12 +3787,21 @@ def source_tree_governance_rule_definition_lines(
     relative: Path,
     path: Path,
 ) -> set[int]:
-    block_names = SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES.get(relative)
     if path.suffix != ".py":
         return set()
     try:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
     except SyntaxError:
+        return set()
+    return source_tree_governance_rule_definition_lines_from_tree(relative, tree)
+
+
+def source_tree_governance_rule_definition_lines_from_tree(
+    relative: Path,
+    tree: ast.AST | None,
+) -> set[int]:
+    block_names = SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES.get(relative)
+    if tree is None:
         return set()
     if relative in {
         GOVERNANCE_CONTRACT_SCRIPT,
@@ -3840,6 +3861,14 @@ def source_tree_python_owner_ranges(
         tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
     except SyntaxError:
         return {}
+    return source_tree_python_owner_ranges_from_tree(tree)
+
+
+def source_tree_python_owner_ranges_from_tree(
+    tree: ast.AST | None,
+) -> dict[str, tuple[frozenset[int], ...]]:
+    if tree is None:
+        return {}
     ranges: dict[str, list[frozenset[int]]] = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -3882,12 +3911,19 @@ def source_tree_allowlist_definition_lines(
     relative: Path,
     lines: list[str],
 ) -> set[int]:
-    block_names = set(SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES.get(relative, set()))
-    if not block_names:
-        return set()
     try:
         tree = ast.parse("\n".join(lines) + "\n")
     except SyntaxError:
+        return set()
+    return source_tree_allowlist_definition_lines_from_tree(relative, tree)
+
+
+def source_tree_allowlist_definition_lines_from_tree(
+    relative: Path,
+    tree: ast.AST | None,
+) -> set[int]:
+    block_names = set(SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES.get(relative, set()))
+    if tree is None or not block_names:
         return set()
     result: set[int] = set()
     for node in ast.iter_child_nodes(tree):
@@ -3904,32 +3940,19 @@ def source_tree_allowlist_definition_lines(
 
 
 def source_tree_active_test_literal_findings(
-    clone_dir: Path,
-    *,
-    tracked_text_files: tuple[Path, ...] | None = None,
+    scan_input: SourceTreeScanInput,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    files = (
-        tracked_text_files
-        if tracked_text_files is not None
-        else source_tree_tracked_text_files(clone_dir)
-    )
-    for relative in files:
+    for relative, text_file in scan_input.text_files.items():
         if relative.parts[:1] != ("tests",) and relative != Path(
             ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
             "build_handoff_package.py"
         ):
             continue
-        path = clone_dir / relative
-        if not path.exists():
-            continue
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
-        rule_definition_lines = source_tree_governance_rule_definition_lines(
-            relative,
-            path,
-        )
-        owner_ranges = source_tree_python_owner_ranges(path)
+        lines = text_file.lines
+        skip_lines = text_file.allowlist_definition_lines
+        rule_definition_lines = text_file.governance_rule_definition_lines
+        owner_ranges = text_file.python_owner_ranges
         relative_key = _source_tree_posix_path(relative)
         occurrence_entries = {
             entry: 0
@@ -3937,7 +3960,7 @@ def source_tree_active_test_literal_findings(
             if entry.path == relative_key
             and entry.rule_id.startswith("active_test_literals:")
         }
-        active_patterns = source_tree_active_test_literal_patterns(clone_dir)
+        active_patterns = dict(scan_input.active_test_literal_patterns)
         for rule, pattern in active_patterns.items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
@@ -4014,11 +4037,13 @@ def source_tree_active_test_literal_findings(
         findings.extend(
             source_tree_synthesized_string_findings(
                 relative,
-                path,
+                text_file.absolute,
                 lines,
                 skip_lines,
                 rule_definition_lines,
                 None,
+                source=text_file.text,
+                owner_ranges=owner_ranges,
                 scan_group="active_test_literals",
                 patterns=active_patterns,
                 occurrence_entries=occurrence_entries,
@@ -4041,17 +4066,13 @@ def source_tree_active_test_literal_findings(
 
 
 def source_tree_governance_truth_findings(
-    clone_dir: Path,
-    *,
-    tracked_text_files: tuple[Path, ...] | None = None,
+    scan_input: SourceTreeScanInput,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for relative in source_tree_active_governance_doc_files(
-        clone_dir,
-        tracked_text_files=tracked_text_files,
+        scan_input,
     ):
-        path = clone_dir / relative
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        lines = scan_input.text_files[relative].lines
         for rule, pattern in source_tree_governance_truth_patterns().items():
             for line_number, line in enumerate(lines, start=1):
                 if not pattern.search(line):
@@ -4073,19 +4094,12 @@ def source_tree_retired_path_policy_line(relative: Path, line: str) -> bool:
 
 
 def source_tree_active_governance_doc_files(
-    clone_dir: Path,
-    *,
-    tracked_text_files: tuple[Path, ...] | None = None,
+    scan_input: SourceTreeScanInput,
 ) -> tuple[Path, ...]:
-    files = (
-        tracked_text_files
-        if tracked_text_files is not None
-        else source_tree_tracked_text_files(clone_dir)
-    )
-    tracked = set(files)
+    tracked = set(scan_input.tracked_text_files)
     result: list[Path] = []
     for root in SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS:
-        path = clone_dir / root
+        path = scan_input.clone_dir / root
         if path.is_file() and root in tracked:
             result.append(root)
             continue
@@ -4095,7 +4109,7 @@ def source_tree_active_governance_doc_files(
                 for relative in sorted(tracked)
                 if relative.is_relative_to(root)
                 and relative.suffix.lower() in {".md", ".txt"}
-                and (clone_dir / relative).is_file()
+                and relative in scan_input.text_files
             )
     return tuple(sorted(set(result)))
 
@@ -4198,27 +4212,14 @@ def ensure_runtime_src_path(repo_root: Path | None = None) -> Path:
 
 
 def source_tree_sensitive_negative_literal_findings(
-    clone_dir: Path,
-    *,
-    tracked_text_files: tuple[Path, ...] | None = None,
+    scan_input: SourceTreeScanInput,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    files = (
-        tracked_text_files
-        if tracked_text_files is not None
-        else source_tree_tracked_text_files(clone_dir)
-    )
-    for relative in files:
-        path = clone_dir / relative
-        if not path.exists():
-            continue
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
-        rule_definition_lines = source_tree_governance_rule_definition_lines(
-            relative,
-            path,
-        )
-        owner_ranges = source_tree_python_owner_ranges(path)
+    for relative, text_file in scan_input.text_files.items():
+        lines = text_file.lines
+        skip_lines = text_file.allowlist_definition_lines
+        rule_definition_lines = text_file.governance_rule_definition_lines
+        owner_ranges = text_file.python_owner_ranges
         relative_key = _source_tree_posix_path(relative)
         occurrence_entries = {
             entry: 0
@@ -4303,11 +4304,13 @@ def source_tree_sensitive_negative_literal_findings(
         findings.extend(
             source_tree_synthesized_string_findings(
                 relative,
-                path,
+                text_file.absolute,
                 lines,
                 skip_lines,
                 rule_definition_lines,
                 None,
+                source=text_file.text,
+                owner_ranges=owner_ranges,
                 scan_group="sensitive_negative_literals",
                 patterns=sensitive_patterns,
                 occurrence_entries=occurrence_entries,

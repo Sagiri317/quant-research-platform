@@ -1,7 +1,10 @@
-# ruff: noqa: F403,F405
 from __future__ import annotations
 
-from tests.architecture.governance_scan_helpers import *
+import os
+import subprocess
+import sys
+
+from tests.architecture.governance_scan_helpers import REPO_ROOT
 
 
 def test_governance_contract_gate_imports_without_pyarrow() -> None:

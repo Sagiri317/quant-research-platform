@@ -7,6 +7,8 @@ import re
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 
+from tests.helpers.import_graph import import_edges_for_roots
+
 SOURCE_ROOT = Path("src/quant_research_platform")
 FORBIDDEN_PUBLIC_STORAGE_PARAMS = {
     "output_dir",
@@ -278,9 +280,11 @@ def test_dataset_inspection_absorbs_planning_metadata() -> None:
 def test_csmar_source_layer_has_no_a_share_or_market_semantics() -> None:
     csmar_root = SOURCE_ROOT / "sources/csmar"
     bad_imports = [
-        f"{path}:{lineno} imports {module}"
-        for path, lineno, module in _iter_imports(csmar_root)
-        if module.startswith("quant_research_platform.markets.implementations.a_share")
+        f"{edge.path}:{edge.lineno} imports {edge.module}"
+        for edge in import_edges_for_roots((csmar_root,))
+        if edge.module.startswith(
+            "quant_research_platform.markets.implementations.a_share"
+        )
     ]
     source_text_hits = []
     for path in sorted(csmar_root.rglob("*.py")):
@@ -418,19 +422,6 @@ def test_chunk_axis_contract_has_no_year_alias() -> None:
 def _dataclass_field_names(cls: type[object]) -> set[str]:
     assert is_dataclass(cls)
     return {field.name for field in fields(cls)}
-
-
-def _iter_imports(root: Path) -> tuple[tuple[Path, int, str], ...]:
-    imports: list[tuple[Path, int, str]] = []
-    for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module is not None:
-                imports.append((path, node.lineno, node.module))
-            elif isinstance(node, ast.Import):
-                imports.extend((path, node.lineno, alias.name) for alias in node.names)
-    return tuple(imports)
-
 
 def _spec_contains_field(spec: object, field_name: str) -> bool:
     value = getattr(spec, field_name, None)

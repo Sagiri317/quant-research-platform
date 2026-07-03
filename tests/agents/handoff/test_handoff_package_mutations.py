@@ -8,28 +8,21 @@ from typing import Any
 
 import pytest
 
-try:
-    from tests.agents.handoff.conftest import (
-        TEST_BRANCH,
-        _copy_valid_package,
-        _init_handoff_repo,
-        _load_handoff_module,
-        _rewrite_package_member,
-    )
-except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
-    from conftest import (  # type: ignore[no-redef]
-        TEST_BRANCH,
-        _copy_valid_package,
-        _init_handoff_repo,
-        _load_handoff_module,
-        _rewrite_package_member,
-    )
+from tests.agents.handoff.conftest import (
+    TEST_BRANCH,
+    _copy_valid_package,
+    _init_handoff_repo,
+    _rewrite_package_member,
+)
+from tests.helpers.maintenance_script_loader import (
+    load_handoff_script_module as _load_handoff_module,
+)
 
 pytestmark = pytest.mark.mutation
 
 
 @pytest.fixture(scope="session")
-def valid_handoff_package(
+def mutation_handoff_package(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> tuple[Path, Path]:
     root = tmp_path_factory.mktemp("mutation-handoff-package")
@@ -60,12 +53,12 @@ def valid_handoff_package(
 
 
 @pytest.fixture(scope="session")
-def cached_replayed_receipts(
-    valid_handoff_package: tuple[Path, Path],
+def cached_mutation_replayed_receipts(
+    mutation_handoff_package: tuple[Path, Path],
 ) -> dict[str, dict[str, Any]]:
     import zipfile
 
-    package, _sidecar = valid_handoff_package
+    package, _sidecar = mutation_handoff_package
     members = (
         "handoff_evidence/check-receipts.json",
         "handoff_evidence/package-smoke-receipt.json",
@@ -133,55 +126,16 @@ def _verify_full(
 def _verify_fast(
     package: Path,
     sidecar: Path,
-    cached_replayed_receipts: dict[str, dict[str, Any]],
+    cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
 ) -> list[str]:
     verifier = _load_handoff_module("verify_handoff_package")
-    handoff_contract = _load_handoff_module("handoff_contract")
-    receipt_contract = _load_handoff_module("receipt_contract")
-    inspection = verifier.inspect_handoff_zip_once(package, sidecar)
-    failures = list(inspection.failures)
-    if inspection.sidecar_payload is not None:
-        failures.extend(
-            verifier.verify_sidecar(
-                inspection.sidecar_payload,
-                package,
-                sidecar,
-                zip_sha256=inspection.zip_sha256,
-            )
-        )
-    loaded = inspection.loaded
-    if loaded.task_metadata is not None:
-        failures.extend(
-            handoff_contract.validate_task_metadata_contract(loaded.task_metadata)
-        )
-    if loaded.validation_summary is not None:
-        failures.extend(
-            handoff_contract.validate_validation_summary_contract(
-                loaded.validation_summary
-            )
-        )
-        failures.extend(
-            handoff_contract.validate_validation_summary_against_receipts(
-                loaded.validation_summary,
-                loaded.receipts,
-            )
-        )
-    for entry, payload in loaded.receipts.items():
-        failures.extend(
-            receipt_contract.validate_receipt_payload(Path(entry).name, payload)
-        )
-    if loaded.validation_summary is not None and set(loaded.receipts) == {
-        verifier.PACKAGE_SMOKE_RECEIPT_ENTRY,
-        verifier.HARD_SCAN_RECEIPT_ENTRY,
-        verifier.CHECK_RECEIPTS_ENTRY,
-    }:
-        failures.extend(
-            verifier.compare_replayed_handoff_payloads(
-                loaded,
-                copy.deepcopy(cached_replayed_receipts),
-            )
-        )
-    return failures
+    package_payload = verifier.load_handoff_package_payload(package, sidecar)
+    result = verifier._validate_handoff_package_payload(
+        package_payload,
+        expected_receipts=copy.deepcopy(cached_mutation_replayed_receipts),
+        replay_bundle=False,
+    )
+    return list(result.failures)
 
 
 def _read_member_json(package: Path, member: str) -> dict[str, Any]:
@@ -194,25 +148,25 @@ def _read_member_json(package: Path, member: str) -> dict[str, Any]:
 
 
 def _copy(
-    tmp_path: Path, valid_handoff_package: tuple[Path, Path]
+    tmp_path: Path, mutation_handoff_package: tuple[Path, Path]
 ) -> tuple[Path, Path]:
-    return _copy_valid_package(valid_handoff_package, tmp_path)
+    return _copy_valid_package(mutation_handoff_package, tmp_path)
 
 
 def test_valid_package_full_verifier_smoke(
-    valid_handoff_package: tuple[Path, Path],
+    mutation_handoff_package: tuple[Path, Path],
 ) -> None:
-    package, sidecar = valid_handoff_package
+    package, sidecar = mutation_handoff_package
 
     assert _verify_full(package, sidecar) == []
 
 
 def test_profile_smoke_command_tamper_fails(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
-    cached_replayed_receipts: dict[str, dict[str, Any]],
+    mutation_handoff_package: tuple[Path, Path],
+    cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
 ) -> None:
-    package, sidecar = _copy(tmp_path, valid_handoff_package)
+    package, sidecar = _copy(tmp_path, mutation_handoff_package)
     payload = _read_member_json(package, "handoff_evidence/check-receipts.json")
     payload["checks"][0]["command_argv"] = ["true"]
     payload["checks"][0]["command"] = "true"
@@ -223,17 +177,17 @@ def test_profile_smoke_command_tamper_fails(
         payload,
     )
 
-    failures = _verify_fast(package, sidecar, cached_replayed_receipts)
+    failures = _verify_fast(package, sidecar, cached_mutation_replayed_receipts)
 
     assert "check_receipt_command_argv_mismatch: profile-smoke" in failures
 
 
 def test_code_map_command_tamper_fails(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
-    cached_replayed_receipts: dict[str, dict[str, Any]],
+    mutation_handoff_package: tuple[Path, Path],
+    cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
 ) -> None:
-    package, sidecar = _copy(tmp_path, valid_handoff_package)
+    package, sidecar = _copy(tmp_path, mutation_handoff_package)
     payload = _read_member_json(package, "handoff_evidence/check-receipts.json")
     payload["checks"][1]["command_argv"] = ["true"]
     payload["checks"][1]["command"] = "true"
@@ -244,7 +198,7 @@ def test_code_map_command_tamper_fails(
         payload,
     )
 
-    failures = _verify_fast(package, sidecar, cached_replayed_receipts)
+    failures = _verify_fast(package, sidecar, cached_mutation_replayed_receipts)
 
     assert "check_receipt_command_argv_mismatch: code-map" in failures
 
@@ -270,14 +224,14 @@ def test_code_map_command_tamper_fails(
 )
 def test_package_smoke_step_tamper_fails(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
-    cached_replayed_receipts: dict[str, dict[str, Any]],
+    mutation_handoff_package: tuple[Path, Path],
+    cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
     step: str,
     field: str,
     value: object,
     expected: str,
 ) -> None:
-    package, sidecar = _copy(tmp_path, valid_handoff_package)
+    package, sidecar = _copy(tmp_path, mutation_handoff_package)
     payload = _read_member_json(package, "handoff_evidence/package-smoke-receipt.json")
     payload[step][field] = value
     mutate_handoff_zip_and_refresh_hashes(
@@ -287,17 +241,17 @@ def test_package_smoke_step_tamper_fails(
         payload,
     )
 
-    failures = _verify_fast(package, sidecar, cached_replayed_receipts)
+    failures = _verify_fast(package, sidecar, cached_mutation_replayed_receipts)
 
     assert expected in failures
 
 
 def test_hard_scan_scan_run_tamper_fails(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
-    cached_replayed_receipts: dict[str, dict[str, Any]],
+    mutation_handoff_package: tuple[Path, Path],
+    cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
 ) -> None:
-    package, sidecar = _copy(tmp_path, valid_handoff_package)
+    package, sidecar = _copy(tmp_path, mutation_handoff_package)
     payload = _read_member_json(package, "handoff_evidence/hard-scan-receipt.json")
     payload["scan_runs"][0]["result_sha256"] = "f" * 64
     mutate_handoff_zip_and_refresh_hashes(
@@ -307,16 +261,16 @@ def test_hard_scan_scan_run_tamper_fails(
         payload,
     )
 
-    failures = _verify_fast(package, sidecar, cached_replayed_receipts)
+    failures = _verify_fast(package, sidecar, cached_mutation_replayed_receipts)
 
     assert "hard_scan_replay_mismatch" in failures
 
 
 def test_sidecar_zip_hash_tamper_fails(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
+    mutation_handoff_package: tuple[Path, Path],
 ) -> None:
-    package, sidecar = _copy(tmp_path, valid_handoff_package)
+    package, sidecar = _copy(tmp_path, mutation_handoff_package)
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     payload["zip_sha256"] = "0" * 64
     sidecar.write_text(
@@ -329,9 +283,9 @@ def test_sidecar_zip_hash_tamper_fails(
 
 def test_task_metadata_base_non_ancestor_fails(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
+    mutation_handoff_package: tuple[Path, Path],
 ) -> None:
-    package, sidecar = _copy(tmp_path, valid_handoff_package)
+    package, sidecar = _copy(tmp_path, mutation_handoff_package)
     payload = _read_member_json(package, "task_metadata.json")
     payload["base"] = "f" * 40
     mutate_handoff_zip_and_refresh_hashes(
@@ -345,10 +299,10 @@ def test_task_metadata_base_non_ancestor_fails(
 
 def test_validation_summary_status_tamper_fails(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
-    cached_replayed_receipts: dict[str, dict[str, Any]],
+    mutation_handoff_package: tuple[Path, Path],
+    cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
 ) -> None:
-    package, sidecar = _copy(tmp_path, valid_handoff_package)
+    package, sidecar = _copy(tmp_path, mutation_handoff_package)
     payload = _read_member_json(package, "handoff_evidence/validation-summary.json")
     row = next(row for row in payload["rows"] if row["status"] == "PASS")
     row["status"] = "FAIL"
@@ -359,7 +313,7 @@ def test_validation_summary_status_tamper_fails(
         payload,
     )
 
-    failures = _verify_fast(package, sidecar, cached_replayed_receipts)
+    failures = _verify_fast(package, sidecar, cached_mutation_replayed_receipts)
 
     assert "validation_summary_replay_mismatch" in failures
 
@@ -434,15 +388,15 @@ def test_validation_summary_status_tamper_fails(
 )
 def test_deleted_fields_fail_when_present(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
-    cached_replayed_receipts: dict[str, dict[str, Any]],
+    mutation_handoff_package: tuple[Path, Path],
+    cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
     member: str,
     path: tuple[object, ...],
     field: str,
     value: object,
     expected: str,
 ) -> None:
-    package, sidecar = _copy(tmp_path, valid_handoff_package)
+    package, sidecar = _copy(tmp_path, mutation_handoff_package)
     payload = _read_member_json(package, member)
     target: Any = payload
     for part in path:
@@ -450,7 +404,7 @@ def test_deleted_fields_fail_when_present(
     target[field] = value
     mutate_handoff_zip_and_refresh_hashes(package, sidecar, member, payload)
 
-    failures = _verify_fast(package, sidecar, cached_replayed_receipts)
+    failures = _verify_fast(package, sidecar, cached_mutation_replayed_receipts)
 
     assert expected in failures
 
@@ -458,11 +412,11 @@ def test_deleted_fields_fail_when_present(
 @pytest.mark.parametrize("row_name", ("private_validation", "baseline_compare"))
 def test_deleted_validation_summary_rows_fail_when_present(
     tmp_path: Path,
-    valid_handoff_package: tuple[Path, Path],
-    cached_replayed_receipts: dict[str, dict[str, Any]],
+    mutation_handoff_package: tuple[Path, Path],
+    cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
     row_name: str,
 ) -> None:
-    package, sidecar = _copy(tmp_path, valid_handoff_package)
+    package, sidecar = _copy(tmp_path, mutation_handoff_package)
     payload = _read_member_json(package, "handoff_evidence/validation-summary.json")
     payload["rows"].append({"name": row_name, "status": "NOT_RUN"})
     mutate_handoff_zip_and_refresh_hashes(
@@ -472,6 +426,6 @@ def test_deleted_validation_summary_rows_fail_when_present(
         payload,
     )
 
-    failures = _verify_fast(package, sidecar, cached_replayed_receipts)
+    failures = _verify_fast(package, sidecar, cached_mutation_replayed_receipts)
 
     assert any("validation_summary_name_invalid" in failure for failure in failures)

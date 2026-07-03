@@ -73,6 +73,8 @@ references/prompt-patterns.md
 ```
 
 `verify_governance.py`、source-tree scan 和相关 tests 必须引用该事实源或由它派生规则。current-contract-only 规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 只从该事实源读取或派生。
+source-tree scan 由 `governance_contract.SourceTreeScanInput` 驱动；individual
+scanner 不保留 Path 旧入口。
 
 建议命令：
 
@@ -101,8 +103,9 @@ handoff scripts 位于：
 `verify_handoff_package.py` 是 handoff/package verifier owner。
 `verify_handoff_package_result()` 是唯一正式 package-level verifier result path。
 standalone verifier CLI 保留，但不是额外 Python wrapper。未经用户明确批准，不保留
-wrapper、alias、adapter 或 compatibility layer。handoff artifact 输出到 `.run/` 或
-用户指定输出目录；`.run/` 不定义合同。
+wrapper、alias、adapter 或 compatibility layer。package payload loader 是唯一
+package load path，并与 builder 共享 package payload validation。handoff artifact
+输出到 `.run/` 或用户指定输出目录；`.run/` 不定义合同。
 
 handoff package layout、sidecar、task metadata、validation summary、`FieldSpec`、
 `allowed_keys()` 和 validation row source contract 由 `handoff/handoff_contract.py`
@@ -112,7 +115,7 @@ payload construction 由 `handoff/replay_evidence.py` 执行，但 replay 模块
 或 compare 规则。`governance_contract.py` 只拥有治理扫描、source-tree scan、共享安全
 路径和 status token 规则。
 
-当前 handoff 流程只通过 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>` 生成；builder 从 clean Git state 写入 bundle，从 bundle clone 生成 machine receipts 和 validation summary，再检查 package envelope、schema、hash 和 share-safety。standalone verifier 仍是完整 bundle replay 和 receipt comparison 的正式入口。具体字段、结构、replay 和 share-safety 细节以 executable contracts 和 verifier 实现为准，文档不复制代码合同。
+当前 handoff 流程只通过 `build_handoff_package.py --repo-root . --out-dir .run/handoffs --task-name <task-name> --base-ref <base-ref>` 生成；builder 从 clean Git state 写入 bundle，从 bundle clone 生成 machine receipts 和 validation summary，再通过 package payload validation 检查 schema、hash 和 share-safety。standalone verifier 仍是完整 bundle replay 和 receipt comparison 的正式入口。具体字段、结构、replay 和 share-safety 细节以 executable contracts 和 verifier 实现为准，文档不复制代码合同。
 
 `.agents/` 只承载 governance、handoff 和 prompt tooling；runtime 业务逻辑必须留在 `src/quant_research_platform/` 的 owner layer。
 

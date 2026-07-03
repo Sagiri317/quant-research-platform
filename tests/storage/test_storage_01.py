@@ -2,18 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.fields import platform_entity_time_key
-from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.data import (
-    DataFrequency,
-    DataGrain,
-    ProcessedDataKind,
-    ProcessedDataSpec,
-)
-from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.storage.datasets import compare_datasets, write_dataset
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import (
@@ -22,35 +12,11 @@ from quant_research_platform.storage.manifests import (
     write_internal_artifact_manifest,
     write_manifest,
 )
-
-
-def _processed_spec(data_id: str = "x") -> ProcessedDataSpec:
-    return ProcessedDataSpec(
-        data_id=data_id,
-        market_id=MarketId("a_share"),
-        kind=ProcessedDataKind.FACTOR,
-        frequency=DataFrequency.DAILY,
-        grain=DataGrain.ASSET_TIMESTAMP,
-        column_roles={
-            "market_id": ColumnRole.KEY,
-            "asset_id": ColumnRole.KEY,
-            "timestamp": ColumnRole.TIMESTAMP,
-            "value": ColumnRole.FACTOR,
-        },
-        primary_key=platform_entity_time_key(),
-        partition_columns=("year",),
-    )
-
-
-def _frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "market_id": ["a_share"],
-            "asset_id": ["asset_001"],
-            "timestamp": pd.to_datetime(["2014-01-02"]),
-            "value": [1.0],
-        }
-    )
+from tests.storage.low_level_fixtures import (
+    make_dataset_artifact_root,
+    make_dataset_frame,
+    make_processed_dataset_spec,
+)
 
 
 def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(
@@ -61,13 +27,17 @@ def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(
     def chunks():
         nonlocal iterated
         iterated = True
-        yield _frame()
+        yield make_dataset_frame(
+            asset_ids=("asset_001",),
+            dates=("2014-01-02",),
+            values=(1.0,),
+        )
 
     with pytest.raises(ValueError, match="outside_local_only_boundary"):
         write_dataset(
             tmp_path / "outside-local-only" / "x",
             chunks(),
-            spec=_processed_spec(),
+            spec=make_processed_dataset_spec(),
         )
 
     assert not iterated
@@ -75,9 +45,17 @@ def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(
 
 
 def test_dataset_writer_accepts_private_processed_artifact_root(tmp_path: Path) -> None:
-    root = tmp_path / "data" / "processed" / "a_share" / "factor" / "x"
+    root = make_dataset_artifact_root(tmp_path)
 
-    write_dataset(root, _frame(), spec=_processed_spec())
+    write_dataset(
+        root,
+        make_dataset_frame(
+            asset_ids=("asset_001",),
+            dates=("2014-01-02",),
+            values=(1.0,),
+        ),
+        spec=make_processed_dataset_spec(),
+    )
 
     assert (root / "spec.json").is_file()
     assert (root / "_manifest" / "manifest.json").is_file()
@@ -89,10 +67,22 @@ def test_projected_dataset_fingerprint_includes_primary_key_columns(
 ) -> None:
     left = tmp_path / "data" / "processed" / "a_share" / "factor" / "left"
     right = tmp_path / "data" / "processed" / "a_share" / "factor" / "right"
-    right_frame = _frame().assign(asset_id="asset_002")
+    right_frame = make_dataset_frame(
+        asset_ids=("asset_001",),
+        dates=("2014-01-02",),
+        values=(1.0,),
+    ).assign(asset_id="asset_002")
 
-    write_dataset(left, _frame(), spec=_processed_spec("left"))
-    write_dataset(right, right_frame, spec=_processed_spec("right"))
+    write_dataset(
+        left,
+        make_dataset_frame(
+            asset_ids=("asset_001",),
+            dates=("2014-01-02",),
+            values=(1.0,),
+        ),
+        spec=make_processed_dataset_spec("left"),
+    )
+    write_dataset(right, right_frame, spec=make_processed_dataset_spec("right"))
 
     comparison = compare_datasets(left, right, columns=["value"])
 

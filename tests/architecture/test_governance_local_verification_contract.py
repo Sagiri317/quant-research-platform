@@ -1,18 +1,26 @@
-# ruff: noqa: F403,F405
 from __future__ import annotations
 
-from tests.architecture.governance_scan_helpers import *
+import ast
+import re
+from pathlib import Path
+
+from tests.architecture.governance_scan_helpers import (
+    _iter_text_files,
+    _public_surface_scan_text,
+)
+from tests.helpers.governance_git_repos import init_governance_git_repo
 
 
 def test_source_tree_rejects_retired_local_verification_surface_terms(
     tmp_path: Path,
 ) -> None:
-    from governance_contract import source_tree_active_test_literal_findings
+    from governance_contract import (
+        build_source_tree_scan_input,
+        source_tree_active_test_literal_findings,
+    )
 
     repo = tmp_path / "repo"
-    test_file = repo / "tests" / "ordinary" / "test_local_verification_surface.py"
-    test_file.parent.mkdir(parents=True)
-    test_file.write_text(
+    source = (
         "\n".join(
             [
                 "from pathlib import Path",
@@ -25,14 +33,15 @@ def test_source_tree_rejects_retired_local_verification_surface_terms(
                 "    label = 'evidence_range'",
                 "",
             ]
-        ),
-        encoding="utf-8",
+        )
+    )
+    init_governance_git_repo(
+        repo,
+        {"tests/ordinary/test_local_verification_surface.py": source},
     )
 
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-
-    findings = source_tree_active_test_literal_findings(repo)
+    scan_input = build_source_tree_scan_input(repo)
+    findings = source_tree_active_test_literal_findings(scan_input)
 
     assert {
         "retired_local_verification_output_surface",

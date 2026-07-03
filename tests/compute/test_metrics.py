@@ -19,24 +19,7 @@ from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
 )
-
-
-def _perfect_panel() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "timestamp": [
-                "2026-01-01",
-                "2026-01-01",
-                "2026-01-01",
-                "2026-01-02",
-                "2026-01-02",
-                "2026-01-02",
-            ],
-            "asset": ["A", "B", "C", "A", "B", "C"],
-            "factor": [1.0, 2.0, 3.0, 3.0, 2.0, 1.0],
-            "forward_return": [0.01, 0.02, 0.03, 0.03, 0.02, 0.01],
-        }
-    )
+from tests.helpers.compute_inputs import make_cross_section_compute_panel
 
 
 def test_backend_constants_import_from_backend_owner() -> None:
@@ -48,7 +31,10 @@ def test_backend_constants_import_from_backend_owner() -> None:
 def test_validate_compute_panel_normalizes_and_sorts_valid_panel() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
-    result = validate_compute_panel(_perfect_panel().iloc[::-1], spec)
+    result = validate_compute_panel(
+        make_cross_section_compute_panel(scenario="perfect").iloc[::-1],
+        spec,
+    )
 
     assert result["timestamp"].tolist()[0] == pd.Timestamp("2026-01-01")
     assert result["asset"].tolist()[:3] == ["A", "B", "C"]
@@ -58,12 +44,21 @@ def test_validate_compute_panel_rejects_missing_signal_column() -> None:
     spec = ComputePanelSpec(signal_columns=("missing",), label_column="forward_return")
 
     with pytest.raises(ValueError, match="panel is missing columns"):
-        validate_compute_panel(_perfect_panel(), spec)
+        validate_compute_panel(
+            make_cross_section_compute_panel(scenario="perfect"),
+            spec,
+        )
 
 
 def test_validate_compute_panel_rejects_duplicate_timestamp_asset_keys() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
-    panel = pd.concat([_perfect_panel(), _perfect_panel().head(1)], ignore_index=True)
+    panel = pd.concat(
+        [
+            make_cross_section_compute_panel(scenario="perfect"),
+            make_cross_section_compute_panel(scenario="perfect").head(1),
+        ],
+        ignore_index=True,
+    )
 
     with pytest.raises(ValueError, match="unique timestamp-asset keys"):
         validate_compute_panel(panel, spec)
@@ -72,7 +67,10 @@ def test_validate_compute_panel_rejects_duplicate_timestamp_asset_keys() -> None
 def test_compute_ic_by_timestamp_computes_pearson_and_rankic() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
-    result = compute_ic_by_timestamp(_perfect_panel(), spec)
+    result = compute_ic_by_timestamp(
+        make_cross_section_compute_panel(scenario="perfect"),
+        spec,
+    )
 
     assert result["timestamp"].nunique() == 2
     assert result["signal"].tolist() == ["factor", "factor"]
@@ -90,7 +88,7 @@ def test_compute_ic_by_timestamp_does_not_call_pandas_series_corr(
     monkeypatch.setattr(pd.Series, "corr", fail_corr)
 
     result = compute_ic_by_timestamp(
-        _perfect_panel(),
+        make_cross_section_compute_panel(scenario="perfect"),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
     )
 
@@ -101,7 +99,11 @@ def test_compute_ic_by_timestamp_does_not_call_pandas_series_corr(
 def test_compute_grouped_label_values_assigns_timestamp_level_groups() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
-    result = compute_grouped_label_values(_perfect_panel(), spec, n_groups=3)
+    result = compute_grouped_label_values(
+        make_cross_section_compute_panel(scenario="perfect"),
+        spec,
+        n_groups=3,
+    )
 
     assert result["group"].tolist() == [1, 2, 3, 1, 2, 3]
     assert result["mean_label_value"].round(6).tolist() == [
@@ -121,7 +123,7 @@ def test_compute_grouped_label_values_does_not_call_pandas_qcut(monkeypatch) -> 
     monkeypatch.setattr(pd, "qcut", fail_qcut)
 
     result = compute_grouped_label_values(
-        _perfect_panel(),
+        make_cross_section_compute_panel(scenario="perfect"),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         n_groups=3,
     )
@@ -140,7 +142,7 @@ def test_compute_grouped_label_values_does_not_group_assigned_pairs(
     monkeypatch.setattr(pd.DataFrame, "assign", fail_assign)
 
     result = compute_grouped_label_values(
-        _perfect_panel(),
+        make_cross_section_compute_panel(scenario="perfect"),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         n_groups=3,
     )

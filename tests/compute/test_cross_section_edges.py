@@ -16,6 +16,7 @@ from quant_research_platform.compute.dataframe.cross_section import (
     summarize_ic,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
+from tests.helpers.compute_inputs import make_cross_section_compute_panel
 
 
 def test_dataframe_cross_section_metrics_and_summaries() -> None:
@@ -23,7 +24,7 @@ def test_dataframe_cross_section_metrics_and_summaries() -> None:
         signal_columns=("factor", "factor_alt"),
         label_column="forward_return",
     )
-    frame = _panel()
+    frame = make_cross_section_compute_panel()
 
     ic = compute_ic_by_timestamp(frame, spec)
     combined_ic, grouped = compute_ic_and_grouped_label_values(
@@ -44,7 +45,9 @@ def test_dataframe_cross_section_metrics_and_summaries() -> None:
 
 def test_dataframe_cross_section_validated_panel_and_empty_summaries() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
-    frame = _panel().assign(segment=["a", "a", "a", "b", "b", "b"])
+    frame = make_cross_section_compute_panel().assign(
+        segment=["a", "a", "a", "b", "b", "b"]
+    )
 
     ic, grouped = compute_ic_and_grouped_label_values_from_validated_panel(
         frame,
@@ -70,9 +73,17 @@ def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> N
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
     with pytest.raises(TypeError, match="n_groups must be an integer"):
-        compute_ic_and_grouped_label_values(_panel(), spec, n_groups=True)
+        compute_ic_and_grouped_label_values(
+            make_cross_section_compute_panel(),
+            spec,
+            n_groups=True,
+        )
     with pytest.raises(ValueError, match="n_groups must be at least 2"):
-        compute_grouped_label_values(_panel(), spec, n_groups=1)
+        compute_grouped_label_values(
+            make_cross_section_compute_panel(),
+            spec,
+            n_groups=1,
+        )
     with pytest.raises(ValueError, match="ic is missing columns"):
         summarize_ic(pd.DataFrame({"signal": ["factor"]}))
     with pytest.raises(ValueError, match="grouped_label_values is missing columns"):
@@ -84,25 +95,4 @@ def test_dataframe_cross_section_numeric_helpers() -> None:
     assert _average_ranks(np.array([2.0, 2.0, 1.0])).tolist() == [2.5, 2.5, 1.0]
     assert np.isnan(
         _pearson_correlation_values(np.array([1.0, 1.0]), np.array([2.0, 3.0]))
-    )
-
-
-def _panel() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(
-                [
-                    "2024-01-02",
-                    "2024-01-02",
-                    "2024-01-02",
-                    "2024-01-03",
-                    "2024-01-03",
-                    "2024-01-03",
-                ]
-            ),
-            "asset": ["A", "B", "C", "A", "B", "C"],
-            "factor": [1.0, 2.0, 3.0, 3.0, 2.0, 1.0],
-            "factor_alt": [3.0, 2.0, 1.0, 1.0, 2.0, 3.0],
-            "forward_return": [0.01, 0.02, 0.03, 0.03, 0.02, 0.01],
-        }
     )

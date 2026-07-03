@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-try:
-    from tests.architecture.conftest import _load_handoff_module
-except ModuleNotFoundError:  # pragma: no cover - addopts='' import mode fallback
-    from conftest import _load_handoff_module  # type: ignore[no-redef]
+from tests.helpers.maintenance_script_loader import (
+    load_handoff_script_module as _load_handoff_module,
+)
 
 
 def _specs(module: object, name: str) -> Mapping[str, object]:

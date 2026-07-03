@@ -1,7 +1,17 @@
-# ruff: noqa: F403,F405
 from __future__ import annotations
 
-from tests.architecture.governance_scan_helpers import *
+import ast
+from dataclasses import fields
+from pathlib import Path, PurePosixPath
+
+import pytest
+
+from tests.architecture.governance_scan_helpers import (
+    GOVERNANCE_NEGATIVE_FIXTURE_FILES,
+    RETIRED_NAME_RULES,
+)
+from tests.helpers.governance_fixtures import source_tree_sensitive_rule_summary
+from tests.helpers.governance_git_repos import init_governance_git_repo
 
 
 def test_source_tree_allowlist_retired_occurrences_are_exact_inventory() -> None:
@@ -53,6 +63,44 @@ def test_source_tree_allowlist_retired_occurrences_are_exact_inventory() -> None
         entry.py_owner if entry.path.suffix == ".py" else not entry.py_owner
         for entry in SOURCE_TREE_ALLOWED_OCCURRENCES
     )
+
+
+def test_source_tree_scan_input_owns_tracked_file_inventory(tmp_path: Path) -> None:
+    from governance_contract import build_source_tree_scan_input
+
+    repo = tmp_path / "repo"
+    init_governance_git_repo(
+        repo,
+        {
+            "src/example.py": "VALUE = 1\n",
+            "data/raw/private.csv": "id,value\n",
+        },
+    )
+
+    scan_input = build_source_tree_scan_input(repo)
+
+    assert scan_input.clone_dir == repo
+    assert Path("src/example.py") in scan_input.tracked_paths
+    assert Path("src/example.py") in scan_input.tracked_text_files
+    assert Path("data/raw/private.csv") in scan_input.tracked_paths
+    assert Path("data/raw/private.csv") not in scan_input.tracked_text_files
+    assert scan_input.text_files[Path("src/example.py")].text == "VALUE = 1\n"
+    assert scan_input.text_files[Path("src/example.py")].ast_tree is not None
+
+
+def test_source_tree_scan_groups_keeps_path_high_level_entrypoint(
+    tmp_path: Path,
+) -> None:
+    from governance_contract import source_tree_scan_groups
+
+    repo = tmp_path / "repo"
+    init_governance_git_repo(repo, {"src/example.py": "VALUE = 1\n"})
+
+    scan_groups = source_tree_scan_groups(repo)
+
+    assert "retired_text" in scan_groups
+    assert "synthesized_strings" in scan_groups
+
 
 def test_source_tree_allowlist_rejects_invalid_exact_inventory_shape() -> None:
     from governance_contract import (
@@ -260,18 +308,19 @@ def test_source_tree_scan_rejects_unregistered_profile_runner_retired_text(
 ) -> None:
     from governance_contract import (
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        build_source_tree_scan_input,
         source_tree_retired_text_findings,
     )
 
     repo = tmp_path / "repo"
-    path = repo / "tests" / "tools" / "test_run_profile.py"
-    path.parent.mkdir(parents=True)
     retired_text = PROFILE_RUNNER_RETIRED_TEXT_RULES[0].example
-    path.write_text(f"{retired_text}\n", encoding="utf-8")
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {"tests/tools/test_run_profile.py": f"{retired_text}\n"},
+    )
 
-    findings = source_tree_retired_text_findings(repo)
+    scan_input = build_source_tree_scan_input(repo)
+    findings = source_tree_retired_text_findings(scan_input)
 
     assert any(
         finding["path"] == "tests/tools/test_run_profile.py"

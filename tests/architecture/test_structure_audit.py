@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import subprocess
 import sys
 from pathlib import Path
+
+from tests.helpers.governance_git_repos import run_governance_script
 
 STRUCTURE_AUDIT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py"
@@ -19,19 +20,12 @@ def test_structure_audit_script_exists_and_is_internal_only() -> None:
 
 
 def test_structure_audit_json_gate_passes() -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(STRUCTURE_AUDIT),
-            "--repo-root",
-            ".",
-            "--json",
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
+    result = run_governance_script(
+        Path("."),
+        str(STRUCTURE_AUDIT),
+        "--repo-root",
+        ".",
+        "--json",
     )
 
     assert result.returncode == 0, result.stdout + result.stderr

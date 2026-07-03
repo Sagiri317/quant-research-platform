@@ -96,15 +96,32 @@ class HandoffVerificationResult:
 
 
 @dataclass(frozen=True)
-class HandoffZipInspection:
-    names: tuple[str, ...]
-    duplicates: tuple[str, ...]
-    raw_bundle: bytes | None
-    loaded: LoadedHandoffPayloads
-    failures: tuple[str, ...]
-    share_safety_failures: tuple[str, ...]
-    sidecar_payload: dict[str, object] | None
+class HandoffPackagePayload:
+    zip_path: Path
+    json_path: Path | None
     zip_sha256: str
+    member_names: tuple[str, ...]
+    duplicate_member_names: tuple[str, ...]
+    raw_bundle: bytes | None
+    sidecar_payload: Mapping[str, object] | None
+    task_metadata: Mapping[str, object] | None
+    validation_summary: Mapping[str, object] | None
+    receipts: Mapping[str, Mapping[str, object]]
+    load_failures: tuple[str, ...]
+    share_safety_failures: tuple[str, ...]
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.task_metadata is not None
+            and self.validation_summary is not None
+            and set(self.receipts)
+            == {
+                PACKAGE_SMOKE_RECEIPT_ENTRY,
+                HARD_SCAN_RECEIPT_ENTRY,
+                CHECK_RECEIPTS_ENTRY,
+            }
+        )
 
 
 def main() -> int:
@@ -128,76 +145,66 @@ def main() -> int:
 def verify_handoff_package_result(
     zip_path: Path, json_path: Path
 ) -> HandoffVerificationResult:
-    return _verify_handoff_package_result(
-        zip_path,
-        json_path,
+    payload = load_handoff_package_payload(zip_path, json_path)
+    return _validate_handoff_package_payload(
+        payload,
         replay_bundle=True,
+        expected_receipts=None,
     )
 
 
-def _inspect_handoff_package_envelope(
-    zip_path: Path,
-    json_path: Path,
-    *,
-    expected_receipts: Mapping[str, Mapping[str, object]] | None = None,
-) -> HandoffVerificationResult:
-    return _verify_handoff_package_result(
-        zip_path,
-        json_path,
-        replay_bundle=False,
-        expected_receipts=expected_receipts,
-    )
-
-
-def _verify_handoff_package_result(
-    zip_path: Path,
-    json_path: Path,
+def _validate_handoff_package_payload(
+    package_payload: HandoffPackagePayload,
     *,
     replay_bundle: bool,
     expected_receipts: Mapping[str, Mapping[str, object]] | None = None,
 ) -> HandoffVerificationResult:
-    inspection = inspect_handoff_zip_once(zip_path, json_path)
     failures: list[str] = []
-    share_safety_failures = list(inspection.share_safety_failures)
-    failures.extend(inspection.failures)
-    if inspection.sidecar_payload is not None:
+    share_safety_failures = list(package_payload.share_safety_failures)
+    failures.extend(package_payload.load_failures)
+    if (
+        package_payload.sidecar_payload is not None
+        and package_payload.json_path is not None
+    ):
         failures.extend(
             verify_sidecar(
-                inspection.sidecar_payload,
-                zip_path,
-                json_path,
-                zip_sha256=inspection.zip_sha256,
+                package_payload.sidecar_payload,
+                package_payload.zip_path,
+                package_payload.json_path,
+                zip_sha256=package_payload.zip_sha256,
             )
         )
-    loaded = inspection.loaded
-    if loaded.task_metadata is not None:
-        failures.extend(validate_task_metadata_contract(loaded.task_metadata))
-    if loaded.validation_summary is not None:
-        failures.extend(validate_validation_summary_contract(loaded.validation_summary))
+    if package_payload.task_metadata is not None:
+        failures.extend(validate_task_metadata_contract(package_payload.task_metadata))
+    if package_payload.validation_summary is not None:
+        failures.extend(
+            validate_validation_summary_contract(package_payload.validation_summary)
+        )
         failures.extend(
             validate_validation_summary_against_receipts(
-                loaded.validation_summary,
-                loaded.receipts,
+                package_payload.validation_summary,
+                package_payload.receipts,
             )
         )
-        failures.extend(mandatory_validation_failures(loaded.validation_summary))
-    for entry, payload in loaded.receipts.items():
+        failures.extend(mandatory_validation_failures(package_payload.validation_summary))
+    for entry, payload in package_payload.receipts.items():
         failures.extend(validate_receipt_payload(Path(entry).name, payload))
-    if expected_receipts is not None and loaded.complete:
-        failures.extend(compare_replayed_handoff_payloads(loaded, expected_receipts))
+    if expected_receipts is not None and package_payload.complete:
+        failures.extend(
+            compare_replayed_handoff_payloads(package_payload, expected_receipts)
+        )
     if (
         replay_bundle
-        and
-        not failures
+        and not failures
         and not share_safety_failures
-        and loaded.complete
-        and loaded.task_metadata is not None
-        and inspection.raw_bundle is not None
+        and package_payload.complete
+        and package_payload.task_metadata is not None
+        and package_payload.raw_bundle is not None
     ):
         bundle_failures, bundle_share_safety_failures = verify_bundle_and_replay_once(
-            inspection.raw_bundle,
-            loaded.task_metadata,
-            loaded,
+            package_payload.raw_bundle,
+            package_payload.task_metadata,
+            package_payload,
         )
         failures.extend(bundle_failures)
         share_safety_failures.extend(bundle_share_safety_failures)
@@ -205,38 +212,40 @@ def _verify_handoff_package_result(
     return HandoffVerificationResult(
         failures=tuple(failures),
         share_safety_failures=tuple(share_safety_failures),
-        zip_sha256=inspection.zip_sha256,
+        zip_sha256=package_payload.zip_sha256,
     )
 
 
-def inspect_handoff_zip_once(
+def load_handoff_package_payload(
     zip_path: Path,
     json_path: Path | None,
-) -> HandoffZipInspection:
+) -> HandoffPackagePayload:
     failures: list[str] = []
     share_safety_failures: list[str] = []
     names: tuple[str, ...] = ()
     duplicates: tuple[str, ...] = ()
     raw_bundle: bytes | None = None
     member_bytes: dict[str, bytes] = {}
-    loaded = LoadedHandoffPayloads(
-        task_metadata=None,
-        validation_summary=None,
-        receipts={},
-    )
+    task_metadata: dict[str, object] | None = None
+    validation_summary: dict[str, object] | None = None
+    receipts: dict[str, dict[str, object]] = {}
     sidecar_payload: dict[str, object] | None = None
     try:
         zip_digest = sha256_file(zip_path)
     except OSError as exc:
-        return HandoffZipInspection(
-            names=(),
-            duplicates=(),
-            raw_bundle=None,
-            loaded=loaded,
-            failures=(f"zip_read_failed: {exc}",),
-            share_safety_failures=(),
-            sidecar_payload=None,
+        return HandoffPackagePayload(
+            zip_path=zip_path,
+            json_path=json_path,
             zip_sha256="",
+            member_names=(),
+            duplicate_member_names=(),
+            raw_bundle=None,
+            sidecar_payload=None,
+            task_metadata=None,
+            validation_summary=None,
+            receipts={},
+            load_failures=(f"zip_read_failed: {exc}",),
+            share_safety_failures=(),
         )
     try:
         with ZipFile(zip_path) as archive:
@@ -271,8 +280,11 @@ def inspect_handoff_zip_once(
         failures.append(f"zip_read_failed: {exc}")
     if member_bytes:
         failures.extend(verify_manifest_hashes_from_bytes(member_bytes, names))
-        loaded = load_handoff_payloads_from_bytes(member_bytes)
-        failures.extend(loaded.failures)
+        json_payloads = load_handoff_json_payloads_from_bytes(member_bytes)
+        task_metadata = json_payloads.task_metadata
+        validation_summary = json_payloads.validation_summary
+        receipts = json_payloads.receipts
+        failures.extend(json_payloads.failures)
     if json_path is not None:
         try:
             raw_sidecar = json_path.read_bytes()
@@ -288,15 +300,19 @@ def inspect_handoff_zip_once(
                 sidecar_payload = sidecar
             else:
                 failures.append("sidecar_must_be_object")
-    return HandoffZipInspection(
-        names=names,
-        duplicates=duplicates,
-        raw_bundle=raw_bundle,
-        loaded=loaded,
-        failures=tuple(failures),
-        share_safety_failures=tuple(share_safety_failures),
-        sidecar_payload=sidecar_payload,
+    return HandoffPackagePayload(
+        zip_path=zip_path,
+        json_path=json_path,
         zip_sha256=zip_digest,
+        member_names=names,
+        duplicate_member_names=duplicates,
+        raw_bundle=raw_bundle,
+        sidecar_payload=sidecar_payload,
+        task_metadata=task_metadata,
+        validation_summary=validation_summary,
+        receipts=receipts,
+        load_failures=tuple(failures),
+        share_safety_failures=tuple(share_safety_failures),
     )
 
 
@@ -360,29 +376,16 @@ def verify_sidecar(
 
 
 @dataclass(frozen=True)
-class LoadedHandoffPayloads:
+class HandoffJsonPayloads:
     task_metadata: dict[str, object] | None
     validation_summary: dict[str, object] | None
     receipts: dict[str, dict[str, object]]
     failures: tuple[str, ...] = ()
 
-    @property
-    def complete(self) -> bool:
-        return (
-            self.task_metadata is not None
-            and self.validation_summary is not None
-            and set(self.receipts)
-            == {
-                PACKAGE_SMOKE_RECEIPT_ENTRY,
-                HARD_SCAN_RECEIPT_ENTRY,
-                CHECK_RECEIPTS_ENTRY,
-            }
-        )
 
-
-def load_handoff_payloads_from_bytes(
+def load_handoff_json_payloads_from_bytes(
     member_bytes: Mapping[str, bytes],
-) -> LoadedHandoffPayloads:
+) -> HandoffJsonPayloads:
     failures: list[str] = []
     task_metadata = load_json_member_from_bytes(
         member_bytes, TASK_METADATA_ENTRY, failures
@@ -401,7 +404,7 @@ def load_handoff_payloads_from_bytes(
         payload = load_json_member_from_bytes(member_bytes, entry, failures)
         if payload is not None:
             receipts[entry] = payload
-    return LoadedHandoffPayloads(
+    return HandoffJsonPayloads(
         task_metadata=task_metadata,
         validation_summary=validation_summary,
         receipts=receipts,
@@ -439,30 +442,30 @@ def load_json_member_raw(
 
 
 def compare_replayed_handoff_payloads(
-    loaded: LoadedHandoffPayloads,
+    package_payload: HandoffPackagePayload,
     replayed: Mapping[str, Mapping[str, object]],
 ) -> list[str]:
     failures: list[str] = []
     failures.extend(
         compare_check_receipts(
-            loaded.receipts[CHECK_RECEIPTS_ENTRY],
+            package_payload.receipts[CHECK_RECEIPTS_ENTRY],
             replayed[CHECK_RECEIPTS_ENTRY],
         )
     )
     failures.extend(
         compare_package_smoke_receipt(
-            loaded.receipts[PACKAGE_SMOKE_RECEIPT_ENTRY],
+            package_payload.receipts[PACKAGE_SMOKE_RECEIPT_ENTRY],
             replayed[PACKAGE_SMOKE_RECEIPT_ENTRY],
         )
     )
     failures.extend(
         compare_hard_scan_receipt(
-            loaded.receipts[HARD_SCAN_RECEIPT_ENTRY],
+            package_payload.receipts[HARD_SCAN_RECEIPT_ENTRY],
             replayed[HARD_SCAN_RECEIPT_ENTRY],
         )
     )
     derived_summary = build_validation_summary_from_receipts(replayed)
-    if loaded.validation_summary != derived_summary:
+    if package_payload.validation_summary != derived_summary:
         failures.append("validation_summary_replay_mismatch")
     return failures
 
@@ -470,7 +473,7 @@ def compare_replayed_handoff_payloads(
 def verify_bundle_and_replay_once(
     raw_bundle: bytes,
     task: Mapping[str, object],
-    loaded: LoadedHandoffPayloads,
+    package_payload: HandoffPackagePayload,
 ) -> tuple[list[str], list[str]]:
     failures: list[str] = []
     share_safety_failures: list[str] = []
@@ -535,7 +538,7 @@ def verify_bundle_and_replay_once(
             final_head,
             source_tree_scan_groups_payload=scan_groups,
         )
-    failures.extend(compare_replayed_handoff_payloads(loaded, replayed))
+    failures.extend(compare_replayed_handoff_payloads(package_payload, replayed))
     return failures, share_safety_failures
 
 

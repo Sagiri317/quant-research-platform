@@ -61,7 +61,10 @@ conda run -n <environment.yml name> python .agents/skills/quant-research-platfor
 active doc roots、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 必须从这里读取或派生。
 
 source-tree sensitive scan 和 bundle share-safety scan 统一复用该事实源；扫描
-边界使用精确规则定义行和明确 root 列表。
+边界使用精确规则定义行和明确 root 列表。source-tree scan 由
+`SourceTreeScanInput` 统一驱动；tracked text file、Python AST、owner ranges、
+allowlist definition lines 和 governance rule definition lines 只构造一次，
+individual scanner 不保留 Path 旧入口。
 
 handoff layout gate 由 `handoff/handoff_contract.py` 和 `handoff/verify_handoff_package.py` 拥有。`FieldSpec` 和 `allowed_keys()` 只由 `handoff_contract.py` 定义；`receipt_contract.py` 只拥有 receipt schema specs、invariants、normalization 和 comparison。source-tree retired surface gate 由 `governance_contract.py`、`verify_governance.py` 和 `tests/architecture/` 拥有。builder、collector、verifier 和 tests 不得复制平行 receipt validator 或 handoff layout 表。
 
@@ -72,11 +75,14 @@ conda run -n <environment.yml name> python .agents/skills/quant-research-platfor
 ```
 
 builder 从 clean Git state 写入 bundle，从 bundle clone 自动生成 machine receipts
-和 validation summary，再检查 package envelope、schema、hash 和 share-safety。
+和 validation summary，再执行 single `HandoffPackagePayload` load 与 package
+payload validation，检查 schema、hash 和 share-safety。
 `verify_handoff_package_result()` 是唯一正式 package-level verifier result path；
 standalone verifier CLI 保留为完整 bundle replay 和 receipt comparison 的直接入口，
-但不是额外 Python wrapper。Standalone verifier 在同一个 bundle clone 中复用
-source-tree scan 结果执行 share-safety 和 hard-scan receipt replay。具体字段、
+但不是额外 Python wrapper。Builder 和 standalone verifier 共用
+`load_handoff_package_payload()` 与 `_validate_handoff_package_payload()`；
+standalone verifier 在同一个 bundle clone 中复用 source-tree scan 结果执行
+share-safety 和 hard-scan receipt replay。具体字段、
 结构、receipt replay、share-safety 和 hard-scan receipt construction 以 executable
 contracts、`verify_handoff_package.py` 和 `replay_evidence.py` 为准。
 `verify_governance.py` 只运行 governance checks，不写 handoff receipts。
@@ -102,7 +108,12 @@ conda run -n <environment.yml name> python .agents/skills/quant-research-platfor
 
 ```bash
 conda run -n <environment.yml name> python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
+conda run -n <environment.yml name> python tests/tools/run_profile.py --profile all --run-dir .run/<purpose>/all -- --durations=100
+conda run -n <environment.yml name> python tests/tools/run_profile.py --profile all --run-dir .run/<purpose>/all-xdist -- -n 4 --dist loadfile --durations=100
 ```
+
+`pytest-xdist>=3.8,<4` 只作为 dev-only speed gate 依赖。sequential `all` profile
+是正式 truth gate；`all-xdist` 不能替代 `all`，只能补充耗时证据。
 
 如果完整运行超时，必须写 `BLOCKED` 并记录超时，可以补充分段运行结果。
 

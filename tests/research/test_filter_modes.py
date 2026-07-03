@@ -7,19 +7,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
-from quant_research_platform.catalog.processed import ProcessedDataCatalog
-from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.data import (
-    DataFrequency,
-    DataGrain,
-    ProcessedDataKind,
-    ProcessedDataSpec,
-)
-from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
@@ -48,21 +37,18 @@ from quant_research_platform.research.predictions import (
 from quant_research_platform.research.predictions import (
     outputs as prediction_outputs,
 )
-from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.research_inputs import (
+    make_processed_catalog,
+    make_research_dataset_catalog,
+    make_signal_spec,
+    write_processed_inputs,
+)
 from tests.research.prediction_output_helpers import (
     prediction_frame_from_artifact,
     prediction_frame_from_artifact_frames,
     write_prediction_result,
 )
-
-
-def _signal(column: str, *, source_kind: str = "factor") -> SignalSpec:
-    return SignalSpec(
-        signal_id=column,
-        source_column=column,
-        source_kind=source_kind,
-    )
 
 
 def _sort_evaluation_frame(
@@ -87,94 +73,6 @@ def _filter_frame() -> pd.DataFrame:
     )
 
 
-def _dataset_catalog() -> ResearchDatasetCatalog:
-    catalog = ResearchDatasetCatalog()
-    catalog.register(
-        ResearchDatasetSpec(
-            data_id="demo_filter",
-            market_id=MarketId("a_share"),
-            input_data_ids=("demo_factor", "demo_label", "demo_annotation"),
-            base_input_data_id="demo_annotation",
-            factor_columns=("factor",),
-            label_columns=("label",),
-            filter_columns=("eligible", "can_enter", "can_exit"),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.RESEARCH_ROW,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "factor": ColumnRole.FACTOR,
-                "label": ColumnRole.LABEL,
-                "eligible": ColumnRole.MASK,
-                "can_enter": ColumnRole.MASK,
-                "can_exit": ColumnRole.MASK,
-            },
-            primary_key=platform_entity_time_key(),
-            partition_columns=("year",),
-        )
-    )
-    return catalog
-
-
-def _processed_catalog() -> ProcessedDataCatalog:
-    catalog = ProcessedDataCatalog()
-    catalog.register(
-        ProcessedDataSpec(
-            data_id="demo_factor",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.FACTOR,
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "factor": ColumnRole.FACTOR,
-            },
-            primary_key=platform_entity_time_key(),
-            partition_columns=("year",),
-        )
-    )
-    catalog.register(
-        ProcessedDataSpec(
-            data_id="demo_label",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.LABEL,
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "label": ColumnRole.LABEL,
-            },
-            primary_key=platform_entity_time_key(),
-            partition_columns=("year",),
-        )
-    )
-    catalog.register(
-        ProcessedDataSpec(
-            data_id="demo_annotation",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.ANNOTATION,
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "eligible": ColumnRole.UNIVERSE,
-                "can_enter": ColumnRole.MASK,
-                "can_exit": ColumnRole.MASK,
-            },
-            primary_key=platform_entity_time_key(),
-            partition_columns=("year",),
-        )
-    )
-    return catalog
-
-
 def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -192,14 +90,14 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         run_id="eval_eligible",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
     tradable_spec = EvaluationSpec(
         run_id="eval_tradable",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
         filter_mode="tradable",
     )
@@ -207,7 +105,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         run_id="eval_unfiltered",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
         filter_mode="unfiltered",
     )
@@ -289,7 +187,7 @@ def test_evaluation_all_nan_signal_label_reports_empty_diagnostics() -> None:
         run_id="eval_all_nan",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
         filter_mode="unfiltered",
     )
@@ -326,7 +224,7 @@ def test_evaluation_group_spread_is_deterministic_for_shuffled_assets() -> None:
         run_id="eval_shuffle_stable",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
 
@@ -498,7 +396,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         run_id="eval_memory_safe",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
     expected = evaluate_signal_frame(frame, spec, n_groups=2)
@@ -544,7 +442,7 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
         run_id="eval_split_timestamp",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
     expected = evaluate_signal_frame(frame, spec, n_groups=2)
@@ -663,7 +561,7 @@ def test_evaluation_rejects_non_monotonic_time_chunk_order() -> None:
         run_id="eval_non_monotonic_chunks",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
 
@@ -685,7 +583,7 @@ def test_evaluation_rejects_pending_non_monotonic_time_overlap() -> None:
         run_id="eval_pending_non_monotonic_chunks",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
 
@@ -707,7 +605,7 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
         run_id="eval_boundary_over_budget",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
@@ -809,7 +707,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
                 run_id="missing_filter",
                 market_id=MarketId("a_share"),
                 research_dataset_id="demo_filter",
-                signals=(_signal("factor"),),
+                signals=(make_signal_spec("factor"),),
                 label_columns=("label",),
                 filter_mode="tradable",
             ),
@@ -821,7 +719,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
                 run_id="null_filter",
                 market_id=MarketId("a_share"),
                 research_dataset_id="demo_filter",
-                signals=(_signal("factor"),),
+                signals=(make_signal_spec("factor"),),
                 label_columns=("label",),
             ),
             _filter_frame().assign(eligible=[True, None, True, True, True, True]),
@@ -832,7 +730,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
                 run_id="bad_filter",
                 market_id=MarketId("a_share"),
                 research_dataset_id="demo_filter",
-                signals=(_signal("factor"),),
+                signals=(make_signal_spec("factor"),),
                 label_columns=("label",),
             ),
             _filter_frame().assign(eligible=["yes"] * 6),
@@ -854,7 +752,7 @@ def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
         run_id="bad_timestamp",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        signals=(_signal("factor"),),
+        signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
 
@@ -871,7 +769,7 @@ def test_filter_columns_cannot_be_features() -> None:
             run_id="bad_eval_features",
             market_id=MarketId("a_share"),
             research_dataset_id="demo_filter",
-            signals=(_signal("eligible"),),
+            signals=(make_signal_spec("eligible"),),
             label_columns=("label",),
         )
     with pytest.raises(ValueError, match="filter_column_in_input_columns: can_exit"):
@@ -1492,9 +1390,17 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     }
 
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = _dataset_catalog()
-    processed_catalog = _processed_catalog()
-    _write_processed_inputs(layout, processed_catalog, frame)
+    dataset_catalog = make_research_dataset_catalog(
+        data_id="demo_filter",
+        input_data_ids=("demo_factor", "demo_label", "demo_annotation"),
+        base_input_data_id="demo_annotation",
+        factor_columns=("factor",),
+        label_columns=("label",),
+        filter_columns=("eligible", "can_enter", "can_exit"),
+        context_columns=(),
+    )
+    processed_catalog = make_processed_catalog(scenario="filter")
+    write_processed_inputs(layout, processed_catalog, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -1557,9 +1463,17 @@ def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
         ignore_index=True,
     )
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = _dataset_catalog()
-    processed_catalog = _processed_catalog()
-    _write_processed_inputs(layout, processed_catalog, frame)
+    dataset_catalog = make_research_dataset_catalog(
+        data_id="demo_filter",
+        input_data_ids=("demo_factor", "demo_label", "demo_annotation"),
+        base_input_data_id="demo_annotation",
+        factor_columns=("factor",),
+        label_columns=("label",),
+        filter_columns=("eligible", "can_enter", "can_exit"),
+        context_columns=(),
+    )
+    processed_catalog = make_processed_catalog(scenario="filter")
+    write_processed_inputs(layout, processed_catalog, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -1671,9 +1585,17 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
         ignore_index=True,
     )
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = _dataset_catalog()
-    processed_catalog = _processed_catalog()
-    _write_processed_inputs(layout, processed_catalog, frame)
+    dataset_catalog = make_research_dataset_catalog(
+        data_id="demo_filter",
+        input_data_ids=("demo_factor", "demo_label", "demo_annotation"),
+        base_input_data_id="demo_annotation",
+        factor_columns=("factor",),
+        label_columns=("label",),
+        filter_columns=("eligible", "can_enter", "can_exit"),
+        context_columns=(),
+    )
+    processed_catalog = make_processed_catalog(scenario="filter")
+    write_processed_inputs(layout, processed_catalog, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -1749,9 +1671,17 @@ def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
     )
     frame = pd.concat([train_rows, test_rows], ignore_index=True)
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = _dataset_catalog()
-    processed_catalog = _processed_catalog()
-    _write_processed_inputs(layout, processed_catalog, frame)
+    dataset_catalog = make_research_dataset_catalog(
+        data_id="demo_filter",
+        input_data_ids=("demo_factor", "demo_label", "demo_annotation"),
+        base_input_data_id="demo_annotation",
+        factor_columns=("factor",),
+        label_columns=("label",),
+        filter_columns=("eligible", "can_enter", "can_exit"),
+        context_columns=(),
+    )
+    processed_catalog = make_processed_catalog(scenario="filter")
+    write_processed_inputs(layout, processed_catalog, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -1796,32 +1726,6 @@ def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
     assert prediction[PREDICTION_SCORE_COLUMN].tolist() == pytest.approx(
         [5.0, 8.0, 11.0, 14.0, 17.0, 20.0]
     )
-
-
-def _write_processed_inputs(
-    layout: StorageLayout,
-    processed_catalog: ProcessedDataCatalog,
-    frame: pd.DataFrame,
-) -> None:
-    columns_by_id = {
-        "demo_factor": ["market_id", "asset_id", "timestamp", "factor"],
-        "demo_label": ["market_id", "asset_id", "timestamp", "label"],
-        "demo_annotation": [
-            "market_id",
-            "asset_id",
-            "timestamp",
-            "eligible",
-            "can_enter",
-            "can_exit",
-        ],
-    }
-    for data_id, columns in columns_by_id.items():
-        spec = processed_catalog.get(data_id)
-        write_dataset(
-            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
-            frame.loc[:, columns],
-            spec=spec,
-        )
 
 
 def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:
@@ -1912,9 +1816,17 @@ def test_prediction_handoff_empty_training_window_fails_closed(
 ) -> None:
     frame = _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03"))
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = _dataset_catalog()
-    processed_catalog = _processed_catalog()
-    _write_processed_inputs(layout, processed_catalog, frame)
+    dataset_catalog = make_research_dataset_catalog(
+        data_id="demo_filter",
+        input_data_ids=("demo_factor", "demo_label", "demo_annotation"),
+        base_input_data_id="demo_annotation",
+        factor_columns=("factor",),
+        label_columns=("label",),
+        filter_columns=("eligible", "can_enter", "can_exit"),
+        context_columns=(),
+    )
+    processed_catalog = make_processed_catalog(scenario="filter")
+    write_processed_inputs(layout, processed_catalog, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,

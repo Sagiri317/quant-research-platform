@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,11 +24,7 @@ class ImportEdge:
 
 @pytest.fixture(scope="session")
 def repo_python_files() -> tuple[Path, ...]:
-    files: list[Path] = []
-    for root in ARCHITECTURE_IMPORT_GRAPH_ROOTS:
-        if root.exists():
-            files.extend(path for path in root.rglob("*.py") if path.is_file())
-    return tuple(sorted(files))
+    return python_files_under(ARCHITECTURE_IMPORT_GRAPH_ROOTS, missing_ok=True)
 
 
 @pytest.fixture(scope="session")
@@ -40,6 +37,36 @@ def ast_trees(repo_python_files: tuple[Path, ...]) -> dict[Path, ast.AST]:
 
 @pytest.fixture(scope="session")
 def import_edges(ast_trees: dict[Path, ast.AST]) -> tuple[ImportEdge, ...]:
+    return _import_edges_from_trees(ast_trees)
+
+
+def python_files_under(
+    roots: Iterable[Path],
+    *,
+    missing_ok: bool = False,
+) -> tuple[Path, ...]:
+    files: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            if missing_ok:
+                continue
+            raise AssertionError(f"python_scan_root_missing: {root}")
+        if root.is_file():
+            files.append(root)
+        else:
+            files.extend(path for path in root.rglob("*.py") if path.is_file())
+    return tuple(sorted(files))
+
+
+def import_edges_for_roots(roots: Iterable[Path]) -> tuple[ImportEdge, ...]:
+    trees = {
+        path: ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for path in python_files_under(roots)
+    }
+    return _import_edges_from_trees(trees)
+
+
+def _import_edges_from_trees(ast_trees: dict[Path, ast.AST]) -> tuple[ImportEdge, ...]:
     edges: list[ImportEdge] = []
     for path, tree in ast_trees.items():
         for node in ast.walk(tree):

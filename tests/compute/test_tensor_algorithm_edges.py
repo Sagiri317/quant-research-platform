@@ -44,10 +44,11 @@ from quant_research_platform.contracts.portfolios import (
     TradabilityConfig,
     WeightConfig,
 )
+from tests.helpers.compute_inputs import make_cross_section_compute_panel
 
 
 def test_tensor_conversion_and_cross_section_outputs() -> None:
-    panel = _panel()
+    panel = make_cross_section_compute_panel()
     spec = ComputePanelSpec(
         signal_columns=("factor", "factor_alt"),
         label_column="forward_return",
@@ -79,7 +80,7 @@ def test_tensor_conversion_and_cross_section_outputs() -> None:
 
 def test_tensor_batch_conversion_validates_columns_and_dtype() -> None:
     batch = panel_to_tensor_batch(
-        _panel(),
+        make_cross_section_compute_panel(),
         timestamp_column="timestamp",
         asset_column="asset",
         signal_columns=("factor",),
@@ -91,7 +92,7 @@ def test_tensor_batch_conversion_validates_columns_and_dtype() -> None:
 
     with pytest.raises(ValueError, match="value_dtype"):
         panel_to_tensor_batch(
-            _panel(),
+            make_cross_section_compute_panel(),
             timestamp_column="timestamp",
             asset_column="asset",
             signal_columns=("factor",),
@@ -100,7 +101,7 @@ def test_tensor_batch_conversion_validates_columns_and_dtype() -> None:
         )
     with pytest.raises(ValueError, match="signal_columns must contain"):
         panel_to_tensor_batch(
-            _panel(),
+            make_cross_section_compute_panel(),
             timestamp_column="timestamp",
             asset_column="asset",
             signal_columns=(),
@@ -108,7 +109,7 @@ def test_tensor_batch_conversion_validates_columns_and_dtype() -> None:
         )
     with pytest.raises(ValueError, match="must not overlap"):
         panel_to_tensor_batch(
-            _panel(),
+            make_cross_section_compute_panel(),
             timestamp_column="timestamp",
             asset_column="asset",
             signal_columns=("factor",),
@@ -116,7 +117,7 @@ def test_tensor_batch_conversion_validates_columns_and_dtype() -> None:
         )
     with pytest.raises(TypeError, match="must be numeric"):
         panel_to_tensor_batch(
-            _panel().assign(text="x"),
+            make_cross_section_compute_panel().assign(text="x"),
             timestamp_column="timestamp",
             asset_column="asset",
             signal_columns=("text",),
@@ -298,7 +299,7 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
         signal_columns=("factor",),
         label_column="forward_return",
     )
-    panel = _panel()
+    panel = make_cross_section_compute_panel()
     positions = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
@@ -397,7 +398,9 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
 
 
 def test_tensorfilter_panel_group_uses_segments() -> None:
-    panel = _panel().assign(segment=["s1", "s2", "s1", "s1", "s2", "s1"])
+    panel = make_cross_section_compute_panel().assign(
+        segment=["s1", "s2", "s1", "s1", "s2", "s1"]
+    )
 
     filtered = filter_panel_group(
         panel=panel,
@@ -411,24 +414,3 @@ def test_tensorfilter_panel_group_uses_segments() -> None:
         segment_columns=(),
         group_values={},
     ).equals(panel)
-
-
-def _panel() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(
-                [
-                    "2024-01-02",
-                    "2024-01-02",
-                    "2024-01-02",
-                    "2024-01-03",
-                    "2024-01-03",
-                    "2024-01-03",
-                ]
-            ),
-            "asset": ["A", "B", "C", "A", "B", "C"],
-            "factor": [1.0, 2.0, 3.0, 3.0, 2.0, 1.0],
-            "factor_alt": [3.0, 2.0, 1.0, 1.0, 2.0, 3.0],
-            "forward_return": [0.01, 0.02, 0.03, 0.03, 0.02, 0.01],
-        }
-    )

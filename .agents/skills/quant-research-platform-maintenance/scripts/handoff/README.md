@@ -32,13 +32,13 @@ README.md
   不执行安装语义。
 - `verify_handoff_package.py` 是 package-level trust boundary。
   `verify_handoff_package_result()` 是唯一 package-level verifier function。
-  它只做一次 zip inspection，并在需要 replay 时只 clone `final-branch.bundle`
-  一次。standalone verifier CLI 保留为 verifier 的直接入口。未经用户明确
-  批准，不新增或保留 wrapper、alias、adapter 或 compatibility layer。verifier 读取
-  sidecar，验证 zip envelope 和 exact member payloads，检查 task metadata Git
-  identity，在同一个 clone 中执行 share-safety scan 和 public receipt replay，
-  比较 packaged receipts 与 replayed receipts，并比较 packaged validation summary
-  与 replay-derived summary。
+  它使用 single `HandoffPackagePayload` load 和 package payload validation，并在
+  需要 replay 时只 clone `final-branch.bundle` 一次。standalone verifier CLI
+  保留为 verifier 的直接入口。未经用户明确批准，不新增或保留 wrapper、alias、
+  adapter 或 compatibility layer。verifier 读取 sidecar，验证 exact member
+  payloads，检查 task metadata Git identity，在同一个 clone 中执行 share-safety
+  scan 和 public receipt replay，比较 packaged receipts 与 replayed receipts，并
+  比较 packaged validation summary 与 replay-derived summary。
 
 ## Build Entry
 
@@ -51,13 +51,15 @@ python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_
 builder 读取当前 Git state，要求 clean worktree，计算
 `base = git merge-base HEAD <base-ref>`，写入 `final-branch.bundle`，从该 bundle
 clone 运行 machine replay，写入 canonical receipts，派生 validation summary，写入
-manifest、zip 和 external sidecar，然后检查 package envelope、schema、hash 和
-share-safety。builder 不运行独立于 package flow 的 safety scan；share-safety
-status 来自同一个 package inspection result。检查不通过时，本次 build 不视为成功。
+manifest、zip 和 external sidecar，然后通过 package payload validation 检查
+schema、hash 和 share-safety。builder 不运行独立于 package flow 的 safety scan；share-safety
+status 来自同一个 package payload validation result。检查不通过时，本次 build
+不视为成功。
 
 standalone verifier 仍是完整 bundle replay 和 receipt comparison 的正式入口；它从
-`final-branch.bundle` clone，一次性复用 source-tree scan 结果执行 share-safety 和
-hard-scan receipt replay，并比较 packaged receipts 与 replayed receipts。
+`final-branch.bundle` clone，一次性复用 `SourceTreeScanInput` 驱动的 source-tree
+scan 结果执行 share-safety 和 hard-scan receipt replay，并比较 packaged receipts
+与 replayed receipts。
 
 builder 只读取当前 Git state 和上述 CLI options；所有 machine evidence 都由
 replay 自动生成。
@@ -94,5 +96,6 @@ machine validation `PASS`。
 mutation tests 使用 replay-compare fast path：先做 sidecar hash、zip layout、
 artifact manifest、payload schema 和 validation-summary-against-receipts 校验，
 再用 session-scoped cached replay receipts 调用
-`compare_replayed_handoff_payloads()`。只有 valid package full verifier smoke、
-Git identity mutation 和 sidecar hash mutation 保留完整 bundle verifier 路径。
+`_validate_handoff_package_payload()` 与 `compare_replayed_handoff_payloads()`。
+只有 valid package full verifier smoke、Git identity mutation 和 sidecar hash
+mutation 保留完整 bundle verifier 路径。

@@ -1,7 +1,15 @@
-# ruff: noqa: F403,F405
 from __future__ import annotations
 
-from tests.architecture.governance_scan_helpers import *
+import subprocess
+import sys
+from pathlib import Path
+
+from tests.architecture.governance_scan_helpers import REPO_ROOT
+from tests.helpers.governance_git_repos import (
+    add_governance_git_change,
+    init_governance_git_repo,
+    run_governance_script,
+)
 
 
 def test_profile_runner_retired_text_rules_are_contract_owned() -> None:
@@ -87,6 +95,7 @@ def test_profile_runner_retired_literals_are_not_allowed_by_unrelated_context(
     from governance_contract import (
         GOVERNANCE_CONTRACT_SCRIPT,
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        build_source_tree_scan_input,
         source_tree_retired_text_findings,
     )
 
@@ -106,15 +115,13 @@ def test_profile_runner_retired_literals_are_not_allowed_by_unrelated_context(
             target.read_text(encoding="utf-8") + f"\n{unrelated_lines}\n",
             encoding="utf-8",
         )
-        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-        subprocess.run(
-            ["git", "add", "."],
-            cwd=repo,
-            check=True,
-            capture_output=True,
+        init_governance_git_repo(
+            repo,
+            {target.as_posix(): repo_file.read_text(encoding="utf-8")},
         )
 
-        findings = source_tree_retired_text_findings(repo)
+        scan_input = build_source_tree_scan_input(repo)
+        findings = source_tree_retired_text_findings(scan_input)
 
         for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES:
             assert any(
@@ -128,6 +135,7 @@ def test_profile_runner_retired_literals_are_not_allowed_inside_owner_context(
     from governance_contract import (
         GOVERNANCE_CONTRACT_SCRIPT,
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        build_source_tree_scan_input,
         source_tree_retired_text_findings,
     )
 
@@ -145,10 +153,13 @@ def test_profile_runner_retired_literals_are_not_allowed_inside_owner_context(
         source.replace(marker, marker + owner_context_lines),
         encoding="utf-8",
     )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {GOVERNANCE_CONTRACT_SCRIPT.as_posix(): repo_file.read_text(encoding="utf-8")},
+    )
 
-    findings = source_tree_retired_text_findings(repo)
+    scan_input = build_source_tree_scan_input(repo)
+    findings = source_tree_retired_text_findings(scan_input)
 
     for rule in PROFILE_RUNNER_RETIRED_TEXT_RULES:
         assert any(
@@ -163,6 +174,7 @@ def test_profile_runner_retired_literals_remain_allowed_in_authorized_contexts(
     from governance_contract import (
         GOVERNANCE_CONTRACT_SCRIPT,
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        build_source_tree_scan_input,
         source_tree_retired_text_findings,
     )
 
@@ -177,10 +189,13 @@ def test_profile_runner_retired_literals_remain_allowed_in_authorized_contexts(
         repo_file = repo / target
         repo_file.parent.mkdir(parents=True)
         repo_file.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
-        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+        init_governance_git_repo(
+            repo,
+            {target.as_posix(): repo_file.read_text(encoding="utf-8")},
+        )
 
-        findings = source_tree_retired_text_findings(repo)
+        scan_input = build_source_tree_scan_input(repo)
+        findings = source_tree_retired_text_findings(scan_input)
 
         assert {
             finding["rule"]
@@ -193,6 +208,7 @@ def test_retired_profile_allowlist_rejects_duplicate_exact_occurrence(
 ) -> None:
     from governance_contract import (
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        build_source_tree_scan_input,
         source_tree_retired_text_findings,
     )
 
@@ -216,10 +232,13 @@ def test_retired_profile_allowlist_rejects_duplicate_exact_occurrence(
         + "\n",
         encoding="utf-8",
     )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+    )
 
-    findings = source_tree_retired_text_findings(repo)
+    scan_input = build_source_tree_scan_input(repo)
+    findings = source_tree_retired_text_findings(scan_input)
 
     assert any(
         finding["path"] == "tests/agents/test_verify_governance.py"
@@ -235,6 +254,7 @@ def test_retired_profile_rule_source_duplicate_exact_occurrence_overmatches(
     from governance_contract import (
         GOVERNANCE_CONTRACT_SCRIPT,
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        build_source_tree_scan_input,
         source_tree_retired_text_findings,
     )
 
@@ -249,10 +269,13 @@ def test_retired_profile_rule_source_duplicate_exact_occurrence_overmatches(
         source.replace(exact_line, f"{exact_line}\n{exact_line}", 1),
         encoding="utf-8",
     )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {GOVERNANCE_CONTRACT_SCRIPT.as_posix(): path.read_text(encoding="utf-8")},
+    )
 
-    findings = source_tree_retired_text_findings(repo)
+    scan_input = build_source_tree_scan_input(repo)
+    findings = source_tree_retired_text_findings(scan_input)
 
     assert any(
         finding["path"] == GOVERNANCE_CONTRACT_SCRIPT.as_posix()
@@ -269,6 +292,7 @@ def test_retired_profile_allowlist_rejects_stale_exact_occurrence(
     from governance_contract import (
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
         SourceTreeAllowedOccurrence,
+        build_source_tree_scan_input,
         source_tree_allowance_contract_findings,
     )
 
@@ -311,10 +335,13 @@ def test_retired_profile_allowlist_rejects_stale_exact_occurrence(
         "SOURCE_TREE_ALLOWED_OCCURRENCES",
         governance_contract.SOURCE_TREE_ALLOWED_OCCURRENCES + (stale,),
     )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+    )
 
-    findings = source_tree_allowance_contract_findings(repo)
+    scan_input = build_source_tree_scan_input(repo)
+    findings = source_tree_allowance_contract_findings(scan_input)
 
     assert any(
         finding["path"] == "tests/agents/test_verify_governance.py"
@@ -330,6 +357,7 @@ def test_allowance_contract_rejects_unreachable_synthesized_occurrence(
     import governance_contract
     from governance_contract import (
         SourceTreeAllowedOccurrence,
+        build_source_tree_scan_input,
         source_tree_allowance_contract_findings,
     )
 
@@ -361,10 +389,13 @@ def test_allowance_contract_rejects_unreachable_synthesized_occurrence(
         "SOURCE_TREE_ALLOWED_OCCURRENCES",
         (entry,),
     )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+    )
 
-    findings = source_tree_allowance_contract_findings(repo)
+    scan_input = build_source_tree_scan_input(repo)
+    findings = source_tree_allowance_contract_findings(scan_input)
 
     assert any(
         finding["path"] == "tests/agents/test_verify_governance.py"
@@ -376,7 +407,10 @@ def test_allowance_contract_rejects_unreachable_synthesized_occurrence(
 def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
     tmp_path: Path,
 ) -> None:
-    from governance_contract import source_tree_retired_text_findings
+    from governance_contract import (
+        build_source_tree_scan_input,
+        source_tree_retired_text_findings,
+    )
 
     repo = tmp_path / "repo"
     path = repo / "tests" / "agents" / "test_verify_governance.py"
@@ -397,10 +431,13 @@ def test_retired_profile_literal_allowlist_is_context_scoped_in_python_file(
         + "\n",
         encoding="utf-8",
     )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {"tests/agents/test_verify_governance.py": path.read_text(encoding="utf-8")},
+    )
 
-    findings = source_tree_retired_text_findings(repo)
+    scan_input = build_source_tree_scan_input(repo)
+    findings = source_tree_retired_text_findings(scan_input)
 
     finding_keys = {
         (finding["path"], finding["line"], finding["rule"]) for finding in findings
@@ -426,6 +463,7 @@ def test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context(
     from governance_contract import (
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
         SourceTreeAllowedOccurrence,
+        build_source_tree_scan_input,
         source_tree_retired_text_findings,
     )
 
@@ -458,10 +496,16 @@ def test_retired_profile_literal_docs_allowlist_is_anchored_to_exact_context(
         "SOURCE_TREE_ALLOWED_OCCURRENCES",
         governance_contract.SOURCE_TREE_ALLOWED_OCCURRENCES + (docs_entry,),
     )
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    init_governance_git_repo(
+        repo,
+        {
+            "docs/architecture/governance.md": allowed.read_text(encoding="utf-8"),
+            "docs/architecture/open-issues.md": rejected.read_text(encoding="utf-8"),
+        },
+    )
 
-    findings = source_tree_retired_text_findings(repo)
+    scan_input = build_source_tree_scan_input(repo)
+    findings = source_tree_retired_text_findings(scan_input)
 
     assert ("docs/architecture/open-issues.md", rule.name) in {
         (finding["path"], finding["rule"]) for finding in findings
@@ -480,6 +524,7 @@ def test_retired_profile_allowlist_rejects_ambiguous_python_owner(
     from governance_contract import (
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
         SourceTreeAllowedOccurrence,
+        build_source_tree_scan_input,
         source_tree_allowance_contract_findings,
     )
 
@@ -533,10 +578,17 @@ def test_retired_profile_allowlist_rejects_ambiguous_python_owner(
             "SOURCE_TREE_ALLOWED_OCCURRENCES",
             (entry,),
         )
-        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+        init_governance_git_repo(
+            repo,
+            {
+                "tests/agents/test_verify_governance.py": path.read_text(
+                    encoding="utf-8",
+                ),
+            },
+        )
 
-        findings = source_tree_allowance_contract_findings(repo)
+        scan_input = build_source_tree_scan_input(repo)
+        findings = source_tree_allowance_contract_findings(scan_input)
 
         assert any(
             finding["path"] == "tests/agents/test_verify_governance.py"
@@ -554,6 +606,7 @@ def test_retired_profile_allowlist_rejects_global_stale_entries(
     from governance_contract import (
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
         SourceTreeAllowedOccurrence,
+        build_source_tree_scan_input,
         source_tree_allowance_contract_findings,
     )
 
@@ -594,47 +647,35 @@ def test_retired_profile_allowlist_rejects_global_stale_entries(
         allowance_owner_path = repo / "tests" / "architecture" / (
             "test_governance_source_tree_scan_contract.py"
         )
-        repo.mkdir(parents=True, exist_ok=True)
-        owner_path.parent.mkdir(parents=True)
-        owner_path.write_text("# allowlist owner\n", encoding="utf-8")
-        allowance_owner_path.write_text(
-            "# source-tree allowlist owner\n",
-            encoding="utf-8",
+        init_governance_git_repo(
+            repo,
+            {
+                owner_path.relative_to(repo).as_posix(): "# allowlist owner\n",
+                allowance_owner_path.relative_to(repo).as_posix(): (
+                    "# source-tree allowlist owner\n"
+                ),
+            },
         )
         if "write" in actions:
-            path.parent.mkdir(parents=True)
-            path.write_text(
-                "\n".join(["def test_func():", f'    x = "{rule.example}"']) + "\n",
-                encoding="utf-8",
-            )
+            source = "\n".join(["def test_func():", f'    x = "{rule.example}"'])
+            source += "\n"
+            if "add" in actions:
+                add_governance_git_change(
+                    repo,
+                    {path.relative_to(repo).as_posix(): source},
+                )
+            else:
+                path.parent.mkdir(parents=True)
+                path.write_text(source, encoding="utf-8")
         entry = SourceTreeAllowedOccurrence(**(base | overrides))
         monkeypatch.setattr(
             governance_contract,
             "SOURCE_TREE_ALLOWED_OCCURRENCES",
             (entry,),
         )
-        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-        subprocess.run(
-            ["git", "add", owner_path.relative_to(repo).as_posix()],
-            cwd=repo,
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "add", allowance_owner_path.relative_to(repo).as_posix()],
-            cwd=repo,
-            check=True,
-            capture_output=True,
-        )
-        if "add" in actions:
-            subprocess.run(
-                ["git", "add", "."],
-                cwd=repo,
-                check=True,
-                capture_output=True,
-            )
 
-        findings = source_tree_allowance_contract_findings(repo)
+        scan_input = build_source_tree_scan_input(repo)
+        findings = source_tree_allowance_contract_findings(scan_input)
 
         assert any(
             finding["path"] == entry.path.as_posix()
@@ -647,19 +688,13 @@ def test_profile_runner_retired_cli_flags_are_rejected() -> None:
     runner = Path("tests/tools/run_profile.py")
 
     for flag in ("--output-dir", "--tmp-dir"):
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(runner),
-                "--profile",
-                "fast",
-                flag,
-                ".run/retired-profile-runner-surface",
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
+        result = run_governance_script(
+            REPO_ROOT,
+            str(runner),
+            "--profile",
+            "fast",
+            flag,
+            ".run/retired-profile-runner-surface",
         )
 
         assert result.returncode == 2

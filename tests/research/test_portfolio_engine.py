@@ -9,11 +9,7 @@ import pytest
 import quant_research_platform.research.portfolios as portfolios_package
 import quant_research_platform.research.portfolios.runner as portfolio_runner
 from quant_research_platform.artifacts.outputs import write_portfolio_outputs
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
-from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.data import DataFrequency, DataGrain
-from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.portfolios import (
@@ -30,14 +26,11 @@ from quant_research_platform.research.portfolios import (
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
-
-
-def _signal(column: str) -> SignalSpec:
-    return SignalSpec(
-        signal_id=column,
-        source_column=column,
-        source_kind="factor",
-    )
+from tests.helpers.research_inputs import (
+    make_research_dataset_catalog,
+    make_research_dataset_spec,
+    make_signal_spec,
+)
 
 
 def test_research_portfolio_package_exports_final_names() -> None:
@@ -128,7 +121,7 @@ def test_portfolio_engine_reports_buy_sell_cost_breakdown() -> None:
         portfolio_id="cost_breakdown_portfolio",
         market_id=MarketId("a_share"),
         research_dataset_id="demo",
-        signals=(_signal("raw_signal"),),
+        signals=(make_signal_spec("raw_signal"),),
         return_source_column="forward_return",
         rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
         execution_lag_steps=0,
@@ -172,7 +165,7 @@ def test_portfolio_engine_long_only_positions_do_not_short_assets() -> None:
         portfolio_id="long_only_portfolio",
         market_id=MarketId("a_share"),
         research_dataset_id="demo",
-        signals=(_signal("raw_signal"),),
+        signals=(make_signal_spec("raw_signal"),),
         return_source_column="forward_return",
         rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
         execution_lag_steps=0,
@@ -292,12 +285,17 @@ def test_portfolio_spec_rejects_unsupported_rebalance_frequency() -> None:
 
 def test_portfolio_runner_writes_private_outputs(tmp_path) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = ResearchDatasetCatalog()
-    dataset_catalog.register(_dataset_spec())
+    dataset_catalog = make_research_dataset_catalog(
+        make_research_dataset_spec(scenario="portfolio")
+    )
     portfolio_catalog = PortfolioCatalog()
     portfolio_catalog.register(_portfolio_spec())
     dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
-    write_dataset(dataset_root, _portfolio_frame(), spec=_dataset_spec())
+    write_dataset(
+        dataset_root,
+        _portfolio_frame(),
+        spec=make_research_dataset_spec(scenario="portfolio"),
+    )
 
     result = build_portfolio_result_from_research_dataset(
         layout=layout,
@@ -341,12 +339,17 @@ def test_portfolio_runner_rejects_empty_time_window_before_artifact_write(
     tmp_path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = ResearchDatasetCatalog()
-    dataset_catalog.register(_dataset_spec())
+    dataset_catalog = make_research_dataset_catalog(
+        make_research_dataset_spec(scenario="portfolio")
+    )
     portfolio_catalog = PortfolioCatalog()
     portfolio_catalog.register(_portfolio_spec())
     dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
-    write_dataset(dataset_root, _portfolio_frame(), spec=_dataset_spec())
+    write_dataset(
+        dataset_root,
+        _portfolio_frame(),
+        spec=make_research_dataset_spec(scenario="portfolio"),
+    )
 
     result = build_portfolio_result_from_research_dataset(
         layout=layout,
@@ -425,28 +428,6 @@ def _portfolio_spec() -> PortfolioSpec:
     )
 
 
-def _dataset_spec() -> ResearchDatasetSpec:
-    return ResearchDatasetSpec(
-        data_id="demo",
-        market_id=MarketId("a_share"),
-        input_data_ids=("factor", "label"),
-        base_input_data_id="factor",
-        factor_columns=("raw_risk",),
-        label_columns=("forward_return",),
-        frequency=DataFrequency.DAILY,
-        grain=DataGrain.RESEARCH_ROW,
-        column_roles={
-            "market_id": ColumnRole.KEY,
-            "asset_id": ColumnRole.KEY,
-            "timestamp": ColumnRole.TIMESTAMP,
-            "raw_risk": ColumnRole.FACTOR,
-            "forward_return": ColumnRole.LABEL,
-        },
-        primary_key=("market_id", "asset_id", "timestamp"),
-        partition_columns=("year",),
-    )
-
-
 def _portfolio_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -462,12 +443,17 @@ def _portfolio_frame() -> pd.DataFrame:
 
 def _run_demo_portfolio(project_root) -> Path:
     layout = StorageLayout(project_root=project_root)
-    dataset_catalog = ResearchDatasetCatalog()
-    dataset_catalog.register(_dataset_spec())
+    dataset_catalog = make_research_dataset_catalog(
+        make_research_dataset_spec(scenario="portfolio")
+    )
     portfolio_catalog = PortfolioCatalog()
     portfolio_catalog.register(_portfolio_spec())
     dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
-    write_dataset(dataset_root, _portfolio_frame(), spec=_dataset_spec())
+    write_dataset(
+        dataset_root,
+        _portfolio_frame(),
+        spec=make_research_dataset_spec(scenario="portfolio"),
+    )
     result = build_portfolio_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,

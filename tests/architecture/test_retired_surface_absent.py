@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
 
 from tests.helpers.governance_fixtures import rule_form, text_rule_example
+from tests.helpers.maintenance_script_loader import (
+    load_governance_contract_module as _load_governance_contract,
+)
 
 
 def test_retired_owner_local_function_names_are_absent() -> None:
@@ -157,20 +159,3 @@ def test_retired_local_only_report_paths_remain_share_unsafe() -> None:
     ):
         assert is_local_only_path(path)
         assert unsafe_for_share_reason(path.as_posix()) == "local_only_path"
-
-
-def _load_governance_contract():
-    script = (
-        Path(".agents")
-        / "skills"
-        / "quant-research-platform-maintenance"
-        / "scripts"
-        / "governance_contract.py"
-    )
-    spec = importlib.util.spec_from_file_location("governance_contract", script)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module

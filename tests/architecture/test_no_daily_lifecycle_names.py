@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import ast
-import importlib.util
 import re
-import sys
 from pathlib import Path
 
 from quant_research_platform.contracts.data import DataFrequency
@@ -92,17 +90,3 @@ def _iter_shared_test_helper_files() -> list[Path]:
 
 def _literal_pattern(value: str) -> re.Pattern[str]:
     return re.compile(r"\b" + re.escape(value) + r"\b")
-
-
-def _load_governance_contract():
-    path = Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/"
-        "governance_contract.py"
-    )
-    spec = importlib.util.spec_from_file_location("governance_contract_for_test", path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module

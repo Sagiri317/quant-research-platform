@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 
 from tests.helpers import frequency_ids
+from tests.helpers.import_graph import python_files_under
 
 SOURCE_ROOT = Path("src/quant_research_platform")
 API_APP = SOURCE_ROOT / "interfaces/api/app.py"
@@ -479,7 +480,7 @@ def test_non_interface_source_modules_do_not_define_hidden_cli_entrypoints() -> 
     allowed_cli_root = SOURCE_ROOT / "interfaces/cli"
     allowed_private_cli = SOURCE_ROOT / "interfaces/private_cli.py"
     hits: list[str] = []
-    for path in _python_files((SOURCE_ROOT,)):
+    for path in python_files_under((SOURCE_ROOT,)):
         tree = _parse_source(path)
         if path == allowed_private_cli or _is_relative_to(path, allowed_cli_root):
             continue
@@ -787,7 +788,7 @@ def test_platform_core_does_not_import_csmar_source_modules() -> None:
         SOURCE_ROOT / "catalog",
     )
     hits: list[str] = []
-    for path in _python_files(checked_roots):
+    for path in python_files_under(checked_roots):
         if path in allowed_composition_roots:
             continue
         tree = _parse_source(path)
@@ -824,7 +825,7 @@ def test_platform_core_does_not_hardcode_csmar_raw_fields_or_tables() -> None:
         "TRD_Dalyr",
     )
     hits: list[str] = []
-    for path in _python_files(checked_roots):
+    for path in python_files_under(checked_roots):
         text = path.read_text(encoding="utf-8")
         for term in forbidden:
             if term in text:
@@ -848,7 +849,7 @@ def test_public_interfaces_remain_provider_neutral() -> None:
         "qrp source",
     )
     hits: list[str] = []
-    for path in _python_files(checked_roots):
+    for path in python_files_under(checked_roots):
         text = path.read_text(encoding="utf-8")
         for term in forbidden:
             if term in text:
@@ -891,17 +892,6 @@ def _top_level_defined_names(tree: ast.Module) -> set[str]:
                 if isinstance(target, ast.Name):
                     names.add(target.id)
     return names
-
-
-def _python_files(roots: tuple[Path, ...]) -> list[Path]:
-    files: list[Path] = []
-    for root in roots:
-        if root.is_file():
-            files.append(root)
-            continue
-        files.extend(path for path in root.rglob("*.py") if path.is_file())
-    return files
-
 
 def _is_dunder_main_guard(node: ast.AST) -> bool:
     if not isinstance(node, ast.Compare):

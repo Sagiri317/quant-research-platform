@@ -11,11 +11,11 @@ from quant_research_platform.research.datasets.validation import (
     validate_prediction_input,
     validate_research_dataset,
 )
-from tests.research.test_research_dataset_contract_closure import _dataset_spec
+from tests.helpers.research_inputs import make_research_dataset_spec
 
 
 def test_research_dataset_validation_rejects_key_and_role_errors() -> None:
-    spec = _dataset_spec()
+    spec = make_research_dataset_spec(scenario="dummy")
     frame = _research_frame()
 
     with pytest.raises(ValueError, match="missing_research_required_fields"):
@@ -34,7 +34,7 @@ def test_research_dataset_validation_rejects_key_and_role_errors() -> None:
 
 
 def test_evaluation_and_prediction_inputs_require_declared_columns() -> None:
-    spec = _dataset_spec()
+    spec = make_research_dataset_spec(scenario="dummy")
     frame = _research_frame()
 
     validate_evaluation_input(

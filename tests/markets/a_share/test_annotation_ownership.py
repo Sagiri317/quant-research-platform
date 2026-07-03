@@ -11,6 +11,12 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     panels,
 )
 from tests.helpers import frequency_ids
+from tests.helpers.synthetic_a_share import (
+    make_synthetic_a_share_market_cap,
+    make_synthetic_a_share_stock_master,
+    make_synthetic_a_share_trading_calendar,
+    make_synthetic_market_bars_daily,
+)
 
 
 def test_panel_module_has_no_annotation_rule_helpers() -> None:
@@ -37,10 +43,10 @@ def test_panel_module_has_no_annotation_rule_helpers() -> None:
 
 def test_market_panel_daily_schema_excludes_derived_annotation_masks() -> None:
     panel = panels.compute_market_panel(
-        _market_bars_daily_frame(),
-        stock_master=_stock_master_frame(),
-        market_cap=_market_cap_frame(),
-        trading_calendar=_trading_calendar_frame(),
+        make_synthetic_market_bars_daily(asset_id="asset_a", market_type=1),
+        stock_master=make_synthetic_a_share_stock_master(asset_id="asset_a"),
+        market_cap=make_synthetic_a_share_market_cap(asset_id="asset_a"),
+        trading_calendar=make_synthetic_a_share_trading_calendar(market_type=1),
     )
 
     assert not {
@@ -67,9 +73,7 @@ def test_annotations_own_eligibility_and_execution_masks() -> None:
         {
             "market_id": ["a_share", "a_share", "a_share"],
             "asset_id": ["asset_a", "asset_a", "asset_a"],
-            "timestamp": pd.to_datetime(
-                ["2024-01-02", "2024-01-03", "2024-01-05"]
-            ),
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-05"]),
             "eligible_base": [True, True, False],
             "eligible_after_listing_age": [True, True, True],
             "eligible_liquidity": [True, True, True],
@@ -80,9 +84,7 @@ def test_annotations_own_eligibility_and_execution_masks() -> None:
         {
             "market_id": ["a_share", "a_share", "a_share"],
             "asset_id": ["asset_a", "asset_a", "asset_a"],
-            "timestamp": pd.to_datetime(
-                ["2024-01-02", "2024-01-03", "2024-01-05"]
-            ),
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-05"]),
             "next_bar_is_trading": [True, True, False],
             "next_bar_limit_status": [-1.0, 0.0, float("nan")],
             "can_enter": [True, True, False],
@@ -309,9 +311,7 @@ def _annotation_panel_frame() -> pd.DataFrame:
         {
             "market_id": ["a_share", "a_share", "a_share"],
             "asset_id": ["asset_a", "asset_a", "asset_a"],
-            "timestamp": pd.to_datetime(
-                ["2024-01-02", "2024-01-03", "2024-01-05"]
-            ),
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-05"]),
             "market_type": [1, 1, 1],
             "is_st": [False, False, True],
             "is_pt": [False, False, False],
@@ -364,68 +364,3 @@ def _chunk_boundary_panel_frame() -> pd.DataFrame:
         )
         rows.append(row)
     return pd.DataFrame(rows)
-
-
-def _market_bars_daily_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "source_asset_id": ["asset_a", "asset_a"],
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-            "market_type": [1, 1],
-            "trading_status_code": [1, 1],
-            "filling_flag": ["0", "0"],
-            "open": [10.0, 11.0],
-            "high": [10.5, 11.5],
-            "low": [9.5, 10.5],
-            "close": [10.2, 11.2],
-            "adj_open": [10.0, 11.0],
-            "adj_close": [10.2, 11.2],
-            "prev_close": [9.9, 10.2],
-            "volume": [100.0, 100.0],
-            "amount": [1000.0, 1000.0],
-            "period_return": [0.01, 0.02],
-            "limit_status": [0, 0],
-        }
-    )
-
-
-def _stock_master_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "source_asset_id": ["asset_a"],
-            "timestamp": pd.to_datetime(["2023-01-01"]),
-            "stock_name": ["Asset A"],
-            "listing_date": pd.to_datetime(["2023-01-01"]),
-            "delisting_date": [pd.NaT],
-            "company_status": ["normal"],
-            "status_change_date": pd.to_datetime(["2023-01-01"]),
-            "csrc_2012_industry_code": ["I1"],
-            "csrc_2012_industry_name": ["Industry"],
-        }
-    )
-
-
-def _market_cap_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "source_asset_id": ["asset_a"],
-            "timestamp": pd.to_datetime(["2023-01-01"]),
-            "share_change_date": pd.to_datetime(["2023-01-01"]),
-            "total_shares": [1000.0],
-            "a_float_shares": [500.0],
-        }
-    )
-
-
-def _trading_calendar_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "timestamp": pd.date_range("2023-01-01", "2024-01-03", freq="D"),
-            "calendar_date": pd.date_range("2023-01-01", "2024-01-03", freq="D"),
-            "source_market_type": [1] * 368,
-            "is_trading_day": [True] * 368,
-            "source_day_of_week": [1] * 368,
-            "source_state": ["O"] * 368,
-        }
-    )

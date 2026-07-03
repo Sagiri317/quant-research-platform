@@ -10,7 +10,6 @@ import pytest
 
 import quant_research_platform.storage._dataset_reading as dataset_reading
 import quant_research_platform.storage.datasets as datasets
-from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -28,53 +27,11 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
-
-
-def _spec(data_id: str = "x") -> ProcessedDataSpec:
-    return ProcessedDataSpec(
-        data_id=data_id,
-        market_id=MarketId("a_share"),
-        kind=ProcessedDataKind.FACTOR,
-        frequency=DataFrequency.DAILY,
-        grain=DataGrain.ASSET_TIMESTAMP,
-        column_roles={
-            "market_id": ColumnRole.KEY,
-            "asset_id": ColumnRole.KEY,
-            "timestamp": ColumnRole.TIMESTAMP,
-            "value": ColumnRole.FACTOR,
-        },
-        primary_key=platform_entity_time_key(),
-        partition_columns=("year",),
-    )
-
-
-def _label_spec(data_id: str = "label_x") -> ProcessedDataSpec:
-    return ProcessedDataSpec(
-        data_id=data_id,
-        market_id=MarketId("a_share"),
-        kind=ProcessedDataKind.LABEL,
-        frequency=DataFrequency.DAILY,
-        grain=DataGrain.ASSET_TIMESTAMP,
-        column_roles={
-            "market_id": ColumnRole.KEY,
-            "asset_id": ColumnRole.KEY,
-            "timestamp": ColumnRole.TIMESTAMP,
-            "label": ColumnRole.LABEL,
-        },
-        primary_key=platform_entity_time_key(),
-        partition_columns=("year",),
-    )
-
-
-def _frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "market_id": ["a_share", "a_share", "a_share"],
-            "asset_id": ["asset_002", "asset_001", "asset_001"],
-            "timestamp": pd.to_datetime(["2015-01-05", "2014-01-02", "2015-01-05"]),
-            "value": [2.0, 1.0, math.nan],
-        }
-    )
+from tests.storage.low_level_fixtures import (
+    make_dataset_artifact_root,
+    make_dataset_frame,
+    make_processed_dataset_spec,
+)
 
 
 def _input_fingerprint_payload(
@@ -97,18 +54,12 @@ def _input_fingerprint_payload(
     return payload
 
 
-def _artifact_root(tmp_path: Path, name: str = "x") -> Path:
-    return tmp_path / "data" / "processed" / "a_share" / "factor" / name
-
-
-def _label_artifact_root(tmp_path: Path, name: str = "label_x") -> Path:
-    return tmp_path / "data" / "processed" / "a_share" / "label" / name
-
-
 def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
-    root = _artifact_root(tmp_path)
+    root = make_dataset_artifact_root(tmp_path)
 
-    result = write_dataset(root, _frame(), spec=_spec())
+    result = write_dataset(
+        root, make_dataset_frame(), spec=make_processed_dataset_spec()
+    )
     manifest = json.loads(
         (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
     )
@@ -137,9 +88,13 @@ def test_write_dataset_partitions_without_groupby_sort_copy(
         raise AssertionError("partition_write_must_not_groupby_full_frame")
 
     monkeypatch.setattr(pd.DataFrame, "groupby", fail_groupby)
-    root = _artifact_root(tmp_path, "no_groupby_partition")
+    root = make_dataset_artifact_root(tmp_path, "no_groupby_partition")
 
-    write_dataset(root, _frame(), spec=_spec("no_groupby_partition"))
+    write_dataset(
+        root,
+        make_dataset_frame(),
+        spec=make_processed_dataset_spec("no_groupby_partition"),
+    )
 
     manifest = json.loads(
         (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
@@ -148,13 +103,13 @@ def test_write_dataset_partitions_without_groupby_sort_copy(
 
 
 def test_write_dataset_merges_allowed_instance_metadata(tmp_path: Path) -> None:
-    root = _artifact_root(tmp_path)
+    root = make_dataset_artifact_root(tmp_path)
     input_fingerprints = {"demo_input": _input_fingerprint_payload()}
 
     write_dataset(
         root,
-        _frame(),
-        spec=_spec(),
+        make_dataset_frame(),
+        spec=make_processed_dataset_spec(),
         instance_metadata={"input_fingerprints": input_fingerprints},
     )
 
@@ -188,9 +143,11 @@ def test_write_dataset_rejects_malformed_input_fingerprints_metadata(
     for index, input_fingerprints in enumerate(cases):
         with pytest.raises(ValueError, match="invalid_input_fingerprints_metadata"):
             write_dataset(
-                _artifact_root(tmp_path, f"bad_fingerprint_metadata_{index}"),
-                _frame(),
-                spec=_spec(f"bad_fingerprint_metadata_{index}"),
+                make_dataset_artifact_root(
+                    tmp_path, f"bad_fingerprint_metadata_{index}"
+                ),
+                make_dataset_frame(),
+                spec=make_processed_dataset_spec(f"bad_fingerprint_metadata_{index}"),
                 instance_metadata={"input_fingerprints": input_fingerprints},
             )
 
@@ -200,29 +157,29 @@ def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata
 ) -> None:
     with pytest.raises(ValueError, match="unsupported_dataset_instance_metadata_key"):
         write_dataset(
-            _artifact_root(tmp_path, "unsupported_metadata"),
-            _frame(),
-            spec=_spec("unsupported_metadata"),
+            make_dataset_artifact_root(tmp_path, "unsupported_metadata"),
+            make_dataset_frame(),
+            spec=make_processed_dataset_spec("unsupported_metadata"),
             instance_metadata={"other_metadata": {}},
         )
 
     with pytest.raises(ValueError, match="reserved_dataset_instance_metadata_key"):
         write_dataset(
-            _artifact_root(tmp_path, "reserved_metadata"),
-            _frame(),
-            spec=_spec("reserved_metadata"),
+            make_dataset_artifact_root(tmp_path, "reserved_metadata"),
+            make_dataset_frame(),
+            spec=make_processed_dataset_spec("reserved_metadata"),
             instance_metadata={"row_count": 999},
         )
 
-    unsafe_root = _artifact_root(tmp_path, "unsafe_metadata")
+    unsafe_root = make_dataset_artifact_root(tmp_path, "unsafe_metadata")
     unsafe_fingerprint = _input_fingerprint_payload(
         extra={"content_hash": "data/raw/internal-provider/export.csv"}
     )
     with pytest.raises(ValueError, match="unsafe_internal_artifact_metadata"):
         write_dataset(
             unsafe_root,
-            _frame(),
-            spec=_spec("unsafe_metadata"),
+            make_dataset_frame(),
+            spec=make_processed_dataset_spec("unsafe_metadata"),
             instance_metadata={
                 "input_fingerprints": {"demo_input": unsafe_fingerprint}
             },
@@ -231,15 +188,17 @@ def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata
 
 
 def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) -> None:
-    materialized_root = _artifact_root(tmp_path, "materialized")
-    chunked_root = _artifact_root(tmp_path, "chunked")
-    frame = _frame()
+    materialized_root = make_dataset_artifact_root(tmp_path, "materialized")
+    chunked_root = make_dataset_artifact_root(tmp_path, "chunked")
+    frame = make_dataset_frame()
 
-    write_dataset(materialized_root, frame, spec=_spec("materialized"))
+    write_dataset(
+        materialized_root, frame, spec=make_processed_dataset_spec("materialized")
+    )
     write_dataset(
         chunked_root,
         (chunk for chunk in [frame.iloc[:1].copy(), frame.iloc[1:].copy()]),
-        spec=_spec("chunked"),
+        spec=make_processed_dataset_spec("chunked"),
     )
 
     materialized = read_dataset(materialized_root)
@@ -259,10 +218,12 @@ def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) ->
 
 
 def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None:
-    root = _artifact_root(tmp_path, "empty_schema")
-    empty_chunk = _frame().iloc[:0].copy()
+    root = make_dataset_artifact_root(tmp_path, "empty_schema")
+    empty_chunk = make_dataset_frame().iloc[:0].copy()
 
-    write_dataset(root, iter([empty_chunk]), spec=_spec("empty_schema"))
+    write_dataset(
+        root, iter([empty_chunk]), spec=make_processed_dataset_spec("empty_schema")
+    )
 
     manifest = json.loads(
         (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
@@ -281,58 +242,65 @@ def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None
 def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="invalid_dataset_chunk"):
         write_dataset(
-            _artifact_root(tmp_path, "invalid"),
-            iter([_frame().iloc[:1], {"not": "a frame"}]),
-            spec=_spec("invalid"),
+            make_dataset_artifact_root(tmp_path, "invalid"),
+            iter([make_dataset_frame().iloc[:1], {"not": "a frame"}]),
+            spec=make_processed_dataset_spec("invalid"),
         )
 
     with pytest.raises(ValueError, match="empty_dataset_schema_missing"):
         write_dataset(
-            _artifact_root(tmp_path, "empty_iterable"),
+            make_dataset_artifact_root(tmp_path, "empty_iterable"),
             iter(()),
-            spec=_spec("empty_iterable"),
+            spec=make_processed_dataset_spec("empty_iterable"),
         )
 
-    duplicate = pd.concat([_frame().iloc[:1], _frame().iloc[:1]], ignore_index=True)
+    duplicate = pd.concat(
+        [make_dataset_frame().iloc[:1], make_dataset_frame().iloc[:1]],
+        ignore_index=True,
+    )
     with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
         write_dataset(
-            _artifact_root(tmp_path, "duplicate"),
+            make_dataset_artifact_root(tmp_path, "duplicate"),
             duplicate,
-            spec=_spec("duplicate"),
+            spec=make_processed_dataset_spec("duplicate"),
         )
 
-    null_key = _frame()
+    null_key = make_dataset_frame()
     null_key.loc[0, "asset_id"] = None
     with pytest.raises(ValueError, match="dataset_primary_key_null"):
         write_dataset(
-            _artifact_root(tmp_path, "null_key"),
+            make_dataset_artifact_root(tmp_path, "null_key"),
             null_key,
-            spec=_spec("null_key"),
+            spec=make_processed_dataset_spec("null_key"),
         )
 
-    infinite = _frame()
+    infinite = make_dataset_frame()
     infinite.loc[0, "value"] = -math.inf
     with pytest.raises(ValueError, match="dataset_infinite_value"):
         write_dataset(
-            _artifact_root(tmp_path, "infinite"),
+            make_dataset_artifact_root(tmp_path, "infinite"),
             infinite,
-            spec=_spec("infinite"),
+            spec=make_processed_dataset_spec("infinite"),
         )
 
-    missing_required = _frame().drop(columns=["value"])
-    missing_root = _artifact_root(tmp_path, "missing_required")
+    missing_required = make_dataset_frame().drop(columns=["value"])
+    missing_root = make_dataset_artifact_root(tmp_path, "missing_required")
     with pytest.raises(ValueError, match="missing_required_columns: value"):
-        write_dataset(missing_root, missing_required, spec=_spec("missing_required"))
+        write_dataset(
+            missing_root,
+            missing_required,
+            spec=make_processed_dataset_spec("missing_required"),
+        )
     assert not missing_root.exists()
 
 
 def test_write_dataset_rejects_existing_root_without_overwrite(tmp_path: Path) -> None:
-    root = _artifact_root(tmp_path)
-    write_dataset(root, _frame(), spec=_spec())
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
     original = read_dataset(root)
 
     with pytest.raises(ValueError, match="dataset_exists"):
-        write_dataset(root, _frame(), spec=_spec())
+        write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
 
     pd.testing.assert_frame_equal(read_dataset(root), original)
 
@@ -343,8 +311,8 @@ def test_write_dataset_rejects_generic_tmp_artifact_root_fail_closed(
     with pytest.raises(ValueError, match="invalid_processed_dataset_root"):
         write_dataset(
             tmp_path / "data" / "processed" / "a_share" / "factor" / ".tmp-user",
-            _frame(),
-            spec=_spec(),
+            make_dataset_frame(),
+            spec=make_processed_dataset_spec(),
         )
 
 
@@ -353,7 +321,7 @@ def test_write_dataset_allows_writer_owned_tmp_artifact_root(
 ) -> None:
     root = tmp_path / "data" / "processed" / "a_share" / "factor" / ".x.tmp-user"
 
-    write_dataset(root, _frame(), spec=_spec())
+    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
 
     assert inspect_dataset(root).spec["data_id"] == "x"
 
@@ -361,8 +329,8 @@ def test_write_dataset_allows_writer_owned_tmp_artifact_root(
 def test_read_dataset_materialized_chunked_projection_and_time_window(
     tmp_path: Path,
 ) -> None:
-    root = _artifact_root(tmp_path)
-    write_dataset(root, _frame(), spec=_spec())
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
 
     materialized = read_dataset(
         root,
@@ -381,8 +349,10 @@ def test_read_dataset_reuses_one_candidate_file_listing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = _artifact_root(tmp_path, "read_plan_reuse")
-    write_dataset(root, _frame(), spec=_spec("read_plan_reuse"))
+    root = make_dataset_artifact_root(tmp_path, "read_plan_reuse")
+    write_dataset(
+        root, make_dataset_frame(), spec=make_processed_dataset_spec("read_plan_reuse")
+    )
     calls = 0
     original = dataset_reading.candidate_data_files
 
@@ -410,8 +380,12 @@ def test_fingerprint_dataset_reuses_one_candidate_file_listing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = _artifact_root(tmp_path, "fingerprint_plan_reuse")
-    write_dataset(root, _frame(), spec=_spec("fingerprint_plan_reuse"))
+    root = make_dataset_artifact_root(tmp_path, "fingerprint_plan_reuse")
+    write_dataset(
+        root,
+        make_dataset_frame(),
+        spec=make_processed_dataset_spec("fingerprint_plan_reuse"),
+    )
     calls = 0
     original = dataset_reading.candidate_data_files
 
@@ -436,8 +410,8 @@ def test_fingerprint_dataset_reuses_one_candidate_file_listing(
 
 
 def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
-    root = _artifact_root(tmp_path)
-    write_dataset(root, _frame(), spec=_spec())
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
 
     manifest_path = root / "_manifest" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -497,8 +471,8 @@ def test_read_dataset_rejects_invalid_qrp_json_schema_id(
     replacement: dict[str, str],
     error: str,
 ) -> None:
-    root = _artifact_root(tmp_path)
-    write_dataset(root, _frame(), spec=_spec())
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
     path = root / relative_path
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload.pop("schema_id", None)
@@ -512,8 +486,8 @@ def test_read_dataset_rejects_invalid_qrp_json_schema_id(
 def test_read_dataset_manifest_columns_mismatch_fails_closed(
     tmp_path: Path,
 ) -> None:
-    root = _artifact_root(tmp_path)
-    write_dataset(root, _frame(), spec=_spec())
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
     manifest_path = root / "_manifest" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["columns"] = ["market_id", "asset_id", "timestamp", "bogus"]
@@ -526,8 +500,8 @@ def test_read_dataset_manifest_columns_mismatch_fails_closed(
 def test_read_dataset_manifest_row_count_mismatch_fails_closed(
     tmp_path: Path,
 ) -> None:
-    root = _artifact_root(tmp_path)
-    write_dataset(root, _frame(), spec=_spec())
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
     manifest_path = root / "_manifest" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["row_count"] = int(manifest["row_count"]) + 1
@@ -540,8 +514,8 @@ def test_read_dataset_manifest_row_count_mismatch_fails_closed(
 def test_read_dataset_rejects_data_root_missing_and_missing_projection_columns(
     tmp_path: Path,
 ) -> None:
-    root = _artifact_root(tmp_path)
-    write_dataset(root, _frame(), spec=_spec())
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
 
     with pytest.raises(ValueError, match="dataset_column_not_found"):
         read_dataset(root, columns=["asset_id", "missing"])
@@ -554,8 +528,8 @@ def test_read_dataset_rejects_data_root_missing_and_missing_projection_columns(
 
 
 def test_inspect_dataset_returns_expanded_metadata(tmp_path: Path) -> None:
-    root = _artifact_root(tmp_path)
-    write_dataset(root, _frame(), spec=_spec())
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
 
     inspection = inspect_dataset(root)
 
@@ -575,12 +549,28 @@ def test_inspect_dataset_returns_expanded_metadata(tmp_path: Path) -> None:
 
 
 def test_write_dataset_preserves_factor_and_label_nan_profiles(tmp_path: Path) -> None:
-    factor_root = _artifact_root(tmp_path, "factor_nan")
-    label_root = _label_artifact_root(tmp_path)
-    label_frame = _frame().rename(columns={"value": "label"})
+    factor_root = make_dataset_artifact_root(tmp_path, "factor_nan")
+    label_root = make_dataset_artifact_root(
+        tmp_path,
+        "label_x",
+        kind=ProcessedDataKind.LABEL,
+    )
+    label_frame = make_dataset_frame().rename(columns={"value": "label"})
 
-    write_dataset(factor_root, _frame(), spec=_spec("factor_nan"))
-    write_dataset(label_root, label_frame, spec=_label_spec())
+    write_dataset(
+        factor_root,
+        make_dataset_frame(),
+        spec=make_processed_dataset_spec("factor_nan"),
+    )
+    write_dataset(
+        label_root,
+        label_frame,
+        spec=make_processed_dataset_spec(
+            "label_x",
+            kind=ProcessedDataKind.LABEL,
+            value_column="label",
+        ),
+    )
 
     factor_manifest = json.loads(
         (factor_root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
@@ -597,11 +587,11 @@ def test_write_dataset_preserves_factor_and_label_nan_profiles(tmp_path: Path) -
 def test_inspect_and_fingerprint_detect_schema_mismatch_across_parts(
     tmp_path: Path,
 ) -> None:
-    root = _artifact_root(tmp_path)
-    write_dataset(root, _frame(), spec=_spec())
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
     bad_part = root / "data" / "year=2016" / "part-000.parquet"
     bad_part.parent.mkdir(parents=True)
-    _frame().assign(extra=1).to_parquet(bad_part, index=False)
+    make_dataset_frame().assign(extra=1).to_parquet(bad_part, index=False)
 
     with pytest.raises(ValueError, match="dataset_schema_mismatch"):
         inspect_dataset(root)
@@ -612,14 +602,16 @@ def test_inspect_and_fingerprint_detect_schema_mismatch_across_parts(
 def test_compare_datasets_statuses_for_semantic_and_schema_differences(
     tmp_path: Path,
 ) -> None:
-    left_root = _artifact_root(tmp_path, "left")
-    right_root = _artifact_root(tmp_path, "right")
-    schema_root = _artifact_root(tmp_path, "schema")
-    write_dataset(left_root, _frame(), spec=_spec("left"))
+    left_root = make_dataset_artifact_root(tmp_path, "left")
+    right_root = make_dataset_artifact_root(tmp_path, "right")
+    schema_root = make_dataset_artifact_root(tmp_path, "schema")
+    write_dataset(
+        left_root, make_dataset_frame(), spec=make_processed_dataset_spec("left")
+    )
     write_dataset(
         right_root,
-        iter([_frame().iloc[:1], _frame().iloc[1:]]),
-        spec=_spec("right"),
+        iter([make_dataset_frame().iloc[:1], make_dataset_frame().iloc[1:]]),
+        spec=make_processed_dataset_spec("right"),
     )
 
     comparison = compare_datasets(left_root, right_root)
@@ -633,11 +625,14 @@ def test_compare_datasets_statuses_for_semantic_and_schema_differences(
         kind=ProcessedDataKind.FACTOR,
         frequency=DataFrequency.DAILY,
         grain=DataGrain.ASSET_TIMESTAMP,
-        column_roles={**_spec().column_roles, "other": ColumnRole.FACTOR},
-        primary_key=platform_entity_time_key(),
+        column_roles={
+            **make_processed_dataset_spec().column_roles,
+            "other": ColumnRole.FACTOR,
+        },
+        primary_key=make_processed_dataset_spec().primary_key,
         partition_columns=("year",),
     )
-    write_dataset(schema_root, _frame().assign(other=1.0), spec=wider_spec)
+    write_dataset(schema_root, make_dataset_frame().assign(other=1.0), spec=wider_spec)
 
     schema_comparison = compare_datasets(left_root, schema_root)
     assert schema_comparison.status == "SCHEMA_MISMATCH"
@@ -647,13 +642,17 @@ def test_compare_datasets_statuses_for_semantic_and_schema_differences(
 def test_compare_datasets_ignores_allowed_instance_metadata_for_same_content(
     tmp_path: Path,
 ) -> None:
-    left_root = _artifact_root(tmp_path, "left_metadata")
-    right_root = _artifact_root(tmp_path, "right_metadata")
-    write_dataset(left_root, _frame(), spec=_spec("left_metadata"))
+    left_root = make_dataset_artifact_root(tmp_path, "left_metadata")
+    right_root = make_dataset_artifact_root(tmp_path, "right_metadata")
+    write_dataset(
+        left_root,
+        make_dataset_frame(),
+        spec=make_processed_dataset_spec("left_metadata"),
+    )
     write_dataset(
         right_root,
-        _frame(),
-        spec=_spec("right_metadata"),
+        make_dataset_frame(),
+        spec=make_processed_dataset_spec("right_metadata"),
         instance_metadata={
             "input_fingerprints": {"demo_input": _input_fingerprint_payload()}
         },

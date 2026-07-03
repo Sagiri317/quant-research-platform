@@ -9,6 +9,107 @@ from typing import Any
 import pandas as pd
 import pyarrow.parquet as pq
 
+from quant_research_platform.catalog.fields import platform_entity_time_key
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    DataGrain,
+    ProcessedDataKind,
+    ProcessedDataSpec,
+)
+from quant_research_platform.contracts.ids import MarketId
+
+
+def make_dataset_frame(
+    *,
+    scenario: str = "default",
+    asset_ids: Sequence[str] | None = None,
+    dates: Sequence[str] | None = None,
+    values: Sequence[object] | None = None,
+    value_column: str = "value",
+    market_id: str = "a_share",
+) -> pd.DataFrame:
+    defaults = _dataset_frame_defaults(scenario)
+    asset_ids = defaults["asset_ids"] if asset_ids is None else asset_ids
+    dates = defaults["dates"] if dates is None else dates
+    values = defaults["values"] if values is None else values
+    return pd.DataFrame(
+        {
+            "market_id": [market_id] * len(asset_ids),
+            "asset_id": list(asset_ids),
+            "timestamp": pd.to_datetime(list(dates)),
+            value_column: list(values),
+        }
+    )
+
+
+def _dataset_frame_defaults(scenario: str) -> dict[str, Sequence[object]]:
+    if scenario == "default":
+        return {
+            "asset_ids": ("asset_002", "asset_001", "asset_001"),
+            "dates": ("2015-01-05", "2014-01-02", "2015-01-05"),
+            "values": (2.0, 1.0, float("nan")),
+        }
+    if scenario == "time_window":
+        return {
+            "asset_ids": ("000001", "000001", "000001"),
+            "dates": ("2014-01-02", "2015-01-05", "2016-01-04"),
+            "values": (1.0, 2.0, 3.0),
+        }
+    if scenario == "correctness":
+        return {
+            "asset_ids": ("asset_a", "asset_b", "asset_a", "asset_b"),
+            "dates": ("2020-01-02", "2020-01-02", "2020-01-06", "2020-01-06"),
+            "values": (1.0, 2.0, 3.0, 4.0),
+        }
+    if scenario == "helper_edges":
+        return {
+            "asset_ids": ("asset_a", "asset_b"),
+            "dates": ("2024-01-02", "2024-01-03"),
+            "values": (1.0, 2.0),
+        }
+    raise ValueError(f"unknown_dataset_frame_scenario: {scenario}")
+
+
+def make_processed_dataset_spec(
+    data_id: str = "x",
+    *,
+    kind: ProcessedDataKind = ProcessedDataKind.FACTOR,
+    value_column: str = "value",
+    value_role: ColumnRole | None = None,
+    market_id: str = "a_share",
+    primary_key: tuple[str, ...] = platform_entity_time_key(),
+    partition_columns: tuple[str, ...] = ("year",),
+) -> ProcessedDataSpec:
+    role = value_role or (
+        ColumnRole.LABEL if kind == ProcessedDataKind.LABEL else ColumnRole.FACTOR
+    )
+    return ProcessedDataSpec(
+        data_id=data_id,
+        market_id=MarketId(market_id),
+        kind=kind,
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            value_column: role,
+        },
+        primary_key=primary_key,
+        partition_columns=partition_columns,
+    )
+
+
+def make_dataset_artifact_root(
+    tmp_path: Path,
+    data_id: str = "x",
+    *,
+    kind: ProcessedDataKind = ProcessedDataKind.FACTOR,
+    market_id: str = "a_share",
+) -> Path:
+    return tmp_path / "data" / "processed" / market_id / kind.value / data_id
+
 
 def write_low_level_parquet_artifact(
     artifact_root: Path,

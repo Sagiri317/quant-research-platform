@@ -26,12 +26,13 @@ tracked handoff tooling 位于：
   package smoke 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`；构建后端依赖由 `environment.yml` 显式提供。package smoke 只通过 wheel 解压和 `PYTHONPATH` import smoke 构造，不执行安装。
 - `verify_handoff_package.py` 是 package trust boundary。
   `verify_handoff_package_result()` 是唯一 package-level verifier function。
-  verifier result path 只做一次 zip inspection，且需要 replay 时只 clone
-  `final-branch.bundle` 一次。standalone verifier CLI 保留，但不是额外 Python
-  wrapper。未经用户明确批准，不新增或保留 wrapper、alias、adapter 或
-  compatibility layer。
+  verifier result path 使用唯一 `HandoffPackagePayload` load 和 package payload
+  validation；需要 replay 时只 clone `final-branch.bundle` 一次。standalone
+  verifier CLI 保留，但不是额外 Python wrapper。未经用户明确批准，不新增或保留
+  wrapper、alias、adapter 或 compatibility layer。
 - `governance_contract.py` 拥有 governance scan、source-tree scan、
-  share-safety path rules 和 status tokens。
+  share-safety path rules 和 status tokens。source-tree scan 由
+  `SourceTreeScanInput` 统一驱动，individual scanner 不保留 Path 旧入口。
 
 ## Build Entry
 
@@ -44,9 +45,9 @@ python .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_
 builder 从当前 Git state 读取 branch 和 HEAD，要求 worktree clean，计算
 `base = git merge-base HEAD <base-ref>`，写入 bundle，从 bundle clone 自动生成
 machine receipts 和 validation summary，写入 manifest、zip 和 external sidecar，
-然后检查 package envelope、schema、hash 和 share-safety。检查不通过时，本次 build
-不视为成功。standalone verifier 仍是完整 bundle replay 和 receipt comparison 的正式
-入口。
+然后通过同一个 `HandoffPackagePayload` load path 检查 schema、hash 和
+share-safety。检查不通过时，本次 build 不视为成功。standalone verifier 仍是完整
+bundle replay 和 receipt comparison 的正式入口。
 
 `profile_smoke` validation row 只代表正式 profile runner 的 `profile-smoke`
 profile；validation summary 必须从 packaged/replayed receipts 派生，不允许手写
@@ -69,8 +70,9 @@ comparison。
 
 `replay_evidence.py` 拥有 machine replay 和 canonical receipt construction。
 
-`verify_handoff_package.py` 拥有 verifier result path、zip inspection primitive、
-bundle replay primitive、replay comparison 和 clone tree share-safety scan。
+`verify_handoff_package.py` 拥有 verifier result path、single
+`HandoffPackagePayload` load、package payload validation、bundle replay
+primitive、replay comparison 和 clone tree share-safety scan。
 
 文档只描述 owner layer、scope boundary 和 acceptance gate；字段事实源使用上述可执行 owner modules。
 
