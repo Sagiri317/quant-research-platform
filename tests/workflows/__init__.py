@@ -1,1 +1,1 @@
-"""流水线测试。"""
+"""Workflow pipeline tests."""

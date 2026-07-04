@@ -1,1 +1,1 @@
-"""CLI 接口测试。"""
+"""CLI interface tests."""

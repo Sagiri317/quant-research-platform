@@ -10,9 +10,9 @@ import pytest
 
 from tests.agents.handoff.conftest import (
     TEST_BRANCH,
-    _copy_valid_package,
-    _init_handoff_repo,
-    _rewrite_package_member,
+    copy_valid_handoff_package,
+    init_handoff_test_repo,
+    rewrite_handoff_package_member,
 )
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
@@ -25,7 +25,7 @@ def mutation_handoff_package(
 ) -> tuple[Path, Path]:
     root = tmp_path_factory.mktemp("mutation-handoff-package")
     repo = root / "repo"
-    base, final_head = _init_handoff_repo(repo)
+    base, final_head = init_handoff_test_repo(repo)
     builder = load_handoff_script_module("build_handoff_package")
     receipts = builder.build_machine_receipts(repo, final_head)
     validation_summary = builder.build_validation_summary_from_receipts(receipts)
@@ -77,7 +77,7 @@ def mutate_handoff_zip_and_refresh_hashes(
 ) -> None:
     import zipfile
 
-    _rewrite_package_member(
+    rewrite_handoff_package_member(
         package,
         member,
         (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
@@ -100,7 +100,7 @@ def mutate_handoff_zip_and_refresh_hashes(
         "schema_id": "qrp-handoff-artifact-manifest",
         "entries": entries,
     }
-    _rewrite_package_member(
+    rewrite_handoff_package_member(
         package,
         "artifact_manifest.json",
         (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(),
@@ -128,7 +128,7 @@ def _verify_fast(
 ) -> list[str]:
     verifier = load_handoff_script_module("verify_handoff_package")
     package_payload = verifier.load_handoff_package_payload(package, sidecar)
-    result = verifier._validate_handoff_package_payload(
+    result = verifier.validate_handoff_package_payload(
         package_payload,
         expected_receipts=copy.deepcopy(cached_mutation_replayed_receipts),
         replay_bundle=False,
@@ -148,7 +148,7 @@ def _read_member_json(package: Path, member: str) -> dict[str, Any]:
 def _copy(
     tmp_path: Path, mutation_handoff_package: tuple[Path, Path]
 ) -> tuple[Path, Path]:
-    return _copy_valid_package(mutation_handoff_package, tmp_path)
+    return copy_valid_handoff_package(mutation_handoff_package, tmp_path)
 
 
 def test_valid_package_full_verifier_smoke(

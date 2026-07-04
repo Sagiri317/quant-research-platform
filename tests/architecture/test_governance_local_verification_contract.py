@@ -5,8 +5,8 @@ import re
 from pathlib import Path
 
 from tests.architecture.governance_scan_helpers import (
-    _iter_text_files,
-    _public_surface_scan_text,
+    iter_governance_text_files,
+    public_surface_scan_text,
 )
 from tests.helpers.governance_git_repos import init_governance_git_repo
 
@@ -70,11 +70,11 @@ def test_local_verification_replaces_retired_public_names() -> None:
     present = sorted(str(path) for path in retired_files if path.exists())
     hits: list[str] = []
     current_file = Path(__file__).resolve()
-    for path in _iter_text_files():
+    for path in iter_governance_text_files():
         if path.resolve() == current_file:
             continue
         try:
-            text = _public_surface_scan_text(path)
+            text = public_surface_scan_text(path)
         except UnicodeDecodeError:
             continue
         for line_number, line in enumerate(text.splitlines(), start=1):

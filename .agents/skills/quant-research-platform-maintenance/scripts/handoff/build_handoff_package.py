@@ -36,8 +36,8 @@ from handoff_contract import (  # noqa: E402
 )
 from replay_evidence import build_machine_receipts  # noqa: E402
 from verify_handoff_package import (  # noqa: E402
-    _validate_handoff_package_payload,
     load_handoff_package_payload,
+    validate_handoff_package_payload,
 )
 
 PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
@@ -120,7 +120,7 @@ def build_handoff_package(
         zip_path,
         json_path,
     )
-    verification = _validate_handoff_package_payload(
+    verification = validate_handoff_package_payload(
         package_payload,
         expected_receipts=receipts,
         replay_bundle=False,

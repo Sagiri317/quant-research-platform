@@ -1,4 +1,4 @@
-"""质量校验报告结构和通用检查。"""
+"""Quality validation report structures and shared checks."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class QualityIssue:
-    """一条质量校验问题。"""
+    """One quality validation issue."""
 
     dataset: str
     check: str
@@ -20,7 +20,7 @@ class QualityIssue:
 
 @dataclass(frozen=True)
 class QualityReport:
-    """单个已加载表的质量校验报告。"""
+    """Quality validation report for one loaded table."""
 
     dataset: str
     file: str
@@ -34,19 +34,19 @@ class QualityReport:
 
 
 def has_blocking_issues(issues: list[QualityIssue]) -> bool:
-    """判断是否存在应阻断 pipeline 的问题。"""
+    """Return whether any issue should block the pipeline."""
 
     return any(issue.severity == "blocking" and issue.count > 0 for issue in issues)
 
 
 def to_datetime(series: pd.Series) -> pd.Series:
-    """把 Series 解析为 datetime，非法值置为 NaT。"""
+    """Parse a Series as datetimes and coerce invalid values to NaT."""
 
     return pd.to_datetime(series, errors="coerce")
 
 
 def date_bounds(dates: pd.Series) -> tuple[str | None, str | None]:
-    """返回 datetime Series 的最小和最大日期字符串。"""
+    """Return minimum and maximum date strings for a datetime Series."""
 
     valid = dates.dropna()
     if valid.empty:
@@ -59,7 +59,7 @@ def duplicate_issue(
     dataset: str,
     primary_key: list[str],
 ) -> QualityIssue | None:
-    """返回重复主键对应的 blocking 问题。"""
+    """Return the blocking issue for duplicate primary keys."""
 
     missing = [column for column in primary_key if column not in frame.columns]
     if missing:
@@ -88,7 +88,7 @@ def expected_year_issue(
     dataset: str,
     expected_year: int | None,
 ) -> QualityIssue | None:
-    """返回日期超出期望年份对应的 blocking 问题。"""
+    """Return the blocking issue for dates outside the expected year."""
 
     if expected_year is None:
         return None
@@ -109,7 +109,7 @@ def missing_columns_issue(
     dataset: str,
     columns: tuple[str, ...],
 ) -> QualityIssue | None:
-    """返回必需列缺失对应的 blocking 问题。"""
+    """Return the blocking issue for missing required columns."""
 
     missing = [column for column in columns if column not in frame.columns]
     if not missing:
@@ -124,7 +124,7 @@ def missing_columns_issue(
 
 
 def ohlc_issue(frame: pd.DataFrame, dataset: str) -> QualityIssue | None:
-    """返回 OHLC 关系不合法对应的 blocking 问题。"""
+    """Return the blocking issue for invalid OHLC relationships."""
 
     required = ["open", "high", "low", "close"]
     if any(column not in frame.columns for column in required):
@@ -153,7 +153,7 @@ def negative_value_issue(
     columns: list[str],
     check: str,
 ) -> QualityIssue | None:
-    """返回指定列存在负值对应的 blocking 问题。"""
+    """Return the blocking issue for negative values in selected columns."""
 
     available = [column for column in columns if column in frame.columns]
     if not available:
@@ -172,7 +172,7 @@ def negative_value_issue(
 
 
 def value_counts(frame: pd.DataFrame, column: str) -> dict[str, int]:
-    """返回 JSON 友好的 value counts。"""
+    """Return JSON-friendly value counts."""
 
     if column not in frame.columns:
         return {}

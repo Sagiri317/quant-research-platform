@@ -3,7 +3,7 @@ from __future__ import annotations
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 
-def _valid_counts(**overrides: int) -> dict[str, int]:
+def make_valid_check_counts(**overrides: int) -> dict[str, int]:
     counts = {
         "passed": 1,
         "failed": 0,
@@ -17,7 +17,7 @@ def _valid_counts(**overrides: int) -> dict[str, int]:
     counts.update(overrides)
     return counts
 
-def _valid_row(
+def make_valid_check_row(
     command_id: str = "profile-smoke", **overrides: object
 ) -> dict[str, object]:
     handoff_contract = load_handoff_script_module("handoff_contract")
@@ -31,7 +31,7 @@ def _valid_row(
         "status": "PASS",
         "exit_code": 0,
         "duration_seconds": 0.1,
-        "counts": _valid_counts() if command_id == "profile-smoke" else None,
+        "counts": make_valid_check_counts() if command_id == "profile-smoke" else None,
         "failure_class": None,
         "blocked_reason": None,
         "not_run_reason": None,
@@ -44,7 +44,10 @@ def make_check_receipts_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_id": "qrp-check-receipts",
         "status": "PASS",
-        "checks": [_valid_row("profile-smoke"), _valid_row("code-map")],
+        "checks": [
+            make_valid_check_row("profile-smoke"),
+            make_valid_check_row("code-map"),
+        ],
     }
     payload.update(overrides)
     return payload
@@ -88,13 +91,13 @@ def make_hard_scan_receipt_payload(**overrides: object) -> dict[str, object]:
     payload.update(overrides)
     return payload
 
-def _valid_validation_summary_rows() -> list[dict[str, str]]:
+def make_valid_validation_summary_rows() -> list[dict[str, str]]:
     handoff_contract = load_handoff_script_module("handoff_contract")
     return [
         {"name": name, "status": "PASS"}
         for name in handoff_contract.MANDATORY_VALIDATION_ROWS
     ]
 
-def _failures(row: dict[str, object]) -> list[str]:
+def receipt_row_failures(row: dict[str, object]) -> list[str]:
     contract = load_handoff_script_module("receipt_contract")
     return contract.validate_check_receipt_row(row)

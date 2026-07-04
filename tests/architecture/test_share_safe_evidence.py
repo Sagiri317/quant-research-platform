@@ -161,7 +161,7 @@ def _synthetic_area(area: str, index: int) -> dict[str, object]:
     }
 
 
-def _synthetic_review_safe_evidence_payload() -> dict[str, object]:
+def synthetic_review_safe_evidence_payload() -> dict[str, object]:
     return {
         "schema_id": "qrp-a-share-aggregate-evidence",
         "output_scope": "REVIEW_SAFE",
@@ -181,7 +181,7 @@ def _synthetic_review_safe_evidence_payload() -> dict[str, object]:
     }
 
 
-def _synthetic_local_verification_inventory_payload() -> dict[str, object]:
+def synthetic_local_verification_inventory_payload() -> dict[str, object]:
     inventory = [
         {
             "kind": "dataset",
@@ -218,7 +218,7 @@ def _synthetic_local_verification_inventory_payload() -> dict[str, object]:
 
 
 def _write_review_safe_evidence_files(tmp_path: Path) -> tuple[Path, Path]:
-    payload = _synthetic_review_safe_evidence_payload()
+    payload = synthetic_review_safe_evidence_payload()
     json_path = tmp_path / "review-safe-evidence.json"
     md_path = tmp_path / "review-safe-evidence.md"
     json_path.write_text(
@@ -235,7 +235,7 @@ def _write_review_safe_evidence_files(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _write_local_inventory_files(tmp_path: Path) -> tuple[Path, Path]:
-    payload = _synthetic_local_verification_inventory_payload()
+    payload = synthetic_local_verification_inventory_payload()
     json_path = tmp_path / "local-verification-inventory.json"
     md_path = tmp_path / "local-verification-inventory.md"
     json_path.write_text(
@@ -299,7 +299,7 @@ def _synthetic_local_verification_inventory_markdown(
 
 
 def test_current_review_safe_parity_evidence_json_schema() -> None:
-    payload = _synthetic_review_safe_evidence_payload()
+    payload = synthetic_review_safe_evidence_payload()
 
     assert payload["schema_id"] == "qrp-a-share-aggregate-evidence"
     assert payload["output_scope"] == "REVIEW_SAFE"
@@ -389,7 +389,7 @@ import tests.architecture.test_share_safe_evidence
 
 
 def test_current_review_safe_parity_evidence_is_aggregate_status_payload() -> None:
-    payload = _synthetic_review_safe_evidence_payload()
+    payload = synthetic_review_safe_evidence_payload()
     text = json.dumps(payload, ensure_ascii=False).lower()
 
     assert "metadata verification" not in text
@@ -401,7 +401,7 @@ def test_current_review_safe_parity_evidence_is_aggregate_status_payload() -> No
 
 
 def test_full_historical_market_panel_daily_covers_full_2014_2025_period() -> None:
-    payload = _synthetic_review_safe_evidence_payload()
+    payload = synthetic_review_safe_evidence_payload()
     area = next(
         item
         for item in payload["areas"]
@@ -438,7 +438,7 @@ def test_review_safe_parity_evidence_uses_lf_newlines(tmp_path: Path) -> None:
 
 
 def test_local_verification_inventory_json_schema_and_coverage() -> None:
-    payload = _synthetic_local_verification_inventory_payload()
+    payload = synthetic_local_verification_inventory_payload()
 
     assert SUMMARY_TOP_LEVEL_FIELDS.issubset(payload)
     assert payload["schema_id"] == "qrp-a-share-verification-inventory"
@@ -471,7 +471,7 @@ def test_local_verification_inventory_json_schema_and_coverage() -> None:
 
 
 def test_local_verification_inventory_covers_full_historical_panel() -> None:
-    payload = _synthetic_local_verification_inventory_payload()
+    payload = synthetic_local_verification_inventory_payload()
     market_panel_daily = next(
         item
         for item in payload["dataset_inventory"]

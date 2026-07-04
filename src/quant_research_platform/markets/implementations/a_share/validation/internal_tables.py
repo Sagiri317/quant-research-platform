@@ -122,7 +122,7 @@ def check_market_bars(
 def check_benchmark_index_market(
     frame: pd.DataFrame, *, expected_year: int | None = None, file: str = ""
 ) -> QualityReport:
-    """检查单个标准化 benchmark index interim frame。"""
+    """Validate one normalized benchmark-index interim frame."""
 
     result = frame.copy()
     result["timestamp"] = to_datetime(result["timestamp"])

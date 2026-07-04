@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 
 from tests.agents.handoff.receipt_contract_fixtures import (
-    _failures,
-    _valid_counts,
-    _valid_row,
     make_check_receipts_payload,
+    make_valid_check_counts,
+    make_valid_check_row,
+    receipt_row_failures,
 )
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
@@ -39,7 +39,9 @@ def test_profile_smoke_counts_collected_must_equal_outcome_total(
     collected: int,
     expected: str,
 ) -> None:
-    failures = _failures(_valid_row(counts=_valid_counts(collected=collected)))
+    failures = receipt_row_failures(
+        make_valid_check_row(counts=make_valid_check_counts(collected=collected))
+    )
 
     assert expected in failures
 

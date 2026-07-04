@@ -8,22 +8,22 @@ from tests.architecture.governance_scan_helpers import (
     FORBIDDEN_WRITER_METHODS,
     RUN_OUTPUT_ARTIFACTS,
     RUNTIME_PROFILING,
-    _call_name,
-    _class_field_names,
-    _function_arg_names,
-    _is_approved_writer_path,
-    _is_open_call,
-    _is_open_write_call,
-    _is_write_mode,
-    _iter_python_files,
-    _open_mode,
+    call_name,
+    class_field_names,
+    function_arg_names,
+    is_approved_writer_path,
+    is_open_call,
+    is_open_write_call,
+    is_write_mode,
+    iter_governance_python_files,
+    open_mode,
 )
 
 
 def test_business_logic_does_not_bypass_persistent_writers() -> None:
     hits: list[str] = []
-    for path in _iter_python_files():
-        if _is_approved_writer_path(path):
+    for path in iter_governance_python_files():
+        if is_approved_writer_path(path):
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -33,18 +33,18 @@ def test_business_logic_does_not_bypass_persistent_writers() -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            call_name = _call_name(node.func)
-            if call_name in FORBIDDEN_WRITER_METHODS:
-                hits.append(f"{path}:{node.lineno}: {call_name}")
+            called_name = call_name(node.func)
+            if called_name in FORBIDDEN_WRITER_METHODS:
+                hits.append(f"{path}:{node.lineno}: {called_name}")
                 continue
-            if _is_open_write_call(node):
+            if is_open_write_call(node):
                 hits.append(f"{path}:{node.lineno}: open(...).write")
                 continue
-            if _is_open_call(node.func):
-                mode = _open_mode(node)
+            if is_open_call(node.func):
+                mode = open_mode(node)
                 if mode is None:
                     hits.append(f"{path}:{node.lineno}: open with dynamic mode")
-                elif _is_write_mode(mode):
+                elif is_write_mode(mode):
                     hits.append(f"{path}:{node.lineno}: open mode={mode!r}")
 
     assert hits == []
@@ -79,16 +79,16 @@ def test_direct_write_gate_detects_chained_open_write() -> None:
     tree = ast.parse("open('artifact.txt', 'w').write('unsafe')\n")
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
 
-    assert any(_is_open_write_call(call) for call in calls)
+    assert any(is_open_write_call(call) for call in calls)
 
 def test_approved_writer_signatures_do_not_accept_arbitrary_physical_roots() -> None:
     writer_arg_sets = (
-        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_stage_profile_outputs"),
-        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_prediction_outputs"),
-        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_evaluation_outputs"),
+        function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_stage_profile_outputs"),
+        function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_prediction_outputs"),
+        function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_evaluation_outputs"),
     )
 
-    assert "output_dir" not in _class_field_names(RUNTIME_PROFILING, "ProfileConfig")
+    assert "output_dir" not in class_field_names(RUNTIME_PROFILING, "ProfileConfig")
     for arg_names in writer_arg_sets:
         assert "".join(("output_", "root")) not in arg_names
         assert "output_dir" not in arg_names

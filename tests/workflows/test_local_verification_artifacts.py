@@ -2,24 +2,24 @@ from __future__ import annotations
 
 import json
 
-from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.workflows import local_verification as module
 from quant_research_platform.workflows.local_verification import run_local_verification
 from quant_research_platform.workflows.local_verification_layout import (
     LocalVerificationLayout,
 )
-from tests.helpers import frequency_ids
 from tests.workflows.local_verification_fixtures import (
     LEGACY_RSS_PEAK_FIELD,
-    _fake_evaluation_result,
-    _fake_portfolio_result,
-    _fake_prediction_result,
-    _persist_fake_artifact,
-    _profile_with_materializers,
-    _repo_run_root,
-    _smoke_prediction_specs,
-    _stub_output_writers,
-    _verification_config,
+    fake_evaluation_result,
+    fake_portfolio_result,
+    fake_prediction_result,
+    make_local_verification_config,
+    persist_fake_artifact,
+    profile_with_materializers,
+    repo_run_root,
+    smoke_prediction_specs,
+    stub_interim_importer,
+    stub_output_writers,
+    stub_processed_builder,
 )
 
 
@@ -33,52 +33,6 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
     prediction_ids: list[str] = []
     portfolio_ids: list[str] = []
 
-    def import_interim(
-        layout,
-        raw_root,
-        start_date,
-        end_date,
-    ):
-        del raw_root, start_date, end_date
-        calls.append("interim")
-        artifact_root = (
-            layout.project_root
-            / "data"
-            / "interim"
-            / "csmar"
-            / frequency_ids.MARKET_BARS_DATA_ID
-        )
-        _persist_fake_artifact(
-            artifact_root,
-            frequency_ids.MARKET_BARS_DATA_ID,
-            "interim",
-        )
-        return type(
-            "Result",
-            (),
-            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
-        )()
-
-    def build_processed(
-        layout,
-        source_id,
-        time_window,
-        kinds,
-    ):
-        del source_id, time_window, kinds
-        calls.append("processed")
-        artifact_root = (
-            layout.project_root
-            / "data"
-            / "processed"
-            / "a_share"
-            / "factor"
-            / "price_volume"
-        )
-        _persist_fake_artifact(artifact_root, "price_volume", "processed")
-        inspection = inspect_dataset(artifact_root)
-        return {"price_volume": inspection}
-
     def assemble_dataset(**kwargs):
         calls.append("research")
         artifact_root = (
@@ -88,7 +42,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
             / "a_share"
             / "price_volume_forward_returns"
         )
-        _persist_fake_artifact(
+        persist_fake_artifact(
             artifact_root,
             "price_volume_forward_returns",
             "research",
@@ -96,7 +50,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
         return artifact_root
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
-    _stub_output_writers(monkeypatch)
+    stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
         "build_evaluation_result_from_research_dataset",
@@ -104,7 +58,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
             calls.append("evaluation")
             or run_years.append((kwargs["time_window"].start.year,))
             or evaluation_run_ids.append(kwargs["run_id"])
-            or _fake_evaluation_result(kwargs)
+            or fake_evaluation_result(kwargs)
         ),
     )
     monkeypatch.setattr(
@@ -114,7 +68,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
             calls.append("prediction")
             or run_years.append((kwargs["time_window"].start.year,))
             or prediction_ids.append(kwargs["prediction_id"])
-            or _fake_prediction_result(kwargs)
+            or fake_prediction_result(kwargs)
         ),
     )
     monkeypatch.setattr(
@@ -124,18 +78,21 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
             calls.append("portfolio")
             or run_years.append((kwargs["time_window"].start.year,))
             or portfolio_ids.append(kwargs["portfolio_id"])
-            or _fake_portfolio_result(kwargs)
+            or fake_portfolio_result(kwargs)
         ),
     )
 
-    profile = _profile_with_materializers(import_interim, build_processed)
+    profile = profile_with_materializers(
+        stub_interim_importer(on_call=lambda: calls.append("interim")),
+        stub_processed_builder(on_call=lambda: calls.append("processed")),
+    )
     expected_prediction_ids = [
-        prediction_spec.prediction_id for prediction_spec in _smoke_prediction_specs()
+        prediction_spec.prediction_id for prediction_spec in smoke_prediction_specs()
     ]
     expected_prediction_count = len(expected_prediction_ids)
-    run_root = _repo_run_root(tmp_path, monkeypatch, ".run", "s1")
+    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "s1")
     result = run_local_verification(
-        _verification_config(
+        make_local_verification_config(
             run_root=run_root,
             start_date="2014-01-01",
             end_date="2016-12-31",

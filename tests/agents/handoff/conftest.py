@@ -36,7 +36,10 @@ def full_valid_handoff_package(
     return package, sidecar
 
 
-def _copy_valid_package(source: tuple[Path, Path], target: Path) -> tuple[Path, Path]:
+def copy_valid_handoff_package(
+    source: tuple[Path, Path],
+    target: Path,
+) -> tuple[Path, Path]:
     source_package, source_sidecar = source
     package = target / source_package.name
     sidecar = target / source_sidecar.name
@@ -48,7 +51,7 @@ def _copy_valid_package(source: tuple[Path, Path], target: Path) -> tuple[Path, 
 def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
     builder = load_handoff_script_module("build_handoff_package")
     repo = tmp_path / "repo"
-    base, final_head = _init_handoff_repo(repo)
+    base, final_head = init_handoff_test_repo(repo)
     result = builder.build_handoff_package(
         repo_root=repo,
         out_dir=tmp_path / "out",
@@ -72,7 +75,7 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
     return repo, Path(result["zip_path"]), Path(result["json_path"]), base, final_head
 
 
-def _init_handoff_repo(repo: Path) -> tuple[str, str]:
+def init_handoff_test_repo(repo: Path) -> tuple[str, str]:
     repo.mkdir()
     support_root = repo / ".agents" / "skills" / "quant-research-platform-maintenance"
     shutil.copytree(
@@ -92,21 +95,21 @@ def _init_handoff_repo(repo: Path) -> tuple[str, str]:
             policy_root / relative,
         )
     _write_minimal_project_files(repo)
-    _git(repo, "init")
-    _git(repo, "config", "user.email", "handoff-test@example.invalid")
-    _git(repo, "config", "user.name", "Handoff Test")
-    _git(repo, "checkout", "-b", TEST_BRANCH)
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "base")
-    base = _git(repo, "rev-parse", "HEAD").strip()
-    _git(repo, "update-ref", "refs/remotes/origin/main", base)
+    run_git(repo, "init")
+    run_git(repo, "config", "user.email", "handoff-test@example.invalid")
+    run_git(repo, "config", "user.name", "Handoff Test")
+    run_git(repo, "checkout", "-b", TEST_BRANCH)
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "base")
+    base = run_git(repo, "rev-parse", "HEAD").strip()
+    run_git(repo, "update-ref", "refs/remotes/origin/main", base)
     (repo / "tests" / "negative_fixtures.py").write_text(
         "NEGATIVE_FIXTURE = 'review-safe aggregate fixture'\n",
         encoding="utf-8",
     )
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "add handoff fixture")
-    final_head = _git(repo, "rev-parse", "HEAD").strip()
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add handoff fixture")
+    final_head = run_git(repo, "rev-parse", "HEAD").strip()
     return base, final_head
 
 
@@ -220,7 +223,7 @@ def _write_minimal_project_files(repo: Path) -> None:
     )
 
 
-def _git(repo: Path, *args: str) -> str:
+def run_git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args],
         cwd=repo,
@@ -245,7 +248,7 @@ def _validation_payload(
     }
 
 
-def _rewrite_package_member(package: Path, member: str, data: bytes) -> None:
+def rewrite_handoff_package_member(package: Path, member: str, data: bytes) -> None:
     temp = package.with_suffix(".rewrite.zip")
     with zipfile.ZipFile(package, "r") as src, zipfile.ZipFile(temp, "w") as dst:
         replaced = False
@@ -261,7 +264,7 @@ def _rewrite_package_member(package: Path, member: str, data: bytes) -> None:
     temp.replace(package)
 
 
-def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
+def refresh_handoff_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
     with zipfile.ZipFile(package, "r") as archive:
         names = sorted(
             name for name in archive.namelist() if name != "artifact_manifest.json"
@@ -281,7 +284,7 @@ def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
         "entries": entries,
     }
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
-    _rewrite_package_member(package, "artifact_manifest.json", manifest_bytes)
+    rewrite_handoff_package_member(package, "artifact_manifest.json", manifest_bytes)
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     payload["zip_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
     sidecar.write_text(
@@ -295,9 +298,9 @@ def _replace_validation_summary(
     sidecar: Path,
     payload: dict[str, object],
 ) -> None:
-    _rewrite_package_member(
+    rewrite_handoff_package_member(
         package,
         "handoff_evidence/validation-summary.json",
         (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
     )
-    _refresh_manifest_and_sidecar(package, sidecar)
+    refresh_handoff_manifest_and_sidecar(package, sidecar)

@@ -11,11 +11,11 @@ from tests.architecture.governance_scan_helpers import (
     RETIRED_DATA_PRODUCT_ALLOWED_NEGATIVE_TESTS,
     RETIRED_DATA_PRODUCT_ID,
     RETIRED_NAME_RULES,
-    _iter_active_governance_doc_files,
-    _iter_active_structure_files,
-    _iter_text_files,
-    _public_surface_scan_text,
     is_retired_path_policy_line,
+    iter_active_governance_doc_files,
+    iter_active_structure_files,
+    iter_governance_text_files,
+    public_surface_scan_text,
 )
 from tests.helpers import frequency_ids
 from tests.helpers.governance_fixtures import (
@@ -26,7 +26,7 @@ from tests.helpers.governance_fixtures import (
 
 def test_active_governance_docs_do_not_publish_retired_state_truth() -> None:
     hits: list[str] = []
-    for path in _iter_active_governance_doc_files():
+    for path in iter_active_governance_doc_files():
         text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), start=1):
             if is_retired_path_policy_line(path, line):
@@ -276,11 +276,11 @@ def test_active_tree_has_no_retired_terms() -> None:
     )
     current_file = Path(__file__).resolve()
     hits: list[str] = []
-    for path in _iter_text_files():
+    for path in iter_governance_text_files():
         if path.resolve() == current_file:
             continue
         try:
-            text = _public_surface_scan_text(path)
+            text = public_surface_scan_text(path)
         except UnicodeDecodeError:
             continue
         for name, pattern in forbidden_patterns:
@@ -308,11 +308,11 @@ def test_active_tree_has_no_stale_qrp_owned_version_tokens() -> None:
     )
     current_file = Path(__file__).resolve()
     hits: list[str] = []
-    for path in _iter_text_files():
+    for path in iter_governance_text_files():
         if path.resolve() == current_file:
             continue
         try:
-            text = _public_surface_scan_text(path)
+            text = public_surface_scan_text(path)
         except UnicodeDecodeError:
             continue
         for name, pattern in forbidden_patterns:
@@ -333,7 +333,7 @@ def test_active_tree_has_no_retired_data_product_vocabulary() -> None:
         re.compile(r"\bdata product id\b", re.IGNORECASE),
     )
     hits: list[str] = []
-    for path in _iter_text_files():
+    for path in iter_governance_text_files():
         if path.resolve() == current_file:
             continue
         try:
@@ -358,7 +358,7 @@ def test_active_tree_has_no_data_product_current_vocabulary() -> None:
         re.compile(r"catalog/data_products\.py"),
     )
     hits: list[str] = []
-    for path in _iter_text_files():
+    for path in iter_governance_text_files():
         if path.resolve() == current_file:
             continue
         try:
@@ -376,7 +376,7 @@ def test_active_tree_has_no_data_product_current_vocabulary() -> None:
 
 def test_active_tree_has_no_retired_data_layer_structure_vocabulary() -> None:
     hits: list[str] = []
-    for path in _iter_active_structure_files():
+    for path in iter_active_structure_files():
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -456,7 +456,7 @@ def test_research_foundation_semantic_closure_terms_are_retired() -> None:
 
     current_file = Path(__file__).resolve()
     hits: list[str] = []
-    for path in _iter_text_files():
+    for path in iter_governance_text_files():
         if path.resolve() == current_file:
             continue
         try:

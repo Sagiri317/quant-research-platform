@@ -10,8 +10,8 @@ pytestmark = pytest.mark.integration
 from tests.architecture.test_share_safe_evidence import (  # noqa: E402
     DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA,
     HASH_RE,
-    _synthetic_local_verification_inventory_payload,
-    _synthetic_review_safe_evidence_payload,
+    synthetic_local_verification_inventory_payload,
+    synthetic_review_safe_evidence_payload,
 )
 from tests.helpers import frequency_ids  # noqa: E402
 
@@ -412,8 +412,8 @@ def test_verification_summary_source_fixture_is_not_public_market_contract(
     source = Path(aggregates.__file__).read_text(encoding="utf-8")
     review_safe_payloads = "\n".join(
         (
-            str(_synthetic_review_safe_evidence_payload()),
-            str(_synthetic_local_verification_inventory_payload()),
+            str(synthetic_review_safe_evidence_payload()),
+            str(synthetic_local_verification_inventory_payload()),
         )
     )
 
@@ -427,7 +427,7 @@ def test_verification_summary_source_fixture_is_not_public_market_contract(
 
 def test_local_verification_inventory_covers_full_historical_panel_synthetic_contract(
 ) -> None:
-    payload = _synthetic_local_verification_inventory_payload()
+    payload = synthetic_local_verification_inventory_payload()
     market_panel_daily = next(
         item
         for item in payload["dataset_inventory"]

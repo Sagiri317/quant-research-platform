@@ -6,28 +6,27 @@ from pathlib import Path
 import pytest
 
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.workflows import local_verification as module
 from quant_research_platform.workflows.local_verification import (
     LocalVerificationRunConfig,
     run_local_verification,
 )
-from tests.helpers import frequency_ids
 from tests.workflows.local_verification_fixtures import (
     SMOKE_PORTFOLIO_EXECUTION_LAG_STEPS,
     SMOKE_PORTFOLIO_FREQUENCY,
     SMOKE_PREDICTION_TEST_START,
     SMOKE_PREDICTION_TRAIN_END,
-    _fake_evaluation_result,
-    _fake_portfolio_result,
-    _fake_prediction_result,
-    _persist_fake_artifact,
-    _persist_fake_research_root,
-    _profile_with_materializers,
-    _repo_run_root,
-    _smoke_prediction_specs,
-    _stub_output_writers,
-    _verification_config,
+    fake_evaluation_result,
+    fake_portfolio_result,
+    fake_prediction_result,
+    make_local_verification_config,
+    persist_fake_research_root,
+    profile_with_materializers,
+    repo_run_root,
+    smoke_prediction_specs,
+    stub_interim_importer,
+    stub_output_writers,
+    stub_processed_builder,
 )
 
 
@@ -35,11 +34,11 @@ def test_local_verification_workflow_rejects_existing_run_root(
     tmp_path,
     monkeypatch,
 ):
-    _repo_run_root(tmp_path, monkeypatch, ".run", "s1")
+    repo_run_root(tmp_path, monkeypatch, ".run", "s1")
     run_root = Path(".run") / "s1"
     run_root.mkdir(parents=True)
     (run_root / "unowned.txt").write_text("keep\n", encoding="utf-8")
-    config = _verification_config(
+    config = make_local_verification_config(
         run_root=run_root,
         start_date="2014-01-01",
         end_date="2016-12-31",
@@ -51,7 +50,7 @@ def test_local_verification_workflow_rejects_existing_run_root(
 
 
 def test_local_verification_workflow_rejects_invalid_date_range(tmp_path):
-    config = _verification_config(
+    config = make_local_verification_config(
         run_root=tmp_path / "local-verification-output" / "s1",
         start_date="2016-12-31",
         end_date="2014-01-01",
@@ -65,7 +64,7 @@ def test_local_verification_workflow_rejects_invalid_date_range(tmp_path):
 def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
     with pytest.raises(ValueError, match="evaluation_start_date_after_end_date"):
         run_local_verification(
-            _verification_config(
+            make_local_verification_config(
                 run_root=tmp_path / "local-verification-output" / "bad-evaluation",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
@@ -81,7 +80,7 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
         match="prediction_train_end_must_precede_test_start",
     ):
         run_local_verification(
-            _verification_config(
+            make_local_verification_config(
                 run_root=tmp_path / "local-verification-output" / "bad-prediction",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
@@ -97,7 +96,7 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
         match="prediction_test_end_must_not_precede_test_start",
     ):
         run_local_verification(
-            _verification_config(
+            make_local_verification_config(
                 run_root=tmp_path / "local-verification-output" / "bad-prediction-end",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
@@ -161,7 +160,7 @@ def test_local_verification_workflow_rejects_override_windows_outside_run_range(
         run_root = tmp_path / "local-verification-output" / run_name
         with pytest.raises(ValueError, match=match):
             run_local_verification(
-                _verification_config(
+                make_local_verification_config(
                     run_root=run_root,
                     start_date="2014-01-01",
                     end_date="2016-12-31",
@@ -173,7 +172,7 @@ def test_local_verification_workflow_rejects_override_windows_outside_run_range(
 
 
 def test_local_verification_run_id_can_be_explicit_long_semantic_value(tmp_path):
-    config = _verification_config(
+    config = make_local_verification_config(
         run_root=tmp_path / "local-verification-output" / "s1",
         start_date="2014-01-01",
         end_date="2016-12-31",
@@ -215,7 +214,7 @@ def test_local_verification_run_id_uses_shared_share_safe_contract(
 
 def test_local_verification_uses_explicit_prediction_windows() -> None:
     windows = module._resolve_effective_windows(
-        _verification_config(
+        make_local_verification_config(
             run_root=Path("unused"),
             start_date="2014-01-01",
             end_date="2016-12-31",
@@ -259,47 +258,12 @@ def test_local_verification_workflow_resolves_independent_windows(
     captured_evaluation_windows: list[tuple[str, str]] = []
     captured_prediction_inputs: list[dict[str, object]] = []
 
-    def import_interim(layout, raw_root, start_date, end_date):
-        del raw_root, start_date, end_date
-        calls.append("interim")
-        artifact_root = (
-            layout.project_root
-            / "data"
-            / "interim"
-            / "csmar"
-            / frequency_ids.MARKET_BARS_DATA_ID
-        )
-        _persist_fake_artifact(
-            artifact_root,
-            frequency_ids.MARKET_BARS_DATA_ID,
-            "interim",
-        )
-        return type(
-            "Result",
-            (),
-            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
-        )()
-
-    def build_processed(layout, source_id, time_window, kinds):
-        del source_id, time_window, kinds
-        calls.append("processed")
-        artifact_root = (
-            layout.project_root
-            / "data"
-            / "processed"
-            / "a_share"
-            / "factor"
-            / "price_volume"
-        )
-        _persist_fake_artifact(artifact_root, "price_volume", "processed")
-        return {"price_volume": inspect_dataset(artifact_root)}
-
     def assemble_dataset(**kwargs):
         calls.append("research")
-        return _persist_fake_research_root(**kwargs)
+        return persist_fake_research_root(**kwargs)
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
-    _stub_output_writers(monkeypatch)
+    stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
         "build_evaluation_result_from_research_dataset",
@@ -311,7 +275,7 @@ def test_local_verification_workflow_resolves_independent_windows(
                     kwargs["time_window"].end.isoformat(),
                 )
             )
-            or _fake_evaluation_result(kwargs)
+            or fake_evaluation_result(kwargs)
         ),
     )
     monkeypatch.setattr(
@@ -330,7 +294,7 @@ def test_local_verification_workflow_resolves_independent_windows(
                     "prediction_test_end": kwargs["prediction_test_end"],
                 }
             )
-            or _fake_prediction_result(kwargs)
+            or fake_prediction_result(kwargs)
         ),
     )
     monkeypatch.setattr(
@@ -344,13 +308,16 @@ def test_local_verification_workflow_resolves_independent_windows(
                     kwargs["time_window"].end.isoformat(),
                 )
             )
-            or _fake_portfolio_result(kwargs)
+            or fake_portfolio_result(kwargs)
         ),
     )
 
-    profile = _profile_with_materializers(import_interim, build_processed)
-    expected_prediction_count = len(tuple(_smoke_prediction_specs()))
-    run_root = _repo_run_root(
+    profile = profile_with_materializers(
+        stub_interim_importer(on_call=lambda: calls.append("interim")),
+        stub_processed_builder(on_call=lambda: calls.append("processed")),
+    )
+    expected_prediction_count = len(tuple(smoke_prediction_specs()))
+    run_root = repo_run_root(
         tmp_path,
         monkeypatch,
         ".run",
@@ -358,7 +325,7 @@ def test_local_verification_workflow_resolves_independent_windows(
         "s-window",
     )
     result = run_local_verification(
-        _verification_config(
+        make_local_verification_config(
             run_root=run_root,
             start_date="2014-01-01",
             end_date="2019-12-31",

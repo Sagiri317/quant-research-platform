@@ -16,7 +16,7 @@ MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 
 @dataclass(frozen=True)
 class RawFileMetadata:
-    """记录从原始 CSMAR export 文件名解析出的 metadata。"""
+    """Metadata parsed from a raw CSMAR export file name."""
 
     dataset: str
     market_scope: str
@@ -29,7 +29,7 @@ class RawFileMetadata:
 
 @dataclass(frozen=True)
 class RawTableContract:
-    """定义内部标准化前的原始 CSMAR export contract。"""
+    """Raw CSMAR export contract before internal standardization."""
 
     dataset: str
     table_code: str
@@ -40,7 +40,7 @@ class RawTableContract:
 
 @dataclass(frozen=True)
 class RawExportInspection:
-    """记录原始 CSMAR export 文件的 header-level 检查结果。"""
+    """Header-level inspection result for a raw CSMAR export file."""
 
     path: Path
     dataset: str
@@ -170,7 +170,7 @@ NATIVE_TABLE_DATASETS: dict[str, str] = {
 
 
 def parse_raw_filename(path: str | Path) -> RawFileMetadata:
-    """解析推荐的原始 CSMAR 文件名格式。"""
+    """Parse the recommended raw CSMAR file name format."""
 
     name = Path(path).name
     match = FILENAME_RE.match(name)
@@ -193,7 +193,7 @@ def parse_raw_filename(path: str | Path) -> RawFileMetadata:
 
 
 def infer_dataset_from_native_export(path: str | Path) -> str:
-    """从 CSMAR 原生表文件名或父目录推断 dataset。"""
+    """Infer the dataset from a native CSMAR table file name or parent path."""
 
     export_path = Path(path)
     stem = re.sub(r"\d+$", "", export_path.stem)
@@ -235,14 +235,14 @@ def read_export_header(path: str | Path) -> tuple[str, ...]:
 
 
 def expected_metadata_sidecar_path(path: str | Path) -> Path:
-    """返回原始 export 推荐的 sidecar metadata path。"""
+    """Return the recommended metadata sidecar path for a raw export."""
 
     export_path = Path(path)
     return export_path.with_suffix(".metadata.json")
 
 
 def inspect_raw_export_file(path: str | Path) -> RawExportInspection:
-    """在不读取完整数据的情况下检查文件名、header 和 metadata sidecar。"""
+    """Inspect the file name, header, and metadata sidecar without full data reads."""
 
     export_path = Path(path)
     try:

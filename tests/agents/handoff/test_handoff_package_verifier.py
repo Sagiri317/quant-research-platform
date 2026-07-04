@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from tests.agents.handoff.conftest import (
-    _copy_valid_package,
-    _refresh_manifest_and_sidecar,
-    _rewrite_package_member,
+    copy_valid_handoff_package,
+    refresh_handoff_manifest_and_sidecar,
+    rewrite_handoff_package_member,
 )
 from tests.agents.handoff.receipt_contract_fixtures import (
     make_hard_scan_receipt_payload,
@@ -36,7 +36,7 @@ def test_verifier_rejects_self_consistent_failed_validation_summary(
     full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = load_handoff_script_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(full_valid_handoff_package, tmp_path)
+    package, sidecar = copy_valid_handoff_package(full_valid_handoff_package, tmp_path)
     with zipfile.ZipFile(package) as archive:
         check_receipts = json.loads(
             archive.read("handoff_evidence/check-receipts.json").decode("utf-8")
@@ -55,17 +55,17 @@ def test_verifier_rejects_self_consistent_failed_validation_summary(
         if row["name"] in {"scripted_checks", "profile_smoke"}:
             row["status"] = "FAIL"
     validation_summary["status"] = "FAIL"
-    _rewrite_package_member(
+    rewrite_handoff_package_member(
         package,
         "handoff_evidence/check-receipts.json",
         (json.dumps(check_receipts, indent=2, sort_keys=True) + "\n").encode(),
     )
-    _rewrite_package_member(
+    rewrite_handoff_package_member(
         package,
         "handoff_evidence/validation-summary.json",
         (json.dumps(validation_summary, indent=2, sort_keys=True) + "\n").encode(),
     )
-    _refresh_manifest_and_sidecar(package, sidecar)
+    refresh_handoff_manifest_and_sidecar(package, sidecar)
     monkeypatch.setattr(verifier, "verify_bundle_and_replay_once", lambda *_: ([], []))
 
     failures = verifier.verify_handoff_package_result(package, sidecar).failures
@@ -81,7 +81,7 @@ def test_verifier_rejects_self_consistent_blocked_package_smoke_validation(
     full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = load_handoff_script_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(full_valid_handoff_package, tmp_path)
+    package, sidecar = copy_valid_handoff_package(full_valid_handoff_package, tmp_path)
     with zipfile.ZipFile(package) as archive:
         package_smoke = json.loads(
             archive.read("handoff_evidence/package-smoke-receipt.json").decode("utf-8")
@@ -108,17 +108,17 @@ def test_verifier_rejects_self_consistent_blocked_package_smoke_validation(
         if row["name"] == "package_smoke":
             row["status"] = "BLOCKED"
     validation_summary["status"] = "BLOCKED"
-    _rewrite_package_member(
+    rewrite_handoff_package_member(
         package,
         "handoff_evidence/package-smoke-receipt.json",
         (json.dumps(package_smoke, indent=2, sort_keys=True) + "\n").encode(),
     )
-    _rewrite_package_member(
+    rewrite_handoff_package_member(
         package,
         "handoff_evidence/validation-summary.json",
         (json.dumps(validation_summary, indent=2, sort_keys=True) + "\n").encode(),
     )
-    _refresh_manifest_and_sidecar(package, sidecar)
+    refresh_handoff_manifest_and_sidecar(package, sidecar)
     monkeypatch.setattr(verifier, "verify_bundle_and_replay_once", lambda *_: ([], []))
 
     failures = verifier.verify_handoff_package_result(package, sidecar).failures
@@ -196,13 +196,13 @@ def test_verifier_rejects_retired_handoff_entries(
     old_name: str,
 ) -> None:
     verifier = load_handoff_script_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(full_valid_handoff_package, tmp_path)
-    _rewrite_package_member(
+    package, sidecar = copy_valid_handoff_package(full_valid_handoff_package, tmp_path)
+    rewrite_handoff_package_member(
         package,
         old_name,
         b'{"schema_id":"qrp-old-receipt","status":"PASS"}\n',
     )
-    _refresh_manifest_and_sidecar(package, sidecar)
+    refresh_handoff_manifest_and_sidecar(package, sidecar)
 
     failures = verifier.verify_handoff_package_result(package, sidecar).failures
 
@@ -215,7 +215,7 @@ def test_verifier_rejects_old_sidecar_status_surface(
     full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = load_handoff_script_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(full_valid_handoff_package, tmp_path)
+    package, sidecar = copy_valid_handoff_package(full_valid_handoff_package, tmp_path)
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     payload["status_summary"] = {"smoke": "PASS"}
     payload["advisory_reviews"] = {"review_subagent": "PASS"}
@@ -233,18 +233,18 @@ def test_verifier_replays_hard_scan_from_bundle(
     full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = load_handoff_script_module("verify_handoff_package")
-    package, sidecar = _copy_valid_package(full_valid_handoff_package, tmp_path)
+    package, sidecar = copy_valid_handoff_package(full_valid_handoff_package, tmp_path)
     with zipfile.ZipFile(package) as archive:
         receipt = json.loads(
             archive.read("handoff_evidence/hard-scan-receipt.json").decode("utf-8")
         )
     receipt["scan_runs"][0]["result_sha256"] = "f" * 64
-    _rewrite_package_member(
+    rewrite_handoff_package_member(
         package,
         "handoff_evidence/hard-scan-receipt.json",
         (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode(),
     )
-    _refresh_manifest_and_sidecar(package, sidecar)
+    refresh_handoff_manifest_and_sidecar(package, sidecar)
 
     failures = verifier.verify_handoff_package_result(package, sidecar).failures
 

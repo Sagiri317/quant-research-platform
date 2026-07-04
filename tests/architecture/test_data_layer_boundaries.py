@@ -337,7 +337,7 @@ def test_production_hot_paths_do_not_reintroduce_materialized_collectors() -> No
             names_from_list_calls = _names_assigned_from_list_calls(function)
             names_from_iter_reads = _names_appended_from_dataset_iterators(function)
             for node in ast.walk(function):
-                if not isinstance(node, ast.Call) or _call_name(node.func) != "concat":
+                if not isinstance(node, ast.Call) or call_name(node.func) != "concat":
                     continue
                 if not _is_pandas_concat(node):
                     continue
@@ -390,7 +390,7 @@ def test_run_id_and_run_result_derived_names_are_contract_checked() -> None:
             if not derived_assignments:
                 continue
             called_names = {
-                _call_name(node.func)
+                call_name(node.func)
                 for node in ast.walk(function)
                 if isinstance(node, ast.Call)
             }
@@ -454,7 +454,7 @@ def _names_assigned_from_list_calls(function: ast.FunctionDef) -> set[str]:
     for node in ast.walk(function):
         if not isinstance(node, ast.Assign | ast.AnnAssign):
             continue
-        if isinstance(node.value, ast.Call) and _call_name(node.value.func) == "list":
+        if isinstance(node.value, ast.Call) and call_name(node.value.func) == "list":
             names.update(_assignment_targets(node))
     return names
 
@@ -479,10 +479,10 @@ def _names_appended_from_dataset_iterators(function: ast.FunctionDef) -> set[str
 def _call_tree_reads_dataset_or_iterator(node: ast.AST) -> bool:
     for child in ast.walk(node):
         if isinstance(child, ast.Call):
-            call_name = _call_name(child.func)
-            if call_name in {"read_dataset", "read_parquet"}:
+            called_name = call_name(child.func)
+            if called_name in {"read_dataset", "read_parquet"}:
                 return True
-            if call_name.startswith("iter_"):
+            if called_name.startswith("iter_"):
                 return True
     return False
 
@@ -517,7 +517,7 @@ def _concat_argument_name(node: ast.Call) -> str | None:
     return None
 
 
-def _call_name(func: ast.expr) -> str:
+def call_name(func: ast.expr) -> str:
     if isinstance(func, ast.Name):
         return func.id
     if isinstance(func, ast.Attribute):

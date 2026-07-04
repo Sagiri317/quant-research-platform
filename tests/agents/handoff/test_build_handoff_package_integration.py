@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from tests.agents.handoff.conftest import (
-    _git,
-    _init_handoff_repo,
+    init_handoff_test_repo,
+    run_git,
 )
 from tests.agents.handoff.receipt_contract_fixtures import (
     make_check_receipts_payload,
@@ -23,7 +23,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
-    _base, final_head = _init_handoff_repo(repo)
+    _base, final_head = init_handoff_test_repo(repo)
     builder_path = (
         repo
         / ".agents"
@@ -68,7 +68,7 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
     sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
     handoff_contract = load_handoff_script_module("handoff_contract")
 
-    assert _git(repo, "rev-parse", "HEAD").strip() == final_head
+    assert run_git(repo, "rev-parse", "HEAD").strip() == final_head
     assert names == set(handoff_contract.REQUIRED_HANDOFF_ENTRIES)
     assert set(sidecar_payload) == {"schema_id", "zip_filename", "zip_sha256"}
     assert set(task_metadata) == {
@@ -138,7 +138,7 @@ def test_builder_generates_machine_receipts_from_bundle_clone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = tmp_path / "repo"
-    _init_handoff_repo(repo)
+    init_handoff_test_repo(repo)
     builder = load_handoff_script_module("build_handoff_package")
     receipt_roots: list[Path] = []
 
@@ -157,7 +157,7 @@ def test_builder_generates_machine_receipts_from_bundle_clone(
         receipt_roots.append(receipt_root)
         assert receipt_root != repo
         assert (receipt_root / ".git").is_dir()
-        assert _git(receipt_root, "rev-parse", "HEAD").strip() == final_head
+        assert run_git(receipt_root, "rev-parse", "HEAD").strip() == final_head
         return {
             builder.CHECK_RECEIPTS_ENTRY: make_check_receipts_payload(),
             builder.PACKAGE_SMOKE_RECEIPT_ENTRY: (
@@ -171,7 +171,7 @@ def test_builder_generates_machine_receipts_from_bundle_clone(
     monkeypatch.setattr(builder, "build_machine_receipts", fake_build_machine_receipts)
     monkeypatch.setattr(
         builder,
-        "_validate_handoff_package_payload",
+        "validate_handoff_package_payload",
         lambda *_args, **_kwargs: Verification(),
     )
 
@@ -191,10 +191,10 @@ def test_builder_fails_when_replayed_validation_row_is_not_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = tmp_path / "repo"
-    _init_handoff_repo(repo)
+    init_handoff_test_repo(repo)
     builder = load_handoff_script_module("build_handoff_package")
     good_receipts = builder.build_machine_receipts(
-        repo, _git(repo, "rev-parse", "HEAD").strip()
+        repo, run_git(repo, "rev-parse", "HEAD").strip()
     )
     check_receipts = good_receipts[builder.CHECK_RECEIPTS_ENTRY]
     profile_smoke = next(
@@ -217,7 +217,7 @@ def test_builder_fails_when_replayed_validation_row_is_not_pass(
     monkeypatch.setattr(builder, "build_machine_receipts", lambda *_: good_receipts)
     monkeypatch.setattr(
         builder,
-        "_validate_handoff_package_payload",
+        "validate_handoff_package_payload",
         lambda *_args, **_kwargs: Verification(),
     )
 
@@ -244,10 +244,10 @@ def test_builder_fails_when_package_smoke_timeout_blocks_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = tmp_path / "repo"
-    _init_handoff_repo(repo)
+    init_handoff_test_repo(repo)
     builder = load_handoff_script_module("build_handoff_package")
     receipts = builder.build_machine_receipts(
-        repo, _git(repo, "rev-parse", "HEAD").strip()
+        repo, run_git(repo, "rev-parse", "HEAD").strip()
     )
     package_smoke = receipts[builder.PACKAGE_SMOKE_RECEIPT_ENTRY]
     package_smoke["status"] = "BLOCKED"
@@ -276,7 +276,7 @@ def test_builder_fails_when_package_smoke_timeout_blocks_validation(
     monkeypatch.setattr(builder, "build_machine_receipts", lambda *_: receipts)
     monkeypatch.setattr(
         builder,
-        "_validate_handoff_package_payload",
+        "validate_handoff_package_payload",
         lambda *_args, **_kwargs: Verification(),
     )
 

@@ -38,7 +38,7 @@ SMOKE_PORTFOLIO_FREQUENCY = frequency_ids.DAILY_FREQUENCY_SLUG
 SMOKE_PORTFOLIO_EXECUTION_LAG_STEPS = 1
 
 
-def _verification_config(**overrides: object) -> LocalVerificationRunConfig:
+def make_local_verification_config(**overrides: object) -> LocalVerificationRunConfig:
     payload = {
         "prediction_train_end": SMOKE_PREDICTION_TRAIN_END,
         "prediction_test_start": SMOKE_PREDICTION_TEST_START,
@@ -49,14 +49,14 @@ def _verification_config(**overrides: object) -> LocalVerificationRunConfig:
     return LocalVerificationRunConfig(**payload)
 
 
-def _smoke_prediction_specs():
+def smoke_prediction_specs():
     return a_share_research_scenarios.build_prediction_catalog(
         train_end=SMOKE_PREDICTION_TRAIN_END,
         test_start=SMOKE_PREDICTION_TEST_START,
     ).list()
 
 
-def _repo_run_root(
+def repo_run_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *parts: str,
@@ -68,7 +68,7 @@ def _repo_run_root(
     return repo_root.joinpath(*parts)
 
 
-def _persist_fake_artifact(
+def persist_fake_artifact(
     artifact_root: Path,
     dataset_id: str,
     logical_layer: str,
@@ -81,7 +81,7 @@ def _persist_fake_artifact(
     )
 
 
-def _persist_fake_research_root(**kwargs) -> Path:
+def persist_fake_research_root(**kwargs) -> Path:
     artifact_root = (
         kwargs["layout"].project_root
         / "data"
@@ -89,7 +89,7 @@ def _persist_fake_research_root(**kwargs) -> Path:
         / "a_share"
         / "price_volume_forward_returns"
     )
-    _persist_fake_artifact(
+    persist_fake_artifact(
         artifact_root,
         "price_volume_forward_returns",
         "research",
@@ -97,7 +97,58 @@ def _persist_fake_research_root(**kwargs) -> Path:
     return artifact_root
 
 
-def _empty_processed(
+def stub_interim_importer(
+    *,
+    on_call=None,
+    on_artifact=None,
+    missing_manifest: bool = False,
+):
+    def materialize_interim(layout, raw_root, start_date, end_date):
+        del raw_root, start_date, end_date
+        if on_call is not None:
+            on_call()
+        artifact_root = (
+            layout.project_root
+            / "data"
+            / "interim"
+            / "csmar"
+            / frequency_ids.MARKET_BARS_DATA_ID
+        )
+        if missing_manifest:
+            (artifact_root / "data").mkdir(parents=True)
+        else:
+            persist_fake_artifact(
+                artifact_root,
+                frequency_ids.MARKET_BARS_DATA_ID,
+                "interim",
+            )
+            if on_artifact is not None:
+                on_artifact(artifact_root, inspect_dataset(artifact_root).manifest)
+        return SimpleNamespace(
+            artifact_roots={frequency_ids.MARKET_BARS_DATA_ID: artifact_root}
+        )
+
+    return materialize_interim
+
+
+def stub_processed_builder(*, on_call=None, materialize=None):
+    def materialize_processed(layout, source_id, time_window, kinds):
+        del source_id, time_window
+        if on_call is not None:
+            on_call()
+        if materialize is not None:
+            return materialize(layout, kinds)
+        del kinds
+        artifact_root = (
+            layout.project_root / "data" / "processed" / "a_share" / "factor"
+        ) / "price_volume"
+        persist_fake_artifact(artifact_root, "price_volume", "processed")
+        return {"price_volume": inspect_dataset(artifact_root)}
+
+    return materialize_processed
+
+
+def empty_processed_inputs(
     layout,
     source_id,
     time_window,
@@ -107,7 +158,7 @@ def _empty_processed(
     return {}
 
 
-def _profile_with_materializers(interim, processed):
+def profile_with_materializers(interim, processed):
     return replace(
         research_profile(),
         materialize_interim_data=interim,
@@ -115,7 +166,7 @@ def _profile_with_materializers(interim, processed):
     )
 
 
-def _fake_evaluation_result(kwargs):
+def fake_evaluation_result(kwargs):
     return SimpleNamespace(
         spec=kwargs["evaluation_catalog"].get(kwargs["run_id"]),
         metrics=pd.DataFrame(),
@@ -126,7 +177,7 @@ def _fake_evaluation_result(kwargs):
     )
 
 
-def _fake_prediction_result(kwargs):
+def fake_prediction_result(kwargs):
     return SimpleNamespace(
         spec=kwargs["prediction_catalog"].get(kwargs["prediction_id"]),
         output_chunks=(),
@@ -135,7 +186,7 @@ def _fake_prediction_result(kwargs):
     )
 
 
-def _fake_portfolio_result(kwargs):
+def fake_portfolio_result(kwargs):
     return SimpleNamespace(
         spec=kwargs["portfolio_catalog"].get(kwargs["portfolio_id"]),
         output_chunks=(),
@@ -143,7 +194,7 @@ def _fake_portfolio_result(kwargs):
     )
 
 
-def _stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
+def stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
     def write_stub(*args, **kwargs):
         del args
         output_spec = kwargs["output_spec"]
@@ -181,7 +232,7 @@ def _stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _persist_tiny_a_share_processed_inputs(
+def persist_tiny_a_share_processed_inputs(
     layout,
     profile,
 ) -> dict[str, object]:

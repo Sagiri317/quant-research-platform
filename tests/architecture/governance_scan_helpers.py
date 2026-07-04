@@ -315,7 +315,7 @@ FORBIDDEN_WRITER_METHODS = {
     "write_text",
     "write_bytes",
 }
-def _iter_text_files() -> list[Path]:
+def iter_governance_text_files() -> list[Path]:
     files: list[Path] = []
     for root in SCAN_ROOTS:
         if not root.exists():
@@ -331,7 +331,7 @@ def _iter_text_files() -> list[Path]:
             ):
                 files.append(path)
     return files
-def _iter_active_governance_doc_files() -> tuple[Path, ...]:
+def iter_active_governance_doc_files() -> tuple[Path, ...]:
     files: list[Path] = []
     for root in ACTIVE_GOVERNANCE_DOC_ROOTS:
         if not root.exists():
@@ -345,8 +345,8 @@ def _iter_active_governance_doc_files() -> tuple[Path, ...]:
             if path.is_file() and path.suffix.lower() in {".md", ".txt"}
         )
     return tuple(sorted(files))
-def _iter_python_files() -> list[Path]:
-    return [path for path in _iter_text_files() if path.suffix == ".py"]
+def iter_governance_python_files() -> list[Path]:
+    return [path for path in iter_governance_text_files() if path.suffix == ".py"]
 def _is_excluded(path: Path) -> bool:
     parts = path.parts
     return any(_contains_parts(parts, excluded) for excluded in EXCLUDED_SCAN_PARTS)
@@ -356,7 +356,7 @@ def _contains_parts(parts: tuple[str, ...], needle: tuple[str, ...]) -> bool:
     return any(
         parts[index : index + len(needle)] == needle for index in range(len(parts))
     )
-def _iter_active_structure_files() -> list[Path]:
+def iter_active_structure_files() -> list[Path]:
     files: list[Path] = []
     for root in ACTIVE_STRUCTURE_SCAN_ROOTS:
         if not root.exists():
@@ -368,7 +368,7 @@ def _iter_active_structure_files() -> list[Path]:
             if path.is_file() and not _is_excluded(path):
                 files.append(path)
     return files
-def _iter_public_surface_files() -> list[Path]:
+def iter_public_surface_files() -> list[Path]:
     files: list[Path] = []
     for root in PUBLIC_SURFACE_SCAN_ROOTS:
         if not root.exists():
@@ -384,7 +384,7 @@ def _iter_public_surface_files() -> list[Path]:
             ):
                 files.append(path)
     return files
-def _public_surface_scan_text(path: Path) -> str:
+def public_surface_scan_text(path: Path) -> str:
     text = path.read_text(encoding="utf-8")
     if path == Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/"
@@ -407,28 +407,28 @@ def _is_internal_provider_doc(path: Path) -> bool:
         _contains_parts(parts, excluded)
         for excluded in INTERNAL_PROVIDER_SCAN_EXCLUSIONS
     )
-def _future_data_hit(path: Path, lineno: int, class_name: str) -> str:
+def future_data_hit(path: Path, lineno: int, class_name: str) -> str:
     return f"{path}:{lineno}: {class_name}.uses_future_data"
-def _is_approved_writer_path(path: Path) -> bool:
+def is_approved_writer_path(path: Path) -> bool:
     return path.parts[0] == "tests" or path in APPROVED_WRITER_MODULES
-def _call_name(func: ast.expr) -> str:
+def call_name(func: ast.expr) -> str:
     if isinstance(func, ast.Name):
         return func.id
     if isinstance(func, ast.Attribute):
         return func.attr
     return ""
-def _is_open_call(func: ast.expr) -> bool:
+def is_open_call(func: ast.expr) -> bool:
     if isinstance(func, ast.Name):
         return func.id == "open"
     return isinstance(func, ast.Attribute) and func.attr == "open"
-def _is_open_write_call(call: ast.Call) -> bool:
+def is_open_write_call(call: ast.Call) -> bool:
     return (
         isinstance(call.func, ast.Attribute)
         and call.func.attr == "write"
         and isinstance(call.func.value, ast.Call)
-        and _is_open_call(call.func.value.func)
+        and is_open_call(call.func.value.func)
     )
-def _open_mode(call: ast.Call) -> str | None:
+def open_mode(call: ast.Call) -> str | None:
     for keyword in call.keywords:
         if keyword.arg == "mode":
             return _literal_string(keyword.value)
@@ -441,7 +441,7 @@ def _literal_string(node: ast.expr) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     return None
-def _literal_string_items(node: ast.expr) -> tuple[str, ...]:
+def literal_string_items(node: ast.expr) -> tuple[str, ...]:
     if not isinstance(node, ast.List | ast.Tuple):
         return ()
     values: list[str] = []
@@ -450,7 +450,7 @@ def _literal_string_items(node: ast.expr) -> tuple[str, ...]:
         if value is not None:
             values.append(value)
     return tuple(values)
-def _function_arg_names(path: Path, function_name: str) -> set[str]:
+def function_arg_names(path: Path, function_name: str) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == function_name:
@@ -465,7 +465,7 @@ def _class_method_arg_names(path: Path, class_name: str, method_name: str) -> se
             if isinstance(child, ast.FunctionDef) and child.name == method_name:
                 return {arg.arg for arg in child.args.args}
     raise AssertionError(f"method not found: {class_name}.{method_name}")
-def _class_field_names(path: Path, class_name: str) -> set[str]:
+def class_field_names(path: Path, class_name: str) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     field_names: set[str] = set()
     for node in tree.body:
@@ -480,5 +480,5 @@ def _class_field_names(path: Path, class_name: str) -> set[str]:
                         field_names.add(target.id)
         return field_names
     raise AssertionError(f"class not found: {class_name}")
-def _is_write_mode(mode: str) -> bool:
+def is_write_mode(mode: str) -> bool:
     return any(flag in mode for flag in ("w", "a", "x", "+"))

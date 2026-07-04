@@ -1,1 +1,1 @@
-"""本地交互入口适配层。"""
+"""Local interface adapters."""

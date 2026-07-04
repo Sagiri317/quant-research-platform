@@ -17,18 +17,19 @@ from quant_research_platform.workflows import local_verification as module
 from quant_research_platform.workflows.local_verification import run_local_verification
 from tests.helpers import frequency_ids
 from tests.workflows.local_verification_fixtures import (
-    _empty_processed,
-    _fake_evaluation_result,
-    _fake_portfolio_result,
-    _fake_prediction_result,
-    _persist_fake_artifact,
-    _persist_fake_research_root,
-    _persist_tiny_a_share_processed_inputs,
-    _profile_with_materializers,
-    _repo_run_root,
-    _smoke_prediction_specs,
-    _stub_output_writers,
-    _verification_config,
+    empty_processed_inputs,
+    fake_evaluation_result,
+    fake_portfolio_result,
+    fake_prediction_result,
+    make_local_verification_config,
+    persist_fake_research_root,
+    persist_tiny_a_share_processed_inputs,
+    profile_with_materializers,
+    repo_run_root,
+    smoke_prediction_specs,
+    stub_interim_importer,
+    stub_output_writers,
+    stub_processed_builder,
 )
 
 
@@ -39,62 +40,43 @@ def test_local_verification_workflow_preserves_dataset_manifests(
     captured_roots: list[Path] = []
     captured_manifests: list[dict[str, object]] = []
 
-    def import_interim(
-        layout,
-        raw_root,
-        start_date,
-        end_date,
-    ):
-        del raw_root, start_date, end_date
-        artifact_root = (
-            layout.project_root
-            / "data"
-            / "interim"
-            / "csmar"
-            / frequency_ids.MARKET_BARS_DATA_ID
-        )
-        _persist_fake_artifact(
-            artifact_root,
-            frequency_ids.MARKET_BARS_DATA_ID,
-            "interim",
-        )
-        captured_roots.append(artifact_root)
-        captured_manifests.append(inspect_dataset(artifact_root).manifest)
-        return type(
-            "Result",
-            (),
-            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
-        )()
-
     monkeypatch.setattr(
         module,
         "assemble_research_dataset",
-        _persist_fake_research_root,
+        persist_fake_research_root,
     )
-    _stub_output_writers(monkeypatch)
+    stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
         "build_evaluation_result_from_research_dataset",
-        lambda **kwargs: _fake_evaluation_result(kwargs),
+        lambda **kwargs: fake_evaluation_result(kwargs),
     )
     monkeypatch.setattr(
         module,
         "build_prediction_result_from_research_dataset",
-        lambda **kwargs: _fake_prediction_result(kwargs),
+        lambda **kwargs: fake_prediction_result(kwargs),
     )
     monkeypatch.setattr(
         module,
         "build_portfolio_result_from_research_dataset",
-        lambda **kwargs: _fake_portfolio_result(kwargs),
+        lambda **kwargs: fake_portfolio_result(kwargs),
     )
 
-    run_root = _repo_run_root(tmp_path, monkeypatch, ".run", "s8")
+    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "s8")
     result = run_local_verification(
-        _verification_config(
+        make_local_verification_config(
             run_root=run_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
-            profile=_profile_with_materializers(import_interim, _empty_processed),
+            profile=profile_with_materializers(
+                stub_interim_importer(
+                    on_artifact=lambda root, manifest: (
+                        captured_roots.append(root),
+                        captured_manifests.append(manifest),
+                    )
+                ),
+                empty_processed_inputs,
+            ),
         )
     )
     manifest = inspect_dataset(captured_roots[0]).manifest
@@ -107,56 +89,38 @@ def test_local_verification_workflow_fails_when_dataset_manifest_is_missing(
     tmp_path,
     monkeypatch,
 ):
-    def import_interim(
-        layout,
-        raw_root,
-        start_date,
-        end_date,
-    ):
-        del raw_root, start_date, end_date
-        artifact_root = (
-            layout.project_root
-            / "data"
-            / "interim"
-            / "csmar"
-            / frequency_ids.MARKET_BARS_DATA_ID
-        )
-        (artifact_root / "data").mkdir(parents=True)
-        return type(
-            "Result",
-            (),
-            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
-        )()
-
     monkeypatch.setattr(
         module,
         "assemble_research_dataset",
-        _persist_fake_research_root,
+        persist_fake_research_root,
     )
-    _stub_output_writers(monkeypatch)
+    stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
         "build_evaluation_result_from_research_dataset",
-        lambda **kwargs: _fake_evaluation_result(kwargs),
+        lambda **kwargs: fake_evaluation_result(kwargs),
     )
     monkeypatch.setattr(
         module,
         "build_prediction_result_from_research_dataset",
-        lambda **kwargs: _fake_prediction_result(kwargs),
+        lambda **kwargs: fake_prediction_result(kwargs),
     )
     monkeypatch.setattr(
         module,
         "build_portfolio_result_from_research_dataset",
-        lambda **kwargs: _fake_portfolio_result(kwargs),
+        lambda **kwargs: fake_portfolio_result(kwargs),
     )
 
-    run_root = _repo_run_root(tmp_path, monkeypatch, ".run", "s9")
+    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "s9")
     result = run_local_verification(
-        _verification_config(
+        make_local_verification_config(
             run_root=run_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
-            profile=_profile_with_materializers(import_interim, _empty_processed),
+            profile=profile_with_materializers(
+                stub_interim_importer(missing_manifest=True),
+                empty_processed_inputs,
+            ),
         )
     )
     run_payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
@@ -180,32 +144,11 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
     base_profile = research_profile()
     prediction_specs = {
         prediction_spec.prediction_id: prediction_spec
-        for prediction_spec in _smoke_prediction_specs()
+        for prediction_spec in smoke_prediction_specs()
     }
     prediction_ids = sorted(prediction_specs)
 
-    def import_interim(layout, raw_root, start_date, end_date):
-        del raw_root, start_date, end_date
-        artifact_root = (
-            layout.project_root
-            / "data"
-            / "interim"
-            / "csmar"
-            / frequency_ids.MARKET_BARS_DATA_ID
-        )
-        _persist_fake_artifact(
-            artifact_root,
-            frequency_ids.MARKET_BARS_DATA_ID,
-            "interim",
-        )
-        return type(
-            "Result",
-            (),
-            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
-        )()
-
-    def build_processed(layout, source_id, time_window, kinds):
-        del source_id, time_window
+    def materialize_processed(layout, kinds):
         assert kinds == frozenset(
             {
                 ProcessedDataKind.PANEL,
@@ -214,9 +157,9 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
                 ProcessedDataKind.LABEL,
             }
         )
-        return _persist_tiny_a_share_processed_inputs(layout, base_profile)
+        return persist_tiny_a_share_processed_inputs(layout, base_profile)
 
-    run_root = _repo_run_root(
+    run_root = repo_run_root(
         tmp_path,
         monkeypatch,
         ".run",
@@ -224,14 +167,16 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
         "tiny-real-stack",
     )
     result = run_local_verification(
-        _verification_config(
+        make_local_verification_config(
             run_root=run_root,
             start_date="2014-01-02",
             end_date="2015-01-05",
             profile=replace(
                 base_profile,
-                materialize_interim_data=import_interim,
-                materialize_processed_data=build_processed,
+                materialize_interim_data=stub_interim_importer(),
+                materialize_processed_data=stub_processed_builder(
+                    materialize=materialize_processed
+                ),
             ),
         )
     )

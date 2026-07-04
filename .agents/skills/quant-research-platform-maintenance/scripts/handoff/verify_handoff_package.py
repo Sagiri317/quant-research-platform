@@ -146,14 +146,14 @@ def verify_handoff_package_result(
     zip_path: Path, json_path: Path
 ) -> HandoffVerificationResult:
     payload = load_handoff_package_payload(zip_path, json_path)
-    return _validate_handoff_package_payload(
+    return validate_handoff_package_payload(
         payload,
         replay_bundle=True,
         expected_receipts=None,
     )
 
 
-def _validate_handoff_package_payload(
+def validate_handoff_package_payload(
     package_payload: HandoffPackagePayload,
     *,
     replay_bundle: bool,

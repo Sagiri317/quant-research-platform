@@ -96,6 +96,6 @@ machine validation `PASS`。
 mutation tests 使用 replay-compare fast path：先做 sidecar hash、zip layout、
 artifact manifest、payload schema 和 validation-summary-against-receipts 校验，
 再用 session-scoped cached replay receipts 调用
-`_validate_handoff_package_payload()` 与 `compare_replayed_handoff_payloads()`。
+`validate_handoff_package_payload()` 与 `compare_replayed_handoff_payloads()`。
 只有 valid package full verifier smoke、Git identity mutation 和 sidecar hash
 mutation 保留完整 bundle verifier 路径。

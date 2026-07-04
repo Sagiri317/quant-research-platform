@@ -12,12 +12,12 @@ from tests.architecture.governance_scan_helpers import (
     PRIVATE_LOCAL_CLI_LINES,
     PUBLIC_CONTRACT_DOCS,
     RETIRED_PUBLIC_CONTRACT_TEXT,
-    _call_name,
-    _future_data_hit,
-    _iter_public_surface_files,
-    _iter_python_files,
-    _literal_string_items,
-    _public_surface_scan_text,
+    call_name,
+    future_data_hit,
+    iter_governance_python_files,
+    iter_public_surface_files,
+    literal_string_items,
+    public_surface_scan_text,
 )
 
 
@@ -37,11 +37,11 @@ def test_public_surfaces_do_not_expose_internal_provider_markers() -> None:
     )
     current_file = Path(__file__).resolve()
     hits: list[str] = []
-    for path in _iter_public_surface_files():
+    for path in iter_public_surface_files():
         if path.resolve() == current_file:
             continue
         try:
-            text = _public_surface_scan_text(path)
+            text = public_surface_scan_text(path)
         except UnicodeDecodeError:
             continue
         for name, pattern in forbidden_patterns:
@@ -70,7 +70,7 @@ def test_public_surfaces_do_not_expose_retired_public_cli_commands() -> None:
     pattern = re.compile(r"\bbuild-interim\b")
     current_file = Path(__file__).resolve()
     hits: list[str] = []
-    for path in _iter_public_surface_files():
+    for path in iter_public_surface_files():
         if path.resolve() == current_file:
             continue
         try:
@@ -140,18 +140,18 @@ def test_factor_and_label_definitions_do_not_use_future_data_token() -> None:
             if isinstance(node, ast.ClassDef) and node.name in checked_classes:
                 for child in ast.walk(node):
                     if isinstance(child, ast.Name) and child.id == "uses_future_data":
-                        hits.append(_future_data_hit(path, child.lineno, node.name))
+                        hits.append(future_data_hit(path, child.lineno, node.name))
                     if (
                         isinstance(child, ast.Constant)
                         and child.value == "uses_future_data"
                     ):
-                        hits.append(_future_data_hit(path, child.lineno, node.name))
+                        hits.append(future_data_hit(path, child.lineno, node.name))
 
     assert hits == []
 
 def test_concrete_field_specs_only_live_in_catalogs() -> None:
     hits: list[str] = []
-    for path in _iter_python_files():
+    for path in iter_governance_python_files():
         if path.parts[:2] != ("src", "quant_research_platform"):
             continue
         try:
@@ -160,7 +160,7 @@ def test_concrete_field_specs_only_live_in_catalogs() -> None:
             hits.append(f"{path}:{exc.lineno}: syntax_error: {exc.msg}")
             continue
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _call_name(node.func) == "FieldSpec":
+            if isinstance(node, ast.Call) and call_name(node.func) == "FieldSpec":
                 if path not in APPROVED_FIELD_SPEC_FILES:
                     hits.append(f"{path}:{node.lineno}: FieldSpec")
 
@@ -178,7 +178,7 @@ def test_compute_modules_do_not_export_private_helpers() -> None:
                 for target in node.targets
             ):
                 continue
-            for value in _literal_string_items(node.value):
+            for value in literal_string_items(node.value):
                 if value.startswith("_"):
                     hits.append(f"{path}: {value}")
 

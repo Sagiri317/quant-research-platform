@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from tests.agents.handoff.receipt_contract_fixtures import (
-    _valid_validation_summary_rows,
+    make_valid_validation_summary_rows,
 )
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
@@ -11,7 +11,10 @@ from tests.helpers.maintenance_script_loader import load_handoff_script_module
 @pytest.mark.parametrize("row_name", ("private_validation", "baseline_compare"))
 def test_validation_summary_rejects_deleted_rows(row_name: str) -> None:
     handoff_contract = load_handoff_script_module("handoff_contract")
-    rows = [*_valid_validation_summary_rows(), {"name": row_name, "status": "NOT_RUN"}]
+    rows = [
+        *make_valid_validation_summary_rows(),
+        {"name": row_name, "status": "NOT_RUN"},
+    ]
     payload = {"schema_id": "qrp-handoff-validation-summary", "rows": rows}
 
     failures = handoff_contract.validate_validation_summary_contract(payload)

@@ -9,18 +9,18 @@ from pathlib import Path
 def init_governance_git_repo(repo: Path, files: Mapping[str, str]) -> str:
     repo.mkdir(parents=True, exist_ok=True)
     _write_files(repo, files)
-    _git(repo, "init")
-    _git(repo, "config", "user.email", "governance@example.invalid")
-    _git(repo, "config", "user.name", "Governance Test")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "base")
-    return _git(repo, "rev-parse", "HEAD").stdout.strip()
+    run_git(repo, "init")
+    run_git(repo, "config", "user.email", "governance@example.invalid")
+    run_git(repo, "config", "user.name", "Governance Test")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "base")
+    return run_git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
 def add_governance_git_change(repo: Path, files: Mapping[str, str]) -> str:
     _write_files(repo, files)
-    _git(repo, "add", ".")
-    return _git(repo, "status", "--short").stdout
+    run_git(repo, "add", ".")
+    return run_git(repo, "status", "--short").stdout
 
 
 def run_governance_script(
@@ -45,7 +45,7 @@ def _write_files(repo: Path, files: Mapping[str, str]) -> None:
         path.write_text(text, encoding="utf-8")
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
         cwd=repo,

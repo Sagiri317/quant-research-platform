@@ -104,6 +104,26 @@ def _argparse_flags(path: Path) -> set[str]:
     return flags
 
 
+def test_handoff_scripts_do_not_import_private_sibling_helpers() -> None:
+    offenders: list[str] = []
+    handoff_modules = {path.stem for path in HANDOFF_ROOT.glob("*.py")}
+
+    for path in HANDOFF_ROOT.glob("*.py"):
+        tree = ast.parse(_source(path), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            if node.module.split(".")[0] not in handoff_modules:
+                continue
+            for alias in node.names:
+                if alias.name.startswith("_"):
+                    offenders.append(
+                        f"{path}:{node.lineno}: from {node.module} import {alias.name}"
+                    )
+
+    assert offenders == []
+
+
 def test_retired_handoff_files_are_absent() -> None:
     retired_package_smoke = "run_" + "package_" + "smoke.py"
 
@@ -257,7 +277,7 @@ def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
     assert _name("load", "handoff", "package", "payload", "once") not in (
         verifier_defs
     )
-    assert "_validate_handoff_package_payload" in verifier_defs
+    assert "validate_handoff_package_payload" in verifier_defs
     assert "verify_bundle_and_replay_once" in verifier_defs
     assert "scan_clone_tree_for_share_safety" in verifier_defs
     assert "compare_replayed_handoff_payloads" in verifier_defs
@@ -305,12 +325,12 @@ def test_verifier_uses_single_result_inspection_and_replay_path() -> None:
 
     result_calls = _called_names_in_function(verifier, "verify_handoff_package_result")
     assert "load_handoff_package_payload" in result_calls
-    assert "_validate_handoff_package_payload" in result_calls
+    assert "validate_handoff_package_payload" in result_calls
     assert _name("scan", "handoff", "zip") not in result_calls
     assert _name("scan", "git", "bundle") not in result_calls
 
     validator_calls = _called_names_in_function(
-        verifier, "_validate_handoff_package_payload"
+        verifier, "validate_handoff_package_payload"
     )
     assert "verify_bundle_and_replay_once" in validator_calls
 
@@ -394,14 +414,14 @@ def test_current_docs_do_not_describe_retired_handoff_inputs() -> None:
         "--receipt-out",
         "advisory-review-receipt",
         "advisory_reviews",
-        "薄" + "包" + "装",
+        "薄" + "包装",
         "thin " + "wrapper",
         "compatibility " + "wrapper",
-        "兼容" + "薄" + "包" + "装",
-        "只是" + "薄" + "包" + "装",
-        "wrapper " + "保留",
-        "task metadata JSON 输入",
-        "receipts-dir 输入",
+        "兼容" + "薄" + "包装",
+        "只是" + "薄" + "包装",
+        "wrapper " + "淇濈暀",
+        "task metadata JSON 杈撳叆",
+        "receipts-dir 杈撳叆",
     ):
         assert retired not in combined
 
@@ -504,7 +524,9 @@ def test_builder_uses_verifier_result_without_separate_scan_status() -> None:
     defs = _function_defs(builder)
 
     assert "scan_status" not in defs
-    assert "_validate_handoff_package_payload" in source
+    assert "validate_handoff_package_payload" in source
+    private_validator = "_" + "validate_handoff_package_payload"
+    assert private_validator not in source
     assert "load_handoff_package_payload" in source
     assert _name("verify", "handoff", "package", "envelope", "result") not in source
     assert "verify_handoff_package_result" not in source
