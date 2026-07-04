@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pandas as pd
 
 from quant_research_platform.markets.implementations.a_share.verification import (
@@ -20,6 +22,16 @@ def _base_frame() -> pd.DataFrame:
             "forward_return_10d": [0.01, 0.02, None],
         }
     )
+
+
+class CountingDatasetReader:
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.calls = 0
+        self._frame = frame
+
+    def __call__(self, *_args: object, **_kwargs: object) -> Iterator[pd.DataFrame]:
+        self.calls += 1
+        return iter((self._frame.copy(),))
 
 
 def test_aggregates_summary_is_row_order_and_file_split_insensitive() -> None:
@@ -193,14 +205,8 @@ def test_aggregates_dataset_summary_cache_reuses_same_root(
     monkeypatch,
     tmp_path,
 ) -> None:
-    calls = 0
-
-    def fake_read_dataset(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return iter((_base_frame(),))
-
-    monkeypatch.setattr(aggregates, "read_dataset", fake_read_dataset)
+    reader = CountingDatasetReader(_base_frame())
+    monkeypatch.setattr(aggregates, "read_dataset", reader)
     cache = {}
     root = tmp_path / "dataset"
 
@@ -208,21 +214,15 @@ def test_aggregates_dataset_summary_cache_reuses_same_root(
     second = aggregates._summarize_dataset_root(root, summary_cache=cache)
 
     assert first.aggregate_checksum == second.aggregate_checksum
-    assert calls == 1
+    assert reader.calls == 1
 
 
 def test_aggregates_dataset_summary_cache_keeps_year_filters_distinct(
     monkeypatch,
     tmp_path,
 ) -> None:
-    calls = 0
-
-    def fake_read_dataset(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return iter((_base_frame(),))
-
-    monkeypatch.setattr(aggregates, "read_dataset", fake_read_dataset)
+    reader = CountingDatasetReader(_base_frame())
+    monkeypatch.setattr(aggregates, "read_dataset", reader)
     cache = {}
     root = tmp_path / "dataset"
 
@@ -230,21 +230,15 @@ def test_aggregates_dataset_summary_cache_keeps_year_filters_distinct(
     aggregates._summarize_dataset_root(root, summary_cache=cache)
     aggregates._summarize_dataset_root(root, years=(2014,), summary_cache=cache)
 
-    assert calls == 2
+    assert reader.calls == 2
 
 
 def test_aggregates_dataset_summary_cache_normalizes_year_order(
     monkeypatch,
     tmp_path,
 ) -> None:
-    calls = 0
-
-    def fake_read_dataset(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return iter((_base_frame(),))
-
-    monkeypatch.setattr(aggregates, "read_dataset", fake_read_dataset)
+    reader = CountingDatasetReader(_base_frame())
+    monkeypatch.setattr(aggregates, "read_dataset", reader)
     cache = {}
     root = tmp_path / "dataset"
 
@@ -259,4 +253,4 @@ def test_aggregates_dataset_summary_cache_normalizes_year_order(
         summary_cache=cache,
     )
 
-    assert calls == 1
+    assert reader.calls == 1

@@ -180,7 +180,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
     def fake_from_environment():
         return policy
 
-    def fake_read_dataset(root: Path, **kwargs) -> pd.DataFrame:
+    def read_private_summary_dataset(root: Path, **kwargs) -> pd.DataFrame:
         if root.name == "trading_calendar":
             return pd.DataFrame(
                 {
@@ -240,7 +240,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
         "inspect_dataset",
         lambda _root: Inspection(),
     )
-    monkeypatch.setattr(aggregates, "read_dataset", fake_read_dataset)
+    monkeypatch.setattr(aggregates, "read_dataset", read_private_summary_dataset)
     monkeypatch.setattr(panels, "compute_market_panel", fake_compute_market_panel)
     monkeypatch.setattr(
         aggregates.RuntimeResourcePolicy,
@@ -330,7 +330,7 @@ def test_dataset_root_summary_uses_dataframe_chunks(
     root = tmp_path / "data" / "processed" / "a_share" / "factor" / "fixture"
     calls: list[dict[str, object]] = []
 
-    def fake_read_dataset(dataset_root, *, time_window, mode):
+    def capture_dataset_chunk_read(dataset_root, *, time_window, mode):
         calls.append(
             {
                 "root": dataset_root,
@@ -359,7 +359,7 @@ def test_dataset_root_summary_uses_dataframe_chunks(
             ]
         )
 
-    monkeypatch.setattr(aggregates, "read_dataset", fake_read_dataset)
+    monkeypatch.setattr(aggregates, "read_dataset", capture_dataset_chunk_read)
 
     summary = aggregates._summarize_dataset_root(root, years=(2025,))
 

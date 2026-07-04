@@ -344,7 +344,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         calls["label_key_coverage"] += 1
         return read_window
 
-    def fake_read_dataset(*args: object, **kwargs: object):
+    def read_dataset_by_mode(*args: object, **kwargs: object):
         del args
         if kwargs.get("mode") is DatasetReadMode.CHUNKED:
             return (_key_frame(),)
@@ -371,7 +371,7 @@ def test_write_paths_read_processed_inputs_via_helper(
     monkeypatch.setattr(
         materialization_planning,
         "read_dataset",
-        fake_read_dataset,
+        read_dataset_by_mode,
     )
     monkeypatch.setattr(
         materialize_annotations.annotations,

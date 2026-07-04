@@ -419,9 +419,9 @@ def test_current_docs_do_not_describe_retired_handoff_inputs() -> None:
         "compatibility " + "wrapper",
         "兼容" + "薄" + "包装",
         "只是" + "薄" + "包装",
-        "wrapper " + "淇濈暀",
-        "task metadata JSON 杈撳叆",
-        "receipts-dir 杈撳叆",
+        "wrapper retained",
+        "task metadata JSON input",
+        "receipts-dir input",
     ):
         assert retired not in combined
 
