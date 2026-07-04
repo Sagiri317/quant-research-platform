@@ -517,5 +517,3 @@ def test_model_rejects_unsupported_contract_version() -> None:
             label_column="label",
             contract_version="9.9",
         )
-
-

@@ -162,6 +162,4 @@ def test_public_interfaces_remain_provider_neutral() -> None:
         for term in forbidden:
             if term in text:
                 hits.append(f"{path}: {term}")
-
     assert hits == []
-

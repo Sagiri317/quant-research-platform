@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import pandas as pd
 
+from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.factors.price_volume import (
     price_volume_window_column,
@@ -45,6 +48,39 @@ def make_report_signal_spec() -> SignalSpec:
         signal_id=REPORT_SIGNAL_COLUMN,
         source_column=REPORT_SIGNAL_COLUMN,
         source_kind="factor",
+    )
+
+
+def make_stage_profile_report_spec() -> OutputSpec:
+    return OutputSpec(
+        output_id="stage_profile",
+        output_definition_id="stage_profile_diagnostic",
+        run_id="run",
+        market_id=MarketId("a_share"),
+        run_type="diagnostics",
+        scope=OutputScope.LOCAL_ONLY,
+    )
+
+
+def make_report_prediction_spec() -> PredictionSpec:
+    return PredictionSpec(
+        prediction_id="pred-run",
+        model_id="linear-demo",
+        research_dataset_id="demo",
+        train_end="2014-01-02",
+        test_start="2014-01-03",
+        test_end="2014-01-03",
+    )
+
+
+def make_prediction_report_spec() -> OutputSpec:
+    return OutputSpec(
+        output_id="pred-run",
+        output_definition_id="prediction_outputs",
+        run_id="test_run",
+        market_id=MarketId("a_share"),
+        run_type="prediction",
+        scope=OutputScope.LOCAL_ONLY,
     )
 
 

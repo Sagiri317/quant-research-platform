@@ -70,7 +70,4 @@ def test_prepare_run_root_uses_git_boundary_outside_cwd(
         run_id="s1",
         replace_output=False,
     )
-
     assert (run_root / "run.json").is_file()
-
-

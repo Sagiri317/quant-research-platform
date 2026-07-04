@@ -62,9 +62,6 @@ def test_runtime_workflow_outputs_do_not_use_action_wording(
         r"[A-Za-z0-9_]*" + re.escape(dry_run) + r"[A-Za-z0-9_-]*)\b",
         re.IGNORECASE,
     )
-    allowed_paths = {
-        Path("tests/architecture/test_no_execution_wording.py"),
-    }
     hits: list[str] = []
     roots = (
         "src/quant_research_platform/workflows/",
@@ -72,8 +69,6 @@ def test_runtime_workflow_outputs_do_not_use_action_wording(
         "tests/workflows/",
     )
     for path in repo_python_files:
-        if path in allowed_paths:
-            continue
         if not path.as_posix().startswith(roots):
             continue
         text = path.read_text(encoding="utf-8")

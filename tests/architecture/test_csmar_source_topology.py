@@ -497,4 +497,3 @@ def test_csmar_data_additions_are_source_local_by_default() -> None:
         "sources/csmar/interim.py"
         in (source_local_change_policy["new A-share CSMAR interim product"])
     )
-

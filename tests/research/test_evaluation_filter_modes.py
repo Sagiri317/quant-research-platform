@@ -451,4 +451,3 @@ def test_evaluation_filter_columns_fail_closed(
 ) -> None:
     with pytest.raises(ValueError, match=match):
         evaluate_signal_frame(frame, spec)
-

@@ -170,7 +170,4 @@ def test_reviewed_package_inits_do_not_reexport_convenience_symbols() -> None:
                 for target in node.targets:
                     if isinstance(target, ast.Name) and target.id == "__all__":
                         hits.append(f"{path}:{node.lineno}: __all__")
-
     assert hits == []
-
-

@@ -36,7 +36,7 @@ ID: handoff-integration-subprocess-cost
 Severity: P2
 Owner layer: tests / handoff tooling
 Status: deferred
-Evidence: Source-tree scan input, handoff package payload loading, fixture naming, and mutation fast-path validation have been consolidated. Remaining cost is the intentionally retained real builder subprocess coverage in `tests/agents/handoff/test_build_handoff_package_integration.py`.
+Evidence: Source-tree scan input, active-doc repo state enumeration, handoff package payload loading, fixture naming, and mutation fast-path validation have been consolidated. Remaining cost is the intentionally retained real builder subprocess coverage in `tests/agents/handoff/test_build_handoff_package_integration.py`.
 Next action: revisit only if after full-suite verification the real builder subprocess path is still a measured slowest-path blocker; do not split it unless the same package-build, verifier, Git identity, and malicious-input semantics stay covered.
 Acceptance gate: full-suite evidence shows the retained real builder subprocess coverage is not a blocker, or an owner-layer split preserves equivalent handoff contract coverage with lower repeated subprocess/package-build cost.
 Scope boundary: preserve handoff coverage, public handoff schema/layout, receipt fields, mandatory validation rows, and standalone verifier replay semantics.

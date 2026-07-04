@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from tests.architecture.topology_helpers import function_body_is_single_call
 from tests.helpers.import_graph import ImportEdge, import_edges_under
 
 PROJECT_SRC = Path("src/quant_research_platform")
@@ -120,7 +121,7 @@ def test_storage_datasets_root_delegates_to_owner_modules() -> None:
         for node in tree.body
         if isinstance(node, ast.FunctionDef)
         and node.name in STORAGE_DATASET_PUBLIC_FUNCTIONS
-        and not _function_body_is_single_call(node)
+        and not function_body_is_single_call(node)
     ]
 
     assert missing_modules == []
@@ -158,19 +159,3 @@ def _referenced_names(tree: ast.Module) -> set[str]:
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             names.add(node.value)
     return names
-
-
-def _function_body_is_single_call(function: ast.FunctionDef) -> bool:
-    body = [
-        node
-        for node in function.body
-        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
-    ]
-    if len(body) != 1:
-        return False
-    statement = body[0]
-    if isinstance(statement, ast.Return):
-        return isinstance(statement.value, ast.Call)
-    if isinstance(statement, ast.Expr):
-        return isinstance(statement.value, ast.Call)
-    return False

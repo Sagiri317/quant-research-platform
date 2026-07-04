@@ -497,8 +497,9 @@ def test_path_name_gate_fails_retired_stage_paths(tmp_path: Path) -> None:
         path.write_text("temporary retired naming fixture\n", encoding="utf-8")
 
     result = module.Result()
+    state_paths = module.repo_state_file_paths(tmp_path)
 
-    module.check_forbidden_path_names(result, tmp_path)
+    module.check_forbidden_path_names(result, state_paths)
 
     for relative in cases:
         assert any(relative in error for error in result.errors), (

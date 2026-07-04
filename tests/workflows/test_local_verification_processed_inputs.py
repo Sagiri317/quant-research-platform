@@ -328,5 +328,3 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
         signal["signal_id"] for signal in portfolio_manifest["metadata"]["signals"]
     } == expected_signals
     assert set(portfolio_returns["signal"]) == expected_signals
-
-

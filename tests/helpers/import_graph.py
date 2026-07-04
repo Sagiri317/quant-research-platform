@@ -88,6 +88,39 @@ def top_level_defined_names(tree: ast.Module) -> set[str]:
     return names
 
 
+def module_all_names(tree: ast.AST) -> tuple[str, ...]:
+    names: list[str] = []
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "__all__"
+            for target in node.targets
+        ):
+            continue
+        if isinstance(node.value, (ast.List, ast.Tuple)):
+            names.extend(
+                item.value
+                for item in node.value.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            )
+    return tuple(names)
+
+
+def imported_modules_from_tree(tree: ast.AST) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            modules.add(node.module)
+        elif isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+    return modules
+
+
+def imported_modules_from_path(path: Path) -> set[str]:
+    return imported_modules_from_tree(parse_source(path))
+
+
 def ast_calls(tree: ast.AST) -> list[ast.Call]:
     return [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
 

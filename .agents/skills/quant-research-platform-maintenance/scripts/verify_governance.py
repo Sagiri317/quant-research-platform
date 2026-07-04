@@ -339,6 +339,16 @@ def repo_state_file_paths(
     return sorted(found)
 
 
+def filter_state_file_paths(
+    paths: list[str],
+    *,
+    suffixes: set[str],
+) -> list[str]:
+    return sorted(
+        path for path in paths if Path(normalize(path)).suffix.lower() in suffixes
+    )
+
+
 def _should_include_state_path(
     path: str,
     *,
@@ -358,8 +368,8 @@ def _should_include_state_path(
     return True
 
 
-def check_forbidden_path_names(result: Result, repo: Path) -> None:
-    for finding in iter_path_name_findings(repo_state_file_paths(repo)):
+def check_forbidden_path_names(result: Result, paths: list[str]) -> None:
+    for finding in iter_path_name_findings(paths):
         result.errors.append(f"retired_path_name: {finding['path']}:{finding['rule']}")
 
 
@@ -546,7 +556,7 @@ def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
             if (
                 "NOT_RUN" in line
                 and "PASS" in line
-                and "涓嶈兘" not in line
+                and "不能" not in line
                 and "not" not in line.lower()
                 and re.search(
                     r"\b(status|result)\s*[:=]\s*`?PASS",
@@ -674,14 +684,14 @@ def main(argv: list[str] | None = None) -> int:
     result = Result()
     scan_scope = args.scan_scope or "changed-files"
     check_retired_governance_paths(result, repo)
-    check_forbidden_path_names(result, repo)
-    state_python_files = repo_state_file_paths(repo, suffixes={".py"}, result=result)
+    state_files = repo_state_file_paths(repo, result=result)
+    check_forbidden_path_names(result, state_files)
+    state_python_files = filter_state_file_paths(state_files, suffixes={".py"})
     check_python_symbol_names(result, repo, state_python_files)
     check_synthesized_strings(result, repo, state_python_files)
-    state_structured_files = repo_state_file_paths(
-        repo,
+    state_structured_files = filter_state_file_paths(
+        state_files,
         suffixes=STRUCTURED_KEY_SUFFIXES,
-        result=result,
     )
     check_structured_key_names(result, repo, state_structured_files)
     changed: list[str] = []

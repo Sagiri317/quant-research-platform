@@ -144,7 +144,4 @@ def test_no_comparison_engine_is_introduced_in_src():
         for path in Path("src").rglob("*comparison*.py")
         if path not in allowed_owner_paths and "verification_summary" not in str(path)
     ]
-
     assert hits == []
-
-

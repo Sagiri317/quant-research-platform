@@ -216,5 +216,3 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
         "run.json",
         "summary.md",
     }
-
-

@@ -81,7 +81,4 @@ def test_compute_constraint_helpers_are_not_owned_by_portfolio_helpers() -> None
             for node in tree.body
             if isinstance(node, ast.FunctionDef) and node.name in names
         )
-
     assert hits == []
-
-

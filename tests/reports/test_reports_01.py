@@ -21,7 +21,6 @@ from quant_research_platform.contracts.evaluations import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
-from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.runtime.profiling import ProfileConfig, StageProfiler
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
@@ -29,12 +28,15 @@ from tests.artifacts.output_edge_fixtures import (
     make_output_edge_evaluation_diagnostics,
 )
 from tests.helpers.report_output_frames import (
+    make_prediction_report_spec,
     make_report_evaluation_group_spread_summary_frame,
     make_report_evaluation_grouped_label_values_frame,
     make_report_evaluation_ic_summary_frame,
     make_report_evaluation_metrics_frame,
     make_report_prediction_output_frame,
+    make_report_prediction_spec,
     make_report_signal_spec,
+    make_stage_profile_report_spec,
 )
 
 
@@ -47,7 +49,7 @@ def test_stage_profile_outputs_write_only_inside_local_output_boundary(
 
     output_dir = write_stage_profile_outputs(
         profiler.to_frame(),
-        spec=_stage_profile_report_spec(),
+        spec=make_stage_profile_report_spec(),
         layout=StorageLayout(project_root=tmp_path),
         markdown_text="Stage profile report.",
     )
@@ -166,15 +168,15 @@ def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) ->
     frame = make_report_prediction_output_frame(row_count=2)
     materialized_root = write_prediction_outputs(
         frame,
-        spec=_prediction_spec(),
-        output_spec=_prediction_report_spec(),
+        spec=make_report_prediction_spec(),
+        output_spec=make_prediction_report_spec(),
         layout=StorageLayout(project_root=tmp_path / "materialized"),
     )
     chunked_writer = prediction_outputs._write_prediction_output_chunks
     chunked_root = chunked_writer(
         (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
-        spec=_prediction_spec(),
-        output_spec=_prediction_report_spec(),
+        spec=make_report_prediction_spec(),
+        output_spec=make_prediction_report_spec(),
         layout=StorageLayout(project_root=tmp_path / "chunked"),
         model_metadata=frame.attrs["model_metadata"],
         prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
@@ -194,8 +196,8 @@ def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> Non
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
         prediction_outputs._write_prediction_output_chunks(
             (frame.copy(), frame.copy()),
-            spec=_prediction_spec(),
-            output_spec=_prediction_report_spec(),
+            spec=make_report_prediction_spec(),
+            output_spec=make_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
             model_metadata=frame.attrs["model_metadata"],
             prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
@@ -261,8 +263,8 @@ def test_prediction_outputs_reject_existing_output_bundle_without_writes(
     with pytest.raises(OutputAlreadyExistsError):
         write_prediction_outputs(
             make_report_prediction_output_frame(),
-            spec=_prediction_spec(),
-            output_spec=_prediction_report_spec(),
+            spec=make_report_prediction_spec(),
+            output_spec=make_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
         )
 
@@ -318,7 +320,7 @@ def test_stage_profile_outputs_clean_temp_root_after_mid_write_failure(
     with pytest.raises(RuntimeError, match="simulated_stage_profile_failure"):
         write_stage_profile_outputs(
             frame,
-            spec=_stage_profile_report_spec(),
+            spec=make_stage_profile_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
             markdown_text="safe",
         )
@@ -347,8 +349,8 @@ def test_prediction_outputs_clean_temp_root_after_mid_write_failure(
     with pytest.raises(RuntimeError, match="simulated_prediction_failure"):
         write_prediction_outputs(
             make_report_prediction_output_frame(),
-            spec=_prediction_spec(),
-            output_spec=_prediction_report_spec(),
+            spec=make_report_prediction_spec(),
+            output_spec=make_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
         )
 
@@ -405,39 +407,6 @@ def test_output_already_exists_error_review_safe_summary_is_path_free() -> None:
     assert summary == {"status": "failed", "failure_code": "output_already_exists"}
     assert "C:" not in str(summary)
     assert "csmar" not in str(summary).lower()
-
-
-def _stage_profile_report_spec() -> OutputSpec:
-    return OutputSpec(
-        output_id="stage_profile",
-        output_definition_id="stage_profile_diagnostic",
-        run_id="run",
-        market_id=MarketId("a_share"),
-        run_type="diagnostics",
-        scope=OutputScope.LOCAL_ONLY,
-    )
-
-
-def _prediction_spec() -> PredictionSpec:
-    return PredictionSpec(
-        prediction_id="pred-run",
-        model_id="linear-demo",
-        research_dataset_id="demo",
-        train_end="2014-01-02",
-        test_start="2014-01-03",
-        test_end="2014-01-03",
-    )
-
-
-def _prediction_report_spec() -> OutputSpec:
-    return OutputSpec(
-        output_id="pred-run",
-        output_definition_id="prediction_outputs",
-        run_id="test_run",
-        market_id=MarketId("a_share"),
-        run_type="prediction",
-        scope=OutputScope.LOCAL_ONLY,
-    )
 
 
 def _evaluation_spec() -> EvaluationSpec:

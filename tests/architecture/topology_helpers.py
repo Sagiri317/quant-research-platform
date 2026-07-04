@@ -84,3 +84,19 @@ def is_sanitize_shared_text_call(node: ast.AST) -> bool:
         and isinstance(node.func, ast.Name)
         and node.func.id == "sanitize_shared_text"
     )
+
+
+def function_body_is_single_call(function: ast.FunctionDef) -> bool:
+    body = [
+        node
+        for node in function.body
+        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
+    ]
+    if len(body) != 1:
+        return False
+    statement = body[0]
+    if isinstance(statement, ast.Return):
+        return isinstance(statement.value, ast.Call)
+    if isinstance(statement, ast.Expr):
+        return isinstance(statement.value, ast.Call)
+    return False

@@ -4,7 +4,11 @@ import ast
 import re
 from pathlib import Path
 
-from tests.helpers.import_graph import python_files_under
+from tests.helpers.import_graph import (
+    imported_modules_from_tree,
+    module_all_names,
+    python_files_under,
+)
 
 PROJECT_SRC = Path("src/quant_research_platform")
 CATALOG_INIT = PROJECT_SRC / "catalog" / "__init__.py"
@@ -15,7 +19,7 @@ SCAN_ROOTS = (Path("src"), Path("tests"))
 def test_profiles_root_init_does_not_export_retired_entrypoints() -> None:
     source = CATALOG_INIT.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(CATALOG_INIT))
-    all_names = _module_all_names(tree)
+    all_names = module_all_names(tree)
 
     assert "quant_research_platform.catalog.defaults" not in source
     assert "catalog.defaults" not in source
@@ -56,7 +60,7 @@ def test_profiles_composition_root_remains_platform_composition_root() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
-    all_names = _module_all_names(tree)
+    all_names = module_all_names(tree)
 
     assert (
         "quant_research_platform.markets.implementations.a_share.processed" in modules
@@ -113,7 +117,7 @@ def test_a_share_research_profiles_do_not_import_csmar() -> None:
     path = PROJECT_SRC / "markets/implementations/a_share/research_profiles.py"
     tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
 
-    imports = _imported_modules(tree)
+    imports = imported_modules_from_tree(tree)
     assert not [
         module
         for module in imports
@@ -125,7 +129,7 @@ def test_profiles_root_is_only_prod_module_composing_csmar_and_a_share() -> None
     composers: list[str] = []
     for path in PROJECT_SRC.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
-        imports = _imported_modules(tree)
+        imports = imported_modules_from_tree(tree)
         has_csmar = any(
             module.startswith("quant_research_platform.sources.csmar")
             for module in imports
@@ -265,31 +269,5 @@ def test_a_share_scenario_builders_require_smoke_windows_and_frequency() -> None
         assert token not in source
 
 
-def _module_all_names(tree: ast.AST) -> tuple[str, ...]:
-    names: list[str] = []
-    for node in ast.iter_child_nodes(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(
-            isinstance(target, ast.Name) and target.id == "__all__"
-            for target in node.targets
-        ):
-            continue
-        if isinstance(node.value, (ast.List, ast.Tuple)):
-            for item in node.value.elts:
-                if isinstance(item, ast.Constant) and isinstance(item.value, str):
-                    names.append(item.value)
-    return tuple(names)
-
-
 def _is_def(node: ast.AST) -> bool:
     return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-
-def _imported_modules(tree: ast.AST) -> set[str]:
-    modules: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module is not None:
-            modules.add(node.module)
-        elif isinstance(node, ast.Import):
-            modules.update(alias.name for alias in node.names)
-    return modules

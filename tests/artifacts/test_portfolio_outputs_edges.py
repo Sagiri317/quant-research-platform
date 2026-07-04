@@ -173,5 +173,3 @@ def test_portfolio_outputs_reject_bad_frames(tmp_path: Path) -> None:
             output_spec=report_spec,
             layout=layout,
         )
-
-

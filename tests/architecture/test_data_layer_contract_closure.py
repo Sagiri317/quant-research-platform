@@ -4,7 +4,11 @@ import ast
 import re
 from pathlib import Path
 
-from tests.helpers.import_graph import import_edges_for_roots, python_files_under
+from tests.helpers.import_graph import (
+    import_edges_for_roots,
+    module_all_names,
+    python_files_under,
+)
 
 ACTIVE_SCAN_ROOTS = (
     Path("src"),
@@ -108,7 +112,7 @@ def test_retired_public_profile_names_are_absent() -> None:
         profiles_path.read_text(encoding="utf-8"),
         filename=str(profiles_path),
     )
-    exported_names = _module_all_names(tree)
+    exported_names = module_all_names(tree)
     assert "ResearchProfile" in exported_names
     assert "research_profile" in exported_names
     assert "CatalogBundle" not in exported_names
@@ -401,21 +405,3 @@ def test_active_code_has_no_retired_data_layer_terms() -> None:
                 hits.append(f"{path}:{pattern}")
 
     assert hits == []
-
-def _module_all_names(tree: ast.AST) -> tuple[str, ...]:
-    names: list[str] = []
-    for node in ast.iter_child_nodes(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(
-            isinstance(target, ast.Name) and target.id == "__all__"
-            for target in node.targets
-        ):
-            continue
-        if isinstance(node.value, (ast.List, ast.Tuple)):
-            names.extend(
-                item.value
-                for item in node.value.elts
-                if isinstance(item, ast.Constant) and isinstance(item.value, str)
-            )
-    return tuple(names)

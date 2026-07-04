@@ -5,6 +5,7 @@ import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
+from tests.helpers.import_graph import imported_modules_from_path
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 HANDOFF_ROOT = Path(
@@ -86,17 +87,6 @@ def _assigned_names(path: Path) -> set[str]:
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names.add(node.target.id)
     return names
-
-
-def _imported_modules(path: Path) -> set[str]:
-    tree = ast.parse(_source(path), filename=str(path))
-    modules: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            modules.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            modules.add(node.module)
-    return modules
 
 
 def _argparse_flags(path: Path) -> set[str]:
@@ -190,7 +180,7 @@ def test_replay_evidence_does_not_import_retired_package_smoke_cli() -> None:
     replay = HANDOFF_ROOT / "replay_evidence.py"
     retired_module = "run_" + "package_" + "smoke"
 
-    assert retired_module not in _imported_modules(replay)
+    assert retired_module not in imported_modules_from_path(replay)
     assert f"from {retired_module} import" not in _source(replay)
     assert "_build_package_artifacts" in _function_defs(replay)
     retired_extract = "_" + _name("in" + "stall", "package", "smoke", "target")

@@ -406,5 +406,3 @@ def test_local_verification_workflow_resolves_independent_windows(
         "prediction_test_start": "2018-01-01",
         "prediction_test_end": "2019-12-31",
     }
-
-

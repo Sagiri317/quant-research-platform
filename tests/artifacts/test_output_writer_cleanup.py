@@ -65,5 +65,3 @@ def test_report_parquet_writer_cleans_temp_on_failure(
             tmp_path / "report.parquet",
         )
     assert not list(tmp_path.glob("*.tmp-*"))
-
-

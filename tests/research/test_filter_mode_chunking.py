@@ -404,4 +404,3 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
     assert max(filtered_chunk_rows) < len(frame)
     pd.testing.assert_frame_equal(result, expected)
     assert result.attrs["prediction_metadata"] == expected.attrs["prediction_metadata"]
-
