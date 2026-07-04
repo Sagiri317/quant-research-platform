@@ -34,7 +34,10 @@ from handoff_contract import (  # noqa: E402
     mandatory_validation_failures,
     validate_task_metadata_contract,
 )
-from replay_evidence import build_machine_receipts  # noqa: E402
+from replay_evidence import (  # noqa: E402
+    ReplayEnvironmentBlocked,
+    build_machine_receipts,
+)
 from verify_handoff_package import (  # noqa: E402
     load_handoff_package_payload,
     validate_handoff_package_payload,
@@ -51,12 +54,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-ref", required=True)
     args = parser.parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
-    result = build_handoff_package(
-        repo_root=repo_root,
-        out_dir=resolve_path(repo_root, args.out_dir),
-        task_name=args.task_name,
-        base_ref=args.base_ref,
-    )
+    try:
+        result = build_handoff_package(
+            repo_root=repo_root,
+            out_dir=resolve_path(repo_root, args.out_dir),
+            task_name=args.task_name,
+            base_ref=args.base_ref,
+        )
+    except ReplayEnvironmentBlocked as exc:
+        for failure in exc.failures:
+            print(f"replay_environment_blocked:{failure}")
+        return 1
     print(f"zip={result['zip_path']}")
     print(f"json={result['json_path']}")
     print(f"zip_sha256={result['zip_sha256']}")

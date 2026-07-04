@@ -12,8 +12,7 @@ from quant_research_platform.research.datasets import (
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
-
-from ._helpers import (
+from tests.helpers.price_volume_reference import (
     assert_forced_tiny_processed_chunks_match_default,
     correctness_processed_catalog,
     correctness_research_dataset_catalog,

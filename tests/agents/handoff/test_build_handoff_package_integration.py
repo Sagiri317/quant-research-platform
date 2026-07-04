@@ -193,9 +193,14 @@ def test_builder_fails_when_replayed_validation_row_is_not_pass(
     repo = tmp_path / "repo"
     init_handoff_test_repo(repo)
     builder = load_handoff_script_module("build_handoff_package")
-    good_receipts = builder.build_machine_receipts(
-        repo, run_git(repo, "rev-parse", "HEAD").strip()
-    )
+    final_head = run_git(repo, "rev-parse", "HEAD").strip()
+    good_receipts = {
+        builder.CHECK_RECEIPTS_ENTRY: make_check_receipts_payload(),
+        builder.PACKAGE_SMOKE_RECEIPT_ENTRY: make_package_smoke_receipt_payload(),
+        builder.HARD_SCAN_RECEIPT_ENTRY: make_hard_scan_receipt_payload(
+            scanned_head=final_head
+        ),
+    }
     check_receipts = good_receipts[builder.CHECK_RECEIPTS_ENTRY]
     profile_smoke = next(
         row
@@ -246,9 +251,14 @@ def test_builder_fails_when_package_smoke_timeout_blocks_validation(
     repo = tmp_path / "repo"
     init_handoff_test_repo(repo)
     builder = load_handoff_script_module("build_handoff_package")
-    receipts = builder.build_machine_receipts(
-        repo, run_git(repo, "rev-parse", "HEAD").strip()
-    )
+    final_head = run_git(repo, "rev-parse", "HEAD").strip()
+    receipts = {
+        builder.CHECK_RECEIPTS_ENTRY: make_check_receipts_payload(),
+        builder.PACKAGE_SMOKE_RECEIPT_ENTRY: make_package_smoke_receipt_payload(),
+        builder.HARD_SCAN_RECEIPT_ENTRY: make_hard_scan_receipt_payload(
+            scanned_head=final_head
+        ),
+    }
     package_smoke = receipts[builder.PACKAGE_SMOKE_RECEIPT_ENTRY]
     package_smoke["status"] = "BLOCKED"
     package_smoke["build"] = {"status": "BLOCKED", "artifact_kinds": []}

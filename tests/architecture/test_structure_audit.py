@@ -46,6 +46,8 @@ def test_structure_audit_json_gate_passes() -> None:
         "package_import_timeout",
         "conda_build_backend_contract",
         "package_content_scan_truthfulness",
+        "handoff_replay_environment_preflight_closure",
+        "test_helper_boundary_closure",
     } <= check_names
 
 
@@ -191,6 +193,66 @@ def test_negative_handoff_evidence_fields_are_semantic_specs() -> None:
     )
 
 
+def test_structure_audit_detects_missing_replay_environment_preflight(
+    tmp_path: Path,
+) -> None:
+    audit = _load_structure_audit()
+    handoff_root = _write_handoff_source(
+        tmp_path,
+        replay_evidence=(
+            "def build_machine_receipts(repo_root, final_head):\n"
+            "    return {}\n"
+        ),
+    )
+    (handoff_root / "build_handoff_package.py").write_text(
+        "from replay_evidence import build_machine_receipts\n",
+        encoding="utf-8",
+    )
+    (handoff_root / "verify_handoff_package.py").write_text(
+        "from replay_evidence import build_machine_receipts\n",
+        encoding="utf-8",
+    )
+    (handoff_root / "receipt_contract.py").write_text("", encoding="utf-8")
+
+    check = audit._handoff_replay_environment_preflight_closure(tmp_path)
+
+    assert check.status == "FAIL"
+    assert "replay_evidence:ReplayEnvironmentBlocked_missing" in check.findings
+    assert "replay_evidence:assert_replay_environment_ready_missing" in check.findings
+    assert "replay_evidence:build_machine_receipts_missing_preflight" in check.findings
+
+
+def test_structure_audit_detects_test_helper_boundary_mutation(
+    tmp_path: Path,
+) -> None:
+    audit = _load_structure_audit()
+    helper = tmp_path / "tests" / "correctness" / "_helpers.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("", encoding="utf-8")
+    research_test = tmp_path / "tests" / "research" / "test_price_volume_factors.py"
+    research_test.parent.mkdir(parents=True)
+    research_test.write_text(
+        "from tests.correctness._helpers import synthetic_price_volume_panel\n",
+        encoding="utf-8",
+    )
+    architecture = tmp_path / "tests" / "architecture"
+    architecture.mkdir(parents=True)
+    (architecture / "test_retired_terms.py").write_text(
+        "SHARED_TEST_HELPER_ROOTS = [Path('tests/correctness/_helpers.py')]\n",
+        encoding="utf-8",
+    )
+    helpers = tmp_path / "tests" / "helpers"
+    helpers.mkdir(parents=True)
+    (helpers / "utils.py").write_text("", encoding="utf-8")
+
+    check = audit._test_helper_boundary_closure(tmp_path)
+
+    assert check.status == "FAIL"
+    assert "tests/correctness/_helpers.py:present" in check.findings
+    assert any("tests.correctness._helpers" in item for item in check.findings)
+    assert "tests/helpers/utils.py:unclear_owner" in check.findings
+
+
 def _load_handoff_contract():
     path = Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
@@ -215,7 +277,7 @@ def _load_structure_audit():
     return module
 
 
-def _write_handoff_source(tmp_path: Path, *, replay_evidence: str = "") -> None:
+def _write_handoff_source(tmp_path: Path, *, replay_evidence: str = "") -> Path:
     handoff_root = (
         tmp_path
         / ".agents"
@@ -234,3 +296,4 @@ def _write_handoff_source(tmp_path: Path, *, replay_evidence: str = "") -> None:
         "PACKAGE_IMPORT_TIMEOUT_SECONDS = 120\n",
         encoding="utf-8",
     )
+    return handoff_root

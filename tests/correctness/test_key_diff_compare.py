@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ._helpers import compare_synthetic_keyed_frames
+from tests.helpers.keyed_frame_diff import compare_synthetic_keyed_frames
 
 
 def test_key_diff_identical_content_passes_across_structural_paths() -> None:

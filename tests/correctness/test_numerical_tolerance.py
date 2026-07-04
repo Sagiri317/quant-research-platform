@@ -4,7 +4,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ._helpers import numeric_series_diff_report, numeric_values_equal
+from tests.helpers.keyed_frame_diff import (
+    numeric_series_diff_report,
+    numeric_values_equal,
+)
 
 
 def test_numeric_diff_helper_treats_nan_pairs_and_value_nan() -> None:

@@ -37,8 +37,7 @@ from quant_research_platform.research.factors.price_volume.rolling import (
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
-
-from ._helpers import (
+from tests.helpers.price_volume_reference import (
     KEY_COLUMNS,
     REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE,
     assert_frame_matches_reference,

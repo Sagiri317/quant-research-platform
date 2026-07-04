@@ -91,6 +91,57 @@ ACTIVE_DENIED_HANDOFF_EVIDENCE_FIELDS = (
         "acceptance_gate": "receipt payload validation rejects raw log fields",
     },
     {
+        "field_name": "dependency_preflight_receipt",
+        "owner": "handoff replay environment diagnostic",
+        "risk": (
+            "local dependency diagnostics are verifier-local and not handoff evidence"
+        ),
+        "lifecycle": (
+            "deny while environment preflight remains outside handoff payloads"
+        ),
+        "acceptance_gate": (
+            "handoff layout and receipt schemas reject extra preflight evidence"
+        ),
+    },
+    {
+        "field_name": "environment_dump",
+        "owner": "handoff receipt contract",
+        "risk": (
+            "environment dumps can expose local paths, package inventory, and "
+            "private state"
+        ),
+        "lifecycle": "deny while REVIEW_SAFE handoff remains compact receipt based",
+        "acceptance_gate": "receipt payload validation rejects environment dump fields",
+    },
+    {
+        "field_name": "pip_freeze",
+        "owner": "handoff receipt contract",
+        "risk": "full dependency inventories are local environment dumps",
+        "lifecycle": "deny while replay diagnostics stay verifier-local",
+        "acceptance_gate": "receipt payload validation rejects dependency dump fields",
+    },
+    {
+        "field_name": "raw_stdout",
+        "owner": "handoff receipt contract",
+        "risk": "raw stdout can expose local paths, private data, or unbounded logs",
+        "lifecycle": "deny while machine evidence is derived from compact receipts",
+        "acceptance_gate": "receipt payload validation rejects raw stdout fields",
+    },
+    {
+        "field_name": "raw_stderr",
+        "owner": "handoff receipt contract",
+        "risk": "raw stderr can expose tracebacks, local paths, or private data",
+        "lifecycle": "deny while machine evidence is derived from compact receipts",
+        "acceptance_gate": "receipt payload validation rejects raw stderr fields",
+    },
+    {
+        "field_name": "raw_pytest_log",
+        "owner": "handoff receipt contract",
+        "risk": "raw pytest logs can contain local paths and unbounded stdout/stderr",
+        "lifecycle": "deny while test evidence remains compact replayable receipt rows",
+        "acceptance_gate": "receipt payload validation rejects raw pytest log fields",
+    },
+    {
         "field_name": "local_absolute_path",
         "owner": "share-safety scanner",
         "risk": "local machine paths are not REVIEW_SAFE",

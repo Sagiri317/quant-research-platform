@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata as importlib_metadata
 import json
 import os
 import re
@@ -53,6 +54,42 @@ FORBIDDEN_PACKAGE_SUFFIXES = {
     ".feather",
     ".arrow",
 }
+REPLAY_ENVIRONMENT_REQUIREMENTS = (
+    ("build", ">=1.5,<2"),
+    ("setuptools", ">=80,<81"),
+    ("wheel", ">=0.45,<1"),
+    ("pyarrow", ">=24,<25"),
+    ("pytest", ">=9,<10"),
+)
+
+
+class ReplayEnvironmentBlocked(Exception):
+    def __init__(self, failures: tuple[str, ...]) -> None:
+        self.failures = failures
+        super().__init__(";".join(failures))
+
+
+def collect_replay_environment_failures(repo_root: Path) -> tuple[str, ...]:
+    _ = repo_root
+    failures: list[str] = []
+    for distribution_name, expected in REPLAY_ENVIRONMENT_REQUIREMENTS:
+        try:
+            installed = importlib_metadata.version(distribution_name)
+        except importlib_metadata.PackageNotFoundError:
+            failures.append(f"dependency_missing:{distribution_name}")
+            continue
+        if not _version_satisfies(installed, expected):
+            failures.append(
+                "dependency_version_mismatch:"
+                f"{distribution_name}:expected={expected}:installed={installed}"
+            )
+    return tuple(failures)
+
+
+def assert_replay_environment_ready(repo_root: Path) -> None:
+    failures = collect_replay_environment_failures(repo_root)
+    if failures:
+        raise ReplayEnvironmentBlocked(failures)
 
 
 def build_replayed_check_receipts(repo_root: Path) -> dict[str, object]:
@@ -127,6 +164,7 @@ def build_machine_receipts(
     *,
     source_tree_scan_groups_payload: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, dict[str, object]]:
+    assert_replay_environment_ready(repo_root)
     return {
         CHECK_RECEIPTS_ENTRY: build_replayed_check_receipts(repo_root),
         PACKAGE_SMOKE_RECEIPT_ENTRY: build_replayed_package_smoke_receipt(repo_root),
@@ -136,6 +174,37 @@ def build_machine_receipts(
             source_tree_scan_groups_payload=source_tree_scan_groups_payload,
         ),
     }
+
+
+def _version_satisfies(installed: str, expected: str) -> bool:
+    installed_version = _version_tuple(installed)
+    for clause in expected.split(","):
+        clause = clause.strip()
+        if not clause:
+            continue
+        match = re.fullmatch(r"(>=|<=|<|>|==)\s*([0-9][0-9A-Za-z._+-]*)", clause)
+        if match is None:
+            return False
+        operator, version = match.groups()
+        target = _version_tuple(version)
+        if operator == ">=" and not installed_version >= target:
+            return False
+        if operator == "<=" and not installed_version <= target:
+            return False
+        if operator == "<" and not installed_version < target:
+            return False
+        if operator == ">" and not installed_version > target:
+            return False
+        if operator == "==" and not installed_version == target:
+            return False
+    return True
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    match = re.match(r"\d+(?:\.\d+)*", value)
+    if match is None:
+        return ()
+    return tuple(int(part) for part in match.group(0).split("."))
 
 
 def _run_replay_command(repo_root: Path, command_id: str) -> dict[str, object]:

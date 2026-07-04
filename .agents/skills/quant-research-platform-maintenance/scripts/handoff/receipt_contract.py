@@ -113,8 +113,14 @@ FORBIDDEN_RECEIPT_FIELDS = frozenset(
         "stderr",
         "raw_output",
         "raw_log",
+        "raw_stdout",
+        "raw_stderr",
+        "raw_pytest_log",
         "raw_grep_output",
         "grep_hits",
+        "environment_dump",
+        "pip_freeze",
+        "dependency_preflight_receipt",
     }
 )
 COUNT_FIELDS = frozenset(

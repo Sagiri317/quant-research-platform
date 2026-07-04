@@ -40,7 +40,7 @@ from quant_research_platform.research.factors.price_volume import (
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
-from tests.correctness._helpers import (
+from tests.helpers.price_volume_reference import (
     assert_frame_matches_reference,
     reference_price_volume_factors,
 )

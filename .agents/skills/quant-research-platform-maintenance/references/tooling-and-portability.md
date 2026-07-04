@@ -15,6 +15,7 @@ validation result 获取 share-safety status 和 zip sha256，不运行独立 sa
 - 输出应可被 human 和 machine 读取。
 - 检查失败时返回非零 exit code。
 - Handoff builder 从 Git state 和 replay 自动生成 compact machine receipts；不要把 raw grep output、完整 pytest log、完整 stdout/stderr、wheel/sdist 或本地临时安装目录写入 handoff。
+- Replay environment preflight 只用于 builder/verifier 本地诊断；缺依赖或版本不匹配输出 `replay_environment_blocked:*`，不得写入 handoff zip、receipt field、validation row 或 artifact type。
 - 本地依赖、验证、构建和测试只使用 conda；环境名从 `environment.yml` 动态读取，不写死在代码、测试或文档中。
 - 如果 `pyproject.toml` 的 dev dependencies 需要 `build`，`environment.yml` 必须提供对应 conda 包 `python-build`。
 - `pytest-xdist>=3.8,<4` 是已批准 dev-only speed-gate 依赖，必须同时出现在

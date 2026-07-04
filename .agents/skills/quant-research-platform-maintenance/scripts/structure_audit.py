@@ -114,6 +114,8 @@ def run_audit(repo_root: Path) -> tuple[AuditCheck, ...]:
         _source_tree_scan_behavior_tests(repo_root),
         _test_owner_placement(repo_root),
         _validation_fail_packages_rejected(repo_root),
+        _handoff_replay_environment_preflight_closure(repo_root),
+        _test_helper_boundary_closure(repo_root),
         _no_duplicate_source_tree_scanner_regex(repo_root),
         _negative_field_specs(repo_root),
         _active_open_issues_current_only(repo_root),
@@ -415,6 +417,101 @@ def _validation_fail_packages_rejected(repo_root: Path) -> AuditCheck:
     return _check("validation_fail_packages_rejected", tuple(findings))
 
 
+def _handoff_replay_environment_preflight_closure(repo_root: Path) -> AuditCheck:
+    findings: list[str] = []
+    replay_path = repo_root / HANDOFF_ROOT / "replay_evidence.py"
+    builder_path = repo_root / HANDOFF_ROOT / "build_handoff_package.py"
+    verifier_path = repo_root / HANDOFF_ROOT / "verify_handoff_package.py"
+    handoff_contract_path = repo_root / HANDOFF_ROOT / "handoff_contract.py"
+    receipt_contract_path = repo_root / HANDOFF_ROOT / "receipt_contract.py"
+    replay_tree = _parse_python_file(replay_path)
+    builder_tree = _parse_python_file(builder_path)
+    verifier_tree = _parse_python_file(verifier_path)
+    receipt_tree = _parse_python_file(receipt_contract_path)
+
+    replay_defs = _top_level_definition_names(replay_tree)
+    for name in (
+        "ReplayEnvironmentBlocked",
+        "collect_replay_environment_failures",
+        "assert_replay_environment_ready",
+    ):
+        if name not in replay_defs:
+            findings.append(f"replay_evidence:{name}_missing")
+    if not _function_calls_name(
+        replay_tree,
+        "build_machine_receipts",
+        "assert_replay_environment_ready",
+    ):
+        findings.append("replay_evidence:build_machine_receipts_missing_preflight")
+    if "ReplayEnvironmentBlocked" not in _imported_or_defined_names(builder_tree):
+        findings.append("builder:ReplayEnvironmentBlocked_not_used")
+    if "ReplayEnvironmentBlocked" not in _imported_or_defined_names(verifier_tree):
+        findings.append("verifier:ReplayEnvironmentBlocked_not_used")
+    builder_text = builder_path.read_text(encoding="utf-8", errors="ignore")
+    verifier_text = verifier_path.read_text(encoding="utf-8", errors="ignore")
+    if "replay_environment_blocked:" not in builder_text:
+        findings.append("builder:replay_environment_blocked_failure_missing")
+    if "replay_environment_blocked:" not in verifier_text:
+        findings.append("verifier:replay_environment_blocked_failure_missing")
+    if _required_handoff_entries_contain(
+        repo_root,
+        ("dependency", "preflight", "environment"),
+    ):
+        findings.append("handoff_contract:preflight_entry_added")
+    forbidden_schema_terms = (
+        "preflight",
+        "environment_dump",
+        "pip_freeze",
+        "raw_stdout",
+        "raw_stderr",
+        "raw_pytest_log",
+    )
+    for field in _receipt_schema_field_names(receipt_tree):
+        if any(term in field for term in forbidden_schema_terms):
+            findings.append(f"receipt_contract:forbidden_schema_field:{field}")
+    if "dependency_preflight_receipt" in _required_handoff_entry_text(
+        handoff_contract_path
+    ):
+        findings.append("handoff_contract:dependency_preflight_receipt_entry_added")
+    return _check("handoff_replay_environment_preflight_closure", tuple(findings))
+
+
+def _test_helper_boundary_closure(repo_root: Path) -> AuditCheck:
+    findings: list[str] = []
+    retired_helper = repo_root / "tests" / "correctness" / "_helpers.py"
+    if retired_helper.exists():
+        findings.append("tests/correctness/_helpers.py:present")
+    for path in (repo_root / "tests").rglob("test_*.py"):
+        owner = _test_owner(path, repo_root)
+        for imported in _imported_modules(path):
+            if imported == "tests.correctness._helpers":
+                findings.append(
+                    f"{path.relative_to(repo_root).as_posix()}:"
+                    "tests.correctness._helpers"
+                )
+            parts = imported.split(".")
+            if len(parts) >= 3 and parts[0] == "tests" and parts[2] == "_helpers":
+                imported_owner = parts[1]
+                if imported_owner != owner:
+                    findings.append(
+                        f"{path.relative_to(repo_root).as_posix()}:{imported}"
+                    )
+    retired_terms = repo_root / "tests" / "architecture" / "test_retired_terms.py"
+    if retired_terms.exists() and "tests/correctness/_helpers.py" in (
+        retired_terms.read_text(encoding="utf-8", errors="ignore")
+    ):
+        findings.append("test_retired_terms:retired_correctness_helper_root")
+    unclear_names = {"common.py", "utils.py", "new_helpers.py", "correctness_data.py"}
+    helpers_root = repo_root / "tests" / "helpers"
+    if helpers_root.exists():
+        findings.extend(
+            f"tests/helpers/{path.name}:unclear_owner"
+            for path in sorted(helpers_root.glob("*.py"))
+            if path.name in unclear_names
+        )
+    return _check("test_helper_boundary_closure", tuple(findings))
+
+
 def _no_duplicate_source_tree_scanner_regex(repo_root: Path) -> AuditCheck:
     verifier = (repo_root / HANDOFF_ROOT / "verify_handoff_package.py").read_text(
         encoding="utf-8"
@@ -640,6 +737,117 @@ def _load_handoff_script_module(repo_root: Path, name: str):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _parse_python_file(path: Path) -> ast.Module:
+    try:
+        return ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, SyntaxError):
+        return ast.Module(body=[], type_ignores=[])
+
+
+def _top_level_definition_names(tree: ast.Module) -> set[str]:
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+    }
+
+
+def _imported_or_defined_names(tree: ast.Module) -> set[str]:
+    names = set(_top_level_definition_names(tree))
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            names.update(
+                alias.asname or alias.name.split(".")[0] for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            names.update(alias.asname or alias.name for alias in node.names)
+    return names
+
+
+def _function_calls_name(
+    tree: ast.Module,
+    function_name: str,
+    called_name: str,
+) -> bool:
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if node.name != function_name:
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if isinstance(func, ast.Name) and func.id == called_name:
+                return True
+            if isinstance(func, ast.Attribute) and func.attr == called_name:
+                return True
+    return False
+
+
+def _required_handoff_entries_contain(
+    repo_root: Path,
+    terms: tuple[str, ...],
+) -> bool:
+    handoff_contract = _load_handoff_script_module(repo_root, "handoff_contract")
+    entries = getattr(handoff_contract, "REQUIRED_HANDOFF_ENTRIES", ())
+    return any(any(term in str(entry) for term in terms) for entry in entries)
+
+
+def _required_handoff_entry_text(path: Path) -> str:
+    try:
+        tree = _parse_python_file(path)
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            targets = [
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            ]
+            if "REQUIRED_HANDOFF_ENTRIES" not in targets:
+                continue
+            return ast.unparse(node)
+    except Exception:
+        return ""
+    return ""
+
+
+def _receipt_schema_field_names(tree: ast.Module) -> set[str]:
+    fields: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        if not any(name.endswith("_FIELD_SPECS") for name in targets):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        for key in node.value.keys:
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                fields.add(key.value)
+    return fields
+
+
+def _imported_modules(path: Path) -> set[str]:
+    tree = _parse_python_file(path)
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level and path.parent.name:
+                module = f"tests.{path.parent.name}.{module}".rstrip(".")
+            imports.add(module)
+    return imports
+
+
+def _test_owner(path: Path, repo_root: Path) -> str:
+    try:
+        return path.relative_to(repo_root / "tests").parts[0]
+    except ValueError:
+        return ""
 
 
 def _check(name: str, findings: Iterable[str]) -> AuditCheck:

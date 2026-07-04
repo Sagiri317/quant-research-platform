@@ -23,6 +23,10 @@ tracked handoff tooling 位于：
 - `replay_evidence.py` 执行 public machine replay，并构造 canonical
   receipts；hard-scan receipt 由
   `governance_contract.source_tree_scan_groups()` 的扫描结果构造。
+  replay environment preflight 是 builder/verifier 本地诊断 primitive，用于在
+  receipt replay 前识别缺失依赖或版本不匹配。该诊断只输出
+  `replay_environment_blocked:*` failure，不写入 handoff zip，也不生成额外
+  receipt、validation row 或 artifact。
   package smoke 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`；构建后端依赖由 `environment.yml` 显式提供。package smoke 只通过 wheel 解压和 `PYTHONPATH` import smoke 构造，不执行安装。
 - `verify_handoff_package.py` 是 package trust boundary。
   `verify_handoff_package_result()` 是唯一 package-level verifier function。
@@ -85,6 +89,11 @@ share-safety scan 和 `replay_evidence.build_machine_receipts()`。packaged rece
 必须与 replayed receipts 派生结果一致。payload/schema mutation tests 使用
 `compare_replayed_handoff_payloads()` 的 fast path；完整 bundle replay 保留给
 valid package smoke 和 Git identity 变异。
+
+如果 bundle clone 环境缺少 replay 必需依赖或依赖版本不满足，verifier 应报告
+`replay_environment_blocked:*`，不得把本地环境问题泛化为
+`*_replay_mismatch`。handoff evidence 仍然只由 compact replayable receipts 和
+derived validation summary 组成。
 
 receipt command rows 必须记录可校验的 `duration_seconds`。动态耗时只用于性能和
 运行事实，不作为 replay equality 的稳定语义。

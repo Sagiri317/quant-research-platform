@@ -55,7 +55,10 @@ from receipt_contract import (  # noqa: E402
     compare_package_smoke_receipt,
     validate_receipt_payload,
 )
-from replay_evidence import build_machine_receipts  # noqa: E402
+from replay_evidence import (  # noqa: E402
+    ReplayEnvironmentBlocked,
+    build_machine_receipts,
+)
 
 from quant_research_platform.policy.share_safety import (  # noqa: E402
     evidence_json_unsafe_reason,
@@ -498,11 +501,17 @@ def verify_bundle_and_replay_once(
         )
         if failures:
             return failures, share_safety_failures
-        replayed = build_machine_receipts(
-            clone_dir,
-            final_head,
-            source_tree_scan_groups_payload=scan_groups,
-        )
+        try:
+            replayed = build_machine_receipts(
+                clone_dir,
+                final_head,
+                source_tree_scan_groups_payload=scan_groups,
+            )
+        except ReplayEnvironmentBlocked as exc:
+            failures.extend(
+                f"replay_environment_blocked:{failure}" for failure in exc.failures
+            )
+            return failures, share_safety_failures
     failures.extend(compare_replayed_handoff_payloads(package_payload, replayed))
     return failures, share_safety_failures
 

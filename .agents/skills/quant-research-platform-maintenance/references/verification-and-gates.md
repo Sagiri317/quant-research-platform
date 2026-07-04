@@ -104,6 +104,12 @@ conda run -n <environment.yml name> python tests/tools/run_profile.py --profile 
 
 Handoff receipt flow 的低成本 gate 放在 `tests/agents/handoff/`：覆盖唯一 builder 入口、sidecar zip envelope、exact zip layout、status-only/placeholder/raw output 拒绝、package/check/hard-scan receipt schema、package mutation，以及从 bundle clone replay public machine receipts。mutation tests 对 payload/schema/replay mismatch 使用 `compare_replayed_handoff_payloads()` fast path；完整 bundle verifier 只保留给 valid package smoke、Git identity 和 sidecar envelope 变异。
 
+Replay environment preflight 是 builder/verifier-local diagnostic gate。缺失依赖
+或版本不满足时，builder 应 fail fast 且不写出 partial package；verifier 应在
+bundle verify、clone、identity checks 和 source-tree share-safety scan 之后、receipt
+replay 之前报告 `replay_environment_blocked:*`。该状态不进入 handoff zip、
+receipt schema、validation row 或 artifact manifest。
+
 Formal handoff validation gate 要求 mandatory validation rows 全部为 `PASS`。builder 和 verifier 都必须调用 `handoff_contract.mandatory_validation_failures()`；任一 mandatory row 为 `FAIL`、`NOT_RUN`、`BLOCKED`、缺失、重复或未知状态时，formal handoff 失败。`validation-summary.json` 顶层 status 由 rows 聚合派生，不得由 package layout PASS、receipt 自洽或 verifier status 替代 row-level PASS。
 
 ## 4. Active-Doc Scan

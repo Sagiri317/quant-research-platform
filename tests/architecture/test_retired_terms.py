@@ -38,7 +38,6 @@ ACTIVE_DOC_ROOTS = (
 )
 SHARED_TEST_HELPER_ROOTS = (
     Path("tests/helpers"),
-    Path("tests/correctness/_helpers.py"),
 )
 
 def test_workflow_run_policy_replaces_retired_action_contract() -> None:

@@ -13,8 +13,10 @@ from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
 from tests.helpers import frequency_ids
-
-from ._helpers import KEY_COLUMNS, synthetic_price_volume_panel
+from tests.helpers.price_volume_reference import (
+    KEY_COLUMNS,
+    synthetic_price_volume_panel,
+)
 
 
 def test_row_order_and_irrelevant_columns_do_not_change_price_volume_factors() -> None:
