@@ -8,7 +8,9 @@
 
 如果 `pyproject.toml` dev dependencies 包含 `build`，`environment.yml` 必须包含对应 conda 包 `python-build`。`pyproject.toml` 必须显式声明 `[build-system]`，且 `environment.yml` 必须显式提供对应构建后端依赖。package smoke 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`；package smoke 不执行安装，只允许 wheel 解压后通过 `PYTHONPATH` import smoke。
 
-`pytest-xdist>=3.8,<4` 只属于 dev dependencies 和 `environment.yml`，用于 `all-xdist` speed gate（速度门禁）；它不得进入 runtime dependencies、`build-system.requires` 或 package smoke runtime。
+`pytest-xdist` 只属于 dev dependencies 和 `environment.yml`，用于 `all-xdist` speed gate；具体版本以 root config 当前声明为准；它不得进入 runtime dependencies、`build-system.requires` 或 package smoke runtime。
+
+Replay environment preflight 只检查 handoff replay/package smoke 的最小 Python runtime metadata。Python 版本和 replay 必需 distribution 约束从 `pyproject.toml` 派生；`environment.yml` 只通过 structure audit / environment contract 与其同步，不作为 runtime preflight 来源。
 
 ## 运行与验证
 

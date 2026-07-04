@@ -47,7 +47,11 @@ def test_structure_audit_json_gate_passes() -> None:
         "conda_build_backend_contract",
         "package_content_scan_truthfulness",
         "handoff_replay_environment_preflight_closure",
+        "price_volume_reference_owner_closure",
+        "helper_owner_inversion_closure",
         "test_helper_boundary_closure",
+        "replay_environment_requirements_single_source",
+        "environment_dependency_sync",
     } <= check_names
 
 
@@ -222,6 +226,108 @@ def test_structure_audit_detects_missing_replay_environment_preflight(
     assert "replay_evidence:build_machine_receipts_missing_preflight" in check.findings
 
 
+def test_structure_audit_detects_price_volume_reference_owner_mutation(
+    tmp_path: Path,
+) -> None:
+    audit = _load_structure_audit()
+    helper = tmp_path / "tests" / "helpers" / "price_volume_reference.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text(
+        "\n".join(
+            [
+                "def minimal_market_bars_frame():",
+                "    return None",
+                "def write_correctness_processed_inputs():",
+                "    return None",
+                "def assert_forced_tiny_processed_chunks_match_default():",
+                "    return None",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    check = audit._price_volume_reference_owner_closure(tmp_path)
+
+    assert check.status == "FAIL"
+    assert "price_volume_reference:minimal_market_bars_frame" in check.findings
+    assert "price_volume_reference:write_correctness_processed_inputs" in (
+        check.findings
+    )
+    assert (
+        "price_volume_reference:"
+        "assert_forced_tiny_processed_chunks_match_default"
+        in check.findings
+    )
+
+
+def test_structure_audit_detects_keyed_frame_owner_inversion(
+    tmp_path: Path,
+) -> None:
+    audit = _load_structure_audit()
+    helper = tmp_path / "tests" / "helpers" / "keyed_frame_diff.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text(
+        "from tests.helpers.price_volume_reference import KEY_COLUMNS\n",
+        encoding="utf-8",
+    )
+
+    check = audit._helper_owner_inversion_closure(tmp_path)
+
+    assert check.status == "FAIL"
+    assert "tests/helpers/keyed_frame_diff.py:tests.helpers.price_volume_reference" in (
+        check.findings
+    )
+
+
+def test_structure_audit_detects_replay_dependency_version_tuple_mutation(
+    tmp_path: Path,
+) -> None:
+    audit = _load_structure_audit()
+    handoff_root = _write_handoff_source(
+        tmp_path,
+        replay_evidence=(
+            "REPLAY_ENVIRONMENT_REQUIREMENTS = (\n"
+            "    ('pyarrow', '>=24,<25'),\n"
+            ")\n"
+            "REPLAY_REQUIRED_DISTRIBUTIONS = ('pyarrow',)\n"
+        ),
+    )
+    (handoff_root / "build_handoff_package.py").write_text("", encoding="utf-8")
+    (handoff_root / "verify_handoff_package.py").write_text("", encoding="utf-8")
+    (handoff_root / "receipt_contract.py").write_text("", encoding="utf-8")
+    _write_root_configs(tmp_path)
+
+    check = audit._replay_environment_requirements_single_source(tmp_path)
+
+    assert check.status == "FAIL"
+    assert "replay_evidence:hardcoded_requirement:pyarrow:>=24,<25" in (
+        check.findings
+    )
+
+
+def test_structure_audit_detects_environment_dependency_sync_mutation(
+    tmp_path: Path,
+) -> None:
+    audit = _load_structure_audit()
+    _write_root_configs(
+        tmp_path,
+        environment_extra=(
+            "  - python=3.12\n"
+            "  - python-build>=1.4,<2\n"
+            "  - ruff>=0.15,<0.16\n"
+        ),
+    )
+
+    check = audit._environment_dependency_sync(tmp_path)
+
+    assert check.status == "FAIL"
+    assert "environment.yml:python_pin_mismatch:expected=3.13" in check.findings
+    assert "environment.yml:dependency_mismatch:build->python-build" in (
+        check.findings
+    )
+    assert "pyproject.toml:ruff_target_mismatch:expected=py313" not in check.findings
+
+
 def test_structure_audit_detects_test_helper_boundary_mutation(
     tmp_path: Path,
 ) -> None:
@@ -297,3 +403,45 @@ def _write_handoff_source(tmp_path: Path, *, replay_evidence: str = "") -> Path:
         encoding="utf-8",
     )
     return handoff_root
+
+
+def _write_root_configs(tmp_path: Path, *, environment_extra: str = "") -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "\n".join(
+            [
+                "[build-system]",
+                'requires = ["setuptools>=80,<81", "wheel>=0.45,<1"]',
+                'build-backend = "setuptools.build_meta"',
+                "",
+                "[project]",
+                'requires-python = ">=3.13,<3.14"',
+                'dependencies = ["pyarrow>=24,<25"]',
+                "",
+                "[project.optional-dependencies]",
+                'dev = ["build>=1.5,<2", "pytest>=9,<10", '
+                '"pytest-xdist>=3.8,<4", "ruff>=0.15,<0.16"]',
+                "",
+                "[tool.ruff]",
+                'target-version = "py313"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    extra = (
+        environment_extra
+        if environment_extra
+        else "  - python-build>=1.5,<2\n  - ruff>=0.15,<0.16\n"
+    )
+    environment = (
+        "name: demo\n"
+        "dependencies:\n"
+        "  - python=3.13\n"
+        "  - pyarrow>=24,<25\n"
+        "  - pytest>=9,<10\n"
+        "  - pytest-xdist>=3.8,<4\n"
+        "  - setuptools>=80,<81\n"
+        "  - wheel>=0.45,<1\n"
+        f"{extra}"
+    )
+    (tmp_path / "environment.yml").write_text(environment, encoding="utf-8")

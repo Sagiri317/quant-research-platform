@@ -24,7 +24,9 @@ tracked handoff tooling 位于：
   receipts；hard-scan receipt 由
   `governance_contract.source_tree_scan_groups()` 的扫描结果构造。
   replay environment preflight 是 builder/verifier 本地诊断 primitive，用于在
-  receipt replay 前识别缺失依赖或版本不匹配。该诊断只输出
+  receipt replay 前识别缺失依赖或版本不匹配。Python runtime metadata 的版本约束
+  从 `pyproject.toml` 派生；`environment.yml` 只通过 structure audit 和 environment
+  contract gate 与 root Python metadata 同步，不作为 runtime preflight 来源。该诊断只输出
   `replay_environment_blocked:*` failure，不写入 handoff zip，也不生成额外
   receipt、validation row 或 artifact。
   package smoke 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`；构建后端依赖由 `environment.yml` 显式提供。package smoke 只通过 wheel 解压和 `PYTHONPATH` import smoke 构造，不执行安装。

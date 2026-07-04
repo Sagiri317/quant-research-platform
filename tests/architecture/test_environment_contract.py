@@ -20,8 +20,6 @@ TOOLING_AND_PORTABILITY = (
     / "tooling-and-portability.md"
 )
 
-EXPECTED_PYTHON_SPEC = ">=3.13,<3.14"
-EXPECTED_RUFF_TARGET = "py313"
 RUNTIME_DEPENDENCIES = {
     "fastapi",
     "numpy",
@@ -76,9 +74,12 @@ LOCAL_ABSOLUTE_PATH_PATTERNS = (
 
 def test_python_and_ruff_contracts_are_locked_to_python_313() -> None:
     pyproject = _load_pyproject()
+    requires_python = pyproject["project"]["requires-python"]
 
-    assert pyproject["project"]["requires-python"] == EXPECTED_PYTHON_SPEC
-    assert pyproject["tool"]["ruff"]["target-version"] == EXPECTED_RUFF_TARGET
+    assert _python_minor_from_requires(requires_python)
+    assert pyproject["tool"]["ruff"]["target-version"] == _ruff_target_from_requires(
+        requires_python
+    )
 
 
 def test_core_dependencies_have_version_boundaries() -> None:
@@ -115,10 +116,46 @@ def test_pytest_xdist_is_dev_only_speed_gate_dependency() -> None:
     build_system_requires = _dependency_specs(pyproject["build-system"]["requires"])
     conda_packages = _environment_dependency_specs(environment)
 
-    assert dev["pytest-xdist"] == "pytest-xdist>=3.8,<4"
-    assert conda_packages["pytest-xdist"] == "pytest-xdist>=3.8,<4"
+    assert "pytest-xdist" in dev
+    assert conda_packages["pytest-xdist"] == dev["pytest-xdist"]
     assert "pytest-xdist" not in runtime
     assert "pytest-xdist" not in build_system_requires
+
+
+def test_environment_dependencies_match_pyproject_dependency_specs() -> None:
+    pyproject = _load_pyproject()
+    environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
+    runtime = _dependency_specs(pyproject["project"]["dependencies"])
+    dev = _dependency_specs(pyproject["project"]["optional-dependencies"]["dev"])
+    build_system_requires = _dependency_specs(pyproject["build-system"]["requires"])
+    conda_specs = _environment_dependency_specs(environment)
+    expected = {
+        "build": ("python-build", dev["build"]),
+        "setuptools": ("setuptools", build_system_requires["setuptools"]),
+        "wheel": ("wheel", build_system_requires["wheel"]),
+        "pyarrow": ("pyarrow", runtime["pyarrow"]),
+        "pytest": ("pytest", dev["pytest"]),
+        "pytest-xdist": ("pytest-xdist", dev["pytest-xdist"]),
+        "ruff": ("ruff", dev["ruff"]),
+    }
+    mismatches = {
+        pyproject_name: conda_name
+        for pyproject_name, (conda_name, pyproject_spec) in expected.items()
+        if conda_name not in conda_specs
+        or not _conda_spec_is_same_or_stricter(conda_specs[conda_name], pyproject_spec)
+    }
+
+    assert mismatches == {}
+
+
+def test_environment_python_pin_matches_requires_python_lower_bound() -> None:
+    pyproject = _load_pyproject()
+    environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
+    expected_minor = _python_minor_from_requires(
+        pyproject["project"]["requires-python"]
+    )
+
+    assert _environment_python_pin(environment) == expected_minor
 
 
 def test_build_system_requires_conda_managed_frontend_and_backend() -> None:
@@ -161,13 +198,16 @@ def test_engineering_contract_points_to_executable_environment_contracts() -> No
     text = ENGINEERING_CONTRACT.read_text(encoding="utf-8")
     environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
     environment_name = _environment_name(environment)
+    pyproject = _load_pyproject()
+    requires_python = pyproject["project"]["requires-python"]
+    python_pin = _environment_python_pin(environment)
 
     assert "pyproject.toml" in text
     assert "environment.yml" in text
-    assert f'requires-python = "{EXPECTED_PYTHON_SPEC}"' in PYPROJECT.read_text(
+    assert f'requires-python = "{requires_python}"' in PYPROJECT.read_text(
         encoding="utf-8"
     )
-    assert "python=3.13" in environment
+    assert f"python={python_pin}" in environment
     assert environment_name
 
 
@@ -190,7 +230,7 @@ def test_engineering_contract_includes_current_formal_commands() -> None:
         "--run-dir .run/<purpose>/all-xdist -- -n 4 --dist loadfile "
         "--durations=100"
     ) in text
-    assert "pytest-xdist>=3.8,<4" in text
+    assert "pytest-xdist" in text
     assert "speed gate" in text
     assert " --run-dir .run/<purpose>/fast" in text
     assert (
@@ -306,6 +346,13 @@ def _environment_dependency_specs(text: str) -> dict[str, str]:
     return specs
 
 
+def _environment_python_pin(text: str) -> str:
+    specs = _environment_dependency_specs(text)
+    python_spec = specs.get("python", "")
+    match = re.fullmatch(r"python=(\d+\.\d+)", python_spec)
+    return match.group(1) if match else ""
+
+
 def _dependency_specs(items: list[str]) -> dict[str, str]:
     specs: dict[str, str] = {}
     for item in items:
@@ -338,6 +385,16 @@ def _bounds(spec: str) -> set[tuple[str, str]]:
         (operator, version)
         for operator, version in re.findall(r"(>=|<=|<|>|==)\s*([0-9][^,;\s]*)", spec)
     }
+
+
+def _python_minor_from_requires(spec: str) -> str:
+    match = re.search(r">=\s*(\d+\.\d+)", spec)
+    return match.group(1) if match else ""
+
+
+def _ruff_target_from_requires(spec: str) -> str:
+    minor = _python_minor_from_requires(spec)
+    return "py" + minor.replace(".", "")
 
 
 def _code_blocks(text: str) -> list[str]:

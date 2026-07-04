@@ -98,7 +98,9 @@ conda run -n <environment.yml name> python tests/tools/run_profile.py --profile 
 conda run -n <environment.yml name> python tests/tools/run_profile.py --profile all --run-dir .run/<purpose>/all-xdist -- -n 4 --dist loadfile --durations=100
 ```
 
-`pytest-xdist>=3.8,<4` 只作为 dev-only speed gate 依赖。sequential `all` profile 是正式 truth gate；`all-xdist` 不能替代 `all`，只能补充耗时证据。
+`pytest-xdist` 只作为 dev-only speed gate 依赖，具体版本以 root config
+当前声明为准。sequential `all` profile 是正式 truth gate；`all-xdist` 不能替代
+`all`，只能补充耗时证据。
 
 如果完整运行超时，必须写 `BLOCKED` 并记录超时；可以补充分段运行结果。
 
@@ -108,7 +110,9 @@ Replay environment preflight 是 builder/verifier-local diagnostic gate。缺失
 或版本不满足时，builder 应 fail fast 且不写出 partial package；verifier 应在
 bundle verify、clone、identity checks 和 source-tree share-safety scan 之后、receipt
 replay 之前报告 `replay_environment_blocked:*`。该状态不进入 handoff zip、
-receipt schema、validation row 或 artifact manifest。
+receipt schema、validation row 或 artifact manifest。runtime preflight 的 Python
+版本和 replay 必需 distribution 约束从 `pyproject.toml` 派生；`environment.yml`
+只通过 structure audit / environment contract 检查与 `pyproject.toml` 同步。
 
 Formal handoff validation gate 要求 mandatory validation rows 全部为 `PASS`。builder 和 verifier 都必须调用 `handoff_contract.mandatory_validation_failures()`；任一 mandatory row 为 `FAIL`、`NOT_RUN`、`BLOCKED`、缺失、重复或未知状态时，formal handoff 失败。`validation-summary.json` 顶层 status 由 rows 聚合派生，不得由 package layout PASS、receipt 自洽或 verifier status 替代 row-level PASS。
 

@@ -8,11 +8,38 @@ from tests.agents.handoff.conftest import init_handoff_test_repo
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 
+def _write_minimal_pyproject(path: Path, *, include_pyarrow: bool = True) -> None:
+    dependencies = [
+        '"pyarrow>=24,<25",' if include_pyarrow else "",
+    ]
+    path.write_text(
+        "\n".join(
+            [
+                "[build-system]",
+                'requires = ["setuptools>=80,<81", "wheel>=0.45,<1"]',
+                'build-backend = "setuptools.build_meta"',
+                "",
+                "[project]",
+                'requires-python = ">=3.13,<3.14"',
+                "dependencies = [",
+                *[line for line in dependencies if line],
+                "]",
+                "",
+                "[project.optional-dependencies]",
+                'dev = ["build>=1.5,<2", "pytest>=9,<10"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_collect_replay_environment_failures_reports_missing_and_version_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     replay = load_handoff_script_module("replay_evidence")
+    _write_minimal_pyproject(tmp_path / "pyproject.toml")
     package_missing = replay.importlib_metadata.PackageNotFoundError("build")
     versions: dict[str, object] = {
         "build": package_missing,
@@ -37,6 +64,84 @@ def test_collect_replay_environment_failures_reports_missing_and_version_mismatc
         "dependency_version_mismatch:setuptools:expected=>=80,<81:installed=82.0.1",
     )
     assert all(":" in failure and "\\" not in failure for failure in failures)
+
+
+def test_collect_replay_environment_failures_reports_python_version_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay = load_handoff_script_module("replay_evidence")
+    _write_minimal_pyproject(tmp_path / "pyproject.toml")
+    versions = {
+        "build": "1.5.0",
+        "setuptools": "80.0.0",
+        "wheel": "0.45.1",
+        "pyarrow": "24.0.0",
+        "pytest": "9.0.1",
+    }
+
+    monkeypatch.setattr(replay.importlib_metadata, "version", versions.__getitem__)
+    monkeypatch.setattr(replay.sys, "version_info", (3, 12, 9, "final", 0))
+
+    failures = replay.collect_replay_environment_failures(tmp_path)
+
+    assert failures == (
+        "python_version_mismatch:expected=>=3.13,<3.14:installed=3.12.9",
+    )
+
+
+def test_collect_replay_environment_failures_reports_contract_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay = load_handoff_script_module("replay_evidence")
+    _write_minimal_pyproject(tmp_path / "pyproject.toml", include_pyarrow=False)
+    versions = {
+        "build": "1.5.0",
+        "setuptools": "80.0.0",
+        "wheel": "0.45.1",
+        "pyarrow": "24.0.0",
+        "pytest": "9.0.1",
+    }
+
+    monkeypatch.setattr(replay.importlib_metadata, "version", versions.__getitem__)
+
+    failures = replay.collect_replay_environment_failures(tmp_path)
+
+    assert failures == (
+        "dependency_contract_missing:"
+        "pyarrow:source=pyproject.toml:[project].dependencies",
+    )
+
+
+def test_replay_environment_preflight_does_not_read_environment_yml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay = load_handoff_script_module("replay_evidence")
+    _write_minimal_pyproject(tmp_path / "pyproject.toml")
+    (tmp_path / "environment.yml").write_text("not: valid: yaml", encoding="utf-8")
+    versions = {
+        "build": "1.5.0",
+        "setuptools": "80.0.0",
+        "wheel": "0.45.1",
+        "pyarrow": "24.0.0",
+        "pytest": "9.0.1",
+    }
+
+    monkeypatch.setattr(replay.importlib_metadata, "version", versions.__getitem__)
+
+    assert replay.collect_replay_environment_failures(tmp_path) == ()
+
+
+def test_replay_environment_preflight_uses_metadata_not_heavy_imports() -> None:
+    replay = load_handoff_script_module("replay_evidence")
+    source = Path(replay.__file__).read_text(encoding="utf-8")
+
+    assert "import importlib.metadata" in source
+    assert "import pyarrow" not in source
+    assert "import build" not in source
+    assert "import pytest" not in source
 
 
 def test_build_machine_receipts_preflights_before_replay(

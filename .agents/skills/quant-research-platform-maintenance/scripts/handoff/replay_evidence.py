@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -54,13 +55,29 @@ FORBIDDEN_PACKAGE_SUFFIXES = {
     ".feather",
     ".arrow",
 }
-REPLAY_ENVIRONMENT_REQUIREMENTS = (
-    ("build", ">=1.5,<2"),
-    ("setuptools", ">=80,<81"),
-    ("wheel", ">=0.45,<1"),
-    ("pyarrow", ">=24,<25"),
-    ("pytest", ">=9,<10"),
+REPLAY_REQUIRED_DISTRIBUTIONS = (
+    "build",
+    "setuptools",
+    "wheel",
+    "pyarrow",
+    "pytest",
 )
+REPLAY_DISTRIBUTION_CONTRACT_SOURCES = {
+    "build": ("project", "optional-dependencies", "dev"),
+    "pytest": ("project", "optional-dependencies", "dev"),
+    "setuptools": ("build-system", "requires"),
+    "wheel": ("build-system", "requires"),
+    "pyarrow": ("project", "dependencies"),
+}
+REPLAY_DISTRIBUTION_SOURCE_LABELS = {
+    "build": "pyproject.toml:[project.optional-dependencies].dev",
+    "pytest": "pyproject.toml:[project.optional-dependencies].dev",
+    "setuptools": "pyproject.toml:[build-system].requires",
+    "wheel": "pyproject.toml:[build-system].requires",
+    "pyarrow": "pyproject.toml:[project].dependencies",
+}
+PYTHON_CONTRACT_SOURCE_LABEL = "pyproject.toml:[project].requires-python"
+PYPROJECT_PATH = "pyproject.toml"
 
 
 class ReplayEnvironmentBlocked(Exception):
@@ -70,18 +87,42 @@ class ReplayEnvironmentBlocked(Exception):
 
 
 def collect_replay_environment_failures(repo_root: Path) -> tuple[str, ...]:
-    _ = repo_root
     failures: list[str] = []
-    for distribution_name, expected in REPLAY_ENVIRONMENT_REQUIREMENTS:
+    pyproject = _load_pyproject(repo_root)
+    python_spec = str(pyproject.get("project", {}).get("requires-python", ""))
+    if not python_spec:
+        failures.append(
+            f"dependency_contract_missing:python:source={PYTHON_CONTRACT_SOURCE_LABEL}"
+        )
+    else:
+        installed_python = _python_version()
+        if not _version_satisfies(installed_python, python_spec):
+            failures.append(
+                "python_version_mismatch:"
+                f"expected={python_spec}:installed={installed_python}"
+            )
+
+    requirements = _replay_requirement_specs(pyproject)
+    for distribution_name in REPLAY_REQUIRED_DISTRIBUTIONS:
+        expected = requirements.get(distribution_name, "")
+        if not expected:
+            failures.append(
+                "dependency_contract_missing:"
+                f"{distribution_name}:source="
+                f"{REPLAY_DISTRIBUTION_SOURCE_LABELS[distribution_name]}"
+            )
+            continue
         try:
             installed = importlib_metadata.version(distribution_name)
         except importlib_metadata.PackageNotFoundError:
             failures.append(f"dependency_missing:{distribution_name}")
             continue
-        if not _version_satisfies(installed, expected):
+        expected_constraint = _version_constraint(expected)
+        if not _version_satisfies(installed, expected_constraint):
             failures.append(
                 "dependency_version_mismatch:"
-                f"{distribution_name}:expected={expected}:installed={installed}"
+                f"{distribution_name}:expected={expected_constraint}:"
+                f"installed={installed}"
             )
     return tuple(failures)
 
@@ -198,6 +239,60 @@ def _version_satisfies(installed: str, expected: str) -> bool:
         if operator == "==" and not installed_version == target:
             return False
     return True
+
+
+def _version_constraint(spec: str) -> str:
+    match = re.search(r"(>=|<=|<|>|==)\s*[0-9]", spec)
+    if match is None:
+        return ""
+    return spec[match.start() :]
+
+
+def _load_pyproject(repo_root: Path) -> dict[str, object]:
+    path = repo_root / PYPROJECT_PATH
+    try:
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+
+def _replay_requirement_specs(pyproject: Mapping[str, object]) -> dict[str, str]:
+    specs: dict[str, str] = {}
+    for distribution_name, source_path in REPLAY_DISTRIBUTION_CONTRACT_SOURCES.items():
+        items = _pyproject_list_at(pyproject, source_path)
+        dependency_specs = _dependency_specs(items)
+        if distribution_name in dependency_specs:
+            specs[distribution_name] = dependency_specs[distribution_name]
+    return specs
+
+
+def _pyproject_list_at(
+    pyproject: Mapping[str, object],
+    source_path: tuple[str, ...],
+) -> tuple[str, ...]:
+    current: object = pyproject
+    for key in source_path:
+        if not isinstance(current, Mapping):
+            return ()
+        current = current.get(key)
+    if not isinstance(current, list):
+        return ()
+    return tuple(str(item) for item in current)
+
+
+def _dependency_specs(items: tuple[str, ...]) -> dict[str, str]:
+    specs: dict[str, str] = {}
+    for item in items:
+        name = re.split(r"[<>=!~; ]", item, maxsplit=1)[0]
+        if name:
+            specs[name] = item
+    return specs
+
+
+def _python_version() -> str:
+    version_info = sys.version_info
+    return ".".join(str(part) for part in version_info[:3])
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from tests.helpers.price_volume_reference import KEY_COLUMNS
+from tests.helpers.panel_keys import DEFAULT_PANEL_KEY_COLUMNS
 
 FLOAT_RTOL = 1e-10
 FLOAT_ATOL = 1e-12
@@ -82,7 +82,7 @@ def compare_synthetic_keyed_frames(
     candidate: pd.DataFrame,
     *,
     trading_sessions: set[str],
-    keys: tuple[str, ...] = KEY_COLUMNS,
+    keys: tuple[str, ...] = DEFAULT_PANEL_KEY_COLUMNS,
 ) -> KeyDiffResult:
     left = baseline.copy()
     right = candidate.copy()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -29,6 +30,10 @@ def _function_defs(path: Path) -> set[str]:
 def _class_defs(path: Path) -> set[str]:
     tree = ast.parse(_source(path), filename=str(path))
     return {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+
+
+def _dependency_specs(items: list[str]) -> dict[str, str]:
+    return {re.split(r"[<>=!~; ]", item, maxsplit=1)[0]: item for item in items}
 
 
 def _class_source(path: Path, class_name: str) -> str:
@@ -247,8 +252,13 @@ def test_handoff_readme_does_not_list_retired_package_smoke_cli() -> None:
 
 def test_dev_dependencies_include_package_build_backend_frontend() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    dev_dependencies = _dependency_specs(
+        pyproject["project"]["optional-dependencies"]["dev"]
+    )
 
-    assert "build>=1.5,<2" in pyproject["project"]["optional-dependencies"]["dev"]
+    assert "build" in dev_dependencies
+    assert ">=" in dev_dependencies["build"]
+    assert "<" in dev_dependencies["build"]
 
 
 def test_verifier_has_no_parallel_contract_functions() -> None:

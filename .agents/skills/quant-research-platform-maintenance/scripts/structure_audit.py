@@ -115,7 +115,11 @@ def run_audit(repo_root: Path) -> tuple[AuditCheck, ...]:
         _test_owner_placement(repo_root),
         _validation_fail_packages_rejected(repo_root),
         _handoff_replay_environment_preflight_closure(repo_root),
+        _price_volume_reference_owner_closure(repo_root),
+        _helper_owner_inversion_closure(repo_root),
         _test_helper_boundary_closure(repo_root),
+        _replay_environment_requirements_single_source(repo_root),
+        _environment_dependency_sync(repo_root),
         _no_duplicate_source_tree_scanner_regex(repo_root),
         _negative_field_specs(repo_root),
         _active_open_issues_current_only(repo_root),
@@ -476,12 +480,44 @@ def _handoff_replay_environment_preflight_closure(repo_root: Path) -> AuditCheck
     return _check("handoff_replay_environment_preflight_closure", tuple(findings))
 
 
+def _price_volume_reference_owner_closure(repo_root: Path) -> AuditCheck:
+    helper_path = repo_root / "tests" / "helpers" / "price_volume_reference.py"
+    tree = _parse_python_file(helper_path)
+    denied_exact = {
+        "assert_forced_tiny_processed_chunks_match_default",
+        "write_minimal_interim_inputs",
+        "write_correctness_processed_inputs",
+        "research_rows_for_dates",
+        "correctness_processed_catalog",
+        "correctness_research_dataset_catalog",
+    }
+    names = _top_level_definition_names(tree) | _top_level_assignment_names(tree)
+    findings = sorted(
+        f"price_volume_reference:{name}"
+        for name in names
+        if name in denied_exact
+        or name.startswith("correctness_")
+        or (name.startswith("minimal_") and name.endswith("_frame"))
+    )
+    return _check("price_volume_reference_owner_closure", tuple(findings))
+
+
+def _helper_owner_inversion_closure(repo_root: Path) -> AuditCheck:
+    findings: list[str] = []
+    keyed_diff = repo_root / "tests" / "helpers" / "keyed_frame_diff.py"
+    if "tests.helpers.price_volume_reference" in _imported_modules(keyed_diff):
+        findings.append(
+            "tests/helpers/keyed_frame_diff.py:tests.helpers.price_volume_reference"
+        )
+    return _check("helper_owner_inversion_closure", tuple(findings))
+
+
 def _test_helper_boundary_closure(repo_root: Path) -> AuditCheck:
     findings: list[str] = []
     retired_helper = repo_root / "tests" / "correctness" / "_helpers.py"
     if retired_helper.exists():
         findings.append("tests/correctness/_helpers.py:present")
-    for path in (repo_root / "tests").rglob("test_*.py"):
+    for path in (repo_root / "tests").rglob("*.py"):
         owner = _test_owner(path, repo_root)
         for imported in _imported_modules(path):
             if imported == "tests.correctness._helpers":
@@ -510,6 +546,112 @@ def _test_helper_boundary_closure(repo_root: Path) -> AuditCheck:
             if path.name in unclear_names
         )
     return _check("test_helper_boundary_closure", tuple(findings))
+
+
+def _replay_environment_requirements_single_source(repo_root: Path) -> AuditCheck:
+    findings: list[str] = []
+    replay_path = repo_root / HANDOFF_ROOT / "replay_evidence.py"
+    replay_tree = _parse_python_file(replay_path)
+    replay_text = replay_path.read_text(encoding="utf-8", errors="ignore")
+    assignments = _module_assignment_nodes(replay_tree)
+    requirements_node = assignments.get("REPLAY_ENVIRONMENT_REQUIREMENTS")
+    if requirements_node is not None:
+        hardcoded = _hardcoded_requirement_findings(requirements_node)
+        findings.extend(
+            hardcoded
+            or ("replay_evidence:REPLAY_ENVIRONMENT_REQUIREMENTS_present",)
+        )
+    required_distributions = _literal_string_tuple(
+        assignments.get("REPLAY_REQUIRED_DISTRIBUTIONS")
+    )
+    if not required_distributions:
+        findings.append("replay_evidence:REPLAY_REQUIRED_DISTRIBUTIONS_missing")
+    if "python-build" in required_distributions:
+        findings.append("replay_evidence:forbidden_distribution:python-build")
+    for token in (
+        "tomllib",
+        "_replay_requirement_specs",
+        "requires-python",
+        "importlib_metadata.version",
+    ):
+        if token not in replay_text:
+            findings.append(f"replay_evidence:pyproject_source_missing:{token}")
+    pyproject = _load_pyproject(repo_root)
+    required = _replay_required_specs_from_pyproject(pyproject)
+    for distribution in required_distributions:
+        if distribution not in required:
+            findings.append(f"replay_evidence:contract_source_missing:{distribution}")
+    return _check("replay_environment_requirements_single_source", tuple(findings))
+
+
+def _environment_dependency_sync(repo_root: Path) -> AuditCheck:
+    pyproject_path = repo_root / "pyproject.toml"
+    environment_path = repo_root / "environment.yml"
+    if not pyproject_path.exists():
+        return _check("environment_dependency_sync", ("pyproject.toml:missing",))
+    if not environment_path.exists():
+        return _check("environment_dependency_sync", ("environment.yml:missing",))
+    pyproject = _load_pyproject(repo_root)
+    environment_specs = _environment_dependency_specs(
+        environment_path.read_text(encoding="utf-8")
+    )
+    project = pyproject.get("project", {})
+    build_system = pyproject.get("build-system", {})
+    tool = pyproject.get("tool", {})
+    runtime = _dependency_specs(
+        project.get("dependencies", []) if isinstance(project, Mapping) else []
+    )
+    dev = _dependency_specs(
+        project.get("optional-dependencies", {}).get("dev", [])
+        if isinstance(project, Mapping)
+        and isinstance(project.get("optional-dependencies"), Mapping)
+        else []
+    )
+    build_requires = _dependency_specs(
+        build_system.get("requires", []) if isinstance(build_system, Mapping) else []
+    )
+    findings: list[str] = []
+    expected_specs = {
+        "build": ("python-build", dev.get("build", "")),
+        "setuptools": ("setuptools", build_requires.get("setuptools", "")),
+        "wheel": ("wheel", build_requires.get("wheel", "")),
+        "pyarrow": ("pyarrow", runtime.get("pyarrow", "")),
+        "pytest": ("pytest", dev.get("pytest", "")),
+        "pytest-xdist": ("pytest-xdist", dev.get("pytest-xdist", "")),
+        "ruff": ("ruff", dev.get("ruff", "")),
+    }
+    for pyproject_name, (conda_name, expected_spec) in expected_specs.items():
+        conda_spec = environment_specs.get(conda_name, "")
+        if not expected_spec or not conda_spec:
+            findings.append(
+                f"environment.yml:dependency_missing:{pyproject_name}->{conda_name}"
+            )
+            continue
+        if not _conda_spec_is_same_or_stricter(conda_spec, expected_spec):
+            findings.append(
+                f"environment.yml:dependency_mismatch:{pyproject_name}->{conda_name}"
+            )
+    requires_python = (
+        str(project.get("requires-python", ""))
+        if isinstance(project, Mapping)
+        else ""
+    )
+    expected_python = _python_minor_from_requires(requires_python)
+    actual_python = _environment_python_pin(environment_specs)
+    if expected_python and actual_python != expected_python:
+        findings.append(f"environment.yml:python_pin_mismatch:expected={expected_python}")
+    ruff_config = tool.get("ruff", {}) if isinstance(tool, Mapping) else {}
+    actual_ruff_target = (
+        str(ruff_config.get("target-version", ""))
+        if isinstance(ruff_config, Mapping)
+        else ""
+    )
+    expected_ruff_target = _ruff_target_from_python_minor(expected_python)
+    if expected_ruff_target and actual_ruff_target != expected_ruff_target:
+        findings.append(
+            f"pyproject.toml:ruff_target_mismatch:expected={expected_ruff_target}"
+        )
+    return _check("environment_dependency_sync", tuple(findings))
 
 
 def _no_duplicate_source_tree_scanner_regex(repo_root: Path) -> AuditCheck:
@@ -632,11 +774,49 @@ def _environment_dependency_specs(text: str) -> dict[str, str]:
     return specs
 
 
+def _load_pyproject(repo_root: Path) -> dict[str, object]:
+    try:
+        with (repo_root / "pyproject.toml").open("rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+
 def _dependency_specs(items: Iterable[str]) -> dict[str, str]:
     specs: dict[str, str] = {}
     for item in items:
         name = re.split(r"[<>=!~; ]", str(item), maxsplit=1)[0]
         specs[name] = str(item)
+    return specs
+
+
+def _replay_required_specs_from_pyproject(
+    pyproject: Mapping[str, object],
+) -> dict[str, str]:
+    project = pyproject.get("project", {})
+    build_system = pyproject.get("build-system", {})
+    runtime = _dependency_specs(
+        project.get("dependencies", []) if isinstance(project, Mapping) else []
+    )
+    dev = _dependency_specs(
+        project.get("optional-dependencies", {}).get("dev", [])
+        if isinstance(project, Mapping)
+        and isinstance(project.get("optional-dependencies"), Mapping)
+        else []
+    )
+    build_requires = _dependency_specs(
+        build_system.get("requires", []) if isinstance(build_system, Mapping) else []
+    )
+    specs: dict[str, str] = {}
+    for name, source in (
+        ("build", dev),
+        ("pytest", dev),
+        ("setuptools", build_requires),
+        ("wheel", build_requires),
+        ("pyarrow", runtime),
+    ):
+        if name in source:
+            specs[name] = source[name]
     return specs
 
 
@@ -651,6 +831,20 @@ def _bounds(spec: str) -> set[tuple[str, str]]:
         (operator, version)
         for operator, version in re.findall(r"(>=|<=|<|>|==)\s*([0-9][^,;\s]*)", spec)
     }
+
+
+def _environment_python_pin(environment_specs: Mapping[str, str]) -> str:
+    match = re.fullmatch(r"python=(\d+\.\d+)", environment_specs.get("python", ""))
+    return match.group(1) if match else ""
+
+
+def _python_minor_from_requires(spec: str) -> str:
+    match = re.search(r">=\s*(\d+\.\d+)", spec)
+    return match.group(1) if match else ""
+
+
+def _ruff_target_from_python_minor(python_minor: str) -> str:
+    return "py" + python_minor.replace(".", "") if python_minor else ""
 
 
 def _load_module(path: Path):
@@ -752,6 +946,62 @@ def _top_level_definition_names(tree: ast.Module) -> set[str]:
         for node in tree.body
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
     }
+
+
+def _top_level_assignment_names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names.update(
+            target.id for target in node.targets if isinstance(target, ast.Name)
+        )
+    return names
+
+
+def _module_assignment_nodes(tree: ast.Module) -> dict[str, ast.AST]:
+    assignments: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                assignments[target.id] = node.value
+    return assignments
+
+
+def _literal_string_tuple(node: ast.AST | None) -> tuple[str, ...]:
+    if not isinstance(node, ast.Tuple | ast.List):
+        return ()
+    values: list[str] = []
+    for item in node.elts:
+        if isinstance(item, ast.Constant) and isinstance(item.value, str):
+            values.append(item.value)
+        else:
+            return ()
+    return tuple(values)
+
+
+def _hardcoded_requirement_findings(node: ast.AST) -> tuple[str, ...]:
+    findings: list[str] = []
+    if not isinstance(node, ast.Tuple | ast.List):
+        return ("replay_evidence:REPLAY_ENVIRONMENT_REQUIREMENTS_present",)
+    for item in node.elts:
+        if not isinstance(item, ast.Tuple | ast.List) or len(item.elts) != 2:
+            continue
+        name_node, spec_node = item.elts
+        if (
+            isinstance(name_node, ast.Constant)
+            and isinstance(name_node.value, str)
+            and isinstance(spec_node, ast.Constant)
+            and isinstance(spec_node.value, str)
+            and _bounds(spec_node.value)
+        ):
+            findings.append(
+                "replay_evidence:hardcoded_requirement:"
+                f"{name_node.value}:{spec_node.value}"
+            )
+    return tuple(findings)
 
 
 def _imported_or_defined_names(tree: ast.Module) -> set[str]:

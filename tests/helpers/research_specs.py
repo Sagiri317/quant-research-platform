@@ -7,6 +7,7 @@ from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.factors.price_volume import (
@@ -17,6 +18,7 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 
 DEMO_FACTOR_COLUMN = price_volume_window_column("mom", 20)
+DEMO_FACTOR_ZSCORE_COLUMN = f"{DEMO_FACTOR_COLUMN}_zscore"
 DEMO_LABEL_COLUMN = forward_return_label_column(20)
 
 
@@ -173,6 +175,41 @@ def make_research_dataset_catalog(
     for spec in registered_specs:
         catalog.register(spec)
     return catalog
+
+
+def correctness_research_dataset_catalog(
+    *,
+    include_feature_transform: bool = False,
+) -> ResearchDatasetCatalog:
+    feature_columns = (
+        (DEMO_FACTOR_ZSCORE_COLUMN,) if include_feature_transform else ()
+    )
+    feature_transforms = (
+        (
+            FeatureTransformSpec(
+                transform_id=DEMO_FACTOR_ZSCORE_COLUMN,
+                source_columns=(DEMO_FACTOR_COLUMN,),
+                output_columns=(DEMO_FACTOR_ZSCORE_COLUMN,),
+                transform="cross_sectional_zscore",
+            ),
+        )
+        if include_feature_transform
+        else ()
+    )
+    catalog = ResearchDatasetCatalog()
+    catalog.register(
+        make_demo_research_dataset_spec(
+            feature_columns=feature_columns,
+            feature_transforms=feature_transforms,
+        )
+    )
+    return catalog
+
+
+def correctness_processed_catalog():
+    from tests.helpers.research_processed_inputs import make_demo_processed_catalog
+
+    return make_demo_processed_catalog()
 
 
 def _demo_research_dataset_defaults() -> dict[str, object]:
