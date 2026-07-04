@@ -263,9 +263,17 @@ def test_materialize_processed_data_by_kind_writes_dependency_and_target(
     ).exists()
 
 
-def test_label_materializer_expands_same_run_panel_dependency_for_future_halo(
+@pytest.mark.parametrize(
+    "data_ids",
+    [
+        ("forward_returns",),
+        (MARKET_PANEL_DATA_ID, "forward_returns"),
+    ],
+)
+def test_label_materializer_expands_panel_dependency_for_future_halo(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    data_ids: tuple[str, ...],
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     write_synthetic_interim_inputs(
@@ -285,7 +293,7 @@ def test_label_materializer_expands_same_run_panel_dependency_for_future_halo(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("forward_returns",),
+        data_ids=data_ids,
     )
 
     panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
@@ -298,44 +306,17 @@ def test_label_materializer_expands_same_run_panel_dependency_for_future_halo(
     assert pd.notna(jan3_label)
 
 
-def test_label_materializer_expands_requested_panel_dependency_for_future_halo(
+@pytest.mark.parametrize(
+    "data_ids",
+    [
+        ("price_volume",),
+        (MARKET_PANEL_DATA_ID, "price_volume"),
+    ],
+)
+def test_factor_materializer_expands_panel_dependency_for_history_halo(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    write_synthetic_interim_inputs(
-        layout,
-        SYNTHETIC_SOURCE_ID,
-        market_bars_data_id=MARKET_BARS_DATA_ID,
-        start_date="2014-01-02",
-        end_date="2014-01-10",
-    )
-    monkeypatch.setattr(
-        materializer,
-        "processed_catalog",
-        lambda: _catalog_with_one_step_forward_return_only(),
-    )
-
-    materializer.materialize_processed_data(
-        layout=layout,
-        source_id=SYNTHETIC_SOURCE_ID,
-        time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=(MARKET_PANEL_DATA_ID, "forward_returns"),
-    )
-
-    panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
-    labels = read_dataset(_processed_root(tmp_path, "label", "forward_returns"))
-    assert pd.to_datetime(panel["timestamp"]).dt.date.max().isoformat() == "2014-01-07"
-    jan3_label = labels.loc[
-        pd.to_datetime(labels["timestamp"]).dt.date.astype(str).eq("2014-01-03"),
-        FORWARD_RETURN_1D_COLUMN,
-    ].iloc[0]
-    assert pd.notna(jan3_label)
-
-
-def test_factor_materializer_expands_same_run_panel_dependency_for_history_halo(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
+    data_ids: tuple[str, ...],
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     write_synthetic_interim_inputs(
@@ -355,38 +336,7 @@ def test_factor_materializer_expands_same_run_panel_dependency_for_history_halo(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-31", "2014-01-31"),
-        data_ids=("price_volume",),
-    )
-
-    panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
-    factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
-    assert pd.to_datetime(panel["timestamp"]).dt.date.min().isoformat() == "2014-01-03"
-    assert pd.notna(factors[MOMENTUM_20D_COLUMN].iloc[0])
-
-
-def test_factor_materializer_expands_requested_panel_dependency_for_history_halo(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    write_synthetic_interim_inputs(
-        layout,
-        SYNTHETIC_SOURCE_ID,
-        market_bars_data_id=MARKET_BARS_DATA_ID,
-        start_date="2014-01-01",
-        end_date="2014-01-31",
-    )
-    monkeypatch.setattr(
-        materializer,
-        "processed_catalog",
-        lambda: _catalog_with_momentum_20d_only(),
-    )
-
-    materializer.materialize_processed_data(
-        layout=layout,
-        source_id=SYNTHETIC_SOURCE_ID,
-        time_window=TimeWindow("2014-01-31", "2014-01-31"),
-        data_ids=(MARKET_PANEL_DATA_ID, "price_volume"),
+        data_ids=data_ids,
     )
 
     panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))

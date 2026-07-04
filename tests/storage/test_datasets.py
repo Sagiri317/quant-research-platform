@@ -29,7 +29,7 @@ from quant_research_platform.storage.datasets import (
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
-    make_dataset_frame,
+    make_default_dataset_frame,
     make_processed_dataset_spec,
 )
 
@@ -58,7 +58,7 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path)
 
     result = write_dataset(
-        root, make_dataset_frame(), spec=make_processed_dataset_spec()
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
     )
     manifest = json.loads(
         (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
@@ -92,7 +92,7 @@ def test_write_dataset_partitions_without_groupby_sort_copy(
 
     write_dataset(
         root,
-        make_dataset_frame(),
+        make_default_dataset_frame(),
         spec=make_processed_dataset_spec("no_groupby_partition"),
     )
 
@@ -108,7 +108,7 @@ def test_write_dataset_merges_allowed_instance_metadata(tmp_path: Path) -> None:
 
     write_dataset(
         root,
-        make_dataset_frame(),
+        make_default_dataset_frame(),
         spec=make_processed_dataset_spec(),
         instance_metadata={"input_fingerprints": input_fingerprints},
     )
@@ -146,7 +146,7 @@ def test_write_dataset_rejects_malformed_input_fingerprints_metadata(
                 make_dataset_artifact_root(
                     tmp_path, f"bad_fingerprint_metadata_{index}"
                 ),
-                make_dataset_frame(),
+                make_default_dataset_frame(),
                 spec=make_processed_dataset_spec(f"bad_fingerprint_metadata_{index}"),
                 instance_metadata={"input_fingerprints": input_fingerprints},
             )
@@ -158,7 +158,7 @@ def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata
     with pytest.raises(ValueError, match="unsupported_dataset_instance_metadata_key"):
         write_dataset(
             make_dataset_artifact_root(tmp_path, "unsupported_metadata"),
-            make_dataset_frame(),
+            make_default_dataset_frame(),
             spec=make_processed_dataset_spec("unsupported_metadata"),
             instance_metadata={"other_metadata": {}},
         )
@@ -166,7 +166,7 @@ def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata
     with pytest.raises(ValueError, match="reserved_dataset_instance_metadata_key"):
         write_dataset(
             make_dataset_artifact_root(tmp_path, "reserved_metadata"),
-            make_dataset_frame(),
+            make_default_dataset_frame(),
             spec=make_processed_dataset_spec("reserved_metadata"),
             instance_metadata={"row_count": 999},
         )
@@ -178,7 +178,7 @@ def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata
     with pytest.raises(ValueError, match="unsafe_internal_artifact_metadata"):
         write_dataset(
             unsafe_root,
-            make_dataset_frame(),
+            make_default_dataset_frame(),
             spec=make_processed_dataset_spec("unsafe_metadata"),
             instance_metadata={
                 "input_fingerprints": {"demo_input": unsafe_fingerprint}
@@ -190,7 +190,7 @@ def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata
 def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) -> None:
     materialized_root = make_dataset_artifact_root(tmp_path, "materialized")
     chunked_root = make_dataset_artifact_root(tmp_path, "chunked")
-    frame = make_dataset_frame()
+    frame = make_default_dataset_frame()
 
     write_dataset(
         materialized_root, frame, spec=make_processed_dataset_spec("materialized")
@@ -219,7 +219,7 @@ def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) ->
 
 def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path, "empty_schema")
-    empty_chunk = make_dataset_frame().iloc[:0].copy()
+    empty_chunk = make_default_dataset_frame().iloc[:0].copy()
 
     write_dataset(
         root, iter([empty_chunk]), spec=make_processed_dataset_spec("empty_schema")
@@ -243,7 +243,7 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
     with pytest.raises(TypeError, match="invalid_dataset_chunk"):
         write_dataset(
             make_dataset_artifact_root(tmp_path, "invalid"),
-            iter([make_dataset_frame().iloc[:1], {"not": "a frame"}]),
+            iter([make_default_dataset_frame().iloc[:1], {"not": "a frame"}]),
             spec=make_processed_dataset_spec("invalid"),
         )
 
@@ -255,7 +255,7 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
         )
 
     duplicate = pd.concat(
-        [make_dataset_frame().iloc[:1], make_dataset_frame().iloc[:1]],
+        [make_default_dataset_frame().iloc[:1], make_default_dataset_frame().iloc[:1]],
         ignore_index=True,
     )
     with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
@@ -265,7 +265,7 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
             spec=make_processed_dataset_spec("duplicate"),
         )
 
-    null_key = make_dataset_frame()
+    null_key = make_default_dataset_frame()
     null_key.loc[0, "asset_id"] = None
     with pytest.raises(ValueError, match="dataset_primary_key_null"):
         write_dataset(
@@ -274,7 +274,7 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
             spec=make_processed_dataset_spec("null_key"),
         )
 
-    infinite = make_dataset_frame()
+    infinite = make_default_dataset_frame()
     infinite.loc[0, "value"] = -math.inf
     with pytest.raises(ValueError, match="dataset_infinite_value"):
         write_dataset(
@@ -283,7 +283,7 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
             spec=make_processed_dataset_spec("infinite"),
         )
 
-    missing_required = make_dataset_frame().drop(columns=["value"])
+    missing_required = make_default_dataset_frame().drop(columns=["value"])
     missing_root = make_dataset_artifact_root(tmp_path, "missing_required")
     with pytest.raises(ValueError, match="missing_required_columns: value"):
         write_dataset(
@@ -296,11 +296,15 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
 
 def test_write_dataset_rejects_existing_root_without_overwrite(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path)
-    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
     original = read_dataset(root)
 
     with pytest.raises(ValueError, match="dataset_exists"):
-        write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+        write_dataset(
+            root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+        )
 
     pd.testing.assert_frame_equal(read_dataset(root), original)
 
@@ -311,7 +315,7 @@ def test_write_dataset_rejects_generic_tmp_artifact_root_fail_closed(
     with pytest.raises(ValueError, match="invalid_processed_dataset_root"):
         write_dataset(
             tmp_path / "data" / "processed" / "a_share" / "factor" / ".tmp-user",
-            make_dataset_frame(),
+            make_default_dataset_frame(),
             spec=make_processed_dataset_spec(),
         )
 
@@ -321,7 +325,9 @@ def test_write_dataset_allows_writer_owned_tmp_artifact_root(
 ) -> None:
     root = tmp_path / "data" / "processed" / "a_share" / "factor" / ".x.tmp-user"
 
-    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
 
     assert inspect_dataset(root).spec["data_id"] == "x"
 
@@ -330,7 +336,9 @@ def test_read_dataset_materialized_chunked_projection_and_time_window(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path)
-    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
 
     materialized = read_dataset(
         root,
@@ -351,7 +359,9 @@ def test_read_dataset_reuses_one_candidate_file_listing(
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "read_plan_reuse")
     write_dataset(
-        root, make_dataset_frame(), spec=make_processed_dataset_spec("read_plan_reuse")
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("read_plan_reuse"),
     )
     calls = 0
     original = dataset_reading.candidate_data_files
@@ -383,7 +393,7 @@ def test_fingerprint_dataset_reuses_one_candidate_file_listing(
     root = make_dataset_artifact_root(tmp_path, "fingerprint_plan_reuse")
     write_dataset(
         root,
-        make_dataset_frame(),
+        make_default_dataset_frame(),
         spec=make_processed_dataset_spec("fingerprint_plan_reuse"),
     )
     calls = 0
@@ -411,7 +421,9 @@ def test_fingerprint_dataset_reuses_one_candidate_file_listing(
 
 def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path)
-    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
 
     manifest_path = root / "_manifest" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -472,7 +484,9 @@ def test_read_dataset_rejects_invalid_qrp_json_schema_id(
     error: str,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path)
-    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
     path = root / relative_path
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload.pop("schema_id", None)
@@ -487,7 +501,9 @@ def test_read_dataset_manifest_columns_mismatch_fails_closed(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path)
-    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
     manifest_path = root / "_manifest" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["columns"] = ["market_id", "asset_id", "timestamp", "bogus"]
@@ -501,7 +517,9 @@ def test_read_dataset_manifest_row_count_mismatch_fails_closed(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path)
-    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
     manifest_path = root / "_manifest" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["row_count"] = int(manifest["row_count"]) + 1
@@ -515,7 +533,9 @@ def test_read_dataset_rejects_data_root_missing_and_missing_projection_columns(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path)
-    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
 
     with pytest.raises(ValueError, match="dataset_column_not_found"):
         read_dataset(root, columns=["asset_id", "missing"])
@@ -529,7 +549,9 @@ def test_read_dataset_rejects_data_root_missing_and_missing_projection_columns(
 
 def test_inspect_dataset_returns_expanded_metadata(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path)
-    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
 
     inspection = inspect_dataset(root)
 
@@ -555,11 +577,11 @@ def test_write_dataset_preserves_factor_and_label_nan_profiles(tmp_path: Path) -
         "label_x",
         kind=ProcessedDataKind.LABEL,
     )
-    label_frame = make_dataset_frame().rename(columns={"value": "label"})
+    label_frame = make_default_dataset_frame().rename(columns={"value": "label"})
 
     write_dataset(
         factor_root,
-        make_dataset_frame(),
+        make_default_dataset_frame(),
         spec=make_processed_dataset_spec("factor_nan"),
     )
     write_dataset(
@@ -588,10 +610,12 @@ def test_inspect_and_fingerprint_detect_schema_mismatch_across_parts(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path)
-    write_dataset(root, make_dataset_frame(), spec=make_processed_dataset_spec())
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
     bad_part = root / "data" / "year=2016" / "part-000.parquet"
     bad_part.parent.mkdir(parents=True)
-    make_dataset_frame().assign(extra=1).to_parquet(bad_part, index=False)
+    make_default_dataset_frame().assign(extra=1).to_parquet(bad_part, index=False)
 
     with pytest.raises(ValueError, match="dataset_schema_mismatch"):
         inspect_dataset(root)
@@ -606,11 +630,18 @@ def test_compare_datasets_statuses_for_semantic_and_schema_differences(
     right_root = make_dataset_artifact_root(tmp_path, "right")
     schema_root = make_dataset_artifact_root(tmp_path, "schema")
     write_dataset(
-        left_root, make_dataset_frame(), spec=make_processed_dataset_spec("left")
+        left_root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("left"),
     )
     write_dataset(
         right_root,
-        iter([make_dataset_frame().iloc[:1], make_dataset_frame().iloc[1:]]),
+        iter(
+            [
+                make_default_dataset_frame().iloc[:1],
+                make_default_dataset_frame().iloc[1:],
+            ]
+        ),
         spec=make_processed_dataset_spec("right"),
     )
 
@@ -632,7 +663,9 @@ def test_compare_datasets_statuses_for_semantic_and_schema_differences(
         primary_key=make_processed_dataset_spec().primary_key,
         partition_columns=("year",),
     )
-    write_dataset(schema_root, make_dataset_frame().assign(other=1.0), spec=wider_spec)
+    write_dataset(
+        schema_root, make_default_dataset_frame().assign(other=1.0), spec=wider_spec
+    )
 
     schema_comparison = compare_datasets(left_root, schema_root)
     assert schema_comparison.status == "SCHEMA_MISMATCH"
@@ -646,12 +679,12 @@ def test_compare_datasets_ignores_allowed_instance_metadata_for_same_content(
     right_root = make_dataset_artifact_root(tmp_path, "right_metadata")
     write_dataset(
         left_root,
-        make_dataset_frame(),
+        make_default_dataset_frame(),
         spec=make_processed_dataset_spec("left_metadata"),
     )
     write_dataset(
         right_root,
-        make_dataset_frame(),
+        make_default_dataset_frame(),
         spec=make_processed_dataset_spec("right_metadata"),
         instance_metadata={
             "input_fingerprints": {"demo_input": _input_fingerprint_payload()}

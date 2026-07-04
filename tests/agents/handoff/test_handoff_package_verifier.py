@@ -11,6 +11,9 @@ from tests.agents.handoff.conftest import (
     _refresh_manifest_and_sidecar,
     _rewrite_package_member,
 )
+from tests.agents.handoff.receipt_contract_fixtures import (
+    make_hard_scan_receipt_payload,
+)
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 
@@ -166,7 +169,7 @@ def test_receipt_contract_rejects_placeholder_check_receipt() -> None:
 
 def test_receipt_contract_rejects_raw_output_in_hard_scan_receipt() -> None:
     contract = load_handoff_script_module("receipt_contract")
-    payload = _hard_scan_receipt()
+    payload = make_hard_scan_receipt_payload()
     payload["raw_output"] = "raw output"
 
     failures = contract.validate_receipt_payload("hard-scan-receipt.json", payload)
@@ -301,20 +304,195 @@ def test_verifier_reuses_clone_source_tree_scan_for_share_safety_and_hard_scan(
     assert received_payloads == [scan_payload]
 
 
-def _hard_scan_receipt() -> dict[str, object]:
-    return {
-        "schema_id": "qrp-hard-scan-receipt",
-        "status": "PASS",
-        "scanned_head": "1" * 40,
-        "scanner_source_sha256": "2" * 64,
-        "scan_runs": [
+def _load_verifier_for_scanner_tests():
+    module = load_handoff_script_module("verify_handoff_package")
+    return module
+
+
+def test_handoff_verifier_allows_final_branch_bundle_by_default(tmp_path: Path) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("final-branch.bundle", b"not a real bundle for path policy")
+        archive.writestr("task_metadata.json", "{}\n")
+
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert inspection.share_safety_failures == ()
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "../handoff_evidence/leak.md",
+        "/handoff_evidence/leak.md",
+        "C:/handoff_evidence/leak.md",
+    ],
+)
+def test_handoff_package_verifier_rejects_tampered_zip_member_paths(
+    tmp_path: Path,
+    member: str,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "tampered.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(member, "{}\n")
+
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert inspection.load_failures or inspection.share_safety_failures
+
+
+def test_handoff_package_verifier_reports_bad_zip_once(tmp_path: Path) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    package.write_bytes(b"not a zip file")
+
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert sum(
+        failure.startswith("zip_read_failed") for failure in inspection.load_failures
+    ) == 1
+
+
+def test_handoff_verifier_rejects_other_nested_packages_by_default(
+    tmp_path: Path,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("handoff_evidence/old.bundle", b"opaque package")
+
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert inspection.share_safety_failures == (
+        "nested package/bundle not allowed by default: handoff_evidence/old.bundle",
+    )
+
+
+def test_handoff_package_verifier_scans_json_sidecar_absolute_paths(
+    tmp_path: Path,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    sidecar = tmp_path / "handoff.json"
+    sidecar.write_text(
+        json.dumps(
             {
-                "scan_id": "allowance_contract",
-                "rule_set_id": "source-tree:allowance_contract",
-                "match_count": 0,
-                "actual_violation_count": 0,
-                "result_sha256": "3" * 64,
-                "replayable_from_bundle": True,
-            }
-        ],
-    }
+                "schema_id": "qrp-handoff-sidecar",
+                "zip_filename": "handoff.zip",
+                "zip_path": "E:/quant-workspace/private/handoff.zip",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("task_metadata.json", "{}\n")
+    inspection = module.load_handoff_package_payload(package, sidecar)
+
+    assert "sidecar_local_absolute_path_text: sidecar.json" in (
+        inspection.share_safety_failures
+    )
+
+
+def test_handoff_package_verifier_allows_scanner_pattern_definitions(
+    tmp_path: Path,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(
+            "verify_handoff_package.py",
+            'LOCAL_PATH_PATTERN = re.compile(r"E:/|/mnt/data|site-packages")\n',
+        )
+
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert inspection.share_safety_failures == ()
+
+
+def test_handoff_package_verifier_rejects_data_research_members_and_paths(
+    tmp_path: Path,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("data/research/a_share/demo/manifest.json", "{}\n")
+
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert (
+        "forbidden_path_segment: data/research: "
+        "data/research/a_share/demo/manifest.json"
+    ) in inspection.share_safety_failures
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        ".run/private/s1/summary.json",
+        ".run/smoke/s1/summary.json",
+        ".run/s86/summary.json",
+    ],
+)
+def test_handoff_package_verifier_rejects_local_run_members(
+    tmp_path: Path,
+    member: str,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(member, "{}\n")
+
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert f"forbidden_path_segment: {member}" in inspection.share_safety_failures
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "source_id=raw-source",
+        "provider_id=raw-provider",
+        "provider_name=raw-provider",
+        "source_name=raw-source",
+        "data_provider=raw-provider",
+        "vendor_name=raw-provider",
+        "raw_vendor=export",
+        "vendor_payload={}",
+    ],
+)
+def test_handoff_package_verifier_rejects_private_provider_markers(
+    tmp_path: Path,
+    text: str,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("handoff_evidence/leak.md", text)
+
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert (
+        "vendor_marker_text: handoff_evidence/leak.md"
+        in inspection.share_safety_failures
+    )
+
+
+def test_handoff_package_verifier_large_text_skip_is_fail_closed(
+    tmp_path: Path,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    large_text = ("x" * (module.BUNDLE_TEXT_SIZE_CAP_BYTES + 1)) + "\nsource_id=raw\n"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("handoff_evidence/large.md", large_text)
+
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert (
+        "text scan exceeded maximum size: handoff_evidence/large.md"
+        in inspection.share_safety_failures
+    )

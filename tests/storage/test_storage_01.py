@@ -14,7 +14,7 @@ from quant_research_platform.storage.manifests import (
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
-    make_dataset_frame,
+    make_default_dataset_frame,
     make_processed_dataset_spec,
 )
 
@@ -27,7 +27,7 @@ def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(
     def chunks():
         nonlocal iterated
         iterated = True
-        yield make_dataset_frame(
+        yield make_default_dataset_frame(
             asset_ids=("asset_001",),
             dates=("2014-01-02",),
             values=(1.0,),
@@ -49,7 +49,7 @@ def test_dataset_writer_accepts_private_processed_artifact_root(tmp_path: Path) 
 
     write_dataset(
         root,
-        make_dataset_frame(
+        make_default_dataset_frame(
             asset_ids=("asset_001",),
             dates=("2014-01-02",),
             values=(1.0,),
@@ -67,7 +67,7 @@ def test_projected_dataset_fingerprint_includes_primary_key_columns(
 ) -> None:
     left = tmp_path / "data" / "processed" / "a_share" / "factor" / "left"
     right = tmp_path / "data" / "processed" / "a_share" / "factor" / "right"
-    right_frame = make_dataset_frame(
+    right_frame = make_default_dataset_frame(
         asset_ids=("asset_001",),
         dates=("2014-01-02",),
         values=(1.0,),
@@ -75,7 +75,7 @@ def test_projected_dataset_fingerprint_includes_primary_key_columns(
 
     write_dataset(
         left,
-        make_dataset_frame(
+        make_default_dataset_frame(
             asset_ids=("asset_001",),
             dates=("2014-01-02",),
             values=(1.0,),

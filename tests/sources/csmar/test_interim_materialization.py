@@ -381,38 +381,35 @@ def test_csmar_index_info_sample_scope_and_formula_commas_preserve_alignment(
     assert raw.loc[0, "Idxinfo10"] == "formula text, with comma"
 
 
-def test_csmar_index_info_ambiguous_long_row_fails_closed(
+@pytest.mark.parametrize(
+    ("filename", "row"),
+    [
+        (
+            "index_info_ambiguous.csv",
+            "000985,benchmark,2014-01-02,2013-12-31,-9666,"
+            "1,2,3,4,1,1,2,3,4,5,formula text\n",
+        ),
+        (
+            "index_info_invalid_enum_long_row.csv",
+            "000985,benchmark,2014-01-02,2013-12-31,-9666,"
+            "sample scope, with comma,5,1,1,1,1,formula text\n",
+        ),
+    ],
+)
+def test_csmar_index_info_malformed_long_rows_fail_closed(
     tmp_path: Path,
+    filename: str,
+    row: str,
 ) -> None:
-    index_path = tmp_path / "index_info_ambiguous.csv"
+    index_path = tmp_path / filename
     index_path.write_text(
         "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
         "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
-        "000985,benchmark,2014-01-02,2013-12-31,-9666,"
-        "1,2,3,4,1,1,2,3,4,5,formula text\n",
+        + row,
         encoding="utf-8",
     )
 
     with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
-        raw_exports.read_private_export_file(index_path, "index_info")
-
-
-def test_csmar_index_info_source_category_codes_are_field_enums(
-    tmp_path: Path,
-) -> None:
-    index_path = tmp_path / "index_info_invalid_enum_long_row.csv"
-    index_path.write_text(
-        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
-        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
-        "000985,benchmark,2014-01-02,2013-12-31,-9666,"
-        "sample scope, with comma,5,1,1,1,1,formula text\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        ValueError,
-        match=r"malformed_csmar_csv_row",
-    ):
         raw_exports.read_private_export_file(index_path, "index_info")
 
 

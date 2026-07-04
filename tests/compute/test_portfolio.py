@@ -220,7 +220,18 @@ def test_tensor_weighted_positions_rejects_duplicate_keys_like_dataframe() -> No
         )
 
 
-def test_build_weighted_positions_supports_long_only_top_leg() -> None:
+@pytest.mark.parametrize(
+    ("top_quantile", "expected_assets", "strictly_positive"),
+    [
+        (1 / 3, {"C"}, False),
+        (1.0, {"A", "B", "C"}, True),
+    ],
+)
+def test_build_weighted_positions_supports_long_only_modes(
+    top_quantile: float,
+    expected_assets: set[str],
+    strictly_positive: bool,
+) -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
     positions, diagnostics = build_weighted_positions(
@@ -228,33 +239,18 @@ def test_build_weighted_positions_supports_long_only_top_leg() -> None:
         spec,
         WeightConfig(
             portfolio_mode="long_only",
-            top_quantile=1 / 3,
-            bottom_quantile=1 / 3,
+            top_quantile=top_quantile,
+            bottom_quantile=top_quantile,
         ),
     )
 
     first = positions[positions["timestamp"] == pd.Timestamp("2026-01-01")]
-    assert first.set_index("asset")["position"].to_dict() == {"C": 1.0}
-    assert (positions["position"] >= 0).all()
-    assert diagnostics["short_count"].tolist() == [0, 0]
-
-
-def test_build_weighted_positions_long_only_allows_full_top_quantile() -> None:
-    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
-
-    positions, diagnostics = build_weighted_positions(
-        _ranking_panel(),
-        spec,
-        WeightConfig(
-            portfolio_mode="long_only",
-            top_quantile=1.0,
-            bottom_quantile=1.0,
-        ),
-    )
-
-    first = positions[positions["timestamp"] == pd.Timestamp("2026-01-01")]
-    assert set(first["asset"]) == {"A", "B", "C"}
-    assert (positions["position"] > 0).all()
+    assert set(first["asset"]) == expected_assets
+    if strictly_positive:
+        assert (positions["position"] > 0).all()
+    else:
+        assert first.set_index("asset")["position"].to_dict() == {"C": 1.0}
+        assert (positions["position"] >= 0).all()
     assert diagnostics["short_count"].tolist() == [0, 0]
 
 

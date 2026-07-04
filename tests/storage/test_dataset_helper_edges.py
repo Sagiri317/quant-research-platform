@@ -26,7 +26,7 @@ from quant_research_platform.storage._dataset_schema import (
 )
 from quant_research_platform.storage._dataset_writing import _WriteStats
 from tests.storage.low_level_fixtures import (
-    make_dataset_frame,
+    make_helper_edges_dataset_frame,
     make_processed_dataset_spec,
 )
 
@@ -37,18 +37,18 @@ def test_write_stats_fail_closed_paths() -> None:
 
     with pytest.raises(ValueError, match="unregistered_output_columns"):
         stats.update_frame(
-            make_dataset_frame(scenario="helper_edges", market_id="dummy").assign(
+            make_helper_edges_dataset_frame(market_id="dummy").assign(
                 extra=1
             )
         )
     with pytest.raises(ValueError, match="missing_required_columns"):
         stats.update_frame(
-            make_dataset_frame(scenario="helper_edges", market_id="dummy").drop(
+            make_helper_edges_dataset_frame(market_id="dummy").drop(
                 columns=["value"]
             )
         )
     with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
-        frame = make_dataset_frame(scenario="helper_edges", market_id="dummy")
+        frame = make_helper_edges_dataset_frame(market_id="dummy")
         stats.update_frame(pd.concat([frame, frame.iloc[[0]]]))
 
     with pytest.raises(ValueError, match="dataset_schema_missing"):
@@ -60,13 +60,13 @@ def test_write_stats_tracks_null_and_non_finite_failures() -> None:
 
     with pytest.raises(ValueError, match="dataset_primary_key_null"):
         _WriteStats(spec=spec, data_root=Path("data")).update_frame(
-            make_dataset_frame(scenario="helper_edges", market_id="dummy").assign(
+            make_helper_edges_dataset_frame(market_id="dummy").assign(
                 asset_id=["asset_a", None]
             )
         )
     with pytest.raises(ValueError, match="dataset_infinite_value"):
         _WriteStats(spec=spec, data_root=Path("data")).update_frame(
-            make_dataset_frame(scenario="helper_edges", market_id="dummy").assign(
+            make_helper_edges_dataset_frame(market_id="dummy").assign(
                 value=[1.0, float("inf")]
             )
         )
@@ -89,13 +89,13 @@ def test_dataset_compare_and_filter_fail_closed_paths(tmp_path: Path) -> None:
     }
     with pytest.raises(ValueError, match="time_window_not_supported"):
         filter_frame_by_time_window(
-            make_dataset_frame(scenario="helper_edges", market_id="dummy"),
+            make_helper_edges_dataset_frame(market_id="dummy"),
             spec=spec_payload,
             time_window=TimeWindow("2024-01-01", "2024-01-31"),
         )
     with pytest.raises(ValueError, match="time_window_timestamp_column_not_selected"):
         filter_frame_by_time_window(
-            make_dataset_frame(scenario="helper_edges", market_id="dummy").drop(
+            make_helper_edges_dataset_frame(market_id="dummy").drop(
                 columns=["timestamp"]
             ),
             spec=data_spec_payload(
@@ -104,7 +104,7 @@ def test_dataset_compare_and_filter_fail_closed_paths(tmp_path: Path) -> None:
             time_window=TimeWindow("2024-01-01", "2024-01-31"),
         )
     assert filter_frame_by_time_window(
-        make_dataset_frame(scenario="helper_edges", market_id="dummy"),
+        make_helper_edges_dataset_frame(market_id="dummy"),
         spec=data_spec_payload(
             make_processed_dataset_spec("storage_demo", market_id="dummy")
         ),
@@ -113,7 +113,7 @@ def test_dataset_compare_and_filter_fail_closed_paths(tmp_path: Path) -> None:
 
 
 def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
-    frame = make_dataset_frame(scenario="helper_edges", market_id="dummy")
+    frame = make_helper_edges_dataset_frame(market_id="dummy")
 
     assert list(
         partition_frames(

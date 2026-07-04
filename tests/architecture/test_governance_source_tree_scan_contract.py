@@ -111,13 +111,23 @@ def test_source_tree_scan_input_owns_pattern_bundles(tmp_path: Path) -> None:
     field_names = {field.name for field in fields(scan_input)}
 
     assert {
+        "path_name_patterns",
+        "python_symbol_patterns",
+        "structured_key_patterns",
         "forbidden_patterns",
         "governance_truth_patterns",
         "sensitive_negative_patterns",
+        "active_test_literal_patterns",
+        "allowed_occurrence_patterns",
     } <= field_names
+    assert scan_input.path_name_patterns
+    assert scan_input.python_symbol_patterns
+    assert scan_input.structured_key_patterns
     assert scan_input.forbidden_patterns
     assert scan_input.governance_truth_patterns
     assert scan_input.sensitive_negative_patterns
+    assert scan_input.active_test_literal_patterns
+    assert scan_input.allowed_occurrence_patterns
 
 
 def test_source_tree_scan_groups_keeps_path_high_level_entrypoint(
@@ -137,7 +147,6 @@ def test_source_tree_scan_groups_keeps_path_high_level_entrypoint(
 def test_source_tree_string_scanners_use_source_iter_names() -> None:
     import governance_contract
 
-    assert hasattr(governance_contract, "iter_split_string_findings_from_source")
     assert hasattr(governance_contract, "iter_synthesized_string_findings_from_source")
     assert not hasattr(governance_contract, "source_tree_" + "split_string_findings")
     assert not hasattr(

@@ -470,7 +470,7 @@ def test_profile_runner_adds_default_duration_summary_when_not_requested(
     )
     assert summary["profile"] == "profile-smoke"
     assert summary["profile_marker"] == runner.FAST_EXCLUDES
-    assert summary["scope_count"] == 14
+    assert summary["scope_count"] == 11
     assert summary["profile_scopes"] == [
         "tests/contracts",
         "tests/tools/test_run_profile.py",
@@ -481,11 +481,8 @@ def test_profile_runner_adds_default_duration_summary_when_not_requested(
         "tests/agents/handoff/test_validation_summary_contract.py",
         "tests/agents/handoff/test_replay_command_contract.py",
         "tests/agents/handoff/test_handoff_package_verifier.py",
-        "tests/agents/handoff/test_handoff_tools.py",
-        "tests/architecture/test_handoff_contract_field_coverage.py",
         "tests/architecture/test_handoff_contract_single_source.py",
-        "tests/architecture/test_handoff_single_verifier.py",
-        "tests/architecture/test_package_scan_coverage.py",
+        "tests/architecture/test_governance_scan_boundaries.py",
     ]
     assert summary["extra_pytest_args"] == ["--durations=10"]
 

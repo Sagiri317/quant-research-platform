@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from tests.agents.handoff.receipt_contract_fixtures import (
-    _hard_scan_payload,
+    make_hard_scan_receipt_payload,
 )
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
@@ -11,12 +11,12 @@ from tests.helpers.maintenance_script_loader import load_handoff_script_module
 def test_hard_scan_rejects_old_classification_and_count_fields() -> None:
     contract = load_handoff_script_module("receipt_contract")
     run = {
-        **_hard_scan_payload()["scan_runs"][0],  # type: ignore[index]
+        **make_hard_scan_receipt_payload()["scan_runs"][0],  # type: ignore[index]
         "deferred_count": 0,
         "negative_fixture_count": 0,
         "false_positive_count": 0,
     }
-    payload = _hard_scan_payload(
+    payload = make_hard_scan_receipt_payload(
         scan_runs=[run],
         classified_exceptions=[],
     )
@@ -58,10 +58,10 @@ def test_normalize_hard_scan_rejects_raw_extra_fields_before_projection(
 ) -> None:
     contract = load_handoff_script_module("receipt_contract")
     run = {
-        **_hard_scan_payload()["scan_runs"][0],  # type: ignore[index]
+        **make_hard_scan_receipt_payload()["scan_runs"][0],  # type: ignore[index]
         **run_overrides,
     }
-    payload = _hard_scan_payload(scan_runs=[run], **payload_overrides)
+    payload = make_hard_scan_receipt_payload(scan_runs=[run], **payload_overrides)
 
     with pytest.raises(SystemExit) as excinfo:
         contract.normalize_hard_scan_receipt(payload)
@@ -71,10 +71,10 @@ def test_normalize_hard_scan_rejects_raw_extra_fields_before_projection(
 def test_hard_scan_rejects_actual_violation_with_top_pass() -> None:
     contract = load_handoff_script_module("receipt_contract")
     run = {
-        **_hard_scan_payload()["scan_runs"][0],  # type: ignore[index]
+        **make_hard_scan_receipt_payload()["scan_runs"][0],  # type: ignore[index]
         "actual_violation_count": 1,
     }
-    payload = _hard_scan_payload(scan_runs=[run])
+    payload = make_hard_scan_receipt_payload(scan_runs=[run])
 
     failures = contract.validate_hard_scan_receipt(payload)
 

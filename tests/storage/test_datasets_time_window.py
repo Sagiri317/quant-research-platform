@@ -24,8 +24,8 @@ from quant_research_platform.storage.datasets import (
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
-    make_dataset_frame,
     make_processed_dataset_spec,
+    make_time_window_dataset_frame,
 )
 
 
@@ -33,7 +33,7 @@ def test_read_dataset_time_window_uses_closed_interval(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path, "windowed")
     write_dataset(
         root,
-        make_dataset_frame(scenario="time_window"),
+        make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("windowed"),
     )
 
@@ -54,7 +54,7 @@ def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_column
     root = make_dataset_artifact_root(tmp_path, "read_pruned")
     write_dataset(
         root,
-        make_dataset_frame(scenario="time_window"),
+        make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("read_pruned"),
     )
     full = read_dataset(root)
@@ -92,7 +92,7 @@ def test_inspect_dataset_time_window_reports_window_scoped_counts(
     root = make_dataset_artifact_root(tmp_path, "inspect")
     write_dataset(
         root,
-        make_dataset_frame(scenario="time_window"),
+        make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("inspect"),
     )
 
@@ -113,7 +113,7 @@ def test_fingerprint_dataset_time_window_hashes_window_only(tmp_path: Path) -> N
     root = make_dataset_artifact_root(tmp_path, "fingerprint")
     write_dataset(
         root,
-        make_dataset_frame(scenario="time_window"),
+        make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("fingerprint"),
     )
 
@@ -136,7 +136,7 @@ def test_fingerprint_and_inspect_time_window_file_count_match_contributing_files
     root = make_dataset_artifact_root(tmp_path, "empty_window")
     write_dataset(
         root,
-        make_dataset_frame(scenario="time_window"),
+        make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("empty_window"),
     )
 
@@ -156,7 +156,7 @@ def test_chunked_read_time_window_without_matching_partitions_yields_empty_schem
     root = make_dataset_artifact_root(tmp_path, "empty_chunked")
     write_dataset(
         root,
-        make_dataset_frame(scenario="time_window"),
+        make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("empty_chunked"),
     )
 
@@ -181,7 +181,7 @@ def test_fingerprint_dataset_time_window_prunes_year_partitions(
     root = make_dataset_artifact_root(tmp_path, "fingerprint_pruned")
     write_dataset(
         root,
-        make_dataset_frame(scenario="time_window"),
+        make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("fingerprint_pruned"),
     )
     original_read_parquet = pd.read_parquet
@@ -212,10 +212,10 @@ def test_compare_datasets_time_window_compares_window_only(tmp_path: Path) -> No
     right = make_dataset_artifact_root(tmp_path, "right")
     write_dataset(
         left,
-        make_dataset_frame(scenario="time_window"),
+        make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("left"),
     )
-    changed = make_dataset_frame(scenario="time_window")
+    changed = make_time_window_dataset_frame()
     changed.loc[changed["timestamp"] == pd.Timestamp("2016-01-04"), "value"] = 99.0
     write_dataset(right, changed, spec=make_processed_dataset_spec("right"))
 
@@ -237,10 +237,10 @@ def test_compare_datasets_time_window_detects_window_differences(
     right = make_dataset_artifact_root(tmp_path, "right_window_diff")
     write_dataset(
         left,
-        make_dataset_frame(scenario="time_window"),
+        make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("left_window_diff"),
     )
-    changed = make_dataset_frame(scenario="time_window")
+    changed = make_time_window_dataset_frame()
     changed.loc[changed["timestamp"] == pd.Timestamp("2015-01-05"), "value"] = 99.0
     write_dataset(
         right,
@@ -295,13 +295,13 @@ def test_write_dataset_existing_root_raises_dataset_exists(tmp_path: Path) -> No
     root = make_dataset_artifact_root(tmp_path, "exists")
     write_dataset(
         root,
-        make_dataset_frame(scenario="time_window"),
+        make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("exists"),
     )
 
     with pytest.raises(ValueError, match="dataset_exists"):
         write_dataset(
             root,
-            make_dataset_frame(scenario="time_window"),
+            make_time_window_dataset_frame(),
             spec=make_processed_dataset_spec("exists"),
         )

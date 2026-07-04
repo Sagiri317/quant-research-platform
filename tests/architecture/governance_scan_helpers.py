@@ -38,7 +38,7 @@ SCAN_ROOTS = (
 )
 GOVERNANCE_SCAN_TEST_FILES = {
     Path("tests/architecture/governance_scan_helpers.py"),
-    Path("tests/architecture/test_governance_scan_roots.py"),
+    Path("tests/architecture/test_governance_scan_boundaries.py"),
     Path("tests/architecture/test_governance_active_docs.py"),
     Path("tests/architecture/test_governance_profile_runner_contract.py"),
     Path("tests/architecture/test_governance_source_tree_scan_contract.py"),
@@ -50,12 +50,11 @@ GOVERNANCE_SCAN_TEST_FILES = {
 RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/agents/handoff/test_build_handoff_package_integration.py"),
     Path("tests/agents/handoff/conftest.py"),
-    Path("tests/agents/handoff/test_handoff_tools.py"),
     Path("tests/agents/handoff/test_handoff_package_verifier.py"),
     Path("tests/architecture/test_environment_contract.py"),
     Path("tests/architecture/test_factor_contract_terms.py"),
     Path("tests/architecture/test_handoff_contract_single_source.py"),
-    Path("tests/architecture/test_package_scan_coverage.py"),
+    Path("tests/architecture/test_governance_scan_boundaries.py"),
     Path("tests/policy/test_share_safety.py"),
     Path("tests/policy/test_share_safety_runtime_edges.py"),
     Path("tests/tools/run_profile.py"),
@@ -95,7 +94,7 @@ GOVERNANCE_NEGATIVE_FIXTURE_FILES = (
     Path("tests/architecture/test_governance_source_tree_scan_contract.py"),
     Path("tests/architecture/test_governance_version_surface_contract.py"),
     Path("tests/architecture/test_handoff_contract_single_source.py"),
-    Path("tests/architecture/test_retired_surface_absent.py"),
+    Path("tests/architecture/test_retired_terms.py"),
     *tuple(sorted(GOVERNANCE_SCAN_TEST_FILES)),
     Path("tests/helpers/governance_fixtures.py"),
 )

@@ -19,72 +19,18 @@ from quant_research_platform.research.models import (
 )
 from quant_research_platform.research.models.supervised import (
     model_algorithm_ids,
-    model_smoke_hyperparameters,
-)
-from quant_research_platform.research.predictions import (
-    outputs as prediction_outputs,
 )
 from tests.helpers.research_specs import (
     make_signal_spec,
 )
+from tests.research.filter_mode_fixtures import (
+    make_filter_mode_frame,
+    make_filter_mode_model_hyperparameters,
+    make_filter_mode_prediction_output_scores,
+)
 from tests.research.prediction_output_helpers import (
     prediction_frame_from_artifact,
 )
-
-
-def _sort_evaluation_frame(
-    frame: pd.DataFrame,
-    columns: tuple[str, ...],
-) -> pd.DataFrame:
-    return frame.sort_values(list(columns)).reset_index(drop=True)
-
-
-def _filter_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "market_id": ["a_share"] * 6,
-            "asset_id": [f"asset_{idx}" for idx in range(6)],
-            "timestamp": [pd.Timestamp("2024-01-02")] * 6,
-            "factor": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            "label": [0.01, 0.02, 0.03, 0.04, 0.05, np.nan],
-            "eligible": [True, True, False, True, True, True],
-            "can_enter": [True, True, True, False, True, True],
-            "can_exit": [True, True, True, True, False, True],
-        }
-    )
-
-
-def _prediction_output_scores(
-    frames: list[pd.DataFrame],
-    *,
-    prediction_spec: PredictionSpec,
-    model_spec: ModelSpec,
-    result,
-) -> pd.DataFrame:
-    build_state = prediction_outputs._PredictionBuildState()
-    output = list(
-        prediction_outputs._iter_prediction_output_frames(
-            iter(frames),
-            spec=prediction_spec,
-            coefficients=result.coefficients,
-            input_columns=model_spec.input_columns,
-            predictor=prediction_outputs.prediction_callable(
-                result.coefficients,
-                model_spec.input_columns,
-                result.prediction_model,
-            ),
-            build_state=build_state,
-        )
-    )
-    return (
-        pd.concat(output, ignore_index=True)
-        .sort_values(["timestamp", "asset_id"], kind="mergesort")
-        .reset_index(drop=True)
-    )
-
-
-def _model_hyperparameters(model_algorithm: str) -> dict[str, object]:
-    return model_smoke_hyperparameters(model_algorithm)
 
 
 def test_filter_columns_cannot_be_features() -> None:
@@ -106,7 +52,7 @@ def test_filter_columns_cannot_be_features() -> None:
 
 
 def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> None:
-    frame = _filter_frame()
+    frame = make_filter_mode_frame()
     eligible_spec = ModelSpec(
         model_id="linear_eligible",
         model_algorithm="linear_regression",
@@ -223,7 +169,7 @@ def test_required_model_algorithm_ids_fit_and_predict(model_algorithm: str) -> N
         input_feature_columns=("feature",),
         label_column="label",
         random_seed=7,
-        hyperparameters=_model_hyperparameters(model_algorithm),
+        hyperparameters=make_filter_mode_model_hyperparameters(model_algorithm),
         max_train_rows=len(train),
     )
     prediction_spec = PredictionSpec(
@@ -348,7 +294,7 @@ def test_model_training_collection_rejects_unbounded_collection() -> None:
 
     frame = pd.concat(
         [
-            _filter_frame().assign(timestamp=pd.Timestamp(value))
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp(value))
             for value in ("2024-01-02", "2024-01-03", "2024-01-04")
         ],
         ignore_index=True,
@@ -448,13 +394,13 @@ def test_rank_ensemble_prediction_outputs_are_chunk_boundary_invariant(
     )
     result = fit_model_result(frame, model_spec)
 
-    one_chunk = _prediction_output_scores(
+    one_chunk = make_filter_mode_prediction_output_scores(
         [frame],
         prediction_spec=prediction_spec,
         model_spec=model_spec,
         result=result,
     )
-    split_chunks = _prediction_output_scores(
+    split_chunks = make_filter_mode_prediction_output_scores(
         [chunk for _, chunk in frame.groupby("timestamp", sort=True)],
         prediction_spec=prediction_spec,
         model_spec=model_spec,

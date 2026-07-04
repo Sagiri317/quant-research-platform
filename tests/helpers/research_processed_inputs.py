@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 
 import pandas as pd
 
@@ -44,48 +43,6 @@ def make_dummy_processed_catalog(
         duplicate_factor_context=duplicate_factor_context,
         missing_factor_key=missing_factor_key,
     )
-
-
-def write_processed_inputs(
-    layout: StorageLayout,
-    processed_catalog: ProcessedDataCatalog,
-    *,
-    frame: pd.DataFrame | None = None,
-    label_frame: pd.DataFrame | None = None,
-    include_extensions: bool = False,
-    drop_factor_key: str | None = None,
-    reverse_base: bool = False,
-    truncate_factors: bool = False,
-    extra_factor_key: bool = False,
-    factor_values: Sequence[object] | None = None,
-) -> None:
-    data_ids = frozenset(spec.data_id for spec in processed_catalog.list())
-    if {"demo_factors", "demo_labels", "demo_annotations"}.issubset(data_ids):
-        _write_demo_processed_inputs(
-            layout,
-            processed_catalog,
-            frame=frame,
-            label_frame=label_frame,
-        )
-        return
-    if {"demo_factor", "demo_label", "demo_annotation"}.issubset(data_ids):
-        if frame is None:
-            raise ValueError("filter_processed_inputs_require_frame")
-        _write_filter_processed_inputs(layout, processed_catalog, frame)
-        return
-    if {"base", "factors", "labels", "filters", "context"}.issubset(data_ids):
-        _write_dummy_processed_inputs(
-            layout,
-            processed_catalog,
-            include_extensions=include_extensions,
-            drop_factor_key=drop_factor_key,
-            reverse_base=reverse_base,
-            truncate_factors=truncate_factors,
-            extra_factor_key=extra_factor_key,
-            factor_values=factor_values,
-        )
-        return
-    raise ValueError(f"unsupported_processed_catalog_ids: {sorted(data_ids)}")
 
 
 def _demo_processed_catalog() -> ProcessedDataCatalog:
@@ -291,16 +248,16 @@ def _dummy_processed_spec(
     )
 
 
-def _write_demo_processed_inputs(
+def write_demo_processed_inputs(
     layout: StorageLayout,
     processed_catalog: ProcessedDataCatalog,
     *,
-    frame: pd.DataFrame | None,
-    label_frame: pd.DataFrame | None,
+    frame: pd.DataFrame | None = None,
+    label_frame: pd.DataFrame | None = None,
 ) -> None:
     frame = _demo_research_rows() if frame is None else frame
     labels = frame if label_frame is None else label_frame
-    columns_by_id = {
+    frames_by_id = {
         "demo_factors": ["market_id", "asset_id", "timestamp", DEMO_FACTOR_COLUMN],
         "demo_annotations": [
             "market_id",
@@ -312,25 +269,23 @@ def _write_demo_processed_inputs(
             "market_type",
         ],
     }
-    for data_id, columns in columns_by_id.items():
-        _write_processed_frame(
-            layout,
-            processed_catalog,
-            data_id,
-            frame.loc[:, columns],
-        )
-    _write_processed_frame(
+    _write_processed_frames(
         layout,
         processed_catalog,
-        "demo_labels",
-        labels.loc[
+        {
+            data_id: frame.loc[:, columns]
+            for data_id, columns in frames_by_id.items()
+        }
+        | {
+            "demo_labels": labels.loc[
             :,
             ["market_id", "asset_id", "timestamp", DEMO_LABEL_COLUMN],
-        ],
+            ],
+        },
     )
 
 
-def _write_filter_processed_inputs(
+def write_filter_processed_inputs(
     layout: StorageLayout,
     processed_catalog: ProcessedDataCatalog,
     frame: pd.DataFrame,
@@ -347,25 +302,23 @@ def _write_filter_processed_inputs(
             "can_exit",
         ],
     }
-    for data_id, columns in columns_by_id.items():
-        _write_processed_frame(
-            layout,
-            processed_catalog,
-            data_id,
-            frame.loc[:, columns],
-        )
+    _write_processed_frames(
+        layout,
+        processed_catalog,
+        {data_id: frame.loc[:, columns] for data_id, columns in columns_by_id.items()},
+    )
 
 
-def _write_dummy_processed_inputs(
+def write_dummy_processed_inputs(
     layout: StorageLayout,
     processed_catalog: ProcessedDataCatalog,
     *,
-    include_extensions: bool,
-    drop_factor_key: str | None,
-    reverse_base: bool,
-    truncate_factors: bool,
-    extra_factor_key: bool,
-    factor_values: Sequence[object] | None,
+    include_extensions: bool = False,
+    drop_factor_key: str | None = None,
+    reverse_base: bool = False,
+    truncate_factors: bool = False,
+    extra_factor_key: bool = False,
+    factor_values: Sequence[object] | None = None,
 ) -> None:
     base = _dummy_base_frame()
     if reverse_base:
@@ -412,22 +365,21 @@ def _write_dummy_processed_inputs(
     }
     if drop_factor_key is not None:
         frames["factors"] = frames["factors"].drop(columns=[drop_factor_key])
-    for data_id, frame in frames.items():
-        _write_processed_frame(layout, processed_catalog, data_id, frame)
+    _write_processed_frames(layout, processed_catalog, frames)
 
 
-def _write_processed_frame(
+def _write_processed_frames(
     layout: StorageLayout,
     processed_catalog: ProcessedDataCatalog,
-    data_id: str,
-    frame: pd.DataFrame,
-) -> Path:
-    spec = processed_catalog.get(data_id)
-    return write_dataset(
-        layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
-        frame,
-        spec=spec,
-    )
+    frames_by_id: Mapping[str, pd.DataFrame],
+) -> None:
+    for data_id, frame in frames_by_id.items():
+        spec = processed_catalog.get(data_id)
+        write_dataset(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            frame,
+            spec=spec,
+        )
 
 
 def _demo_research_rows() -> pd.DataFrame:

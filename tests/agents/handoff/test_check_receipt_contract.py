@@ -5,10 +5,10 @@ import shlex
 import pytest
 
 from tests.agents.handoff.receipt_contract_fixtures import (
-    _check_receipts,
     _failures,
     _valid_counts,
     _valid_row,
+    make_check_receipts_payload,
 )
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
@@ -114,14 +114,14 @@ def test_check_receipt_rejects_old_trace_fields() -> None:
 
 def test_check_receipts_rejects_missing_or_extra_command() -> None:
     contract = load_handoff_script_module("receipt_contract")
-    payload = _check_receipts(checks=[_valid_row("profile-smoke")])
+    payload = make_check_receipts_payload(checks=[_valid_row("profile-smoke")])
 
     failures = contract.validate_check_receipts(payload)
 
     assert "check_receipts_missing_command: code-map" in failures
     extra = _valid_row("profile-smoke")
     extra["command_id"] = "extra"
-    payload = _check_receipts(
+    payload = make_check_receipts_payload(
         checks=[_valid_row("profile-smoke"), _valid_row("code-map"), extra]
     )
     failures = contract.validate_check_receipts(payload)

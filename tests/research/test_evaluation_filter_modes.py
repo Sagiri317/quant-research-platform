@@ -9,76 +9,15 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.contracts.predictions import (
-    PredictionSpec,
-)
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.evaluations.engine import evaluate_signal_frame
-from quant_research_platform.research.models.supervised import (
-    model_smoke_hyperparameters,
-)
-from quant_research_platform.research.predictions import (
-    outputs as prediction_outputs,
-)
 from tests.helpers.research_specs import (
     make_signal_spec,
 )
-
-
-def _sort_evaluation_frame(
-    frame: pd.DataFrame,
-    columns: tuple[str, ...],
-) -> pd.DataFrame:
-    return frame.sort_values(list(columns)).reset_index(drop=True)
-
-
-def _filter_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "market_id": ["a_share"] * 6,
-            "asset_id": [f"asset_{idx}" for idx in range(6)],
-            "timestamp": [pd.Timestamp("2024-01-02")] * 6,
-            "factor": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            "label": [0.01, 0.02, 0.03, 0.04, 0.05, np.nan],
-            "eligible": [True, True, False, True, True, True],
-            "can_enter": [True, True, True, False, True, True],
-            "can_exit": [True, True, True, True, False, True],
-        }
-    )
-
-
-def _prediction_output_scores(
-    frames: list[pd.DataFrame],
-    *,
-    prediction_spec: PredictionSpec,
-    model_spec: ModelSpec,
-    result,
-) -> pd.DataFrame:
-    build_state = prediction_outputs._PredictionBuildState()
-    output = list(
-        prediction_outputs._iter_prediction_output_frames(
-            iter(frames),
-            spec=prediction_spec,
-            coefficients=result.coefficients,
-            input_columns=model_spec.input_columns,
-            predictor=prediction_outputs.prediction_callable(
-                result.coefficients,
-                model_spec.input_columns,
-                result.prediction_model,
-            ),
-            build_state=build_state,
-        )
-    )
-    return (
-        pd.concat(output, ignore_index=True)
-        .sort_values(["timestamp", "asset_id"], kind="mergesort")
-        .reset_index(drop=True)
-    )
-
-
-def _model_hyperparameters(model_algorithm: str) -> dict[str, object]:
-    return model_smoke_hyperparameters(model_algorithm)
+from tests.research.filter_mode_fixtures import (
+    make_filter_mode_frame,
+    sort_filter_mode_evaluation_frame,
+)
 
 
 def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
@@ -93,7 +32,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
     monkeypatch.setattr(pd.Series, "corr", fail_corr)
     monkeypatch.setattr(pd, "qcut", fail_qcut)
 
-    frame = _filter_frame()
+    frame = make_filter_mode_frame()
     eligible_spec = EvaluationSpec(
         run_id="eval_eligible",
         market_id=MarketId("a_share"),
@@ -188,7 +127,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
 
 
 def test_evaluation_all_nan_signal_label_reports_empty_diagnostics() -> None:
-    frame = _filter_frame()
+    frame = make_filter_mode_frame()
     frame["factor"] = np.nan
     frame["label"] = np.nan
     spec = EvaluationSpec(
@@ -244,25 +183,31 @@ def test_evaluation_group_spread_is_deterministic_for_shuffled_assets() -> None:
     )
 
     pd.testing.assert_frame_equal(
-        _sort_evaluation_frame(baseline.metrics, ("timestamp", "signal", "label")),
-        _sort_evaluation_frame(shuffled.metrics, ("timestamp", "signal", "label")),
+        sort_filter_mode_evaluation_frame(
+            baseline.metrics,
+            ("timestamp", "signal", "label"),
+        ),
+        sort_filter_mode_evaluation_frame(
+            shuffled.metrics,
+            ("timestamp", "signal", "label"),
+        ),
     )
     pd.testing.assert_frame_equal(
-        _sort_evaluation_frame(
+        sort_filter_mode_evaluation_frame(
             baseline.grouped_label_values,
             ("timestamp", "signal", "label", "group"),
         ),
-        _sort_evaluation_frame(
+        sort_filter_mode_evaluation_frame(
             shuffled.grouped_label_values,
             ("timestamp", "signal", "label", "group"),
         ),
     )
     pd.testing.assert_frame_equal(
-        _sort_evaluation_frame(
+        sort_filter_mode_evaluation_frame(
             baseline.group_spread_summary,
             ("signal", "label"),
         ),
-        _sort_evaluation_frame(
+        sort_filter_mode_evaluation_frame(
             shuffled.group_spread_summary,
             ("signal", "label"),
         ),
@@ -312,7 +257,7 @@ def test_evaluation_normalizes_lower_rank_signal_before_compute_output() -> None
 
 
 def test_evaluation_computes_multiple_signals_in_one_run() -> None:
-    frame = _filter_frame().assign(
+    frame = make_filter_mode_frame().assign(
         reverse_factor=[6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
     )
     spec = EvaluationSpec(
@@ -348,7 +293,7 @@ def test_evaluation_computes_multiple_signals_in_one_run() -> None:
 
 
 def test_evaluation_computes_signal_by_label_cross_product() -> None:
-    frame = _filter_frame().assign(
+    frame = make_filter_mode_frame().assign(
         reverse_factor=[6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
         label_alt=[0.06, 0.05, 0.04, 0.03, 0.02, 0.01],
     )
@@ -470,7 +415,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
                 label_columns=("label",),
                 filter_mode="tradable",
             ),
-            _filter_frame().drop(columns=["can_exit"]),
+            make_filter_mode_frame().drop(columns=["can_exit"]),
             "missing_filter_columns: can_exit",
         ),
         (
@@ -481,7 +426,9 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
                 signals=(make_signal_spec("factor"),),
                 label_columns=("label",),
             ),
-            _filter_frame().assign(eligible=[True, None, True, True, True, True]),
+            make_filter_mode_frame().assign(
+                eligible=[True, None, True, True, True, True],
+            ),
             "null_filter_column_values: eligible",
         ),
         (
@@ -492,7 +439,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
                 signals=(make_signal_spec("factor"),),
                 label_columns=("label",),
             ),
-            _filter_frame().assign(eligible=["yes"] * 6),
+            make_filter_mode_frame().assign(eligible=["yes"] * 6),
             "invalid_filter_column_dtype: eligible",
         ),
     ],
@@ -504,5 +451,4 @@ def test_evaluation_filter_columns_fail_closed(
 ) -> None:
     with pytest.raises(ValueError, match=match):
         evaluate_signal_frame(frame, spec)
-
 

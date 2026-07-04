@@ -56,7 +56,7 @@ from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
     make_demo_processed_catalog,
-    write_processed_inputs,
+    write_demo_processed_inputs,
 )
 from tests.helpers.research_specs import (
     make_research_dataset_catalog,
@@ -161,7 +161,7 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
     dataset_catalog = make_research_dataset_catalog(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
-    write_processed_inputs(layout, processed_catalog)
+    write_demo_processed_inputs(layout, processed_catalog)
 
     root = assemble_research_dataset(
         layout=layout,
@@ -252,7 +252,7 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
             partition_columns=("year",),
         )
     )
-    write_processed_inputs(layout, processed_catalog)
+    write_demo_processed_inputs(layout, processed_catalog)
 
     assemble_research_dataset(
         layout=layout,
@@ -322,8 +322,8 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
     dataset_catalog = make_research_dataset_catalog(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
-    write_processed_inputs(default_layout, processed_catalog, frame=frame)
-    write_processed_inputs(tiny_layout, processed_catalog, frame=frame)
+    write_demo_processed_inputs(default_layout, processed_catalog, frame=frame)
+    write_demo_processed_inputs(tiny_layout, processed_catalog, frame=frame)
 
     default_root = assemble_research_dataset(
         layout=default_layout,
@@ -391,7 +391,7 @@ def test_sparse_research_dataset_left_joins_missing_non_base_input_key(
     )
     frame = _research_rows()
     labels = frame.drop(index=frame.index[-1]).reset_index(drop=True)
-    write_processed_inputs(layout, processed_catalog, label_frame=labels)
+    write_demo_processed_inputs(layout, processed_catalog, label_frame=labels)
 
     assemble_research_dataset(
         layout=layout,
@@ -442,7 +442,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
             partition_columns=("year",),
         )
     )
-    write_processed_inputs(layout, processed_catalog)
+    write_demo_processed_inputs(layout, processed_catalog)
 
     with pytest.raises(ValueError, match="invalid_research_factor_columns"):
         assemble_research_dataset(
@@ -503,7 +503,7 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
                 partition_columns=("year",),
             )
         )
-        write_processed_inputs(layout, processed_catalog)
+        write_demo_processed_inputs(layout, processed_catalog)
         assemble_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
@@ -570,7 +570,7 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
     processed_catalog = make_demo_processed_catalog()
-    write_processed_inputs(layout, processed_catalog)
+    write_demo_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -639,7 +639,7 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
     processed_catalog = make_demo_processed_catalog()
-    write_processed_inputs(layout, processed_catalog)
+    write_demo_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -698,7 +698,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
     processed_catalog = make_demo_processed_catalog()
-    write_processed_inputs(layout, processed_catalog, frame=frame)
+    write_demo_processed_inputs(layout, processed_catalog, frame=frame)
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
     assemble_research_dataset(
         layout=layout,
@@ -805,7 +805,7 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
     processed_catalog = make_demo_processed_catalog()
-    write_processed_inputs(layout, processed_catalog)
+    write_demo_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -865,7 +865,7 @@ def test_evaluation_runner_streams_research_chunks(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
     processed_catalog = make_demo_processed_catalog()
-    write_processed_inputs(layout, processed_catalog, frame=frame)
+    write_demo_processed_inputs(layout, processed_catalog, frame=frame)
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
     assemble_research_dataset(
         layout=layout,

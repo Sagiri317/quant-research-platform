@@ -7,10 +7,13 @@ from pathlib import Path
 import pytest
 
 from tests.agents.handoff.conftest import (
-    _check_receipts,
     _git,
     _init_handoff_repo,
-    _package_smoke_receipt,
+)
+from tests.agents.handoff.receipt_contract_fixtures import (
+    make_check_receipts_payload,
+    make_hard_scan_receipt_payload,
+    make_package_smoke_receipt_payload,
 )
 from tests.helpers.governance_git_repos import run_governance_script
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
@@ -156,9 +159,13 @@ def test_builder_generates_machine_receipts_from_bundle_clone(
         assert (receipt_root / ".git").is_dir()
         assert _git(receipt_root, "rev-parse", "HEAD").strip() == final_head
         return {
-            builder.CHECK_RECEIPTS_ENTRY: _check_receipts(),
-            builder.PACKAGE_SMOKE_RECEIPT_ENTRY: _package_smoke_receipt(),
-            builder.HARD_SCAN_RECEIPT_ENTRY: _hard_scan_receipt(final_head),
+            builder.CHECK_RECEIPTS_ENTRY: make_check_receipts_payload(),
+            builder.PACKAGE_SMOKE_RECEIPT_ENTRY: (
+                make_package_smoke_receipt_payload()
+            ),
+            builder.HARD_SCAN_RECEIPT_ENTRY: make_hard_scan_receipt_payload(
+                scanned_head=final_head
+            ),
         }
 
     monkeypatch.setattr(builder, "build_machine_receipts", fake_build_machine_receipts)
@@ -285,22 +292,3 @@ def test_builder_fails_when_package_smoke_timeout_blocks_validation(
         "validation_summary_row_not_pass:package_smoke:BLOCKED"
         in result["verify_failures"]
     )
-
-
-def _hard_scan_receipt(final_head: str) -> dict[str, object]:
-    return {
-        "schema_id": "qrp-hard-scan-receipt",
-        "status": "PASS",
-        "scanned_head": final_head,
-        "scanner_source_sha256": "2" * 64,
-        "scan_runs": [
-            {
-                "scan_id": "allowance_contract",
-                "rule_set_id": "source-tree:allowance_contract",
-                "match_count": 0,
-                "actual_violation_count": 0,
-                "result_sha256": "3" * 64,
-                "replayable_from_bundle": True,
-            }
-        ],
-    }

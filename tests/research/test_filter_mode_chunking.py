@@ -16,74 +16,16 @@ from quant_research_platform.research.evaluations.engine import evaluate_signal_
 from quant_research_platform.research.models import (
     fit_model_result,
 )
-from quant_research_platform.research.models.supervised import (
-    model_smoke_hyperparameters,
-)
-from quant_research_platform.research.predictions import (
-    outputs as prediction_outputs,
-)
 from tests.helpers.research_specs import (
     make_signal_spec,
+)
+from tests.research.filter_mode_fixtures import (
+    make_filter_mode_frame,
 )
 from tests.research.prediction_output_helpers import (
     prediction_frame_from_artifact,
     prediction_frame_from_artifact_frames,
 )
-
-
-def _sort_evaluation_frame(
-    frame: pd.DataFrame,
-    columns: tuple[str, ...],
-) -> pd.DataFrame:
-    return frame.sort_values(list(columns)).reset_index(drop=True)
-
-
-def _filter_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "market_id": ["a_share"] * 6,
-            "asset_id": [f"asset_{idx}" for idx in range(6)],
-            "timestamp": [pd.Timestamp("2024-01-02")] * 6,
-            "factor": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            "label": [0.01, 0.02, 0.03, 0.04, 0.05, np.nan],
-            "eligible": [True, True, False, True, True, True],
-            "can_enter": [True, True, True, False, True, True],
-            "can_exit": [True, True, True, True, False, True],
-        }
-    )
-
-
-def _prediction_output_scores(
-    frames: list[pd.DataFrame],
-    *,
-    prediction_spec: PredictionSpec,
-    model_spec: ModelSpec,
-    result,
-) -> pd.DataFrame:
-    build_state = prediction_outputs._PredictionBuildState()
-    output = list(
-        prediction_outputs._iter_prediction_output_frames(
-            iter(frames),
-            spec=prediction_spec,
-            coefficients=result.coefficients,
-            input_columns=model_spec.input_columns,
-            predictor=prediction_outputs.prediction_callable(
-                result.coefficients,
-                model_spec.input_columns,
-                result.prediction_model,
-            ),
-            build_state=build_state,
-        )
-    )
-    return (
-        pd.concat(output, ignore_index=True)
-        .sort_values(["timestamp", "asset_id"], kind="mergesort")
-        .reset_index(drop=True)
-    )
-
-
-def _model_hyperparameters(model_algorithm: str) -> dict[str, object]:
-    return model_smoke_hyperparameters(model_algorithm)
 
 
 def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
@@ -93,7 +35,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
 
     frame = pd.concat(
         [
-            _filter_frame().assign(
+            make_filter_mode_frame().assign(
                 timestamp=pd.Timestamp(value),
                 unused_blob="x" * 1000,
             )
@@ -151,7 +93,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
 def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
     from quant_research_platform.research.evaluations import engine as eval_engine
 
-    frame = _filter_frame()
+    frame = make_filter_mode_frame()
     spec = EvaluationSpec(
         run_id="eval_split_timestamp",
         market_id=MarketId("a_share"),
@@ -186,7 +128,7 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
     from quant_research_platform.research.models import fitting as model_fitting
     from quant_research_platform.research.models import supervised as model_supervised
 
-    frame = _filter_frame()
+    frame = make_filter_mode_frame()
     spec = ModelSpec(
         model_id="linear_split_timestamp",
         model_algorithm="linear_regression",
@@ -228,7 +170,7 @@ def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
 ) -> None:
     import quant_research_platform.research.predictions.outputs as artifacts_module
 
-    frame = _filter_frame().drop(columns=["label"])
+    frame = make_filter_mode_frame().drop(columns=["label"])
     spec = PredictionSpec(
         prediction_id="pred_split_timestamp",
         model_id="linear_split_timestamp",
@@ -267,7 +209,7 @@ def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
 def test_evaluation_rejects_non_monotonic_time_chunk_order() -> None:
     from quant_research_platform.research.evaluations import engine as eval_engine
 
-    frame = _filter_frame()
+    frame = make_filter_mode_frame()
     first = frame.assign(timestamp=pd.Timestamp("2024-01-02"))
     second = frame.assign(timestamp=pd.Timestamp("2024-01-03"))
     late_overlap = frame.assign(timestamp=pd.Timestamp("2024-01-02"))
@@ -290,7 +232,7 @@ def test_evaluation_rejects_non_monotonic_time_chunk_order() -> None:
 def test_evaluation_rejects_pending_non_monotonic_time_overlap() -> None:
     from quant_research_platform.research.evaluations import engine as eval_engine
 
-    frame = _filter_frame()
+    frame = make_filter_mode_frame()
     first = frame.assign(timestamp=pd.Timestamp("2024-01-03"))
     earlier = frame.assign(timestamp=pd.Timestamp("2024-01-02"))
     spec = EvaluationSpec(
@@ -314,7 +256,7 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
 ) -> None:
     from quant_research_platform.research.evaluations import engine as eval_engine
 
-    frame = _filter_frame()
+    frame = make_filter_mode_frame()
     spec = EvaluationSpec(
         run_id="eval_boundary_over_budget",
         market_id=MarketId("a_share"),
@@ -346,7 +288,9 @@ def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
 
     with pytest.raises(ValueError, match="invalid_time_chunk_timestamp_values"):
         evaluate_signal_frame(
-            _filter_frame().assign(timestamp=[pd.NaT] * len(_filter_frame())),
+            make_filter_mode_frame().assign(
+                timestamp=[pd.NaT] * len(make_filter_mode_frame()),
+            ),
             spec,
         )
 
@@ -358,7 +302,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
 
     frame = pd.concat(
         [
-            _filter_frame().assign(
+            make_filter_mode_frame().assign(
                 timestamp=pd.Timestamp(value),
                 unused_blob="x" * 1000,
             )
@@ -413,7 +357,7 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
 
     frame = pd.concat(
         [
-            _filter_frame().assign(
+            make_filter_mode_frame().assign(
                 timestamp=pd.Timestamp(value),
                 unused_blob="x" * 1000,
             )
@@ -460,5 +404,4 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
     assert max(filtered_chunk_rows) < len(frame)
     pd.testing.assert_frame_equal(result, expected)
     assert result.attrs["prediction_metadata"] == expected.attrs["prediction_metadata"]
-
 

@@ -6,14 +6,14 @@ from pathlib import Path
 import pytest
 
 from tests.agents.handoff.receipt_contract_fixtures import (
-    _package_smoke_payload,
+    make_package_smoke_receipt_payload,
 )
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 
 def test_package_smoke_rejects_child_fail_with_top_pass() -> None:
     contract = load_handoff_script_module("receipt_contract")
-    payload = _package_smoke_payload(
+    payload = make_package_smoke_receipt_payload(
         wheel_extract={
             "status": "FAIL",
             "method": "zipfile_extract",
@@ -52,14 +52,14 @@ def test_package_smoke_accepts_failed_step_with_content_scan_not_run(
     payload_overrides: dict[str, object],
 ) -> None:
     contract = load_handoff_script_module("receipt_contract")
-    payload = _package_smoke_payload(**payload_overrides)
+    payload = make_package_smoke_receipt_payload(**payload_overrides)
     payload["import"] = {"status": "NOT_RUN", "module": "quant_research_platform"}
 
     assert contract.validate_package_smoke_receipt(payload) == []
 
 def test_package_smoke_rejects_build_fail_with_claimed_content_scan_pass() -> None:
     contract = load_handoff_script_module("receipt_contract")
-    payload = _package_smoke_payload(
+    payload = make_package_smoke_receipt_payload(
         status="FAIL",
         build={"status": "FAIL", "artifact_kinds": []},
         wheel_extract={"status": "NOT_RUN", "method": "zipfile_extract"},
@@ -72,7 +72,7 @@ def test_package_smoke_rejects_build_fail_with_claimed_content_scan_pass() -> No
 
 def test_package_smoke_rejects_old_artifact_and_example_fields() -> None:
     contract = load_handoff_script_module("receipt_contract")
-    payload = _package_smoke_payload(
+    payload = make_package_smoke_receipt_payload(
         wheel={"filename": "demo.whl", "sha256": "0" * 64},
         sdist={"filename": "demo.tar.gz", "sha256": "1" * 64},
     )
@@ -89,7 +89,7 @@ def test_package_smoke_rejects_old_artifact_and_example_fields() -> None:
 
 def test_package_smoke_rejects_fixed_value_drift() -> None:
     contract = load_handoff_script_module("receipt_contract")
-    payload = _package_smoke_payload(
+    payload = make_package_smoke_receipt_payload(
         build={"status": "PASS", "artifact_kinds": ["wheel"]},
         wheel_extract={
             "status": "PASS",

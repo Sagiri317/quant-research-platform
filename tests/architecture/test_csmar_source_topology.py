@@ -4,128 +4,15 @@ import ast
 from pathlib import Path
 
 from tests.helpers import frequency_ids
-from tests.helpers.import_graph import python_files_under
+from tests.helpers.import_graph import (
+    parse_source,
+    python_files_under,
+    read_source,
+    top_level_defined_names,
+)
 
 SOURCE_ROOT = Path("src/quant_research_platform")
-API_APP = SOURCE_ROOT / "interfaces/api/app.py"
-PUBLIC_CLI = SOURCE_ROOT / "interfaces/cli/commands.py"
-PRIVATE_CLI = SOURCE_ROOT / "interfaces/private_cli.py"
 
-
-def _read_source(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
-
-
-def _parse_source(path: Path) -> ast.Module:
-    return ast.parse(_read_source(path), filename=str(path))
-
-
-def _top_level_defined_names(tree: ast.Module) -> set[str]:
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-            names.add(node.name)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
-    return names
-
-def _is_dunder_main_guard(node: ast.AST) -> bool:
-    if not isinstance(node, ast.Compare):
-        return False
-    if not (
-        isinstance(node.left, ast.Name)
-        and node.left.id == "__name__"
-        and len(node.ops) == 1
-        and isinstance(node.ops[0], ast.Eq)
-        and len(node.comparators) == 1
-    ):
-        return False
-    comparator = node.comparators[0]
-    return isinstance(comparator, ast.Constant) and comparator.value == "__main__"
-
-
-def _ast_calls(tree: ast.Module) -> list[ast.Call]:
-    return [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-
-
-def _is_app_route_decorator(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "app"
-        and node.func.attr in {"get", "post", "put", "patch", "delete"}
-    )
-
-
-def _is_add_typer_call(node: ast.Call) -> bool:
-    return (
-        isinstance(node.func, ast.Attribute)
-        and node.func.attr == "add_typer"
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "app"
-    )
-
-
-def _is_typer_command_decorator(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "command"
-        and isinstance(node.func.value, ast.Name)
-    )
-
-
-def _decorator_owner_name(node: ast.Call) -> str:
-    if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-        return node.func.value.id
-    raise AssertionError("decorator_owner_missing")
-
-
-def _first_string_arg(node: ast.Call) -> str:
-    if node.args and isinstance(node.args[0], ast.Constant):
-        value = node.args[0].value
-        if isinstance(value, str):
-            return value
-    raise AssertionError("first_string_arg_missing")
-
-
-def _keyword_string(node: ast.Call, keyword_name: str) -> str:
-    for keyword in node.keywords:
-        if keyword.arg == keyword_name and isinstance(keyword.value, ast.Constant):
-            value = keyword.value.value
-            if isinstance(value, str):
-                return value
-    raise AssertionError(f"keyword_string_missing: {keyword_name}")
-
-
-def _is_typer_echo_call(node: ast.Call) -> bool:
-    return (
-        isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "typer"
-        and node.func.attr == "echo"
-    )
-
-
-def _is_sanitize_shared_text_call(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "sanitize_shared_text"
-    )
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
 def test_retired_top_level_source_packages_are_absent() -> None:
     retired = {
         "datasets",
@@ -165,8 +52,8 @@ def test_active_source_has_no_broad_artifact_report_diagnostics_abstractions() -
     }
     hits: list[str] = []
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
-        tree = _parse_source(path)
-        defined = _top_level_defined_names(tree)
+        tree = parse_source(path)
+        defined = top_level_defined_names(tree)
         for name in sorted(forbidden_names & defined):
             hits.append(f"{path}: {name}")
 
@@ -246,7 +133,7 @@ def test_a_share_source_to_dataset_old_helpers_are_absent() -> None:
     for path, names in retired_functions.items():
         if not path.exists():
             continue
-        tree = _parse_source(path)
+        tree = parse_source(path)
         hits.extend(
             f"{path}:{node.lineno}: {node.name}"
             for node in tree.body
@@ -277,8 +164,8 @@ def test_a_share_materialization_validation_owner_is_split_from_entrypoint() -> 
         "require_source_inputs_for_spec",
     }
 
-    owner_defined = _top_level_defined_names(_parse_source(owner_path))
-    entrypoint_defined = _top_level_defined_names(_parse_source(entrypoint_path))
+    owner_defined = top_level_defined_names(parse_source(owner_path))
+    entrypoint_defined = top_level_defined_names(parse_source(entrypoint_path))
 
     assert sorted(owner_required - owner_defined) == []
     assert sorted(owner_required & entrypoint_defined) == []
@@ -298,8 +185,8 @@ def test_a_share_materialization_io_owner_is_split_from_entrypoint() -> None:
         "write_and_inspect",
     }
 
-    owner_defined = _top_level_defined_names(_parse_source(owner_path))
-    entrypoint_defined = _top_level_defined_names(_parse_source(entrypoint_path))
+    owner_defined = top_level_defined_names(parse_source(owner_path))
+    entrypoint_defined = top_level_defined_names(parse_source(entrypoint_path))
 
     assert sorted(owner_required - owner_defined) == []
     assert sorted(owner_required & entrypoint_defined) == []
@@ -307,7 +194,7 @@ def test_a_share_materialization_io_owner_is_split_from_entrypoint() -> None:
 
 def test_csmar_package_init_does_not_reexport_convenience_functions() -> None:
     path = SOURCE_ROOT / "sources/csmar/__init__.py"
-    tree = _parse_source(path)
+    tree = parse_source(path)
     exported_names = set()
     imported_names = set()
     for node in tree.body:
@@ -341,8 +228,8 @@ def test_csmar_source_package_does_not_own_market_interim_contracts() -> None:
     }
     hits: list[str] = []
     for path in source_root.rglob("*.py"):
-        tree = _parse_source(path)
-        defined = _top_level_defined_names(tree)
+        tree = parse_source(path)
+        defined = top_level_defined_names(tree)
         overlap = sorted(forbidden_raw_names & defined)
         hits.extend(f"{path}: {name}" for name in overlap)
 
@@ -376,8 +263,8 @@ def test_a_share_csmar_binding_does_not_export_unprefixed_behavior() -> None:
 
 def test_csmar_mapping_and_checksum_owners_are_split_from_raw_schemas() -> None:
     raw_path = SOURCE_ROOT / "sources/csmar/raw_schemas.py"
-    raw_text = _read_source(raw_path)
-    raw_tree = _parse_source(raw_path)
+    raw_text = read_source(raw_path)
+    raw_tree = parse_source(raw_path)
     forbidden_raw_owners = {
         "map_columns",
         "missing_raw_columns",
@@ -420,7 +307,7 @@ def test_csmar_split_modules_own_mapping_and_checksum_functions() -> None:
     missing: list[str] = []
     reverse_imports: list[str] = []
     for path, names in expected.items():
-        text = _read_source(path)
+        text = read_source(path)
         tree = ast.parse(text, filename=str(path))
         defined = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
         for name in sorted(names - defined):
@@ -441,7 +328,7 @@ def test_csmar_split_modules_own_mapping_and_checksum_functions() -> None:
 
 def test_csmar_source_raw_exports_do_not_write_metadata_manifests() -> None:
     path = SOURCE_ROOT / "sources/csmar/raw_exports.py"
-    tree = _parse_source(path)
+    tree = parse_source(path)
     text = path.read_text(encoding="utf-8")
     hits: list[str] = []
     forbidden_functions = {"write_raw_export_metadata"}
@@ -465,7 +352,7 @@ def test_csmar_source_raw_exports_do_not_write_metadata_manifests() -> None:
 
 def test_csmar_field_mappings_does_not_own_validators_checksums_or_mappers() -> None:
     path = SOURCE_ROOT / "sources/csmar/field_mappings.py"
-    tree = _parse_source(path)
+    tree = parse_source(path)
     forbidden = {
         "DatasetContract",
         "DATASET_CONTRACTS",
@@ -480,16 +367,16 @@ def test_csmar_field_mappings_does_not_own_validators_checksums_or_mappers() -> 
         "raw_export_sha256",
     }
 
-    assert _top_level_defined_names(tree).isdisjoint(forbidden)
+    assert top_level_defined_names(tree).isdisjoint(forbidden)
 
 
 def test_csmar_mapping_metadata_is_owned_by_field_mappings() -> None:
     raw_path = SOURCE_ROOT / "sources/csmar/raw_schemas.py"
     mapping_path = SOURCE_ROOT / "sources/csmar/field_mappings.py"
     checksum_path = SOURCE_ROOT / "sources/csmar/checksums.py"
-    raw_tree = _parse_source(raw_path)
-    mapping_tree = _parse_source(mapping_path)
-    checksum_tree = _parse_source(checksum_path)
+    raw_tree = parse_source(raw_path)
+    mapping_tree = parse_source(mapping_path)
+    checksum_tree = parse_source(checksum_path)
 
     raw_dataclass_fields = {
         node.target.id
@@ -547,7 +434,7 @@ def test_platform_core_does_not_import_csmar_source_modules() -> None:
     for path in python_files_under(checked_roots):
         if path in allowed_composition_roots:
             continue
-        tree = _parse_source(path)
+        tree = parse_source(path)
         for node in ast.walk(tree):
             module = None
             if isinstance(node, ast.ImportFrom):
@@ -610,5 +497,4 @@ def test_csmar_data_additions_are_source_local_by_default() -> None:
         "sources/csmar/interim.py"
         in (source_local_change_policy["new A-share CSMAR interim product"])
     )
-
 

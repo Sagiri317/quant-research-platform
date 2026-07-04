@@ -85,13 +85,6 @@ def make_dummy_research_dataset_spec(**overrides: object) -> ResearchDatasetSpec
     )
 
 
-def make_filter_research_dataset_spec(**overrides: object) -> ResearchDatasetSpec:
-    return _research_dataset_spec_from_defaults(
-        _filter_research_dataset_defaults(),
-        **overrides,
-    )
-
-
 def make_portfolio_research_dataset_spec(**overrides: object) -> ResearchDatasetSpec:
     return _research_dataset_spec_from_defaults(
         _portfolio_research_dataset_defaults(),
@@ -209,19 +202,6 @@ def _dummy_research_dataset_defaults() -> dict[str, object]:
         "label_columns": ("label_1",),
         "filter_columns": ("eligible",),
         "context_columns": ("context_1",),
-    }
-
-
-def _filter_research_dataset_defaults() -> dict[str, object]:
-    return {
-        "data_id": "demo",
-        "market_id": "a_share",
-        "input_data_ids": ("demo_factor", "demo_label", "demo_annotation"),
-        "base_input_data_id": "demo_annotation",
-        "factor_columns": ("factor",),
-        "label_columns": ("label",),
-        "filter_columns": ("eligible", "can_enter", "can_exit"),
-        "context_columns": (),
     }
 
 

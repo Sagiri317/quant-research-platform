@@ -7,18 +7,18 @@ from pathlib import Path
 import pytest
 
 from tests.agents.handoff.receipt_contract_fixtures import (
-    _check_receipts,
     _failures,
     _valid_counts,
     _valid_row,
+    make_check_receipts_payload,
 )
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 
 def test_compare_functions_detect_replay_drift() -> None:
     contract = load_handoff_script_module("receipt_contract")
-    packaged = _check_receipts()
-    replayed = _check_receipts()
+    packaged = make_check_receipts_payload()
+    replayed = make_check_receipts_payload()
     replayed["checks"][0]["exit_code"] = 1  # type: ignore[index]
     replayed["checks"][0]["status"] = "FAIL"  # type: ignore[index]
     replayed["checks"][0]["failure_class"] = "pytest_failed"  # type: ignore[index]
@@ -45,8 +45,8 @@ def test_profile_smoke_counts_collected_must_equal_outcome_total(
 
 def test_compare_functions_detect_pytest_count_drift() -> None:
     contract = load_handoff_script_module("receipt_contract")
-    packaged = _check_receipts()
-    replayed = _check_receipts()
+    packaged = make_check_receipts_payload()
+    replayed = make_check_receipts_payload()
     replayed["checks"][0]["counts"]["passed"] += 1  # type: ignore[index]
     replayed["checks"][0]["counts"]["collected"] += 1  # type: ignore[index]
 

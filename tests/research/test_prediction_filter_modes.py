@@ -16,22 +16,19 @@ from quant_research_platform.contracts.predictions import (
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import assemble_research_dataset
-from quant_research_platform.research.models.supervised import (
-    model_smoke_hyperparameters,
-)
 from quant_research_platform.research.predictions import (
     build_prediction_result_from_research_dataset,
-)
-from quant_research_platform.research.predictions import (
-    outputs as prediction_outputs,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
     make_filter_processed_catalog,
-    write_processed_inputs,
+    write_filter_processed_inputs,
 )
 from tests.helpers.research_specs import (
     make_research_dataset_catalog,
+)
+from tests.research.filter_mode_fixtures import (
+    make_filter_mode_frame,
 )
 from tests.research.prediction_output_helpers import (
     prediction_frame_from_artifact,
@@ -39,68 +36,13 @@ from tests.research.prediction_output_helpers import (
 )
 
 
-def _sort_evaluation_frame(
-    frame: pd.DataFrame,
-    columns: tuple[str, ...],
-) -> pd.DataFrame:
-    return frame.sort_values(list(columns)).reset_index(drop=True)
-
-
-def _filter_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "market_id": ["a_share"] * 6,
-            "asset_id": [f"asset_{idx}" for idx in range(6)],
-            "timestamp": [pd.Timestamp("2024-01-02")] * 6,
-            "factor": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            "label": [0.01, 0.02, 0.03, 0.04, 0.05, np.nan],
-            "eligible": [True, True, False, True, True, True],
-            "can_enter": [True, True, True, False, True, True],
-            "can_exit": [True, True, True, True, False, True],
-        }
-    )
-
-
-def _prediction_output_scores(
-    frames: list[pd.DataFrame],
-    *,
-    prediction_spec: PredictionSpec,
-    model_spec: ModelSpec,
-    result,
-) -> pd.DataFrame:
-    build_state = prediction_outputs._PredictionBuildState()
-    output = list(
-        prediction_outputs._iter_prediction_output_frames(
-            iter(frames),
-            spec=prediction_spec,
-            coefficients=result.coefficients,
-            input_columns=model_spec.input_columns,
-            predictor=prediction_outputs.prediction_callable(
-                result.coefficients,
-                model_spec.input_columns,
-                result.prediction_model,
-            ),
-            build_state=build_state,
-        )
-    )
-    return (
-        pd.concat(output, ignore_index=True)
-        .sort_values(["timestamp", "asset_id"], kind="mergesort")
-        .reset_index(drop=True)
-    )
-
-
-def _model_hyperparameters(model_algorithm: str) -> dict[str, object]:
-    return model_smoke_hyperparameters(model_algorithm)
-
-
 def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     tmp_path: Path,
 ) -> None:
     frame = pd.concat(
         [
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
         ],
         ignore_index=True,
     )
@@ -157,7 +99,7 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         context_columns=(),
     )
     processed_catalog = make_filter_processed_catalog()
-    write_processed_inputs(layout, processed_catalog, frame=frame)
+    write_filter_processed_inputs(layout, processed_catalog, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -213,9 +155,9 @@ def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
 ) -> None:
     frame = pd.concat(
         [
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-04")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-04")),
         ],
         ignore_index=True,
     )
@@ -230,7 +172,7 @@ def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
         context_columns=(),
     )
     processed_catalog = make_filter_processed_catalog()
-    write_processed_inputs(layout, processed_catalog, frame=frame)
+    write_filter_processed_inputs(layout, processed_catalog, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -280,8 +222,8 @@ def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
 def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> None:
     frame = pd.concat(
         [
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
         ],
         ignore_index=True,
     )
@@ -296,7 +238,7 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
         context_columns=(),
     )
     processed_catalog = make_filter_processed_catalog()
-    write_processed_inputs(layout, processed_catalog, frame=frame)
+    write_filter_processed_inputs(layout, processed_catalog, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -358,13 +300,13 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
 def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
     tmp_path: Path,
 ) -> None:
-    train_rows = _filter_frame().assign(
+    train_rows = make_filter_mode_frame().assign(
         timestamp=pd.Timestamp("2024-01-02"),
         factor=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
         label=[5.0, 8.0, 11.0, 14.0, 17.0, 20.0],
         eligible=True,
     )
-    test_rows = _filter_frame().assign(
+    test_rows = make_filter_mode_frame().assign(
         timestamp=pd.Timestamp("2024-01-03"),
         factor=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
         label=[-10.0, -20.0, -30.0, -40.0, -50.0, -60.0],
@@ -382,7 +324,7 @@ def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
         context_columns=(),
     )
     processed_catalog = make_filter_processed_catalog()
-    write_processed_inputs(layout, processed_catalog, frame=frame)
+    write_filter_processed_inputs(layout, processed_catalog, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -439,7 +381,7 @@ def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:
         sample_filter_mode="unfiltered",
     )
     prediction = prediction_frame_from_artifact(
-        _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+        make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
         input_columns=("factor",),
@@ -466,7 +408,7 @@ def test_prediction_outputs_fail_closed_errors_are_specific() -> None:
         match="prediction_train_end_must_precede_test_start",
     ):
         prediction_frame_from_artifact(
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
             PredictionSpec(
                 prediction_id="pred_bad_order",
                 model_id="linear_eligible",
@@ -483,7 +425,7 @@ def test_prediction_outputs_fail_closed_errors_are_specific() -> None:
         match="prediction_test_end_must_not_precede_test_start",
     ):
         prediction_frame_from_artifact(
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
             PredictionSpec(
                 prediction_id="pred_bad_test_end",
                 model_id="linear_eligible",
@@ -498,7 +440,7 @@ def test_prediction_outputs_fail_closed_errors_are_specific() -> None:
 
     with pytest.raises(ValueError, match="empty_prediction_window"):
         prediction_frame_from_artifact(
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
             PredictionSpec(
                 prediction_id="pred_empty_test",
                 model_id="linear_eligible",
@@ -515,7 +457,7 @@ def test_prediction_outputs_fail_closed_errors_are_specific() -> None:
 def test_prediction_handoff_empty_training_window_fails_closed(
     tmp_path: Path,
 ) -> None:
-    frame = _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03"))
+    frame = make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-03"))
     layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = make_research_dataset_catalog(
         data_id="demo_filter",
@@ -527,7 +469,7 @@ def test_prediction_handoff_empty_training_window_fails_closed(
         context_columns=(),
     )
     processed_catalog = make_filter_processed_catalog()
-    write_processed_inputs(layout, processed_catalog, frame=frame)
+    write_filter_processed_inputs(layout, processed_catalog, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -578,7 +520,7 @@ def test_prediction_outputs_rejects_filter_columns_as_direct_features() -> None:
 
     with pytest.raises(ValueError, match="filter_column_in_input_columns: eligible"):
         prediction_frame_from_artifact(
-            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+            make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
             spec,
             coefficients=np.asarray([0.0, 0.01]),
             input_columns=("eligible",),

@@ -20,16 +20,69 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.ids import MarketId
 
 
-def make_dataset_frame(
+def make_default_dataset_frame(
     *,
-    scenario: str = "default",
     asset_ids: Sequence[str] | None = None,
     dates: Sequence[str] | None = None,
     values: Sequence[object] | None = None,
     value_column: str = "value",
     market_id: str = "a_share",
 ) -> pd.DataFrame:
-    defaults = _dataset_frame_defaults(scenario)
+    return _make_dataset_frame(
+        asset_ids=asset_ids,
+        dates=dates,
+        values=values,
+        value_column=value_column,
+        market_id=market_id,
+        defaults=_DEFAULT_DATASET_FRAME,
+    )
+
+
+def make_time_window_dataset_frame(
+    *,
+    value_column: str = "value",
+    market_id: str = "a_share",
+) -> pd.DataFrame:
+    return _make_dataset_frame(
+        value_column=value_column,
+        market_id=market_id,
+        defaults=_TIME_WINDOW_DATASET_FRAME,
+    )
+
+
+def make_helper_edges_dataset_frame(
+    *,
+    value_column: str = "value",
+    market_id: str = "a_share",
+) -> pd.DataFrame:
+    return _make_dataset_frame(
+        value_column=value_column,
+        market_id=market_id,
+        defaults=_HELPER_EDGES_DATASET_FRAME,
+    )
+
+
+def make_correctness_dataset_frame(
+    *,
+    value_column: str = "value",
+    market_id: str = "a_share",
+) -> pd.DataFrame:
+    return _make_dataset_frame(
+        value_column=value_column,
+        market_id=market_id,
+        defaults=_CORRECTNESS_DATASET_FRAME,
+    )
+
+
+def _make_dataset_frame(
+    *,
+    asset_ids: Sequence[str] | None = None,
+    dates: Sequence[str] | None = None,
+    values: Sequence[object] | None = None,
+    value_column: str = "value",
+    market_id: str = "a_share",
+    defaults: dict[str, Sequence[object]],
+) -> pd.DataFrame:
     asset_ids = defaults["asset_ids"] if asset_ids is None else asset_ids
     dates = defaults["dates"] if dates is None else dates
     values = defaults["values"] if values is None else values
@@ -43,32 +96,26 @@ def make_dataset_frame(
     )
 
 
-def _dataset_frame_defaults(scenario: str) -> dict[str, Sequence[object]]:
-    if scenario == "default":
-        return {
-            "asset_ids": ("asset_002", "asset_001", "asset_001"),
-            "dates": ("2015-01-05", "2014-01-02", "2015-01-05"),
-            "values": (2.0, 1.0, float("nan")),
-        }
-    if scenario == "time_window":
-        return {
-            "asset_ids": ("000001", "000001", "000001"),
-            "dates": ("2014-01-02", "2015-01-05", "2016-01-04"),
-            "values": (1.0, 2.0, 3.0),
-        }
-    if scenario == "correctness":
-        return {
-            "asset_ids": ("asset_a", "asset_b", "asset_a", "asset_b"),
-            "dates": ("2020-01-02", "2020-01-02", "2020-01-06", "2020-01-06"),
-            "values": (1.0, 2.0, 3.0, 4.0),
-        }
-    if scenario == "helper_edges":
-        return {
-            "asset_ids": ("asset_a", "asset_b"),
-            "dates": ("2024-01-02", "2024-01-03"),
-            "values": (1.0, 2.0),
-        }
-    raise ValueError(f"unknown_dataset_frame_scenario: {scenario}")
+_DEFAULT_DATASET_FRAME = {
+    "asset_ids": ("asset_002", "asset_001", "asset_001"),
+    "dates": ("2015-01-05", "2014-01-02", "2015-01-05"),
+    "values": (2.0, 1.0, float("nan")),
+}
+_TIME_WINDOW_DATASET_FRAME = {
+    "asset_ids": ("000001", "000001", "000001"),
+    "dates": ("2014-01-02", "2015-01-05", "2016-01-04"),
+    "values": (1.0, 2.0, 3.0),
+}
+_CORRECTNESS_DATASET_FRAME = {
+    "asset_ids": ("asset_a", "asset_b", "asset_a", "asset_b"),
+    "dates": ("2020-01-02", "2020-01-02", "2020-01-06", "2020-01-06"),
+    "values": (1.0, 2.0, 3.0, 4.0),
+}
+_HELPER_EDGES_DATASET_FRAME = {
+    "asset_ids": ("asset_a", "asset_b"),
+    "dates": ("2024-01-02", "2024-01-03"),
+    "values": (1.0, 2.0),
+}
 
 
 def make_processed_dataset_spec(

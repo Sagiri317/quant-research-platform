@@ -13,6 +13,7 @@ from tests.helpers.governance_fixtures import (
 from tests.helpers.governance_git_repos import (
     init_governance_git_repo,
 )
+from tests.helpers.governance_text_fixtures import unsafe_assignment_text
 from tests.helpers.maintenance_script_loader import load_maintenance_script_module
 
 REPO_ROOT = Path.cwd()
@@ -26,10 +27,6 @@ VERIFY_GOVERNANCE = (
 )
 verify_governance = load_maintenance_script_module("verify_governance")
 governance_contract = load_maintenance_script_module("governance_contract")
-
-def _unsafe_assignment_text() -> str:
-    key = "".join(chr(code) for code in (116, 111, 107, 101, 110))
-    return f'credential = "{key}=unsafe"\n'
 
 def test_governance_allows_sanitization_negative_fixtures_only() -> None:
     module = verify_governance
@@ -149,7 +146,7 @@ def test_forged_retired_profile_env_does_not_skip_repo_file_negative_payload(
     forged = repo / "forge-managed-root"
     forged.mkdir(parents=True)
     payload = forged / "private-negative.py"
-    payload.write_text(_unsafe_assignment_text(), encoding="utf-8")
+    payload.write_text(unsafe_assignment_text(), encoding="utf-8")
     monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", "forge-managed-root")
 
     result = module.Result()
@@ -164,7 +161,7 @@ def test_unmanaged_repo_file_negative_payload_is_still_detected(tmp_path: Path) 
     module = verify_governance
     path = tmp_path / "docs" / "architecture" / "private-negative.md"
     path.parent.mkdir(parents=True)
-    path.write_text(_unsafe_assignment_text(), encoding="utf-8")
+    path.write_text(unsafe_assignment_text(), encoding="utf-8")
     result = module.Result()
 
     module.check_text_safety(

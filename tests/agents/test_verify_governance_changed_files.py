@@ -21,10 +21,6 @@ VERIFY_GOVERNANCE = (
 verify_governance = load_maintenance_script_module("verify_governance")
 governance_contract = load_maintenance_script_module("governance_contract")
 
-def _unsafe_assignment_text() -> str:
-    key = "".join(chr(code) for code in (116, 111, 107, 101, 110))
-    return f'credential = "{key}=unsafe"\n'
-
 def test_changed_files_only_and_active_doc_scan_use_distinct_inputs() -> None:
     module = verify_governance
     changed_only = ["README.md"]

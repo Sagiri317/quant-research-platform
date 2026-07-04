@@ -40,7 +40,7 @@ def _valid_row(
     row.update(overrides)
     return row
 
-def _check_receipts(**overrides: object) -> dict[str, object]:
+def make_check_receipts_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_id": "qrp-check-receipts",
         "status": "PASS",
@@ -49,7 +49,7 @@ def _check_receipts(**overrides: object) -> dict[str, object]:
     payload.update(overrides)
     return payload
 
-def _package_smoke_payload(**overrides: object) -> dict[str, object]:
+def make_package_smoke_receipt_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_id": "qrp-package-smoke-receipt",
         "status": "PASS",
@@ -68,7 +68,7 @@ def _package_smoke_payload(**overrides: object) -> dict[str, object]:
     payload.update(overrides)
     return payload
 
-def _hard_scan_payload(**overrides: object) -> dict[str, object]:
+def make_hard_scan_receipt_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_id": "qrp-hard-scan-receipt",
         "status": "PASS",

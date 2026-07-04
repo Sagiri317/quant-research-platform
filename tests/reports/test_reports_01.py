@@ -17,7 +17,6 @@ from quant_research_platform.artifacts.outputs import (
     write_stage_profile_outputs,
 )
 from quant_research_platform.contracts.evaluations import (
-    EvaluationDiagnostics,
     EvaluationSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
@@ -26,6 +25,9 @@ from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.runtime.profiling import ProfileConfig, StageProfiler
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
+from tests.artifacts.output_edge_fixtures import (
+    make_output_edge_evaluation_diagnostics,
+)
 from tests.helpers.report_output_frames import (
     make_report_evaluation_group_spread_summary_frame,
     make_report_evaluation_grouped_label_values_frame,
@@ -283,7 +285,10 @@ def test_evaluation_outputs_reject_existing_output_bundle_without_writes(
             make_report_evaluation_grouped_label_values_frame(),
             ic_summary=make_report_evaluation_ic_summary_frame(),
             group_spread_summary=make_report_evaluation_group_spread_summary_frame(),
-            evaluation_diagnostics=build_evaluation_diagnostics(),
+            evaluation_diagnostics=make_output_edge_evaluation_diagnostics(
+                min_timestamp="2014-01-03",
+                max_timestamp="2014-01-03",
+            ),
             spec=_evaluation_spec(),
             output_spec=_evaluation_outputs_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -379,7 +384,10 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
             make_report_evaluation_grouped_label_values_frame(),
             ic_summary=make_report_evaluation_ic_summary_frame(),
             group_spread_summary=make_report_evaluation_group_spread_summary_frame(),
-            evaluation_diagnostics=build_evaluation_diagnostics(),
+            evaluation_diagnostics=make_output_edge_evaluation_diagnostics(
+                min_timestamp="2014-01-03",
+                max_timestamp="2014-01-03",
+            ),
             spec=_evaluation_spec(),
             output_spec=_evaluation_outputs_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -450,24 +458,4 @@ def _evaluation_outputs_spec() -> OutputSpec:
         market_id=MarketId("a_share"),
         run_type="evaluation",
         scope=OutputScope.LOCAL_ONLY,
-    )
-
-
-def build_evaluation_diagnostics() -> EvaluationDiagnostics:
-    return EvaluationDiagnostics(
-        filter_mode="eligible",
-        filter_columns_used=("eligible",),
-        filter_definition="eligible == True",
-        rows_input=2,
-        rows_after_filter_mode=2,
-        rows_after_signal_label_dropna=2,
-        metric_rows=1,
-        grouped_label_value_rows=1,
-        ic_summary_rows=1,
-        group_spread_summary_rows=1,
-        timestamp_count=1,
-        min_timestamp="2014-01-03",
-        max_timestamp="2014-01-03",
-        n_groups=2,
-        skipped_timestamp_count=0,
     )

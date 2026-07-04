@@ -21,12 +21,6 @@ VERIFY_GOVERNANCE = (
 verify_governance = load_maintenance_script_module("verify_governance")
 governance_contract = load_maintenance_script_module("governance_contract")
 
-def _unsafe_assignment_text() -> str:
-    key = "".join(chr(code) for code in (116, 111, 107, 101, 110))
-    return f'credential = "{key}=unsafe"\n'
-
-@pytest.mark.integration
-@pytest.mark.slow
 def test_active_doc_scan_cli_collects_non_empty_clean_tree_file_set() -> None:
     result = run_governance_script(
         REPO_ROOT,

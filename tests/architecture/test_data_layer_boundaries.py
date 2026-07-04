@@ -7,7 +7,7 @@ import re
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 
-from tests.helpers.import_graph import import_edges_for_roots
+from tests.helpers.import_graph import import_edges_for_roots, is_relative_to
 
 SOURCE_ROOT = Path("src/quant_research_platform")
 FORBIDDEN_PUBLIC_STORAGE_PARAMS = {
@@ -374,7 +374,7 @@ def test_run_id_and_run_result_derived_names_are_contract_checked() -> None:
     hits: list[str] = []
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
         if not any(
-            _is_relative_to(path, root)
+            is_relative_to(path, root)
             for root in RUN_RESULT_AND_RUN_ID_SCAN_ROOTS
         ):
             continue
@@ -523,11 +523,3 @@ def _call_name(func: ast.expr) -> str:
     if isinstance(func, ast.Attribute):
         return func.attr
     return ""
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True

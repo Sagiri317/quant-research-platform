@@ -115,10 +115,14 @@ class SourceTreeScanInput:
     tracked_paths: tuple[Path, ...]
     tracked_text_files: tuple[Path, ...]
     text_files: Mapping[Path, SourceTreeTextFile]
-    active_test_literal_patterns: Mapping[str, re.Pattern[str]]
+    path_name_patterns: Mapping[str, re.Pattern[str]]
+    python_symbol_patterns: Mapping[str, re.Pattern[str]]
+    structured_key_patterns: Mapping[str, re.Pattern[str]]
     forbidden_patterns: Mapping[str, re.Pattern[str]]
     governance_truth_patterns: Mapping[str, re.Pattern[str]]
     sensitive_negative_patterns: Mapping[str, re.Pattern[str]]
+    active_test_literal_patterns: Mapping[str, re.Pattern[str]]
+    allowed_occurrence_patterns: Mapping[str, re.Pattern[str]]
 
 
 @dataclass(frozen=True)
@@ -464,7 +468,6 @@ RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {
     Path("tests/agents/test_compare_run_results.py"),
     Path("tests/agents/test_verify_governance_active_docs.py"),
     Path("tests/agents/handoff/test_handoff_package_verifier.py"),
-    Path("tests/agents/handoff/test_handoff_tools.py"),
     Path("tests/architecture/test_governance_active_docs.py"),
     Path("tests/architecture/test_governance_local_verification_contract.py"),
     Path("tests/architecture/test_governance_profile_runner_contract.py"),
@@ -490,7 +493,7 @@ SOURCE_TREE_RETIRED_TEXT_NEGATIVE_TEST_SOURCES = {
 }
 RUN_OUTPUT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = (
     ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
-    "tests/architecture/test_no_legacy_names.py",
+    "tests/architecture/test_retired_terms.py",
 )
 
 LAYER_BOUNDARY_IMPORT_RULES = (
@@ -946,7 +949,6 @@ PRIVACY_TEXT_SAFETY_FIXTURE_SOURCES = (
     "tests/policy/test_share_safety.py",
     "tests/policy/test_share_safety_runtime_edges.py",
     "tests/storage/test_manifest_helper_edges.py",
-    "tests/agents/handoff/test_handoff_tools.py",
     "tests/agents/handoff/test_handoff_package_verifier.py",
 )
 
@@ -1152,7 +1154,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
             "removed or renamed"
         ),
         covered_by=(
-            "tests/architecture/test_retired_surface_absent.py::"
+            "tests/architecture/test_retired_terms.py::"
             "test_retired_local_only_report_paths_remain_share_unsafe",
         ),
         py_owner="assign:_RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES",
@@ -1171,7 +1173,7 @@ SOURCE_TREE_ALLOWED_OCCURRENCES = (
             "removed or renamed"
         ),
         covered_by=(
-            "tests/architecture/test_retired_surface_absent.py::"
+            "tests/architecture/test_retired_terms.py::"
             "test_retired_local_only_report_paths_remain_share_unsafe",
         ),
         py_owner="assign:_RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES",
@@ -1520,43 +1522,43 @@ _MIGRATED_SOURCE_TREE_LITERAL_OCCURRENCE_ROWS = (
         "def:check_markdown_paths",
     ),
     (
-        "tests/agents/handoff/test_handoff_tools.py",
+        "tests/agents/handoff/test_handoff_package_verifier.py",
         "sensitive_negative_literals:sensitive_local_only_path",
         _exact_line('"zip_path": "E', ':/quant-workspace/private/handoff.zip",'),
         "def:test_handoff_package_verifier_scans_json_sidecar_absolute_paths",
     ),
     (
-        "tests/agents/handoff/test_handoff_tools.py",
+        "tests/agents/handoff/test_handoff_package_verifier.py",
         "sensitive_negative_literals:sensitive_provider_marker",
         _exact_line('"provider_name', '=raw-provider",'),
         "def:test_handoff_package_verifier_rejects_private_provider_markers",
     ),
     (
-        "tests/agents/handoff/test_handoff_tools.py",
+        "tests/agents/handoff/test_handoff_package_verifier.py",
         "sensitive_negative_literals:sensitive_provider_marker",
         _exact_line('"source_name', '=raw-source",'),
         "def:test_handoff_package_verifier_rejects_private_provider_markers",
     ),
     (
-        "tests/agents/handoff/test_handoff_tools.py",
+        "tests/agents/handoff/test_handoff_package_verifier.py",
         "sensitive_negative_literals:sensitive_provider_marker",
         _exact_line('"data_provider', '=raw-provider",'),
         "def:test_handoff_package_verifier_rejects_private_provider_markers",
     ),
     (
-        "tests/agents/handoff/test_handoff_tools.py",
+        "tests/agents/handoff/test_handoff_package_verifier.py",
         "sensitive_negative_literals:sensitive_provider_marker",
         _exact_line('"vendor_name=', 'raw-provider",'),
         "def:test_handoff_package_verifier_rejects_private_provider_markers",
     ),
     (
-        "tests/agents/handoff/test_handoff_tools.py",
+        "tests/agents/handoff/test_handoff_package_verifier.py",
         "sensitive_negative_literals:sensitive_provider_marker",
         _exact_line('"raw_v', 'endor=export",'),
         "def:test_handoff_package_verifier_rejects_private_provider_markers",
     ),
     (
-        "tests/agents/handoff/test_handoff_tools.py",
+        "tests/agents/handoff/test_handoff_package_verifier.py",
         "sensitive_negative_literals:sensitive_provider_marker",
         _exact_line('"vendor_', 'payload={}",'),
         "def:test_handoff_package_verifier_rejects_private_provider_markers",
@@ -2033,7 +2035,7 @@ SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
     Path("tests/architecture/test_handoff_contract_single_source.py"): (
         _SOURCE_TREE_RETIRED_RULE_DEFINITION_RULES
     ),
-    Path("tests/architecture/test_retired_surface_absent.py"): {
+    Path("tests/architecture/test_retired_terms.py"): {
         "retired_csmar_source_alias",
         "retired_a_share_market_alias",
         "retired_model_algorithm_collection",
@@ -2235,7 +2237,7 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "test_active_docs_reject_retired_review_safety_names",
         "test_research_foundation_semantic_closure_terms_are_retired",
     },
-    Path("tests/architecture/test_governance_scan_roots.py"): {
+    Path("tests/architecture/test_governance_scan_boundaries.py"): {
         "test_verify_governance_uses_current_local_only_roots",
         "test_gitignore_is_active_doc_scanned_for_retired_result_paths",
         "test_gitignore_rejects_outputs_local_layout",
@@ -2850,12 +2852,16 @@ def is_allowed_version_surface(path: str | Path, version: str) -> bool:
     return version in VERSION_SURFACE_POLICY["allowed"]
 
 
-def iter_path_name_findings(paths: object) -> list[dict[str, object]]:
+def iter_path_name_findings(
+    paths: object,
+    *,
+    patterns: Mapping[str, re.Pattern[str]] | None = None,
+) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    patterns = path_name_forbidden_patterns()
+    active_patterns = patterns or path_name_forbidden_patterns()
     for raw_path in paths:
         path = normalize_repo_path(raw_path)
-        for rule, pattern in patterns.items():
+        for rule, pattern in active_patterns.items():
             if pattern.search(path):
                 findings.append({"path": path, "rule": rule})
     return findings
@@ -2910,13 +2916,16 @@ def python_symbols_from_source(source: str) -> list[dict[str, object]]:
 def iter_python_symbol_findings(
     path: str | Path,
     source: str,
+    *,
+    patterns: Mapping[str, re.Pattern[str]] | None = None,
 ) -> list[dict[str, object]]:
     if is_governance_rule_definition_path(path):
         return []
     findings: list[dict[str, object]] = []
+    active_patterns = patterns or python_symbol_forbidden_patterns()
     for item in python_symbols_from_source(source):
         symbol = str(item["symbol"])
-        for rule, pattern in python_symbol_forbidden_patterns().items():
+        for rule, pattern in active_patterns.items():
             if not pattern.search(symbol):
                 continue
             if is_allowed_runtime_symbol(path, symbol, rule):
@@ -2938,13 +2947,16 @@ def iter_python_symbol_findings(
 def iter_structured_key_findings(
     path: str | Path,
     text: str,
+    *,
+    patterns: Mapping[str, re.Pattern[str]] | None = None,
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
+    active_patterns = patterns or structured_key_forbidden_patterns()
     for item in structured_keys_from_text(path, text):
         key = str(item["key"])
         key_path = str(item["key_path"])
         line_number = int(item["line"])
-        for rule, pattern in structured_key_forbidden_patterns().items():
+        for rule, pattern in active_patterns.items():
             if not pattern.search(key):
                 continue
             findings.append(
@@ -3307,12 +3319,18 @@ def build_source_tree_scan_input(repo_root: Path) -> SourceTreeScanInput:
         tracked_paths=tracked_paths,
         tracked_text_files=tracked_text_files,
         text_files=text_files,
-        active_test_literal_patterns=source_tree_active_test_literal_patterns(
-            repo_root
-        ),
+        path_name_patterns=path_name_forbidden_patterns(),
+        python_symbol_patterns=python_symbol_forbidden_patterns(),
+        structured_key_patterns=structured_key_forbidden_patterns(),
         forbidden_patterns=source_tree_forbidden_patterns(),
         governance_truth_patterns=source_tree_governance_truth_patterns(),
         sensitive_negative_patterns=source_tree_sensitive_negative_patterns(),
+        active_test_literal_patterns=source_tree_active_test_literal_patterns(
+            repo_root
+        ),
+        allowed_occurrence_patterns=source_tree_allowed_occurrence_patterns(
+            repo_root=repo_root
+        ),
     )
 
 
@@ -3419,11 +3437,10 @@ def source_tree_allowance_contract_findings(
     enforce_missing_allowance_entries = (
         clone_dir / governance_allowlist_owner_path
     ).is_file()
-    patterns = source_tree_allowed_occurrence_patterns(repo_root=clone_dir)
     if enforce_missing_allowance_entries:
         for failure in validate_source_tree_allowed_occurrences(
             SOURCE_TREE_ALLOWED_OCCURRENCES,
-            patterns_by_rule_id=patterns,
+            patterns_by_rule_id=scan_input.allowed_occurrence_patterns,
         ):
             findings.append(
                 {
@@ -3538,7 +3555,7 @@ def source_tree_allowed_occurrence_unreachable_reason(
     if scan_group == "synthesized_strings":
         if entry.path.suffix != ".py":
             return "source_tree_allowed_occurrence_unreachable"
-        pattern = source_tree_forbidden_patterns().get(rule)
+        pattern = scan_input.forbidden_patterns.get(rule)
         if pattern is None:
             return "source_tree_allowed_occurrence_unreachable"
         candidates = iter_synthesized_string_findings(
@@ -3578,7 +3595,7 @@ def source_tree_allowed_occurrence_unreachable_reason(
     if scan_group == "sensitive_negative_literals":
         if not source_tree_text_path_in_scope(relative):
             return "source_tree_allowed_occurrence_unreachable"
-        if rule not in source_tree_sensitive_negative_patterns():
+        if rule not in scan_input.sensitive_negative_patterns:
             return "source_tree_allowed_occurrence_unreachable"
         return ""
     return "source_tree_allowed_occurrence_unreachable"
@@ -3598,7 +3615,8 @@ def source_tree_retired_path_name_findings(
     scan_input: SourceTreeScanInput,
 ) -> list[dict[str, object]]:
     return iter_path_name_findings(
-        relative.as_posix() for relative in scan_input.tracked_paths
+        (relative.as_posix() for relative in scan_input.tracked_paths),
+        patterns=scan_input.path_name_patterns,
     )
 
 
@@ -3609,7 +3627,13 @@ def source_tree_python_symbol_findings(
     for relative, text_file in scan_input.text_files.items():
         if relative.suffix.lower() != ".py":
             continue
-        findings.extend(iter_python_symbol_findings(relative, text_file.text))
+        findings.extend(
+            iter_python_symbol_findings(
+                relative,
+                text_file.text,
+                patterns=scan_input.python_symbol_patterns,
+            )
+        )
     return findings
 
 
@@ -3620,7 +3644,13 @@ def source_tree_structured_key_findings(
     for relative, text_file in scan_input.text_files.items():
         if relative.suffix.lower() not in {".json", ".toml", ".yaml", ".yml"}:
             continue
-        findings.extend(iter_structured_key_findings(relative, text_file.text))
+        findings.extend(
+            iter_structured_key_findings(
+                relative,
+                text_file.text,
+                patterns=scan_input.structured_key_patterns,
+            )
+        )
     return findings
 
 
@@ -3783,27 +3813,6 @@ def source_tree_synthesized_string_scan_findings(
             )
         )
     return findings
-
-
-def iter_split_string_findings_from_source(
-    relative: Path,
-    path: Path,
-    lines: tuple[str, ...],
-    skip_lines: frozenset[int],
-    rule_definition_lines: frozenset[int],
-) -> list[dict[str, object]]:
-    return iter_synthesized_string_findings_from_source(
-        relative,
-        path,
-        lines,
-        skip_lines,
-        rule_definition_lines,
-        None,
-        source="\n".join(lines) + "\n",
-        owner_ranges={},
-        scan_group="synthesized_strings",
-        patterns=source_tree_forbidden_patterns(),
-    )
 
 
 def iter_synthesized_string_findings_from_source(

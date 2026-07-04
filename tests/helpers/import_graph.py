@@ -66,6 +66,40 @@ def import_edges_for_roots(roots: Iterable[Path]) -> tuple[ImportEdge, ...]:
     return _import_edges_from_trees(trees)
 
 
+def read_source(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig")
+
+
+def parse_source(path: Path) -> ast.Module:
+    return ast.parse(read_source(path), filename=str(path))
+
+
+def top_level_defined_names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            names.add(node.name)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+    return names
+
+
+def ast_calls(tree: ast.AST) -> list[ast.Call]:
+    return [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+
+def is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def _import_edges_from_trees(ast_trees: dict[Path, ast.AST]) -> tuple[ImportEdge, ...]:
     edges: list[ImportEdge] = []
     for path, tree in ast_trees.items():
