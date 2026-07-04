@@ -29,6 +29,21 @@ from tests.storage.low_level_fixtures import (
 )
 
 
+def capture_read_parquet_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> list[Path]:
+    original_read_parquet = pd.read_parquet
+    read_paths: list[Path] = []
+
+    def record_read_parquet(path, *args, **kwargs):
+        read_paths.append(Path(path))
+        return original_read_parquet(path, *args, **kwargs)
+
+    monkeypatch.setattr(target, record_read_parquet)
+    return read_paths
+
+
 def test_read_dataset_time_window_uses_closed_interval(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path, "windowed")
     write_dataset(
@@ -58,16 +73,9 @@ def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_column
         spec=make_processed_dataset_spec("read_pruned"),
     )
     full = read_dataset(root)
-    original_read_parquet = pd.read_parquet
-    read_paths: list[Path] = []
-
-    def spy_read_parquet(path, *args, **kwargs):
-        read_paths.append(Path(path))
-        return original_read_parquet(path, *args, **kwargs)
-
-    monkeypatch.setattr(
+    read_paths = capture_read_parquet_paths(
+        monkeypatch,
         "quant_research_platform.storage._dataset_reading.pd.read_parquet",
-        spy_read_parquet,
     )
 
     result = read_dataset(
@@ -184,16 +192,9 @@ def test_fingerprint_dataset_time_window_prunes_year_partitions(
         make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("fingerprint_pruned"),
     )
-    original_read_parquet = pd.read_parquet
-    read_paths: list[Path] = []
-
-    def spy_read_parquet(path, *args, **kwargs):
-        read_paths.append(Path(path))
-        return original_read_parquet(path, *args, **kwargs)
-
-    monkeypatch.setattr(
+    read_paths = capture_read_parquet_paths(
+        monkeypatch,
         "quant_research_platform.storage._dataset_fingerprinting.pd.read_parquet",
-        spy_read_parquet,
     )
 
     fingerprint = fingerprint_dataset(

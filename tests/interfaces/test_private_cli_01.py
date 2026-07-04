@@ -37,6 +37,27 @@ ALLOWED_INVENTORY_FIELDS = {
 }
 
 
+def record_local_verification_run(calls: list, *, run_id: str):
+    def run(config):
+        calls.append(config)
+        run_root = f"local-verification-output/{run_id}"
+        return type(
+            "Result",
+            (),
+            {
+                "status": "PASS",
+                "run_id": run_id,
+                "run_root": run_root,
+                "summary": {
+                    "status": "PASS",
+                    "run_root": run_root,
+                },
+            },
+        )()
+
+    return run
+
+
 def test_qrp_private_script_entry_is_the_only_private_cli_addition() -> None:
     payload = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
@@ -296,25 +317,9 @@ def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
 def test_qrp_local_verification_run_accepts_required_options(monkeypatch) -> None:
     calls = []
 
-    def fake_run(config):
-        calls.append(config)
-        return type(
-            "Result",
-            (),
-            {
-                "status": "PASS",
-                "run_id": "s1",
-                "run_root": "local-verification-output/s1",
-                "summary": {
-                    "status": "PASS",
-                    "run_root": "local-verification-output/s1",
-                },
-            },
-        )()
-
     monkeypatch.setattr(
         "quant_research_platform.interfaces.private_cli.run_local_verification",
-        fake_run,
+        record_local_verification_run(calls, run_id="s1"),
     )
     runner = CliRunner()
 
@@ -357,25 +362,9 @@ def test_qrp_local_verification_run_accepts_required_options(monkeypatch) -> Non
 def test_qrp_local_verification_run_accepts_window_overrides(monkeypatch) -> None:
     calls = []
 
-    def fake_run(config):
-        calls.append(config)
-        return type(
-            "Result",
-            (),
-            {
-                "status": "PASS",
-                "run_id": "s2",
-                "run_root": "local-verification-output/s2",
-                "summary": {
-                    "status": "PASS",
-                    "run_root": "local-verification-output/s2",
-                },
-            },
-        )()
-
     monkeypatch.setattr(
         "quant_research_platform.interfaces.private_cli.run_local_verification",
-        fake_run,
+        record_local_verification_run(calls, run_id="s2"),
     )
     runner = CliRunner()
 

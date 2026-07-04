@@ -7,6 +7,7 @@ import re
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 
+from tests.architecture.topology_helpers import call_name
 from tests.helpers.import_graph import import_edges_for_roots, is_relative_to
 
 SOURCE_ROOT = Path("src/quant_research_platform")
@@ -515,11 +516,3 @@ def _concat_argument_name(node: ast.Call) -> str | None:
     if isinstance(argument, ast.Name):
         return argument.id
     return None
-
-
-def call_name(func: ast.expr) -> str:
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    return ""

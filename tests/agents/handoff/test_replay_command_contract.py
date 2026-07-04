@@ -8,6 +8,8 @@ import pytest
 
 from tests.agents.handoff.receipt_contract_fixtures import (
     make_check_receipts_payload,
+    make_successful_subprocess_result,
+    make_timeout_subprocess_run,
     make_valid_check_counts,
     make_valid_check_row,
     receipt_row_failures,
@@ -72,11 +74,13 @@ def test_replay_command_executes_current_interpreter_but_records_canonical_pytho
     replay = load_handoff_script_module("replay_evidence")
     calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    def record_replay_command(
+        argv: list[str], **_: object
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, "1 passed in 0.01s", "")
+        return make_successful_subprocess_result(argv, stdout="1 passed in 0.01s")
 
-    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+    monkeypatch.setattr(replay.subprocess, "run", record_replay_command)
 
     row = replay._run_replay_command(tmp_path, "profile-smoke")
 
@@ -91,10 +95,7 @@ def test_replay_command_timeout_records_blocked_without_exit_code(
 ) -> None:
     replay = load_handoff_script_module("replay_evidence")
 
-    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-
-    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+    monkeypatch.setattr(replay.subprocess, "run", make_timeout_subprocess_run())
 
     row = replay._run_replay_command(tmp_path, "profile-smoke")
 

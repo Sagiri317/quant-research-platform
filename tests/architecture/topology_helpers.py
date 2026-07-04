@@ -3,6 +3,23 @@ from __future__ import annotations
 import ast
 
 
+def contains_parts(parts: tuple[str, ...], needle: tuple[str, ...]) -> bool:
+    if len(needle) > len(parts):
+        return False
+    return any(
+        parts[index : index + len(needle)] == needle
+        for index in range(len(parts))
+    )
+
+
+def call_name(func: ast.expr) -> str:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
 def is_dunder_main_guard(node: ast.AST) -> bool:
     if not isinstance(node, ast.Compare):
         return False

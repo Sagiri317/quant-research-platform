@@ -38,6 +38,7 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.synthetic_a_share import processed_a_share_root
 
 KEY_COLUMNS = ("market_id", "asset_id", "timestamp")
 FLOAT_RTOL = 1e-10
@@ -89,7 +90,7 @@ def synthetic_price_volume_panel(
     return pd.DataFrame(rows)
 
 
-def _reference_price_volume_factors(
+def reference_price_volume_factors(
     panel: pd.DataFrame,
     *,
     factor_columns: tuple[str, ...],
@@ -728,8 +729,8 @@ def assert_forced_tiny_processed_chunks_match_default(
         ),
     )
 
-    default_root = processed_root(tmp_path / "default", kind, data_id)
-    tiny_root = processed_root(tmp_path / "tiny", kind, data_id)
+    default_root = processed_a_share_root(tmp_path / "default", kind, data_id)
+    tiny_root = processed_a_share_root(tmp_path / "tiny", kind, data_id)
     default = read_dataset(default_root).sort_values(list(KEY_COLUMNS))
     tiny = read_dataset(tiny_root).sort_values(list(KEY_COLUMNS))
 
@@ -741,10 +742,6 @@ def assert_forced_tiny_processed_chunks_match_default(
         inspect_dataset(tiny_root).file_count
         > inspect_dataset(default_root).file_count
     )
-
-
-def processed_root(project_root, kind: str, data_id: str):
-    return project_root / "data" / "processed" / "a_share" / kind / data_id
 
 
 def write_minimal_interim_inputs(

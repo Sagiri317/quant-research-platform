@@ -754,7 +754,7 @@ def test_profile_runner_env_is_not_forwarded_to_pytest_subprocess(
     spec.loader.exec_module(runner)
     captured = {}
 
-    def fake_run(command, **kwargs):
+    def capture_pytest_env(command, **kwargs):
         captured["env"] = kwargs["env"]
         return subprocess.CompletedProcess(
             args=command,
@@ -764,7 +764,7 @@ def test_profile_runner_env_is_not_forwarded_to_pytest_subprocess(
         )
 
     monkeypatch.setenv("QRP_MANAGED_REPO_ROOTS", "forge-managed-root")
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.subprocess, "run", capture_pytest_env)
 
     exit_code = runner.main(
         [

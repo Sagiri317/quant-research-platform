@@ -41,9 +41,9 @@ from quant_research_platform.research.labels.forward_returns import (
 from ._helpers import (
     KEY_COLUMNS,
     REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE,
-    _reference_price_volume_factors,
     assert_frame_matches_reference,
     pandas_window_moment_by_asset,
+    reference_price_volume_factors,
     reference_qrp_window_moment_by_asset,
     synthetic_price_volume_panel,
 )
@@ -57,7 +57,7 @@ def test_price_volume_all_factor_columns_match_qrp_reference() -> None:
         panel.sample(frac=1.0, random_state=17),
         factor_columns=factor_columns,
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
-    reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
+    reference = reference_price_volume_factors(panel, factor_columns=factor_columns)
 
     assert_frame_matches_reference(
         result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
@@ -222,7 +222,7 @@ def test_price_volume_qrp_moment_contract_edge_windows() -> None:
         panel.sample(frac=1.0, random_state=7),
         factor_columns=factor_columns,
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
-    reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
+    reference = reference_price_volume_factors(panel, factor_columns=factor_columns)
 
     assert_frame_matches_reference(
         result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
@@ -265,7 +265,7 @@ def test_price_volume_moments_apply_qrp_near_zero_policy() -> None:
         panel,
         factor_columns=factor_columns,
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
-    reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
+    reference = reference_price_volume_factors(panel, factor_columns=factor_columns)
 
     assert_frame_matches_reference(
         result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
@@ -291,7 +291,7 @@ def test_price_volume_moments_use_qrp_formula_above_near_zero_threshold() -> Non
         panel,
         factor_columns=factor_columns,
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
-    reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
+    reference = reference_price_volume_factors(panel, factor_columns=factor_columns)
     first_window_series = pd.Series(first_window, dtype="float64")
     moment_2 = float(((first_window_series - first_window_series.mean()) ** 2).mean())
 
@@ -315,7 +315,7 @@ def test_price_volume_well_conditioned_moments_cross_check_pandas() -> None:
         panel,
         factor_columns=factor_columns,
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
-    reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
+    reference = reference_price_volume_factors(panel, factor_columns=factor_columns)
     group_keys = panel.sort_values(["asset_id", "timestamp"])["asset_id"]
     returns = pd.to_numeric(
         panel.sort_values(["asset_id", "timestamp"])["period_return"],
@@ -426,7 +426,7 @@ def test_price_volume_session_chunk_boundary_matches_unchunked_reference() -> No
         split_session_index=131,
         warmup_sessions=60,
     )
-    reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
+    reference = reference_price_volume_factors(panel, factor_columns=factor_columns)
 
     expected = reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
     assert_frame_matches_reference(

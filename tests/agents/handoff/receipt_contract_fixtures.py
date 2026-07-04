@@ -1,6 +1,41 @@
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
+
+
+def make_successful_subprocess_result(
+    argv: list[str],
+    *,
+    stdout: str = "",
+    stderr: str = "",
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(argv, 0, stdout, stderr)
+
+
+def make_timeout_subprocess_run():
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    return run
+
+
+def make_package_build_subprocess_run(
+    artifacts: tuple[str, ...],
+    calls: list[tuple[list[str], object]] | None = None,
+):
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if calls is not None:
+            calls.append((argv, kwargs.get("timeout")))
+        dist = Path(argv[-1])
+        dist.mkdir(parents=True, exist_ok=True)
+        for artifact in artifacts:
+            (dist / artifact).write_text("artifact", encoding="utf-8")
+        return make_successful_subprocess_result(argv)
+
+    return run
 
 
 def make_valid_check_counts(**overrides: int) -> dict[str, int]:

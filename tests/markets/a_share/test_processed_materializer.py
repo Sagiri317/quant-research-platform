@@ -44,7 +44,10 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from tests.helpers.synthetic_a_share import write_synthetic_interim_inputs
+from tests.helpers.synthetic_a_share import (
+    processed_a_share_root,
+    write_synthetic_interim_inputs,
+)
 
 SYNTHETIC_SOURCE_ID = SourceId("synthetic_vendor_a")
 MARKET_BARS_DATA_ID = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
@@ -296,8 +299,10 @@ def test_label_materializer_expands_panel_dependency_for_future_halo(
         data_ids=data_ids,
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
-    labels = read_dataset(_processed_root(tmp_path, "label", "forward_returns"))
+    panel = read_dataset(
+        processed_a_share_root(tmp_path, "panel", MARKET_PANEL_DATA_ID)
+    )
+    labels = read_dataset(processed_a_share_root(tmp_path, "label", "forward_returns"))
     assert pd.to_datetime(panel["timestamp"]).dt.date.max().isoformat() == "2014-01-07"
     jan3_label = labels.loc[
         pd.to_datetime(labels["timestamp"]).dt.date.astype(str).eq("2014-01-03"),
@@ -339,8 +344,10 @@ def test_factor_materializer_expands_panel_dependency_for_history_halo(
         data_ids=data_ids,
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
-    factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
+    panel = read_dataset(
+        processed_a_share_root(tmp_path, "panel", MARKET_PANEL_DATA_ID)
+    )
+    factors = read_dataset(processed_a_share_root(tmp_path, "factor", "price_volume"))
     assert pd.to_datetime(panel["timestamp"]).dt.date.min().isoformat() == "2014-01-03"
     assert pd.notna(factors[MOMENTUM_20D_COLUMN].iloc[0])
 
@@ -555,8 +562,10 @@ def test_materialize_processed_data_writes_only_core_trading_sessions(
         data_ids=("price_volume",),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
-    factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
+    panel = read_dataset(
+        processed_a_share_root(tmp_path, "panel", MARKET_PANEL_DATA_ID)
+    )
+    factors = read_dataset(processed_a_share_root(tmp_path, "factor", "price_volume"))
 
     assert panel["timestamp"].dt.date.astype(str).tolist() == [
         "2017-04-28",
@@ -613,7 +622,7 @@ def test_existing_dependency_coverage_rejects_missing_middle_sessions(
         time_window=TimeWindow("2014-01-02", "2016-01-04"),
         data_ids=(MARKET_PANEL_DATA_ID,),
     )
-    source_panel_root = _processed_root(
+    source_panel_root = processed_a_share_root(
         tmp_path / "source",
         "panel",
         MARKET_PANEL_DATA_ID,
@@ -629,7 +638,9 @@ def test_existing_dependency_coverage_rejects_missing_middle_sessions(
         start_date="2014-01-02",
         end_date="2016-01-04",
     )
-    panel_root = _processed_root(tmp_path / "coverage", "panel", MARKET_PANEL_DATA_ID)
+    panel_root = processed_a_share_root(
+        tmp_path / "coverage", "panel", MARKET_PANEL_DATA_ID
+    )
     write_dataset(
         panel_root,
         panel_without_2015,
@@ -673,7 +684,7 @@ def test_existing_dependency_coverage_accepts_non_trading_end_date(
         data_ids=("execution",),
     )
 
-    annotation_root = _processed_root(tmp_path, "annotation", "execution")
+    annotation_root = processed_a_share_root(tmp_path, "annotation", "execution")
     annotation = read_dataset(annotation_root)
     assert annotation["timestamp"].dt.date.astype(str).tolist() == [
         "2016-12-29",
@@ -711,7 +722,9 @@ def test_annotation_materializer_uses_dependency_lookahead_session(tmp_path) -> 
         data_ids=("execution",),
     )
 
-    execution = read_dataset(_processed_root(tmp_path, "annotation", "execution"))
+    execution = read_dataset(
+        processed_a_share_root(tmp_path, "annotation", "execution")
+    )
     assert execution["timestamp"].dt.date.astype(str).tolist() == ["2014-01-30"]
     assert execution["next_bar_is_trading"].tolist() == [True]
     assert execution["can_enter"].tolist() == [True]
@@ -813,8 +826,8 @@ def _assert_forced_tiny_chunks_match_default(
         ),
     )
 
-    default_root = _processed_root(tmp_path / "default", kind, data_id)
-    tiny_root = _processed_root(tmp_path / "tiny", kind, data_id)
+    default_root = processed_a_share_root(tmp_path / "default", kind, data_id)
+    tiny_root = processed_a_share_root(tmp_path / "tiny", kind, data_id)
     default = read_dataset(default_root).sort_values(
         ["market_id", "asset_id", "timestamp"]
     )
@@ -827,10 +840,6 @@ def _assert_forced_tiny_chunks_match_default(
     assert (
         inspect_dataset(tiny_root).file_count > inspect_dataset(default_root).file_count
     )
-
-
-def _processed_root(project_root: Path, kind: str, data_id: str) -> Path:
-    return project_root / "data" / "processed" / "a_share" / kind / data_id
 
 
 def _catalog_with_processed_inputs(

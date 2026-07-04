@@ -28,6 +28,14 @@ from tests.research.prediction_output_helpers import (
 )
 
 
+def wrap_filter_for_chunking(original_filter, filtered_chunk_rows: list[int]):
+    def record_filtered_chunk(frame, *, mode, metadata_key):
+        filtered_chunk_rows.append(len(frame))
+        return original_filter(frame, mode=mode, metadata_key=metadata_key)
+
+    return record_filtered_chunk
+
+
 def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -144,11 +152,11 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
     original_filter = model_fitting.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
-    def wrapped_filter(frame, *, mode, metadata_key):
-        filtered_chunk_rows.append(len(frame))
-        return original_filter(frame, mode=mode, metadata_key=metadata_key)
-
-    monkeypatch.setattr(model_fitting, "apply_filter_mode", wrapped_filter)
+    monkeypatch.setattr(
+        model_fitting,
+        "apply_filter_mode",
+        wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
+    )
     result = model_fitting.fit_model_result_from_frames(
         (frame.iloc[:3], frame.iloc[3:]),
         spec,
@@ -189,11 +197,11 @@ def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
     original_filter = artifacts_module.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
-    def wrapped_filter(frame, *, mode, metadata_key):
-        filtered_chunk_rows.append(len(frame))
-        return original_filter(frame, mode=mode, metadata_key=metadata_key)
-
-    monkeypatch.setattr(artifacts_module, "apply_filter_mode", wrapped_filter)
+    monkeypatch.setattr(
+        artifacts_module,
+        "apply_filter_mode",
+        wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
+    )
     result = prediction_frame_from_artifact_frames(
         (frame.iloc[:3], frame.iloc[3:]),
         spec,
@@ -326,14 +334,14 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     original_filter = model_fitting.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
-    def wrapped_filter(frame, *, mode, metadata_key):
-        filtered_chunk_rows.append(len(frame))
-        return original_filter(frame, mode=mode, metadata_key=metadata_key)
-
     def fail_column_stack(*args, **kwargs):
         raise AssertionError("model fit must not allocate a full intercept matrix")
 
-    monkeypatch.setattr(model_fitting, "apply_filter_mode", wrapped_filter)
+    monkeypatch.setattr(
+        model_fitting,
+        "apply_filter_mode",
+        wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
+    )
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
 
@@ -387,12 +395,12 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
     original_filter = artifacts_module.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
-    def wrapped_filter(frame, *, mode, metadata_key):
-        filtered_chunk_rows.append(len(frame))
-        return original_filter(frame, mode=mode, metadata_key=metadata_key)
-
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
-    monkeypatch.setattr(artifacts_module, "apply_filter_mode", wrapped_filter)
+    monkeypatch.setattr(
+        artifacts_module,
+        "apply_filter_mode",
+        wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
+    )
     result = prediction_frame_from_artifact(
         frame.drop(columns=["label"]),
         spec,

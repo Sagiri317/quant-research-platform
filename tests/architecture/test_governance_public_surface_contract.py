@@ -12,13 +12,13 @@ from tests.architecture.governance_scan_helpers import (
     PRIVATE_LOCAL_CLI_LINES,
     PUBLIC_CONTRACT_DOCS,
     RETIRED_PUBLIC_CONTRACT_TEXT,
-    call_name,
     future_data_hit,
     iter_governance_python_files,
     iter_public_surface_files,
     literal_string_items,
     public_surface_scan_text,
 )
+from tests.architecture.topology_helpers import call_name
 
 
 def test_public_surfaces_do_not_expose_internal_provider_markers() -> None:

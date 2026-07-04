@@ -8,7 +8,6 @@ from tests.architecture.governance_scan_helpers import (
     FORBIDDEN_WRITER_METHODS,
     RUN_OUTPUT_ARTIFACTS,
     RUNTIME_PROFILING,
-    call_name,
     class_field_names,
     function_arg_names,
     is_approved_writer_path,
@@ -18,6 +17,7 @@ from tests.architecture.governance_scan_helpers import (
     iter_governance_python_files,
     open_mode,
 )
+from tests.architecture.topology_helpers import call_name
 
 
 def test_business_logic_does_not_bypass_persistent_writers() -> None:

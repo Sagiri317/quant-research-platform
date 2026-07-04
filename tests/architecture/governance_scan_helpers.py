@@ -5,6 +5,8 @@ import re
 import sys
 from pathlib import Path
 
+from tests.architecture.topology_helpers import contains_parts
+
 GOVERNANCE_SCRIPT_DIR = (
     Path(__file__).resolve().parents[2]
     / ".agents"
@@ -349,13 +351,7 @@ def iter_governance_python_files() -> list[Path]:
     return [path for path in iter_governance_text_files() if path.suffix == ".py"]
 def _is_excluded(path: Path) -> bool:
     parts = path.parts
-    return any(_contains_parts(parts, excluded) for excluded in EXCLUDED_SCAN_PARTS)
-def _contains_parts(parts: tuple[str, ...], needle: tuple[str, ...]) -> bool:
-    if len(needle) > len(parts):
-        return False
-    return any(
-        parts[index : index + len(needle)] == needle for index in range(len(parts))
-    )
+    return any(contains_parts(parts, excluded) for excluded in EXCLUDED_SCAN_PARTS)
 def iter_active_structure_files() -> list[Path]:
     files: list[Path] = []
     for root in ACTIVE_STRUCTURE_SCAN_ROOTS:
@@ -404,19 +400,13 @@ def _is_internal_provider_doc(path: Path) -> bool:
         return True
     parts = path.parts
     return any(
-        _contains_parts(parts, excluded)
+        contains_parts(parts, excluded)
         for excluded in INTERNAL_PROVIDER_SCAN_EXCLUSIONS
     )
 def future_data_hit(path: Path, lineno: int, class_name: str) -> str:
     return f"{path}:{lineno}: {class_name}.uses_future_data"
 def is_approved_writer_path(path: Path) -> bool:
     return path.parts[0] == "tests" or path in APPROVED_WRITER_MODULES
-def call_name(func: ast.expr) -> str:
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    return ""
 def is_open_call(func: ast.expr) -> bool:
     if isinstance(func, ast.Name):
         return func.id == "open"

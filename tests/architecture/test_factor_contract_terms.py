@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests.architecture.topology_helpers import contains_parts
+
 SCAN_ROOTS = (
     Path("src"),
     Path("tests"),
@@ -71,13 +73,4 @@ def _iter_active_text_files() -> tuple[Path, ...]:
 
 
 def _is_excluded(path: Path) -> bool:
-    return any(_contains(path.parts, excluded) for excluded in EXCLUDED_PARTS)
-
-
-def _contains(parts: tuple[str, ...], needle: tuple[str, ...]) -> bool:
-    if len(needle) > len(parts):
-        return False
-    return any(
-        parts[index : index + len(needle)] == needle
-        for index in range(len(parts))
-    )
+    return any(contains_parts(path.parts, excluded) for excluded in EXCLUDED_PARTS)

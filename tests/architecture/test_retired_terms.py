@@ -123,7 +123,7 @@ def _scan_files(roots: tuple[Path, ...]) -> tuple[Path, ...]:
     return tuple(sorted(set(files)))
 
 
-def test_daily_lifecycle_names_are_replaced(
+def test_retired_surface_findings_are_absent(
     live_source_tree_scan: dict[str, dict[str, object]],
 ) -> None:
     scan_groups = live_source_tree_scan
@@ -266,15 +266,6 @@ def test_retired_constant_fixtures_are_derived_from_governance_contract() -> Non
         "retired_csmar_source_alias",
     )
 
-
-def test_retired_handoff_evidence_names_are_absent(
-    live_source_tree_scan: dict[str, dict[str, object]],
-) -> None:
-    scan_groups = live_source_tree_scan
-
-    assert scan_groups["retired_text"]["findings"] == []
-    assert scan_groups["python_symbols"]["findings"] == []
-    assert scan_groups["synthesized_strings"]["findings"] == []
 
 
 def test_retired_pr_body_renderer_is_absent() -> None:

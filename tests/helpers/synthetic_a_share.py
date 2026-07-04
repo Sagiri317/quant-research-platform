@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import pandas as pd
 
@@ -15,6 +16,10 @@ from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
+
+
+def processed_a_share_root(project_root: Path, kind: str, data_id: str) -> Path:
+    return project_root / "data" / "processed" / "a_share" / kind / data_id
 
 
 def make_synthetic_market_bars_daily(

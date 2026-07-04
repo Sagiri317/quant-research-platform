@@ -22,6 +22,48 @@ def _load_runner():
     return module
 
 
+def make_completed_run(
+    command,
+    *,
+    stdout: str = "pytest ok\n",
+    stderr: str = "",
+    **_kwargs,
+):
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=0,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def make_recording_run(calls: list, *, stdout: str = "pytest ok\n"):
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return make_completed_run(command, stdout=stdout)
+
+    return run
+
+
+def reject_pytest_call(*_args, **_kwargs):
+    raise AssertionError("pytest should not be called")
+
+
+def fixed_profile_datetime(runner):
+    real_datetime = runner.datetime
+    return type(
+        "FixedDatetime",
+        (),
+        {
+            "now": classmethod(
+                lambda cls, tz=None: real_datetime(
+                    2026, 6, 30, 8, 9, 10, tzinfo=runner.UTC
+                )
+            )
+        },
+    )
+
+
 def test_list_profiles_includes_required_profiles(capsys) -> None:
     runner = _load_runner()
 
@@ -118,16 +160,7 @@ def test_default_run_dir_is_profile_scoped_under_run_root(
     runner = _load_runner()
     calls = []
 
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="pytest ok\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.subprocess, "run", make_recording_run(calls))
 
     exit_code = runner.main(
         [
@@ -225,15 +258,8 @@ def test_default_run_dir_creations_are_unique_with_same_timestamp(
     monkeypatch,
 ) -> None:
     runner = _load_runner()
-    real_datetime = runner.datetime
 
-    class FixedDatetime:
-        @classmethod
-        def now(cls, tz=None):
-            del tz
-            return real_datetime(2026, 6, 30, 8, 9, 10, tzinfo=runner.UTC)
-
-    monkeypatch.setattr(runner, "datetime", FixedDatetime)
+    monkeypatch.setattr(runner, "datetime", fixed_profile_datetime(runner))
 
     first = runner._resolve_run_dir(tmp_path, None, profile_name="fast")
     second = runner._resolve_run_dir(tmp_path, None, profile_name="fast")
@@ -252,24 +278,9 @@ def test_default_run_dir_creation_is_concurrent_safe(
     monkeypatch,
 ) -> None:
     runner = _load_runner()
-    real_datetime = runner.datetime
 
-    class FixedDatetime:
-        @classmethod
-        def now(cls, tz=None):
-            del tz
-            return real_datetime(2026, 6, 30, 8, 9, 10, tzinfo=runner.UTC)
-
-    def fake_run(command, **kwargs):
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="pytest ok\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(runner, "datetime", FixedDatetime)
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "datetime", fixed_profile_datetime(runner))
+    monkeypatch.setattr(runner.subprocess, "run", make_completed_run)
 
     def run_once() -> int:
         return runner.main(["--profile", "fast", "--repo-root", str(tmp_path)])
@@ -291,10 +302,7 @@ def test_explicit_run_dir_must_be_under_run_root(
 ) -> None:
     runner = _load_runner()
 
-    def fail_run(*_args, **_kwargs):
-        raise AssertionError("pytest should not be called")
-
-    monkeypatch.setattr(runner.subprocess, "run", fail_run)
+    monkeypatch.setattr(runner.subprocess, "run", reject_pytest_call)
 
     exit_code = runner.main(
         [
@@ -320,10 +328,7 @@ def test_explicit_run_dir_existing_non_empty_fails_before_pytest(
     run_dir.mkdir(parents=True)
     (run_dir / "existing.txt").write_text("occupied\n", encoding="utf-8")
 
-    def fail_run(*_args, **_kwargs):
-        raise AssertionError("pytest should not be called")
-
-    monkeypatch.setattr(runner.subprocess, "run", fail_run)
+    monkeypatch.setattr(runner.subprocess, "run", reject_pytest_call)
 
     exit_code = runner.main(
         [
@@ -347,10 +352,7 @@ def test_explicit_run_dir_existing_empty_fails_before_pytest(
     run_dir = tmp_path / ".run" / "manual" / "fast"
     run_dir.mkdir(parents=True)
 
-    def fail_run(*_args, **_kwargs):
-        raise AssertionError("pytest should not be called")
-
-    monkeypatch.setattr(runner.subprocess, "run", fail_run)
+    monkeypatch.setattr(runner.subprocess, "run", reject_pytest_call)
 
     exit_code = runner.main(
         [
@@ -372,10 +374,7 @@ def test_unknown_profile_fails_before_running_pytest(
 ) -> None:
     runner = _load_runner()
 
-    def fail_run(*_args, **_kwargs):
-        raise AssertionError("pytest should not be called")
-
-    monkeypatch.setattr(runner.subprocess, "run", fail_run)
+    monkeypatch.setattr(runner.subprocess, "run", reject_pytest_call)
 
     exit_code = runner.main(
         [
@@ -396,16 +395,11 @@ def test_performance_profile_runs_active_lightweight_scope(
     runner = _load_runner()
     calls = []
 
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="performance ok\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        make_recording_run(calls, stdout="performance ok\n"),
+    )
 
     exit_code = runner.main(
         [
@@ -440,16 +434,7 @@ def test_profile_runner_adds_default_duration_summary_when_not_requested(
     runner = _load_runner()
     calls = []
 
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="pytest ok\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.subprocess, "run", make_recording_run(calls))
 
     exit_code = runner.main(
         [
@@ -494,16 +479,7 @@ def test_profile_runner_passes_xdist_speed_gate_args_through(
     runner = _load_runner()
     calls = []
 
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="pytest ok\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.subprocess, "run", make_recording_run(calls))
 
     exit_code = runner.main(
         [
@@ -555,15 +531,7 @@ def test_profile_summary_sanitizes_absolute_paths_in_pytest_args(
     local_log = tmp_path / "logs" / "pytest.log"
     local_equals_log = tmp_path / "logs=private" / "pytest.log"
 
-    def fake_run(command, **kwargs):
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="pytest ok\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.subprocess, "run", make_completed_run)
 
     exit_code = runner.main(
         [

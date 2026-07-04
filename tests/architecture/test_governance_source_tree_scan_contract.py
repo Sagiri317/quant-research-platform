@@ -155,58 +155,37 @@ def test_source_tree_string_scanners_use_source_iter_names() -> None:
     )
 
 
-def test_source_tree_allowlist_rejects_invalid_exact_inventory_shape() -> None:
-    from governance_contract import (
-        PROFILE_RUNNER_RETIRED_TEXT_RULES,
-        SourceTreeAllowedOccurrence,
-        validate_source_tree_allowed_occurrences,
-    )
-
-    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
-    valid_kwargs = {
-        "path": Path("tests/architecture/test_governance_source_tree_scan_contract.py"),
-        "rule_id": f"retired_text:{rule.name}",
-        "exact_line": f'x = "{rule.example}"',
-        "owner": "architecture-governance-negative-tests",
-        "rationale": "test-only exact occurrence inventory",
-        "lifecycle": "test-only",
-        "covered_by": (
-            "tests/architecture/test_governance_source_tree_scan_contract.py",
-        ),
-        "py_owner": "def:test_func",
-    }
-
-    cases = [
-        ("source_tree_allowed_occurrence_missing_exact_line", {"exact_line": ""}),
+@pytest.mark.parametrize(
+    ("expected", "override_key", "override_value"),
+    (
+        ("source_tree_allowed_occurrence_missing_exact_line", "exact_line", ""),
         (
             "source_tree_allowed_occurrence_exact_line_rule_mismatch",
-            {"exact_line": "x = 'other'"},
+            "exact_line",
+            "x = 'other'",
         ),
         (
             "source_tree_allowed_occurrence_exact_line_rule_overmatched",
-            {"exact_line": f'x = "{rule.example} {rule.example}"'},
+            "exact_line",
+            None,
         ),
-        ("source_tree_allowed_occurrence_missing_py_owner", {"py_owner": ""}),
+        ("source_tree_allowed_occurrence_missing_py_owner", "py_owner", ""),
         (
             "source_tree_allowed_occurrence_non_python_rejects_py_owner",
-            {"path": Path("docs/architecture/governance.md")},
+            "path",
+            Path("docs/architecture/governance.md"),
         ),
-        ("source_tree_allowed_occurrence_missing_owner", {"owner": ""}),
-        ("source_tree_allowed_occurrence_missing_rationale", {"rationale": ""}),
-        ("source_tree_allowed_occurrence_missing_lifecycle", {"lifecycle": ""}),
-        (
-            "source_tree_allowed_occurrence_missing_covered_by",
-            {"covered_by": ()},
-        ),
-    ]
-
-    for expected, overrides in cases:
-        entry = SourceTreeAllowedOccurrence(**(valid_kwargs | overrides))
-        failures = validate_source_tree_allowed_occurrences((entry,))
-        assert any(expected in item for item in failures), (expected, failures)
-
-
-def test_source_tree_allowlist_rejects_invalid_path_and_rule() -> None:
+        ("source_tree_allowed_occurrence_missing_owner", "owner", ""),
+        ("source_tree_allowed_occurrence_missing_rationale", "rationale", ""),
+        ("source_tree_allowed_occurrence_missing_lifecycle", "lifecycle", ""),
+        ("source_tree_allowed_occurrence_missing_covered_by", "covered_by", ()),
+    ),
+)
+def test_source_tree_allowlist_rejects_invalid_exact_inventory_shape(
+    expected: str,
+    override_key: str,
+    override_value: object,
+) -> None:
     from governance_contract import (
         PROFILE_RUNNER_RETIRED_TEXT_RULES,
         SourceTreeAllowedOccurrence,
@@ -226,8 +205,20 @@ def test_source_tree_allowlist_rejects_invalid_path_and_rule() -> None:
         ),
         "py_owner": "def:test_func",
     }
+    value = (
+        f'x = "{rule.example} {rule.example}"'
+        if override_value is None
+        else override_value
+    )
 
-    cases = [
+    entry = SourceTreeAllowedOccurrence(**(valid_kwargs | {override_key: value}))
+    failures = validate_source_tree_allowed_occurrences((entry,))
+    assert any(expected in item for item in failures), (expected, failures)
+
+
+@pytest.mark.parametrize(
+    ("expected", "overrides"),
+    (
         (
             "source_tree_allowed_occurrence_absolute_path",
             {"path": Path("/tmp/fixture.py")},
@@ -241,12 +232,35 @@ def test_source_tree_allowlist_rejects_invalid_path_and_rule() -> None:
             "source_tree_allowed_occurrence_unknown_rule",
             {"rule_id": "retired_text:unknown_retired_rule"},
         ),
-    ]
+    ),
+)
+def test_source_tree_allowlist_rejects_invalid_path_and_rule(
+    expected: str,
+    overrides: dict[str, object],
+) -> None:
+    from governance_contract import (
+        PROFILE_RUNNER_RETIRED_TEXT_RULES,
+        SourceTreeAllowedOccurrence,
+        validate_source_tree_allowed_occurrences,
+    )
 
-    for expected, overrides in cases:
-        entry = SourceTreeAllowedOccurrence(**(valid_kwargs | overrides))
-        failures = validate_source_tree_allowed_occurrences((entry,))
-        assert any(expected in item for item in failures), (expected, failures)
+    rule = PROFILE_RUNNER_RETIRED_TEXT_RULES[0]
+    valid_kwargs = {
+        "path": Path("tests/architecture/test_governance_source_tree_scan_contract.py"),
+        "rule_id": f"retired_text:{rule.name}",
+        "exact_line": f'x = "{rule.example}"',
+        "owner": "architecture-governance-negative-tests",
+        "rationale": "test-only exact occurrence inventory",
+        "lifecycle": "test-only",
+        "covered_by": (
+            "tests/architecture/test_governance_source_tree_scan_contract.py",
+        ),
+        "py_owner": "def:test_func",
+    }
+
+    entry = SourceTreeAllowedOccurrence(**(valid_kwargs | overrides))
+    failures = validate_source_tree_allowed_occurrences((entry,))
+    assert any(expected in item for item in failures), (expected, failures)
 
 
 def test_source_tree_allowed_occurrence_normalizes_string_path() -> None:

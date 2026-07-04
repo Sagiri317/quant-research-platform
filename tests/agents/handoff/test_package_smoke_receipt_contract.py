@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from tests.agents.handoff.receipt_contract_fixtures import (
+    make_package_build_subprocess_run,
     make_package_smoke_receipt_payload,
+    make_timeout_subprocess_run,
 )
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
@@ -132,14 +133,11 @@ def test_package_smoke_build_requires_exactly_one_wheel_and_sdist(
 ) -> None:
     replay = load_handoff_script_module("replay_evidence")
 
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        dist = Path(argv[-1])
-        dist.mkdir(parents=True, exist_ok=True)
-        for artifact in artifacts:
-            (dist / artifact).write_text("artifact", encoding="utf-8")
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        replay.subprocess,
+        "run",
+        make_package_build_subprocess_run(artifacts),
+    )
 
     build_status, _wheel_path, _sdist_path = replay._build_package_artifacts(
         tmp_path,
@@ -155,19 +153,14 @@ def test_package_smoke_build_uses_no_isolation_and_timeout(
     replay = load_handoff_script_module("replay_evidence")
     calls: list[tuple[list[str], object]] = []
 
-    def fake_run(
-        argv: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append((argv, kwargs.get("timeout")))
-        dist = Path(argv[-1])
-        dist.mkdir(parents=True, exist_ok=True)
-        (dist / "demo-0.0.0-py3-none-any.whl").write_text(
-            "artifact", encoding="utf-8"
-        )
-        (dist / "demo-0.0.0.tar.gz").write_text("artifact", encoding="utf-8")
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        replay.subprocess,
+        "run",
+        make_package_build_subprocess_run(
+            ("demo-0.0.0-py3-none-any.whl", "demo-0.0.0.tar.gz"),
+            calls,
+        ),
+    )
 
     build_status, _wheel_path, _sdist_path = replay._build_package_artifacts(
         tmp_path,
@@ -188,10 +181,7 @@ def test_package_smoke_build_timeout_is_blocked(
 ) -> None:
     replay = load_handoff_script_module("replay_evidence")
 
-    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-
-    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+    monkeypatch.setattr(replay.subprocess, "run", make_timeout_subprocess_run())
 
     build_status, wheel_path, sdist_path = replay._build_package_artifacts(
         tmp_path,
@@ -213,10 +203,7 @@ def test_package_smoke_import_timeout_is_blocked(
     with zipfile.ZipFile(wheel_path, "w") as archive:
         archive.writestr("quant_research_platform/__init__.py", "")
 
-    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-
-    monkeypatch.setattr(replay.subprocess, "run", fake_run)
+    monkeypatch.setattr(replay.subprocess, "run", make_timeout_subprocess_run())
 
     extract_status, import_status = replay._extract_wheel_smoke_target(
         tmp_path,

@@ -54,6 +54,22 @@ def _input_fingerprint_payload(
     return payload
 
 
+def count_candidate_data_file_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    calls = {"count": 0}
+    original = dataset_reading.candidate_data_files
+
+    def count_candidate_data_files(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "candidate_data_files",
+        count_candidate_data_files,
+    )
+    return calls
+
+
 def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path)
 
@@ -363,19 +379,7 @@ def test_read_dataset_reuses_one_candidate_file_listing(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("read_plan_reuse"),
     )
-    calls = 0
-    original = dataset_reading.candidate_data_files
-
-    def spycandidate_data_files(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(
-        dataset_reading,
-        "candidate_data_files",
-        spycandidate_data_files,
-    )
+    calls = count_candidate_data_file_calls(monkeypatch)
 
     read_dataset(
         root,
@@ -383,7 +387,7 @@ def test_read_dataset_reuses_one_candidate_file_listing(
         time_window=TimeWindow("2015-01-01", "2015-01-05"),
     )
 
-    assert calls == 1
+    assert calls["count"] == 1
 
 
 def test_fingerprint_dataset_reuses_one_candidate_file_listing(
@@ -396,19 +400,7 @@ def test_fingerprint_dataset_reuses_one_candidate_file_listing(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("fingerprint_plan_reuse"),
     )
-    calls = 0
-    original = dataset_reading.candidate_data_files
-
-    def spycandidate_data_files(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(
-        dataset_reading,
-        "candidate_data_files",
-        spycandidate_data_files,
-    )
+    calls = count_candidate_data_file_calls(monkeypatch)
 
     fingerprint_dataset(
         root,
@@ -416,7 +408,7 @@ def test_fingerprint_dataset_reuses_one_candidate_file_listing(
         time_window=TimeWindow("2015-01-01", "2015-01-05"),
     )
 
-    assert calls == 1
+    assert calls["count"] == 1
 
 
 def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
