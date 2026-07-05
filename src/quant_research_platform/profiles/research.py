@@ -59,6 +59,39 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer as processed_materializer_module,
 )
+from quant_research_platform.markets.implementations.crypto import (
+    definition as crypto_definition,
+)
+from quant_research_platform.markets.implementations.crypto import (
+    fields as crypto_fields,
+)
+from quant_research_platform.markets.implementations.crypto import (
+    research_profiles as crypto_research_profiles,
+)
+from quant_research_platform.markets.implementations.crypto import (
+    research_scenarios as crypto_research_scenarios,
+)
+from quant_research_platform.markets.implementations.crypto.factors import (
+    definitions as crypto_factor_definitions,
+)
+from quant_research_platform.markets.implementations.crypto.labels import (
+    definitions as crypto_label_definitions,
+)
+from quant_research_platform.markets.implementations.crypto.processed import (
+    catalog as crypto_processed_catalog_module,
+)
+from quant_research_platform.markets.implementations.crypto.processed import (
+    materializer as crypto_processed_materializer_module,
+)
+from quant_research_platform.sources.binance.catalog import (
+    source_definition as binance_source_definition,
+)
+from quant_research_platform.sources.binance.interim import (
+    interim_catalog as binance_interim_catalog,
+)
+from quant_research_platform.sources.binance.interim import (
+    materialize_interim_data as _materialize_binance_interim_data,
+)
 from quant_research_platform.sources.csmar.catalog import source_definition
 from quant_research_platform.sources.csmar.interim import (
     interim_catalog as csmar_interim_catalog,
@@ -119,6 +152,11 @@ def research_profile(profile_id: str | None = None) -> ResearchProfile:
     )
     builders = {
         active_profile_id: _a_share_csmar_research_profile,
+        research_profile_id(
+            MarketId("crypto"),
+            SourceId("binance"),
+            DataFrequency.MINUTE,
+        ): _crypto_binance_research_profile,
     }
     selected = profile_id or active_profile_id
     try:
@@ -158,9 +196,44 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
     )
 
 
+def _crypto_binance_research_profile() -> ResearchProfile:
+    return ResearchProfile(
+        profile_id=research_profile_id(
+            MarketId("crypto"),
+            SourceId("binance"),
+            DataFrequency.MINUTE,
+        ),
+        fields=crypto_fields.field_catalog(),
+        factors=crypto_factor_definitions.factor_catalog(),
+        labels=crypto_label_definitions.label_catalog(),
+        processed=crypto_processed_catalog_module.processed_catalog(),
+        research_datasets=crypto_research_profiles.build_research_dataset_catalog(),
+        evaluations=crypto_research_scenarios.build_evaluation_catalog(),
+        models=ModelCatalog(),
+        predictions=PredictionCatalog(),
+        portfolios=PortfolioCatalog(),
+        sources=_crypto_binance_source_registry(),
+        markets=_crypto_market_registry(),
+        outputs=output_catalog(),
+        source_interim_catalogs=_crypto_binance_source_interim_catalogs(),
+        source_id=SourceId("binance"),
+        build_prediction_catalog=_empty_prediction_catalog,
+        build_portfolio_catalog=_empty_portfolio_catalog,
+        materialize_interim_data=_materialize_crypto_binance_interim_data,
+        materialize_processed_data=_materialize_crypto_processed_data,
+        schema_inventory_important_columns=_crypto_schema_inventory_important_columns,
+    )
+
+
 def _a_share_csmar_source_registry() -> SourceRegistry:
     registry = SourceRegistry()
     registry.register(source_definition())
+    return registry
+
+
+def _crypto_binance_source_registry() -> SourceRegistry:
+    registry = SourceRegistry()
+    registry.register(binance_source_definition())
     return registry
 
 
@@ -170,8 +243,22 @@ def _a_share_market_registry() -> MarketRegistry:
     return registry
 
 
+def _crypto_market_registry() -> MarketRegistry:
+    registry = MarketRegistry()
+    registry.register(crypto_definition.market_definition())
+    return registry
+
+
 def _a_share_csmar_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]:
     catalog = csmar_interim_catalog()
+    source_ids = {str(spec.source_id) for spec in catalog.list()}
+    if len(source_ids) != 1:
+        raise ValueError("unexpected_source_interim_catalog_sources")
+    return {next(iter(source_ids)): catalog}
+
+
+def _crypto_binance_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]:
+    catalog = binance_interim_catalog()
     source_ids = {str(spec.source_id) for spec in catalog.list()}
     if len(source_ids) != 1:
         raise ValueError("unexpected_source_interim_catalog_sources")
@@ -196,6 +283,20 @@ def _materialize_a_share_csmar_interim_data(
     )
 
 
+def _materialize_crypto_binance_interim_data(
+    layout: StorageLayout,
+    raw_root: Path,
+    start_date: str,
+    end_date: str,
+) -> object:
+    return _materialize_binance_interim_data(
+        layout=layout,
+        raw_root=raw_root,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
 def _materialize_processed_data(
     layout: StorageLayout,
     source_id: SourceId,
@@ -207,6 +308,38 @@ def _materialize_processed_data(
         source_id=source_id,
         time_window=time_window,
         kinds=kinds,
+    )
+
+
+def _materialize_crypto_processed_data(
+    layout: StorageLayout,
+    source_id: SourceId,
+    time_window: TimeWindow,
+    kinds: frozenset[ProcessedDataKind],
+) -> Mapping[str, DatasetInspection]:
+    return crypto_processed_materializer_module.materialize_processed_data(
+        layout=layout,
+        source_id=source_id,
+        time_window=time_window,
+        kinds=kinds,
+    )
+
+
+def _empty_prediction_catalog(**_: object) -> PredictionCatalog:
+    return PredictionCatalog()
+
+
+def _empty_portfolio_catalog(**_: object) -> PortfolioCatalog:
+    return PortfolioCatalog()
+
+
+def _crypto_schema_inventory_important_columns() -> tuple[str, ...]:
+    return (
+        "close",
+        "eligible",
+        "spread",
+        "relative_spread",
+        "forward_return_1m",
     )
 
 

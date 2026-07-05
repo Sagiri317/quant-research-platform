@@ -198,6 +198,9 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
     assert run_payload["status"]["compare"] == "NOT_RUN"
     assert run_payload["status"]["full_horizon"] == "NOT_RUN"
     assert run_payload["status"]["validation_matrix"] == "NOT_RUN"
+    assert run_payload["checks"]["validation"]["share_safety_scan"][
+        "checked_count"
+    ] == 1
     assert len(run_payload["outputs"]) == len(prediction_ids) + 2
     assert set(metrics["signal"]) == {"mom_20d", "rev_1d", "mom_20d_zscore"}
     assert "mom_20d_zscore" in research.columns

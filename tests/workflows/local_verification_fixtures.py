@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from quant_research_platform.catalog.portfolios import PortfolioCatalog
+from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -163,6 +165,14 @@ def profile_with_materializers(interim, processed):
         research_profile(),
         materialize_interim_data=interim,
         materialize_processed_data=processed,
+    )
+
+
+def profile_with_empty_prediction_and_portfolio_builders(profile=None):
+    return replace(
+        profile or research_profile(),
+        build_prediction_catalog=lambda **_: PredictionCatalog(),
+        build_portfolio_catalog=lambda **_: PortfolioCatalog(),
     )
 
 

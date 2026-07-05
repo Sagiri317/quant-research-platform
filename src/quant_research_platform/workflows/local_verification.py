@@ -145,6 +145,8 @@ def _run_local_verification_with_policy(
         effective_windows["evaluation_end_date"],
     )
     catalogs = config.profile
+    research_dataset_id = _only_research_dataset_id(config.profile)
+    evaluation_run_id = _only_evaluation_run_id(config.profile)
     prediction_catalog = config.profile.build_prediction_catalog(
         train_end=effective_windows["prediction_train_end"],
         test_start=effective_windows["prediction_test_start"],
@@ -181,7 +183,7 @@ def _run_local_verification_with_policy(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             processed_catalog=catalogs.processed,
-            dataset_id="price_volume_forward_returns",
+            dataset_id=research_dataset_id,
             time_window=time_window,
             resource_policy=resource_policy,
         )
@@ -190,7 +192,7 @@ def _run_local_verification_with_policy(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             evaluation_catalog=catalogs.evaluations,
-            run_id="signal_forward_return_20d",
+            run_id=evaluation_run_id,
             time_window=evaluation_time_window,
         )
         evaluation_root = write_evaluation_outputs(
@@ -225,29 +227,37 @@ def _run_local_verification_with_policy(
                 ),
                 layout=storage_layout,
                 run_id=run_id,
+                market_id=catalogs.research_datasets.get(
+                    prediction_spec.research_dataset_id
+                ).market_id,
             )
-            for prediction_spec in prediction_catalog.list()
+            for prediction_spec in _optional_prediction_specs(prediction_catalog)
         )
     with recorder.record("portfolio_generation"):
-        portfolio_result = build_portfolio_result_from_research_dataset(
-            layout=storage_layout,
-            dataset_catalog=catalogs.research_datasets,
-            portfolio_catalog=portfolio_catalog,
-            portfolio_id="signal_forward_return_20d_portfolio",
-            time_window=evaluation_time_window,
-        )
-        portfolio_root = write_portfolio_outputs(
-            output_chunks=portfolio_result.output_chunks,
-            summary_factory=portfolio_result.summary_factory,
-            spec=portfolio_result.spec,
-            output_spec=_output_spec(
-                output_id=portfolio_result.spec.portfolio_id,
-                output_definition_id="portfolio_outputs",
-                run_id=run_id,
-                market_id=portfolio_result.spec.market_id,
-                run_type=portfolio_result.spec.run_type,
-            ),
-            layout=storage_layout,
+        portfolio_roots = tuple(
+            write_portfolio_outputs(
+                output_chunks=portfolio_result.output_chunks,
+                summary_factory=portfolio_result.summary_factory,
+                spec=portfolio_result.spec,
+                output_spec=_output_spec(
+                    output_id=portfolio_result.spec.portfolio_id,
+                    output_definition_id="portfolio_outputs",
+                    run_id=run_id,
+                    market_id=portfolio_result.spec.market_id,
+                    run_type=portfolio_result.spec.run_type,
+                ),
+                layout=storage_layout,
+            )
+            for portfolio_id in _optional_portfolio_ids(portfolio_catalog)
+            for portfolio_result in (
+                build_portfolio_result_from_research_dataset(
+                    layout=storage_layout,
+                    dataset_catalog=catalogs.research_datasets,
+                    portfolio_catalog=portfolio_catalog,
+                    portfolio_id=portfolio_id,
+                    time_window=evaluation_time_window,
+                ),
+            )
         )
 
     dataset_roots = _dataset_roots(
@@ -259,7 +269,7 @@ def _run_local_verification_with_policy(
     output_bundles = (
         Path(evaluation_root),
         *(Path(prediction_root) for prediction_root in prediction_roots),
-        Path(portfolio_root),
+        *(Path(portfolio_root) for portfolio_root in portfolio_roots),
     )
     layer_summaries = _build_layer_summaries(
         layout=layout,
@@ -277,7 +287,7 @@ def _run_local_verification_with_policy(
             run_id=run_id,
             dataset_roots=dataset_roots,
             layer_summaries=layer_summaries,
-            generated_text_paths=(),
+            generated_text_paths=_generated_text_paths(output_bundles),
         )
     statuses = validate_verification_statuses(
         smoke_status=str(validation_summary.get("status", "FAIL")),
@@ -391,6 +401,7 @@ def _write_prediction_result(
     *,
     layout: StorageLayout,
     run_id: str,
+    market_id: str,
 ) -> Path:
     return write_prediction_outputs(
         spec=result.spec,
@@ -398,6 +409,7 @@ def _write_prediction_result(
             output_id=result.spec.prediction_id,
             output_definition_id="prediction_outputs",
             run_id=run_id,
+            market_id=market_id,
             run_type=result.spec.run_type,
         ),
         layout=layout,
@@ -413,7 +425,7 @@ def _output_spec(
     output_definition_id: str,
     run_id: str,
     run_type: str,
-    market_id: str = "a_share",
+    market_id: str,
 ) -> OutputSpec:
     return OutputSpec(
         output_id=output_id,
@@ -423,6 +435,33 @@ def _output_spec(
         run_type=run_type,
         scope=OutputScope.LOCAL_ONLY,
     )
+
+
+def _only_research_dataset_id(profile: ResearchProfile) -> str:
+    specs = profile.research_datasets.list()
+    if len(specs) != 1:
+        raise ValueError("ambiguous_research_dataset")
+    return specs[0].data_id
+
+
+def _only_evaluation_run_id(profile: ResearchProfile) -> str:
+    specs = profile.evaluations.list()
+    if len(specs) != 1:
+        raise ValueError("ambiguous_evaluation_run")
+    return specs[0].run_id
+
+
+def _optional_prediction_specs(prediction_catalog) -> tuple[object, ...]:
+    return prediction_catalog.list()
+
+
+def _optional_portfolio_ids(portfolio_catalog) -> tuple[str, ...]:
+    specs = portfolio_catalog.list()
+    if not specs:
+        return ()
+    if len(specs) != 1:
+        raise ValueError("ambiguous_portfolio")
+    return (specs[0].portfolio_id,)
 
 
 def resolve_local_verification_run_id(
@@ -651,6 +690,14 @@ def _output_index(output_bundle: Path, run_root: Path) -> dict[str, Any]:
         **payload,
         "manifest_path": manifest_path.relative_to(run_root).as_posix(),
     }
+
+
+def _generated_text_paths(output_bundles: tuple[Path, ...]) -> tuple[Path, ...]:
+    return tuple(
+        summary_path
+        for summary_path in (Path(root) / "summary.md" for root in output_bundles)
+        if summary_path.is_file()
+    )
 
 
 def _dataset_id(dataset_root: Path) -> str:

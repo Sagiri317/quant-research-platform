@@ -55,6 +55,7 @@ EVALUATION_ARTIFACTS = [
     "grouped_label_values.parquet",
     "ic_summary.parquet",
     "group_spread_summary.parquet",
+    "summary.md",
 ]
 
 

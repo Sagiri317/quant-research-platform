@@ -4356,9 +4356,19 @@ def discover_market_bars_data_id_helper(repo_root: Path | None) -> object:
             module_name = ".".join(path.relative_to(src_root).with_suffix("").parts)
             module = importlib.import_module(module_name)
             helper = getattr(module, "market_bars_data_id", None)
-            if callable(helper):
+            if callable(helper) and _market_bars_helper_supports_active_frequency(
+                helper
+            ):
                 return helper
     raise RuntimeError("active market bars data id helper unavailable")
+
+
+def _market_bars_helper_supports_active_frequency(helper: object) -> bool:
+    try:
+        helper("1d")  # type: ignore[operator]
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def ensure_runtime_src_path(repo_root: Path | None = None) -> Path:

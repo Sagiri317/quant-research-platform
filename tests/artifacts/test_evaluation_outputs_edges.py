@@ -300,4 +300,54 @@ def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> 
         "grouped_label_values.parquet",
         "ic_summary.parquet",
         "group_spread_summary.parquet",
+        "summary.md",
     ]
+
+
+def test_evaluation_outputs_writes_share_safe_summary_md(tmp_path: Path) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    report_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+
+    output_bundle = outputs.write_evaluation_outputs(
+        make_artifact_evaluation_metrics_frame(),
+        make_artifact_evaluation_grouped_label_values_frame(),
+        ic_summary=make_artifact_evaluation_ic_summary_frame(),
+        group_spread_summary=make_artifact_evaluation_group_spread_summary_frame(),
+        evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
+        spec=spec,
+        output_spec=report_spec,
+        layout=StorageLayout(project_root=tmp_path),
+    )
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
+    summary = (output_bundle / "summary.md").read_text(encoding="utf-8")
+
+    assert manifest["files"] == [
+        "metrics.parquet",
+        "grouped_label_values.parquet",
+        "ic_summary.parquet",
+        "group_spread_summary.parquet",
+        "summary.md",
+    ]
+    assert "# Evaluation Summary" in summary
+    assert "- run_id: `eval_demo`" in summary
+    assert "- market_id: `a_share`" in summary
+    assert "- research_dataset_id: `research_demo`" in summary
+    assert "- rows_input: `2`" in summary
+    assert "- rows_after_filter: `2`" in summary
+    assert "- timestamp_count: `1`" in summary
+    assert "- min_timestamp: `2024-01-02`" in summary
+    assert "- max_timestamp: `2024-01-02`" in summary
+    assert "| signal | label | mean_ic | mean_rankic |" in summary
+    assert "| signal | label | top_bottom_label_value_spread_mean |" in summary
+    assert "source_asset_id" not in summary
+    assert "data/raw" not in summary

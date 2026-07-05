@@ -5,15 +5,20 @@ from pathlib import Path
 
 import pytest
 
+from quant_research_platform.agents.factor_factory import propose_factor
 from quant_research_platform.agents.proposals import (
     PROPOSAL_STATUSES,
     FactorProposal,
     ResearchDatasetProposal,
+    factor_definition_from_proposal,
 )
 from quant_research_platform.agents.safety import (
     ProposalSafetyError,
     assert_proposal_is_share_safe,
 )
+from quant_research_platform.contracts.factors import FactorSet
+from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.profiles.research import research_profile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AGENT_SRC = PROJECT_ROOT / "src" / "quant_research_platform" / "agents"
@@ -66,6 +71,29 @@ def test_agent_proposal_rejects_unapproved_status() -> None:
             input_data_ids=("features",),
             status="approved",
         )
+
+
+def test_crypto_factor_proposal_is_validation_only_and_unapproved() -> None:
+    profile = research_profile("crypto_binance_1m")
+
+    proposal = propose_factor(
+        profile=profile,
+        proposal_id="crypto-factor-proposal-001",
+        factor_id="depth_pressure_demo",
+        rationale="Evaluate aggregate quote pressure using review-safe fields.",
+        input_columns=("bid_depth", "ask_depth"),
+    )
+    definition = factor_definition_from_proposal(
+        proposal,
+        market_id=MarketId("crypto"),
+        field_names=set(profile.fields.list_names()),
+    )
+
+    assert proposal.approved is False
+    assert proposal.status == "proposed"
+    assert proposal.required_input_data_id == "market_panel_1m"
+    assert definition.factor_set is FactorSet.EXPERIMENTAL
+    assert definition.required_input_data_id == "market_panel_1m"
 
 
 @pytest.mark.parametrize(

@@ -128,6 +128,22 @@ PROFILE_A_SHARE_PROCESSED = (
     "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.markets.implementations.a_share.processed",
 )
+PROFILE_CRYPTO_ROOT = (
+    "src/quant_research_platform/profiles/research.py",
+    "quant_research_platform.markets.implementations.crypto",
+)
+PROFILE_CRYPTO_FACTORS = (
+    "src/quant_research_platform/profiles/research.py",
+    "quant_research_platform.markets.implementations.crypto.factors",
+)
+PROFILE_CRYPTO_LABELS = (
+    "src/quant_research_platform/profiles/research.py",
+    "quant_research_platform.markets.implementations.crypto.labels",
+)
+PROFILE_CRYPTO_PROCESSED = (
+    "src/quant_research_platform/profiles/research.py",
+    "quant_research_platform.markets.implementations.crypto.processed",
+)
 PROFILE_CSMAR_CATALOG = (
     "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.sources.csmar.catalog",
@@ -135,6 +151,14 @@ PROFILE_CSMAR_CATALOG = (
 PROFILE_CSMAR_INTERIM = (
     "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.sources.csmar.interim",
+)
+PROFILE_BINANCE_CATALOG = (
+    "src/quant_research_platform/profiles/research.py",
+    "quant_research_platform.sources.binance.catalog",
+)
+PROFILE_BINANCE_INTERIM = (
+    "src/quant_research_platform/profiles/research.py",
+    "quant_research_platform.sources.binance.interim",
 )
 PROFILE_REPORT_CATALOG = (
     "src/quant_research_platform/profiles/research.py",
@@ -149,9 +173,17 @@ KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS = {
     PROFILE_A_SHARE_PROCESSED: (
         "profiles.py composes the active A-share processed catalog."
     ),
+    PROFILE_CRYPTO_ROOT: "profiles.py composes the crypto research profile owners.",
+    PROFILE_CRYPTO_FACTORS: "profiles.py composes the crypto factor catalog.",
+    PROFILE_CRYPTO_LABELS: "profiles.py composes the crypto label catalog.",
+    PROFILE_CRYPTO_PROCESSED: "profiles.py composes the crypto processed catalog.",
     PROFILE_CSMAR_CATALOG: "profiles.py composes the CSMAR source catalog.",
     PROFILE_CSMAR_INTERIM: (
         "profiles.py composes the source-owned CSMAR interim catalog."
+    ),
+    PROFILE_BINANCE_CATALOG: "profiles.py composes the Binance source catalog.",
+    PROFILE_BINANCE_INTERIM: (
+        "profiles.py composes the source-owned Binance interim catalog."
     ),
     PROFILE_REPORT_CATALOG: (
         "profiles.py composes report owner definitions into the research profile."

@@ -158,6 +158,7 @@ ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST = {
 APPROVED_FIELD_SPEC_FILES = {
     Path("src/quant_research_platform/catalog/fields.py"),
     Path("src/quant_research_platform/markets/implementations/a_share/fields.py"),
+    Path("src/quant_research_platform/markets/implementations/crypto/fields.py"),
 }
 APPROVED_WRITER_MODULES = {
     Path(

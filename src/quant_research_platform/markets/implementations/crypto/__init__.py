@@ -1,0 +1,2 @@
+"""Crypto market implementation owner."""
+

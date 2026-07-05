@@ -119,6 +119,15 @@ def write_evaluation_outputs(
             compression="zstd",
             index=False,
         )
+        (temp_root / "summary.md").write_text(
+            _render_evaluation_summary(
+                spec=spec,
+                evaluation_diagnostics=evaluation_diagnostics,
+                ic_summary=ic_summary,
+                group_spread_summary=group_spread_summary,
+            ),
+            encoding="utf-8",
+        )
         write_manifest(
             temp_root / "manifest.json",
             output_manifest_payload(
@@ -133,3 +142,66 @@ def write_evaluation_outputs(
 
     atomic_write_directory(output_bundle, _write)
     return output_bundle
+
+
+def _render_evaluation_summary(
+    *,
+    spec: EvaluationSpec,
+    evaluation_diagnostics: EvaluationDiagnostics,
+    ic_summary: pd.DataFrame,
+    group_spread_summary: pd.DataFrame,
+) -> str:
+    signals = ", ".join(signal.signal_id for signal in spec.signals)
+    labels = ", ".join(spec.label_columns)
+    lines = [
+        "# Evaluation Summary",
+        "",
+        f"- run_id: `{spec.run_id}`",
+        f"- market_id: `{spec.market_id}`",
+        f"- research_dataset_id: `{spec.research_dataset_id}`",
+        f"- signals: `{signals}`",
+        f"- labels: `{labels}`",
+        f"- rows_input: `{evaluation_diagnostics.rows_input}`",
+        f"- rows_after_filter: `{evaluation_diagnostics.rows_after_filter_mode}`",
+        f"- timestamp_count: `{evaluation_diagnostics.timestamp_count}`",
+        f"- min_timestamp: `{evaluation_diagnostics.min_timestamp}`",
+        f"- max_timestamp: `{evaluation_diagnostics.max_timestamp}`",
+        "",
+        "## IC Summary",
+        "",
+        _markdown_table(
+            ic_summary,
+            ("signal", "label", "mean_ic", "mean_rankic"),
+        ),
+        "",
+        "## Group Spread Summary",
+        "",
+        _markdown_table(
+            group_spread_summary,
+            ("signal", "label", "top_bottom_label_value_spread_mean"),
+        ),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _markdown_table(frame: pd.DataFrame, columns: tuple[str, ...]) -> str:
+    rows = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for _, row in frame.loc[:, list(columns)].iterrows():
+        rows.append(
+            "| "
+            + " | ".join(_markdown_cell(row[column]) for column in columns)
+            + " |"
+        )
+    return "\n".join(rows)
+
+
+def _markdown_cell(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)

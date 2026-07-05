@@ -837,6 +837,7 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
     assert (output_bundle / "grouped_label_values.parquet").is_file()
     assert (output_bundle / "ic_summary.parquet").is_file()
     assert (output_bundle / "group_spread_summary.parquet").is_file()
+    assert (output_bundle / "summary.md").is_file()
     assert (output_bundle / "manifest.json").is_file()
     manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["files"] == [
@@ -844,6 +845,7 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
         "grouped_label_values.parquet",
         "ic_summary.parquet",
         "group_spread_summary.parquet",
+        "summary.md",
     ]
 
 

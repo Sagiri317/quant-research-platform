@@ -14,6 +14,7 @@ from tests.workflows.local_verification_fixtures import (
     fake_prediction_result,
     make_local_verification_config,
     persist_fake_artifact,
+    profile_with_empty_prediction_and_portfolio_builders,
     profile_with_materializers,
     repo_run_root,
     smoke_prediction_specs,
@@ -173,3 +174,67 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
         "run.json",
         "summary.md",
     }
+
+
+def test_local_verification_skips_empty_prediction_and_portfolio_catalogs(
+    tmp_path,
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    def assemble_dataset(**kwargs):
+        calls.append("research")
+        artifact_root = (
+            kwargs["layout"].project_root
+            / "data"
+            / "research"
+            / "a_share"
+            / "price_volume_forward_returns"
+        )
+        persist_fake_artifact(
+            artifact_root,
+            "price_volume_forward_returns",
+            "research",
+        )
+        return artifact_root
+
+    monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
+    stub_output_writers(monkeypatch)
+    monkeypatch.setattr(
+        module,
+        "build_evaluation_result_from_research_dataset",
+        lambda **kwargs: calls.append("evaluation") or fake_evaluation_result(kwargs),
+    )
+    monkeypatch.setattr(
+        module,
+        "build_prediction_result_from_research_dataset",
+        lambda **kwargs: calls.append("prediction") or fake_prediction_result(kwargs),
+    )
+    monkeypatch.setattr(
+        module,
+        "build_portfolio_result_from_research_dataset",
+        lambda **kwargs: calls.append("portfolio") or fake_portfolio_result(kwargs),
+    )
+
+    profile = profile_with_empty_prediction_and_portfolio_builders(
+        profile_with_materializers(
+            stub_interim_importer(on_call=lambda: calls.append("interim")),
+            stub_processed_builder(on_call=lambda: calls.append("processed")),
+        )
+    )
+    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "s-empty-optional")
+    result = run_local_verification(
+        make_local_verification_config(
+            run_root=run_root,
+            start_date="2014-01-01",
+            end_date="2016-12-31",
+            profile=profile,
+        )
+    )
+    run_payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+
+    assert result.status == "NOT_RUN"
+    assert calls == ["interim", "processed", "research", "evaluation"]
+    assert [output["output_definition_id"] for output in run_payload["outputs"]] == [
+        "evaluation_outputs"
+    ]
