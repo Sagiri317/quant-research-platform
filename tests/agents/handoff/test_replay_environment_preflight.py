@@ -32,7 +32,7 @@ def test_collect_replay_environment_failures_reports_missing_and_version_mismatc
     package_missing = replay.importlib_metadata.PackageNotFoundError("build")
     versions: dict[str, object] = {
         "build": package_missing,
-        "setuptools": "82.0.1",
+        "setuptools": "999.0.0",
         "wheel": _installed_inside(build_system_requirement("wheel")),
         "pyarrow": _installed_inside(project_dependency_requirement("pyarrow")),
         "pytest": _installed_inside(dev_dependency_requirement("pytest")),
@@ -52,7 +52,7 @@ def test_collect_replay_environment_failures_reports_missing_and_version_mismatc
         "dependency_missing:build",
         "dependency_version_mismatch:setuptools:"
         f"expected={dependency_constraint(build_system_requirement('setuptools'))}:"
-        "installed=82.0.1",
+        "installed=999.0.0",
     )
     assert all(":" in failure and "\\" not in failure for failure in failures)
 
@@ -72,13 +72,13 @@ def test_collect_replay_environment_failures_reports_python_version_mismatch(
     }
 
     monkeypatch.setattr(replay.importlib_metadata, "version", versions.__getitem__)
-    monkeypatch.setattr(replay.sys, "version_info", (3, 12, 9, "final", 0))
+    monkeypatch.setattr(replay.sys, "version_info", (9, 9, 9, "final", 0))
 
     failures = replay.collect_replay_environment_failures(tmp_path)
 
     assert failures == (
         f"python_version_mismatch:expected={project_requires_python()}:"
-        "installed=3.12.9",
+        "installed=9.9.9",
     )
 
 
