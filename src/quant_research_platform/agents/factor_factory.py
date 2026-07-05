@@ -2,6 +2,7 @@
 
 from quant_research_platform.agents.proposals import FactorProposal
 from quant_research_platform.agents.safety import assert_proposal_is_share_safe
+from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.profiles.research import ResearchProfile
 
 
@@ -17,6 +18,11 @@ def propose_factor(
     derived_input_columns: tuple[str, ...] = (),
     derived_input_producers: dict[str, str] | None = None,
     required_input_data_id: str | None = None,
+    family: str = "proposal",
+    grain: DataGrain = DataGrain.ASSET_TIMESTAMP,
+    lookback_window: int | None = None,
+    timing_semantics: str = "as_of_timestamp",
+    null_policy: str = "preserve_nulls",
 ) -> FactorProposal:
     _validate_input_columns(tuple(input_columns), profile=profile)
     resolved_input_data_id = required_input_data_id or _unique_factor_input_data_id(
@@ -32,6 +38,11 @@ def propose_factor(
         derived_input_columns=tuple(derived_input_columns),
         derived_input_producers=dict(derived_input_producers or {}),
         required_input_data_id=resolved_input_data_id,
+        family=family,
+        grain=grain,
+        lookback_window=lookback_window,
+        timing_semantics=timing_semantics,
+        null_policy=null_policy,
     )
     assert_proposal_is_share_safe(proposal)
     return proposal

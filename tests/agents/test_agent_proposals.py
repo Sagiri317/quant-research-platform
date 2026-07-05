@@ -16,6 +16,7 @@ from quant_research_platform.agents.safety import (
     ProposalSafetyError,
     assert_proposal_is_share_safe,
 )
+from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorSet
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.profiles.research import research_profile
@@ -82,9 +83,25 @@ def test_crypto_factor_proposal_is_validation_only_and_unapproved() -> None:
         factor_id="depth_pressure_demo",
         rationale="Evaluate aggregate quote pressure using review-safe fields.",
         input_columns=("bid_depth", "ask_depth"),
+        family="microstructure",
+        grain=DataGrain.ASSET_TIMESTAMP,
+        lookback_window=5,
+        timing_semantics="uses_past_and_current_ticks",
+        null_policy="preserve_nulls",
+    )
+
+    with pytest.raises(PermissionError, match="proposal_requires_human_approval"):
+        factor_definition_from_proposal(
+            proposal,
+            market_id=MarketId("crypto"),
+            field_names=set(profile.fields.list_names()),
+        )
+
+    approved_proposal = FactorProposal(
+        **{**proposal.__dict__, "approved": True},
     )
     definition = factor_definition_from_proposal(
-        proposal,
+        approved_proposal,
         market_id=MarketId("crypto"),
         field_names=set(profile.fields.list_names()),
     )
@@ -94,6 +111,11 @@ def test_crypto_factor_proposal_is_validation_only_and_unapproved() -> None:
     assert proposal.required_input_data_id == "market_panel_1m"
     assert definition.factor_set is FactorSet.EXPERIMENTAL
     assert definition.required_input_data_id == "market_panel_1m"
+    assert definition.family == "microstructure"
+    assert definition.grain is DataGrain.ASSET_TIMESTAMP
+    assert definition.lookback_window == 5
+    assert definition.timing_semantics == "uses_past_and_current_ticks"
+    assert definition.null_policy == "preserve_nulls"
 
 
 @pytest.mark.parametrize(
@@ -106,6 +128,10 @@ def test_crypto_factor_proposal_is_validation_only_and_unapproved() -> None:
         "private/raw_frame.csv",
         "payload.pkl",
         "tensor.arrow",
+        "source_asset_id",
+        "source_id",
+        "api_key=hidden",
+        "access_token=hidden",
     ),
 )
 def test_agent_safety_rejects_private_or_row_level_text(unsafe_text: str) -> None:
@@ -127,7 +153,7 @@ def test_agents_do_not_import_storage_sources_or_a_share_implementation() -> Non
     forbidden_roots = {
         "quant_research_platform.storage",
         "quant_research_platform.sources",
-        "quant_research_platform.markets.implementations.a_share",
+        "quant_research_platform.markets",
     }
     imported: list[str] = []
     for path in sorted(AGENT_SRC.glob("*.py")):

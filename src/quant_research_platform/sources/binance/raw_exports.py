@@ -1,4 +1,4 @@
-"""Local Binance raw JSON/JSONL export readers."""
+"""Local Binance raw JSONL envelope readers."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 DATA_ID_BY_RAW_KIND = {
     "klines": "market_bars_1m",
@@ -22,7 +24,7 @@ def dataset_files_by_id(raw_root: Path) -> dict[str, tuple[Path, ...]]:
     }
 
 
-def iter_raw_rows(path: Path) -> Iterator[dict[str, Any]]:
+def iter_raw_envelopes(path: Path) -> Iterator[dict[str, Any]]:
     raw_path = Path(path)
     if not raw_path.is_file():
         raise FileNotFoundError(raw_path)
@@ -35,19 +37,11 @@ def iter_raw_rows(path: Path) -> Iterator[dict[str, Any]]:
                 if not line.strip():
                     continue
                 yielded = True
-                yield _loads_object(line, raw_path, line_number=line_number)
+                yield _validate_envelope(
+                    _loads_object(line, raw_path, line_number=line_number)
+                )
         if not yielded:
             raise ValueError("empty_binance_raw_file")
-        return
-    if raw_path.suffix == ".json":
-        payload = _loads_json(raw_path.read_text(encoding="utf-8"), raw_path)
-        rows = payload if isinstance(payload, list) else [payload]
-        if not rows:
-            raise ValueError("empty_binance_raw_file")
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ValueError("malformed_binance_raw_row")
-            yield row
         return
     raise ValueError("unsupported_binance_raw_file_extension")
 
@@ -55,13 +49,13 @@ def iter_raw_rows(path: Path) -> Iterator[dict[str, Any]]:
 def _raw_kind_files(root: Path, raw_kind: str) -> tuple[Path, ...]:
     if raw_kind == "klines":
         base = root / "spot" / "klines"
-        patterns = ("*" + "/1m/*.jsonl", "*" + "/1m/*.json")
+        patterns = ("*" + "/1m/*.jsonl",)
     elif raw_kind == "agg_trades":
         base = root / "spot" / "agg_trades"
-        patterns = ("*" + "/*.jsonl", "*" + "/*.json")
+        patterns = ("*" + "/*.jsonl",)
     elif raw_kind == "depth":
         base = root / "spot" / "depth"
-        patterns = ("*" + "/*.jsonl", "*" + "/*.json")
+        patterns = ("*" + "/*.jsonl",)
     else:
         raise ValueError(f"unsupported_binance_raw_kind: {raw_kind}")
     files: list[Path] = []
@@ -70,11 +64,8 @@ def _raw_kind_files(root: Path, raw_kind: str) -> tuple[Path, ...]:
     return tuple(path for path in files if path.is_file())
 
 
-def _loads_object(text: str, path: Path, *, line_number: int) -> dict[str, Any]:
-    payload = _loads_json(text, path, line_number=line_number)
-    if not isinstance(payload, dict):
-        raise ValueError("malformed_binance_raw_row")
-    return payload
+def _loads_object(text: str, path: Path, *, line_number: int) -> Any:
+    return _loads_json(text, path, line_number=line_number)
 
 
 def _loads_json(text: str, path: Path, *, line_number: int | None = None) -> Any:
@@ -85,4 +76,48 @@ def _loads_json(text: str, path: Path, *, line_number: int | None = None) -> Any
         raise ValueError(f"malformed_binance_raw_row: {path.name}{location}") from exc
 
 
-__all__ = ["DATA_ID_BY_RAW_KIND", "dataset_files_by_id", "iter_raw_rows"]
+def _validate_envelope(envelope: Any) -> dict[str, Any]:
+    if not isinstance(envelope, dict):
+        raise ValueError("binance_raw_envelope_required")
+    required = {
+        "source",
+        "market_type",
+        "data_kind",
+        "symbol",
+        "captured_at",
+        "payload",
+    }
+    if not required.issubset(envelope):
+        raise ValueError("binance_raw_envelope_required")
+    if envelope["source"] != "binance":
+        raise ValueError("invalid_binance_raw_envelope_source")
+    if envelope["market_type"] != "spot":
+        raise ValueError("unsupported_binance_market_type")
+    data_kind = envelope["data_kind"]
+    if data_kind not in DATA_ID_BY_RAW_KIND:
+        raise ValueError("unsupported_binance_data_kind")
+    if not isinstance(envelope["symbol"], str) or not envelope["symbol"]:
+        raise ValueError("invalid_binance_raw_envelope_symbol")
+    _parse_captured_at(envelope["captured_at"])
+    payload = envelope["payload"]
+    if data_kind == "klines":
+        if envelope.get("interval") != "1m":
+            raise ValueError("unsupported_binance_kline_interval")
+        if not isinstance(payload, list) or len(payload) < 11:
+            raise ValueError("invalid_binance_kline_payload")
+    elif data_kind == "agg_trades":
+        if not isinstance(payload, dict):
+            raise ValueError("invalid_binance_agg_trade_payload")
+    elif data_kind == "depth" and not isinstance(payload, dict):
+        raise ValueError("invalid_binance_depth_payload")
+    return envelope
+
+
+def _parse_captured_at(value: object) -> pd.Timestamp:
+    timestamp = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(timestamp):
+        raise ValueError("invalid_binance_raw_envelope_captured_at")
+    return timestamp
+
+
+__all__ = ["DATA_ID_BY_RAW_KIND", "dataset_files_by_id", "iter_raw_envelopes"]

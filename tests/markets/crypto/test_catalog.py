@@ -73,5 +73,9 @@ def test_crypto_evaluation_uses_microstructure_research_dataset() -> None:
         "spread",
         "relative_spread",
         "depth_imbalance",
+        "microprice",
+        "microprice_deviation",
+        "trade_intensity_5m",
+        "signed_volume_5m",
         "flow_imbalance_5m",
     )

@@ -29,6 +29,7 @@ profiles/        API/CLI/agent/workflow composition root
 sources/         provider/source ingestion, raw schema, field mapping, raw/interim transform
 markets/         generic market domain and session windows
 markets/implementations/a_share/  A-share calendar, processed data, masks, research binding
+markets/implementations/crypto/   Crypto market definition, processed data, factors, labels, research binding
 research/        generic research result builders, no file writes
 compute/         dataframe/tensor numeric kernels, portfolio math, performance
 reports/         build/render evidence and report payload/text
@@ -56,7 +57,7 @@ agents/          agent-assisted research helpers
 docs/architecture/   current architecture contracts, governance contracts, open issues
 docs/code-map/       code flow maps and A-share data flow
 docs/api/            API boundary
-docs/data/           data directory contract
+docs/data/           data directory contract and source raw input contracts
 ```
 
 ## agent skill 分层

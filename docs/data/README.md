@@ -17,6 +17,8 @@
 
 `sources/` 负责摄取与 raw/interim 转换；`markets/implementations/a_share/` 负责 A 股 processed data 和市场语义；`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data layout。共享安全检测规则由 `policy/share_safety.py` 提供，storage 不维护平行正则。
 
+Binance raw input 合同见 `docs/data/binance.md`。当前 Binance raw 只接受 canonical JSONL envelope；裸 connector payload 不属于 current contract。
+
 每个 QRP dataset 保留：
 
 ```text

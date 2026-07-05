@@ -285,6 +285,7 @@ def test_factor_proposal_registration_rejects_duplicate_output_columns() -> None
         input_columns=("close",),
         output_columns=("candidate_factor", "candidate_factor"),
         required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
+        approved=True,
     )
 
     with pytest.raises(ValueError, match="duplicate_factor_output_column"):
@@ -305,6 +306,7 @@ def test_factor_proposal_registration_rejects_unresolved_derived_input() -> None
         derived_input_columns=("candidate_derived",),
         output_columns=("candidate_factor",),
         required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
+        approved=True,
     )
 
     with pytest.raises(ValueError, match="unresolved_factor_derived_input"):

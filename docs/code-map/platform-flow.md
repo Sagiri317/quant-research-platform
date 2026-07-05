@@ -32,6 +32,7 @@ src/quant_research_platform/profiles
 src/quant_research_platform/sources
 src/quant_research_platform/markets
 src/quant_research_platform/markets/implementations/a_share
+src/quant_research_platform/markets/implementations/crypto
 src/quant_research_platform/storage
 src/quant_research_platform/research
 src/quant_research_platform/compute
@@ -70,3 +71,7 @@ qrp research-datasets requirements <dataset_id>
 `.agents tooling` only carries governance, handoff, and prompt tooling. `.run artifacts` are generated evidence, not an architecture or tool source.
 
 `private data safety` remains a hard boundary: REVIEW_SAFE evidence must use summaries, counts, hashes, schemas, command status, and sanitized text only.
+
+## Crypto Binance Flow
+
+当前 crypto Binance 链路由 `docs/code-map/crypto-data-flow.md` 细化。核心 owner-flow 是 `sources/binance` raw envelope/interim normalization -> `markets/implementations/crypto/processed` processed datasets -> `research` factor/label calculations -> crypto research dataset/evaluation specs。

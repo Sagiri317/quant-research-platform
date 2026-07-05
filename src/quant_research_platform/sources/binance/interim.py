@@ -20,10 +20,12 @@ from quant_research_platform.sources.binance import ids
 from quant_research_platform.sources.binance.fields import field_role
 from quant_research_platform.sources.binance.raw_exports import (
     dataset_files_by_id,
-    iter_raw_rows,
+    iter_raw_envelopes,
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+
+RAW_ROW_BATCH_SIZE = 100_000
 
 MARKET_BARS_COLUMNS = (
     "source_asset_id",
@@ -96,20 +98,31 @@ def iter_interim_frames(
     *,
     data_id: str,
     input_files: tuple[Path, ...],
+    row_batch_size: int = RAW_ROW_BATCH_SIZE,
 ) -> Iterator[pd.DataFrame]:
+    if row_batch_size <= 0:
+        raise ValueError("invalid_binance_raw_row_batch_size")
     for input_file in sorted(input_files):
-        frame = normalize_raw_rows(iter_raw_rows(input_file), data_id=data_id)
-        if not frame.empty:
-            yield frame
+        for batch in _iter_batches(
+            iter_raw_envelopes(input_file),
+            batch_size=row_batch_size,
+        ):
+            frame = normalize_raw_envelopes(batch, data_id=data_id)
+            if not frame.empty:
+                yield frame
 
 
-def normalize_raw_rows(rows: Iterator[dict[str, Any]], *, data_id: str) -> pd.DataFrame:
+def normalize_raw_envelopes(
+    envelopes: tuple[dict[str, Any], ...],
+    *,
+    data_id: str,
+) -> pd.DataFrame:
     if data_id == ids.market_bars_data_id():
-        return _normalize_klines(tuple(rows))
+        return _normalize_klines(envelopes)
     if data_id == ids.aggregate_trades_data_id():
-        return _normalize_aggregate_trades(tuple(rows))
+        return _normalize_aggregate_trades(envelopes)
     if data_id == ids.depth_levels_data_id():
-        return _normalize_depth(tuple(rows))
+        return _normalize_depth(envelopes)
     raise ValueError(f"unsupported_binance_data_id: {data_id}")
 
 
@@ -119,6 +132,7 @@ def materialize_interim_data(
     start_date: str | None = None,
     end_date: str | None = None,
     data_ids: tuple[str, ...] = tuple(sorted(INTERIM_COLUMNS_BY_DATA_ID)),
+    row_batch_size: int = RAW_ROW_BATCH_SIZE,
 ) -> BinanceInterimImportResult:
     del start_date, end_date
     catalog = interim_catalog()
@@ -135,7 +149,11 @@ def materialize_interim_data(
         artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
         write_dataset(
             artifact_root,
-            iter_interim_frames(data_id=data_id, input_files=input_files),
+            iter_interim_frames(
+                data_id=data_id,
+                input_files=input_files,
+                row_batch_size=row_batch_size,
+            ),
             spec=spec,
         )
         written[data_id] = artifact_root
@@ -145,31 +163,23 @@ def materialize_interim_data(
 def _normalize_klines(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
     normalized = [
         {
-            "source_asset_id": str(row["symbol"]),
-            "timestamp": _timestamp_ms(_first_present(row, "open_time", "openTime")),
-            "open_time": _timestamp_ms(_first_present(row, "open_time", "openTime")),
-            "close_time": _timestamp_ms(
-                _first_present(row, "close_time", "closeTime")
-            ),
-            "open": _float(row["open"]),
-            "high": _float(row["high"]),
-            "low": _float(row["low"]),
-            "close": _float(row["close"]),
-            "volume": _float(row["volume"]),
-            "quote_volume": _float(
-                _first_present(row, "quote_volume", "quoteVolume")
-            ),
-            "trade_count": int(_first_present(row, "trade_count", "tradeCount")),
-            "taker_buy_volume": _float(
-                _first_present(row, "taker_buy_volume", "takerBuyVolume")
-            ),
-            "taker_buy_quote_volume": _float(
-                _first_present(row, "taker_buy_quote_volume", "takerBuyQuoteVolume")
-            ),
-            "source_market_type": "spot",
-            "interval": str(row.get("interval", "1m")),
+            "source_asset_id": str(envelope["symbol"]),
+            "timestamp": _timestamp_ms(envelope["payload"][0]),
+            "open_time": _timestamp_ms(envelope["payload"][0]),
+            "close_time": _timestamp_ms(envelope["payload"][6]),
+            "open": _float(envelope["payload"][1]),
+            "high": _float(envelope["payload"][2]),
+            "low": _float(envelope["payload"][3]),
+            "close": _float(envelope["payload"][4]),
+            "volume": _float(envelope["payload"][5]),
+            "quote_volume": _float(envelope["payload"][7]),
+            "trade_count": int(envelope["payload"][8]),
+            "taker_buy_volume": _float(envelope["payload"][9]),
+            "taker_buy_quote_volume": _float(envelope["payload"][10]),
+            "source_market_type": str(envelope["market_type"]),
+            "interval": str(envelope["interval"]),
         }
-        for row in rows
+        for envelope in rows
     ]
     return _ordered_frame(
         normalized,
@@ -180,26 +190,27 @@ def _normalize_klines(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
 
 def _normalize_aggregate_trades(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
     normalized = []
-    for row in rows:
-        quantity = _float(_first_present(row, "quantity", "q"))
-        price = _float(_first_present(row, "price", "p"))
-        is_buyer_maker = bool(row.get("is_buyer_maker", row.get("m", False)))
+    for envelope in rows:
+        payload = envelope["payload"]
+        quantity = _float(_first_present(payload, "quantity", "q"))
+        price = _float(_first_present(payload, "price", "p"))
+        is_buyer_maker = bool(payload.get("is_buyer_maker", payload.get("m", False)))
         normalized.append(
             {
-                "source_asset_id": str(row["symbol"]),
-                "timestamp": _timestamp_ms(_first_present(row, "timestamp", "T")),
+                "source_asset_id": str(envelope["symbol"]),
+                "timestamp": _timestamp_ms(_first_present(payload, "timestamp", "T")),
                 "aggregate_trade_id": int(
-                    _first_present(row, "aggregate_trade_id", "a")
+                    _first_present(payload, "aggregate_trade_id", "a")
                 ),
                 "price": price,
                 "quantity": quantity,
                 "quote_quantity": price * quantity,
-                "first_trade_id": int(_first_present(row, "first_trade_id", "f")),
-                "last_trade_id": int(_first_present(row, "last_trade_id", "l")),
+                "first_trade_id": int(_first_present(payload, "first_trade_id", "f")),
+                "last_trade_id": int(_first_present(payload, "last_trade_id", "l")),
                 "is_buyer_maker": is_buyer_maker,
                 "taker_side": "sell" if is_buyer_maker else "buy",
                 "signed_quantity": -quantity if is_buyer_maker else quantity,
-                "source_market_type": "spot",
+                "source_market_type": str(envelope["market_type"]),
             }
         )
     return _ordered_frame(
@@ -211,12 +222,13 @@ def _normalize_aggregate_trades(rows: tuple[dict[str, Any], ...]) -> pd.DataFram
 
 def _normalize_depth(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
     normalized: list[dict[str, Any]] = []
-    for row in rows:
-        timestamp = _timestamp_ms(row["timestamp"])
-        symbol = str(row["symbol"])
+    for envelope in rows:
+        payload = envelope["payload"]
+        timestamp = _timestamp_iso(envelope["captured_at"])
+        symbol = str(envelope["symbol"])
         for side, raw_levels in (
-            ("bid", row.get("bids", ())),
-            ("ask", row.get("asks", ())),
+            ("bid", payload.get("bids", ())),
+            ("ask", payload.get("asks", ())),
         ):
             for level, raw_level in enumerate(raw_levels, start=1):
                 price, quantity = raw_level
@@ -228,7 +240,7 @@ def _normalize_depth(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
                         "level": level,
                         "price": _float(price),
                         "quantity": _float(quantity),
-                        "source_market_type": "spot",
+                        "source_market_type": str(envelope["market_type"]),
                     }
                 )
     return _ordered_frame(
@@ -285,6 +297,10 @@ def _timestamp_ms(value: object) -> pd.Timestamp:
     return pd.to_datetime(int(value), unit="ms", utc=True).tz_localize(None)
 
 
+def _timestamp_iso(value: object) -> pd.Timestamp:
+    return pd.to_datetime(value, utc=True).tz_localize(None)
+
+
 def _float(value: object) -> float:
     return float(value)
 
@@ -296,11 +312,26 @@ def _first_present(row: dict[str, Any], *keys: str) -> object:
     raise KeyError(keys[0])
 
 
+def _iter_batches(
+    rows: Iterator[dict[str, Any]],
+    *,
+    batch_size: int,
+) -> Iterator[tuple[dict[str, Any], ...]]:
+    batch: list[dict[str, Any]] = []
+    for row in rows:
+        batch.append(row)
+        if len(batch) >= batch_size:
+            yield tuple(batch)
+            batch = []
+    if batch:
+        yield tuple(batch)
+
+
 __all__ = [
     "BinanceInterimImportResult",
     "interim_catalog",
     "interim_specs",
     "iter_interim_frames",
     "materialize_interim_data",
-    "normalize_raw_rows",
+    "normalize_raw_envelopes",
 ]

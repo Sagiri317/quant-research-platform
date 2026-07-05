@@ -12,6 +12,21 @@ _PROPOSAL_DATA_FILE_PATH_RE = re.compile(
     r"(?i)(?:^|[\s`'\"=:\[{(])[^`'\"\s\]}),;]+"
     r"\.(?:parquet|csv|pkl|pickle|feather|arrow)(?:$|[\s`'\"\]}),;])"
 )
+_SOURCE_ASSET_ID_TERM = "source_asset" + "_id"
+_SOURCE_ID_TERM = "source" + "_id"
+_PROPOSAL_FORBIDDEN_TEXT_RE = re.compile(
+    "(?i)(?:"
+    + "|".join(
+        (
+            _SOURCE_ASSET_ID_TERM,
+            _SOURCE_ID_TERM,
+            r"api[_-]?key",
+            r"access[_-]?token",
+            r"refresh[_-]?token",
+        )
+    )
+    + ")"
+)
 
 
 class ProposalSafetyError(ValueError):
@@ -34,6 +49,8 @@ def assert_proposal_starts_unapproved(proposal: Any) -> None:
 
 
 def assert_share_safe_text(text: str) -> None:
+    if _PROPOSAL_FORBIDDEN_TEXT_RE.search(text):
+        raise ProposalSafetyError("proposal_contains_share_unsafe_text:private_marker")
     if _PROPOSAL_DATA_FILE_PATH_RE.search(text):
         raise ProposalSafetyError("proposal_contains_share_unsafe_text:data_file_path")
     reason = unsafe_for_share_reason(text)
@@ -43,6 +60,10 @@ def assert_share_safe_text(text: str) -> None:
 
 def assert_proposal_is_share_safe(proposal: Any) -> None:
     assert_proposal_starts_unapproved(proposal)
+    assert_proposal_text_is_share_safe(proposal)
+
+
+def assert_proposal_text_is_share_safe(proposal: Any) -> None:
     for text in _iter_text_values(proposal):
         assert_share_safe_text(text)
 
@@ -73,6 +94,7 @@ __all__ = [
     "ProposalSafetyError",
     "assert_proposal_is_share_safe",
     "assert_proposal_starts_unapproved",
+    "assert_proposal_text_is_share_safe",
     "assert_share_safe_text",
     "require_human_approval",
 ]

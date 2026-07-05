@@ -20,7 +20,10 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     materialize_labels,
     materialize_panel,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+)
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -38,7 +41,8 @@ def materialize_processed_data(
 ) -> dict[str, DatasetInspection]:
     """Materialize registered crypto processed datasets from local interim data."""
 
-    del resource_policy
+    policy = resource_policy or active_runtime_resource_policy()
+    policy.require_valid_chunk_budget()
     if (data_ids is None) == (kinds is None):
         raise ValueError("data_ids_xor_kinds_required")
     catalog = processed_catalog()
@@ -64,6 +68,7 @@ def materialize_processed_data(
             layout=layout,
             source_id=source_id,
             time_window=time_window,
+            resource_policy=policy,
         )
     return written
 
@@ -90,6 +95,7 @@ def _materialize_one(
     layout: StorageLayout,
     source_id: SourceId,
     time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
     if spec.kind is ProcessedDataKind.PANEL:
         return materialize_panel.write_panel(
@@ -97,18 +103,21 @@ def _materialize_one(
             layout=layout,
             source_id=source_id,
             time_window=time_window,
+            resource_policy=resource_policy,
         )
     if spec.kind is ProcessedDataKind.FACTOR:
         return materialize_factors.write_factors(
             spec,
             layout=layout,
             time_window=time_window,
+            resource_policy=resource_policy,
         )
     if spec.kind is ProcessedDataKind.LABEL:
         return materialize_labels.write_labels(
             spec,
             layout=layout,
             time_window=time_window,
+            resource_policy=resource_policy,
         )
     raise ValueError(f"unsupported_crypto_processed_kind: {spec.kind}")
 

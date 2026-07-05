@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from quant_research_platform.agents.safety import (
+    assert_proposal_text_is_share_safe,
+    require_human_approval,
+)
+from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
 
@@ -29,6 +34,11 @@ class FactorProposal(ProposalPayloadMixin):
     derived_input_columns: tuple[str, ...] = ()
     derived_input_producers: dict[str, str] = field(default_factory=dict)
     required_input_data_id: str = ""
+    family: str = "proposal"
+    grain: DataGrain = DataGrain.ASSET_TIMESTAMP
+    lookback_window: int | None = None
+    timing_semantics: str = "as_of_timestamp"
+    null_policy: str = "preserve_nulls"
     contract_version: str = "0.1"
     proposal_type: str = "factor"
     title: str = ""
@@ -139,6 +149,8 @@ def factor_definition_from_proposal(
     market_id: MarketId,
     field_names: set[str],
 ) -> FactorDefinition:
+    require_human_approval(proposal)
+    assert_proposal_text_is_share_safe(proposal)
     output_columns = tuple(proposal.output_columns or (proposal.factor_id,))
     if len(set(output_columns)) != len(output_columns):
         raise ValueError("duplicate_factor_output_column")
@@ -178,7 +190,11 @@ def factor_definition_from_proposal(
         output_column=output_columns[0],
         display_name=proposal.factor_id,
         description=proposal.rationale,
-        family="proposal",
+        family=proposal.family,
+        lookback_window=proposal.lookback_window,
+        grain=proposal.grain,
+        timing_semantics=proposal.timing_semantics,
+        null_policy=proposal.null_policy,
         required_input_data_id=proposal.required_input_data_id,
     )
 
