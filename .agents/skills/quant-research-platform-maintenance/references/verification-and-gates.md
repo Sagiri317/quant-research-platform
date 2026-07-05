@@ -81,6 +81,9 @@ conda run -n <environment.yml name> python .agents/skills/quant-research-platfor
 ```
 
 该 gate 覆盖 package build 必须使用 `--no-isolation`、不得使用 installer 或 skip-dependency fallback、package build/import subprocess timeout、build-system 到 conda backend dependency 映射，以及 content_scan 失败路径不得伪装为 `PASS`。
+`tooling_environment_dependency_sync` 只同步 handoff replay、package smoke 和
+speed/lint gate 需要的关键工具依赖、Python pin 以及 `ruff target-version`；它不是
+full dependency lockfile，也不强制同步全部 runtime dependencies。
 
 ### Code-Map Gate
 

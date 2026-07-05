@@ -6,6 +6,14 @@ import sys
 from pathlib import Path
 
 from tests.helpers.governance_git_repos import run_governance_script
+from tests.helpers.root_config_contract import (
+    dev_dependency_requirement,
+    project_requires_python,
+    python_minor_from_requires,
+    render_minimal_environment_from_root_contract,
+    render_minimal_pyproject_from_root_contract,
+    ruff_target_from_requires,
+)
 
 STRUCTURE_AUDIT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py"
@@ -51,7 +59,8 @@ def test_structure_audit_json_gate_passes() -> None:
         "helper_owner_inversion_closure",
         "test_helper_boundary_closure",
         "replay_environment_requirements_single_source",
-        "environment_dependency_sync",
+        "tooling_environment_dependency_sync",
+        "agents_scripts_self_contained_boundary",
     } <= check_names
 
 
@@ -139,18 +148,11 @@ def test_structure_audit_detects_missing_conda_build_backend_dependency(
 ) -> None:
     audit = _load_structure_audit()
     (tmp_path / "pyproject.toml").write_text(
-        "\n".join(
-            [
-                "[build-system]",
-                'requires = ["setuptools>=80,<81", "wheel>=0.45,<1"]',
-                'build-backend = "setuptools.build_meta"',
-                "",
-            ]
-        ),
+        render_minimal_pyproject_from_root_contract(),
         encoding="utf-8",
     )
     (tmp_path / "environment.yml").write_text(
-        "dependencies:\n  - python-build>=1.5,<2\n  - setuptools>=80,<81\n",
+        _root_environment_without(("wheel",)),
         encoding="utf-8",
     )
 
@@ -287,7 +289,7 @@ def test_structure_audit_detects_replay_dependency_version_tuple_mutation(
         tmp_path,
         replay_evidence=(
             "REPLAY_ENVIRONMENT_REQUIREMENTS = (\n"
-            "    ('pyarrow', '>=24,<25'),\n"
+            "    ('pyarrow', '>=1,<2'),\n"
             ")\n"
             "REPLAY_REQUIRED_DISTRIBUTIONS = ('pyarrow',)\n"
         ),
@@ -300,32 +302,70 @@ def test_structure_audit_detects_replay_dependency_version_tuple_mutation(
     check = audit._replay_environment_requirements_single_source(tmp_path)
 
     assert check.status == "FAIL"
-    assert "replay_evidence:hardcoded_requirement:pyarrow:>=24,<25" in (
+    assert "replay_evidence:hardcoded_requirement:pyarrow:>=1,<2" in (
         check.findings
     )
 
 
-def test_structure_audit_detects_environment_dependency_sync_mutation(
+def test_structure_audit_detects_tooling_environment_dependency_sync_mutation(
     tmp_path: Path,
 ) -> None:
     audit = _load_structure_audit()
+    requires_python = project_requires_python()
     _write_root_configs(
         tmp_path,
         environment_extra=(
             "  - python=3.12\n"
-            "  - python-build>=1.4,<2\n"
-            "  - ruff>=0.15,<0.16\n"
+            "  - python-build==1\n"
+            f"  - {dev_dependency_requirement('ruff')}\n"
         ),
     )
 
-    check = audit._environment_dependency_sync(tmp_path)
+    check = audit._tooling_environment_dependency_sync(tmp_path)
 
     assert check.status == "FAIL"
-    assert "environment.yml:python_pin_mismatch:expected=3.13" in check.findings
+    assert (
+        "environment.yml:python_pin_mismatch:"
+        f"expected={python_minor_from_requires(requires_python)}"
+        in check.findings
+    )
     assert "environment.yml:dependency_mismatch:build->python-build" in (
         check.findings
     )
-    assert "pyproject.toml:ruff_target_mismatch:expected=py313" not in check.findings
+    assert (
+        "pyproject.toml:ruff_target_mismatch:"
+        f"expected={ruff_target_from_requires(requires_python)}"
+        not in check.findings
+    )
+
+
+def test_structure_audit_detects_agents_script_importing_tests_helpers(
+    tmp_path: Path,
+) -> None:
+    audit = _load_structure_audit()
+    script = (
+        tmp_path
+        / ".agents"
+        / "skills"
+        / "quant-research-platform-maintenance"
+        / "scripts"
+        / "handoff"
+        / "replay_evidence.py"
+    )
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "from tests.helpers.root_config_contract import load_pyproject\n",
+        encoding="utf-8",
+    )
+
+    check = audit._agents_scripts_self_contained_boundary(tmp_path)
+
+    assert check.status == "FAIL"
+    assert (
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "replay_evidence.py:tests.helpers.root_config_contract"
+        in check.findings
+    )
 
 
 def test_structure_audit_detects_test_helper_boundary_mutation(
@@ -406,42 +446,49 @@ def _write_handoff_source(tmp_path: Path, *, replay_evidence: str = "") -> Path:
 
 
 def _write_root_configs(tmp_path: Path, *, environment_extra: str = "") -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        "\n".join(
-            [
-                "[build-system]",
-                'requires = ["setuptools>=80,<81", "wheel>=0.45,<1"]',
-                'build-backend = "setuptools.build_meta"',
-                "",
-                "[project]",
-                'requires-python = ">=3.13,<3.14"',
-                'dependencies = ["pyarrow>=24,<25"]',
-                "",
-                "[project.optional-dependencies]",
-                'dev = ["build>=1.5,<2", "pytest>=9,<10", '
-                '"pytest-xdist>=3.8,<4", "ruff>=0.15,<0.16"]',
-                "",
-                "[tool.ruff]",
-                'target-version = "py313"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
+    pyproject = render_minimal_pyproject_from_root_contract()
+    pyproject = pyproject + (
+        "\n"
+        "[tool.ruff]\n"
+        f'target-version = "{_root_ruff_target()}"\n'
     )
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     extra = (
         environment_extra
         if environment_extra
-        else "  - python-build>=1.5,<2\n  - ruff>=0.15,<0.16\n"
+        else _root_environment_tooling_lines(("python-build", "ruff"))
     )
-    environment = (
-        "name: demo\n"
-        "dependencies:\n"
-        "  - python=3.13\n"
-        "  - pyarrow>=24,<25\n"
-        "  - pytest>=9,<10\n"
-        "  - pytest-xdist>=3.8,<4\n"
-        "  - setuptools>=80,<81\n"
-        "  - wheel>=0.45,<1\n"
-        f"{extra}"
+    environment = render_minimal_environment_from_root_contract()
+    environment = "\n".join(
+        line
+        for line in environment.splitlines()
+        if not any(f"  - {name}" in line for name in ("python-build", "ruff"))
     )
+    environment = environment + "\n" + extra
     (tmp_path / "environment.yml").write_text(environment, encoding="utf-8")
+
+
+def _root_ruff_target() -> str:
+    import tomllib
+
+    with Path("pyproject.toml").open("rb") as handle:
+        return tomllib.load(handle)["tool"]["ruff"]["target-version"]
+
+
+def _root_environment_tooling_lines(names: tuple[str, ...]) -> str:
+    lines = []
+    for line in render_minimal_environment_from_root_contract().splitlines():
+        for name in names:
+            if line.strip().startswith(f"- {name}"):
+                lines.append(line + "\n")
+    return "".join(lines)
+
+
+def _root_environment_without(names: tuple[str, ...]) -> str:
+    lines = []
+    for line in render_minimal_environment_from_root_contract().splitlines():
+        stripped = line.strip()
+        if any(stripped.startswith(f"- {name}") for name in names):
+            continue
+        lines.append(line)
+    return "\n".join(lines) + "\n"

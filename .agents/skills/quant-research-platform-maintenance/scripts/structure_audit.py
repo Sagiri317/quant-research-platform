@@ -119,7 +119,8 @@ def run_audit(repo_root: Path) -> tuple[AuditCheck, ...]:
         _helper_owner_inversion_closure(repo_root),
         _test_helper_boundary_closure(repo_root),
         _replay_environment_requirements_single_source(repo_root),
-        _environment_dependency_sync(repo_root),
+        _tooling_environment_dependency_sync(repo_root),
+        _agents_scripts_self_contained_boundary(repo_root),
         _no_duplicate_source_tree_scanner_regex(repo_root),
         _negative_field_specs(repo_root),
         _active_open_issues_current_only(repo_root),
@@ -584,13 +585,17 @@ def _replay_environment_requirements_single_source(repo_root: Path) -> AuditChec
     return _check("replay_environment_requirements_single_source", tuple(findings))
 
 
-def _environment_dependency_sync(repo_root: Path) -> AuditCheck:
+def _tooling_environment_dependency_sync(repo_root: Path) -> AuditCheck:
     pyproject_path = repo_root / "pyproject.toml"
     environment_path = repo_root / "environment.yml"
     if not pyproject_path.exists():
-        return _check("environment_dependency_sync", ("pyproject.toml:missing",))
+        return _check(
+            "tooling_environment_dependency_sync", ("pyproject.toml:missing",)
+        )
     if not environment_path.exists():
-        return _check("environment_dependency_sync", ("environment.yml:missing",))
+        return _check(
+            "tooling_environment_dependency_sync", ("environment.yml:missing",)
+        )
     pyproject = _load_pyproject(repo_root)
     environment_specs = _environment_dependency_specs(
         environment_path.read_text(encoding="utf-8")
@@ -651,7 +656,27 @@ def _environment_dependency_sync(repo_root: Path) -> AuditCheck:
         findings.append(
             f"pyproject.toml:ruff_target_mismatch:expected={expected_ruff_target}"
         )
-    return _check("environment_dependency_sync", tuple(findings))
+    return _check("tooling_environment_dependency_sync", tuple(findings))
+
+
+def _agents_scripts_self_contained_boundary(repo_root: Path) -> AuditCheck:
+    scripts_root = (
+        repo_root
+        / ".agents"
+        / "skills"
+        / "quant-research-platform-maintenance"
+        / "scripts"
+    )
+    findings: list[str] = []
+    if not scripts_root.exists():
+        return _check("agents_scripts_self_contained_boundary", ())
+    for path in sorted(scripts_root.rglob("*.py")):
+        for imported in _imported_modules(path):
+            if imported == "tests" or imported.startswith("tests."):
+                findings.append(
+                    f"{path.relative_to(repo_root).as_posix()}:{imported}"
+                )
+    return _check("agents_scripts_self_contained_boundary", tuple(findings))
 
 
 def _no_duplicate_source_tree_scanner_regex(repo_root: Path) -> AuditCheck:
@@ -1087,7 +1112,7 @@ def _imported_modules(path: Path) -> set[str]:
             imports.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            if node.level and path.parent.name:
+            if node.level and "tests" in path.parts and path.parent.name:
                 module = f"tests.{path.parent.name}.{module}".rstrip(".")
             imports.add(module)
     return imports

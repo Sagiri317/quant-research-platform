@@ -6,32 +6,21 @@ import pytest
 
 from tests.agents.handoff.conftest import init_handoff_test_repo
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
+from tests.helpers.root_config_contract import (
+    build_system_requirement,
+    dependency_constraint,
+    dev_dependency_requirement,
+    project_dependency_requirement,
+    project_requires_python,
+    render_minimal_pyproject_from_root_contract,
+)
 
 
 def _write_minimal_pyproject(path: Path, *, include_pyarrow: bool = True) -> None:
-    dependencies = [
-        '"pyarrow>=24,<25",' if include_pyarrow else "",
-    ]
-    path.write_text(
-        "\n".join(
-            [
-                "[build-system]",
-                'requires = ["setuptools>=80,<81", "wheel>=0.45,<1"]',
-                'build-backend = "setuptools.build_meta"',
-                "",
-                "[project]",
-                'requires-python = ">=3.13,<3.14"',
-                "dependencies = [",
-                *[line for line in dependencies if line],
-                "]",
-                "",
-                "[project.optional-dependencies]",
-                'dev = ["build>=1.5,<2", "pytest>=9,<10"]',
-                "",
-            ]
-        ),
-        encoding="utf-8",
+    text = render_minimal_pyproject_from_root_contract(
+        include_project_deps=include_pyarrow
     )
+    path.write_text(text, encoding="utf-8")
 
 
 def test_collect_replay_environment_failures_reports_missing_and_version_mismatch(
@@ -44,9 +33,9 @@ def test_collect_replay_environment_failures_reports_missing_and_version_mismatc
     versions: dict[str, object] = {
         "build": package_missing,
         "setuptools": "82.0.1",
-        "wheel": "0.45.1",
-        "pyarrow": "24.0.0",
-        "pytest": "9.0.1",
+        "wheel": _installed_inside(build_system_requirement("wheel")),
+        "pyarrow": _installed_inside(project_dependency_requirement("pyarrow")),
+        "pytest": _installed_inside(dev_dependency_requirement("pytest")),
     }
 
     def fake_version(distribution_name: str) -> str:
@@ -61,7 +50,9 @@ def test_collect_replay_environment_failures_reports_missing_and_version_mismatc
 
     assert failures == (
         "dependency_missing:build",
-        "dependency_version_mismatch:setuptools:expected=>=80,<81:installed=82.0.1",
+        "dependency_version_mismatch:setuptools:"
+        f"expected={dependency_constraint(build_system_requirement('setuptools'))}:"
+        "installed=82.0.1",
     )
     assert all(":" in failure and "\\" not in failure for failure in failures)
 
@@ -73,11 +64,11 @@ def test_collect_replay_environment_failures_reports_python_version_mismatch(
     replay = load_handoff_script_module("replay_evidence")
     _write_minimal_pyproject(tmp_path / "pyproject.toml")
     versions = {
-        "build": "1.5.0",
-        "setuptools": "80.0.0",
-        "wheel": "0.45.1",
-        "pyarrow": "24.0.0",
-        "pytest": "9.0.1",
+        "build": _installed_inside(dev_dependency_requirement("build")),
+        "setuptools": _installed_inside(build_system_requirement("setuptools")),
+        "wheel": _installed_inside(build_system_requirement("wheel")),
+        "pyarrow": _installed_inside(project_dependency_requirement("pyarrow")),
+        "pytest": _installed_inside(dev_dependency_requirement("pytest")),
     }
 
     monkeypatch.setattr(replay.importlib_metadata, "version", versions.__getitem__)
@@ -86,7 +77,8 @@ def test_collect_replay_environment_failures_reports_python_version_mismatch(
     failures = replay.collect_replay_environment_failures(tmp_path)
 
     assert failures == (
-        "python_version_mismatch:expected=>=3.13,<3.14:installed=3.12.9",
+        f"python_version_mismatch:expected={project_requires_python()}:"
+        "installed=3.12.9",
     )
 
 
@@ -97,11 +89,11 @@ def test_collect_replay_environment_failures_reports_contract_missing(
     replay = load_handoff_script_module("replay_evidence")
     _write_minimal_pyproject(tmp_path / "pyproject.toml", include_pyarrow=False)
     versions = {
-        "build": "1.5.0",
-        "setuptools": "80.0.0",
-        "wheel": "0.45.1",
-        "pyarrow": "24.0.0",
-        "pytest": "9.0.1",
+        "build": _installed_inside(dev_dependency_requirement("build")),
+        "setuptools": _installed_inside(build_system_requirement("setuptools")),
+        "wheel": _installed_inside(build_system_requirement("wheel")),
+        "pyarrow": _installed_inside(project_dependency_requirement("pyarrow")),
+        "pytest": _installed_inside(dev_dependency_requirement("pytest")),
     }
 
     monkeypatch.setattr(replay.importlib_metadata, "version", versions.__getitem__)
@@ -122,11 +114,11 @@ def test_replay_environment_preflight_does_not_read_environment_yml(
     _write_minimal_pyproject(tmp_path / "pyproject.toml")
     (tmp_path / "environment.yml").write_text("not: valid: yaml", encoding="utf-8")
     versions = {
-        "build": "1.5.0",
-        "setuptools": "80.0.0",
-        "wheel": "0.45.1",
-        "pyarrow": "24.0.0",
-        "pytest": "9.0.1",
+        "build": _installed_inside(dev_dependency_requirement("build")),
+        "setuptools": _installed_inside(build_system_requirement("setuptools")),
+        "wheel": _installed_inside(build_system_requirement("wheel")),
+        "pyarrow": _installed_inside(project_dependency_requirement("pyarrow")),
+        "pytest": _installed_inside(dev_dependency_requirement("pytest")),
     }
 
     monkeypatch.setattr(replay.importlib_metadata, "version", versions.__getitem__)
@@ -233,3 +225,9 @@ def test_builder_reports_replay_environment_blocked_without_partial_package(
     assert "replay_environment_blocked:dependency_missing:pyarrow" in captured.out
     assert not (out_dir / "handoff-test.zip").exists()
     assert not (out_dir / "handoff-test.json").exists()
+
+
+def _installed_inside(spec: str) -> str:
+    constraint = dependency_constraint(spec)
+    match = constraint.split(",", 1)[0].removeprefix(">=")
+    return match + ".0" if match.count(".") == 1 else match

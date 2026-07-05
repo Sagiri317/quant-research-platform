@@ -10,6 +10,9 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
+from tests.helpers.root_config_contract import (
+    render_minimal_pyproject_from_root_contract,
+)
 
 HANDOFF_TOOL_ROOT = (
     Path(".agents")
@@ -130,26 +133,8 @@ def _write_minimal_project_files(repo: Path) -> None:
         encoding="utf-8",
     )
     (repo / "pyproject.toml").write_text(
-        "\n".join(
-            [
-                "[build-system]",
-                'requires = ["setuptools>=80,<81", "wheel>=0.45,<1"]',
-                'build-backend = "setuptools.build_meta"',
-                "",
-                "[project]",
-                'name = "quant-research-platform"',
-                'version = "0.0.0"',
-                'requires-python = ">=3.13,<3.14"',
-                'dependencies = ["pyarrow>=24,<25"]',
-                "",
-                "[project.optional-dependencies]",
-                'dev = ["build>=1.5,<2", "pytest>=9,<10"]',
-                "",
-                "[tool.setuptools.packages.find]",
-                'where = ["src"]',
-                "",
-            ]
-        ),
+        render_minimal_pyproject_from_root_contract()
+        + "\n[tool.setuptools.packages.find]\nwhere = [\"src\"]\n",
         encoding="utf-8",
     )
     code_map = repo / "docs" / "code-map" / "platform-flow.md"

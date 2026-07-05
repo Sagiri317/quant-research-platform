@@ -72,7 +72,7 @@ LOCAL_ABSOLUTE_PATH_PATTERNS = (
 )
 
 
-def test_python_and_ruff_contracts_are_locked_to_python_313() -> None:
+def test_python_and_ruff_contracts_follow_root_config() -> None:
     pyproject = _load_pyproject()
     requires_python = pyproject["project"]["requires-python"]
 
@@ -122,7 +122,7 @@ def test_pytest_xdist_is_dev_only_speed_gate_dependency() -> None:
     assert "pytest-xdist" not in build_system_requires
 
 
-def test_environment_dependencies_match_pyproject_dependency_specs() -> None:
+def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> None:
     pyproject = _load_pyproject()
     environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
     runtime = _dependency_specs(pyproject["project"]["dependencies"])

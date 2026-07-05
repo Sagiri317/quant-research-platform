@@ -12,6 +12,8 @@
 
 Replay environment preflight 只检查 handoff replay/package smoke 的最小 Python runtime metadata。Python 版本和 replay 必需 distribution 约束从 `pyproject.toml` 派生；`environment.yml` 只通过 structure audit / environment contract 与其同步，不作为 runtime preflight 来源。
 
+Structure audit 的 `tooling_environment_dependency_sync` 只检查 handoff replay、package smoke 和 speed/lint gate 需要的关键工具依赖、Python pin 与 `ruff target-version`。它不是 full dependency lockfile，不要求把全部 runtime dependencies 纳入同步 gate。
+
 ## 运行与验证
 
 常用命令：
