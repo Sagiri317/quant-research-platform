@@ -16,7 +16,9 @@ payload
 interval
 ```
 
-`source` 必须是 `binance`，`market_type` 必须是 `spot`。当前 `data_kind` 只允许：
+`source` 必须是 `binance`，`market_type` 必须是 `spot`。`captured_at`
+必须是带 `Z` 或 `+/-HH:MM` UTC offset 的 ISO timestamp 字符串；numeric
+timestamp 和没有 timezone offset 的字符串不是当前合同。当前 `data_kind` 只允许：
 
 ```text
 klines
@@ -37,6 +39,8 @@ data/raw/binance/spot/depth/<symbol>/*.jsonl
 ```
 
 These paths are local input layout only. They do not define public API, public CLI, or durable research output.
+`sources/binance` runtime 只读取这些本地 JSONL 文件，不联网、不读取 API key
+或 secret，也不把 connector 调用逻辑写入 repo runtime。
 
 ## Interim Datasets
 

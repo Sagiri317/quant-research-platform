@@ -29,6 +29,7 @@ web/playwright-report/
 web/test-results/
 .playwright-cli/
 .run/
+outputs/
 *.egg-info/
 .coverage
 

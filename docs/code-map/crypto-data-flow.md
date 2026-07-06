@@ -53,6 +53,16 @@ flow_imbalance_5m
 
 Lower spread signals are interpreted as `lower_is_better`; the other listed signals use `higher_is_better`.
 
+## Current Labels
+
+The crypto research dataset uses only the approved forward-return labels:
+
+```text
+forward_return_1m
+forward_return_5m
+forward_return_15m
+```
+
 ## Boundary
 
 The crypto flow is a local research flow. It does not add execution connectors, exchange execution, production trading, external LLM calls, public API endpoints, public CLI commands, scheduler, worker, or deployment surface.

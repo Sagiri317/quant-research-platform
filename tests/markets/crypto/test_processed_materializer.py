@@ -20,12 +20,17 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     processed_catalog,
 )
+from quant_research_platform.markets.implementations.crypto.research_profiles import (
+    build_research_dataset_catalog,
+)
+from quant_research_platform.research.datasets import assemble_research_dataset
 from quant_research_platform.research.factors.microstructure import (
     calculate_microstructure_factors,
 )
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.sources.binance.interim import materialize_interim_data
 from quant_research_platform.storage.datasets import DatasetReadMode, read_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -133,6 +138,59 @@ def test_crypto_processed_materializer_uses_chunked_reads(
     assert ("labels", "market_panel_1m", DatasetReadMode.CHUNKED) in calls
 
 
+def test_crypto_panel_reads_matching_trade_and_depth_once_per_bars_chunk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _write_binance_fixture(tmp_path)
+    layout = StorageLayout(project_root=tmp_path)
+    materialize_interim_data(layout=layout, row_batch_size=18)
+    call_counts = {
+        "market_bars_1m": 0,
+        "aggregate_trades_tick": 0,
+        "depth_levels_tick": 0,
+    }
+    yielded_chunks = {"market_bars_1m": 0}
+    real_read_dataset = read_dataset
+
+    def wrapped_read_dataset(dataset_root, **kwargs):
+        root_name = Path(dataset_root).name
+        if kwargs.get("mode") is DatasetReadMode.CHUNKED and root_name in call_counts:
+            call_counts[root_name] += 1
+        result = real_read_dataset(dataset_root, **kwargs)
+        if (
+            kwargs.get("mode") is DatasetReadMode.CHUNKED
+            and root_name in yielded_chunks
+        ):
+            return _count_yielded_chunks(result, yielded_chunks, root_name)
+        return result
+
+    monkeypatch.setattr(materialize_panel, "read_dataset", wrapped_read_dataset)
+
+    materialize_panel.write_panel(
+        processed_catalog().get("market_panel_1m"),
+        layout=layout,
+        source_id=SourceId("binance"),
+        time_window=TimeWindow("2026-07-06", "2026-07-06"),
+        resource_policy=RuntimeResourcePolicy(
+            available_memory_bytes=1024,
+            chunk_target_bytes=1,
+            memory_safety_factor=1.0,
+        ),
+    )
+
+    assert call_counts["market_bars_1m"] == 1
+    assert yielded_chunks["market_bars_1m"] > 1
+    assert call_counts["aggregate_trades_tick"] == yielded_chunks["market_bars_1m"]
+    assert call_counts["depth_levels_tick"] == yielded_chunks["market_bars_1m"]
+
+
+def _count_yielded_chunks(iterator, counts: dict[str, int], root_name: str):
+    for chunk in iterator:
+        counts[root_name] += 1
+        yield chunk
+
+
 def test_crypto_processed_chunk_boundaries_match_full_frame_calculations(
     tmp_path: Path,
 ) -> None:
@@ -180,6 +238,47 @@ def test_crypto_processed_chunk_boundaries_match_full_frame_calculations(
         labels.reset_index(drop=True),
         expected_labels.reset_index(drop=True),
     )
+
+
+def test_crypto_research_dataset_includes_full_market_context_columns(
+    tmp_path: Path,
+) -> None:
+    _write_binance_fixture(tmp_path)
+    layout = StorageLayout(project_root=tmp_path)
+    materialize_interim_data(layout=layout, row_batch_size=3)
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SourceId("binance"),
+        time_window=TimeWindow("2026-07-06", "2026-07-06"),
+        kinds=frozenset(
+            {
+                ProcessedDataKind.PANEL,
+                ProcessedDataKind.FACTOR,
+                ProcessedDataKind.LABEL,
+            }
+        ),
+    )
+
+    root = assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=build_research_dataset_catalog(),
+        processed_catalog=processed_catalog(),
+        dataset_id="microstructure_forward_returns",
+        time_window=TimeWindow("2026-07-06", "2026-07-06"),
+    )
+
+    research = read_dataset(root)
+    assert {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_volume",
+        "trade_count",
+        "mid_price",
+    }.issubset(research.columns)
+    assert "source_asset_id" not in research.columns
 
 
 def test_crypto_processed_materializer_stabilizes_schema_when_depth_is_missing(

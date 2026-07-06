@@ -114,10 +114,26 @@ def _validate_envelope(envelope: Any) -> dict[str, Any]:
 
 
 def _parse_captured_at(value: object) -> pd.Timestamp:
+    if not isinstance(value, str) or not _has_utc_offset(value):
+        raise ValueError("invalid_binance_raw_envelope_captured_at")
     timestamp = pd.to_datetime(value, utc=True, errors="coerce")
     if pd.isna(timestamp):
         raise ValueError("invalid_binance_raw_envelope_captured_at")
     return timestamp
+
+
+def _has_utc_offset(value: str) -> bool:
+    if value.endswith("Z"):
+        return True
+    if len(value) < 6:
+        return False
+    offset = value[-6:]
+    return (
+        offset[0] in {"+", "-"}
+        and offset[1:3].isdigit()
+        and offset[3] == ":"
+        and offset[4:6].isdigit()
+    )
 
 
 __all__ = ["DATA_ID_BY_RAW_KIND", "dataset_files_by_id", "iter_raw_envelopes"]

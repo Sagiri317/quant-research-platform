@@ -74,11 +74,23 @@ def _iter_panel_chunks(
         time_window=time_window,
         mode=DatasetReadMode.CHUNKED,
     ):
+        if bars_chunk.empty:
+            continue
+        matching_trades = _read_matching_chunks(
+            trade_root,
+            bars_chunk,
+            time_window=time_window,
+        )
+        matching_depth = _read_matching_chunks(
+            depth_root,
+            bars_chunk,
+            time_window=time_window,
+        )
         for bars in _split_frame_by_policy(bars_chunk, resource_policy):
             if bars.empty:
                 continue
-            trades = _read_matching_chunks(trade_root, bars, time_window=time_window)
-            depth = _read_matching_chunks(depth_root, bars, time_window=time_window)
+            trades = _filter_matching_frame(matching_trades, bars)
+            depth = _filter_matching_frame(matching_depth, bars)
             yield _build_panel(bars, trades, depth).loc[:, spec.required_columns]
 
 
@@ -120,12 +132,44 @@ def _iter_matching_chunks(
     ):
         if chunk.empty:
             continue
-        timestamps = pd.to_datetime(chunk["timestamp"], errors="coerce")
-        mask = chunk["source_asset_id"].astype(str).isin(asset_ids)
-        mask &= timestamps.ge(start) & timestamps.le(end + pd.Timedelta(minutes=1))
-        matching = chunk.loc[mask].copy()
+        matching = chunk.loc[
+            _matching_window_mask(
+                chunk,
+                asset_ids=asset_ids,
+                start=start,
+                end=end,
+            )
+        ].copy()
         if not matching.empty:
             yield matching
+
+
+def _filter_matching_frame(frame: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or bars.empty:
+        return pd.DataFrame(columns=frame.columns)
+    asset_ids = set(bars["source_asset_id"].astype(str))
+    start = pd.to_datetime(bars["timestamp"], errors="coerce").min()
+    end = pd.to_datetime(bars["timestamp"], errors="coerce").max()
+    return frame.loc[
+        _matching_window_mask(
+            frame,
+            asset_ids=asset_ids,
+            start=start,
+            end=end,
+        )
+    ].copy()
+
+
+def _matching_window_mask(
+    frame: pd.DataFrame,
+    *,
+    asset_ids: set[str],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.Series:
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    mask = frame["source_asset_id"].astype(str).isin(asset_ids)
+    return mask & timestamps.ge(start) & timestamps.le(end + pd.Timedelta(minutes=1))
 
 
 def _prepend(

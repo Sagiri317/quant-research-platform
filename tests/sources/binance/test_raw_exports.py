@@ -113,6 +113,16 @@ def test_binance_raw_exports_validates_envelope_contract(
             {"captured_at": "not-a-time"},
             "invalid_binance_raw_envelope_captured_at",
         ),
+        (
+            "klines",
+            {"captured_at": 1783296000000},
+            "invalid_binance_raw_envelope_captured_at",
+        ),
+        (
+            "klines",
+            {"captured_at": "2026-07-06T00:00:02"},
+            "invalid_binance_raw_envelope_captured_at",
+        ),
         ("klines", {"symbol": ""}, "invalid_binance_raw_envelope_symbol"),
         ("klines", {"payload": [1783296000000]}, "invalid_binance_kline_payload"),
         (

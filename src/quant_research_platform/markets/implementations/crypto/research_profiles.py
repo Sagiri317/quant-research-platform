@@ -25,7 +25,16 @@ from quant_research_platform.research.factors.microstructure import (
 )
 
 RESEARCH_DATASET_FILTER_COLUMNS: tuple[str, ...] = ("eligible",)
-RESEARCH_DATASET_CONTEXT_COLUMNS: tuple[str, ...] = ("close", "volume")
+RESEARCH_DATASET_CONTEXT_COLUMNS: tuple[str, ...] = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+    "trade_count",
+    "mid_price",
+)
 
 
 def build_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:

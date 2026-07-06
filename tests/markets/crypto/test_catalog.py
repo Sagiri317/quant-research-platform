@@ -39,6 +39,16 @@ def test_crypto_processed_and_research_catalogs_use_approved_ids() -> None:
         assert "source_asset_id" not in spec.required_columns
     assert processed.get("market_panel_1m").kind is ProcessedDataKind.PANEL
     assert processed.get("market_panel_1m").frequency is DataFrequency.MINUTE
+    assert research.list()[0].context_columns == (
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_volume",
+        "trade_count",
+        "mid_price",
+    )
 
 
 def test_crypto_factors_and_labels_are_strictly_limited() -> None:

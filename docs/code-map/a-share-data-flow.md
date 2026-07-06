@@ -8,6 +8,20 @@
 internal-provider raw exports -> source contracts -> interim normalization -> dataset artifacts -> research datasets -> factors/features/labels -> evaluation/portfolio/report
 ```
 
+当前 CSMAR 默认日频边界保持为 `2014-01-01` 到 `2025-12-31`；
+调用方显式传入 start/end date 时仍以调用方窗口为准。repo-root 数据链路使用
+统一 storage layout：
+
+```text
+data/raw/csmar
+-> data/interim/csmar
+-> data/processed/a_share
+-> data/research/a_share
+-> evaluation output
+```
+
+该链路描述长期目录语义，不表示当前工作树中某次运行状态。
+
 ## sources 层
 
 sources 层负责内部供应商 raw schema、字段映射、raw/interim 转换和 source-local ID。它不承载 A 股市场语义、研究算法或对外 provider selector。
