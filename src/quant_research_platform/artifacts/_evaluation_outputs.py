@@ -123,6 +123,7 @@ def write_evaluation_outputs(
             _render_evaluation_summary(
                 spec=spec,
                 evaluation_diagnostics=evaluation_diagnostics,
+                metrics=metrics,
                 ic_summary=ic_summary,
                 group_spread_summary=group_spread_summary,
             ),
@@ -148,6 +149,7 @@ def _render_evaluation_summary(
     *,
     spec: EvaluationSpec,
     evaluation_diagnostics: EvaluationDiagnostics,
+    metrics: pd.DataFrame,
     ic_summary: pd.DataFrame,
     group_spread_summary: pd.DataFrame,
 ) -> str:
@@ -172,6 +174,13 @@ def _render_evaluation_summary(
         _markdown_table(
             ic_summary,
             ("signal", "label", "mean_ic", "mean_rankic"),
+        ),
+        "",
+        "## Signal/Label Coverage Summary",
+        "",
+        _markdown_table(
+            _signal_label_coverage_summary(metrics),
+            ("signal", "label", "mean_n_obs", "min_n_obs", "non_empty_period_count"),
         ),
         "",
         "## Group Spread Summary",
@@ -204,4 +213,24 @@ def _markdown_cell(value: object) -> str:
         return ""
     if isinstance(value, float):
         return f"{value:.6g}"
-    return str(value)
+    return str(value).replace("|", r"\|")
+
+
+def _signal_label_coverage_summary(metrics: pd.DataFrame) -> pd.DataFrame:
+    columns = ["signal", "label", "mean_n_obs", "min_n_obs", "non_empty_period_count"]
+    if metrics.empty:
+        return pd.DataFrame(columns=columns)
+    source = metrics.copy()
+    if "n_obs" not in source:
+        return source.loc[:, ["signal", "label"]].drop_duplicates().assign(
+            mean_n_obs=pd.NA,
+            min_n_obs=pd.NA,
+            non_empty_period_count=pd.NA,
+        )
+    grouped = source.groupby(["signal", "label"], as_index=False, sort=True)["n_obs"]
+    summary = grouped.agg(
+        mean_n_obs="mean",
+        min_n_obs="min",
+        non_empty_period_count=lambda values: int(pd.to_numeric(values).gt(0).sum()),
+    )
+    return summary.loc[:, columns]

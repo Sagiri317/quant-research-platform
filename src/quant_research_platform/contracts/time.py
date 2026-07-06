@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time
 from typing import NewType
 
 Timestamp = NewType("Timestamp", datetime)
@@ -15,26 +15,82 @@ AvailableAt = NewType("AvailableAt", datetime)
 class TimeWindow:
     """Closed logical time interval used for dataset reads and inspection."""
 
-    start: date
-    end: date
+    start: date | datetime
+    end: date | datetime
 
     def __post_init__(self) -> None:
-        start = _coerce_date(self.start)
-        end = _coerce_date(self.end)
+        start = _coerce_bound(self.start)
+        end = _coerce_bound(self.end)
+        if isinstance(start, datetime) != isinstance(end, datetime):
+            raise ValueError("mixed_time_window_bounds")
         if start > end:
             raise ValueError("invalid_time_window")
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "end", end)
 
 
-def _coerce_date(value: date | datetime | str) -> date:
+def is_intraday_time_window(time_window: TimeWindow) -> bool:
+    return isinstance(time_window.start, datetime)
+
+
+def require_date_window(time_window: TimeWindow, *, context: str) -> None:
+    if is_intraday_time_window(time_window):
+        raise ValueError(f"{context}_requires_date_time_window")
+
+
+def time_window_date_bounds(time_window: TimeWindow) -> tuple[date, date]:
+    start = (
+        time_window.start.date()
+        if isinstance(time_window.start, datetime)
+        else time_window.start
+    )
+    end = (
+        time_window.end.date()
+        if isinstance(time_window.end, datetime)
+        else time_window.end
+    )
+    return start, end
+
+
+def time_window_timestamp_bounds(
+    time_window: TimeWindow,
+) -> tuple[datetime, datetime]:
+    if isinstance(time_window.start, datetime) and isinstance(
+        time_window.end,
+        datetime,
+    ):
+        return time_window.start, time_window.end
+    start = datetime.combine(time_window.start, time.min)
+    end = datetime.combine(time_window.end, time.max)
+    return start, end
+
+
+def _coerce_bound(value: date | datetime | str) -> date | datetime:
     if isinstance(value, datetime):
-        return value.date()
+        return _normalize_datetime(value)
     if isinstance(value, date):
         return value
     if isinstance(value, str):
+        if "T" in value or " " in value:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return _normalize_datetime(parsed)
         return date.fromisoformat(value)
     raise TypeError("invalid_time_window_bound")
 
 
-__all__ = ["AvailableAt", "SessionDate", "Timestamp", "TimeWindow"]
+def _normalize_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
+__all__ = [
+    "AvailableAt",
+    "SessionDate",
+    "TimeWindow",
+    "Timestamp",
+    "is_intraday_time_window",
+    "require_date_window",
+    "time_window_date_bounds",
+    "time_window_timestamp_bounds",
+]

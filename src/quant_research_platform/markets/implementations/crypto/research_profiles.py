@@ -33,6 +33,9 @@ RESEARCH_DATASET_CONTEXT_COLUMNS: tuple[str, ...] = (
     "volume",
     "quote_volume",
     "trade_count",
+    "trade_flow_observed",
+    "quote_observed",
+    "quote_age_seconds",
     "mid_price",
 )
 

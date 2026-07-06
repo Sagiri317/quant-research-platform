@@ -68,7 +68,7 @@ def test_crypto_processed_materializer_builds_panel_factors_and_labels(
     )
 
     assert panel.loc[0, "market_id"] == "crypto"
-    assert panel.loc[0, "asset_id"] == "BTCUSDT"
+    assert panel.loc[0, "asset_id"] == "btc_usdt"
     assert panel["eligible"].all()
     assert "source_asset_id" not in panel.columns
     assert {
@@ -276,6 +276,9 @@ def test_crypto_research_dataset_includes_full_market_context_columns(
         "volume",
         "quote_volume",
         "trade_count",
+        "trade_flow_observed",
+        "quote_observed",
+        "quote_age_seconds",
         "mid_price",
     }.issubset(research.columns)
     assert "source_asset_id" not in research.columns
@@ -298,7 +301,7 @@ def test_crypto_processed_materializer_stabilizes_schema_when_depth_is_missing(
     panel = read_dataset(
         layout.processed_data_root("crypto", ProcessedDataKind.PANEL, "market_panel_1m")
     )
-    missing_depth_rows = panel.loc[panel["asset_id"].eq("ETHUSDT")]
+    missing_depth_rows = panel.loc[panel["asset_id"].eq("eth_usdt")]
     assert not missing_depth_rows.empty
     assert missing_depth_rows["best_bid"].isna().all()
     assert missing_depth_rows["bid_depth"].isna().all()

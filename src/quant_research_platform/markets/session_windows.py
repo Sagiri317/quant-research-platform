@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, require_date_window
 
 
 def normalize_session_dates(values: Iterable[object]) -> tuple[pd.Timestamp, ...]:
@@ -70,6 +70,7 @@ class SessionWindowPlanner:
         *,
         reason: str,
     ) -> tuple[SessionWindow, ...]:
+        require_date_window(time_window, context="session_window_planner")
         target_sessions = tuple(
             session
             for session in self.sessions

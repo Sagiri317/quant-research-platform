@@ -25,7 +25,8 @@ from quant_research_platform.storage.datasets import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 
-MICROSTRUCTURE_ROLLING_LOOKBACK_ROWS = 4
+MICROSTRUCTURE_ROLLING_WINDOW_MINUTES = 5
+MICROSTRUCTURE_ROLLING_CARRY_BARS = MICROSTRUCTURE_ROLLING_WINDOW_MINUTES - 1
 _CORE_ROW = "_qrp_core_row"
 
 
@@ -72,7 +73,11 @@ def _iter_factor_chunks(
         core = panel.copy()
         core[_CORE_ROW] = True
         combined = _with_factor_carry(core, carry_by_asset)
-        factors = calculate_microstructure_factors(combined)
+        factors = calculate_microstructure_factors(
+            combined,
+            expected_interval=pd.Timedelta(minutes=1),
+            min_periods=MICROSTRUCTURE_ROLLING_WINDOW_MINUTES,
+        )
         output = factors.loc[factors[_CORE_ROW]].copy()
         yield output.loc[:, spec.required_columns]
         _update_factor_carry(combined, carry_by_asset)
@@ -107,7 +112,7 @@ def _update_factor_carry(
     for asset_id, asset_rows in ordered.groupby("asset_id", sort=False):
         carry_by_asset[str(asset_id)] = (
             asset_rows.drop(columns=[_CORE_ROW])
-            .tail(MICROSTRUCTURE_ROLLING_LOOKBACK_ROWS)
+            .tail(MICROSTRUCTURE_ROLLING_CARRY_BARS)
             .copy()
         )
 

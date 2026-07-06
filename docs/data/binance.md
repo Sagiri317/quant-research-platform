@@ -26,7 +26,9 @@ agg_trades
 depth
 ```
 
-`klines` 必须声明 `interval=1m`，`payload` 是 connector 返回的 kline array。`agg_trades` 和 `depth` 的 `payload` 是 connector 返回的 object。裸 payload、非 envelope JSON、非 JSONL 文件和 unsupported data kind 都不是当前合同。
+`interval` 只对 `klines` 必填，且当前只接受 `interval=1m`。`agg_trades` 和 `depth` 不声明 `interval`。`klines` 的 `payload` 是 connector 返回的 kline array，允许 connector 追加额外字段；当前语义校验只读取已批准字段。`agg_trades` 和 `depth` 的 `payload` 是 connector 返回的 object。裸 payload、非 envelope JSON、非 JSONL 文件和 unsupported data kind 都不是当前合同。
+
+Raw envelope structure 不因语义校验而改变。当前 raw validation 会检查 kline OHLC、volume、trade count、aggregate trade price/quantity/id range，以及 depth price/quantity。双边 best bid/ask 同时存在时必须满足 bid < ask；one-sided depth payload 可保留为 raw valid，后续 panel 层用 quote observation diagnostics 表达不可用 quote。
 
 ## Raw Layout
 
@@ -52,7 +54,7 @@ agg_trades  -> aggregate_trades_tick
 depth       -> depth_levels_tick
 ```
 
-Interim materialization reads raw envelopes in bounded batches and writes source-normalized datasets through `storage.write_dataset`. `sources/` owns provider field mapping only; market semantics and research factors are owned by `markets/implementations/crypto/` and `research/`.
+Interim materialization reads raw envelopes in bounded batches, validates `data_id` and raw `data_kind` before normalization, applies requested start/end filtering to source timestamps, and writes source-normalized datasets through `storage.write_dataset`. `sources/` owns provider field mapping only; market semantics and research factors are owned by `markets/implementations/crypto/` and `research/`.
 
 ## Safety Boundary
 

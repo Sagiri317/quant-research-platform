@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import pandas as pd
+
+from quant_research_platform.research.time_series.contiguity import (
+    contiguous_segment_ids,
+    iter_grouped_timestamps,
+)
+
+
+def test_contiguous_segment_ids_resets_on_gap() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "a", "a", "a"],
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-07-06 00:00",
+                    "2026-07-06 00:01",
+                    "2026-07-06 00:03",
+                    "2026-07-06 00:04",
+                ]
+            ),
+        }
+    )
+
+    result = contiguous_segment_ids(
+        frame,
+        expected_interval=pd.Timedelta(minutes=1),
+    )
+
+    assert result.tolist() == [0, 0, 1, 1]
+
+
+def test_contiguous_segment_ids_respects_group_columns_and_input_order() -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["crypto", "crypto", "crypto", "crypto"],
+            "asset_id": ["b", "a", "b", "a"],
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-07-06 00:03",
+                    "2026-07-06 00:00",
+                    "2026-07-06 00:00",
+                    "2026-07-06 00:01",
+                ]
+            ),
+        }
+    )
+
+    result = contiguous_segment_ids(
+        frame,
+        group_columns=("market_id", "asset_id"),
+        expected_interval=pd.Timedelta(minutes=1),
+    )
+
+    assert result.tolist() == [2, 0, 1, 0]
+
+
+def test_iter_grouped_timestamps_accepts_frame_and_mapping() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["b", "a", "a"],
+            "timestamp": pd.to_datetime(
+                ["2026-07-06 00:01", "2026-07-06 00:01", "2026-07-06 00:00"]
+            ),
+        }
+    )
+
+    from_frame = tuple(
+        group.tolist()
+        for group in iter_grouped_timestamps(
+            frame,
+            group_columns=("asset_id",),
+            timestamp_column="timestamp",
+        )
+    )
+    from_mapping = tuple(
+        group.tolist()
+        for group in iter_grouped_timestamps(
+            {"a": (pd.Timestamp("2026-07-06 00:01"), pd.Timestamp("2026-07-06 00:00"))}
+        )
+    )
+
+    assert from_frame == (
+        [pd.Timestamp("2026-07-06 00:00"), pd.Timestamp("2026-07-06 00:01")],
+        [pd.Timestamp("2026-07-06 00:01")],
+    )
+    assert from_mapping == (
+        [pd.Timestamp("2026-07-06 00:00"), pd.Timestamp("2026-07-06 00:01")],
+    )

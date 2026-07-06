@@ -99,6 +99,8 @@ def iter_interim_frames(
     data_id: str,
     input_files: tuple[Path, ...],
     row_batch_size: int = RAW_ROW_BATCH_SIZE,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> Iterator[pd.DataFrame]:
     if row_batch_size <= 0:
         raise ValueError("invalid_binance_raw_row_batch_size")
@@ -108,6 +110,7 @@ def iter_interim_frames(
             batch_size=row_batch_size,
         ):
             frame = normalize_raw_envelopes(batch, data_id=data_id)
+            frame = _filter_time_window(frame, start_date=start_date, end_date=end_date)
             if not frame.empty:
                 yield frame
 
@@ -117,6 +120,7 @@ def normalize_raw_envelopes(
     *,
     data_id: str,
 ) -> pd.DataFrame:
+    _validate_raw_kind_matches_data_id(envelopes, data_id=data_id)
     if data_id == ids.market_bars_data_id():
         return _normalize_klines(envelopes)
     if data_id == ids.aggregate_trades_data_id():
@@ -134,7 +138,6 @@ def materialize_interim_data(
     data_ids: tuple[str, ...] = tuple(sorted(INTERIM_COLUMNS_BY_DATA_ID)),
     row_batch_size: int = RAW_ROW_BATCH_SIZE,
 ) -> BinanceInterimImportResult:
-    del start_date, end_date
     catalog = interim_catalog()
     source_raw_root = raw_root or layout.raw_source_root(ids.SOURCE_ID)
     files_by_data_id = dataset_files_by_id(source_raw_root)
@@ -153,6 +156,8 @@ def materialize_interim_data(
                 data_id=data_id,
                 input_files=input_files,
                 row_batch_size=row_batch_size,
+                start_date=start_date,
+                end_date=end_date,
             ),
             spec=spec,
         )
@@ -186,6 +191,40 @@ def _normalize_klines(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
         MARKET_BARS_COLUMNS,
         ["source_asset_id", "timestamp"],
     )
+
+
+def _validate_raw_kind_matches_data_id(
+    envelopes: tuple[dict[str, Any], ...],
+    *,
+    data_id: str,
+) -> None:
+    expected = {
+        ids.market_bars_data_id(): "klines",
+        ids.aggregate_trades_data_id(): "agg_trades",
+        ids.depth_levels_data_id(): "depth",
+    }.get(data_id)
+    if expected is None:
+        raise ValueError(f"unsupported_binance_data_id: {data_id}")
+    for envelope in envelopes:
+        if envelope.get("data_kind") != expected:
+            raise ValueError("binance_raw_data_id_kind_mismatch")
+
+
+def _filter_time_window(
+    frame: pd.DataFrame,
+    *,
+    start_date: str | None,
+    end_date: str | None,
+) -> pd.DataFrame:
+    if frame.empty or (start_date is None and end_date is None):
+        return frame
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    mask = pd.Series(True, index=frame.index)
+    if start_date is not None:
+        mask &= timestamps.ge(pd.Timestamp(start_date))
+    if end_date is not None:
+        mask &= timestamps.le(pd.Timestamp(end_date))
+    return frame.loc[mask.fillna(False)].copy()
 
 
 def _normalize_aggregate_trades(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:

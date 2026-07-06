@@ -32,7 +32,7 @@ from quant_research_platform.storage.datasets import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 
-LABEL_LOOKAHEAD_ROWS = max(CRYPTO_FORWARD_RETURN_HORIZONS) + 1
+LABEL_LOOKAHEAD_BARS = max(CRYPTO_FORWARD_RETURN_HORIZONS) + 1
 
 
 def write_labels(
@@ -94,13 +94,15 @@ def _label_frame(panel: pd.DataFrame) -> pd.DataFrame:
         horizons=CRYPTO_FORWARD_RETURN_HORIZONS,
         frequency=DataFrequency.MINUTE,
         execution_price_column="close",
+        expected_interval=pd.Timedelta(minutes=1),
+        require_contiguous=True,
     )
 
 
 def _label_emit_mask(panel: pd.DataFrame) -> pd.Series:
     positions = panel.groupby("asset_id", sort=False).cumcount()
     group_sizes = panel.groupby("asset_id", sort=False)["asset_id"].transform("size")
-    return positions.lt(group_sizes - LABEL_LOOKAHEAD_ROWS)
+    return positions.lt(group_sizes - LABEL_LOOKAHEAD_BARS)
 
 
 def _ordered_panel(panel: pd.DataFrame) -> pd.DataFrame:

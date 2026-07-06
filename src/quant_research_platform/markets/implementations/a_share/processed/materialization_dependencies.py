@@ -9,7 +9,7 @@ import pandas as pd
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.ids import SourceId
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, require_date_window
 from quant_research_platform.markets.implementations.a_share.factors import (
     calculations as factor_calculations,
 )
@@ -112,6 +112,8 @@ def planned_processed_dependency_windows(
     return windows
 
 def merge_time_windows(left: TimeWindow, right: TimeWindow) -> TimeWindow:
+    require_date_window(left, context="a_share_dependency_window")
+    require_date_window(right, context="a_share_dependency_window")
     return TimeWindow(min(left.start, right.start), max(left.end, right.end))
 
 def _processed_dependency_time_window(
@@ -167,6 +169,7 @@ def _session_offset_time_window(
     lookback_sessions: int,
     lookahead_sessions: int,
 ) -> TimeWindow:
+    require_date_window(time_window, context="a_share_dependency_session_offset")
     if not sessions or (lookback_sessions <= 0 and lookahead_sessions <= 0):
         return time_window
     normalized_sessions = tuple(

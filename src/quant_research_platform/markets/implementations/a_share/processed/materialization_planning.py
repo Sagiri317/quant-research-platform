@@ -11,7 +11,7 @@ import pandas as pd
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, require_date_window
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
 )
@@ -59,6 +59,7 @@ def require_dataset_coverage(
     *,
     sessions: tuple[pd.Timestamp, ...],
 ) -> None:
+    require_date_window(time_window, context="a_share_dataset_coverage")
     target = _target_sessions(sessions, time_window)
     coverage_window = TimeWindow(target[0].date(), target[-1].date())
     available_sessions = _dataset_session_dates(root, coverage_window)
@@ -154,6 +155,7 @@ def _target_sessions(
     sessions: tuple[pd.Timestamp, ...],
     time_window: TimeWindow,
 ) -> tuple[pd.Timestamp, ...]:
+    require_date_window(time_window, context="a_share_target_sessions")
     target = tuple(
         session
         for session in sessions
@@ -182,6 +184,7 @@ def planned_session_windows(
     lookahead_sessions: int = 0,
     estimated_bytes_per_session: int | None = None,
 ) -> tuple[SessionWindow, ...]:
+    require_date_window(time_window, context="a_share_planned_session_windows")
     target_sessions = _target_sessions(sessions, time_window)
     estimated = (
         _estimated_bytes_per_session(inspection, len(target_sessions))
@@ -328,6 +331,7 @@ def _sample_window(
     warmup_sessions: int = 0,
     lookahead_sessions: int = 0,
 ) -> SessionWindow:
+    require_date_window(time_window, context="a_share_sample_window")
     target_sessions = _target_sessions(sessions, time_window)
     sample_session_count = min(len(target_sessions), SIZING_SAMPLE_SESSION_CAP)
     return SessionWindowPlanner.from_sessions(

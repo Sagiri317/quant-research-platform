@@ -47,6 +47,9 @@ def test_crypto_processed_and_research_catalogs_use_approved_ids() -> None:
         "volume",
         "quote_volume",
         "trade_count",
+        "trade_flow_observed",
+        "quote_observed",
+        "quote_age_seconds",
         "mid_price",
     )
 
@@ -56,14 +59,14 @@ def test_crypto_factors_and_labels_are_strictly_limited() -> None:
     labels = label_catalog()
 
     assert [definition.output_column for definition in factors.list()] == [
+        "spread",
+        "relative_spread",
         "depth_imbalance",
-        "flow_imbalance_5m",
         "microprice",
         "microprice_deviation",
-        "relative_spread",
-        "signed_volume_5m",
-        "spread",
         "trade_intensity_5m",
+        "signed_volume_5m",
+        "flow_imbalance_5m",
     ]
     assert [definition.output_column for definition in labels.list()] == [
         forward_return_label_column(1, DataFrequency.MINUTE),

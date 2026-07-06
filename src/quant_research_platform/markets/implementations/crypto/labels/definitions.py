@@ -31,11 +31,13 @@ def label_catalog() -> LabelCatalog:
                 family="forward_return",
                 input_columns=("close",),
                 output_column=column,
-                label_timing="next_bar_close_to_horizon_close",
+                label_timing=(
+                    "next_contiguous_bar_close_to_horizon_contiguous_bar_close"
+                ),
                 horizon=horizon,
                 lookahead=horizon + 1,
-                entry_rule="next_bar_close",
-                exit_rule="horizon_bar_close",
+                entry_rule="next_contiguous_1m_bar_close",
+                exit_rule="horizon_contiguous_1m_bar_close",
             )
         )
     return catalog

@@ -148,6 +148,73 @@ def test_binance_raw_exports_rejects_invalid_envelope_fields(
         tuple(iter_raw_envelopes(path))
 
 
+def test_binance_raw_exports_accepts_kline_payload_with_extra_fields(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "extra-kline.jsonl"
+    envelope = _envelope(data_kind="klines")
+    envelope["payload"] = [*envelope["payload"], "extra"]
+    path.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+
+    rows = tuple(iter_raw_envelopes(path))
+
+    assert rows[0]["payload"][-1] == "extra"
+
+
+def test_binance_raw_exports_does_not_require_interval_for_trades_or_depth(
+    tmp_path: Path,
+) -> None:
+    trade_path = tmp_path / "trade.jsonl"
+    depth_path = tmp_path / "depth.jsonl"
+    _write_jsonl(trade_path, _envelope(data_kind="agg_trades"))
+    _write_jsonl(depth_path, _envelope(data_kind="depth"))
+
+    assert tuple(iter_raw_envelopes(trade_path))[0]["data_kind"] == "agg_trades"
+    assert tuple(iter_raw_envelopes(depth_path))[0]["data_kind"] == "depth"
+
+
+def test_binance_raw_exports_rejects_invalid_market_payload_values(
+    tmp_path: Path,
+) -> None:
+    kline_path = tmp_path / "bad-kline.jsonl"
+    kline = _envelope(data_kind="klines")
+    payload = list(kline["payload"])
+    payload[2] = "90.0"
+    kline["payload"] = payload
+    _write_jsonl(kline_path, kline)
+    with pytest.raises(ValueError, match="invalid_binance_kline_ohlc"):
+        tuple(iter_raw_envelopes(kline_path))
+
+    trade_path = tmp_path / "bad-trade.jsonl"
+    trade = _envelope(data_kind="agg_trades")
+    trade["payload"] = {**trade["payload"], "f": 12, "l": 11}
+    _write_jsonl(trade_path, trade)
+    with pytest.raises(ValueError, match="invalid_binance_agg_trade_id_range"):
+        tuple(iter_raw_envelopes(trade_path))
+
+    depth_path = tmp_path / "bad-depth.jsonl"
+    depth = _envelope(data_kind="depth")
+    depth["payload"] = {
+        "lastUpdateId": 1,
+        "bids": [["101.0", "1.0"]],
+        "asks": [["100.0", "1.0"]],
+    }
+    _write_jsonl(depth_path, depth)
+    with pytest.raises(ValueError, match="crossed_binance_depth_book"):
+        tuple(iter_raw_envelopes(depth_path))
+
+
+def test_binance_raw_exports_accepts_one_sided_depth_payload(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "one-sided-depth.jsonl"
+    envelope = _envelope(data_kind="depth")
+    envelope["payload"] = {"lastUpdateId": 1, "bids": [["100.0", "1.0"]], "asks": []}
+    _write_jsonl(path, envelope)
+
+    assert tuple(iter_raw_envelopes(path))[0]["data_kind"] == "depth"
+
+
 def test_binance_raw_exports_rejects_missing_required_envelope_key(
     tmp_path: Path,
 ) -> None:

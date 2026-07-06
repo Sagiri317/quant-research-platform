@@ -348,6 +348,12 @@ def test_evaluation_outputs_writes_share_safe_summary_md(tmp_path: Path) -> None
     assert "- min_timestamp: `2024-01-02`" in summary
     assert "- max_timestamp: `2024-01-02`" in summary
     assert "| signal | label | mean_ic | mean_rankic |" in summary
+    assert "## Signal/Label Coverage Summary" in summary
+    assert (
+        "| signal | label | mean_n_obs | min_n_obs | non_empty_period_count |"
+        in summary
+    )
+    assert "| signal | label | 2 | 2 | 1 |" in summary
     assert "| signal | label | top_bottom_label_value_spread_mean |" in summary
     assert "source_asset_id" not in summary
     assert "data/raw" not in summary

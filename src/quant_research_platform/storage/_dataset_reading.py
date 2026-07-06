@@ -9,7 +9,11 @@ from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_date_bounds,
+    time_window_timestamp_bounds,
+)
 from quant_research_platform.storage._dataset_manifest_validation import (
     manifest_has_runtime_metadata,
     validate_manifest_runtime_metadata,
@@ -189,8 +193,8 @@ def filter_frame_by_time_window(
     if timestamp_column not in frame:
         raise ValueError("time_window_timestamp_column_not_selected")
     values = pd.to_datetime(frame[timestamp_column], errors="coerce")
-    dates = values.dt.date
-    mask = (dates >= time_window.start) & (dates <= time_window.end)
+    start, end = time_window_timestamp_bounds(time_window)
+    mask = values.ge(pd.Timestamp(start)) & values.le(pd.Timestamp(end))
     return frame.loc[mask.fillna(False)].copy()
 
 
@@ -211,9 +215,10 @@ def prune_paths_for_time_window(
     )
     if partition_columns != ("year",):
         return paths
+    start, end = time_window_date_bounds(time_window)
     years = {
         f"year={year}"
-        for year in range(int(time_window.start.year), int(time_window.end.year) + 1)
+        for year in range(int(start.year), int(end.year) + 1)
     }
     return tuple(
         path for path in paths if relative_partition_label(data_root, path) in years
@@ -229,11 +234,10 @@ def parquet_filters_for_time_window(
         return None
     if timestamp_column is None:
         raise ValueError("time_window_not_supported")
-    start = pd.Timestamp(time_window.start)
-    exclusive_end = pd.Timestamp(time_window.end) + pd.Timedelta(days=1)
+    start, end = time_window_timestamp_bounds(time_window)
     return [
-        (timestamp_column, ">=", start),
-        (timestamp_column, "<", exclusive_end),
+        (timestamp_column, ">=", pd.Timestamp(start)),
+        (timestamp_column, "<=", pd.Timestamp(end)),
     ]
 
 

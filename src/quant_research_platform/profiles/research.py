@@ -216,7 +216,7 @@ def _crypto_binance_research_profile() -> ResearchProfile:
         markets=_crypto_market_registry(),
         outputs=output_catalog(),
         source_interim_catalogs=_crypto_binance_source_interim_catalogs(),
-        source_id=SourceId("binance"),
+        source_id=_crypto_active_source_id(),
         build_prediction_catalog=_empty_prediction_catalog,
         build_portfolio_catalog=_empty_portfolio_catalog,
         materialize_interim_data=_materialize_crypto_binance_interim_data,
@@ -267,6 +267,10 @@ def _crypto_binance_source_interim_catalogs() -> Mapping[str, InterimDataCatalog
 
 def _active_source_id() -> SourceId:
     return SourceId(next(iter(_a_share_csmar_source_interim_catalogs())))
+
+
+def _crypto_active_source_id() -> SourceId:
+    return SourceId(next(iter(_crypto_binance_source_interim_catalogs())))
 
 
 def _materialize_a_share_csmar_interim_data(

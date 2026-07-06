@@ -102,6 +102,38 @@ def test_forward_return_labels_treat_non_finite_prices_as_invalid() -> None:
     assert not np.isinf(result[[one_step_label]].to_numpy(dtype="float64")).any()
 
 
+def test_forward_return_minute_contiguous_labels_do_not_cross_gap() -> None:
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["asset_a", "asset_a", "asset_a", "asset_a", "asset_a"],
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-07-06 00:00",
+                    "2026-07-06 00:01",
+                    "2026-07-06 00:03",
+                    "2026-07-06 00:04",
+                    "2026-07-06 00:05",
+                ]
+            ),
+            "close": [100.0, 101.0, 103.0, 104.0, 105.0],
+        }
+    )
+
+    result = add_forward_return_labels(
+        panel,
+        horizons=(1,),
+        frequency=DataFrequency.MINUTE,
+        execution_price_column="close",
+        expected_interval=pd.Timedelta(minutes=1),
+        require_contiguous=True,
+    )
+
+    column = forward_return_label_column(1, DataFrequency.MINUTE)
+    assert pd.isna(result.loc[0, column])
+    assert pd.isna(result.loc[1, column])
+    assert result.loc[2, column] == pytest.approx(105.0 / 104.0 - 1.0)
+
+
 def test_forward_return_valid_bar_read_window_uses_sparse_asset_keys() -> None:
     panel_keys = pd.DataFrame(
         [

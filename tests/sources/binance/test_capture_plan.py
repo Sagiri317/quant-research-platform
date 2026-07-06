@@ -56,3 +56,74 @@ def test_binance_capture_plan_rejects_unsupported_data_kind() -> None:
             depth_limit=20,
             chunk_size=50,
         )
+
+
+def test_binance_capture_plan_rejects_invalid_symbols_and_duplicate_symbols() -> None:
+    with pytest.raises(ValueError, match="invalid_binance_symbol"):
+        BinanceCapturePlan(
+            capture_id="capture_20260706_000000",
+            market_type="spot",
+            data_kind="klines",
+            symbols=("btc_usdt",),
+            interval="1m",
+            start_time="2026-07-06T00:00:00Z",
+            end_time="2026-07-06T02:00:00Z",
+            limit=120,
+            depth_limit=20,
+            chunk_size=50,
+        )
+    with pytest.raises(ValueError, match="duplicate_binance_symbols"):
+        BinanceCapturePlan(
+            capture_id="capture_20260706_000000",
+            market_type="spot",
+            data_kind="klines",
+            symbols=("BTCUSDT", "BTCUSDT"),
+            interval="1m",
+            start_time="2026-07-06T00:00:00Z",
+            end_time="2026-07-06T02:00:00Z",
+            limit=120,
+            depth_limit=20,
+            chunk_size=50,
+        )
+
+
+def test_binance_capture_plan_rejects_invalid_utc_window_and_limits() -> None:
+    with pytest.raises(ValueError, match="invalid_binance_capture_time_order"):
+        BinanceCapturePlan(
+            capture_id="capture_20260706_000000",
+            market_type="spot",
+            data_kind="klines",
+            symbols=("BTCUSDT",),
+            interval="1m",
+            start_time="2026-07-06T02:00:00Z",
+            end_time="2026-07-06T00:00:00Z",
+            limit=120,
+            depth_limit=20,
+            chunk_size=50,
+        )
+    with pytest.raises(ValueError, match="invalid_binance_start_time"):
+        BinanceCapturePlan(
+            capture_id="capture_20260706_000000",
+            market_type="spot",
+            data_kind="klines",
+            symbols=("BTCUSDT",),
+            interval="1m",
+            start_time="2026-07-06T00:00:00",
+            end_time="2026-07-06T02:00:00Z",
+            limit=120,
+            depth_limit=20,
+            chunk_size=50,
+        )
+    with pytest.raises(ValueError, match="binance_capture_limit_too_large"):
+        BinanceCapturePlan(
+            capture_id="capture_20260706_000000",
+            market_type="spot",
+            data_kind="klines",
+            symbols=("BTCUSDT",),
+            interval="1m",
+            start_time="2026-07-06T00:00:00Z",
+            end_time="2026-07-06T02:00:00Z",
+            limit=1001,
+            depth_limit=20,
+            chunk_size=50,
+        )

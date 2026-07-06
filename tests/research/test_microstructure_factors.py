@@ -4,9 +4,11 @@ import math
 
 import pandas as pd
 
+from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.research.factors.microstructure import (
     MICROSTRUCTURE_FACTOR_COLUMNS,
     calculate_microstructure_factors,
+    microstructure_factor_definitions,
 )
 
 
@@ -51,13 +53,13 @@ def test_microstructure_factor_calculation_outputs_approved_columns() -> None:
     assert first["depth_imbalance"] == (7.0 - 5.0) / (7.0 + 5.0)
     assert first["microprice"] == (102.0 * 2.0 + 100.0 * 2.0) / 4.0
     assert first["microprice_deviation"] == first["microprice"] / 101.0 - 1.0
-    assert first["trade_intensity_5m"] == 3
-    assert first["signed_volume_5m"] == -1.0
-    assert first["flow_imbalance_5m"] == -1.0 / 10.0
+    assert math.isnan(first["trade_intensity_5m"])
+    assert math.isnan(first["signed_volume_5m"])
+    assert math.isnan(first["flow_imbalance_5m"])
     second = result.iloc[1]
-    assert second["trade_intensity_5m"] == 7
-    assert second["signed_volume_5m"] == 1.0
-    assert second["flow_imbalance_5m"] == 1.0 / 15.0
+    assert math.isnan(second["trade_intensity_5m"])
+    assert math.isnan(second["signed_volume_5m"])
+    assert math.isnan(second["flow_imbalance_5m"])
 
 
 def test_microstructure_factor_calculation_handles_missing_and_zero_denominators(
@@ -91,3 +93,61 @@ def test_microstructure_factor_calculation_handles_missing_and_zero_denominators
     assert result.loc[1, "spread"] == -1.0
     assert result.loc[1, "depth_imbalance"] == 0.0
     assert math.isnan(result.loc[1, "flow_imbalance_5m"])
+
+
+def test_microstructure_rolling_5m_requires_full_contiguous_observed_window() -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["crypto"] * 6,
+            "asset_id": ["btc_usdt"] * 6,
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-07-06 00:00",
+                    "2026-07-06 00:01",
+                    "2026-07-06 00:02",
+                    "2026-07-06 00:04",
+                    "2026-07-06 00:05",
+                    "2026-07-06 00:06",
+                ]
+            ),
+            "best_bid": [100.0] * 6,
+            "best_ask": [101.0] * 6,
+            "bid_quantity": [1.0] * 6,
+            "ask_quantity": [1.0] * 6,
+            "bid_depth": [2.0] * 6,
+            "ask_depth": [2.0] * 6,
+            "mid_price": [100.5] * 6,
+            "trade_count": [1] * 6,
+            "trade_flow_observed": [True, True, True, False, True, True],
+            "signed_volume": [1.0] * 6,
+            "volume": [2.0] * 6,
+        }
+    )
+
+    result = calculate_microstructure_factors(frame)
+
+    assert result["trade_intensity_5m"].isna().all()
+    assert result["signed_volume_5m"].isna().all()
+    assert result["flow_imbalance_5m"].isna().all()
+
+
+def test_microstructure_definitions_keep_point_in_time_factors_unwindowed() -> None:
+    definitions = {
+        definition.factor_id: definition
+        for definition in microstructure_factor_definitions(
+            market_id=MarketId("crypto"),
+            required_input_data_id="market_panel_1m",
+        )
+    }
+
+    assert definitions["spread"].required_windows == ()
+    assert definitions["spread"].lookback_window is None
+    assert definitions["spread"].window is None
+    assert definitions["spread"].timing_semantics == "bar_close_asof_quote"
+    assert definitions["trade_intensity_5m"].required_windows == (5,)
+    assert definitions["trade_intensity_5m"].lookback_window == 5
+    assert definitions["trade_intensity_5m"].window == 5
+    assert (
+        definitions["trade_intensity_5m"].timing_semantics
+        == "clock_contiguous_5m_after_bar_close"
+    )
