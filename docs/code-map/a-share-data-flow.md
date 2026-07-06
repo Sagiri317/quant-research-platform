@@ -8,13 +8,13 @@
 internal-provider raw exports -> source contracts -> interim normalization -> dataset artifacts -> research datasets -> factors/features/labels -> evaluation/portfolio/report
 ```
 
-当前 CSMAR 默认日频边界保持为 `2014-01-01` 到 `2025-12-31`；
+当前 A-share 日频默认边界保持为 `2014-01-01` 到 `2025-12-31`；
 调用方显式传入 start/end date 时仍以调用方窗口为准。repo-root 数据链路使用
 统一 storage layout：
 
 ```text
-data/raw/csmar
--> data/interim/csmar
+internal-provider raw root
+-> internal-provider interim dataset root
 -> data/processed/a_share
 -> data/research/a_share
 -> evaluation output
@@ -24,7 +24,7 @@ data/raw/csmar
 
 ## sources 层
 
-sources 层负责内部供应商 raw schema、字段映射、raw/interim 转换和 source-local ID。它不承载 A 股市场语义、研究算法或对外 provider selector。
+sources 层负责内部供应商 raw schema、字段映射、raw/interim 转换和内部输入标识。它不承载 A 股市场语义、研究算法或对外数据源选择面。
 
 ## markets 层
 
@@ -32,7 +32,7 @@ sources 层负责内部供应商 raw schema、字段映射、raw/interim 转换�
 
 A-share active processed profile 仍为日频。minute/tick 只由通用 data frequency contract 表达，A-share processed materialization 对 active profile 以日频 fail-closed。mask owner 是 `markets/implementations/a_share/processed/annotations.py`；research/factors、research/labels 和 research/evaluations 不重算 A-share mask。
 
-`markets/implementations/a_share/processed/materializer.py` 保留 `materialize_processed_data()` 入口和窄 orchestration。source ID mapping 位于 `source_ids.py`；dependency graph、profile frequency、input contract 和 required column validation 位于 `materialization_validation.py`；dataset root、processed input read、chunk iteration 和 write/inspect 位于 `materialization_io.py`。panel、annotation、factor 和 label materialization 继续通过当前 processed owner modules 调用 panel compute、`annotations.derive_annotations()`、factor definitions 和 label definitions。
+`markets/implementations/a_share/processed/materializer.py` 保留 `materialize_processed_data()` 入口和窄 orchestration。内部输入映射由 processed owner-local mapping module 负责；dependency graph、profile frequency、input contract 和 required column validation 位于 `materialization_validation.py`；dataset root、processed input read、chunk iteration 和 write/inspect 位于 `materialization_io.py`。panel、annotation、factor 和 label materialization 继续通过当前 processed owner modules 调用 panel compute、`annotations.derive_annotations()`、factor definitions 和 label definitions。
 
 processed owner 内部跨文件生产 helper 使用非下划线 owner-local 名称，并且不从 `processed/__init__.py` 重导出。下划线 helper 只表示同文件私有实现细节。
 
