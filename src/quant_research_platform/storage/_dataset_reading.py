@@ -12,7 +12,7 @@ import pandas as pd
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_date_bounds,
-    time_window_timestamp_bounds,
+    time_window_timestamp_interval,
 )
 from quant_research_platform.storage._dataset_manifest_validation import (
     manifest_has_runtime_metadata,
@@ -193,8 +193,10 @@ def filter_frame_by_time_window(
     if timestamp_column not in frame:
         raise ValueError("time_window_timestamp_column_not_selected")
     values = pd.to_datetime(frame[timestamp_column], errors="coerce")
-    start, end = time_window_timestamp_bounds(time_window)
-    mask = values.ge(pd.Timestamp(start)) & values.le(pd.Timestamp(end))
+    start, end, end_inclusive = time_window_timestamp_interval(time_window)
+    end_timestamp = pd.Timestamp(end)
+    end_mask = values.le(end_timestamp) if end_inclusive else values.lt(end_timestamp)
+    mask = values.ge(pd.Timestamp(start)) & end_mask
     return frame.loc[mask.fillna(False)].copy()
 
 
@@ -234,10 +236,11 @@ def parquet_filters_for_time_window(
         return None
     if timestamp_column is None:
         raise ValueError("time_window_not_supported")
-    start, end = time_window_timestamp_bounds(time_window)
+    start, end, end_inclusive = time_window_timestamp_interval(time_window)
+    upper_operator = "<=" if end_inclusive else "<"
     return [
         (timestamp_column, ">=", pd.Timestamp(start)),
-        (timestamp_column, "<=", pd.Timestamp(end)),
+        (timestamp_column, upper_operator, pd.Timestamp(end)),
     ]
 
 

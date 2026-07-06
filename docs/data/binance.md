@@ -4,7 +4,8 @@
 
 ## Raw Envelope
 
-Binance raw input 只接受 JSONL。每行必须是 canonical envelope，顶层字段为：
+Binance raw input 只接受 JSONL。每行必须是 canonical envelope，所有
+`data_kind` 共同必需的顶层字段为：
 
 ```text
 source
@@ -13,7 +14,6 @@ data_kind
 symbol
 captured_at
 payload
-interval
 ```
 
 `source` 必须是 `binance`，`market_type` 必须是 `spot`。`captured_at`
@@ -26,9 +26,14 @@ agg_trades
 depth
 ```
 
-`interval` 只对 `klines` 必填，且当前只接受 `interval=1m`。`agg_trades` 和 `depth` 不声明 `interval`。`klines` 的 `payload` 是 connector 返回的 kline array，允许 connector 追加额外字段；当前语义校验只读取已批准字段。`agg_trades` 和 `depth` 的 `payload` 是 connector 返回的 object。裸 payload、非 envelope JSON、非 JSONL 文件和 unsupported data kind 都不是当前合同。
+Conditional fields:
 
-Raw envelope structure 不因语义校验而改变。当前 raw validation 会检查 kline OHLC、volume、trade count、aggregate trade price/quantity/id range，以及 depth price/quantity。双边 best bid/ask 同时存在时必须满足 bid < ask；one-sided depth payload 可保留为 raw valid，后续 panel 层用 quote observation diagnostics 表达不可用 quote。
+- `klines`: `interval` required and must be `1m`.
+- `agg_trades` / `depth`: `interval` must be absent.
+
+`klines` 的 `payload` 是 connector 返回的 kline array，允许 connector 追加额外字段；当前语义校验只读取已批准字段。`agg_trades` 和 `depth` 的 `payload` 是 connector 返回的 object。裸 payload、非 envelope JSON、非 JSONL 文件和 unsupported data kind 都不是当前合同。
+
+Raw envelope structure 不因语义校验而改变。当前 raw validation 会检查 kline OHLC、volume、trade count、aggregate trade price/quantity/id range，以及 depth price/quantity。Kline semantic validation 还要求 `taker_buy_volume <= volume`、`taker_buy_quote_volume <= quote_volume`，numeric payload 拒绝 `NaN`、`inf`、`-inf` 和 nonnumeric values。双边 best bid/ask 同时存在时必须满足 bid < ask；one-sided depth payload 可保留为 raw valid，后续 panel 层用 quote observation diagnostics 表达不可用 quote。
 
 ## Raw Layout
 

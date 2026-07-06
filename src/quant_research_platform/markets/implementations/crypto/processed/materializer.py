@@ -16,6 +16,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     catalog as processed_catalog_module,
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
+    materialization_dependencies,
     materialize_factors,
     materialize_labels,
     materialize_panel,
@@ -63,11 +64,16 @@ def materialize_processed_data(
         spec = specs.get(data_id)
         if spec is None:
             continue
+        target_time_window = _target_time_window(
+            spec,
+            specs=specs,
+            core_time_window=time_window,
+        )
         written[data_id] = _materialize_one(
             spec,
             layout=layout,
             source_id=source_id,
-            time_window=time_window,
+            time_window=target_time_window,
             resource_policy=policy,
         )
     return written
@@ -120,6 +126,25 @@ def _materialize_one(
             resource_policy=resource_policy,
         )
     raise ValueError(f"unsupported_crypto_processed_kind: {spec.kind}")
+
+
+def _target_time_window(
+    spec: ProcessedDataSpec,
+    *,
+    specs: Mapping[str, ProcessedDataSpec],
+    core_time_window: TimeWindow,
+) -> TimeWindow:
+    if spec.data_id != MARKET_PANEL_DATA_ID:
+        return core_time_window
+    if any(
+        data_id in specs
+        for data_id in (
+            MICROSTRUCTURE_PROCESSED_DATA_ID,
+            FORWARD_RETURNS_PROCESSED_DATA_ID,
+        )
+    ):
+        return materialization_dependencies.panel_dependency_window(core_time_window)
+    return core_time_window
 
 
 __all__ = ["materialize_processed_data", "processed_catalog"]

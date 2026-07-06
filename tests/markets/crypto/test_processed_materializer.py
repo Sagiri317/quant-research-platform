@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.contracts.data import ProcessedDataKind
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    DataGrain,
+    InterimDataSpec,
+    ProcessedDataKind,
+)
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
@@ -32,7 +39,11 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.sources.binance.interim import materialize_interim_data
-from quant_research_platform.storage.datasets import DatasetReadMode, read_dataset
+from quant_research_platform.storage.datasets import (
+    DatasetReadMode,
+    read_dataset,
+    write_dataset,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -138,6 +149,128 @@ def test_crypto_processed_materializer_uses_chunked_reads(
     assert ("labels", "market_panel_1m", DatasetReadMode.CHUNKED) in calls
 
 
+def test_crypto_factor_time_window_uses_prior_warmup_minutes() -> None:
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        materialization_dependencies,
+    )
+
+    core = TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00")
+
+    read_window = materialization_dependencies.factor_read_window(core)
+
+    assert read_window == TimeWindow("2026-07-06T00:06:00", "2026-07-06T00:12:00")
+
+
+def test_crypto_label_time_window_uses_future_lookahead_minutes() -> None:
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        materialization_dependencies,
+    )
+
+    core = TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00")
+
+    read_window = materialization_dependencies.label_read_window(core)
+
+    assert read_window == TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:28:00")
+
+
+def test_crypto_materializer_materializes_panel_dependency_window_for_factor_label(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, TimeWindow]] = []
+
+    def record(name: str):
+        def wrapped(*_: Any, time_window: TimeWindow, **__: Any) -> object:
+            calls.append((name, time_window))
+            return object()
+
+        return wrapped
+
+    monkeypatch.setattr(materialize_panel, "write_panel", record("panel"))
+    monkeypatch.setattr(materialize_factors, "write_factors", record("factors"))
+    monkeypatch.setattr(materialize_labels, "write_labels", record("labels"))
+
+    core = TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00")
+    materializer.materialize_processed_data(
+        layout=StorageLayout(project_root=tmp_path),
+        source_id=SourceId("synthetic_crypto"),
+        time_window=core,
+        kinds=frozenset({ProcessedDataKind.FACTOR, ProcessedDataKind.LABEL}),
+    )
+
+    assert calls == [
+        ("panel", TimeWindow("2026-07-06T00:06:00", "2026-07-06T00:28:00")),
+        ("factors", core),
+        ("labels", core),
+    ]
+
+
+def test_crypto_factor_label_emit_only_core_window(tmp_path: Path) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    catalog = processed_catalog()
+    panel_spec = catalog.get("market_panel_1m")
+    factor_spec = catalog.get("microstructure")
+    label_spec = catalog.get("forward_returns")
+    panel_root = layout.processed_data_root(
+        "crypto",
+        ProcessedDataKind.PANEL,
+        "market_panel_1m",
+    )
+    write_dataset(panel_root, _panel_frame(minutes=30), spec=panel_spec)
+
+    core = TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00")
+    materialize_factors.write_factors(
+        factor_spec,
+        layout=layout,
+        time_window=core,
+        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+    )
+    materialize_labels.write_labels(
+        label_spec,
+        layout=layout,
+        time_window=core,
+        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+    )
+
+    factors = read_dataset(
+        layout.processed_data_root("crypto", ProcessedDataKind.FACTOR, "microstructure")
+    )
+    labels = read_dataset(
+        layout.processed_data_root("crypto", ProcessedDataKind.LABEL, "forward_returns")
+    )
+
+    expected_timestamps = [
+        pd.Timestamp("2026-07-06 00:10:00"),
+        pd.Timestamp("2026-07-06 00:11:00"),
+        pd.Timestamp("2026-07-06 00:12:00"),
+    ]
+    assert factors["timestamp"].tolist() == expected_timestamps
+    assert labels["timestamp"].tolist() == expected_timestamps
+    assert not factors["trade_intensity_5m"].isna().any()
+    assert not labels["forward_return_15m"].isna().any()
+
+
+def test_synthetic_crypto_normalized_interim_can_generate_non_binance_panel(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    source_id = SourceId("synthetic_crypto")
+    _write_synthetic_crypto_interim(layout, source_id)
+
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=source_id,
+        time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
+        data_ids=("market_panel_1m",),
+    )
+
+    panel = read_dataset(
+        layout.processed_data_root("crypto", ProcessedDataKind.PANEL, "market_panel_1m")
+    )
+    assert panel["asset_id"].tolist() == ["btc_usdt"]
+    assert "source_asset_id" not in panel.columns
+
+
 def test_crypto_panel_reads_matching_trade_and_depth_once_per_bars_chunk(
     tmp_path: Path,
     monkeypatch,
@@ -189,6 +322,188 @@ def _count_yielded_chunks(iterator, counts: dict[str, int], root_name: str):
     for chunk in iterator:
         counts[root_name] += 1
         yield chunk
+
+
+def _panel_frame(*, minutes: int) -> pd.DataFrame:
+    timestamps = pd.date_range("2026-07-06 00:00:00", periods=minutes, freq="min")
+    return pd.DataFrame(
+        {
+            "market_id": ["crypto"] * minutes,
+            "asset_id": ["btc_usdt"] * minutes,
+            "timestamp": timestamps,
+            "open": [100.0 + index for index in range(minutes)],
+            "high": [101.0 + index for index in range(minutes)],
+            "low": [99.0 + index for index in range(minutes)],
+            "close": [100.5 + index for index in range(minutes)],
+            "volume": [10.0] * minutes,
+            "quote_volume": [1005.0] * minutes,
+            "trade_count": [2.0] * minutes,
+            "trade_flow_observed": [True] * minutes,
+            "taker_buy_volume": [4.0] * minutes,
+            "taker_sell_volume": [6.0] * minutes,
+            "signed_volume": [1.0] * minutes,
+            "best_bid": [100.0 + index for index in range(minutes)],
+            "best_ask": [100.2 + index for index in range(minutes)],
+            "quote_observed": [True] * minutes,
+            "quote_age_seconds": [1.0] * minutes,
+            "bid_quantity": [1.5] * minutes,
+            "ask_quantity": [1.0] * minutes,
+            "bid_depth": [1.5] * minutes,
+            "ask_depth": [1.0] * minutes,
+            "mid_price": [100.1 + index for index in range(minutes)],
+            "eligible": [True] * minutes,
+        }
+    )
+
+
+def _write_synthetic_crypto_interim(layout: StorageLayout, source_id: SourceId) -> None:
+    write_dataset(
+        layout.interim_data_root(source_id, "market_bars_1m"),
+        pd.DataFrame(
+            {
+                "source_asset_id": ["BTCUSDT"],
+                "timestamp": pd.to_datetime(["2026-07-06 00:00:00"]),
+                "open_time": pd.to_datetime(["2026-07-06 00:00:00"]),
+                "close_time": pd.to_datetime(["2026-07-06 00:00:59"]),
+                "open": [100.0],
+                "high": [101.0],
+                "low": [99.0],
+                "close": [100.5],
+                "volume": [10.0],
+                "quote_volume": [1005.0],
+                "trade_count": [1],
+                "taker_buy_volume": [4.0],
+                "taker_buy_quote_volume": [402.0],
+                "source_market_type": ["spot"],
+                "interval": ["1m"],
+            }
+        ),
+        spec=_interim_spec(
+            source_id,
+            data_id="market_bars_1m",
+            columns=(
+                "source_asset_id",
+                "timestamp",
+                "open_time",
+                "close_time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "quote_volume",
+                "trade_count",
+                "taker_buy_volume",
+                "taker_buy_quote_volume",
+                "source_market_type",
+                "interval",
+            ),
+            primary_key=("source_asset_id", "timestamp"),
+            frequency=DataFrequency.MINUTE,
+            grain=DataGrain.ASSET_TIMESTAMP,
+        ),
+    )
+    write_dataset(
+        layout.interim_data_root(source_id, "aggregate_trades_tick"),
+        pd.DataFrame(
+            {
+                "source_asset_id": ["BTCUSDT"],
+                "timestamp": pd.to_datetime(["2026-07-06 00:00:01"]),
+                "aggregate_trade_id": [1],
+                "price": [100.1],
+                "quantity": [2.0],
+                "quote_quantity": [200.2],
+                "first_trade_id": [1],
+                "last_trade_id": [1],
+                "is_buyer_maker": [False],
+                "taker_side": ["buy"],
+                "signed_quantity": [2.0],
+                "source_market_type": ["spot"],
+            }
+        ),
+        spec=_interim_spec(
+            source_id,
+            data_id="aggregate_trades_tick",
+            columns=(
+                "source_asset_id",
+                "timestamp",
+                "aggregate_trade_id",
+                "price",
+                "quantity",
+                "quote_quantity",
+                "first_trade_id",
+                "last_trade_id",
+                "is_buyer_maker",
+                "taker_side",
+                "signed_quantity",
+                "source_market_type",
+            ),
+            primary_key=("source_asset_id", "timestamp", "aggregate_trade_id"),
+            frequency=DataFrequency.TICK,
+            grain=DataGrain.TRADE_EVENT,
+        ),
+    )
+    write_dataset(
+        layout.interim_data_root(source_id, "depth_levels_tick"),
+        pd.DataFrame(
+            {
+                "source_asset_id": ["BTCUSDT", "BTCUSDT"],
+                "timestamp": pd.to_datetime(
+                    ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
+                ),
+                "side": ["bid", "ask"],
+                "level": [1, 1],
+                "price": [100.0, 100.2],
+                "quantity": [1.5, 1.0],
+                "source_market_type": ["spot", "spot"],
+            }
+        ),
+        spec=_interim_spec(
+            source_id,
+            data_id="depth_levels_tick",
+            columns=(
+                "source_asset_id",
+                "timestamp",
+                "side",
+                "level",
+                "price",
+                "quantity",
+                "source_market_type",
+            ),
+            primary_key=("source_asset_id", "timestamp", "side", "level"),
+            frequency=DataFrequency.TICK,
+            grain=DataGrain.ORDER_BOOK_LEVEL,
+        ),
+    )
+
+
+def _interim_spec(
+    source_id: SourceId,
+    *,
+    data_id: str,
+    columns: tuple[str, ...],
+    primary_key: tuple[str, ...],
+    frequency: DataFrequency,
+    grain: DataGrain,
+) -> InterimDataSpec:
+    return InterimDataSpec(
+        data_id=data_id,
+        source_id=source_id,
+        frequency=frequency,
+        grain=grain,
+        primary_key=primary_key,
+        partition_columns=("year",),
+        column_roles={
+            column: (
+                ColumnRole.TIMESTAMP
+                if column == "timestamp"
+                else ColumnRole.KEY
+                if column in primary_key
+                else ColumnRole.CONTEXT
+            )
+            for column in columns
+        },
+    )
 
 
 def test_crypto_processed_chunk_boundaries_match_full_frame_calculations(

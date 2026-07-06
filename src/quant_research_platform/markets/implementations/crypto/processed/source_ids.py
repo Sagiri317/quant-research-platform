@@ -5,11 +5,15 @@ from __future__ import annotations
 from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.sources.binance import ids as binance_ids
 
+MARKET_BARS_SOURCE_DATA_ID = binance_ids.market_bars_data_id()
+AGGREGATE_TRADES_SOURCE_DATA_ID = binance_ids.aggregate_trades_data_id()
+DEPTH_LEVELS_SOURCE_DATA_ID = binance_ids.depth_levels_data_id()
+
 
 def market_bars_source_data_id(spec: ProcessedDataSpec) -> str:
     return _exactly_one(
         spec,
-        expected=binance_ids.market_bars_data_id(),
+        expected=MARKET_BARS_SOURCE_DATA_ID,
         error="panel_market_bars_source_input_not_unique",
     )
 
@@ -17,7 +21,7 @@ def market_bars_source_data_id(spec: ProcessedDataSpec) -> str:
 def aggregate_trades_source_data_id(spec: ProcessedDataSpec) -> str:
     return _exactly_one(
         spec,
-        expected=binance_ids.aggregate_trades_data_id(),
+        expected=AGGREGATE_TRADES_SOURCE_DATA_ID,
         error="panel_aggregate_trades_source_input_not_unique",
     )
 
@@ -25,7 +29,7 @@ def aggregate_trades_source_data_id(spec: ProcessedDataSpec) -> str:
 def depth_levels_source_data_id(spec: ProcessedDataSpec) -> str:
     return _exactly_one(
         spec,
-        expected=binance_ids.depth_levels_data_id(),
+        expected=DEPTH_LEVELS_SOURCE_DATA_ID,
         error="panel_depth_levels_source_input_not_unique",
     )
 
@@ -45,6 +49,9 @@ def _exactly_one(
 
 
 __all__ = [
+    "AGGREGATE_TRADES_SOURCE_DATA_ID",
+    "DEPTH_LEVELS_SOURCE_DATA_ID",
+    "MARKET_BARS_SOURCE_DATA_ID",
     "aggregate_trades_source_data_id",
     "depth_levels_source_data_id",
     "market_bars_source_data_id",

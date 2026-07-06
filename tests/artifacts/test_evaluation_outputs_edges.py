@@ -357,3 +357,59 @@ def test_evaluation_outputs_writes_share_safe_summary_md(tmp_path: Path) -> None
     assert "| signal | label | top_bottom_label_value_spread_mean |" in summary
     assert "source_asset_id" not in summary
     assert "data/raw" not in summary
+
+
+def test_summary_markdown_escapes_pipe_characters(tmp_path: Path) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(
+            replace(
+                make_artifact_signal_spec(),
+                signal_id="sig|nal",
+                source_column="sig|nal",
+            ),
+        ),
+        label_columns=("lab|el",),
+    )
+    report_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+    metrics = make_artifact_evaluation_metrics_frame().assign(
+        signal="sig|nal",
+        label="lab|el",
+    )
+    grouped = make_artifact_evaluation_grouped_label_values_frame().assign(
+        signal="sig|nal",
+        label="lab|el",
+    )
+    ic_summary = make_artifact_evaluation_ic_summary_frame().assign(
+        signal="sig|nal",
+        label="lab|el",
+    )
+    spread = make_artifact_evaluation_group_spread_summary_frame().assign(
+        signal="sig|nal",
+        label="lab|el",
+    )
+
+    output_bundle = outputs.write_evaluation_outputs(
+        metrics,
+        grouped,
+        ic_summary=ic_summary,
+        group_spread_summary=spread,
+        evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
+        spec=spec,
+        output_spec=report_spec,
+        layout=StorageLayout(project_root=tmp_path),
+    )
+    summary = (output_bundle / "summary.md").read_text(encoding="utf-8")
+
+    assert "sig\\|nal" in summary
+    assert "lab\\|el" in summary
+    assert "| sig|nal |" not in summary
+    assert "| lab|el |" not in summary
+    assert "source_asset_id" not in summary
+    assert "data/raw" not in summary

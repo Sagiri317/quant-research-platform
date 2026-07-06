@@ -59,8 +59,22 @@ def compute_market_panel(
     panel.loc[stale_or_missing, list(quote_columns)] = pd.NA
     panel["eligible"] = (
         _numeric(panel, "open").gt(0.0)
+        & _numeric(panel, "high").gt(0.0)
+        & _numeric(panel, "low").gt(0.0)
         & _numeric(panel, "high").ge(_numeric(panel, "low"))
         & _numeric(panel, "close").gt(0.0)
+        & _numeric(panel, "high").ge(
+            pd.concat(
+                (_numeric(panel, "open"), _numeric(panel, "close")),
+                axis=1,
+            ).max(axis=1)
+        )
+        & _numeric(panel, "low").le(
+            pd.concat(
+                (_numeric(panel, "open"), _numeric(panel, "close")),
+                axis=1,
+            ).min(axis=1)
+        )
     )
     return (
         _stabilize_panel_schema(panel.loc[:, PANEL_COLUMNS])
@@ -133,8 +147,8 @@ def _asof_quotes(
             continue
         quote = candidates.iloc[-1]
         age = pd.Timestamp(bar["close_time"]) - pd.Timestamp(quote["quote_timestamp"])
-        observed = pd.notna(age) and age <= max_quote_age
-        row.update(quote.drop(labels=["quote_timestamp"]).to_dict())
+        observed = pd.notna(age) and age <= max_quote_age and bool(quote["quote_valid"])
+        row.update(quote.drop(labels=["quote_timestamp", "quote_valid"]).to_dict())
         row["quote_age_seconds"] = age.total_seconds() if observed else pd.NA
         row["quote_observed"] = bool(observed)
         result_rows.append(row)
@@ -160,17 +174,32 @@ def _quote_snapshots(depth: pd.DataFrame) -> pd.DataFrame:
         aggfunc="sum",
     )
     quotes = pd.DataFrame(index=best.index)
-    quotes["best_bid"] = best.get(("price", "bid"))
-    quotes["best_ask"] = best.get(("price", "ask"))
-    quotes["bid_quantity"] = best.get(("quantity", "bid"))
-    quotes["ask_quantity"] = best.get(("quantity", "ask"))
-    quotes["bid_depth"] = depth_totals.get("bid")
-    quotes["ask_depth"] = depth_totals.get("ask")
+    quotes["best_bid"] = _pivot_value(best, ("price", "bid"))
+    quotes["best_ask"] = _pivot_value(best, ("price", "ask"))
+    quotes["bid_quantity"] = _pivot_value(best, ("quantity", "bid"))
+    quotes["ask_quantity"] = _pivot_value(best, ("quantity", "ask"))
+    quotes["bid_depth"] = _pivot_value(depth_totals, "bid")
+    quotes["ask_depth"] = _pivot_value(depth_totals, "ask")
     quotes["mid_price"] = (quotes["best_bid"] + quotes["best_ask"]) / 2.0
+    required = ("best_bid", "best_ask", "bid_quantity", "ask_quantity")
+    quotes["quote_valid"] = (
+        quotes.loc[:, required].notna().all(axis=1)
+        & quotes["best_bid"].gt(0.0)
+        & quotes["best_ask"].gt(0.0)
+        & quotes["bid_quantity"].ge(0.0)
+        & quotes["ask_quantity"].ge(0.0)
+        & quotes["best_bid"].lt(quotes["best_ask"])
+    )
     return quotes.reset_index().sort_values(
         ["asset_id", "quote_timestamp"],
         kind="mergesort",
     )
+
+
+def _pivot_value(frame: pd.DataFrame, key: object) -> pd.Series:
+    if key in frame:
+        return pd.to_numeric(frame[key], errors="coerce")
+    return pd.Series(pd.NA, index=frame.index, dtype="Float64")
 
 
 def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:

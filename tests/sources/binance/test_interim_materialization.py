@@ -101,6 +101,68 @@ def test_binance_interim_materializer_writes_multiple_batches(
     assert len(market_bars) == 5
 
 
+def test_binance_date_only_interim_end_includes_full_day(tmp_path: Path) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    for offset in range(2):
+        _append_jsonl(
+            raw_root / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-06.jsonl",
+            _kline_envelope(offset),
+        )
+        _append_jsonl(
+            raw_root / "spot" / "agg_trades" / "BTCUSDT" / "2026-07-06.jsonl",
+            _trade_envelope(offset),
+        )
+        _append_jsonl(
+            raw_root / "spot" / "depth" / "BTCUSDT" / "2026-07-06.jsonl",
+            _depth_envelope(offset),
+        )
+
+    result = materialize_interim_data(
+        layout=StorageLayout(project_root=tmp_path),
+        start_date="2026-07-06",
+        end_date="2026-07-06",
+        row_batch_size=1,
+    )
+
+    assert len(read_dataset(result.artifact_roots["market_bars_1m"])) == 2
+    assert len(read_dataset(result.artifact_roots["aggregate_trades_tick"])) == 2
+    assert len(read_dataset(result.artifact_roots["depth_levels_tick"])) == 6
+
+
+def test_binance_datetime_interim_end_filters_precisely(tmp_path: Path) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    for offset in range(3):
+        _append_jsonl(
+            raw_root / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-06.jsonl",
+            _kline_envelope(offset),
+        )
+        _append_jsonl(
+            raw_root / "spot" / "agg_trades" / "BTCUSDT" / "2026-07-06.jsonl",
+            _trade_envelope(offset),
+        )
+        _append_jsonl(
+            raw_root / "spot" / "depth" / "BTCUSDT" / "2026-07-06.jsonl",
+            _depth_envelope(offset),
+        )
+
+    result = materialize_interim_data(
+        layout=StorageLayout(project_root=tmp_path),
+        start_date="2026-07-06T00:01:00",
+        end_date="2026-07-06T00:01:02",
+        row_batch_size=1,
+    )
+
+    assert read_dataset(result.artifact_roots["market_bars_1m"])[
+        "timestamp"
+    ].tolist() == [pd.Timestamp("2026-07-06 00:01:00")]
+    assert read_dataset(result.artifact_roots["aggregate_trades_tick"])[
+        "timestamp"
+    ].tolist() == [pd.Timestamp("2026-07-06 00:01:01")]
+    assert read_dataset(result.artifact_roots["depth_levels_tick"])[
+        "timestamp"
+    ].nunique() == 1
+
+
 def _append_jsonl(path: Path, row: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:

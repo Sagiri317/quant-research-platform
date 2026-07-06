@@ -32,29 +32,13 @@ LOCAL_VERIFICATION_SUMMARY_FIXTURE_SOURCE_LITERAL = (
 )
 A_SHARE_CSMAR_ID_IMPORTS = {
     (
-        PROJECT_SRC / "markets/implementations/a_share/processed/catalog.py",
-        "quant_research_platform.sources.csmar",
-    ),
-    (
-        PROJECT_SRC / "markets/implementations/a_share/validation/internal_tables.py",
-        "quant_research_platform.sources.csmar",
-    ),
-    (
-        PROJECT_SRC / "markets/implementations/a_share/verification/aggregates.py",
+        PROJECT_SRC / "markets/implementations/a_share/processed/source_ids.py",
         "quant_research_platform.sources.csmar",
     ),
 }
 A_SHARE_CSMAR_ID_RESIDUE_LINES = {
     (
-        Path("processed/catalog.py"),
-        "from quant_research_platform.sources.csmar import ids as csmar_ids",
-    ),
-    (
-        Path("validation/internal_tables.py"),
-        "from quant_research_platform.sources.csmar import ids as csmar_ids",
-    ),
-    (
-        Path("verification/aggregates.py"),
+        Path("processed/source_ids.py"),
         "from quant_research_platform.sources.csmar import ids as csmar_ids",
     ),
 }

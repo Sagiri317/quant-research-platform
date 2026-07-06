@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_research_platform.contracts.data import DataFrequency
-from quant_research_platform.sources.csmar import ids as csmar_ids
+from quant_research_platform.markets.implementations.a_share.processed import (
+    source_ids,
+)
 
 from .quality_report import (
     QualityIssue,
@@ -20,7 +21,7 @@ from .quality_report import (
     value_counts,
 )
 
-MARKET_BARS_DATA_ID = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
+MARKET_BARS_DATA_ID = source_ids.MARKET_BARS_SOURCE_DATA_ID
 MARKET_BARS_REQUIRED_COLUMNS = (
     "market_id",
     "asset_id",

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from quant_research_platform.contracts.data import ProcessedDataSpec
-from quant_research_platform.markets.implementations.a_share.processed.catalog import (
-    MARKET_BARS_SOURCE_DATA_ID,
-)
+from quant_research_platform.contracts.data import DataFrequency, ProcessedDataSpec
+from quant_research_platform.sources.csmar import ids as csmar_ids
+
+MARKET_BARS_SOURCE_DATA_ID = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
 
 
 def market_bars_source_data_id(spec: ProcessedDataSpec) -> str:
@@ -19,4 +19,4 @@ def market_bars_source_data_id(spec: ProcessedDataSpec) -> str:
     return candidates[0]
 
 
-__all__ = ["market_bars_source_data_id"]
+__all__ = ["MARKET_BARS_SOURCE_DATA_ID", "market_bars_source_data_id"]

@@ -14,13 +14,15 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
     market_context_data_id,
     market_panel_data_id,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    source_ids,
 )
 from quant_research_platform.markets.implementations.a_share.research_scenarios import (
     default_evaluation_period,
@@ -39,7 +41,6 @@ from quant_research_platform.runtime.resources import (
     active_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
@@ -748,7 +749,7 @@ def _estimate_generated_full_panel_memory_bytes(
 
 
 def _local_market_bars_data_id() -> str:
-    return csmar_ids.market_bars_data_id(DataFrequency.DAILY)
+    return source_ids.MARKET_BARS_SOURCE_DATA_ID
 
 
 def _trading_sessions_from_calendar(

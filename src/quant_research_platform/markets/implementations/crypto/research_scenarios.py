@@ -12,18 +12,12 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
 )
+from quant_research_platform.research.factors.microstructure import (
+    MICROSTRUCTURE_FACTOR_COLUMNS,
+)
 
 EVALUATION_RUN_ID = "microstructure_forward_returns_evaluation"
-DEFAULT_SIGNAL_COLUMNS = (
-    "spread",
-    "relative_spread",
-    "depth_imbalance",
-    "microprice",
-    "microprice_deviation",
-    "trade_intensity_5m",
-    "signed_volume_5m",
-    "flow_imbalance_5m",
-)
+DEFAULT_SIGNAL_COLUMNS = MICROSTRUCTURE_FACTOR_COLUMNS
 
 
 def build_signal_specs() -> tuple[SignalSpec, ...]:

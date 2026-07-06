@@ -148,6 +148,10 @@ PROFILE_CSMAR_CATALOG = (
     "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.sources.csmar.catalog",
 )
+PROFILE_CSMAR_IDS = (
+    "src/quant_research_platform/profiles/research.py",
+    "quant_research_platform.sources.csmar",
+)
 PROFILE_CSMAR_INTERIM = (
     "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.sources.csmar.interim",
@@ -155,6 +159,10 @@ PROFILE_CSMAR_INTERIM = (
 PROFILE_BINANCE_CATALOG = (
     "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.sources.binance.catalog",
+)
+PROFILE_BINANCE_IDS = (
+    "src/quant_research_platform/profiles/research.py",
+    "quant_research_platform.sources.binance",
 )
 PROFILE_BINANCE_INTERIM = (
     "src/quant_research_platform/profiles/research.py",
@@ -178,10 +186,16 @@ KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS = {
     PROFILE_CRYPTO_LABELS: "profiles.py composes the crypto label catalog.",
     PROFILE_CRYPTO_PROCESSED: "profiles.py composes the crypto processed catalog.",
     PROFILE_CSMAR_CATALOG: "profiles.py composes the CSMAR source catalog.",
+    PROFILE_CSMAR_IDS: (
+        "profiles.py composes the CSMAR source id into the A-share research profile."
+    ),
     PROFILE_CSMAR_INTERIM: (
         "profiles.py composes the source-owned CSMAR interim catalog."
     ),
     PROFILE_BINANCE_CATALOG: "profiles.py composes the Binance source catalog.",
+    PROFILE_BINANCE_IDS: (
+        "profiles.py composes the Binance source id into the crypto research profile."
+    ),
     PROFILE_BINANCE_INTERIM: (
         "profiles.py composes the source-owned Binance interim catalog."
     ),

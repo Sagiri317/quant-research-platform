@@ -16,7 +16,11 @@ from quant_research_platform.markets.implementations.crypto.research_profiles im
     build_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
+    DEFAULT_SIGNAL_COLUMNS,
     build_evaluation_catalog,
+)
+from quant_research_platform.research.factors.microstructure import (
+    MICROSTRUCTURE_FACTOR_COLUMNS,
 )
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
@@ -92,3 +96,7 @@ def test_crypto_evaluation_uses_microstructure_research_dataset() -> None:
         "signed_volume_5m",
         "flow_imbalance_5m",
     )
+
+
+def test_default_signal_columns_match_microstructure_factor_columns() -> None:
+    assert DEFAULT_SIGNAL_COLUMNS == MICROSTRUCTURE_FACTOR_COLUMNS

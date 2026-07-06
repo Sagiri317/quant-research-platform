@@ -19,10 +19,14 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_HORIZONS,
 )
+from quant_research_platform.markets.implementations.crypto.processed import (
+    materialization_dependencies,
+)
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.storage._dataset_reading import filter_frame_by_time_window
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     DatasetReadMode,
@@ -33,6 +37,7 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.layout import StorageLayout
 
 LABEL_LOOKAHEAD_BARS = max(CRYPTO_FORWARD_RETURN_HORIZONS) + 1
+_CORE_ROW = "_qrp_core_row"
 
 
 def write_labels(
@@ -70,22 +75,27 @@ def _iter_label_chunks(
     buffer = pd.DataFrame()
     for panel in read_dataset(
         panel_root,
-        time_window=time_window,
+        time_window=materialization_dependencies.label_read_window(time_window),
         mode=DatasetReadMode.CHUNKED,
     ):
         if panel.empty:
             continue
+        panel = panel.copy()
+        panel[_CORE_ROW] = _core_mask(panel, time_window)
         buffer = _ordered_panel(
             panel if buffer.empty else pd.concat((buffer, panel), ignore_index=True)
         )
-        emit_mask = _label_emit_mask(buffer)
+        emit_mask = _label_emit_mask(buffer) & buffer[_CORE_ROW].astype(bool)
         if not emit_mask.any():
             continue
         labeled = _label_frame(buffer)
         yield labeled.loc[emit_mask].loc[:, spec.required_columns]
         buffer = buffer.loc[~emit_mask].copy()
     if not buffer.empty:
-        yield _label_frame(buffer).loc[:, spec.required_columns]
+        labeled = _label_frame(buffer)
+        core_mask = buffer[_CORE_ROW].astype(bool)
+        if core_mask.any():
+            yield labeled.loc[core_mask].loc[:, spec.required_columns]
 
 
 def _label_frame(panel: pd.DataFrame) -> pd.DataFrame:
@@ -110,6 +120,19 @@ def _ordered_panel(panel: pd.DataFrame) -> pd.DataFrame:
         ["market_id", "asset_id", "timestamp"],
         kind="mergesort",
     ).reset_index(drop=True)
+
+
+def _core_mask(frame: pd.DataFrame, time_window: TimeWindow) -> pd.Series:
+    spec = {
+        "column_roles": {"timestamp": "timestamp"},
+        "primary_key": ("timestamp",),
+    }
+    filtered = filter_frame_by_time_window(
+        frame.loc[:, ["timestamp"]].assign(_qrp_index=frame.index),
+        spec=spec,
+        time_window=time_window,
+    )
+    return frame.index.isin(filtered["_qrp_index"])
 
 
 __all__ = ["write_labels"]

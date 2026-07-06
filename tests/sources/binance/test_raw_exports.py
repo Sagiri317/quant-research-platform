@@ -204,6 +204,68 @@ def test_binance_raw_exports_rejects_invalid_market_payload_values(
         tuple(iter_raw_envelopes(depth_path))
 
 
+def test_binance_raw_exports_rejects_taker_buy_volume_above_volume(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bad-taker-volume.jsonl"
+    envelope = _envelope(data_kind="klines")
+    payload = list(envelope["payload"])
+    payload[9] = "11.0"
+    envelope["payload"] = payload
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_kline_volume"):
+        tuple(iter_raw_envelopes(path))
+
+
+def test_binance_raw_exports_rejects_taker_buy_quote_volume_above_quote_volume(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bad-taker-quote-volume.jsonl"
+    envelope = _envelope(data_kind="klines")
+    payload = list(envelope["payload"])
+    payload[10] = "1006.0"
+    envelope["payload"] = payload
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_kline_volume"):
+        tuple(iter_raw_envelopes(path))
+
+
+@pytest.mark.parametrize("bad_value", ["NaN", "Infinity", "-Infinity"])
+def test_binance_raw_exports_rejects_nan_or_infinite_numeric_payload_values(
+    tmp_path: Path,
+    bad_value: str,
+) -> None:
+    path = tmp_path / "bad-finite.jsonl"
+    envelope = _envelope(data_kind="klines")
+    payload = list(envelope["payload"])
+    payload[5] = bad_value
+    envelope["payload"] = payload
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_kline_volume"):
+        tuple(iter_raw_envelopes(path))
+
+
+def test_binance_raw_numeric_conversion_raises_contract_error_without_raw_value(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bad-nonnumeric.jsonl"
+    envelope = _envelope(data_kind="klines")
+    payload = list(envelope["payload"])
+    payload[5] = "not-a-number"
+    envelope["payload"] = payload
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError) as exc_info:
+        tuple(iter_raw_envelopes(path))
+
+    message = str(exc_info.value)
+    assert message == "invalid_binance_kline_volume"
+    assert "not-a-number" not in message
+
+
 def test_binance_raw_exports_accepts_one_sided_depth_payload(
     tmp_path: Path,
 ) -> None:

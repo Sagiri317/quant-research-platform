@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import NewType
 
 Timestamp = NewType("Timestamp", datetime)
@@ -65,6 +65,21 @@ def time_window_timestamp_bounds(
     return start, end
 
 
+def time_window_timestamp_interval(
+    time_window: TimeWindow,
+) -> tuple[datetime, datetime, bool]:
+    """Return timestamp filter bounds and whether the upper bound is closed."""
+
+    if isinstance(time_window.start, datetime) and isinstance(
+        time_window.end,
+        datetime,
+    ):
+        return time_window.start, time_window.end, True
+    start = datetime.combine(time_window.start, time.min)
+    end = datetime.combine(time_window.end + timedelta(days=1), time.min)
+    return start, end, False
+
+
 def _coerce_bound(value: date | datetime | str) -> date | datetime:
     if isinstance(value, datetime):
         return _normalize_datetime(value)
@@ -93,4 +108,5 @@ __all__ = [
     "require_date_window",
     "time_window_date_bounds",
     "time_window_timestamp_bounds",
+    "time_window_timestamp_interval",
 ]

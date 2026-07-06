@@ -16,6 +16,10 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     InterimDataSpec,
 )
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.sources.binance import ids
 from quant_research_platform.sources.binance.fields import field_role
 from quant_research_platform.sources.binance.raw_exports import (
@@ -220,11 +224,34 @@ def _filter_time_window(
         return frame
     timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
     mask = pd.Series(True, index=frame.index)
-    if start_date is not None:
-        mask &= timestamps.ge(pd.Timestamp(start_date))
-    if end_date is not None:
-        mask &= timestamps.le(pd.Timestamp(end_date))
+    start, end, end_inclusive = _timestamp_filter_interval(
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if start is not None:
+        mask &= timestamps.ge(start)
+    if end is not None:
+        mask &= timestamps.le(end) if end_inclusive else timestamps.lt(end)
     return frame.loc[mask.fillna(False)].copy()
+
+
+def _timestamp_filter_interval(
+    *,
+    start_date: str | None,
+    end_date: str | None,
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None, bool]:
+    if start_date is not None and end_date is not None:
+        start, end, end_inclusive = time_window_timestamp_interval(
+            TimeWindow(start_date, end_date)
+        )
+        return pd.Timestamp(start), pd.Timestamp(end), end_inclusive
+    if start_date is not None:
+        start = pd.Timestamp(start_date)
+        return start, None, True
+    assert end_date is not None
+    end_window = TimeWindow(end_date, end_date)
+    _start, end, end_inclusive = time_window_timestamp_interval(end_window)
+    return None, pd.Timestamp(end), end_inclusive
 
 
 def _normalize_aggregate_trades(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:

@@ -83,6 +83,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.markets.implementations.crypto.processed import (
     materializer as crypto_processed_materializer_module,
 )
+from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.sources.binance.catalog import (
     source_definition as binance_source_definition,
 )
@@ -92,6 +93,7 @@ from quant_research_platform.sources.binance.interim import (
 from quant_research_platform.sources.binance.interim import (
     materialize_interim_data as _materialize_binance_interim_data,
 )
+from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.sources.csmar.catalog import source_definition
 from quant_research_platform.sources.csmar.interim import (
     interim_catalog as csmar_interim_catalog,
@@ -147,14 +149,14 @@ def research_profile(profile_id: str | None = None) -> ResearchProfile:
 
     active_profile_id = research_profile_id(
         MarketId("a_share"),
-        SourceId("csmar"),
+        csmar_ids.SOURCE_ID,
         DataFrequency.DAILY,
     )
     builders = {
         active_profile_id: _a_share_csmar_research_profile,
         research_profile_id(
             MarketId("crypto"),
-            SourceId("binance"),
+            binance_ids.SOURCE_ID,
             DataFrequency.MINUTE,
         ): _crypto_binance_research_profile,
     }
@@ -169,7 +171,7 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
     return ResearchProfile(
         profile_id=research_profile_id(
             MarketId("a_share"),
-            SourceId("csmar"),
+            csmar_ids.SOURCE_ID,
             DataFrequency.DAILY,
         ),
         fields=a_share_fields.field_catalog(),
@@ -200,7 +202,7 @@ def _crypto_binance_research_profile() -> ResearchProfile:
     return ResearchProfile(
         profile_id=research_profile_id(
             MarketId("crypto"),
-            SourceId("binance"),
+            binance_ids.SOURCE_ID,
             DataFrequency.MINUTE,
         ),
         fields=crypto_fields.field_catalog(),
@@ -266,11 +268,11 @@ def _crypto_binance_source_interim_catalogs() -> Mapping[str, InterimDataCatalog
 
 
 def _active_source_id() -> SourceId:
-    return SourceId(next(iter(_a_share_csmar_source_interim_catalogs())))
+    return csmar_ids.SOURCE_ID
 
 
 def _crypto_active_source_id() -> SourceId:
-    return SourceId(next(iter(_crypto_binance_source_interim_catalogs())))
+    return binance_ids.SOURCE_ID
 
 
 def _materialize_a_share_csmar_interim_data(

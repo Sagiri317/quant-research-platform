@@ -18,7 +18,6 @@ from quant_research_platform.runtime.resources import (
     ResourceChunkPlanner,
     RuntimeResourcePolicy,
 )
-from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     DatasetReadMode,
@@ -37,8 +36,6 @@ def write_panel(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
-    if source_id != binance_ids.SOURCE_ID:
-        raise ValueError(f"unsupported_crypto_source: {source_id}")
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     write_dataset(
         root,

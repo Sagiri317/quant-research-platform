@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -128,12 +129,22 @@ def _validate_kline_payload(payload: list[object]) -> None:
     close = _positive_number(payload[4], error="invalid_binance_kline_ohlc")
     if high < max(open_price, close) or low > min(open_price, close):
         raise ValueError("invalid_binance_kline_ohlc")
-    _non_negative_number(payload[5], error="invalid_binance_kline_volume")
-    _non_negative_number(payload[7], error="invalid_binance_kline_volume")
-    _non_negative_number(payload[9], error="invalid_binance_kline_volume")
-    _non_negative_number(payload[10], error="invalid_binance_kline_volume")
-    if int(payload[8]) < 0:
-        raise ValueError("invalid_binance_kline_trade_count")
+    volume = _non_negative_number(payload[5], error="invalid_binance_kline_volume")
+    quote_volume = _non_negative_number(
+        payload[7],
+        error="invalid_binance_kline_volume",
+    )
+    taker_buy_volume = _non_negative_number(
+        payload[9],
+        error="invalid_binance_kline_volume",
+    )
+    taker_buy_quote_volume = _non_negative_number(
+        payload[10],
+        error="invalid_binance_kline_volume",
+    )
+    if taker_buy_volume > volume or taker_buy_quote_volume > quote_volume:
+        raise ValueError("invalid_binance_kline_volume")
+    _non_negative_integer(payload[8], error="invalid_binance_kline_trade_count")
 
 
 def _validate_agg_trade_payload(payload: dict[str, Any]) -> None:
@@ -145,9 +156,18 @@ def _validate_agg_trade_payload(payload: dict[str, Any]) -> None:
         _first_present(payload, "quantity", "q"),
         error="invalid_binance_agg_trade_quantity",
     )
-    first = int(_first_present(payload, "first_trade_id", "f"))
-    last = int(_first_present(payload, "last_trade_id", "l"))
-    aggregate = int(_first_present(payload, "aggregate_trade_id", "a"))
+    first = _non_negative_integer(
+        _first_present(payload, "first_trade_id", "f"),
+        error="invalid_binance_agg_trade_id_range",
+    )
+    last = _non_negative_integer(
+        _first_present(payload, "last_trade_id", "l"),
+        error="invalid_binance_agg_trade_id_range",
+    )
+    aggregate = _non_negative_integer(
+        _first_present(payload, "aggregate_trade_id", "a"),
+        error="invalid_binance_agg_trade_id_range",
+    )
     if aggregate < 0 or first < 0 or last < first:
         raise ValueError("invalid_binance_agg_trade_id_range")
 
@@ -208,15 +228,35 @@ def _has_utc_offset(value: str) -> bool:
 
 
 def _positive_number(value: object, *, error: str) -> float:
-    number = float(value)
+    number = _finite_float(value, error=error)
     if number <= 0:
         raise ValueError(error)
     return number
 
 
 def _non_negative_number(value: object, *, error: str) -> float:
-    number = float(value)
+    number = _finite_float(value, error=error)
     if number < 0:
+        raise ValueError(error)
+    return number
+
+
+def _non_negative_integer(value: object, *, error: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(error) from exc
+    if number < 0:
+        raise ValueError(error)
+    return number
+
+
+def _finite_float(value: object, *, error: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(error) from exc
+    if not math.isfinite(number):
         raise ValueError(error)
     return number
 

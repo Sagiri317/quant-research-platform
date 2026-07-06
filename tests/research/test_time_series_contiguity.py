@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import pandas as pd
 
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.research.factors.price_volume.windows import (
+    price_volume_valid_bar_read_window,
+)
 from quant_research_platform.research.time_series.contiguity import (
     contiguous_segment_ids,
     iter_grouped_timestamps,
@@ -88,3 +92,23 @@ def test_iter_grouped_timestamps_accepts_frame_and_mapping() -> None:
     assert from_mapping == (
         [pd.Timestamp("2026-07-06 00:00"), pd.Timestamp("2026-07-06 00:01")],
     )
+
+
+def test_price_volume_windows_use_generic_grouped_timestamp_helper() -> None:
+    panel_keys = pd.DataFrame(
+        {
+            "asset_id": ["asset_a", "asset_a", "asset_b"],
+            "timestamp": pd.to_datetime(
+                ["2024-01-02", "2024-01-05", "2024-01-03"]
+            ),
+        }
+    )
+
+    read_window = price_volume_valid_bar_read_window(
+        panel_keys,
+        read_window=TimeWindow("2024-01-05", "2024-01-05"),
+        core_sessions=(pd.Timestamp("2024-01-05"),),
+        lookback_bars=1,
+    )
+
+    assert read_window == TimeWindow("2024-01-02", "2024-01-05")

@@ -21,6 +21,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
 )
+from quant_research_platform.markets.implementations.crypto.processed import source_ids
 from quant_research_platform.research.factors.microstructure import (
     MICROSTRUCTURE_FACTOR_COLUMNS,
 )
@@ -59,9 +60,9 @@ def processed_catalog() -> ProcessedDataCatalog:
             data_id=MARKET_PANEL_DATA_ID,
             columns=PANEL_COLUMNS,
             source_input_data_ids=(
-                "market_bars_1m",
-                "aggregate_trades_tick",
-                "depth_levels_tick",
+                source_ids.MARKET_BARS_SOURCE_DATA_ID,
+                source_ids.AGGREGATE_TRADES_SOURCE_DATA_ID,
+                source_ids.DEPTH_LEVELS_SOURCE_DATA_ID,
             ),
             role_overrides={"eligible": ColumnRole.UNIVERSE},
         ),
