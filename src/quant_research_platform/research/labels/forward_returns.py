@@ -35,6 +35,7 @@ def add_forward_return_labels(
 ) -> pd.DataFrame:
     """Add per-asset valid-bar next-open to horizon-open labels."""
 
+    horizons = _validate_horizons(horizons)
     result = frame.sort_values([asset_column, date_column]).copy()
     price = pd.to_numeric(result[execution_price_column], errors="coerce")
     grouped_price = price.groupby(result[asset_column], sort=False)
@@ -67,6 +68,7 @@ def forward_return_label_column(
     horizon: int,
     frequency: DataFrequency | str = DataFrequency.DAILY,
 ) -> str:
+    _validate_horizon(horizon, error="invalid_forward_return_horizon")
     return f"forward_return_{horizon}{horizon_unit_suffix(frequency)}"
 
 
@@ -79,7 +81,13 @@ def forward_return_valid_bar_read_window(
     asset_column: str = "asset_id",
     date_column: str = "timestamp",
 ) -> TimeWindow:
-    if lookahead_bars <= 0:
+    if (
+        not isinstance(lookahead_bars, int)
+        or isinstance(lookahead_bars, bool)
+        or lookahead_bars < 0
+    ):
+        raise ValueError("invalid_forward_return_lookahead_bars")
+    if lookahead_bars == 0:
         return read_window
     key_groups = tuple(
         iter_grouped_timestamps(
@@ -117,6 +125,24 @@ def forward_return_valid_bar_read_window(
     if end <= read_window.end:
         return read_window
     return TimeWindow(read_window.start, end)
+
+
+def _validate_horizons(horizons: object) -> tuple[int, ...]:
+    if not isinstance(horizons, tuple) or not horizons:
+        raise ValueError("invalid_forward_return_horizons")
+    values = tuple(
+        _validate_horizon(value, error="invalid_forward_return_horizons")
+        for value in horizons
+    )
+    if len(set(values)) != len(values):
+        raise ValueError("invalid_forward_return_horizons")
+    return values
+
+
+def _validate_horizon(value: object, *, error: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(error)
+    return value
 
 
 __all__ = [

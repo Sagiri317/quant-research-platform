@@ -37,14 +37,19 @@ def require_human_approval(proposal_or_approved: Any) -> None:
     approved = (
         proposal_or_approved
         if isinstance(proposal_or_approved, bool)
-        else bool(getattr(proposal_or_approved, "approved", False))
+        else getattr(proposal_or_approved, "approved", False)
     )
+    if not isinstance(approved, bool):
+        raise ValueError("invalid_proposal_approved")
     if not approved:
         raise PermissionError("proposal_requires_human_approval")
 
 
 def assert_proposal_starts_unapproved(proposal: Any) -> None:
-    if bool(getattr(proposal, "approved", False)):
+    approved = getattr(proposal, "approved", False)
+    if not isinstance(approved, bool):
+        raise ValueError("invalid_proposal_approved")
+    if approved:
         raise ProposalSafetyError("proposal_must_start_unapproved")
 
 

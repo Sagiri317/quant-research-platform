@@ -81,6 +81,7 @@ def _iter_factor_chunks(
             combined,
             expected_interval=pd.Timedelta(minutes=1),
             min_periods=MICROSTRUCTURE_ROLLING_WINDOW_MINUTES,
+            trade_flow_observed_column="trade_flow_observed",
         )
         output = factors.loc[factors[_CORE_ROW]].copy()
         yield output.loc[:, spec.required_columns]
@@ -131,7 +132,9 @@ def _core_mask(frame: pd.DataFrame, time_window: TimeWindow) -> pd.Series:
         spec=spec,
         time_window=time_window,
     )
-    return frame.index.isin(filtered["_qrp_index"])
+    positions = pd.Series(False, index=range(len(frame)))
+    positions.loc[filtered["_qrp_index"].to_numpy(dtype=int)] = True
+    return pd.Series(positions.to_numpy(dtype=bool), index=frame.index)
 
 
 __all__ = ["write_factors"]

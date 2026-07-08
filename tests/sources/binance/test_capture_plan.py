@@ -87,6 +87,68 @@ def test_binance_capture_plan_rejects_invalid_symbols_and_duplicate_symbols() ->
         )
 
 
+def test_binance_capture_plan_rejects_bare_str_symbols() -> None:
+    with pytest.raises(ValueError, match="binance_symbols_required"):
+        BinanceCapturePlan(
+            capture_id="capture_20260706_000000",
+            market_type="spot",
+            data_kind="klines",
+            symbols="BTCUSDT",  # type: ignore[arg-type]
+            interval="1m",
+            start_time="2026-07-06T00:00:00Z",
+            end_time="2026-07-06T02:00:00Z",
+            limit=120,
+            depth_limit=20,
+            chunk_size=50,
+        )
+
+
+@pytest.mark.parametrize("limit", [True, 120.5, "120"])
+def test_binance_capture_plan_rejects_non_strict_limits(limit: object) -> None:
+    with pytest.raises(ValueError, match="binance_capture_positive_limits_required"):
+        BinanceCapturePlan(
+            capture_id="capture_20260706_000000",
+            market_type="spot",
+            data_kind="klines",
+            symbols=("BTCUSDT",),
+            interval="1m",
+            start_time="2026-07-06T00:00:00Z",
+            end_time="2026-07-06T02:00:00Z",
+            limit=limit,  # type: ignore[arg-type]
+            depth_limit=20,
+            chunk_size=50,
+        )
+
+
+def test_binance_capture_plan_requires_interval_only_for_klines() -> None:
+    with pytest.raises(ValueError, match="unsupported_binance_interval"):
+        BinanceCapturePlan(
+            capture_id="capture_20260706_000000",
+            market_type="spot",
+            data_kind="klines",
+            symbols=("BTCUSDT",),
+            interval=None,  # type: ignore[arg-type]
+            start_time="2026-07-06T00:00:00Z",
+            end_time="2026-07-06T02:00:00Z",
+            limit=120,
+            depth_limit=20,
+            chunk_size=50,
+        )
+    with pytest.raises(ValueError, match="unexpected_binance_interval"):
+        BinanceCapturePlan(
+            capture_id="capture_20260706_000000",
+            market_type="spot",
+            data_kind="depth",
+            symbols=("BTCUSDT",),
+            interval="1m",
+            start_time="2026-07-06T00:00:00Z",
+            end_time="2026-07-06T02:00:00Z",
+            limit=120,
+            depth_limit=20,
+            chunk_size=50,
+        )
+
+
 def test_binance_capture_plan_rejects_invalid_utc_window_and_limits() -> None:
     with pytest.raises(ValueError, match="invalid_binance_capture_time_order"):
         BinanceCapturePlan(

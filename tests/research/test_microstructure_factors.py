@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.research.factors.microstructure import (
@@ -131,6 +132,43 @@ def test_microstructure_rolling_5m_requires_full_contiguous_observed_window() ->
     assert result["flow_imbalance_5m"].isna().all()
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"rolling_window": 0}, "unsupported_microstructure_rolling_window"),
+        ({"rolling_window": 3}, "unsupported_microstructure_rolling_window"),
+        ({"min_periods": 4}, "microstructure_rolling_requires_full_window"),
+        ({"min_periods": 6}, "microstructure_rolling_requires_full_window"),
+        ({"expected_interval": pd.Timedelta(0)}, "invalid_expected_interval"),
+    ],
+)
+def test_microstructure_rolling_contract_fails_closed(kwargs, error) -> None:
+    with pytest.raises(ValueError, match=error):
+        calculate_microstructure_factors(_microstructure_frame(), **kwargs)
+
+
+def test_microstructure_requires_explicit_trade_flow_observed_column_when_named(
+) -> None:
+    frame = _microstructure_frame().drop(columns=["trade_flow_observed"])
+
+    with pytest.raises(ValueError, match="missing_trade_flow_observed_column"):
+        calculate_microstructure_factors(
+            frame,
+            trade_flow_observed_column="trade_flow_observed",
+        )
+
+
+def test_microstructure_rejects_non_bool_trade_flow_observed_column() -> None:
+    frame = _microstructure_frame()
+    frame["trade_flow_observed"] = ["False"] * len(frame)
+
+    with pytest.raises(ValueError, match="invalid_trade_flow_observed"):
+        calculate_microstructure_factors(
+            frame,
+            trade_flow_observed_column="trade_flow_observed",
+        )
+
+
 def test_microstructure_definitions_keep_point_in_time_factors_unwindowed() -> None:
     definitions = {
         definition.factor_id: definition
@@ -150,4 +188,25 @@ def test_microstructure_definitions_keep_point_in_time_factors_unwindowed() -> N
     assert (
         definitions["trade_intensity_5m"].timing_semantics
         == "clock_contiguous_5m_after_bar_close"
+    )
+
+
+def _microstructure_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "market_id": ["crypto"] * 5,
+            "asset_id": ["btc_usdt"] * 5,
+            "timestamp": pd.date_range("2026-07-06 00:00", periods=5, freq="min"),
+            "best_bid": [100.0] * 5,
+            "best_ask": [101.0] * 5,
+            "bid_quantity": [1.0] * 5,
+            "ask_quantity": [1.0] * 5,
+            "bid_depth": [2.0] * 5,
+            "ask_depth": [2.0] * 5,
+            "mid_price": [100.5] * 5,
+            "trade_count": [1] * 5,
+            "trade_flow_observed": [True] * 5,
+            "signed_volume": [1.0] * 5,
+            "volume": [2.0] * 5,
+        }
     )

@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
+from quant_research_platform.sources.binance.validation import (
+    depth_side_levels,
+    first_present,
+    strict_boolean,
+    strict_data_kind,
+    strict_iso_timestamp,
+    strict_market_type,
+    strict_millisecond_timestamp,
+    strict_non_negative_float,
+    strict_non_negative_integer,
+    strict_positive_float,
+    strict_symbol,
+)
 
 DATA_ID_BY_RAW_KIND = {
     "klines": "market_bars_1m",
@@ -92,14 +103,13 @@ def _validate_envelope(envelope: Any) -> dict[str, Any]:
         raise ValueError("binance_raw_envelope_required")
     if envelope["source"] != "binance":
         raise ValueError("invalid_binance_raw_envelope_source")
-    if envelope["market_type"] != "spot":
-        raise ValueError("unsupported_binance_market_type")
-    data_kind = envelope["data_kind"]
-    if data_kind not in DATA_ID_BY_RAW_KIND:
-        raise ValueError("unsupported_binance_data_kind")
-    if not isinstance(envelope["symbol"], str) or not envelope["symbol"]:
-        raise ValueError("invalid_binance_raw_envelope_symbol")
-    _parse_captured_at(envelope["captured_at"])
+    strict_market_type(envelope["market_type"])
+    data_kind = strict_data_kind(envelope["data_kind"])
+    strict_symbol(envelope["symbol"], error="invalid_binance_raw_envelope_symbol")
+    strict_iso_timestamp(
+        envelope["captured_at"],
+        error="invalid_binance_raw_envelope_captured_at",
+    )
     payload = envelope["payload"]
     if data_kind == "klines":
         if envelope.get("interval") != "1m":
@@ -123,50 +133,64 @@ def _validate_envelope(envelope: Any) -> dict[str, Any]:
 
 
 def _validate_kline_payload(payload: list[object]) -> None:
-    open_price = _positive_number(payload[1], error="invalid_binance_kline_ohlc")
-    high = _positive_number(payload[2], error="invalid_binance_kline_ohlc")
-    low = _positive_number(payload[3], error="invalid_binance_kline_ohlc")
-    close = _positive_number(payload[4], error="invalid_binance_kline_ohlc")
+    open_time = strict_millisecond_timestamp(
+        payload[0],
+        error="invalid_binance_kline_open_time",
+    )
+    close_time = strict_millisecond_timestamp(
+        payload[6],
+        error="invalid_binance_kline_close_time",
+    )
+    if close_time < open_time:
+        raise ValueError("invalid_binance_kline_time_order")
+    open_price = strict_positive_float(payload[1], error="invalid_binance_kline_ohlc")
+    high = strict_positive_float(payload[2], error="invalid_binance_kline_ohlc")
+    low = strict_positive_float(payload[3], error="invalid_binance_kline_ohlc")
+    close = strict_positive_float(payload[4], error="invalid_binance_kline_ohlc")
     if high < max(open_price, close) or low > min(open_price, close):
         raise ValueError("invalid_binance_kline_ohlc")
-    volume = _non_negative_number(payload[5], error="invalid_binance_kline_volume")
-    quote_volume = _non_negative_number(
+    volume = strict_non_negative_float(payload[5], error="invalid_binance_kline_volume")
+    quote_volume = strict_non_negative_float(
         payload[7],
         error="invalid_binance_kline_volume",
     )
-    taker_buy_volume = _non_negative_number(
+    taker_buy_volume = strict_non_negative_float(
         payload[9],
         error="invalid_binance_kline_volume",
     )
-    taker_buy_quote_volume = _non_negative_number(
+    taker_buy_quote_volume = strict_non_negative_float(
         payload[10],
         error="invalid_binance_kline_volume",
     )
     if taker_buy_volume > volume or taker_buy_quote_volume > quote_volume:
         raise ValueError("invalid_binance_kline_volume")
-    _non_negative_integer(payload[8], error="invalid_binance_kline_trade_count")
+    strict_non_negative_integer(payload[8], error="invalid_binance_kline_trade_count")
 
 
 def _validate_agg_trade_payload(payload: dict[str, Any]) -> None:
-    _positive_number(
-        _first_present(payload, "price", "p"),
+    strict_positive_float(
+        first_present(payload, "price", "p"),
         error="invalid_binance_agg_trade_price",
     )
-    _positive_number(
-        _first_present(payload, "quantity", "q"),
+    strict_positive_float(
+        first_present(payload, "quantity", "q"),
         error="invalid_binance_agg_trade_quantity",
     )
-    first = _non_negative_integer(
-        _first_present(payload, "first_trade_id", "f"),
+    first = strict_non_negative_integer(
+        first_present(payload, "first_trade_id", "f"),
         error="invalid_binance_agg_trade_id_range",
     )
-    last = _non_negative_integer(
-        _first_present(payload, "last_trade_id", "l"),
+    last = strict_non_negative_integer(
+        first_present(payload, "last_trade_id", "l"),
         error="invalid_binance_agg_trade_id_range",
     )
-    aggregate = _non_negative_integer(
-        _first_present(payload, "aggregate_trade_id", "a"),
+    aggregate = strict_non_negative_integer(
+        first_present(payload, "aggregate_trade_id", "a"),
         error="invalid_binance_agg_trade_id_range",
+    )
+    strict_boolean(
+        payload.get("is_buyer_maker", payload.get("m")),
+        error="invalid_binance_agg_trade_side",
     )
     if aggregate < 0 or first < 0 or last < first:
         raise ValueError("invalid_binance_agg_trade_id_range")
@@ -175,10 +199,12 @@ def _validate_agg_trade_payload(payload: dict[str, Any]) -> None:
 def _validate_depth_payload(payload: dict[str, Any]) -> None:
     bids = _validate_depth_side(
         payload.get("bids", ()),
+        side="bid",
         error="invalid_binance_depth_bid",
     )
     asks = _validate_depth_side(
         payload.get("asks", ()),
+        side="ask",
         error="invalid_binance_depth_ask",
     )
     if bids and asks and bids[0][0] >= asks[0][0]:
@@ -188,84 +214,10 @@ def _validate_depth_payload(payload: dict[str, Any]) -> None:
 def _validate_depth_side(
     raw_levels: object,
     *,
+    side: str,
     error: str,
 ) -> list[tuple[float, float]]:
-    if raw_levels is None:
-        return []
-    if not isinstance(raw_levels, list | tuple):
-        raise ValueError(error)
-    levels: list[tuple[float, float]] = []
-    for raw_level in raw_levels:
-        if not isinstance(raw_level, list | tuple) or len(raw_level) < 2:
-            raise ValueError(error)
-        price = _positive_number(raw_level[0], error=error)
-        quantity = _non_negative_number(raw_level[1], error=error)
-        levels.append((price, quantity))
-    return levels
-
-
-def _parse_captured_at(value: object) -> pd.Timestamp:
-    if not isinstance(value, str) or not _has_utc_offset(value):
-        raise ValueError("invalid_binance_raw_envelope_captured_at")
-    timestamp = pd.to_datetime(value, utc=True, errors="coerce")
-    if pd.isna(timestamp):
-        raise ValueError("invalid_binance_raw_envelope_captured_at")
-    return timestamp
-
-
-def _has_utc_offset(value: str) -> bool:
-    if value.endswith("Z"):
-        return True
-    if len(value) < 6:
-        return False
-    offset = value[-6:]
-    return (
-        offset[0] in {"+", "-"}
-        and offset[1:3].isdigit()
-        and offset[3] == ":"
-        and offset[4:6].isdigit()
-    )
-
-
-def _positive_number(value: object, *, error: str) -> float:
-    number = _finite_float(value, error=error)
-    if number <= 0:
-        raise ValueError(error)
-    return number
-
-
-def _non_negative_number(value: object, *, error: str) -> float:
-    number = _finite_float(value, error=error)
-    if number < 0:
-        raise ValueError(error)
-    return number
-
-
-def _non_negative_integer(value: object, *, error: str) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(error) from exc
-    if number < 0:
-        raise ValueError(error)
-    return number
-
-
-def _finite_float(value: object, *, error: str) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(error) from exc
-    if not math.isfinite(number):
-        raise ValueError(error)
-    return number
-
-
-def _first_present(row: dict[str, Any], *keys: str) -> object:
-    for key in keys:
-        if key in row and row[key] is not None:
-            return row[key]
-    raise ValueError("missing_binance_raw_payload_field")
+    return depth_side_levels(raw_levels, side=side, error=error)
 
 
 __all__ = ["DATA_ID_BY_RAW_KIND", "dataset_files_by_id", "iter_raw_envelopes"]

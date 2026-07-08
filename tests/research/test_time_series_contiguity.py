@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.factors.price_volume.windows import (
@@ -60,6 +61,25 @@ def test_contiguous_segment_ids_respects_group_columns_and_input_order() -> None
     assert result.tolist() == [2, 0, 1, 0]
 
 
+def test_contiguous_segment_ids_uses_position_not_duplicate_index_labels() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "a", "a"],
+            "timestamp": pd.to_datetime(
+                ["2026-07-06 00:00", "2026-07-06 00:01", "2026-07-06 00:03"]
+            ),
+        },
+        index=[0, 0, 0],
+    )
+
+    result = contiguous_segment_ids(
+        frame,
+        expected_interval=pd.Timedelta(minutes=1),
+    )
+
+    assert result.tolist() == [0, 0, 1]
+
+
 def test_iter_grouped_timestamps_accepts_frame_and_mapping() -> None:
     frame = pd.DataFrame(
         {
@@ -94,6 +114,13 @@ def test_iter_grouped_timestamps_accepts_frame_and_mapping() -> None:
     )
 
 
+def test_iter_grouped_timestamps_rejects_invalid_timestamp_values() -> None:
+    frame = pd.DataFrame({"asset_id": ["a"], "timestamp": ["bad"]})
+
+    with pytest.raises(ValueError, match="invalid_grouped_timestamp_values"):
+        tuple(iter_grouped_timestamps(frame))
+
+
 def test_price_volume_windows_use_generic_grouped_timestamp_helper() -> None:
     panel_keys = pd.DataFrame(
         {
@@ -112,3 +139,16 @@ def test_price_volume_windows_use_generic_grouped_timestamp_helper() -> None:
     )
 
     assert read_window == TimeWindow("2024-01-02", "2024-01-05")
+
+
+@pytest.mark.parametrize("lookback_bars", [True, -1, 1.5])
+def test_price_volume_read_window_rejects_invalid_lookback_bars(
+    lookback_bars: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_price_volume_lookback_bars"):
+        price_volume_valid_bar_read_window(
+            pd.DataFrame({"asset_id": ["asset_a"], "timestamp": ["2024-01-02"]}),
+            read_window=TimeWindow("2024-01-02", "2024-01-02"),
+            core_sessions=(pd.Timestamp("2024-01-02"),),
+            lookback_bars=lookback_bars,  # type: ignore[arg-type]
+        )

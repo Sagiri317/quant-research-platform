@@ -14,6 +14,7 @@ from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
+    strict_non_negative_count_series,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
@@ -156,7 +157,7 @@ def _compute_evaluation_frames(
                 n_groups=n_groups,
             )
             rows_after_dropna += int(
-                pd.to_numeric(metrics["n_obs"], errors="coerce").fillna(0).sum()
+                strict_non_negative_count_series(metrics["n_obs"]).sum()
             )
             metric_parts.append(metrics)
             grouped_parts.append(grouped_label_values)

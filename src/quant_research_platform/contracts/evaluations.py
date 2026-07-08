@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+import pandas as pd
 
 from quant_research_platform.contracts.filtering import (
     EvaluationFilterMode,
@@ -98,6 +101,64 @@ class EvaluationDiagnostics:
             raise ValueError("evaluation_diagnostics_n_groups_too_small")
 
 
+def strict_non_negative_count_series(
+    values: pd.Series,
+    *,
+    error: str = "invalid_evaluation_observation_counts",
+) -> pd.Series:
+    numeric = _strict_numeric_series(values, error=error, allow_null=False)
+    if numeric.lt(0).any() or numeric.mod(1).ne(0).any():
+        raise ValueError(error)
+    if values.map(lambda value: isinstance(value, bool)).any():
+        raise ValueError(error)
+    return numeric.astype("int64")
+
+
+def strict_positive_group_series(
+    values: pd.Series,
+    *,
+    error: str = "evaluation_group_out_of_range",
+) -> pd.Series:
+    numeric = strict_non_negative_count_series(values, error=error)
+    if numeric.le(0).any():
+        raise ValueError(error)
+    return numeric
+
+
+def strict_non_negative_count_value(
+    value: object,
+    *,
+    error: str = "invalid_evaluation_diagnostics_count",
+) -> int:
+    series = strict_non_negative_count_series(pd.Series([value]), error=error)
+    return int(series.iloc[0])
+
+
+def strict_finite_or_null_numeric_series(
+    values: pd.Series,
+    *,
+    error: str = "invalid_evaluation_numeric_values",
+) -> pd.Series:
+    return _strict_numeric_series(values, error=error, allow_null=True)
+
+
+def _strict_numeric_series(
+    values: pd.Series,
+    *,
+    error: str,
+    allow_null: bool,
+) -> pd.Series:
+    if values.map(lambda value: isinstance(value, bool)).any():
+        raise ValueError(error)
+    numeric = pd.to_numeric(values, errors="coerce")
+    if not allow_null and numeric.isna().any():
+        raise ValueError(error)
+    finite = numeric.dropna().map(math.isfinite)
+    if not bool(finite.all()):
+        raise ValueError(error)
+    return numeric
+
+
 def _validate_signals(signals: tuple[_SignalSpec, ...]) -> None:
     if not signals:
         raise ValueError("evaluation_signals_required")
@@ -151,4 +212,8 @@ def _validate_column_tuple(
 __all__ = [
     "EvaluationDiagnostics",
     "EvaluationSpec",
+    "strict_finite_or_null_numeric_series",
+    "strict_non_negative_count_series",
+    "strict_non_negative_count_value",
+    "strict_positive_group_series",
 ]

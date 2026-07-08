@@ -264,6 +264,68 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
         )
 
 
+@pytest.mark.parametrize("n_obs", [2.5, True, -1])
+def test_evaluation_outputs_rejects_invalid_metric_observation_counts(
+    tmp_path: Path,
+    n_obs: object,
+) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    report_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+    metrics = make_artifact_evaluation_metrics_frame().assign(n_obs=[n_obs])
+
+    with pytest.raises(ValueError, match="invalid_evaluation_observation_counts"):
+        outputs.write_evaluation_outputs(
+            metrics,
+            make_artifact_evaluation_grouped_label_values_frame(),
+            ic_summary=make_artifact_evaluation_ic_summary_frame(),
+            group_spread_summary=make_artifact_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
+            spec=spec,
+            output_spec=report_spec,
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+
+def test_evaluation_outputs_rejects_non_finite_summary_numbers(
+    tmp_path: Path,
+) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    report_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+    metrics = make_artifact_evaluation_metrics_frame().assign(ic=[float("inf")])
+
+    with pytest.raises(ValueError, match="invalid_evaluation_numeric_values"):
+        outputs.write_evaluation_outputs(
+            metrics,
+            make_artifact_evaluation_grouped_label_values_frame(),
+            ic_summary=make_artifact_evaluation_ic_summary_frame(),
+            group_spread_summary=make_artifact_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
+            spec=spec,
+            output_spec=report_spec,
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+
 def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> None:
     spec = EvaluationSpec(
         run_id="eval_demo",

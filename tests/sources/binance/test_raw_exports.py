@@ -232,6 +232,22 @@ def test_binance_raw_exports_rejects_taker_buy_quote_volume_above_quote_volume(
         tuple(iter_raw_envelopes(path))
 
 
+@pytest.mark.parametrize("bad_trade_count", [True, 7.5, "7.0"])
+def test_binance_raw_exports_rejects_bool_or_fractional_integer_payload_values(
+    tmp_path: Path,
+    bad_trade_count: object,
+) -> None:
+    path = tmp_path / "bad-integer.jsonl"
+    envelope = _envelope(data_kind="klines")
+    payload = list(envelope["payload"])
+    payload[8] = bad_trade_count
+    envelope["payload"] = payload
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_kline_trade_count"):
+        tuple(iter_raw_envelopes(path))
+
+
 @pytest.mark.parametrize("bad_value", ["NaN", "Infinity", "-Infinity"])
 def test_binance_raw_exports_rejects_nan_or_infinite_numeric_payload_values(
     tmp_path: Path,
@@ -245,6 +261,96 @@ def test_binance_raw_exports_rejects_nan_or_infinite_numeric_payload_values(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_volume"):
+        tuple(iter_raw_envelopes(path))
+
+
+def test_binance_raw_exports_rejects_unhashable_data_kind_with_stable_error(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bad-data-kind.jsonl"
+    envelope = _envelope(data_kind="klines")
+    envelope["data_kind"] = ["klines"]
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="unsupported_binance_data_kind"):
+        tuple(iter_raw_envelopes(path))
+
+
+@pytest.mark.parametrize("bad_symbol", ["btcusdt", "BTC-USDT"])
+def test_binance_raw_exports_rejects_non_canonical_symbols(
+    tmp_path: Path,
+    bad_symbol: str,
+) -> None:
+    path = tmp_path / "bad-symbol.jsonl"
+    envelope = _envelope(data_kind="klines")
+    envelope["symbol"] = bad_symbol
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_raw_envelope_symbol"):
+        tuple(iter_raw_envelopes(path))
+
+
+@pytest.mark.parametrize("bad_time", [True, 1783296000000.5, "1783296000000.0"])
+def test_binance_raw_exports_rejects_invalid_millisecond_timestamps(
+    tmp_path: Path,
+    bad_time: object,
+) -> None:
+    path = tmp_path / "bad-time.jsonl"
+    envelope = _envelope(data_kind="klines")
+    payload = list(envelope["payload"])
+    payload[0] = bad_time
+    envelope["payload"] = payload
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_kline_open_time"):
+        tuple(iter_raw_envelopes(path))
+
+
+def test_binance_raw_exports_rejects_kline_close_time_before_open_time(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bad-time-order.jsonl"
+    envelope = _envelope(data_kind="klines")
+    payload = list(envelope["payload"])
+    payload[6] = payload[0] - 1
+    envelope["payload"] = payload
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_kline_time_order"):
+        tuple(iter_raw_envelopes(path))
+
+
+def test_binance_raw_exports_rejects_non_bool_aggregate_trade_side(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bad-bool.jsonl"
+    envelope = _envelope(data_kind="agg_trades")
+    envelope["payload"] = {**envelope["payload"], "m": "False"}
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_agg_trade_side"):
+        tuple(iter_raw_envelopes(path))
+
+
+@pytest.mark.parametrize(
+    ("levels", "error"),
+    [
+        ([["100.0", "1.0", "extra"]], "invalid_binance_depth_bid"),
+        ([["99.9", "1.0"], ["100.0", "1.0"]], "invalid_binance_depth_bid"),
+        ([["100.0", "1.0"], ["100.0", "2.0"]], "invalid_binance_depth_bid"),
+    ],
+)
+def test_binance_raw_exports_rejects_invalid_depth_levels(
+    tmp_path: Path,
+    levels: list[list[str]],
+    error: str,
+) -> None:
+    path = tmp_path / "bad-depth-levels.jsonl"
+    envelope = _envelope(data_kind="depth")
+    envelope["payload"] = {"lastUpdateId": 1, "bids": levels, "asks": []}
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match=error):
         tuple(iter_raw_envelopes(path))
 
 

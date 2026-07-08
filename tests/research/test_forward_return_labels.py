@@ -31,6 +31,20 @@ def test_forward_return_label_column_uses_frequency_suffix_contract() -> None:
     )
 
 
+@pytest.mark.parametrize("horizons", [(), [1], (True,), (0,), (1, 1)])
+def test_forward_return_labels_reject_invalid_horizons(horizons: object) -> None:
+    with pytest.raises(ValueError, match="invalid_forward_return_horizons"):
+        add_forward_return_labels(
+            make_synthetic_market_panel(sessions=3, assets=("asset_a",)),
+            horizons=horizons,  # type: ignore[arg-type]
+        )
+
+
+def test_forward_return_label_column_rejects_invalid_horizon() -> None:
+    with pytest.raises(ValueError, match="invalid_forward_return_horizon"):
+        forward_return_label_column(True)  # type: ignore[arg-type]
+
+
 def test_forward_return_labels_group_sort_horizons_and_invalid_entry_price() -> None:
     panel = make_synthetic_market_panel(sessions=130)
     ordered = panel.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
@@ -157,6 +171,19 @@ def test_forward_return_valid_bar_read_window_uses_sparse_asset_keys() -> None:
     )
 
     assert read_window == TimeWindow("2024-01-03", "2024-01-09")
+
+
+@pytest.mark.parametrize("lookahead_bars", [True, -1, 1.5])
+def test_forward_return_read_window_rejects_invalid_lookahead_bars(
+    lookahead_bars: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_forward_return_lookahead_bars"):
+        forward_return_valid_bar_read_window(
+            pd.DataFrame({"asset_id": ["asset_a"], "timestamp": ["2024-01-02"]}),
+            read_window=TimeWindow("2024-01-02", "2024-01-02"),
+            core_sessions=(pd.Timestamp("2024-01-02"),),
+            lookahead_bars=lookahead_bars,  # type: ignore[arg-type]
+        )
 
 
 def test_forward_return_labels_multi_horizon_do_not_read_past_exit_bar() -> None:

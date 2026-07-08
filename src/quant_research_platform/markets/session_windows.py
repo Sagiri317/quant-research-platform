@@ -13,7 +13,12 @@ from quant_research_platform.contracts.time import TimeWindow, require_date_wind
 def normalize_session_dates(values: Iterable[object]) -> tuple[pd.Timestamp, ...]:
     """Normalize provided session dates to sorted unique daily timestamps."""
 
-    normalized = {pd.Timestamp(value).normalize() for value in values}
+    if isinstance(values, str):
+        raise ValueError("invalid_session_dates")
+    try:
+        normalized = {pd.Timestamp(value).normalize() for value in values}
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_session_dates") from exc
     return tuple(sorted(normalized))
 
 
@@ -36,12 +41,18 @@ class SessionWindowPlanner:
     lookahead_sessions: int = 0
 
     def __post_init__(self) -> None:
-        if self.target_core_session_count <= 0:
-            raise ValueError("invalid_target_core_session_count")
-        if self.warmup_sessions < 0:
-            raise ValueError("invalid_warmup_sessions")
-        if self.lookahead_sessions < 0:
-            raise ValueError("invalid_lookahead_sessions")
+        _require_positive_int(
+            self.target_core_session_count,
+            error="invalid_target_core_session_count",
+        )
+        _require_non_negative_int(
+            self.warmup_sessions,
+            error="invalid_warmup_sessions",
+        )
+        _require_non_negative_int(
+            self.lookahead_sessions,
+            error="invalid_lookahead_sessions",
+        )
         object.__setattr__(
             self,
             "sessions",
@@ -116,3 +127,13 @@ __all__ = [
     "SessionWindowPlanner",
     "normalize_session_dates",
 ]
+
+
+def _require_positive_int(value: object, *, error: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(error)
+
+
+def _require_non_negative_int(value: object, *, error: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(error)

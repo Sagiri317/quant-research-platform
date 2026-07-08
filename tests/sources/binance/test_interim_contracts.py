@@ -6,8 +6,11 @@ from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.sources.binance.interim import (
     interim_catalog,
+    iter_interim_frames,
+    materialize_interim_data,
     normalize_raw_envelopes,
 )
+from quant_research_platform.storage.layout import StorageLayout
 
 
 def test_binance_interim_catalog_registers_approved_source_specs() -> None:
@@ -65,4 +68,58 @@ def test_binance_interim_rejects_data_id_raw_kind_mismatch() -> None:
                 },
             ),
             data_id="market_bars_1m",
+        )
+
+
+@pytest.mark.parametrize("row_batch_size", [True, 1.5, "100"])
+def test_binance_interim_rejects_non_strict_row_batch_size(
+    row_batch_size: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_binance_raw_row_batch_size"):
+        tuple(
+            iter_interim_frames(
+                data_id="market_bars_1m",
+                input_files=(),
+                row_batch_size=row_batch_size,  # type: ignore[arg-type]
+            )
+        )
+
+
+def test_binance_interim_materialization_rejects_bare_str_data_ids(tmp_path) -> None:
+    with pytest.raises(ValueError, match="invalid_binance_interim_data_ids"):
+        materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            data_ids="market_bars_1m",  # type: ignore[arg-type]
+        )
+
+
+def test_binance_interim_rejects_unknown_data_id_with_stable_error(tmp_path) -> None:
+    with pytest.raises(ValueError, match="unsupported_binance_data_id"):
+        materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            data_ids=("unknown",),
+        )
+
+
+def test_binance_interim_rejects_missing_payload_field_with_value_error() -> None:
+    with pytest.raises(ValueError, match="missing_binance_raw_payload_field"):
+        normalize_raw_envelopes(
+            (
+                {
+                    "source": "binance",
+                    "market_type": "spot",
+                    "data_kind": "agg_trades",
+                    "symbol": "BTCUSDT",
+                    "captured_at": "2026-07-06T00:00:02Z",
+                    "payload": {
+                        "a": 1,
+                        "p": "100.1",
+                        "q": "2.0",
+                        "f": 10,
+                        "T": 1783296001000,
+                        "m": False,
+                    },
+                },
+            ),
+            data_id="aggregate_trades_tick",
         )

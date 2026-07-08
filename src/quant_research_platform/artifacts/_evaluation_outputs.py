@@ -27,6 +27,7 @@ from quant_research_platform.artifacts._parquet_writers import write_parquet
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
+    strict_non_negative_count_series,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.storage.atomic import atomic_write_directory
@@ -227,10 +228,11 @@ def _signal_label_coverage_summary(metrics: pd.DataFrame) -> pd.DataFrame:
             min_n_obs=pd.NA,
             non_empty_period_count=pd.NA,
         )
+    source["n_obs"] = strict_non_negative_count_series(source["n_obs"])
     grouped = source.groupby(["signal", "label"], as_index=False, sort=True)["n_obs"]
     summary = grouped.agg(
         mean_n_obs="mean",
         min_n_obs="min",
-        non_empty_period_count=lambda values: int(pd.to_numeric(values).gt(0).sum()),
+        non_empty_period_count=lambda values: int(values.gt(0).sum()),
     )
     return summary.loc[:, columns]

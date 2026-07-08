@@ -86,11 +86,14 @@ def _coerce_bound(value: date | datetime | str) -> date | datetime:
     if isinstance(value, date):
         return value
     if isinstance(value, str):
-        if "T" in value or " " in value:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return _normalize_datetime(parsed)
-        return date.fromisoformat(value)
-    raise TypeError("invalid_time_window_bound")
+        try:
+            if "T" in value or " " in value:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return _normalize_datetime(parsed)
+            return date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("invalid_time_window_bound") from exc
+    raise ValueError("invalid_time_window_bound")
 
 
 def _normalize_datetime(value: datetime) -> datetime:
@@ -107,6 +110,5 @@ __all__ = [
     "is_intraday_time_window",
     "require_date_window",
     "time_window_date_bounds",
-    "time_window_timestamp_bounds",
     "time_window_timestamp_interval",
 ]

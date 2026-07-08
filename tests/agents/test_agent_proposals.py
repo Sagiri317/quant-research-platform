@@ -15,6 +15,7 @@ from quant_research_platform.agents.proposals import (
 from quant_research_platform.agents.safety import (
     ProposalSafetyError,
     assert_proposal_is_share_safe,
+    require_human_approval,
 )
 from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorSet
@@ -72,6 +73,37 @@ def test_agent_proposal_rejects_unapproved_status() -> None:
             input_data_ids=("features",),
             status="approved",
         )
+
+
+@pytest.mark.parametrize("approved", ["False", 1, 0, None, object()])
+def test_agent_proposals_reject_non_strict_approval_values(approved: object) -> None:
+    with pytest.raises(ValueError, match="invalid_proposal_approved"):
+        FactorProposal(
+            proposal_id="factor-proposal-bad-approved",
+            factor_id="factor_alpha",
+            rationale="Evaluate a synthetic factor idea.",
+            input_columns=("close",),
+            required_input_data_id="price_volume",
+            approved=approved,  # type: ignore[arg-type]
+        )
+
+
+def test_agent_proposal_rejects_bare_str_tuple_fields() -> None:
+    with pytest.raises(ValueError, match="invalid_proposal_tuple_field: input_columns"):
+        FactorProposal(
+            proposal_id="factor-proposal-bad-inputs",
+            factor_id="factor_alpha",
+            rationale="Evaluate a synthetic factor idea.",
+            input_columns="close",  # type: ignore[arg-type]
+        )
+
+
+def test_agent_safety_requires_strict_bool_approval() -> None:
+    class Proposal:
+        approved = "False"
+
+    with pytest.raises(ValueError, match="invalid_proposal_approved"):
+        require_human_approval(Proposal())
 
 
 def test_crypto_factor_proposal_is_validation_only_and_unapproved() -> None:

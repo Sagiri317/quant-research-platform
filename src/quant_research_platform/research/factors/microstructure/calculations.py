@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+from pandas.api.types import is_bool_dtype
 
 from quant_research_platform.research.time_series.contiguity import (
     contiguous_segment_ids,
@@ -17,12 +18,18 @@ def calculate_microstructure_factors(
     rolling_window: int = 5,
     expected_interval: pd.Timedelta = DEFAULT_EXPECTED_INTERVAL,
     min_periods: int = 5,
-    trade_flow_observed_column: str = "trade_flow_observed",
+    trade_flow_observed_column: str | None = None,
 ) -> pd.DataFrame:
     """Add the approved 1m microstructure factors using contiguous clock windows."""
 
-    if min_periods < rolling_window:
+    if rolling_window != 5:
+        raise ValueError("unsupported_microstructure_rolling_window")
+    if min_periods != rolling_window:
         raise ValueError("microstructure_rolling_requires_full_window")
+    if not isinstance(expected_interval, pd.Timedelta):
+        raise ValueError("invalid_expected_interval")
+    if expected_interval <= pd.Timedelta(0):
+        raise ValueError("invalid_expected_interval")
 
     result = frame.sort_values(
         ["market_id", "asset_id", "timestamp"],
@@ -54,11 +61,12 @@ def calculate_microstructure_factors(
         mid_price.le(0)
     )
 
-    observed = (
-        result[trade_flow_observed_column].astype("boolean")
-        if trade_flow_observed_column in result
-        else pd.Series(True, index=result.index, dtype="boolean")
-    )
+    if trade_flow_observed_column is None:
+        observed = pd.Series(True, index=result.index, dtype="bool")
+    elif trade_flow_observed_column in result:
+        observed = _strict_bool_series(result[trade_flow_observed_column])
+    else:
+        raise ValueError("missing_trade_flow_observed_column")
     trade_count_sum = _rolling_group_sum(
         result,
         _numeric(result, "trade_count"),
@@ -95,6 +103,16 @@ def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(frame[column], errors="coerce")
 
 
+def _strict_bool_series(series: pd.Series) -> pd.Series:
+    if series.isna().any():
+        raise ValueError("invalid_trade_flow_observed")
+    if is_bool_dtype(series):
+        return series.astype("bool")
+    if not series.map(lambda value: isinstance(value, bool)).all():
+        raise ValueError("invalid_trade_flow_observed")
+    return pd.Series(series.to_numpy(dtype=bool), index=series.index)
+
+
 def _rolling_group_sum(
     frame: pd.DataFrame,
     series: pd.Series,
@@ -110,8 +128,9 @@ def _rolling_group_sum(
         timestamp_column="timestamp",
         expected_interval=expected_interval,
     )
-    valid_series = series.where(observed.fillna(False).astype(bool))
-    valid_count = observed.fillna(False).astype(int)
+    valid_mask = observed.eq(True)
+    valid_series = series.where(valid_mask)
+    valid_count = valid_mask.astype("int64")
     grouped = [frame["market_id"], frame["asset_id"], segments]
     rolling_sum = (
         valid_series.groupby(grouped, sort=False)

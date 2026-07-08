@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -161,6 +162,36 @@ def test_crypto_factor_time_window_uses_prior_warmup_minutes() -> None:
     assert read_window == TimeWindow("2026-07-06T00:06:00", "2026-07-06T00:12:00")
 
 
+def test_crypto_factor_only_panel_dependency_window_uses_factor_warmup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, TimeWindow]] = []
+
+    def record(name: str):
+        def wrapped(*_: Any, time_window: TimeWindow, **__: Any) -> object:
+            calls.append((name, time_window))
+            return object()
+
+        return wrapped
+
+    monkeypatch.setattr(materialize_panel, "write_panel", record("panel"))
+    monkeypatch.setattr(materialize_factors, "write_factors", record("factors"))
+
+    core = TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00")
+    materializer.materialize_processed_data(
+        layout=StorageLayout(project_root=tmp_path),
+        source_id=SourceId("synthetic_crypto"),
+        time_window=core,
+        kinds=frozenset({ProcessedDataKind.FACTOR}),
+    )
+
+    assert calls == [
+        ("panel", TimeWindow("2026-07-06T00:06:00", "2026-07-06T00:12:00")),
+        ("factors", core),
+    ]
+
+
 def test_crypto_label_time_window_uses_future_lookahead_minutes() -> None:
     from quant_research_platform.markets.implementations.crypto.processed import (
         materialization_dependencies,
@@ -171,6 +202,56 @@ def test_crypto_label_time_window_uses_future_lookahead_minutes() -> None:
     read_window = materialization_dependencies.label_read_window(core)
 
     assert read_window == TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:28:00")
+
+
+def test_crypto_label_only_panel_dependency_window_uses_label_lookahead(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, TimeWindow]] = []
+
+    def record(name: str):
+        def wrapped(*_: Any, time_window: TimeWindow, **__: Any) -> object:
+            calls.append((name, time_window))
+            return object()
+
+        return wrapped
+
+    monkeypatch.setattr(materialize_panel, "write_panel", record("panel"))
+    monkeypatch.setattr(materialize_labels, "write_labels", record("labels"))
+
+    core = TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00")
+    materializer.materialize_processed_data(
+        layout=StorageLayout(project_root=tmp_path),
+        source_id=SourceId("synthetic_crypto"),
+        time_window=core,
+        kinds=frozenset({ProcessedDataKind.LABEL}),
+    )
+
+    assert calls == [
+        ("panel", TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:28:00")),
+        ("labels", core),
+    ]
+
+
+def test_crypto_materializer_rejects_bare_str_data_ids(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="invalid_crypto_processed_data_ids"):
+        materializer.materialize_processed_data(
+            layout=StorageLayout(project_root=tmp_path),
+            source_id=SourceId("binance"),
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            data_ids="market_panel_1m",  # type: ignore[arg-type]
+        )
+
+
+def test_crypto_materializer_rejects_invalid_kinds(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="invalid_crypto_processed_kinds"):
+        materializer.materialize_processed_data(
+            layout=StorageLayout(project_root=tmp_path),
+            source_id=SourceId("binance"),
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            kinds=frozenset({"panel"}),  # type: ignore[arg-type]
+        )
 
 
 def test_crypto_materializer_materializes_panel_dependency_window_for_factor_label(

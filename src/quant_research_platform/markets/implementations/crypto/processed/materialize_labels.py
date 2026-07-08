@@ -85,7 +85,7 @@ def _iter_label_chunks(
         buffer = _ordered_panel(
             panel if buffer.empty else pd.concat((buffer, panel), ignore_index=True)
         )
-        emit_mask = _label_emit_mask(buffer) & buffer[_CORE_ROW].astype(bool)
+        emit_mask = _label_emit_mask(buffer) & buffer[_CORE_ROW].astype("boolean")
         if not emit_mask.any():
             continue
         labeled = _label_frame(buffer)
@@ -93,7 +93,7 @@ def _iter_label_chunks(
         buffer = buffer.loc[~emit_mask].copy()
     if not buffer.empty:
         labeled = _label_frame(buffer)
-        core_mask = buffer[_CORE_ROW].astype(bool)
+        core_mask = buffer[_CORE_ROW].astype("boolean")
         if core_mask.any():
             yield labeled.loc[core_mask].loc[:, spec.required_columns]
 
@@ -132,7 +132,9 @@ def _core_mask(frame: pd.DataFrame, time_window: TimeWindow) -> pd.Series:
         spec=spec,
         time_window=time_window,
     )
-    return frame.index.isin(filtered["_qrp_index"])
+    positions = pd.Series(False, index=range(len(frame)))
+    positions.loc[filtered["_qrp_index"].to_numpy(dtype=int)] = True
+    return pd.Series(positions.to_numpy(dtype=bool), index=frame.index)
 
 
 __all__ = ["write_labels"]

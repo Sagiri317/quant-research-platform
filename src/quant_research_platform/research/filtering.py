@@ -45,11 +45,11 @@ def _validated_bool_mask(frame: pd.DataFrame, column: str) -> pd.Series:
     if bool(series.isna().any()):
         raise ValueError(f"null_filter_column_values: {column}")
     if is_bool_dtype(series):
-        return series.astype(bool)
+        return series.eq(True)
     if is_integer_dtype(series):
         values = set(series.unique().tolist())
         if values.issubset({0, 1}):
-            return series.astype(bool)
+            return series.eq(1)
     raise ValueError(f"invalid_filter_column_dtype: {column}")
 
 

@@ -92,3 +92,8 @@ def test_evaluation_diagnostics_reports_fail_closed_on_bad_inputs() -> None:
         summarize_signal_label_coverage(
             pd.DataFrame({"timestamp": ["bad"], "n_obs": [1]})
         )
+
+    with pytest.raises(ValueError, match="invalid_evaluation_observation_counts"):
+        summarize_signal_label_coverage(
+            pd.DataFrame({"timestamp": ["2024-01-02"], "n_obs": [1.5]})
+        )

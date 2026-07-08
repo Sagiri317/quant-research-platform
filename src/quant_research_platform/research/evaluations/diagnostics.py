@@ -17,6 +17,7 @@ from quant_research_platform.compute.dataframe.cross_section import (
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
+    strict_non_negative_count_series,
 )
 
 
@@ -42,9 +43,7 @@ def summarize_signal_label_coverage(
     timestamps = pd.to_datetime(metrics[timestamp_column], errors="coerce")
     if bool(timestamps.isna().any()):
         raise ValueError("invalid_evaluation_timestamp_values")
-    n_obs = pd.to_numeric(metrics["n_obs"], errors="coerce")
-    if bool(n_obs.isna().any()):
-        raise ValueError("invalid_evaluation_observation_counts")
+    n_obs = strict_non_negative_count_series(metrics["n_obs"])
     return {
         "metric_rows": int(len(metrics)),
         "rows_after_signal_label_dropna": int(n_obs.sum()),

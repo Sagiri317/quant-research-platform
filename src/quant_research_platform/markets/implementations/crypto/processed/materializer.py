@@ -48,13 +48,16 @@ def materialize_processed_data(
         raise ValueError("data_ids_xor_kinds_required")
     catalog = processed_catalog()
     if data_ids is not None:
+        data_ids = _strict_data_ids(data_ids)
         requested = tuple(catalog.get(data_id) for data_id in data_ids)
     else:
         assert kinds is not None
+        kinds = _strict_kinds(kinds)
         requested = tuple(spec for spec in catalog.list() if spec.kind in kinds)
     if not requested:
         raise ValueError("no_processed_targets")
-    specs = _include_dependencies({spec.data_id: spec for spec in requested})
+    requested_by_id = {spec.data_id: spec for spec in requested}
+    specs = _include_dependencies(requested_by_id)
     written: dict[str, DatasetInspection] = {}
     for data_id in (
         MARKET_PANEL_DATA_ID,
@@ -67,6 +70,7 @@ def materialize_processed_data(
         target_time_window = _target_time_window(
             spec,
             specs=specs,
+            requested_by_id=requested_by_id,
             core_time_window=time_window,
         )
         written[data_id] = _materialize_one(
@@ -132,19 +136,37 @@ def _target_time_window(
     spec: ProcessedDataSpec,
     *,
     specs: Mapping[str, ProcessedDataSpec],
+    requested_by_id: Mapping[str, ProcessedDataSpec],
     core_time_window: TimeWindow,
 ) -> TimeWindow:
     if spec.data_id != MARKET_PANEL_DATA_ID:
         return core_time_window
-    if any(
-        data_id in specs
-        for data_id in (
-            MICROSTRUCTURE_PROCESSED_DATA_ID,
-            FORWARD_RETURNS_PROCESSED_DATA_ID,
-        )
-    ):
+    requested_factor = MICROSTRUCTURE_PROCESSED_DATA_ID in requested_by_id
+    requested_label = FORWARD_RETURNS_PROCESSED_DATA_ID in requested_by_id
+    if requested_factor and requested_label:
         return materialization_dependencies.panel_dependency_window(core_time_window)
+    if requested_factor:
+        return materialization_dependencies.factor_read_window(core_time_window)
+    if requested_label:
+        return materialization_dependencies.label_read_window(core_time_window)
     return core_time_window
+
+
+def _strict_data_ids(data_ids: object) -> tuple[str, ...]:
+    if isinstance(data_ids, str) or not isinstance(data_ids, tuple | list):
+        raise ValueError("invalid_crypto_processed_data_ids")
+    values = tuple(data_ids)
+    if any(not isinstance(data_id, str) for data_id in values):
+        raise ValueError("invalid_crypto_processed_data_ids")
+    return values
+
+
+def _strict_kinds(kinds: object) -> frozenset[ProcessedDataKind]:
+    if not isinstance(kinds, frozenset) or any(
+        not isinstance(kind, ProcessedDataKind) for kind in kinds
+    ):
+        raise ValueError("invalid_crypto_processed_kinds")
+    return kinds
 
 
 __all__ = ["materialize_processed_data", "processed_catalog"]

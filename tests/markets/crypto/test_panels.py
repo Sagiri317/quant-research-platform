@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.markets.implementations.crypto.processed.panels import (
     compute_market_panel,
@@ -25,6 +26,7 @@ def test_compute_market_panel_canonicalizes_source_asset_and_asof_quote() -> Non
             "quote_volume": [1005.0, 1116.5],
             "trade_count": [1, 1],
             "taker_buy_volume": [4.0, 5.0],
+            "taker_buy_quote_volume": [402.0, 507.5],
         }
     )
     trades = pd.DataFrame(
@@ -84,6 +86,7 @@ def test_compute_market_panel_distinguishes_missing_trade_feed_from_zero_flow() 
             "quote_volume": [0.0, 1015.0],
             "trade_count": [0, 2],
             "taker_buy_volume": [0.0, 5.0],
+            "taker_buy_quote_volume": [0.0, 507.5],
         }
     )
 
@@ -215,6 +218,81 @@ def test_invalid_ohlc_sets_eligible_false() -> None:
     assert bool(panel.loc[0, "eligible"]) is False
 
 
+def test_invalid_bar_quantity_sets_eligible_false_and_masks_taker_sell_volume() -> None:
+    bars = _bars_frame()
+    bars.loc[0, "taker_buy_volume"] = 11.0
+
+    panel = compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
+
+    assert bool(panel.loc[0, "eligible"]) is False
+    assert math.isnan(panel.loc[0, "taker_sell_volume"])
+
+
+def test_invalid_signed_trade_quantity_is_not_observed() -> None:
+    trades = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"],
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:01"]),
+            "signed_quantity": ["bad"],
+        }
+    )
+
+    panel = compute_market_panel(_bars_frame(), trades=trades, depth=pd.DataFrame())
+
+    assert bool(panel.loc[0, "trade_flow_observed"]) is False
+    assert math.isnan(panel.loc[0, "signed_volume"])
+
+
+def test_zero_quantity_quote_is_not_observed() -> None:
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT", "BTCUSDT"],
+            "timestamp": pd.to_datetime(
+                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
+            ),
+            "side": ["bid", "ask"],
+            "level": [1, 1],
+            "price": [100.0, 100.2],
+            "quantity": [0.0, 1.0],
+        }
+    )
+
+    panel = compute_market_panel(_bars_frame(), trades=pd.DataFrame(), depth=depth)
+
+    assert bool(panel.loc[0, "quote_observed"]) is False
+    assert math.isnan(panel.loc[0, "best_bid"])
+
+
+def test_invalid_depth_inputs_fail_closed() -> None:
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT", "BTCUSDT"],
+            "timestamp": pd.to_datetime(
+                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
+            ),
+            "side": ["bid", "bid"],
+            "level": [1, 1],
+            "price": [100.0, 99.9],
+            "quantity": [1.5, 1.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="duplicate_crypto_depth_level"):
+        compute_market_panel(_bars_frame(), trades=pd.DataFrame(), depth=depth)
+
+
+def test_invalid_bar_timestamp_fails_closed() -> None:
+    bars = pd.DataFrame(
+        {
+            **_bars_frame().to_dict(orient="list"),
+            "timestamp": ["bad"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_crypto_panel_timestamp"):
+        compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
+
+
 def test_quote_observed_and_trade_flow_observed_do_not_control_eligible() -> None:
     panel = compute_market_panel(
         _bars_frame(),
@@ -241,5 +319,6 @@ def _bars_frame() -> pd.DataFrame:
             "quote_volume": [1005.0],
             "trade_count": [1],
             "taker_buy_volume": [4.0],
+            "taker_buy_quote_volume": [402.0],
         }
     )

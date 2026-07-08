@@ -40,12 +40,24 @@ def _exactly_one(
     expected: str,
     error: str,
 ) -> str:
+    _require_exact_source_input_set(spec)
     matches = tuple(
         data_id for data_id in spec.source_input_data_ids if data_id == expected
     )
     if len(matches) != 1:
         raise ValueError(error)
     return matches[0]
+
+
+def _require_exact_source_input_set(spec: ProcessedDataSpec) -> None:
+    values = tuple(spec.source_input_data_ids)
+    expected = (
+        MARKET_BARS_SOURCE_DATA_ID,
+        AGGREGATE_TRADES_SOURCE_DATA_ID,
+        DEPTH_LEVELS_SOURCE_DATA_ID,
+    )
+    if len(values) != len(expected) or set(values) != set(expected):
+        raise ValueError("panel_source_input_data_ids_mismatch")
 
 
 __all__ = [

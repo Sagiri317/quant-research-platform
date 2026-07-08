@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
-
-import pandas as pd
 
 from quant_research_platform.artifacts.evidence import (
     write_json_evidence,
@@ -101,8 +99,8 @@ _WORKFLOW_ID = "local_verification"
 def run_local_verification(
     config: LocalVerificationRunConfig,
 ) -> LocalVerificationRunResult:
-    start = pd.Timestamp(config.start_date)
-    end = pd.Timestamp(config.end_date)
+    start = _local_verification_bound(config.start_date)
+    end = _local_verification_bound(config.end_date)
     if start > end:
         raise ValueError("start_date_after_end_date")
     effective_windows = _resolve_effective_windows(config)
@@ -531,10 +529,10 @@ def _resolve_effective_windows(
 ) -> dict[str, str | None]:
     evaluation_start_date = config.evaluation_start_date or config.start_date
     evaluation_end_date = config.evaluation_end_date or config.end_date
-    run_start = pd.Timestamp(config.start_date)
-    run_end = pd.Timestamp(config.end_date)
-    evaluation_start = pd.Timestamp(evaluation_start_date)
-    evaluation_end = pd.Timestamp(evaluation_end_date)
+    run_start = _local_verification_bound(config.start_date)
+    run_end = _local_verification_bound(config.end_date)
+    evaluation_start = _local_verification_bound(evaluation_start_date)
+    evaluation_end = _local_verification_bound(evaluation_end_date)
     if evaluation_start > evaluation_end:
         raise ValueError("evaluation_start_date_after_end_date")
     if evaluation_start < run_start or evaluation_end > run_end:
@@ -543,10 +541,12 @@ def _resolve_effective_windows(
     prediction_train_end = config.prediction_train_end
     prediction_test_start = config.prediction_test_start
     prediction_test_end = config.prediction_test_end
-    train_end = pd.Timestamp(prediction_train_end)
-    test_start = pd.Timestamp(prediction_test_start)
+    train_end = _local_verification_bound(prediction_train_end)
+    test_start = _local_verification_bound(prediction_test_start)
     test_end = (
-        pd.Timestamp(prediction_test_end) if prediction_test_end is not None else None
+        _local_verification_bound(prediction_test_end)
+        if prediction_test_end is not None
+        else None
     )
     if (
         train_end < run_start
@@ -567,6 +567,10 @@ def _resolve_effective_windows(
         "prediction_test_start": prediction_test_start,
         "prediction_test_end": prediction_test_end,
     }
+
+
+def _local_verification_bound(value: str) -> date | datetime:
+    return TimeWindow(value, value).start
 
 
 def _run_json_path(run_root: Path) -> Path:

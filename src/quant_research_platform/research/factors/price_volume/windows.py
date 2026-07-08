@@ -88,7 +88,13 @@ def price_volume_valid_bar_read_window(
     asset_column: str = "asset_id",
     date_column: str = "timestamp",
 ) -> TimeWindow:
-    if lookback_bars <= 0:
+    if (
+        not isinstance(lookback_bars, int)
+        or isinstance(lookback_bars, bool)
+        or lookback_bars < 0
+    ):
+        raise ValueError("invalid_price_volume_lookback_bars")
+    if lookback_bars == 0:
         return read_window
     key_groups = tuple(
         iter_grouped_timestamps(

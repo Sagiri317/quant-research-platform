@@ -26,22 +26,22 @@ def contiguous_segment_ids(
     if missing:
         raise ValueError("contiguity_columns_missing")
     work = frame.loc[:, [*group_columns, timestamp_column]].copy()
-    work["_qrp_original_index"] = frame.index
-    work[timestamp_column] = pd.to_datetime(work[timestamp_column], errors="coerce")
+    work["_qrp_original_position"] = range(len(frame))
+    work[timestamp_column] = _strict_timestamps(work[timestamp_column])
     work = work.sort_values(
-        [*group_columns, timestamp_column, "_qrp_original_index"],
+        [*group_columns, timestamp_column, "_qrp_original_position"],
         kind="mergesort",
     )
-    segment_values = pd.Series(index=work.index, dtype="int64")
+    segment_values = pd.Series(index=work["_qrp_original_position"], dtype="int64")
     next_segment_id = 0
     for _, rows in work.groupby(list(group_columns), sort=False, dropna=False):
         deltas = rows[timestamp_column].diff()
         resets = deltas.isna() | deltas.ne(expected_interval)
         local_segments = resets.cumsum().astype("int64") - 1 + next_segment_id
-        segment_values.loc[rows.index] = local_segments
+        segment_values.loc[rows["_qrp_original_position"]] = local_segments.to_numpy()
         next_segment_id = int(local_segments.max()) + 1
-    aligned = segment_values.reindex(frame.index)
-    return aligned.astype("int64")
+    aligned = segment_values.sort_index()
+    return pd.Series(aligned.to_numpy(dtype="int64"), index=frame.index)
 
 
 def iter_grouped_timestamps(
@@ -63,8 +63,8 @@ def iter_grouped_timestamps(
         if missing:
             raise ValueError("panel_key_columns_missing")
         keys = panel_keys.loc[:, [*group_columns, timestamp_column]].copy()
-        keys[timestamp_column] = pd.to_datetime(keys[timestamp_column], errors="coerce")
-        keys = keys.dropna(subset=[*group_columns, timestamp_column])
+        keys[timestamp_column] = _strict_timestamps(keys[timestamp_column])
+        keys = keys.dropna(subset=[*group_columns])
         if keys.empty:
             return
         keys = keys.sort_values([*group_columns, timestamp_column], kind="mergesort")
@@ -72,10 +72,17 @@ def iter_grouped_timestamps(
             yield group[timestamp_column].reset_index(drop=True)
         return
     for timestamps in panel_keys.values():
-        dates = pd.Series(pd.to_datetime(tuple(timestamps), errors="coerce"))
-        dates = dates.dropna().sort_values(kind="mergesort").reset_index(drop=True)
+        dates = pd.Series(_strict_timestamps(pd.Series(tuple(timestamps))))
+        dates = dates.sort_values(kind="mergesort").reset_index(drop=True)
         if not dates.empty:
             yield dates
+
+
+def _strict_timestamps(values: pd.Series) -> pd.Series:
+    timestamps = pd.to_datetime(values, errors="coerce")
+    if timestamps.isna().any():
+        raise ValueError("invalid_grouped_timestamp_values")
+    return timestamps
 
 
 __all__ = ["contiguous_segment_ids", "iter_grouped_timestamps"]

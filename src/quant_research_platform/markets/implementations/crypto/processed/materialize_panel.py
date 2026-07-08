@@ -87,13 +87,21 @@ def _iter_panel_chunks(
         matching_depth = _read_matching_chunks(
             depth_root,
             bars_chunk,
-            max_quote_age=pd.Timedelta(seconds=120),
+            max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
         )
         for bars in _split_frame_by_policy(bars_chunk, resource_policy):
             if bars.empty:
                 continue
-            trades = _filter_matching_frame(matching_trades, bars)
-            depth = _filter_matching_frame(matching_depth, bars)
+            trades = _filter_matching_frame(
+                matching_trades,
+                bars,
+                max_quote_age=pd.Timedelta(0),
+            )
+            depth = _filter_matching_frame(
+                matching_depth,
+                bars,
+                max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
+            )
             yield panels.compute_market_panel(bars, trades=trades, depth=depth).loc[
                 :,
                 spec.required_columns,
@@ -119,6 +127,7 @@ def _read_matching_chunks(
         start=start,
         end=end,
         time_window=read_window,
+        max_quote_age=max_quote_age,
     )
     try:
         first = next(chunks)
@@ -134,6 +143,7 @@ def _iter_matching_chunks(
     start: pd.Timestamp,
     end: pd.Timestamp,
     time_window: TimeWindow,
+    max_quote_age: pd.Timedelta,
 ) -> Iterator[pd.DataFrame]:
     for chunk in read_dataset(
         dataset_root,
@@ -148,13 +158,19 @@ def _iter_matching_chunks(
                 asset_ids=asset_ids,
                 start=start,
                 end=end,
+                max_quote_age=max_quote_age,
             )
         ].copy()
         if not matching.empty:
             yield matching
 
 
-def _filter_matching_frame(frame: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+def _filter_matching_frame(
+    frame: pd.DataFrame,
+    bars: pd.DataFrame,
+    *,
+    max_quote_age: pd.Timedelta,
+) -> pd.DataFrame:
     if frame.empty or bars.empty:
         return pd.DataFrame(columns=frame.columns)
     asset_ids = set(bars["source_asset_id"].astype(str))
@@ -166,6 +182,7 @@ def _filter_matching_frame(frame: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFr
             asset_ids=asset_ids,
             start=start,
             end=end,
+            max_quote_age=max_quote_age,
         )
     ].copy()
 
@@ -176,10 +193,11 @@ def _matching_window_mask(
     asset_ids: set[str],
     start: pd.Timestamp,
     end: pd.Timestamp,
+    max_quote_age: pd.Timedelta,
 ) -> pd.Series:
     timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
     mask = frame["source_asset_id"].astype(str).isin(asset_ids)
-    return mask & timestamps.ge(start - pd.Timedelta(seconds=120)) & timestamps.le(end)
+    return mask & timestamps.ge(start - max_quote_age) & timestamps.le(end)
 
 
 def _prepend(

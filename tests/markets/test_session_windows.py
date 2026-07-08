@@ -147,3 +147,36 @@ def test_session_windows_fail_closed_when_time_window_has_no_sessions() -> None:
 
     with pytest.raises(ValueError, match="no_trading_sessions_in_time_window"):
         planner.windows(TimeWindow("2015-01-03", "2015-01-04"), reason="label")
+
+
+def test_session_windows_reject_bare_str_sessions() -> None:
+    with pytest.raises(ValueError, match="invalid_session_dates"):
+        normalize_session_dates("2015-01-05")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("target_core_session_count", True, "invalid_target_core_session_count"),
+        ("target_core_session_count", 1.5, "invalid_target_core_session_count"),
+        ("warmup_sessions", True, "invalid_warmup_sessions"),
+        ("lookahead_sessions", 1.5, "invalid_lookahead_sessions"),
+    ],
+)
+def test_session_windows_reject_non_strict_session_counts(
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    kwargs = {
+        "target_core_session_count": 1,
+        "warmup_sessions": 0,
+        "lookahead_sessions": 0,
+        field: value,
+    }
+
+    with pytest.raises(ValueError, match=error):
+        SessionWindowPlanner(
+            sessions=(pd.Timestamp("2015-01-05"),),
+            **kwargs,  # type: ignore[arg-type]
+        )

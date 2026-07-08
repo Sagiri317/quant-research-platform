@@ -26,6 +26,19 @@ from quant_research_platform.sources.binance.raw_exports import (
     dataset_files_by_id,
     iter_raw_envelopes,
 )
+from quant_research_platform.sources.binance.validation import (
+    depth_side_levels,
+    first_present,
+    strict_boolean,
+    strict_data_kind,
+    strict_market_type,
+    strict_millisecond_timestamp,
+    strict_non_negative_float,
+    strict_non_negative_integer,
+    strict_positive_float,
+    strict_positive_integer,
+    strict_symbol,
+)
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -106,8 +119,12 @@ def iter_interim_frames(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> Iterator[pd.DataFrame]:
-    if row_batch_size <= 0:
-        raise ValueError("invalid_binance_raw_row_batch_size")
+    strict_positive_integer(
+        row_batch_size,
+        error="invalid_binance_raw_row_batch_size",
+    )
+    if isinstance(input_files, str) or not isinstance(input_files, tuple | list):
+        raise ValueError("invalid_binance_raw_input_files")
     for input_file in sorted(input_files):
         for batch in _iter_batches(
             iter_raw_envelopes(input_file),
@@ -147,7 +164,8 @@ def materialize_interim_data(
     files_by_data_id = dataset_files_by_id(source_raw_root)
     written: dict[str, Path] = {}
     skipped: list[str] = []
-    for data_id in data_ids:
+    requested_data_ids = _strict_data_ids(data_ids)
+    for data_id in requested_data_ids:
         spec = catalog.get(data_id)
         input_files = files_by_data_id.get(data_id, ())
         if not input_files:
@@ -172,20 +190,47 @@ def materialize_interim_data(
 def _normalize_klines(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
     normalized = [
         {
-            "source_asset_id": str(envelope["symbol"]),
+            "source_asset_id": strict_symbol(envelope["symbol"]),
             "timestamp": _timestamp_ms(envelope["payload"][0]),
             "open_time": _timestamp_ms(envelope["payload"][0]),
             "close_time": _timestamp_ms(envelope["payload"][6]),
-            "open": _float(envelope["payload"][1]),
-            "high": _float(envelope["payload"][2]),
-            "low": _float(envelope["payload"][3]),
-            "close": _float(envelope["payload"][4]),
-            "volume": _float(envelope["payload"][5]),
-            "quote_volume": _float(envelope["payload"][7]),
-            "trade_count": int(envelope["payload"][8]),
-            "taker_buy_volume": _float(envelope["payload"][9]),
-            "taker_buy_quote_volume": _float(envelope["payload"][10]),
-            "source_market_type": str(envelope["market_type"]),
+            "open": strict_positive_float(
+                envelope["payload"][1],
+                error="invalid_binance_kline_ohlc",
+            ),
+            "high": strict_positive_float(
+                envelope["payload"][2],
+                error="invalid_binance_kline_ohlc",
+            ),
+            "low": strict_positive_float(
+                envelope["payload"][3],
+                error="invalid_binance_kline_ohlc",
+            ),
+            "close": strict_positive_float(
+                envelope["payload"][4],
+                error="invalid_binance_kline_ohlc",
+            ),
+            "volume": strict_non_negative_float(
+                envelope["payload"][5],
+                error="invalid_binance_kline_volume",
+            ),
+            "quote_volume": strict_non_negative_float(
+                envelope["payload"][7],
+                error="invalid_binance_kline_volume",
+            ),
+            "trade_count": strict_non_negative_integer(
+                envelope["payload"][8],
+                error="invalid_binance_kline_trade_count",
+            ),
+            "taker_buy_volume": strict_non_negative_float(
+                envelope["payload"][9],
+                error="invalid_binance_kline_volume",
+            ),
+            "taker_buy_quote_volume": strict_non_negative_float(
+                envelope["payload"][10],
+                error="invalid_binance_kline_volume",
+            ),
+            "source_market_type": strict_market_type(envelope["market_type"]),
             "interval": str(envelope["interval"]),
         }
         for envelope in rows
@@ -210,7 +255,7 @@ def _validate_raw_kind_matches_data_id(
     if expected is None:
         raise ValueError(f"unsupported_binance_data_id: {data_id}")
     for envelope in envelopes:
-        if envelope.get("data_kind") != expected:
+        if strict_data_kind(envelope.get("data_kind")) != expected:
             raise ValueError("binance_raw_data_id_kind_mismatch")
 
 
@@ -246,7 +291,9 @@ def _timestamp_filter_interval(
         )
         return pd.Timestamp(start), pd.Timestamp(end), end_inclusive
     if start_date is not None:
-        start = pd.Timestamp(start_date)
+        start, _end, _end_inclusive = time_window_timestamp_interval(
+            TimeWindow(start_date, start_date)
+        )
         return start, None, True
     assert end_date is not None
     end_window = TimeWindow(end_date, end_date)
@@ -258,25 +305,41 @@ def _normalize_aggregate_trades(rows: tuple[dict[str, Any], ...]) -> pd.DataFram
     normalized = []
     for envelope in rows:
         payload = envelope["payload"]
-        quantity = _float(_first_present(payload, "quantity", "q"))
-        price = _float(_first_present(payload, "price", "p"))
-        is_buyer_maker = bool(payload.get("is_buyer_maker", payload.get("m", False)))
+        quantity = strict_positive_float(
+            first_present(payload, "quantity", "q"),
+            error="invalid_binance_agg_trade_quantity",
+        )
+        price = strict_positive_float(
+            first_present(payload, "price", "p"),
+            error="invalid_binance_agg_trade_price",
+        )
+        is_buyer_maker = strict_boolean(
+            payload.get("is_buyer_maker", payload.get("m")),
+            error="invalid_binance_agg_trade_side",
+        )
         normalized.append(
             {
-                "source_asset_id": str(envelope["symbol"]),
-                "timestamp": _timestamp_ms(_first_present(payload, "timestamp", "T")),
-                "aggregate_trade_id": int(
-                    _first_present(payload, "aggregate_trade_id", "a")
+                "source_asset_id": strict_symbol(envelope["symbol"]),
+                "timestamp": _timestamp_ms(first_present(payload, "timestamp", "T")),
+                "aggregate_trade_id": strict_non_negative_integer(
+                    first_present(payload, "aggregate_trade_id", "a"),
+                    error="invalid_binance_agg_trade_id_range",
                 ),
                 "price": price,
                 "quantity": quantity,
                 "quote_quantity": price * quantity,
-                "first_trade_id": int(_first_present(payload, "first_trade_id", "f")),
-                "last_trade_id": int(_first_present(payload, "last_trade_id", "l")),
+                "first_trade_id": strict_non_negative_integer(
+                    first_present(payload, "first_trade_id", "f"),
+                    error="invalid_binance_agg_trade_id_range",
+                ),
+                "last_trade_id": strict_non_negative_integer(
+                    first_present(payload, "last_trade_id", "l"),
+                    error="invalid_binance_agg_trade_id_range",
+                ),
                 "is_buyer_maker": is_buyer_maker,
                 "taker_side": "sell" if is_buyer_maker else "buy",
                 "signed_quantity": -quantity if is_buyer_maker else quantity,
-                "source_market_type": str(envelope["market_type"]),
+                "source_market_type": strict_market_type(envelope["market_type"]),
             }
         )
     return _ordered_frame(
@@ -291,22 +354,30 @@ def _normalize_depth(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
     for envelope in rows:
         payload = envelope["payload"]
         timestamp = _timestamp_iso(envelope["captured_at"])
-        symbol = str(envelope["symbol"])
+        symbol = strict_symbol(envelope["symbol"])
         for side, raw_levels in (
             ("bid", payload.get("bids", ())),
             ("ask", payload.get("asks", ())),
         ):
-            for level, raw_level in enumerate(raw_levels, start=1):
-                price, quantity = raw_level
+            for level, (price, quantity) in enumerate(
+                depth_side_levels(
+                    raw_levels,
+                    side=side,
+                    error=f"invalid_binance_depth_{side}",
+                ),
+                start=1,
+            ):
                 normalized.append(
                     {
                         "source_asset_id": symbol,
                         "timestamp": timestamp,
                         "side": side,
                         "level": level,
-                        "price": _float(price),
-                        "quantity": _float(quantity),
-                        "source_market_type": str(envelope["market_type"]),
+                        "price": price,
+                        "quantity": quantity,
+                        "source_market_type": strict_market_type(
+                            envelope["market_type"]
+                        ),
                     }
                 )
     return _ordered_frame(
@@ -360,22 +431,14 @@ def _ordered_frame(
 
 
 def _timestamp_ms(value: object) -> pd.Timestamp:
-    return pd.to_datetime(int(value), unit="ms", utc=True).tz_localize(None)
+    return strict_millisecond_timestamp(
+        value,
+        error="invalid_binance_millisecond_timestamp",
+    ).tz_localize(None)
 
 
 def _timestamp_iso(value: object) -> pd.Timestamp:
     return pd.to_datetime(value, utc=True).tz_localize(None)
-
-
-def _float(value: object) -> float:
-    return float(value)
-
-
-def _first_present(row: dict[str, Any], *keys: str) -> object:
-    for key in keys:
-        if key in row and row[key] is not None:
-            return row[key]
-    raise KeyError(keys[0])
 
 
 def _iter_batches(
@@ -391,6 +454,18 @@ def _iter_batches(
             batch = []
     if batch:
         yield tuple(batch)
+
+
+def _strict_data_ids(data_ids: object) -> tuple[str, ...]:
+    if isinstance(data_ids, str) or not isinstance(data_ids, tuple | list):
+        raise ValueError("invalid_binance_interim_data_ids")
+    values = tuple(data_ids)
+    if any(not isinstance(data_id, str) for data_id in values):
+        raise ValueError("invalid_binance_interim_data_ids")
+    unknown = sorted(set(values).difference(INTERIM_COLUMNS_BY_DATA_ID))
+    if unknown:
+        raise ValueError("unsupported_binance_data_id")
+    return values
 
 
 __all__ = [

@@ -12,6 +12,9 @@ from quant_research_platform.artifacts._output_common_validation import (
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
+    strict_finite_or_null_numeric_series,
+    strict_non_negative_count_series,
+    strict_positive_group_series,
 )
 from quant_research_platform.contracts.filtering import (
     filter_definition,
@@ -102,9 +105,7 @@ def validate_evaluation_diagnostics_consistency(
         if not timestamps.empty
         else None
     )
-    n_obs = pd.to_numeric(metrics["n_obs"], errors="coerce")
-    if bool(n_obs.isna().any()):
-        raise ValueError("evaluation_diagnostics_inconsistent")
+    n_obs = strict_non_negative_count_series(metrics["n_obs"])
     expected_skipped_timestamp_count = int(
         metrics.loc[n_obs.lt(2), "timestamp"].nunique()
     )
@@ -151,15 +152,33 @@ def validate_evaluation_artifact_structure(
     )
     for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
         _validate_signal_label_membership(frame, spec=spec)
-    groups = pd.to_numeric(grouped_label_values["group"], errors="coerce")
-    if bool(groups.isna().any()):
+    strict_non_negative_count_series(metrics["n_obs"])
+    strict_non_negative_count_series(grouped_label_values["n_obs"])
+    groups = strict_positive_group_series(grouped_label_values["group"])
+    if bool(groups.gt(n_groups).any()):
         raise ValueError("evaluation_group_out_of_range")
-    if (
-        bool((groups % 1 != 0).any())
-        or bool(groups.lt(1).any())
-        or bool(groups.gt(n_groups).any())
+    for frame, columns in (
+        (metrics, ("ic", "rankic")),
+        (grouped_label_values, ("mean_label_value",)),
+        (
+            ic_summary,
+            tuple(
+                column
+                for column in ic_summary.columns
+                if column not in {"signal", "label"}
+            ),
+        ),
+        (
+            group_spread_summary,
+            tuple(
+                column
+                for column in group_spread_summary.columns
+                if column not in {"signal", "label"}
+            ),
+        ),
     ):
-        raise ValueError("evaluation_group_out_of_range")
+        for column in columns:
+            strict_finite_or_null_numeric_series(frame[column])
 
 
 def _reject_duplicate_keys(

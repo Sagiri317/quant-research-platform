@@ -64,6 +64,20 @@ def test_local_verification_workflow_rejects_invalid_date_range(tmp_path):
         run_local_verification(config)
 
 
+def test_local_verification_workflow_rejects_invalid_date_string(tmp_path):
+    config = make_local_verification_config(
+        run_root=tmp_path / "local-verification-output" / "bad-date",
+        start_date="not-a-date",
+        end_date="2016-12-31",
+        profile=research_profile(),
+    )
+
+    with pytest.raises(ValueError, match="invalid_time_window_bound"):
+        run_local_verification(config)
+
+    assert not (tmp_path / "local-verification-output" / "bad-date").exists()
+
+
 def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
     with pytest.raises(ValueError, match="evaluation_start_date_after_end_date"):
         run_local_verification(

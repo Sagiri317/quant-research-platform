@@ -1,14 +1,26 @@
 """Agent-assisted factor research helpers."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Protocol
+
 from quant_research_platform.agents.proposals import FactorProposal
 from quant_research_platform.agents.safety import assert_proposal_is_share_safe
 from quant_research_platform.contracts.data import DataGrain
-from quant_research_platform.profiles.research import ResearchProfile
+
+if TYPE_CHECKING:
+    from quant_research_platform.catalog.factors import FactorCatalog
+    from quant_research_platform.catalog.fields import FieldCatalog
+
+
+class ResearchProfileLike(Protocol):
+    fields: FieldCatalog
+    factors: FactorCatalog
 
 
 def propose_factor(
     *,
-    profile: ResearchProfile,
+    profile: ResearchProfileLike,
     proposal_id: str,
     factor_id: str,
     rationale: str,
@@ -24,7 +36,7 @@ def propose_factor(
     timing_semantics: str = "as_of_timestamp",
     null_policy: str = "preserve_nulls",
 ) -> FactorProposal:
-    _validate_input_columns(tuple(input_columns), profile=profile)
+    _validate_input_columns(input_columns, profile=profile)
     resolved_input_data_id = required_input_data_id or _unique_factor_input_data_id(
         profile
     )
@@ -32,7 +44,7 @@ def propose_factor(
         proposal_id=proposal_id,
         factor_id=factor_id,
         rationale=rationale,
-        input_columns=tuple(input_columns),
+        input_columns=input_columns,
         output_columns=tuple(output_columns or (factor_id,)),
         base_input_columns=tuple(base_input_columns or input_columns),
         derived_input_columns=tuple(derived_input_columns),
@@ -51,15 +63,19 @@ def propose_factor(
 def _validate_input_columns(
     input_columns: tuple[str, ...],
     *,
-    profile: ResearchProfile,
+    profile: ResearchProfileLike,
 ) -> None:
+    if not isinstance(input_columns, tuple) or any(
+        not isinstance(column, str) or not column for column in input_columns
+    ):
+        raise ValueError("invalid_proposal_tuple_field: input_columns")
     fields = profile.fields
     unknown = sorted(set(input_columns).difference(fields.list_names()))
     if unknown:
         raise ValueError(f"unknown_factor_input_columns: {', '.join(unknown)}")
 
 
-def _unique_factor_input_data_id(profile: ResearchProfile) -> str:
+def _unique_factor_input_data_id(profile: ResearchProfileLike) -> str:
     candidates = sorted(
         {
             definition.required_input_data_id
