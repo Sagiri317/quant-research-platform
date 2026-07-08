@@ -13,10 +13,18 @@ def plan_workflow(
     proposal = WorkflowProposal(
         proposal_id=proposal_id,
         workflow_id=workflow_id,
-        step_ids=tuple(step_ids),
+        step_ids=_validate_step_ids(step_ids),
     )
     assert_proposal_is_share_safe(proposal)
     return proposal
+
+
+def _validate_step_ids(step_ids: object) -> tuple[str, ...]:
+    if not isinstance(step_ids, tuple):
+        raise ValueError("invalid_proposal_tuple_field: step_ids")
+    if any(not isinstance(step_id, str) or not step_id for step_id in step_ids):
+        raise ValueError("invalid_proposal_tuple_field: step_ids")
+    return step_ids
 
 
 __all__ = ["WorkflowProposal", "plan_workflow"]

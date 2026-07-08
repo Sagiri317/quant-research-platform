@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -124,24 +125,22 @@ def test_one_sided_depth_maps_to_quote_observed_false() -> None:
     assert math.isnan(panel.loc[0, "best_bid"])
 
 
-def test_incomplete_quote_fields_do_not_set_quote_observed_true() -> None:
+def test_one_sided_quote_fields_do_not_set_quote_observed_true() -> None:
     depth = pd.DataFrame(
         {
-            "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
-            ),
-            "side": ["bid", "ask"],
-            "level": [1, 1],
-            "price": [100.0, 100.2],
-            "quantity": [1.5, pd.NA],
+            "source_asset_id": ["BTCUSDT"],
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58"]),
+            "side": ["bid"],
+            "level": [1],
+            "price": [100.0],
+            "quantity": [1.5],
         }
     )
 
     panel = compute_market_panel(_bars_frame(), trades=pd.DataFrame(), depth=depth)
 
     assert bool(panel.loc[0, "quote_observed"]) is False
-    assert math.isnan(panel.loc[0, "best_ask"])
+    assert math.isnan(panel.loc[0, "best_bid"])
 
 
 def test_crossed_or_invalid_quote_sets_quote_observed_false() -> None:
@@ -228,7 +227,7 @@ def test_invalid_bar_quantity_sets_eligible_false_and_masks_taker_sell_volume() 
     assert math.isnan(panel.loc[0, "taker_sell_volume"])
 
 
-def test_invalid_signed_trade_quantity_is_not_observed() -> None:
+def test_invalid_signed_trade_quantity_fails_closed() -> None:
     trades = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT"],
@@ -237,10 +236,8 @@ def test_invalid_signed_trade_quantity_is_not_observed() -> None:
         }
     )
 
-    panel = compute_market_panel(_bars_frame(), trades=trades, depth=pd.DataFrame())
-
-    assert bool(panel.loc[0, "trade_flow_observed"]) is False
-    assert math.isnan(panel.loc[0, "signed_volume"])
+    with pytest.raises(ValueError, match="invalid_crypto_signed_quantity"):
+        compute_market_panel(_bars_frame(), trades=trades, depth=pd.DataFrame())
 
 
 def test_zero_quantity_quote_is_not_observed() -> None:
@@ -291,6 +288,129 @@ def test_invalid_bar_timestamp_fails_closed() -> None:
 
     with pytest.raises(ValueError, match="invalid_crypto_panel_timestamp"):
         compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("open", "bad"),
+        ("high", True),
+    ],
+)
+def test_invalid_bar_ohlc_fails_closed(column: str, value: object) -> None:
+    bars = _bars_frame()
+    bars[column] = bars[column].astype(object)
+    bars.loc[0, column] = value
+
+    with pytest.raises(ValueError, match="invalid_crypto_ohlc"):
+        compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("volume", "bad"),
+        ("taker_buy_volume", True),
+    ],
+)
+def test_invalid_bar_quantity_inputs_fail_closed(
+    column: str,
+    value: object,
+) -> None:
+    bars = _bars_frame()
+    bars[column] = bars[column].astype(object)
+    bars.loc[0, column] = value
+
+    with pytest.raises(ValueError, match="invalid_crypto_bar_quantity"):
+        compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
+
+
+def test_bool_trade_count_fails_closed() -> None:
+    bars = _bars_frame()
+    bars["trade_count"] = bars["trade_count"].astype(object)
+    bars.loc[0, "trade_count"] = True
+
+    with pytest.raises(ValueError, match="invalid_crypto_trade_count"):
+        compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
+
+
+@pytest.mark.parametrize("trade_count", [1.5, -1])
+def test_non_integer_or_negative_trade_count_sets_eligible_false(
+    trade_count: object,
+) -> None:
+    bars = _bars_frame()
+    bars["trade_count"] = bars["trade_count"].astype(object)
+    bars.loc[0, "trade_count"] = trade_count
+
+    panel = compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
+
+    assert bool(panel.loc[0, "eligible"]) is False
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "error"),
+    [
+        ("price", "bad", "invalid_crypto_depth_price"),
+        ("price", pd.NA, "invalid_crypto_depth_price"),
+        ("price", np.nan, "invalid_crypto_depth_price"),
+        ("price", True, "invalid_crypto_depth_price"),
+        ("quantity", "bad", "invalid_crypto_depth_quantity"),
+        ("quantity", pd.NA, "invalid_crypto_depth_quantity"),
+        ("quantity", np.nan, "invalid_crypto_depth_quantity"),
+        ("quantity", True, "invalid_crypto_depth_quantity"),
+    ],
+)
+def test_invalid_depth_price_quantity_fail_closed(
+    column: str,
+    value: object,
+    error: str,
+) -> None:
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT", "BTCUSDT"],
+            "timestamp": pd.to_datetime(
+                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
+            ),
+            "side": ["bid", "ask"],
+            "level": [1, 1],
+            "price": [100.0, 100.2],
+            "quantity": [1.5, 1.0],
+        }
+    )
+    depth[column] = depth[column].astype(object)
+    depth.loc[0, column] = value
+
+    with pytest.raises(ValueError, match=error):
+        compute_market_panel(_bars_frame(), trades=pd.DataFrame(), depth=depth)
+
+
+@pytest.mark.parametrize("signed_quantity", [True, np.nan])
+def test_invalid_signed_trade_quantity_edge_cases_fail_closed(
+    signed_quantity: object,
+) -> None:
+    trades = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"],
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:01"]),
+            "signed_quantity": [signed_quantity],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_crypto_signed_quantity"):
+        compute_market_panel(_bars_frame(), trades=trades, depth=pd.DataFrame())
+
+
+def test_invalid_trade_source_asset_fails_closed() -> None:
+    trades = pd.DataFrame(
+        {
+            "source_asset_id": ["unknown"],
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:01"]),
+            "signed_quantity": [1.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_crypto_source_asset_id"):
+        compute_market_panel(_bars_frame(), trades=trades, depth=pd.DataFrame())
 
 
 def test_quote_observed_and_trade_flow_observed_do_not_control_eligible() -> None:

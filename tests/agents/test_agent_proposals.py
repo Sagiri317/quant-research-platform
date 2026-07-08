@@ -9,7 +9,9 @@ from quant_research_platform.agents.factor_factory import propose_factor
 from quant_research_platform.agents.proposals import (
     PROPOSAL_STATUSES,
     FactorProposal,
+    LabelProposal,
     ResearchDatasetProposal,
+    WorkflowProposal,
     factor_definition_from_proposal,
 )
 from quant_research_platform.agents.safety import (
@@ -75,6 +77,60 @@ def test_agent_proposal_rejects_unapproved_status() -> None:
         )
 
 
+@pytest.mark.parametrize("status", [["proposed"], {"x": 1}])
+def test_agent_proposal_rejects_non_string_status(status: object) -> None:
+    with pytest.raises(ValueError, match="invalid_proposal_status"):
+        ResearchDatasetProposal(
+            proposal_id="dataset-proposal-bad-status",
+            data_id="research_dataset",
+            input_data_ids=("features",),
+            status=status,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("horizon", [0, -1, True, 1.5, "5"])
+def test_label_proposal_rejects_invalid_horizon(horizon: object) -> None:
+    with pytest.raises(ValueError, match="invalid_label_proposal_horizon"):
+        LabelProposal(
+            proposal_id="label-proposal-bad-horizon",
+            label_id="forward_return_bad",
+            rationale="Invalid horizon candidate.",
+            horizon=horizon,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("proposal_type", "wrong", "invalid_proposal_type"),
+        ("rationale", "", "invalid_proposal_rationale"),
+        ("rationale", 1, "invalid_proposal_rationale"),
+        ("title", 1, "invalid_proposal_title"),
+        ("required_contracts", "LabelDefinition", "invalid_proposal_tuple_field"),
+        (
+            "required_contracts",
+            ("LabelDefinition", 1),
+            "invalid_proposal_tuple_field",
+        ),
+    ],
+)
+def test_label_proposal_rejects_invalid_semantic_fields(
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    kwargs = {
+        "proposal_id": "label-proposal-bad-field",
+        "label_id": "forward_return_bad",
+        "rationale": "Invalid semantic field candidate.",
+        "horizon": 5,
+        field: value,
+    }
+
+    with pytest.raises(ValueError, match=error):
+        LabelProposal(**kwargs)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("approved", ["False", 1, 0, None, object()])
 def test_agent_proposals_reject_non_strict_approval_values(approved: object) -> None:
     with pytest.raises(ValueError, match="invalid_proposal_approved"):
@@ -95,6 +151,15 @@ def test_agent_proposal_rejects_bare_str_tuple_fields() -> None:
             factor_id="factor_alpha",
             rationale="Evaluate a synthetic factor idea.",
             input_columns="close",  # type: ignore[arg-type]
+        )
+
+
+def test_workflow_proposal_rejects_wrong_proposal_type() -> None:
+    with pytest.raises(ValueError, match="invalid_proposal_type"):
+        WorkflowProposal(
+            proposal_id="workflow-proposal-bad-type",
+            workflow_id="workflow",
+            proposal_type="factor",
         )
 
 

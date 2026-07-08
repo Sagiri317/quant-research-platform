@@ -42,7 +42,7 @@ Strict scalar rules:
 
 Raw envelope structure 不因语义校验而改变。当前 raw validation 会检查 kline OHLC、volume、trade count、aggregate trade price/quantity/id range，以及 depth price/quantity。Kline semantic validation 还要求 `taker_buy_volume <= volume`、`taker_buy_quote_volume <= quote_volume`，numeric payload 拒绝 `NaN`、`inf`、`-inf` 和 nonnumeric values。双边 best bid/ask 同时存在时必须满足 bid < ask；one-sided depth payload 可保留为 raw valid，后续 panel 层用 quote observation diagnostics 表达不可用 quote。
 
-Depth normalization 在 raw 和 interim 路径复用同一个 owner helper。`bids` 必须按 price 非递增排列，`asks` 必须按 price 非递减排列，每个 raw level 必须恰好是 `[price, quantity]`，level 1 表示校验后的 best bid 或 best ask。同一 asset、timestamp、side 下的 duplicate depth level 在 market-panel gate 中 fail closed。
+Depth normalization 在 raw 和 interim 路径复用同一个 owner helper。`bids` 必须按 price 严格递减排列，`asks` 必须按 price 严格递增排列，每个 raw level 必须恰好是 `[price, quantity]`，level 1 表示校验后的 best bid 或 best ask。同一 asset、timestamp、side 下的 duplicate depth level 在 market-panel gate 中 fail closed。
 
 ## Raw Layout
 

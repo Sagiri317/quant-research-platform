@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -18,16 +19,33 @@ from quant_research_platform.markets.implementations.crypto.processed import sou
 PROJECT_SRC = Path("src/quant_research_platform")
 
 
+@dataclass(frozen=True)
+class ImportRecord:
+    path: Path
+    line_number: int
+    module: str
+    name: str | None = None
+    asname: str | None = None
+
+    @property
+    def qualified_name(self) -> str:
+        if self.name is None:
+            return self.module
+        return f"{self.module}.{self.name}"
+
+
 def test_market_processed_source_id_bridges_are_only_source_imports() -> None:
     allowed = {
-        PROJECT_SRC / "markets/implementations/a_share/processed/source_ids.py": {
-            "quant_research_platform.sources.csmar.ids",
+        PROJECT_SRC / "markets/implementations/a_share/processed/source_ids.py": (
             "quant_research_platform.sources.csmar",
-        },
-        PROJECT_SRC / "markets/implementations/crypto/processed/source_ids.py": {
-            "quant_research_platform.sources.binance.ids",
+            "ids",
+            "csmar_ids",
+        ),
+        PROJECT_SRC / "markets/implementations/crypto/processed/source_ids.py": (
             "quant_research_platform.sources.binance",
-        },
+            "ids",
+            "binance_ids",
+        ),
     }
     roots = (
         PROJECT_SRC / "markets/implementations/a_share",
@@ -36,11 +54,14 @@ def test_market_processed_source_id_bridges_are_only_source_imports() -> None:
     hits: list[str] = []
     for root in roots:
         for path in sorted(root.rglob("*.py")):
-            for module, line_number in _imported_modules(path):
-                if not module.startswith("quant_research_platform.sources"):
+            for record in _import_records(path):
+                if not record.module.startswith("quant_research_platform.sources"):
                     continue
-                if module not in allowed.get(path, set()):
-                    hits.append(f"{path}:{line_number}:{module}")
+                if _allowed_source_bridge_import(record) != allowed.get(path):
+                    hits.append(
+                        f"{path}:{record.line_number}:"
+                        f"{record.qualified_name} as {record.asname}"
+                    )
 
     assert hits == []
 
@@ -55,10 +76,12 @@ def test_processed_catalogs_and_materializers_do_not_import_sources() -> None:
         PROJECT_SRC / "markets/implementations/crypto/processed/materialize_labels.py",
     )
     hits = [
-        f"{path}:{line_number}:{module}"
+        f"{path}:{record.line_number}:{module}"
         for path in paths
-        for module, line_number in _imported_modules(path)
-        if module.startswith("quant_research_platform.sources")
+        for record in _import_records(path)
+        if (module := record.qualified_name).startswith(
+            "quant_research_platform.sources"
+        )
     ]
 
     assert hits == []
@@ -112,12 +135,74 @@ def test_crypto_source_input_bridge_requires_exact_source_input_set(
         source_ids.market_bars_source_data_id(spec)
 
 
-def _imported_modules(path: Path) -> tuple[tuple[str, int], ...]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    modules: list[tuple[str, int]] = []
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "from quant_research_platform.sources.binance import ids as binance_ids",
+            [],
+        ),
+        (
+            "from quant_research_platform.sources.binance import ids",
+            ["quant_research_platform.sources.binance.ids as None"],
+        ),
+        (
+            "from quant_research_platform.sources.binance import catalog",
+            ["quant_research_platform.sources.binance.catalog as None"],
+        ),
+    ],
+)
+def test_source_bridge_import_records_require_ids_alias(
+    source: str,
+    expected: list[str],
+) -> None:
+    path = PROJECT_SRC / "markets/implementations/crypto/processed/source_ids.py"
+    records = _import_records_from_source(source, path=path)
+    hits = [
+        f"{record.qualified_name} as {record.asname}"
+        for record in records
+        if _allowed_source_bridge_import(record)
+        != ("quant_research_platform.sources.binance", "ids", "binance_ids")
+    ]
+
+    assert hits == expected
+
+
+def _allowed_source_bridge_import(
+    record: ImportRecord,
+) -> tuple[str, str, str] | None:
+    if record.name is None:
+        return None
+    return (record.module, record.name, record.asname or "")
+
+
+def _import_records(path: Path) -> tuple[ImportRecord, ...]:
+    return _import_records_from_source(path.read_text(encoding="utf-8"), path=path)
+
+
+def _import_records_from_source(source: str, *, path: Path) -> tuple[ImportRecord, ...]:
+    tree = ast.parse(source, filename=str(path))
+    modules: list[ImportRecord] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module is not None:
-            modules.append((node.module, node.lineno))
+            modules.extend(
+                ImportRecord(
+                    path=path,
+                    line_number=node.lineno,
+                    module=node.module,
+                    name=alias.name,
+                    asname=alias.asname,
+                )
+                for alias in node.names
+            )
         elif isinstance(node, ast.Import):
-            modules.extend((alias.name, node.lineno) for alias in node.names)
+            modules.extend(
+                ImportRecord(
+                    path=path,
+                    line_number=node.lineno,
+                    module=alias.name,
+                    asname=alias.asname,
+                )
+                for alias in node.names
+            )
     return tuple(modules)

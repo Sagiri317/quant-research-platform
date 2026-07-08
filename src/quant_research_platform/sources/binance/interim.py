@@ -31,6 +31,7 @@ from quant_research_platform.sources.binance.validation import (
     first_present,
     strict_boolean,
     strict_data_kind,
+    strict_iso_timestamp,
     strict_market_type,
     strict_millisecond_timestamp,
     strict_non_negative_float,
@@ -438,7 +439,10 @@ def _timestamp_ms(value: object) -> pd.Timestamp:
 
 
 def _timestamp_iso(value: object) -> pd.Timestamp:
-    return pd.to_datetime(value, utc=True).tz_localize(None)
+    return strict_iso_timestamp(
+        value,
+        error="invalid_binance_raw_envelope_captured_at",
+    ).tz_localize(None)
 
 
 def _iter_batches(

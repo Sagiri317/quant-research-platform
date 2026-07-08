@@ -37,6 +37,24 @@ def propose_factor(
     null_policy: str = "preserve_nulls",
 ) -> FactorProposal:
     _validate_input_columns(input_columns, profile=profile)
+    resolved_output_columns = _validate_optional_tuple(
+        output_columns,
+        "output_columns",
+        default=(factor_id,),
+    )
+    resolved_base_input_columns = _validate_optional_tuple(
+        base_input_columns,
+        "base_input_columns",
+        default=input_columns,
+    )
+    resolved_derived_input_columns = _validate_tuple_field(
+        derived_input_columns,
+        "derived_input_columns",
+        required=False,
+    )
+    resolved_derived_input_producers = _validate_derived_input_producers(
+        derived_input_producers,
+    )
     resolved_input_data_id = required_input_data_id or _unique_factor_input_data_id(
         profile
     )
@@ -45,10 +63,10 @@ def propose_factor(
         factor_id=factor_id,
         rationale=rationale,
         input_columns=input_columns,
-        output_columns=tuple(output_columns or (factor_id,)),
-        base_input_columns=tuple(base_input_columns or input_columns),
-        derived_input_columns=tuple(derived_input_columns),
-        derived_input_producers=dict(derived_input_producers or {}),
+        output_columns=resolved_output_columns,
+        base_input_columns=resolved_base_input_columns,
+        derived_input_columns=resolved_derived_input_columns,
+        derived_input_producers=resolved_derived_input_producers,
         required_input_data_id=resolved_input_data_id,
         family=family,
         grain=grain,
@@ -73,6 +91,48 @@ def _validate_input_columns(
     unknown = sorted(set(input_columns).difference(fields.list_names()))
     if unknown:
         raise ValueError(f"unknown_factor_input_columns: {', '.join(unknown)}")
+
+
+def _validate_optional_tuple(
+    value: tuple[str, ...] | None,
+    field_name: str,
+    *,
+    default: tuple[str, ...],
+) -> tuple[str, ...]:
+    if value is None:
+        return default
+    return _validate_tuple_field(value, field_name, required=False)
+
+
+def _validate_tuple_field(
+    value: object,
+    field_name: str,
+    *,
+    required: bool,
+) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ValueError(f"invalid_proposal_tuple_field: {field_name}")
+    if required and not value:
+        raise ValueError(f"invalid_proposal_tuple_field: {field_name}")
+    if any(not isinstance(column, str) or not column for column in value):
+        raise ValueError(f"invalid_proposal_tuple_field: {field_name}")
+    return value
+
+
+def _validate_derived_input_producers(
+    value: dict[str, str] | None,
+) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or any(
+        not isinstance(column, str)
+        or not column
+        or not isinstance(producer, str)
+        or not producer
+        for column, producer in value.items()
+    ):
+        raise ValueError("invalid_factor_derived_input_producers")
+    return value
 
 
 def _unique_factor_input_data_id(profile: ResearchProfileLike) -> str:

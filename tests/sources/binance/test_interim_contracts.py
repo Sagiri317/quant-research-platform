@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
@@ -68,6 +69,53 @@ def test_binance_interim_rejects_data_id_raw_kind_mismatch() -> None:
                 },
             ),
             data_id="market_bars_1m",
+        )
+
+
+@pytest.mark.parametrize(
+    "captured_at",
+    ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00+00:00"],
+)
+def test_binance_interim_accepts_strict_depth_captured_at(captured_at: str) -> None:
+    frame = normalize_raw_envelopes(
+        (
+            {
+                "source": "binance",
+                "market_type": "spot",
+                "data_kind": "depth",
+                "symbol": "BTCUSDT",
+                "captured_at": captured_at,
+                "payload": {
+                    "lastUpdateId": 1,
+                    "bids": [["100.0", "1.0"]],
+                    "asks": [["101.0", "1.5"]],
+                },
+            },
+        ),
+        data_id="depth_levels_tick",
+    )
+
+    assert frame["timestamp"].iloc[0] == pd.Timestamp("2026-01-01T00:00:00")
+
+
+def test_binance_interim_rejects_naive_depth_captured_at() -> None:
+    with pytest.raises(ValueError, match="invalid_binance_raw_envelope_captured_at"):
+        normalize_raw_envelopes(
+            (
+                {
+                    "source": "binance",
+                    "market_type": "spot",
+                    "data_kind": "depth",
+                    "symbol": "BTCUSDT",
+                    "captured_at": "2026-01-01T00:00:00",
+                    "payload": {
+                        "lastUpdateId": 1,
+                        "bids": [["100.0", "1.0"]],
+                        "asks": [["101.0", "1.5"]],
+                    },
+                },
+            ),
+            data_id="depth_levels_tick",
         )
 
 

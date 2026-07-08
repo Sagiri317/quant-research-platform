@@ -46,7 +46,7 @@ quote_age_seconds
 
 `trade_flow_observed` distinguishes real zero trade flow from missing aggregate trade feed. A zero-trade bar with no matching aggregate trades can produce `signed_volume=0` and `trade_flow_observed=True`; a positive-trade bar without matching aggregate trades keeps `signed_volume` null and `trade_flow_observed=False`.
 
-Quotes are selected as-of bar `close_time`, never after bar close. `quote_observed=True` only when the as-of quote exists and `quote_age_seconds` is within the approved max quote age. Missing or stale quotes leave quote-derived fields null and `quote_observed=False`.
+Quotes are selected as-of bar `close_time`, never after bar close. `quote_observed=True` only when the as-of quote timestamp is less than or equal to bar `close_time`, `quote_age_seconds <= DEFAULT_MAX_QUOTE_AGE`, `best_bid > 0`, `best_ask > 0`, `best_bid < best_ask`, `bid_quantity > 0`, and `ask_quantity > 0`. Missing, stale, crossed, one-sided, zero-size, or invalid quotes leave quote-derived fields null and `quote_observed=False`.
 
 ## Current Evaluation Signals
 

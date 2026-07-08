@@ -148,6 +148,79 @@ def test_forward_return_minute_contiguous_labels_do_not_cross_gap() -> None:
     assert result.loc[2, column] == pytest.approx(105.0 / 104.0 - 1.0)
 
 
+def test_forward_return_labels_reject_duplicate_asset_timestamp() -> None:
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["asset_a", "asset_a"],
+            "timestamp": pd.to_datetime(["2026-07-06 00:00", "2026-07-06 00:00"]),
+            "close": [100.0, 101.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="duplicate_forward_return_asset_timestamp"):
+        add_forward_return_labels(
+            panel,
+            horizons=(1,),
+            frequency=DataFrequency.MINUTE,
+            execution_price_column="close",
+        )
+
+
+@pytest.mark.parametrize("require_contiguous", [False, True])
+def test_forward_return_labels_reject_invalid_timestamp(
+    require_contiguous: bool,
+) -> None:
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["asset_a", "asset_a"],
+            "timestamp": ["bad", "2026-07-06 00:01"],
+            "close": [100.0, 101.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_forward_return_timestamp"):
+        add_forward_return_labels(
+            panel,
+            horizons=(1,),
+            frequency=DataFrequency.MINUTE,
+            execution_price_column="close",
+            expected_interval=pd.Timedelta(minutes=1),
+            require_contiguous=require_contiguous,
+        )
+
+
+@pytest.mark.parametrize(
+    ("drop_column", "error_column"),
+    [
+        ("close", "close"),
+        ("asset_id", "asset_id"),
+        ("timestamp", "timestamp"),
+    ],
+)
+def test_forward_return_labels_reject_missing_required_columns(
+    drop_column: str,
+    error_column: str,
+) -> None:
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["asset_a", "asset_a"],
+            "timestamp": pd.to_datetime(["2026-07-06 00:00", "2026-07-06 00:01"]),
+            "close": [100.0, 101.0],
+        }
+    ).drop(columns=[drop_column])
+
+    with pytest.raises(
+        ValueError,
+        match=f"missing_forward_return_columns: {error_column}",
+    ):
+        add_forward_return_labels(
+            panel,
+            horizons=(1,),
+            frequency=DataFrequency.MINUTE,
+            execution_price_column="close",
+        )
+
+
 def test_forward_return_valid_bar_read_window_uses_sparse_asset_keys() -> None:
     panel_keys = pd.DataFrame(
         [

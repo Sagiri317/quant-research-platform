@@ -36,6 +36,12 @@ def add_forward_return_labels(
     """Add per-asset valid-bar next-open to horizon-open labels."""
 
     horizons = _validate_horizons(horizons)
+    frame = _validate_label_input_frame(
+        frame,
+        asset_column=asset_column,
+        date_column=date_column,
+        execution_price_column=execution_price_column,
+    )
     result = frame.sort_values([asset_column, date_column]).copy()
     price = pd.to_numeric(result[execution_price_column], errors="coerce")
     grouped_price = price.groupby(result[asset_column], sort=False)
@@ -143,6 +149,27 @@ def _validate_horizon(value: object, *, error: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(error)
     return value
+
+
+def _validate_label_input_frame(
+    frame: pd.DataFrame,
+    *,
+    asset_column: str,
+    date_column: str,
+    execution_price_column: str,
+) -> pd.DataFrame:
+    required_columns = (asset_column, date_column, execution_price_column)
+    missing = [column for column in required_columns if column not in frame.columns]
+    if missing:
+        raise ValueError(f"missing_forward_return_columns: {', '.join(missing)}")
+    result = frame.copy()
+    timestamps = pd.to_datetime(result[date_column], errors="coerce")
+    if timestamps.isna().any():
+        raise ValueError("invalid_forward_return_timestamp")
+    result[date_column] = timestamps
+    if result.duplicated([asset_column, date_column]).any():
+        raise ValueError("duplicate_forward_return_asset_timestamp")
+    return result
 
 
 __all__ = [

@@ -49,7 +49,11 @@ class FactorProposal(ProposalPayloadMixin):
     approved: bool = False
 
     def __post_init__(self) -> None:
-        _validate_common_proposal(self, id_fields=("proposal_id", "factor_id"))
+        _validate_common_proposal(
+            self,
+            id_fields=("proposal_id", "factor_id"),
+            proposal_type="factor",
+        )
         _validate_tuple_field(self.input_columns, "input_columns")
         _validate_tuple_field(self.output_columns, "output_columns", required=False)
         _validate_tuple_field(
@@ -64,6 +68,7 @@ class FactorProposal(ProposalPayloadMixin):
         )
         _validate_tuple_field(self.expected_inputs, "expected_inputs", required=False)
         _validate_tuple_field(self.expected_outputs, "expected_outputs", required=False)
+        _validate_derived_input_producers(self.derived_input_producers)
         if not isinstance(self.grain, DataGrain):
             raise ValueError("invalid_factor_proposal_grain")
         if self.lookback_window is not None and (
@@ -103,7 +108,15 @@ class LabelProposal(ProposalPayloadMixin):
     approved: bool = False
 
     def __post_init__(self) -> None:
-        _validate_common_proposal(self, id_fields=("proposal_id", "label_id"))
+        _validate_common_proposal(
+            self,
+            id_fields=("proposal_id", "label_id"),
+            proposal_type="label",
+        )
+        _validate_positive_integer(
+            self.horizon,
+            error="invalid_label_proposal_horizon",
+        )
         _validate_tuple_field(self.expected_inputs, "expected_inputs", required=False)
         _validate_tuple_field(self.expected_outputs, "expected_outputs", required=False)
         _validate_proposal_status(self.status)
@@ -131,7 +144,11 @@ class ResearchDatasetProposal(ProposalPayloadMixin):
     approved: bool = False
 
     def __post_init__(self) -> None:
-        _validate_common_proposal(self, id_fields=("proposal_id", "data_id"))
+        _validate_common_proposal(
+            self,
+            id_fields=("proposal_id", "data_id"),
+            proposal_type="research_dataset",
+        )
         _validate_tuple_field(self.input_data_ids, "input_data_ids")
         _validate_tuple_field(self.expected_inputs, "expected_inputs", required=False)
         _validate_tuple_field(self.expected_outputs, "expected_outputs", required=False)
@@ -162,7 +179,11 @@ class WorkflowProposal(ProposalPayloadMixin):
     approved: bool = False
 
     def __post_init__(self) -> None:
-        _validate_common_proposal(self, id_fields=("proposal_id", "workflow_id"))
+        _validate_common_proposal(
+            self,
+            id_fields=("proposal_id", "workflow_id"),
+            proposal_type="workflow",
+        )
         _validate_tuple_field(self.step_ids, "step_ids", required=False)
         _validate_tuple_field(self.expected_inputs, "expected_inputs", required=False)
         _validate_tuple_field(self.expected_outputs, "expected_outputs", required=False)
@@ -233,14 +254,32 @@ def factor_definition_from_proposal(
     )
 
 
-def _validate_proposal_status(status: str) -> None:
+def _validate_proposal_status(status: object) -> None:
+    if not isinstance(status, str):
+        raise ValueError("invalid_proposal_status")
     if status not in PROPOSAL_STATUSES:
         raise ValueError("invalid_proposal_status")
 
 
-def _validate_common_proposal(proposal: object, *, id_fields: tuple[str, ...]) -> None:
+def _validate_common_proposal(
+    proposal: object,
+    *,
+    id_fields: tuple[str, ...],
+    proposal_type: str,
+) -> None:
     if not isinstance(proposal.approved, bool):
         raise ValueError("invalid_proposal_approved")
+    if proposal.proposal_type != proposal_type:
+        raise ValueError("invalid_proposal_type")
+    if not isinstance(proposal.rationale, str) or not proposal.rationale:
+        raise ValueError("invalid_proposal_rationale")
+    if not isinstance(proposal.title, str):
+        raise ValueError("invalid_proposal_title")
+    _validate_tuple_field(
+        proposal.required_contracts,
+        "required_contracts",
+        required=False,
+    )
     for field_name in id_fields:
         value = getattr(proposal, field_name)
         if not isinstance(value, str) or not value:
@@ -259,6 +298,23 @@ def _validate_tuple_field(
         raise ValueError(f"invalid_proposal_tuple_field: {field_name}")
     if any(not isinstance(item, str) or not item for item in value):
         raise ValueError(f"invalid_proposal_tuple_field: {field_name}")
+
+
+def _validate_positive_integer(value: object, *, error: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(error)
+    return value
+
+
+def _validate_derived_input_producers(value: object) -> None:
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str)
+        or not key
+        or not isinstance(producer, str)
+        or not producer
+        for key, producer in value.items()
+    ):
+        raise ValueError("invalid_factor_derived_input_producers")
 
 
 __all__ = [

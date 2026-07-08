@@ -25,11 +25,9 @@ def compute_market_panel(
 ) -> pd.DataFrame:
     if not isinstance(max_quote_age, pd.Timedelta) or max_quote_age < pd.Timedelta(0):
         raise ValueError("invalid_crypto_max_quote_age")
-    panel = bars.copy()
+    panel = bars.copy().reset_index(drop=True)
     panel["market_id"] = str(MARKET_ID)
-    panel["asset_id"] = panel["source_asset_id"].map(canonical_crypto_asset_id)
-    if panel["asset_id"].isna().any():
-        raise ValueError("invalid_crypto_source_asset_id")
+    panel["asset_id"] = _crypto_asset_id_series(panel["source_asset_id"])
     panel["timestamp"] = _timestamp_series(
         panel,
         "timestamp",
@@ -40,11 +38,31 @@ def compute_market_panel(
         "close_time",
         error="invalid_crypto_panel_close_time",
     )
-    volume = _numeric(panel, "volume")
-    quote_volume = _numeric(panel, "quote_volume")
-    trade_count = _numeric(panel, "trade_count")
-    taker_buy_volume = _numeric(panel, "taker_buy_volume")
-    taker_buy_quote_volume = _numeric(panel, "taker_buy_quote_volume")
+    open_price = _required_numeric(panel, "open", error="invalid_crypto_ohlc")
+    high_price = _required_numeric(panel, "high", error="invalid_crypto_ohlc")
+    low_price = _required_numeric(panel, "low", error="invalid_crypto_ohlc")
+    close_price = _required_numeric(panel, "close", error="invalid_crypto_ohlc")
+    volume = _required_numeric(panel, "volume", error="invalid_crypto_bar_quantity")
+    quote_volume = _required_numeric(
+        panel,
+        "quote_volume",
+        error="invalid_crypto_bar_quantity",
+    )
+    trade_count = _required_numeric(
+        panel,
+        "trade_count",
+        error="invalid_crypto_trade_count",
+    )
+    taker_buy_volume = _required_numeric(
+        panel,
+        "taker_buy_volume",
+        error="invalid_crypto_bar_quantity",
+    )
+    taker_buy_quote_volume = _required_numeric(
+        panel,
+        "taker_buy_quote_volume",
+        error="invalid_crypto_bar_quantity",
+    )
     valid_trade_count = trade_count.ge(0.0) & trade_count.mod(1).eq(0.0)
     valid_bar_quantity = (
         volume.ge(0.0)
@@ -87,23 +105,13 @@ def compute_market_panel(
     )
     panel.loc[stale_or_missing, list(quote_columns)] = pd.NA
     panel["eligible"] = (
-        _numeric(panel, "open").gt(0.0)
-        & _numeric(panel, "high").gt(0.0)
-        & _numeric(panel, "low").gt(0.0)
-        & _numeric(panel, "high").ge(_numeric(panel, "low"))
-        & _numeric(panel, "close").gt(0.0)
-        & _numeric(panel, "high").ge(
-            pd.concat(
-                (_numeric(panel, "open"), _numeric(panel, "close")),
-                axis=1,
-            ).max(axis=1)
-        )
-        & _numeric(panel, "low").le(
-            pd.concat(
-                (_numeric(panel, "open"), _numeric(panel, "close")),
-                axis=1,
-            ).min(axis=1)
-        )
+        open_price.gt(0.0)
+        & high_price.gt(0.0)
+        & low_price.gt(0.0)
+        & high_price.ge(low_price)
+        & close_price.gt(0.0)
+        & high_price.ge(pd.concat((open_price, close_price), axis=1).max(axis=1))
+        & low_price.le(pd.concat((open_price, close_price), axis=1).min(axis=1))
         & valid_bar_quantity
     )
     return (
@@ -118,8 +126,7 @@ def _signed_trade_volume(trades: pd.DataFrame) -> pd.DataFrame:
     if trades.empty:
         return pd.DataFrame(columns=columns)
     frame = trades.copy()
-    frame["asset_id"] = frame["source_asset_id"].map(canonical_crypto_asset_id)
-    frame = frame.loc[frame["asset_id"].notna()].copy()
+    frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
     frame["timestamp"] = _timestamp_series(
         frame,
         "timestamp",
@@ -127,10 +134,11 @@ def _signed_trade_volume(trades: pd.DataFrame) -> pd.DataFrame:
     ).dt.floor(
         "min"
     )
-    frame["signed_quantity"] = pd.to_numeric(frame["signed_quantity"], errors="coerce")
-    frame = frame.loc[frame["signed_quantity"].notna()].copy()
-    if frame.empty:
-        return pd.DataFrame(columns=columns)
+    frame["signed_quantity"] = _required_numeric(
+        frame,
+        "signed_quantity",
+        error="invalid_crypto_signed_quantity",
+    )
     grouped = (
         frame.groupby(["asset_id", "timestamp"], as_index=False, sort=False)[
             "signed_quantity"
@@ -195,21 +203,19 @@ def _asof_quotes(
 
 def _quote_snapshots(depth: pd.DataFrame) -> pd.DataFrame:
     frame = depth.copy()
-    frame["asset_id"] = frame["source_asset_id"].map(canonical_crypto_asset_id)
-    if frame["asset_id"].isna().any():
-        raise ValueError("invalid_crypto_source_asset_id")
+    frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
     _validate_depth_contract(frame)
     frame["quote_timestamp"] = _timestamp_series(
         frame,
         "timestamp",
         error="invalid_crypto_depth_timestamp",
     )
-    frame["price"] = _numeric_not_bool(
+    frame["price"] = _required_numeric(
         frame,
         "price",
         error="invalid_crypto_depth_price",
     )
-    frame["quantity"] = _numeric_not_bool(
+    frame["quantity"] = _required_numeric(
         frame,
         "quantity",
         error="invalid_crypto_depth_quantity",
@@ -255,6 +261,16 @@ def _pivot_value(frame: pd.DataFrame, key: object) -> pd.Series:
     return pd.Series(pd.NA, index=frame.index, dtype="Float64")
 
 
+def _crypto_asset_id_series(series: pd.Series) -> pd.Series:
+    try:
+        values = series.map(canonical_crypto_asset_id)
+    except ValueError as exc:
+        raise ValueError("invalid_crypto_source_asset_id") from exc
+    if values.isna().any():
+        raise ValueError("invalid_crypto_source_asset_id")
+    return values
+
+
 def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(frame[column], errors="coerce")
 
@@ -292,8 +308,8 @@ def _validate_depth_contract(frame: pd.DataFrame) -> None:
         raise ValueError("invalid_crypto_depth_level")
     if frame.duplicated(["asset_id", "timestamp", "side", "level"]).any():
         raise ValueError("duplicate_crypto_depth_level")
-    prices = _numeric_not_bool(frame, "price", error="invalid_crypto_depth_price")
-    quantities = _numeric_not_bool(
+    prices = _required_numeric(frame, "price", error="invalid_crypto_depth_price")
+    quantities = _required_numeric(
         frame,
         "quantity",
         error="invalid_crypto_depth_quantity",

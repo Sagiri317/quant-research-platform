@@ -165,6 +165,69 @@ def test_factor_factory_rejects_unknown_input_columns() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"output_columns": "abc"}, "invalid_proposal_tuple_field: output_columns"),
+        (
+            {"base_input_columns": "close"},
+            "invalid_proposal_tuple_field: base_input_columns",
+        ),
+        (
+            {"derived_input_columns": "abc"},
+            "invalid_proposal_tuple_field: derived_input_columns",
+        ),
+        (
+            {"derived_input_producers": [("x", "y")]},
+            "invalid_factor_derived_input_producers",
+        ),
+    ],
+)
+def test_factor_factory_rejects_bare_string_or_non_dict_contract_fields(
+    kwargs: dict[str, object],
+    error: str,
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        propose_factor(
+            profile=research_profile(),
+            proposal_id="factor-proposal-bad-contract-field",
+            factor_id="bad_contract_field",
+            rationale="Candidate with invalid factory contract inputs.",
+            input_columns=("close",),
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
+def test_workflow_planner_rejects_bare_str_step_ids() -> None:
+    with pytest.raises(ValueError, match="invalid_proposal_tuple_field: step_ids"):
+        plan_workflow(
+            proposal_id="workflow-proposal-bad-steps",
+            workflow_id="bad_workflow",
+            step_ids="abc",  # type: ignore[arg-type]
+        )
+
+
+def test_workflow_planner_rejects_non_string_step_ids() -> None:
+    with pytest.raises(ValueError, match="invalid_proposal_tuple_field: step_ids"):
+        plan_workflow(
+            proposal_id="workflow-proposal-bad-step-item",
+            workflow_id="bad_workflow",
+            step_ids=("a", 1),  # type: ignore[arg-type]
+        )
+
+
+def test_dataset_planner_rejects_bare_str_input_data_ids() -> None:
+    with pytest.raises(
+        ValueError,
+        match="invalid_proposal_tuple_field: input_data_ids",
+    ):
+        plan_research_dataset(
+            proposal_id="dataset-proposal-bad-inputs",
+            data_id="bad_dataset",
+            input_data_ids="features",  # type: ignore[arg-type]
+        )
+
+
 def test_factor_factory_derives_unique_required_input_data_id_from_profile() -> None:
     proposal = propose_factor(
         profile=research_profile(),
