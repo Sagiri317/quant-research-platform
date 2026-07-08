@@ -189,6 +189,33 @@ def test_forward_return_labels_reject_invalid_timestamp(
         )
 
 
+@pytest.mark.parametrize("asset_id", [None, pd.NA, [], {}, set()])
+@pytest.mark.parametrize("require_contiguous", [False, True])
+def test_forward_return_labels_reject_invalid_asset_key(
+    asset_id: object,
+    require_contiguous: bool,
+) -> None:
+    panel = pd.DataFrame(
+        {
+            "asset_id": [asset_id, "asset_a"],
+            "timestamp": pd.to_datetime(
+                ["2026-07-06 00:00", "2026-07-06 00:01"]
+            ),
+            "close": [100.0, 101.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_forward_return_asset_key"):
+        add_forward_return_labels(
+            panel,
+            horizons=(1,),
+            frequency=DataFrequency.MINUTE,
+            execution_price_column="close",
+            expected_interval=pd.Timedelta(minutes=1),
+            require_contiguous=require_contiguous,
+        )
+
+
 @pytest.mark.parametrize(
     ("drop_column", "error_column"),
     [

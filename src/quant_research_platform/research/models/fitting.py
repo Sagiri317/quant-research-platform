@@ -190,8 +190,10 @@ def fit_linear_coefficients(
             mode=spec.sample_filter_mode,
             metadata_key="sample_filter_mode",
         )
-        rows_input += int(metadata["rows_input"])
-        rows_after_filter += int(metadata["rows_after_filter_mode"])
+        rows_input += _strict_non_negative_count_value(metadata["rows_input"])
+        rows_after_filter += _strict_non_negative_count_value(
+            metadata["rows_after_filter_mode"]
+        )
         filter_columns_used = list(metadata["filter_columns_used"])
         filter_definition = str(metadata["filter_definition"])
         usable = filtered.dropna(
@@ -332,8 +334,10 @@ def collect_training_frame(
             mode=spec.sample_filter_mode,
             metadata_key="sample_filter_mode",
         )
-        rows_input += int(metadata["rows_input"])
-        rows_after_filter += int(metadata["rows_after_filter_mode"])
+        rows_input += _strict_non_negative_count_value(metadata["rows_input"])
+        rows_after_filter += _strict_non_negative_count_value(
+            metadata["rows_after_filter_mode"]
+        )
         filter_columns_used = list(metadata["filter_columns_used"])
         filter_definition = str(metadata["filter_definition"])
         usable = filtered.dropna(subset=[*spec.input_columns, spec.label_column]).loc[

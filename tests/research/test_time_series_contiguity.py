@@ -142,8 +142,8 @@ def test_iter_grouped_timestamps_rejects_invalid_timestamp_values() -> None:
         tuple(iter_grouped_timestamps(frame))
 
 
-@pytest.mark.parametrize("asset_id", [None, pd.NA])
-def test_iter_grouped_timestamps_rejects_null_group_keys(asset_id: object) -> None:
+@pytest.mark.parametrize("asset_id", [None, pd.NA, [], {}, set()])
+def test_iter_grouped_timestamps_rejects_invalid_group_keys(asset_id: object) -> None:
     frame = pd.DataFrame(
         {
             "asset_id": [asset_id],
@@ -155,17 +155,29 @@ def test_iter_grouped_timestamps_rejects_null_group_keys(asset_id: object) -> No
         tuple(iter_grouped_timestamps(frame))
 
 
-@pytest.mark.parametrize("key", [None, pd.NA, ("asset", None)])
+@pytest.mark.parametrize(
+    "key",
+    [None, pd.NA, [], {}, set(), ("asset", None), ("asset", []), ("asset", {})],
+)
 def test_iter_grouped_timestamps_mapping_rejects_invalid_group_keys(
     key: object,
 ) -> None:
+    panel_keys = _ItemsOnlyMapping(((key, (pd.Timestamp("2026-07-06 00:00"),)),))
+
     with pytest.raises(ValueError, match="invalid_grouped_timestamp_keys"):
-        tuple(iter_grouped_timestamps({key: (pd.Timestamp("2026-07-06 00:00"),)}))
+        tuple(iter_grouped_timestamps(panel_keys))  # type: ignore[arg-type]
 
 
 def test_iter_grouped_timestamps_mapping_rejects_invalid_timestamp_values() -> None:
     with pytest.raises(ValueError, match="invalid_grouped_timestamp_values"):
         tuple(iter_grouped_timestamps({"asset": ("bad",)}))
+
+
+def test_iter_grouped_timestamps_mapping_rejects_none_timestamp_values() -> None:
+    panel_keys = _ItemsOnlyMapping((("asset", None),))
+
+    with pytest.raises(ValueError, match="invalid_grouped_timestamp_values"):
+        tuple(iter_grouped_timestamps(panel_keys))  # type: ignore[arg-type]
 
 
 def test_price_volume_windows_use_generic_grouped_timestamp_helper() -> None:
@@ -203,6 +215,14 @@ def test_price_volume_read_window_rejects_null_group_key() -> None:
             core_sessions=(pd.Timestamp("2024-01-05"),),
             lookback_bars=1,
         )
+
+
+class _ItemsOnlyMapping:
+    def __init__(self, values: tuple[tuple[object, object], ...]) -> None:
+        self._values = values
+
+    def items(self) -> tuple[tuple[object, object], ...]:
+        return self._values
 
 
 @pytest.mark.parametrize("lookback_bars", [True, -1, 1.5])

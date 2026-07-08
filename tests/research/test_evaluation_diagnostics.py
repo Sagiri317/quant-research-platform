@@ -5,6 +5,7 @@ import pytest
 
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.research.evaluations import engine as evaluation_engine
 from quant_research_platform.research.evaluations.diagnostics import (
     build_evaluation_diagnostics,
     summarize_group_spread,
@@ -150,6 +151,86 @@ def test_build_evaluation_diagnostics_accepts_valid_counts() -> None:
     assert diagnostics.n_groups == 2
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rows_input", True),
+        ("rows_input", 1.5),
+        ("rows_input", -1),
+        ("rows_after_filter_mode", True),
+        ("rows_after_filter_mode", 1.5),
+        ("rows_after_filter_mode", -1),
+    ],
+)
+def test_evaluation_engine_rejects_invalid_filter_metadata_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    metadata = {
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+    }
+    metadata[field] = value
+
+    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
+        return frame, metadata
+
+    monkeypatch.setattr(
+        "quant_research_platform.research.filtering.apply_filter_mode",
+        fake_apply_filter_mode,
+    )
+
+    with pytest.raises(ValueError, match="invalid_evaluation_diagnostics_count"):
+        evaluation_engine.evaluate_signal_frame_chunks(
+            (_evaluation_frame(),),
+            EvaluationSpec(
+                run_id="eval_bad_metadata_count",
+                market_id=MarketId("a_share"),
+                research_dataset_id="research_demo",
+                signals=(make_artifact_signal_spec(),),
+                label_columns=("label",),
+                n_groups=2,
+            ),
+            n_groups=2,
+        )
+
+
+def test_evaluation_engine_accepts_valid_filter_metadata_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
+        return frame, {
+            "filter_columns_used": ["eligible"],
+            "filter_definition": "eligible == True",
+            "rows_input": 2,
+            "rows_after_filter_mode": 2,
+        }
+
+    monkeypatch.setattr(
+        "quant_research_platform.research.filtering.apply_filter_mode",
+        fake_apply_filter_mode,
+    )
+
+    result = evaluation_engine.evaluate_signal_frame_chunks(
+        (_evaluation_frame(),),
+        EvaluationSpec(
+            run_id="eval_valid_metadata_count",
+            market_id=MarketId("a_share"),
+            research_dataset_id="research_demo",
+            signals=(make_artifact_signal_spec(),),
+            label_columns=("label",),
+            n_groups=2,
+        ),
+        n_groups=2,
+    )
+
+    assert result.diagnostics.rows_input == 2
+    assert result.diagnostics.rows_after_filter_mode == 2
+
+
 def _build_diagnostics(
     *,
     filter_metadata: dict[str, object] | None = None,
@@ -192,3 +273,15 @@ def _filter_metadata() -> dict[str, object]:
         "rows_input": 2,
         "rows_after_filter_mode": 2,
     }
+
+
+def _evaluation_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "asset_id": ["asset_a", "asset_b"],
+            "feature": [1.0, 2.0],
+            "label": [0.1, 0.2],
+            "eligible": [True, True],
+        }
+    )

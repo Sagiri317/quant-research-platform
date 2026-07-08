@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 
 import pandas as pd
 
@@ -73,6 +73,8 @@ def iter_grouped_timestamps(
         return
     for key, timestamps in panel_keys.items():
         _validate_mapping_group_key(key)
+        if timestamps is None:
+            raise ValueError("invalid_grouped_timestamp_values")
         dates = pd.Series(_strict_timestamps(pd.Series(tuple(timestamps))))
         dates = dates.sort_values(kind="mergesort").reset_index(drop=True)
         if not dates.empty:
@@ -98,16 +100,25 @@ def _validate_group_key_frame(
     frame: pd.DataFrame,
     group_columns: tuple[str, ...],
 ) -> None:
-    if frame.loc[:, list(group_columns)].isna().any(axis=None):
-        raise ValueError("invalid_grouped_timestamp_keys")
+    for column in group_columns:
+        for value in frame[column].tolist():
+            _strict_group_key_value(value)
 
 
 def _validate_mapping_group_key(key: object) -> None:
-    if isinstance(key, tuple):
-        invalid = any(_is_null_group_key(part) for part in key)
-    else:
-        invalid = _is_null_group_key(key)
-    if invalid:
+    _strict_group_key_value(key)
+
+
+def _strict_group_key_value(value: object) -> None:
+    if isinstance(value, tuple):
+        for part in value:
+            _strict_group_key_value(part)
+        return
+    if (
+        _is_null_group_key(value)
+        or isinstance(value, (list, dict, set))
+        or not isinstance(value, Hashable)
+    ):
         raise ValueError("invalid_grouped_timestamp_keys")
 
 

@@ -6,7 +6,7 @@ calendar/session windows and do not fill missing or suspended rows.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -163,6 +163,8 @@ def _validate_label_input_frame(
     if missing:
         raise ValueError(f"missing_forward_return_columns: {', '.join(missing)}")
     result = frame.copy()
+    for value in result[asset_column].tolist():
+        _strict_asset_key_value(value)
     timestamps = pd.to_datetime(result[date_column], errors="coerce")
     if timestamps.isna().any():
         raise ValueError("invalid_forward_return_timestamp")
@@ -170,6 +172,24 @@ def _validate_label_input_frame(
     if result.duplicated([asset_column, date_column]).any():
         raise ValueError("duplicate_forward_return_asset_timestamp")
     return result
+
+
+def _strict_asset_key_value(value: object) -> None:
+    if (
+        _is_null_asset_key(value)
+        or isinstance(value, (list, dict, set))
+        or not isinstance(value, Hashable)
+    ):
+        raise ValueError("invalid_forward_return_asset_key")
+
+
+def _is_null_asset_key(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
 
 
 __all__ = [

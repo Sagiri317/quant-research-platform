@@ -17,6 +17,7 @@ from quant_research_platform.contracts.predictions import (
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import assemble_research_dataset
 from quant_research_platform.research.predictions import (
+    build_prediction_result_from_frames,
     build_prediction_result_from_research_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -148,6 +149,89 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         manifest["metadata"]["prediction_metadata"]["effective_test_end"]
         == "2024-01-03"
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rows_input", True),
+        ("rows_input", 1.5),
+        ("rows_input", -1),
+        ("rows_after_filter_mode", True),
+        ("rows_after_filter_mode", 1.5),
+        ("rows_after_filter_mode", -1),
+    ],
+)
+def test_prediction_build_rejects_invalid_filter_metadata_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    metadata = {
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+    }
+    metadata[field] = value
+
+    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
+        return frame, metadata
+
+    monkeypatch.setattr(
+        "quant_research_platform.research.predictions.outputs.apply_filter_mode",
+        fake_apply_filter_mode,
+    )
+    spec = PredictionSpec(
+        prediction_id="pred_bad_metadata_count",
+        model_id="linear_eligible",
+        research_dataset_id="demo_filter",
+        train_end="2024-01-02",
+        test_start="2024-01-03",
+        test_end="2024-01-03",
+    )
+    frame = make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-03"))
+    result = build_prediction_result_from_frames(
+        (frame.drop(columns=["label"]),),
+        spec,
+        coefficients=np.asarray([0.0, 0.01]),
+        input_columns=("factor",),
+        model_metadata=_prediction_model_metadata(),
+    )
+
+    with pytest.raises(ValueError, match="invalid_prediction_metadata_count"):
+        tuple(result.output_chunks)
+
+
+def _prediction_model_metadata() -> dict[str, object]:
+    return {
+        "contract_version": "0.1",
+        "model_algorithm": "linear_regression",
+        "sample_filter_mode": "eligible",
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+        "rows_after_input_label_dropna": 2,
+        "train_start": "2024-01-02",
+        "train_end": "2024-01-02",
+        "test_start": None,
+        "test_end": None,
+        "oos_start": None,
+        "oos_end": None,
+        "input_factor_columns": ["factor"],
+        "input_feature_columns": [],
+        "input_columns": ["factor"],
+        "input_count": 1,
+        "label_column": "label",
+        "hyperparameters": {},
+        "random_seed": None,
+        "max_train_rows": None,
+        "purge_gap_steps": 0,
+        "dependency_status": {"status": "available", "package": "sklearn"},
+        "coefficient_count": 2,
+        "feature_importance": {"factor": 0.1},
+    }
 
 
 def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(

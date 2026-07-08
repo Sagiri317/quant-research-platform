@@ -85,8 +85,12 @@ class _PredictionBuildState:
     effective_test_end: str | None = None
 
     def record_filter_metadata(self, metadata: dict[str, object]) -> None:
-        self.rows_input += int(metadata["rows_input"])
-        self.rows_after_filter += int(metadata["rows_after_filter_mode"])
+        self.rows_input += _strict_non_negative_prediction_count(
+            metadata["rows_input"]
+        )
+        self.rows_after_filter += _strict_non_negative_prediction_count(
+            metadata["rows_after_filter_mode"]
+        )
         self.filter_columns_used = tuple(metadata["filter_columns_used"])
         self.filter_definition = str(metadata["filter_definition"])
 
@@ -257,6 +261,12 @@ def validate_prediction_outputs(frame: pd.DataFrame, spec: PredictionSpec) -> No
         (timestamps > pd.Timestamp(spec.test_end)).any()
     ):
         raise ValueError("prediction_output_after_test_end")
+
+
+def _strict_non_negative_prediction_count(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("invalid_prediction_metadata_count")
+    return value
 
 
 __all__ = [

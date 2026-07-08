@@ -15,6 +15,7 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
     strict_non_negative_count_series,
+    strict_non_negative_count_value,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
@@ -133,8 +134,10 @@ def _compute_evaluation_frames(
             mode=spec.filter_mode,
             metadata_key="filter_mode",
         )
-        rows_input += int(metadata["rows_input"])
-        rows_after_filter += int(metadata["rows_after_filter_mode"])
+        rows_input += strict_non_negative_count_value(metadata["rows_input"])
+        rows_after_filter += strict_non_negative_count_value(
+            metadata["rows_after_filter_mode"]
+        )
         filter_columns_used = list(metadata["filter_columns_used"])
         filter_definition = str(metadata["filter_definition"])
         for label_column in label_columns:

@@ -366,7 +366,11 @@ def validate_model_metadata_consistency(
     *,
     spec: PredictionSpec,
 ) -> None:
-    input_count = int(metadata["input_count"])
+    input_count = require_non_negative_metadata_int(
+        metadata,
+        "input_count",
+        "model_metadata_inconsistent",
+    )
     input_columns = metadata["input_columns"]
     if not isinstance(input_columns, list) or input_count != len(input_columns):
         raise ValueError("model_metadata_inconsistent")
@@ -391,7 +395,14 @@ def validate_model_metadata_consistency(
         or metadata["oos_start"] != spec.test_start
     ):
         raise ValueError("model_metadata_inconsistent")
-    if int(metadata["coefficient_count"]) <= 0:
+    if (
+        require_non_negative_metadata_int(
+            metadata,
+            "coefficient_count",
+            "model_metadata_inconsistent",
+        )
+        <= 0
+    ):
         raise ValueError("model_metadata_inconsistent")
     validate_model_selection_metadata_consistency(metadata, spec=spec)
 
@@ -473,7 +484,17 @@ def validate_prediction_metadata_consistency_from_summary(
         ("rows_input", "rows_after_filter_mode", "rows_after_input_dropna"),
         "prediction_metadata_inconsistent",
     )
-    if int(metadata["prediction_rows"]) > int(metadata["rows_after_input_dropna"]):
+    prediction_rows = require_non_negative_metadata_int(
+        metadata,
+        "prediction_rows",
+        "prediction_metadata_inconsistent",
+    )
+    rows_after_input_dropna = require_non_negative_metadata_int(
+        metadata,
+        "rows_after_input_dropna",
+        "prediction_metadata_inconsistent",
+    )
+    if prediction_rows > rows_after_input_dropna:
         raise ValueError("prediction_metadata_inconsistent")
     validate_filter_metadata(
         mode=str(metadata["sample_filter_mode"]),

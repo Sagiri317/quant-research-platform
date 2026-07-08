@@ -136,12 +136,16 @@ def _inspection_covers_window(
     ]
     if len(timestamp_columns) != 1:
         raise ValueError("time_window_not_supported")
+    timestamp_column = timestamp_columns[0]
+    asset_columns = [column for column in spec.primary_key if str(column) == "asset_id"]
+    read_columns = tuple((*asset_columns, timestamp_column))
+    frame = read_dataset(
+        _processed_root(layout, spec),
+        columns=read_columns,
+        time_window=time_window,
+    )
     timestamps = pd.to_datetime(
-        read_dataset(
-            _processed_root(layout, spec),
-            columns=tuple(timestamp_columns),
-            time_window=time_window,
-        )[timestamp_columns[0]],
+        frame[timestamp_column],
         errors="coerce",
     )
     if timestamps.isna().any() or timestamps.empty:
@@ -151,7 +155,24 @@ def _inspection_covers_window(
     required_end = pd.Timestamp(end_bound)
     if not end_inclusive:
         required_end = required_end - pd.Timedelta(minutes=1)
-    return timestamps.min() <= required_start and timestamps.max() >= required_end
+    if required_end < required_start:
+        return False
+    expected_timestamps = set(
+        pd.date_range(required_start, required_end, freq="min")
+    )
+    if not expected_timestamps:
+        return False
+    frame = frame.assign(**{timestamp_column: timestamps})
+    if asset_columns:
+        asset_column = asset_columns[0]
+        if frame[asset_column].isna().any():
+            return False
+        for _, asset_rows in frame.groupby(asset_column, sort=False, dropna=False):
+            observed_timestamps = set(asset_rows[timestamp_column])
+            if not expected_timestamps.issubset(observed_timestamps):
+                return False
+        return True
+    return expected_timestamps.issubset(set(timestamps))
 
 
 def _include_dependencies(

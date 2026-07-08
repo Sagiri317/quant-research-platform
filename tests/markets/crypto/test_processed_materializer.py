@@ -450,6 +450,43 @@ def test_crypto_materializer_rejects_insufficient_existing_panel_dependency(
         )
 
 
+def test_crypto_materializer_rejects_panel_dependency_with_middle_minute_gap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    panel_spec = processed_catalog().get("market_panel_1m")
+    gapped = pd.concat(
+        (
+            _panel_frame(minutes=1).assign(timestamp=pd.Timestamp("2026-07-06 00:06")),
+            _panel_frame(minutes=1).assign(timestamp=pd.Timestamp("2026-07-06 00:12")),
+        ),
+        ignore_index=True,
+    )
+    write_dataset(
+        layout.processed_data_root(
+            "crypto",
+            ProcessedDataKind.PANEL,
+            "market_panel_1m",
+        ),
+        gapped,
+        spec=panel_spec,
+    )
+
+    def fail_panel_write(*_: Any, **__: Any) -> object:
+        raise AssertionError("unexpected_crypto_dependency_panel_write")
+
+    monkeypatch.setattr(materialize_panel, "write_panel", fail_panel_write)
+
+    with pytest.raises(ValueError, match="insufficient_crypto_dependency_coverage"):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SourceId("synthetic_crypto"),
+            time_window=TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00"),
+            data_ids=("microstructure",),
+        )
+
+
 def test_crypto_materializer_materializes_missing_panel_dependency(
     tmp_path: Path,
     monkeypatch,
@@ -523,6 +560,110 @@ def test_crypto_factor_label_emit_only_core_window(tmp_path: Path) -> None:
     assert labels["timestamp"].tolist() == expected_timestamps
     assert not factors["trade_intensity_5m"].isna().any()
     assert not labels["forward_return_15m"].isna().any()
+
+
+@pytest.mark.parametrize("index", [[10, 20, 30], [0, 0, 1]])
+def test_crypto_core_mask_uses_original_row_positions(index: list[int]) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-07-06 00:09:00",
+                    "2026-07-06 00:10:00",
+                    "2026-07-06 00:11:00",
+                ]
+            )
+        },
+        index=index,
+    )
+    core = TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:10:00")
+
+    assert materialize_factors._core_mask(frame, core).tolist() == [False, True, False]
+    assert materialize_labels._core_mask(frame, core).tolist() == [False, True, False]
+
+
+@pytest.mark.parametrize("index", [[100 + index for index in range(30)], [0] * 30])
+def test_crypto_factor_label_materialization_core_selection_uses_positions(
+    monkeypatch,
+    index: list[int],
+) -> None:
+    panel = _panel_frame(minutes=30)
+    panel.index = index
+    core = TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00")
+
+    def read_panel(*_: Any, **__: Any):
+        return iter((panel.copy(),))
+
+    monkeypatch.setattr(materialize_factors, "read_dataset", read_panel)
+    monkeypatch.setattr(materialize_labels, "read_dataset", read_panel)
+
+    factors = pd.concat(
+        materialize_factors._iter_factor_chunks(
+            processed_catalog().get("microstructure"),
+            panel_root=Path("unused"),
+            time_window=core,
+        ),
+        ignore_index=True,
+    )
+    labels = pd.concat(
+        materialize_labels._iter_label_chunks(
+            processed_catalog().get("forward_returns"),
+            panel_root=Path("unused"),
+            time_window=core,
+        ),
+        ignore_index=True,
+    )
+
+    expected = pd.to_datetime(
+        ["2026-07-06 00:10:00", "2026-07-06 00:11:00", "2026-07-06 00:12:00"]
+    ).tolist()
+    assert factors["timestamp"].tolist() == expected
+    assert labels["timestamp"].tolist() == expected
+
+
+@pytest.mark.parametrize(
+    ("frame_name", "column", "error"),
+    [
+        ("bars", "timestamp", "invalid_crypto_matching_bar_timestamp"),
+        ("bars", "close_time", "invalid_crypto_matching_bar_close_time"),
+        ("trades", "timestamp", "invalid_crypto_matching_trade_timestamp"),
+        ("depth", "timestamp", "invalid_crypto_matching_depth_timestamp"),
+    ],
+)
+def test_crypto_panel_matching_rejects_invalid_timestamps(
+    tmp_path: Path,
+    monkeypatch,
+    frame_name: str,
+    column: str,
+    error: str,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    frames = _matching_panel_frames()
+    frames[frame_name][column] = frames[frame_name][column].astype(object)
+    frames[frame_name].loc[0, column] = "bad"
+
+    def fake_read_dataset(dataset_root, **kwargs):
+        root_name = Path(dataset_root).name
+        if kwargs.get("mode") is not DatasetReadMode.CHUNKED:
+            raise AssertionError("crypto_panel_matching_requires_chunked_reads")
+        if root_name == "market_bars_1m":
+            return iter((frames["bars"],))
+        if root_name == "aggregate_trades_tick":
+            return iter((frames["trades"],))
+        if root_name == "depth_levels_tick":
+            return iter((frames["depth"],))
+        raise AssertionError(f"unexpected_dataset_root:{root_name}")
+
+    monkeypatch.setattr(materialize_panel, "read_dataset", fake_read_dataset)
+
+    with pytest.raises(ValueError, match=error):
+        materialize_panel.write_panel(
+            processed_catalog().get("market_panel_1m"),
+            layout=layout,
+            source_id=SourceId("synthetic_crypto"),
+            time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
+            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        )
 
 
 def test_synthetic_crypto_normalized_interim_can_generate_non_binance_panel(
@@ -629,6 +770,45 @@ def _panel_frame(*, minutes: int) -> pd.DataFrame:
             "eligible": [True] * minutes,
         }
     )
+
+
+def _matching_panel_frames() -> dict[str, pd.DataFrame]:
+    bars = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"],
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:00"]),
+            "close_time": pd.to_datetime(["2026-07-06 00:00:59"]),
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.5],
+            "volume": [10.0],
+            "quote_volume": [1005.0],
+            "trade_count": [1],
+            "taker_buy_volume": [4.0],
+            "taker_buy_quote_volume": [402.0],
+        }
+    )
+    trades = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"],
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:01"]),
+            "signed_quantity": [2.0],
+        }
+    )
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT", "BTCUSDT"],
+            "timestamp": pd.to_datetime(
+                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
+            ),
+            "side": ["bid", "ask"],
+            "level": [1, 1],
+            "price": [100.0, 100.2],
+            "quantity": [1.5, 1.0],
+        }
+    )
+    return {"bars": bars, "trades": trades, "depth": depth}
 
 
 def _existing_processed_frame(spec, *, minutes: int) -> pd.DataFrame:

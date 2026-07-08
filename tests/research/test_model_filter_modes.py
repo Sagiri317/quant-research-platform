@@ -191,6 +191,101 @@ def test_model_metadata_rejects_invalid_count_values(
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rows_input", True),
+        ("rows_input", 1.5),
+        ("rows_input", -1),
+        ("rows_after_filter_mode", True),
+        ("rows_after_filter_mode", 1.5),
+        ("rows_after_filter_mode", -1),
+    ],
+)
+def test_model_streaming_fit_rejects_invalid_filter_metadata_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    from quant_research_platform.research.models import fitting as model_fitting
+
+    metadata = _model_filter_metadata()
+    metadata[field] = value
+
+    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
+        return frame, metadata
+
+    monkeypatch.setattr(model_fitting, "apply_filter_mode", fake_apply_filter_mode)
+    spec = ModelSpec(
+        model_id="linear_bad_streaming_metadata_count",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+    )
+
+    with pytest.raises(ValueError, match="invalid_model_metadata_count"):
+        fit_model_result(make_filter_mode_frame(), spec)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rows_input", True),
+        ("rows_input", 1.5),
+        ("rows_input", -1),
+        ("rows_after_filter_mode", True),
+        ("rows_after_filter_mode", 1.5),
+        ("rows_after_filter_mode", -1),
+    ],
+)
+def test_model_training_collection_rejects_invalid_filter_metadata_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    from quant_research_platform.research.models import fitting as model_fitting
+
+    metadata = _model_filter_metadata()
+    metadata[field] = value
+
+    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
+        return frame, metadata
+
+    monkeypatch.setattr(model_fitting, "apply_filter_mode", fake_apply_filter_mode)
+    spec = ModelSpec(
+        model_id="linear_bad_collected_metadata_count",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+        max_train_rows=len(make_filter_mode_frame()),
+    )
+
+    with pytest.raises(ValueError, match="invalid_model_metadata_count"):
+        model_fitting.collect_training_frame((make_filter_mode_frame(),), spec)
+
+
+def test_model_fit_accepts_valid_filter_metadata_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.research.models import fitting as model_fitting
+
+    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
+        return frame, _model_filter_metadata()
+
+    monkeypatch.setattr(model_fitting, "apply_filter_mode", fake_apply_filter_mode)
+    spec = ModelSpec(
+        model_id="linear_valid_metadata_count",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+    )
+
+    result = fit_model_result(make_filter_mode_frame(), spec)
+
+    assert result.metadata["rows_input"] == 2
+    assert result.metadata["rows_after_filter_mode"] == 2
+
+
+@pytest.mark.parametrize(
     "model_algorithm",
     model_algorithm_ids(),
 )
@@ -566,3 +661,12 @@ def test_model_rejects_unsupported_contract_version() -> None:
             label_column="label",
             contract_version="9.9",
         )
+
+
+def _model_filter_metadata() -> dict[str, object]:
+    return {
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+    }

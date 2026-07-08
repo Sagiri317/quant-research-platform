@@ -127,13 +127,15 @@ def _core_mask(frame: pd.DataFrame, time_window: TimeWindow) -> pd.Series:
         "column_roles": {"timestamp": "timestamp"},
         "primary_key": ("timestamp",),
     }
+    work = frame.loc[:, ["timestamp"]].copy()
+    work["_qrp_original_position"] = range(len(frame))
     filtered = filter_frame_by_time_window(
-        frame.loc[:, ["timestamp"]].assign(_qrp_index=frame.index),
+        work,
         spec=spec,
         time_window=time_window,
     )
     positions = pd.Series(False, index=range(len(frame)))
-    positions.loc[filtered["_qrp_index"].to_numpy(dtype=int)] = True
+    positions.iloc[filtered["_qrp_original_position"].to_numpy(dtype=int)] = True
     return pd.Series(positions.to_numpy(dtype=bool), index=frame.index)
 
 

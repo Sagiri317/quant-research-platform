@@ -83,11 +83,13 @@ def _iter_panel_chunks(
             trade_root,
             bars_chunk,
             max_quote_age=pd.Timedelta(0),
+            timestamp_error="invalid_crypto_matching_trade_timestamp",
         )
         matching_depth = _read_matching_chunks(
             depth_root,
             bars_chunk,
             max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
+            timestamp_error="invalid_crypto_matching_depth_timestamp",
         )
         for bars in _split_frame_by_policy(bars_chunk, resource_policy):
             if bars.empty:
@@ -96,11 +98,13 @@ def _iter_panel_chunks(
                 matching_trades,
                 bars,
                 max_quote_age=pd.Timedelta(0),
+                timestamp_error="invalid_crypto_matching_trade_timestamp",
             )
             depth = _filter_matching_frame(
                 matching_depth,
                 bars,
                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
+                timestamp_error="invalid_crypto_matching_depth_timestamp",
             )
             yield panels.compute_market_panel(bars, trades=trades, depth=depth).loc[
                 :,
@@ -113,10 +117,19 @@ def _read_matching_chunks(
     bars: pd.DataFrame,
     *,
     max_quote_age: pd.Timedelta,
+    timestamp_error: str,
 ) -> pd.DataFrame:
     asset_ids = set(bars["source_asset_id"].astype(str))
-    start = pd.to_datetime(bars["timestamp"], errors="coerce").min()
-    end = pd.to_datetime(bars["close_time"], errors="coerce").max()
+    start = _strict_timestamp_column(
+        bars,
+        "timestamp",
+        "invalid_crypto_matching_bar_timestamp",
+    ).min()
+    end = _strict_timestamp_column(
+        bars,
+        "close_time",
+        "invalid_crypto_matching_bar_close_time",
+    ).max()
     read_window = TimeWindow(
         (start - max_quote_age).to_pydatetime(),
         end.to_pydatetime(),
@@ -128,6 +141,7 @@ def _read_matching_chunks(
         end=end,
         time_window=read_window,
         max_quote_age=max_quote_age,
+        timestamp_error=timestamp_error,
     )
     try:
         first = next(chunks)
@@ -144,6 +158,7 @@ def _iter_matching_chunks(
     end: pd.Timestamp,
     time_window: TimeWindow,
     max_quote_age: pd.Timedelta,
+    timestamp_error: str,
 ) -> Iterator[pd.DataFrame]:
     for chunk in read_dataset(
         dataset_root,
@@ -159,6 +174,7 @@ def _iter_matching_chunks(
                 start=start,
                 end=end,
                 max_quote_age=max_quote_age,
+                timestamp_error=timestamp_error,
             )
         ].copy()
         if not matching.empty:
@@ -170,12 +186,21 @@ def _filter_matching_frame(
     bars: pd.DataFrame,
     *,
     max_quote_age: pd.Timedelta,
+    timestamp_error: str,
 ) -> pd.DataFrame:
     if frame.empty or bars.empty:
         return pd.DataFrame(columns=frame.columns)
     asset_ids = set(bars["source_asset_id"].astype(str))
-    start = pd.to_datetime(bars["timestamp"], errors="coerce").min()
-    end = pd.to_datetime(bars["close_time"], errors="coerce").max()
+    start = _strict_timestamp_column(
+        bars,
+        "timestamp",
+        "invalid_crypto_matching_bar_timestamp",
+    ).min()
+    end = _strict_timestamp_column(
+        bars,
+        "close_time",
+        "invalid_crypto_matching_bar_close_time",
+    ).max()
     return frame.loc[
         _matching_window_mask(
             frame,
@@ -183,6 +208,7 @@ def _filter_matching_frame(
             start=start,
             end=end,
             max_quote_age=max_quote_age,
+            timestamp_error=timestamp_error,
         )
     ].copy()
 
@@ -194,10 +220,24 @@ def _matching_window_mask(
     start: pd.Timestamp,
     end: pd.Timestamp,
     max_quote_age: pd.Timedelta,
+    timestamp_error: str,
 ) -> pd.Series:
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    timestamps = _strict_timestamp_column(frame, "timestamp", timestamp_error)
     mask = frame["source_asset_id"].astype(str).isin(asset_ids)
     return mask & timestamps.ge(start - max_quote_age) & timestamps.le(end)
+
+
+def _strict_timestamp_column(
+    frame: pd.DataFrame,
+    column: str,
+    error: str,
+) -> pd.Series:
+    if frame.empty:
+        return pd.Series([], index=frame.index, dtype="datetime64[ns]")
+    timestamps = pd.to_datetime(frame[column], errors="coerce")
+    if timestamps.isna().any():
+        raise ValueError(error)
+    return timestamps
 
 
 def _prepend(
