@@ -246,6 +246,23 @@ def test_forward_return_valid_bar_read_window_uses_sparse_asset_keys() -> None:
     assert read_window == TimeWindow("2024-01-03", "2024-01-09")
 
 
+def test_forward_return_read_window_rejects_null_group_key() -> None:
+    panel_keys = pd.DataFrame(
+        {
+            "asset_id": [None],
+            "timestamp": pd.to_datetime(["2024-01-03"]),
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_grouped_timestamp_keys"):
+        forward_return_valid_bar_read_window(
+            panel_keys,
+            read_window=TimeWindow("2024-01-03", "2024-01-03"),
+            core_sessions=(pd.Timestamp("2024-01-03"),),
+            lookahead_bars=1,
+        )
+
+
 @pytest.mark.parametrize("lookahead_bars", [True, -1, 1.5])
 def test_forward_return_read_window_rejects_invalid_lookahead_bars(
     lookahead_bars: object,

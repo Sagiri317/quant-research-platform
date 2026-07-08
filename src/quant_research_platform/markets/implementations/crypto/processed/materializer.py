@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+import pandas as pd
+
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.ids import SourceId
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.markets.implementations.crypto.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     MARKET_PANEL_DATA_ID,
@@ -25,7 +30,11 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
 )
-from quant_research_platform.storage.datasets import DatasetInspection
+from quant_research_platform.storage.datasets import (
+    DatasetInspection,
+    inspect_dataset,
+    read_dataset,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 processed_catalog = processed_catalog_module.processed_catalog
@@ -56,6 +65,9 @@ def materialize_processed_data(
         requested = tuple(spec for spec in catalog.list() if spec.kind in kinds)
     if not requested:
         raise ValueError("no_processed_targets")
+    for spec in requested:
+        if _processed_root(layout, spec).exists():
+            raise ValueError("dataset_exists")
     requested_by_id = {spec.data_id: spec for spec in requested}
     specs = _include_dependencies(requested_by_id)
     written: dict[str, DatasetInspection] = {}
@@ -73,6 +85,16 @@ def materialize_processed_data(
             requested_by_id=requested_by_id,
             core_time_window=time_window,
         )
+        if (
+            spec.data_id not in requested_by_id
+            and _processed_root(layout, spec).exists()
+        ):
+            written[data_id] = _inspect_existing_dependency(
+                layout,
+                spec,
+                time_window=target_time_window,
+            )
+            continue
         written[data_id] = _materialize_one(
             spec,
             layout=layout,
@@ -81,6 +103,55 @@ def materialize_processed_data(
             resource_policy=policy,
         )
     return written
+
+
+def _processed_root(layout: StorageLayout, spec: ProcessedDataSpec):
+    return layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+
+
+def _inspect_existing_dependency(
+    layout: StorageLayout,
+    spec: ProcessedDataSpec,
+    *,
+    time_window: TimeWindow,
+) -> DatasetInspection:
+    inspection = inspect_dataset(_processed_root(layout, spec), time_window=time_window)
+    if not _inspection_covers_window(layout, spec, inspection, time_window):
+        raise ValueError("insufficient_crypto_dependency_coverage")
+    return inspection
+
+
+def _inspection_covers_window(
+    layout: StorageLayout,
+    spec: ProcessedDataSpec,
+    inspection: DatasetInspection,
+    time_window: TimeWindow,
+) -> bool:
+    if inspection.row_count <= 0:
+        return False
+    timestamp_columns = [
+        column
+        for column in spec.primary_key
+        if str(column) == "timestamp"
+    ]
+    if len(timestamp_columns) != 1:
+        raise ValueError("time_window_not_supported")
+    timestamps = pd.to_datetime(
+        read_dataset(
+            _processed_root(layout, spec),
+            columns=tuple(timestamp_columns),
+            time_window=time_window,
+        )[timestamp_columns[0]],
+        errors="coerce",
+    )
+    if timestamps.isna().any() or timestamps.empty:
+        return False
+    start_bound, end_bound, end_inclusive = time_window_timestamp_interval(time_window)
+    required_start = pd.Timestamp(start_bound)
+    required_end = pd.Timestamp(end_bound)
+    if not end_inclusive:
+        required_end = required_end - pd.Timedelta(minutes=1)
+    return timestamps.min() <= required_start and timestamps.max() >= required_end
 
 
 def _include_dependencies(

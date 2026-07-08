@@ -154,6 +154,57 @@ def test_agent_proposal_rejects_bare_str_tuple_fields() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("required_input_data_id", ""),
+        ("required_input_data_id", None),
+        ("family", ""),
+        ("family", 123),
+        ("timing_semantics", ""),
+        ("timing_semantics", None),
+        ("null_policy", ""),
+        ("null_policy", None),
+    ],
+)
+def test_factor_proposal_rejects_invalid_semantic_fields(
+    field: str,
+    value: object,
+) -> None:
+    kwargs = {
+        "proposal_id": "factor-proposal-bad-semantic-field",
+        "factor_id": "factor_alpha",
+        "rationale": "Evaluate a synthetic factor idea.",
+        "input_columns": ("close",),
+        "required_input_data_id": "price_volume",
+        field: value,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=f"invalid_factor_proposal_semantic_field: {field}",
+    ):
+        FactorProposal(**kwargs)  # type: ignore[arg-type]
+
+
+def test_factor_proposal_accepts_valid_semantic_fields() -> None:
+    proposal = FactorProposal(
+        proposal_id="factor-proposal-valid-semantic-fields",
+        factor_id="factor_alpha",
+        rationale="Evaluate a synthetic factor idea.",
+        input_columns=("close",),
+        required_input_data_id="price_volume",
+        family="price_volume",
+        timing_semantics="as_of_timestamp",
+        null_policy="preserve_nulls",
+    )
+
+    assert proposal.required_input_data_id == "price_volume"
+    assert proposal.family == "price_volume"
+    assert proposal.timing_semantics == "as_of_timestamp"
+    assert proposal.null_policy == "preserve_nulls"
+
+
 def test_workflow_proposal_rejects_wrong_proposal_type() -> None:
     with pytest.raises(ValueError, match="invalid_proposal_type"):
         WorkflowProposal(

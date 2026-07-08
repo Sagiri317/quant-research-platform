@@ -17,15 +17,15 @@ LABEL_LOOKAHEAD_EXTRA_MINUTES = max(CRYPTO_FORWARD_RETURN_HORIZONS) + 1
 
 
 def factor_read_window(core: TimeWindow) -> TimeWindow:
-    start_bound, end_bound, _end_inclusive = time_window_timestamp_interval(core)
-    start = pd.Timestamp(start_bound) - pd.Timedelta(minutes=FACTOR_WARMUP_MINUTES)
-    return TimeWindow(start.to_pydatetime(), pd.Timestamp(end_bound).to_pydatetime())
+    core_start, core_end = _minute_core_bounds(core)
+    start = core_start - pd.Timedelta(minutes=FACTOR_WARMUP_MINUTES)
+    return TimeWindow(start.to_pydatetime(), core_end.to_pydatetime())
 
 
 def label_read_window(core: TimeWindow) -> TimeWindow:
-    start_bound, end_bound, _end_inclusive = time_window_timestamp_interval(core)
-    end = pd.Timestamp(end_bound) + pd.Timedelta(minutes=LABEL_LOOKAHEAD_EXTRA_MINUTES)
-    return TimeWindow(pd.Timestamp(start_bound).to_pydatetime(), end.to_pydatetime())
+    core_start, core_end = _minute_core_bounds(core)
+    end = core_end + pd.Timedelta(minutes=LABEL_LOOKAHEAD_EXTRA_MINUTES)
+    return TimeWindow(core_start.to_pydatetime(), end.to_pydatetime())
 
 
 def panel_dependency_window(core: TimeWindow) -> TimeWindow:
@@ -35,6 +35,15 @@ def panel_dependency_window(core: TimeWindow) -> TimeWindow:
         min(pd.Timestamp(factor.start), pd.Timestamp(label.start)).to_pydatetime(),
         max(pd.Timestamp(factor.end), pd.Timestamp(label.end)).to_pydatetime(),
     )
+
+
+def _minute_core_bounds(core: TimeWindow) -> tuple[pd.Timestamp, pd.Timestamp]:
+    start_bound, end_bound, end_inclusive = time_window_timestamp_interval(core)
+    core_start = pd.Timestamp(start_bound)
+    core_end = pd.Timestamp(end_bound)
+    if not end_inclusive:
+        core_end = core_end - pd.Timedelta(minutes=1)
+    return core_start, core_end
 
 
 __all__ = [

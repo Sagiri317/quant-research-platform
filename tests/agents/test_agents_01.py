@@ -38,6 +38,7 @@ def test_agent_proposals_start_unapproved() -> None:
             proposal_id="factor-proposal-001",
             factor_id="price_volume_reversal",
             rationale="Mean reversion candidate from public field ids.",
+            required_input_data_id="a_share_daily_0_1",
             input_columns=("close", "volume"),
         ),
         LabelProposal(
@@ -78,6 +79,7 @@ def test_share_safety_rejects_local_text_markers(unsafe_text: str) -> None:
         proposal_id="factor-proposal-unsafe",
         factor_id="unsafe_factor",
         rationale=unsafe_text,
+        required_input_data_id="a_share_daily_0_1",
         input_columns=("close",),
     )
 

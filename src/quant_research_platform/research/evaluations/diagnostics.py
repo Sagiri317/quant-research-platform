@@ -18,6 +18,7 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
     strict_non_negative_count_series,
+    strict_non_negative_count_value,
 )
 
 
@@ -94,9 +95,18 @@ def build_evaluation_diagnostics(
             str(column) for column in filter_metadata["filter_columns_used"]
         ),
         filter_definition=str(filter_metadata["filter_definition"]),
-        rows_input=int(filter_metadata["rows_input"]),
-        rows_after_filter_mode=int(filter_metadata["rows_after_filter_mode"]),
-        rows_after_signal_label_dropna=rows_after_signal_label_dropna,
+        rows_input=strict_non_negative_count_value(
+            filter_metadata["rows_input"],
+            error="invalid_evaluation_diagnostics_count",
+        ),
+        rows_after_filter_mode=strict_non_negative_count_value(
+            filter_metadata["rows_after_filter_mode"],
+            error="invalid_evaluation_diagnostics_count",
+        ),
+        rows_after_signal_label_dropna=strict_non_negative_count_value(
+            rows_after_signal_label_dropna,
+            error="invalid_evaluation_diagnostics_count",
+        ),
         metric_rows=int(coverage["metric_rows"]),
         grouped_label_value_rows=int(len(grouped_label_values)),
         ic_summary_rows=int(len(ic_summary)),
@@ -104,7 +114,10 @@ def build_evaluation_diagnostics(
         timestamp_count=int(coverage["timestamp_count"]),
         min_timestamp=coverage["min_timestamp"],
         max_timestamp=coverage["max_timestamp"],
-        n_groups=n_groups,
+        n_groups=strict_non_negative_count_value(
+            n_groups,
+            error="invalid_evaluation_diagnostics_count",
+        ),
         skipped_timestamp_count=int(coverage["skipped_timestamp_count"]),
     )
 

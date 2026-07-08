@@ -142,6 +142,55 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
 
 
 @pytest.mark.parametrize(
+    ("metadata_name", "field", "value"),
+    [
+        ("filter_metadata", "rows_input", True),
+        ("filter_metadata", "rows_input", 1.5),
+        ("filter_metadata", "rows_input", -1),
+        ("filter_metadata", "rows_after_filter_mode", True),
+        ("filter_metadata", "rows_after_filter_mode", 1.5),
+        ("row_counts", "rows_after_input_label_dropna", True),
+        ("row_counts", "rows_after_input_label_dropna", 1.5),
+        ("row_counts", "rows_after_input_label_dropna", -1),
+    ],
+)
+def test_model_metadata_rejects_invalid_count_values(
+    metadata_name: str,
+    field: str,
+    value: object,
+) -> None:
+    from quant_research_platform.research.models import fitting as model_fitting
+
+    spec = ModelSpec(
+        model_id="linear_bad_metadata_count",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+    )
+    filter_metadata = {
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+    }
+    row_counts = {
+        "rows_after_input_label_dropna": 2,
+        "train_start": "2024-01-02",
+        "train_end": "2024-01-02",
+    }
+    target = filter_metadata if metadata_name == "filter_metadata" else row_counts
+    target[field] = value
+
+    with pytest.raises(ValueError, match="invalid_model_metadata_count"):
+        model_fitting.model_metadata(
+            spec,
+            filter_metadata=filter_metadata,
+            row_counts=row_counts,
+            coefficient_count=2,
+        )
+
+
+@pytest.mark.parametrize(
     "model_algorithm",
     model_algorithm_ids(),
 )

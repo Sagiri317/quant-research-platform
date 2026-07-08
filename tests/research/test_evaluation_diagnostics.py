@@ -3,11 +3,15 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.evaluations import EvaluationSpec
+from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.research.evaluations.diagnostics import (
+    build_evaluation_diagnostics,
     summarize_group_spread,
     summarize_period_ic,
     summarize_signal_label_coverage,
 )
+from tests.helpers.report_output_frames import make_artifact_signal_spec
 
 
 def test_summarize_signal_label_coverage_handles_empty_metrics() -> None:
@@ -97,3 +101,94 @@ def test_evaluation_diagnostics_reports_fail_closed_on_bad_inputs() -> None:
         summarize_signal_label_coverage(
             pd.DataFrame({"timestamp": ["2024-01-02"], "n_obs": [1.5]})
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rows_input", True),
+        ("rows_input", 1.5),
+        ("rows_input", -1),
+        ("rows_after_filter_mode", True),
+        ("rows_after_filter_mode", 1.5),
+        ("rows_after_filter_mode", -1),
+    ],
+)
+def test_build_evaluation_diagnostics_rejects_invalid_filter_metadata_counts(
+    field: str,
+    value: object,
+) -> None:
+    metadata = _filter_metadata()
+    metadata[field] = value
+
+    with pytest.raises(ValueError, match="invalid_evaluation_diagnostics_count"):
+        _build_diagnostics(filter_metadata=metadata)
+
+
+@pytest.mark.parametrize("value", [True, 1.5, -1])
+def test_build_evaluation_diagnostics_rejects_invalid_dropna_count(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_evaluation_diagnostics_count"):
+        _build_diagnostics(rows_after_signal_label_dropna=value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [True, 1.5, -1])
+def test_build_evaluation_diagnostics_rejects_invalid_group_count(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_evaluation_diagnostics_count"):
+        _build_diagnostics(n_groups=value)  # type: ignore[arg-type]
+
+
+def test_build_evaluation_diagnostics_accepts_valid_counts() -> None:
+    diagnostics = _build_diagnostics()
+
+    assert diagnostics.rows_input == 2
+    assert diagnostics.rows_after_filter_mode == 2
+    assert diagnostics.rows_after_signal_label_dropna == 2
+    assert diagnostics.n_groups == 2
+
+
+def _build_diagnostics(
+    *,
+    filter_metadata: dict[str, object] | None = None,
+    rows_after_signal_label_dropna: int = 2,
+    n_groups: int = 2,
+):
+    return build_evaluation_diagnostics(
+        spec=EvaluationSpec(
+            run_id="eval_demo",
+            market_id=MarketId("a_share"),
+            research_dataset_id="research_demo",
+            signals=(make_artifact_signal_spec(),),
+            label_columns=("label",),
+            n_groups=2,
+        ),
+        filter_metadata=filter_metadata or _filter_metadata(),
+        rows_after_signal_label_dropna=rows_after_signal_label_dropna,
+        metrics=pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(["2024-01-02"]),
+                "signal": ["signal"],
+                "label": ["label"],
+                "ic": [0.1],
+                "rankic": [0.2],
+                "n_obs": [2],
+            }
+        ),
+        grouped_label_values=pd.DataFrame(),
+        ic_summary=pd.DataFrame(),
+        group_spread_summary=pd.DataFrame(),
+        n_groups=n_groups,
+        timestamp_column="timestamp",
+    )
+
+
+def _filter_metadata() -> dict[str, object]:
+    return {
+        "filter_columns_used": ("eligible",),
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+    }

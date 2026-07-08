@@ -71,6 +71,13 @@ class FactorProposal(ProposalPayloadMixin):
         _validate_derived_input_producers(self.derived_input_producers)
         if not isinstance(self.grain, DataGrain):
             raise ValueError("invalid_factor_proposal_grain")
+        for field_name in (
+            "required_input_data_id",
+            "family",
+            "timing_semantics",
+            "null_policy",
+        ):
+            _validate_non_empty_string(getattr(self, field_name), field_name)
         if self.lookback_window is not None and (
             not isinstance(self.lookback_window, int)
             or isinstance(self.lookback_window, bool)
@@ -298,6 +305,11 @@ def _validate_tuple_field(
         raise ValueError(f"invalid_proposal_tuple_field: {field_name}")
     if any(not isinstance(item, str) or not item for item in value):
         raise ValueError(f"invalid_proposal_tuple_field: {field_name}")
+
+
+def _validate_non_empty_string(value: object, field_name: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"invalid_factor_proposal_semantic_field: {field_name}")
 
 
 def _validate_positive_integer(value: object, *, error: str) -> int:

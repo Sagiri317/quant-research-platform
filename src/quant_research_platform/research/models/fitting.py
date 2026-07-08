@@ -104,10 +104,14 @@ def model_metadata(
         "sample_filter_mode": spec.sample_filter_mode,
         "filter_columns_used": list(filter_metadata["filter_columns_used"]),
         "filter_definition": str(filter_metadata["filter_definition"]),
-        "rows_input": int(filter_metadata["rows_input"]),
-        "rows_after_filter_mode": int(filter_metadata["rows_after_filter_mode"]),
-        "rows_after_input_label_dropna": int(
-            row_counts["rows_after_input_label_dropna"]
+        "rows_input": _strict_non_negative_count_value(
+            filter_metadata["rows_input"],
+        ),
+        "rows_after_filter_mode": _strict_non_negative_count_value(
+            filter_metadata["rows_after_filter_mode"],
+        ),
+        "rows_after_input_label_dropna": _strict_non_negative_count_value(
+            row_counts["rows_after_input_label_dropna"],
         ),
         "train_start": row_counts["train_start"],
         "train_end": row_counts["train_end"],
@@ -428,6 +432,12 @@ def fit_linear_coefficients_from_tsqr(
 
 def date_string(value: pd.Timestamp) -> str:
     return pd.Timestamp(value).date().isoformat()
+
+
+def _strict_non_negative_count_value(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("invalid_model_metadata_count")
+    return value
 
 
 __all__ = [

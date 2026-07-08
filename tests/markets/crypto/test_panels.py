@@ -295,6 +295,9 @@ def test_invalid_bar_timestamp_fails_closed() -> None:
     [
         ("open", "bad"),
         ("high", True),
+        ("open", float("inf")),
+        ("low", float("-inf")),
+        ("close", np.nan),
     ],
 )
 def test_invalid_bar_ohlc_fails_closed(column: str, value: object) -> None:
@@ -311,6 +314,9 @@ def test_invalid_bar_ohlc_fails_closed(column: str, value: object) -> None:
     [
         ("volume", "bad"),
         ("taker_buy_volume", True),
+        ("volume", float("inf")),
+        ("quote_volume", float("-inf")),
+        ("taker_buy_quote_volume", np.nan),
     ],
 )
 def test_invalid_bar_quantity_inputs_fail_closed(
@@ -329,6 +335,15 @@ def test_bool_trade_count_fails_closed() -> None:
     bars = _bars_frame()
     bars["trade_count"] = bars["trade_count"].astype(object)
     bars.loc[0, "trade_count"] = True
+
+    with pytest.raises(ValueError, match="invalid_crypto_trade_count"):
+        compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
+
+
+def test_infinite_trade_count_fails_closed() -> None:
+    bars = _bars_frame()
+    bars["trade_count"] = bars["trade_count"].astype(object)
+    bars.loc[0, "trade_count"] = float("inf")
 
     with pytest.raises(ValueError, match="invalid_crypto_trade_count"):
         compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
@@ -353,10 +368,12 @@ def test_non_integer_or_negative_trade_count_sets_eligible_false(
         ("price", "bad", "invalid_crypto_depth_price"),
         ("price", pd.NA, "invalid_crypto_depth_price"),
         ("price", np.nan, "invalid_crypto_depth_price"),
+        ("price", float("inf"), "invalid_crypto_depth_price"),
         ("price", True, "invalid_crypto_depth_price"),
         ("quantity", "bad", "invalid_crypto_depth_quantity"),
         ("quantity", pd.NA, "invalid_crypto_depth_quantity"),
         ("quantity", np.nan, "invalid_crypto_depth_quantity"),
+        ("quantity", float("inf"), "invalid_crypto_depth_quantity"),
         ("quantity", True, "invalid_crypto_depth_quantity"),
     ],
 )
@@ -384,7 +401,7 @@ def test_invalid_depth_price_quantity_fail_closed(
         compute_market_panel(_bars_frame(), trades=pd.DataFrame(), depth=depth)
 
 
-@pytest.mark.parametrize("signed_quantity", [True, np.nan])
+@pytest.mark.parametrize("signed_quantity", [True, np.nan, "bad", float("inf")])
 def test_invalid_signed_trade_quantity_edge_cases_fail_closed(
     signed_quantity: object,
 ) -> None:
@@ -398,6 +415,44 @@ def test_invalid_signed_trade_quantity_edge_cases_fail_closed(
 
     with pytest.raises(ValueError, match="invalid_crypto_signed_quantity"):
         compute_market_panel(_bars_frame(), trades=trades, depth=pd.DataFrame())
+
+
+@pytest.mark.parametrize("side", [["bid"], {}, None, "buy"])
+def test_invalid_depth_side_values_fail_closed(side: object) -> None:
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT", "BTCUSDT"],
+            "timestamp": pd.to_datetime(
+                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
+            ),
+            "side": [side, "ask"],
+            "level": [1, 1],
+            "price": [100.0, 100.2],
+            "quantity": [1.5, 1.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_crypto_depth_side"):
+        compute_market_panel(_bars_frame(), trades=pd.DataFrame(), depth=depth)
+
+
+def test_valid_depth_side_values_still_pass() -> None:
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT", "BTCUSDT"],
+            "timestamp": pd.to_datetime(
+                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
+            ),
+            "side": ["bid", "ask"],
+            "level": [1, 1],
+            "price": [100.0, 100.2],
+            "quantity": [1.5, 1.0],
+        }
+    )
+
+    panel = compute_market_panel(_bars_frame(), trades=pd.DataFrame(), depth=depth)
+
+    assert bool(panel.loc[0, "quote_observed"]) is True
 
 
 def test_invalid_trade_source_asset_fails_closed() -> None:

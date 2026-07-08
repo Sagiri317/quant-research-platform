@@ -162,6 +162,18 @@ def test_crypto_factor_time_window_uses_prior_warmup_minutes() -> None:
     assert read_window == TimeWindow("2026-07-06T00:06:00", "2026-07-06T00:12:00")
 
 
+def test_crypto_factor_date_only_dependency_window_excludes_next_midnight() -> None:
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        materialization_dependencies,
+    )
+
+    read_window = materialization_dependencies.factor_read_window(
+        TimeWindow("2026-01-01", "2026-01-01")
+    )
+
+    assert read_window == TimeWindow("2025-12-31T23:56:00", "2026-01-01T23:59:00")
+
+
 def test_crypto_factor_only_panel_dependency_window_uses_factor_warmup(
     tmp_path: Path,
     monkeypatch,
@@ -202,6 +214,18 @@ def test_crypto_label_time_window_uses_future_lookahead_minutes() -> None:
     read_window = materialization_dependencies.label_read_window(core)
 
     assert read_window == TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:28:00")
+
+
+def test_crypto_label_date_only_dependency_window_excludes_next_midnight() -> None:
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        materialization_dependencies,
+    )
+
+    read_window = materialization_dependencies.label_read_window(
+        TimeWindow("2026-01-01", "2026-01-01")
+    )
+
+    assert read_window == TimeWindow("2026-01-01T00:00:00", "2026-01-02T00:15:00")
 
 
 def test_crypto_label_only_panel_dependency_window_uses_label_lookahead(
@@ -283,6 +307,176 @@ def test_crypto_materializer_materializes_panel_dependency_window_for_factor_lab
         ("panel", TimeWindow("2026-07-06T00:06:00", "2026-07-06T00:28:00")),
         ("factors", core),
         ("labels", core),
+    ]
+
+
+def test_crypto_factor_label_date_only_dependency_union_is_precise() -> None:
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        materialization_dependencies,
+    )
+
+    read_window = materialization_dependencies.panel_dependency_window(
+        TimeWindow("2026-01-01", "2026-01-01")
+    )
+
+    assert read_window == TimeWindow("2025-12-31T23:56:00", "2026-01-02T00:15:00")
+
+
+def test_crypto_datetime_dependency_window_keeps_closed_end() -> None:
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        materialization_dependencies,
+    )
+
+    core = TimeWindow("2026-01-01T09:30:00", "2026-01-01T09:31:00")
+
+    assert materialization_dependencies.factor_read_window(core) == TimeWindow(
+        "2026-01-01T09:26:00",
+        "2026-01-01T09:31:00",
+    )
+    assert materialization_dependencies.label_read_window(core) == TimeWindow(
+        "2026-01-01T09:30:00",
+        "2026-01-01T09:47:00",
+    )
+
+
+@pytest.mark.parametrize(
+    ("data_id", "kind", "writer_name"),
+    [
+        ("market_panel_1m", ProcessedDataKind.PANEL, "panel"),
+        ("microstructure", ProcessedDataKind.FACTOR, "factors"),
+        ("forward_returns", ProcessedDataKind.LABEL, "labels"),
+    ],
+)
+def test_crypto_materializer_requested_existing_target_fails_before_dependencies(
+    tmp_path: Path,
+    monkeypatch,
+    data_id: str,
+    kind: ProcessedDataKind,
+    writer_name: str,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    catalog = processed_catalog()
+    spec = catalog.get(data_id)
+    write_dataset(
+        layout.processed_data_root("crypto", kind, data_id),
+        _existing_processed_frame(spec, minutes=30),
+        spec=spec,
+    )
+
+    def fail_dependency_write(*_: Any, **__: Any) -> object:
+        raise AssertionError(f"unexpected_crypto_{writer_name}_write")
+
+    monkeypatch.setattr(materialize_panel, "write_panel", fail_dependency_write)
+    monkeypatch.setattr(materialize_factors, "write_factors", fail_dependency_write)
+    monkeypatch.setattr(materialize_labels, "write_labels", fail_dependency_write)
+
+    with pytest.raises(ValueError, match="dataset_exists"):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SourceId("synthetic_crypto"),
+            time_window=TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00"),
+            data_ids=(data_id,),
+        )
+
+
+def test_crypto_materializer_reuses_sufficient_existing_panel_dependency(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    catalog = processed_catalog()
+    panel_spec = catalog.get("market_panel_1m")
+    write_dataset(
+        layout.processed_data_root(
+            "crypto",
+            ProcessedDataKind.PANEL,
+            "market_panel_1m",
+        ),
+        _panel_frame(minutes=30),
+        spec=panel_spec,
+    )
+    calls: list[tuple[str, TimeWindow]] = []
+
+    def fail_panel_write(*_: Any, **__: Any) -> object:
+        raise AssertionError("unexpected_crypto_dependency_panel_write")
+
+    def record_factors(*_: Any, time_window: TimeWindow, **__: Any) -> object:
+        calls.append(("factors", time_window))
+        return object()
+
+    monkeypatch.setattr(materialize_panel, "write_panel", fail_panel_write)
+    monkeypatch.setattr(materialize_factors, "write_factors", record_factors)
+
+    result = materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SourceId("synthetic_crypto"),
+        time_window=TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00"),
+        data_ids=("microstructure",),
+    )
+
+    assert sorted(result) == ["market_panel_1m", "microstructure"]
+    assert calls == [
+        ("factors", TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00"))
+    ]
+
+
+def test_crypto_materializer_rejects_insufficient_existing_panel_dependency(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    panel_spec = processed_catalog().get("market_panel_1m")
+    write_dataset(
+        layout.processed_data_root(
+            "crypto",
+            ProcessedDataKind.PANEL,
+            "market_panel_1m",
+        ),
+        _panel_frame(minutes=12),
+        spec=panel_spec,
+    )
+
+    def fail_panel_write(*_: Any, **__: Any) -> object:
+        raise AssertionError("unexpected_crypto_dependency_panel_write")
+
+    monkeypatch.setattr(materialize_panel, "write_panel", fail_panel_write)
+
+    with pytest.raises(ValueError, match="insufficient_crypto_dependency_coverage"):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SourceId("synthetic_crypto"),
+            time_window=TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00"),
+            data_ids=("microstructure",),
+        )
+
+
+def test_crypto_materializer_materializes_missing_panel_dependency(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, TimeWindow]] = []
+
+    def record_panel(*_: Any, time_window: TimeWindow, **__: Any) -> object:
+        calls.append(("panel", time_window))
+        return object()
+
+    def record_factors(*_: Any, time_window: TimeWindow, **__: Any) -> object:
+        calls.append(("factors", time_window))
+        return object()
+
+    monkeypatch.setattr(materialize_panel, "write_panel", record_panel)
+    monkeypatch.setattr(materialize_factors, "write_factors", record_factors)
+
+    materializer.materialize_processed_data(
+        layout=StorageLayout(project_root=tmp_path),
+        source_id=SourceId("synthetic_crypto"),
+        time_window=TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00"),
+        data_ids=("microstructure",),
+    )
+
+    assert calls == [
+        ("panel", TimeWindow("2026-07-06T00:06:00", "2026-07-06T00:12:00")),
+        ("factors", TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00")),
     ]
 
 
@@ -435,6 +629,21 @@ def _panel_frame(*, minutes: int) -> pd.DataFrame:
             "eligible": [True] * minutes,
         }
     )
+
+
+def _existing_processed_frame(spec, *, minutes: int) -> pd.DataFrame:
+    timestamps = pd.date_range("2026-07-06 00:00:00", periods=minutes, freq="min")
+    values: dict[str, object] = {}
+    for column in spec.required_columns:
+        if column == "market_id":
+            values[column] = ["crypto"] * minutes
+        elif column == "asset_id":
+            values[column] = ["btc_usdt"] * minutes
+        elif column == "timestamp":
+            values[column] = timestamps
+        else:
+            values[column] = [1.0] * minutes
+    return pd.DataFrame(values)
 
 
 def _write_synthetic_crypto_interim(layout: StorageLayout, source_id: SourceId) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 from pandas.api.types import is_bool_dtype
 
@@ -277,7 +279,7 @@ def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:
 
 def _required_numeric(frame: pd.DataFrame, column: str, *, error: str) -> pd.Series:
     values = _numeric_not_bool(frame, column, error=error)
-    if values.isna().any():
+    if values.isna().any() or not values.map(math.isfinite).all():
         raise ValueError(error)
     return values
 
@@ -296,8 +298,9 @@ def _timestamp_series(frame: pd.DataFrame, column: str, *, error: str) -> pd.Ser
 
 
 def _validate_depth_contract(frame: pd.DataFrame) -> None:
-    if not set(frame["side"]).issubset({"bid", "ask"}):
-        raise ValueError("invalid_crypto_depth_side")
+    for side in frame["side"]:
+        if not isinstance(side, str) or side not in {"bid", "ask"}:
+            raise ValueError("invalid_crypto_depth_side")
     levels = pd.to_numeric(frame["level"], errors="coerce")
     if (
         levels.isna().any()
