@@ -666,6 +666,97 @@ def test_crypto_panel_matching_rejects_invalid_timestamps(
         )
 
 
+@pytest.mark.parametrize(
+    ("frame_name", "error"),
+    [
+        ("bars", "invalid_crypto_matching_bar_source_asset_id"),
+        ("trades", "invalid_crypto_matching_trade_source_asset_id"),
+        ("depth", "invalid_crypto_matching_depth_source_asset_id"),
+    ],
+)
+@pytest.mark.parametrize(
+    "bad_source_asset_id",
+    [None, pd.NA, "", [], {}, set()],
+    ids=["none", "pd_na", "empty", "list", "dict", "set"],
+)
+def test_crypto_panel_matching_rejects_invalid_source_asset_id(
+    tmp_path: Path,
+    monkeypatch,
+    frame_name: str,
+    error: str,
+    bad_source_asset_id: object,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    frames = _matching_panel_frames()
+    frames[frame_name]["source_asset_id"] = frames[frame_name][
+        "source_asset_id"
+    ].astype(object)
+    frames[frame_name].at[0, "source_asset_id"] = bad_source_asset_id
+    _patch_matching_panel_reads(monkeypatch, frames)
+
+    with pytest.raises(ValueError, match=error):
+        materialize_panel.write_panel(
+            processed_catalog().get("market_panel_1m"),
+            layout=layout,
+            source_id=SourceId("synthetic_crypto"),
+            time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
+            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        )
+
+
+@pytest.mark.parametrize(
+    ("frame_name", "error"),
+    [
+        ("bars", "invalid_crypto_matching_bar_source_asset_id"),
+        ("trades", "invalid_crypto_matching_trade_source_asset_id"),
+        ("depth", "invalid_crypto_matching_depth_source_asset_id"),
+    ],
+)
+def test_crypto_panel_matching_rejects_missing_source_asset_id_column(
+    tmp_path: Path,
+    monkeypatch,
+    frame_name: str,
+    error: str,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    frames = _matching_panel_frames()
+    frames[frame_name] = frames[frame_name].drop(columns=["source_asset_id"])
+    _patch_matching_panel_reads(monkeypatch, frames)
+
+    with pytest.raises(ValueError, match=error):
+        materialize_panel.write_panel(
+            processed_catalog().get("market_panel_1m"),
+            layout=layout,
+            source_id=SourceId("synthetic_crypto"),
+            time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
+            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        )
+
+
+def test_crypto_panel_matching_accepts_valid_source_asset_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _patch_matching_panel_reads(monkeypatch, _matching_panel_frames())
+
+    materialize_panel.write_panel(
+        processed_catalog().get("market_panel_1m"),
+        layout=layout,
+        source_id=SourceId("synthetic_crypto"),
+        time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
+        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+    )
+
+    panel = read_dataset(
+        layout.processed_data_root("crypto", ProcessedDataKind.PANEL, "market_panel_1m")
+    )
+    assert panel["asset_id"].tolist() == ["btc_usdt"]
+    assert panel["trade_flow_observed"].tolist() == [True]
+    assert panel["quote_observed"].tolist() == [True]
+    assert "source_asset_id" not in panel.columns
+
+
 def test_synthetic_crypto_normalized_interim_can_generate_non_binance_panel(
     tmp_path: Path,
 ) -> None:
@@ -809,6 +900,22 @@ def _matching_panel_frames() -> dict[str, pd.DataFrame]:
         }
     )
     return {"bars": bars, "trades": trades, "depth": depth}
+
+
+def _patch_matching_panel_reads(monkeypatch, frames: dict[str, pd.DataFrame]) -> None:
+    def fake_read_dataset(dataset_root, **kwargs):
+        root_name = Path(dataset_root).name
+        if kwargs.get("mode") is not DatasetReadMode.CHUNKED:
+            raise AssertionError("crypto_panel_matching_requires_chunked_reads")
+        if root_name == "market_bars_1m":
+            return iter((frames["bars"],))
+        if root_name == "aggregate_trades_tick":
+            return iter((frames["trades"],))
+        if root_name == "depth_levels_tick":
+            return iter((frames["depth"],))
+        raise AssertionError(f"unexpected_dataset_root:{root_name}")
+
+    monkeypatch.setattr(materialize_panel, "read_dataset", fake_read_dataset)
 
 
 def _existing_processed_frame(spec, *, minutes: int) -> pd.DataFrame:

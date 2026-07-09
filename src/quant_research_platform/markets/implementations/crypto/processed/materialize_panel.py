@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Hashable, Iterator
 
 import pandas as pd
 
@@ -83,12 +83,14 @@ def _iter_panel_chunks(
             trade_root,
             bars_chunk,
             max_quote_age=pd.Timedelta(0),
+            source_asset_error="invalid_crypto_matching_trade_source_asset_id",
             timestamp_error="invalid_crypto_matching_trade_timestamp",
         )
         matching_depth = _read_matching_chunks(
             depth_root,
             bars_chunk,
             max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
+            source_asset_error="invalid_crypto_matching_depth_source_asset_id",
             timestamp_error="invalid_crypto_matching_depth_timestamp",
         )
         for bars in _split_frame_by_policy(bars_chunk, resource_policy):
@@ -98,12 +100,14 @@ def _iter_panel_chunks(
                 matching_trades,
                 bars,
                 max_quote_age=pd.Timedelta(0),
+                source_asset_error="invalid_crypto_matching_trade_source_asset_id",
                 timestamp_error="invalid_crypto_matching_trade_timestamp",
             )
             depth = _filter_matching_frame(
                 matching_depth,
                 bars,
                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
+                source_asset_error="invalid_crypto_matching_depth_source_asset_id",
                 timestamp_error="invalid_crypto_matching_depth_timestamp",
             )
             yield panels.compute_market_panel(bars, trades=trades, depth=depth).loc[
@@ -117,9 +121,15 @@ def _read_matching_chunks(
     bars: pd.DataFrame,
     *,
     max_quote_age: pd.Timedelta,
+    source_asset_error: str,
     timestamp_error: str,
 ) -> pd.DataFrame:
-    asset_ids = set(bars["source_asset_id"].astype(str))
+    asset_ids = set(
+        _strict_source_asset_ids(
+            bars,
+            error="invalid_crypto_matching_bar_source_asset_id",
+        )
+    )
     start = _strict_timestamp_column(
         bars,
         "timestamp",
@@ -141,6 +151,7 @@ def _read_matching_chunks(
         end=end,
         time_window=read_window,
         max_quote_age=max_quote_age,
+        source_asset_error=source_asset_error,
         timestamp_error=timestamp_error,
     )
     try:
@@ -158,6 +169,7 @@ def _iter_matching_chunks(
     end: pd.Timestamp,
     time_window: TimeWindow,
     max_quote_age: pd.Timedelta,
+    source_asset_error: str,
     timestamp_error: str,
 ) -> Iterator[pd.DataFrame]:
     for chunk in read_dataset(
@@ -174,6 +186,7 @@ def _iter_matching_chunks(
                 start=start,
                 end=end,
                 max_quote_age=max_quote_age,
+                source_asset_error=source_asset_error,
                 timestamp_error=timestamp_error,
             )
         ].copy()
@@ -186,11 +199,17 @@ def _filter_matching_frame(
     bars: pd.DataFrame,
     *,
     max_quote_age: pd.Timedelta,
+    source_asset_error: str,
     timestamp_error: str,
 ) -> pd.DataFrame:
     if frame.empty or bars.empty:
         return pd.DataFrame(columns=frame.columns)
-    asset_ids = set(bars["source_asset_id"].astype(str))
+    asset_ids = set(
+        _strict_source_asset_ids(
+            bars,
+            error="invalid_crypto_matching_bar_source_asset_id",
+        )
+    )
     start = _strict_timestamp_column(
         bars,
         "timestamp",
@@ -208,6 +227,7 @@ def _filter_matching_frame(
             start=start,
             end=end,
             max_quote_age=max_quote_age,
+            source_asset_error=source_asset_error,
             timestamp_error=timestamp_error,
         )
     ].copy()
@@ -220,11 +240,29 @@ def _matching_window_mask(
     start: pd.Timestamp,
     end: pd.Timestamp,
     max_quote_age: pd.Timedelta,
+    source_asset_error: str,
     timestamp_error: str,
 ) -> pd.Series:
     timestamps = _strict_timestamp_column(frame, "timestamp", timestamp_error)
-    mask = frame["source_asset_id"].astype(str).isin(asset_ids)
+    source_ids = _strict_source_asset_ids(frame, error=source_asset_error)
+    mask = source_ids.isin(asset_ids)
     return mask & timestamps.ge(start - max_quote_age) & timestamps.le(end)
+
+
+def _strict_source_asset_ids(frame: pd.DataFrame, *, error: str) -> pd.Series:
+    if "source_asset_id" not in frame.columns:
+        raise ValueError(error)
+    values = frame["source_asset_id"]
+    for value in values:
+        if (
+            value is None
+            or isinstance(value, (list, dict, set))
+            or not isinstance(value, Hashable)
+            or not isinstance(value, str)
+            or value == ""
+        ):
+            raise ValueError(error)
+    return values
 
 
 def _strict_timestamp_column(
