@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -131,6 +132,24 @@ def test_strict_timestamp_series_returns_naive_utc_for_aware_values() -> None:
         pd.Timestamp("2023-12-31T15:00:00"),
         pd.Timestamp("2024-01-01T00:00:00"),
     ]
+
+
+def test_strict_timestamp_series_rejects_dst_mixed_offsets() -> None:
+    zone = ZoneInfo("America/New_York")
+    values = pd.Series(
+        [
+            pd.Timestamp("2024-01-15T12:00:00", tz=zone),
+            pd.Timestamp("2024-07-15T12:00:00", tz=zone),
+        ]
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(ValueError, match="invalid_contract_timestamp"):
+            validation.strict_timestamp_series(
+                values,
+                error="invalid_contract_timestamp",
+            )
 
 
 @pytest.mark.parametrize(

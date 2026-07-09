@@ -79,7 +79,12 @@ def strict_timestamp_series(
     if bool(invalid.any()):
         raise ValueError(error)
     if isinstance(parsed.dtype, pd.DatetimeTZDtype):
-        parsed = parsed.dt.tz_convert("UTC").dt.tz_localize(None)
+        local_naive = parsed.dt.tz_localize(None)
+        utc_naive = parsed.dt.tz_convert("UTC").dt.tz_localize(None)
+        offsets = local_naive - utc_naive
+        if offsets.dropna().nunique() > 1:
+            raise ValueError(error)
+        parsed = utc_naive
     try:
         return pd.Series(parsed, index=series.index, dtype="datetime64[ns]")
     except (TypeError, ValueError, OverflowError):
