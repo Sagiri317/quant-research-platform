@@ -99,7 +99,7 @@ def test_strict_bool_series_accepts_explicit_bool_forms() -> None:
 
 def test_strict_timestamp_series_rejects_invalid_or_null_values() -> None:
     with warnings.catch_warnings():
-        warnings.simplefilter("error", UserWarning)
+        warnings.simplefilter("error")
         with pytest.raises(ValueError, match="invalid_contract_timestamp"):
             validation.strict_timestamp_series(
                 pd.Series(["not-a-date", "2024-01-02"]),
@@ -110,3 +110,44 @@ def test_strict_timestamp_series_rejects_invalid_or_null_values() -> None:
             pd.Series([pd.NaT]),
             error="invalid_contract_timestamp",
         )
+
+
+def test_strict_timestamp_series_returns_naive_utc_for_aware_values() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = validation.strict_timestamp_series(
+            pd.Series(
+                [
+                    "2024-01-01T00:00:00+09:00",
+                    "2024-01-01T09:00:00+09:00",
+                ]
+            ),
+            error="invalid_contract_timestamp",
+        )
+
+    assert result.dtype == "datetime64[ns]"
+    assert result.dt.tz is None
+    assert result.tolist() == [
+        pd.Timestamp("2023-12-31T15:00:00"),
+        pd.Timestamp("2024-01-01T00:00:00"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["2024-01-01T00:00:00+00:00", "2024-01-01T00:00:00"],
+        ["2024-01-01T00:00:00+00:00", "2024-01-01T00:00:00+01:00"],
+    ],
+    ids=["aware-naive", "mixed-offsets"],
+)
+def test_strict_timestamp_series_rejects_mixed_timezone_inputs_without_warnings(
+    values: list[str],
+) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(ValueError, match="invalid_contract_timestamp"):
+            validation.strict_timestamp_series(
+                pd.Series(values),
+                error="invalid_contract_timestamp",
+            )

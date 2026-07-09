@@ -64,11 +64,41 @@ def strict_timestamp_series(
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
-    parsed = pd.to_datetime(series, errors="coerce", format="mixed")
-    invalid = parsed.isna() & ~(null_mask & allow_null)
-    if bool(invalid.any()):
-        raise ValueError(error)
-    return parsed
+    parsed_values: list[pd.Timestamp | pd.NaTType] = []
+    aware: bool | None = None
+    offset: object = None
+    for value, is_null in zip(series.tolist(), null_mask.tolist(), strict=True):
+        if is_null:
+            parsed_values.append(pd.NaT)
+            continue
+        try:
+            timestamp = pd.Timestamp(
+                pd.to_datetime(value, errors="coerce", format="mixed")
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(error) from exc
+        if pd.isna(timestamp):
+            raise ValueError(error)
+        timestamp_offset = timestamp.utcoffset()
+        timestamp_aware = timestamp_offset is not None
+        if aware is None:
+            aware = timestamp_aware
+            offset = timestamp_offset
+        elif timestamp_aware != aware or (
+            timestamp_aware and timestamp_offset != offset
+        ):
+            raise ValueError(error)
+        if timestamp_aware:
+            timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+        parsed_values.append(timestamp)
+    try:
+        return pd.Series(
+            parsed_values,
+            index=series.index,
+            dtype="datetime64[ns]",
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(error) from exc
 
 
 def strict_bool_series(
