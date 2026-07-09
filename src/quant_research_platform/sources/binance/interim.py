@@ -120,6 +120,7 @@ def iter_interim_frames(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> Iterator[pd.DataFrame]:
+    _strict_data_ids((data_id,))
     strict_positive_integer(
         row_batch_size,
         error="invalid_binance_raw_row_batch_size",

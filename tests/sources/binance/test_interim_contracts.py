@@ -133,6 +133,25 @@ def test_binance_interim_rejects_non_strict_row_batch_size(
         )
 
 
+def test_binance_interim_iterator_rejects_unknown_data_id_without_input_files(
+) -> None:
+    with pytest.raises(ValueError, match="unsupported_binance_data_id"):
+        tuple(iter_interim_frames(data_id="unknown", input_files=()))
+
+
+@pytest.mark.parametrize("data_id", [None, 1, True, [], {}])
+def test_binance_interim_iterator_rejects_invalid_data_id_without_input_files(
+    data_id: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_binance_interim_data_ids"):
+        tuple(
+            iter_interim_frames(
+                data_id=data_id,  # type: ignore[arg-type]
+                input_files=(),
+            )
+        )
+
+
 def test_binance_interim_materialization_rejects_bare_str_data_ids(tmp_path) -> None:
     with pytest.raises(ValueError, match="invalid_binance_interim_data_ids"):
         materialize_interim_data(
