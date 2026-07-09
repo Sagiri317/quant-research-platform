@@ -151,3 +151,25 @@ def test_strict_timestamp_series_rejects_mixed_timezone_inputs_without_warnings(
                 pd.Series(values),
                 error="invalid_contract_timestamp",
             )
+
+
+def test_strict_timestamp_series_uses_vectorized_parse_for_large_string_input(
+    monkeypatch,
+) -> None:
+    values = pd.Series(["2024-01-01T00:00:00"] * 2048)
+    original_to_datetime = validation.pd.to_datetime
+    calls: list[object] = []
+
+    def spy_to_datetime(values, *args, **kwargs):
+        calls.append(values)
+        return original_to_datetime(values, *args, **kwargs)
+
+    monkeypatch.setattr(validation.pd, "to_datetime", spy_to_datetime)
+    result = validation.strict_timestamp_series(
+        values,
+        error="invalid_contract_timestamp",
+    )
+
+    assert len(calls) == 1
+    assert isinstance(calls[0], pd.Series)
+    assert result.dtype == "datetime64[ns]"
