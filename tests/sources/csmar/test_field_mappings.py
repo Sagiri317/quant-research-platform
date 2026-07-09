@@ -6,7 +6,7 @@ import pytest
 from quant_research_platform.sources.csmar import field_mappings
 
 
-def test_normalize_provider_stock_code_series_accepts_known_provider_forms() -> None:
+def test_csmar_source_accepts_provider_excel_like_stock_code_forms() -> None:
     values = pd.Series([1, 1.0, "1", "000001", "000001.0"])
 
     result = field_mappings.normalize_provider_stock_code_series(values)

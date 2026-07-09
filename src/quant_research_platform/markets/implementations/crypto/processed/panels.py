@@ -81,7 +81,10 @@ def compute_market_panel(
         how="left",
         on=("asset_id", "timestamp"),
     )
-    panel["trade_flow_observed"] = panel["trade_flow_observed"].fillna(False)
+    panel["trade_flow_observed"] = panel["trade_flow_observed"].where(
+        panel["trade_flow_observed"].notna(),
+        False,
+    )
     zero_trade = valid_bar_quantity & trade_count.eq(0) & panel["signed_volume"].isna()
     panel.loc[zero_trade, "signed_volume"] = 0.0
     panel.loc[zero_trade, "trade_flow_observed"] = True
@@ -90,7 +93,10 @@ def compute_market_panel(
         how="left",
         on=("asset_id", "timestamp"),
     )
-    panel["quote_observed"] = panel["quote_observed"].fillna(False)
+    panel["quote_observed"] = panel["quote_observed"].where(
+        panel["quote_observed"].notna(),
+        False,
+    )
     stale_or_missing = ~_strict_bool_series(
         panel["quote_observed"],
         error="invalid_crypto_quote_observed",

@@ -45,7 +45,29 @@ def test_a_share_adapter_generates_index_asset_namespace() -> None:
     assert result.loc[0, "asset_id"] == "index:000985"
 
 
-@pytest.mark.parametrize("value", [None, pd.NA, "", True, -1, 1.5, [], {}, set()])
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        pd.NA,
+        float("nan"),
+        "",
+        "nan",
+        "None",
+        True,
+        1,
+        1.0,
+        -1,
+        "-1",
+        1.5,
+        "1.5",
+        "000001.0",
+        "1000000",
+        [],
+        {},
+        set(),
+    ],
+)
 def test_a_share_adapter_rejects_invalid_stock_source_asset_id(value: object) -> None:
     adapter = MarketAdapter()
 

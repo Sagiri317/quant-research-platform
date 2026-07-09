@@ -21,7 +21,7 @@ from quant_research_platform.artifacts._parquet_writers import write_parquet
 from quant_research_platform.artifacts._portfolio_output_validation import (
     PORTFOLIO_ARTIFACTS,
     portfolio_required_columns,
-    validate_portfolio_signal_column,
+    validate_portfolio_artifact_membership_columns,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
@@ -94,7 +94,7 @@ def _write_portfolio_output_chunks(
                 required=required_columns[artifact_name],
                 error_name=f"portfolio_{artifact_name}",
             )
-            validate_portfolio_signal_column(
+            validate_portfolio_artifact_membership_columns(
                 summary_outputs[artifact_name],
                 artifact_name=artifact_name,
                 spec=spec,
@@ -191,18 +191,9 @@ def _portfolio_output_chunk_frame(
         required=required,
         error_name=f"portfolio_{artifact_name}",
     )
-    if "signal" in frame.columns:
-        signal_ids = {signal.signal_id for signal in spec.signals}
-        artifact_signals = {
-            str(value) for value in frame["signal"].dropna().unique().tolist()
-        }
-        if not artifact_signals.issubset(signal_ids):
-            raise ValueError("portfolio_artifact_signal_mismatch: " + artifact_name)
-    if artifact_name == "portfolio_returns":
-        return_sources = {
-            str(value)
-            for value in frame["return_source_column"].dropna().unique().tolist()
-        }
-        if return_sources and return_sources != {spec.return_source_column}:
-            raise ValueError("portfolio_return_source_column_mismatch")
+    validate_portfolio_artifact_membership_columns(
+        frame,
+        artifact_name=artifact_name,
+        spec=spec,
+    )
     return frame.loc[:, list(required)]

@@ -58,19 +58,9 @@ def strict_numeric_value_series(
 
 
 def _strict_stock_code_value(value: object, *, error: str) -> str:
-    if isinstance(value, bool):
-        raise ValueError(error)
-    if isinstance(value, int):
-        return _format_stock_code(value, error=error)
-    if isinstance(value, float):
-        if pd.isna(value) or not value.is_integer():
-            raise ValueError(error)
-        return _format_stock_code(int(value), error=error)
     if not isinstance(value, str):
         raise ValueError(error)
     text = value.strip()
-    if text.endswith(".0"):
-        text = text[:-2]
     if not text.isdecimal():
         raise ValueError(error)
     return _format_stock_code(int(text), error=error)

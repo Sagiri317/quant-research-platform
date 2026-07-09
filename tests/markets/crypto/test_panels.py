@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,11 @@ import pytest
 from quant_research_platform.markets.implementations.crypto.processed.panels import (
     compute_market_panel,
 )
+
+
+class _StringLikeCryptoSymbol:
+    def __str__(self) -> str:
+        return "BTCUSDT"
 
 
 def test_compute_market_panel_canonicalizes_source_asset_and_asof_quote() -> None:
@@ -466,6 +472,36 @@ def test_invalid_trade_source_asset_fails_closed() -> None:
 
     with pytest.raises(ValueError, match="invalid_crypto_source_asset_id"):
         compute_market_panel(_bars_frame(), trades=trades, depth=pd.DataFrame())
+
+
+@pytest.mark.parametrize(
+    "source_asset_id",
+    [1, 1.0, True, [], {}, set(), None, "", _StringLikeCryptoSymbol()],
+)
+def test_invalid_panel_source_asset_id_values_fail_closed(
+    source_asset_id: object,
+) -> None:
+    bars = _bars_frame()
+    bars["source_asset_id"] = bars["source_asset_id"].astype(object)
+    bars.at[0, "source_asset_id"] = source_asset_id
+
+    with pytest.raises(ValueError, match="invalid_crypto_source_asset_id"):
+        compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
+
+
+def test_missing_observation_flags_are_bool_without_downcast_warning() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        panel = compute_market_panel(
+            _bars_frame(),
+            trades=pd.DataFrame(),
+            depth=pd.DataFrame(),
+        )
+
+    assert panel["quote_observed"].dtype == "bool"
+    assert panel["trade_flow_observed"].dtype == "bool"
+    assert panel["quote_observed"].tolist() == [False]
+    assert panel["trade_flow_observed"].tolist() == [False]
 
 
 def test_quote_observed_and_trade_flow_observed_do_not_control_eligible() -> None:

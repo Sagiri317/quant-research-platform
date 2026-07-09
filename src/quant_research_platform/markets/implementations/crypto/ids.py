@@ -17,7 +17,11 @@ def market_panel_data_id() -> str:
 
 
 def canonical_crypto_asset_id(source_asset_id: str) -> str:
-    symbol = str(source_asset_id).strip().upper()
+    if not isinstance(source_asset_id, str):
+        raise ValueError("unsupported_crypto_source_asset_id")
+    symbol = source_asset_id.strip().upper()
+    if symbol == "":
+        raise ValueError("unsupported_crypto_source_asset_id")
     for quote in _SUPPORTED_QUOTE_ASSETS:
         if symbol.endswith(quote) and len(symbol) > len(quote):
             base = symbol[: -len(quote)]

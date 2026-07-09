@@ -6,6 +6,9 @@ from collections.abc import Mapping
 
 import pandas as pd
 
+from quant_research_platform.artifacts._membership_validation import (
+    validate_string_membership_column,
+)
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS,
     PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS,
@@ -181,33 +184,32 @@ def validate_portfolio_artifact_semantics(
     spec: PortfolioSpec,
 ) -> None:
     for artifact_name, frame in artifacts.items():
-        validate_portfolio_signal_column(
+        validate_portfolio_artifact_membership_columns(
             frame,
             artifact_name=artifact_name,
             spec=spec,
         )
-    portfolio_returns = artifacts["portfolio_returns"]
-    return_sources = {
-        str(value)
-        for value in (
-            portfolio_returns["return_source_column"].dropna().unique().tolist()
-        )
-    }
-    if return_sources and return_sources != {spec.return_source_column}:
-        raise ValueError("portfolio_return_source_column_mismatch")
 
 
-def validate_portfolio_signal_column(
+def validate_portfolio_artifact_membership_columns(
     frame: pd.DataFrame,
     *,
     artifact_name: str,
     spec: PortfolioSpec,
 ) -> None:
-    signal_ids = {signal.signal_id for signal in spec.signals}
     if "signal" not in frame.columns:
         return
-    artifact_signals = {
-        str(value) for value in frame["signal"].dropna().unique().tolist()
-    }
-    if not artifact_signals.issubset(signal_ids):
-        raise ValueError("portfolio_artifact_signal_mismatch: " + artifact_name)
+    signal_ids = {signal.signal_id for signal in spec.signals}
+    validate_string_membership_column(
+        frame,
+        "signal",
+        signal_ids,
+        "portfolio_artifact_signal_mismatch: " + artifact_name,
+    )
+    if "return_source_column" in frame.columns:
+        validate_string_membership_column(
+            frame,
+            "return_source_column",
+            (spec.return_source_column,),
+            "portfolio_return_source_column_mismatch",
+        )

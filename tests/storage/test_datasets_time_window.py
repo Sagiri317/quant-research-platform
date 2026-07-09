@@ -14,6 +14,10 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.storage._dataset_inspection import (
+    _inspection_runtime_metadata,
+)
+from quant_research_platform.storage._dataset_reading import DatasetReadContext
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
@@ -227,6 +231,45 @@ def test_inspect_dataset_time_window_reports_window_scoped_counts(
     assert inspection.file_count == 1
     assert inspection.partitions == ("year=2015",)
     assert inspection.partition_row_counts == {"year=2015": 1}
+
+
+def test_inspection_runtime_metadata_rejects_invalid_timestamp_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    path = data_root / "part-000.parquet"
+    context = DatasetReadContext(
+        root=tmp_path,
+        data_root=data_root,
+        spec={
+            "schema_id": "qrp-dataset-spec",
+            "primary_key": ["market_id", "asset_id", "timestamp"],
+            "column_roles": {
+                "market_id": "key",
+                "asset_id": "key",
+                "timestamp": "timestamp",
+                "value": "feature",
+            },
+        },
+        manifest={},
+        all_paths=(path,),
+        read_paths=(path,),
+        logical_columns=("market_id", "asset_id", "timestamp", "value"),
+        physical_columns=("timestamp",),
+        timestamp_column="timestamp",
+        time_window=TimeWindow("2024-01-01", "2024-01-31"),
+        schema=(("timestamp", "string"),),
+        schema_hash="hash",
+        parquet_filters=None,
+    )
+
+    monkeypatch.setattr(
+        "quant_research_platform.storage._dataset_inspection.pd.read_parquet",
+        lambda *_, **__: pd.DataFrame({"timestamp": ["2024-01-02", "bad-date"]}),
+    )
+    with pytest.raises(ValueError, match="invalid_time_window_timestamp_value"):
+        _inspection_runtime_metadata(context)
 
 
 def test_fingerprint_dataset_time_window_hashes_window_only(tmp_path: Path) -> None:

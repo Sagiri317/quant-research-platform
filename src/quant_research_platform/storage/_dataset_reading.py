@@ -14,6 +14,7 @@ from quant_research_platform.contracts.time import (
     time_window_date_bounds,
     time_window_timestamp_interval,
 )
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.storage._dataset_manifest_validation import (
     manifest_has_runtime_metadata,
     validate_manifest_runtime_metadata,
@@ -192,12 +193,15 @@ def filter_frame_by_time_window(
         raise ValueError("time_window_not_supported")
     if timestamp_column not in frame:
         raise ValueError("time_window_timestamp_column_not_selected")
-    values = pd.to_datetime(frame[timestamp_column], errors="coerce")
+    values = strict_timestamp_series(
+        frame[timestamp_column],
+        error="invalid_time_window_timestamp_value",
+    )
     start, end, end_inclusive = time_window_timestamp_interval(time_window)
     end_timestamp = pd.Timestamp(end)
     end_mask = values.le(end_timestamp) if end_inclusive else values.lt(end_timestamp)
     mask = values.ge(pd.Timestamp(start)) & end_mask
-    return frame.loc[mask.fillna(False)].copy()
+    return frame.loc[mask].copy()
 
 
 def prune_paths_for_time_window(

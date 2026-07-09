@@ -15,6 +15,7 @@ import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.storage._dataset_manifest_validation import (
     validate_written_artifact,
 )
@@ -150,7 +151,11 @@ class _WriteStats:
         timestamp_column = timestamp_primary_key_column_from_spec(self.spec)
         if timestamp_column is None or timestamp_column not in frame or frame.empty:
             return
-        values = pd.to_datetime(frame[timestamp_column], errors="coerce").dropna()
+        values = strict_timestamp_series(
+            frame[timestamp_column],
+            error="invalid_dataset_timestamp_value",
+            allow_null=True,
+        ).dropna()
         if values.empty:
             return
         current_min = values.min()

@@ -1,2 +1,1 @@
 """Crypto market implementation owner."""
-

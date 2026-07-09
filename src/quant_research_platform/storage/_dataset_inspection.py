@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.storage._dataset_manifest_validation import (
     manifest_partition_row_counts,
 )
@@ -91,7 +92,10 @@ def _inspection_runtime_metadata(
             filtered
         )
         row_count += len(filtered)
-        values = pd.to_datetime(filtered[timestamp_column], errors="coerce").dropna()
+        values = strict_timestamp_series(
+            filtered[timestamp_column],
+            error="invalid_time_window_timestamp_value",
+        ).dropna()
         if not values.empty:
             current_min = values.min()
             current_max = values.max()

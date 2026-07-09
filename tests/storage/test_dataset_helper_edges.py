@@ -72,6 +72,17 @@ def test_write_stats_tracks_null_and_non_finite_failures() -> None:
         )
 
 
+def test_write_stats_rejects_invalid_non_null_timestamp() -> None:
+    spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
+
+    with pytest.raises(ValueError, match="invalid_dataset_timestamp_value"):
+        _WriteStats(spec=spec, data_root=Path("data")).update_frame(
+            make_helper_edges_dataset_frame(market_id="dummy").assign(
+                timestamp=["2024-01-02", "bad-date"]
+            )
+        )
+
+
 def test_dataset_compare_and_filter_fail_closed_paths(tmp_path: Path) -> None:
     left = tmp_path / "left"
     right = tmp_path / "right"
@@ -110,6 +121,17 @@ def test_dataset_compare_and_filter_fail_closed_paths(tmp_path: Path) -> None:
         ),
         time_window=TimeWindow("2025-01-03", "2025-01-31"),
     ).empty
+
+    with pytest.raises(ValueError, match="invalid_time_window_timestamp_value"):
+        filter_frame_by_time_window(
+            make_helper_edges_dataset_frame(market_id="dummy").assign(
+                timestamp=["2024-01-02", "bad-date"]
+            ),
+            spec=data_spec_payload(
+                make_processed_dataset_spec("storage_demo", market_id="dummy")
+            ),
+            time_window=TimeWindow("2024-01-01", "2024-01-31"),
+        )
 
 
 def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
