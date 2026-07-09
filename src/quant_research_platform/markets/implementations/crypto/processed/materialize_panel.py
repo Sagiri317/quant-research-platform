@@ -9,6 +9,7 @@ import pandas as pd
 from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.markets.implementations.crypto.processed import (
     panels,
     source_ids,
@@ -270,12 +271,7 @@ def _strict_timestamp_column(
     column: str,
     error: str,
 ) -> pd.Series:
-    if frame.empty:
-        return pd.Series([], index=frame.index, dtype="datetime64[ns]")
-    timestamps = pd.to_datetime(frame[column], errors="coerce")
-    if timestamps.isna().any():
-        raise ValueError(error)
-    return timestamps
+    return strict_timestamp_series(frame[column], error=error)
 
 
 def _prepend(

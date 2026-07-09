@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -450,6 +451,49 @@ def test_crypto_materializer_rejects_insufficient_existing_panel_dependency(
         )
 
 
+def test_crypto_materializer_invalid_dependency_timestamp_is_not_coverage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    panel_spec = processed_catalog().get("market_panel_1m")
+    write_dataset(
+        layout.processed_data_root(
+            "crypto",
+            ProcessedDataKind.PANEL,
+            "market_panel_1m",
+        ),
+        _panel_frame(minutes=30),
+        spec=panel_spec,
+    )
+    monkeypatch.setattr(
+        materializer,
+        "read_dataset",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            {
+                "asset_id": ["crypto:BTCUSDT", "crypto:BTCUSDT"],
+                "timestamp": ["bad", "2026-07-06T00:12:00"],
+            }
+        ),
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(
+            ValueError,
+            match="insufficient_crypto_dependency_coverage",
+        ):
+            materializer.materialize_processed_data(
+                layout=layout,
+                source_id=SourceId("synthetic_crypto"),
+                time_window=TimeWindow(
+                    "2026-07-06T00:10:00",
+                    "2026-07-06T00:12:00",
+                ),
+                data_ids=("microstructure",),
+            )
+
+
 def test_crypto_materializer_rejects_panel_dependency_with_middle_minute_gap(
     tmp_path: Path,
     monkeypatch,
@@ -656,14 +700,19 @@ def test_crypto_panel_matching_rejects_invalid_timestamps(
 
     monkeypatch.setattr(materialize_panel, "read_dataset", fake_read_dataset)
 
-    with pytest.raises(ValueError, match=error):
-        materialize_panel.write_panel(
-            processed_catalog().get("market_panel_1m"),
-            layout=layout,
-            source_id=SourceId("synthetic_crypto"),
-            time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
-        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(ValueError, match=error):
+            materialize_panel.write_panel(
+                processed_catalog().get("market_panel_1m"),
+                layout=layout,
+                source_id=SourceId("synthetic_crypto"),
+                time_window=TimeWindow(
+                    "2026-07-06T00:00:00",
+                    "2026-07-06T00:00:00",
+                ),
+                resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+            )
 
 
 @pytest.mark.parametrize(

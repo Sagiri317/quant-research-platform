@@ -292,8 +292,10 @@ def test_invalid_bar_timestamp_fails_closed() -> None:
         }
     )
 
-    with pytest.raises(ValueError, match="invalid_crypto_panel_timestamp"):
-        compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(ValueError, match="invalid_crypto_panel_timestamp"):
+            compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
 
 
 @pytest.mark.parametrize(

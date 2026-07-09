@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -178,15 +180,17 @@ def test_forward_return_labels_reject_invalid_timestamp(
         }
     )
 
-    with pytest.raises(ValueError, match="invalid_forward_return_timestamp"):
-        add_forward_return_labels(
-            panel,
-            horizons=(1,),
-            frequency=DataFrequency.MINUTE,
-            execution_price_column="close",
-            expected_interval=pd.Timedelta(minutes=1),
-            require_contiguous=require_contiguous,
-        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(ValueError, match="invalid_forward_return_timestamp"):
+            add_forward_return_labels(
+                panel,
+                horizons=(1,),
+                frequency=DataFrequency.MINUTE,
+                execution_price_column="close",
+                expected_interval=pd.Timedelta(minutes=1),
+                require_contiguous=require_contiguous,
+            )
 
 
 @pytest.mark.parametrize("asset_id", [None, pd.NA, [], {}, set()])

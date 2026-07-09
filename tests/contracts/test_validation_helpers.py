@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import pandas as pd
 import pytest
@@ -97,11 +98,13 @@ def test_strict_bool_series_accepts_explicit_bool_forms() -> None:
 
 
 def test_strict_timestamp_series_rejects_invalid_or_null_values() -> None:
-    with pytest.raises(ValueError, match="invalid_contract_timestamp"):
-        validation.strict_timestamp_series(
-            pd.Series(["2024-01-02", "not-a-date"]),
-            error="invalid_contract_timestamp",
-        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(ValueError, match="invalid_contract_timestamp"):
+            validation.strict_timestamp_series(
+                pd.Series(["not-a-date", "2024-01-02"]),
+                error="invalid_contract_timestamp",
+            )
     with pytest.raises(ValueError, match="invalid_contract_timestamp"):
         validation.strict_timestamp_series(
             pd.Series([pd.NaT]),

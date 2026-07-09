@@ -12,6 +12,7 @@ from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.markets.implementations.crypto.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     MARKET_PANEL_DATA_ID,
@@ -144,11 +145,14 @@ def _inspection_covers_window(
         columns=read_columns,
         time_window=time_window,
     )
-    timestamps = pd.to_datetime(
-        frame[timestamp_column],
-        errors="coerce",
-    )
-    if timestamps.isna().any() or timestamps.empty:
+    try:
+        timestamps = strict_timestamp_series(
+            frame[timestamp_column],
+            error="invalid_crypto_dependency_coverage_timestamp",
+        )
+    except ValueError:
+        return False
+    if timestamps.empty:
         return False
     start_bound, end_bound, end_inclusive = time_window_timestamp_interval(time_window)
     required_start = pd.Timestamp(start_bound)

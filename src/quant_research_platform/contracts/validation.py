@@ -64,7 +64,7 @@ def strict_timestamp_series(
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
-    parsed = pd.to_datetime(series, errors="coerce")
+    parsed = pd.to_datetime(series, errors="coerce", format="mixed")
     invalid = parsed.isna() & ~(null_mask & allow_null)
     if bool(invalid.any()):
         raise ValueError(error)

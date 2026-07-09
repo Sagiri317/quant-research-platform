@@ -7,6 +7,7 @@ import math
 import pandas as pd
 from pandas.api.types import is_bool_dtype
 
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.markets.implementations.crypto.ids import (
     MARKET_ID,
     canonical_crypto_asset_id,
@@ -30,12 +31,12 @@ def compute_market_panel(
     panel = bars.copy().reset_index(drop=True)
     panel["market_id"] = str(MARKET_ID)
     panel["asset_id"] = _crypto_asset_id_series(panel["source_asset_id"])
-    panel["timestamp"] = _timestamp_series(
+    panel["timestamp"] = _strict_timestamp_column(
         panel,
         "timestamp",
         error="invalid_crypto_panel_timestamp",
     )
-    panel["close_time"] = _timestamp_series(
+    panel["close_time"] = _strict_timestamp_column(
         panel,
         "close_time",
         error="invalid_crypto_panel_close_time",
@@ -135,7 +136,7 @@ def _signed_trade_volume(trades: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
     frame = trades.copy()
     frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
-    frame["timestamp"] = _timestamp_series(
+    frame["timestamp"] = _strict_timestamp_column(
         frame,
         "timestamp",
         error="invalid_crypto_trade_timestamp",
@@ -213,7 +214,7 @@ def _quote_snapshots(depth: pd.DataFrame) -> pd.DataFrame:
     frame = depth.copy()
     frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
     _validate_depth_contract(frame)
-    frame["quote_timestamp"] = _timestamp_series(
+    frame["quote_timestamp"] = _strict_timestamp_column(
         frame,
         "timestamp",
         error="invalid_crypto_depth_timestamp",
@@ -296,11 +297,13 @@ def _numeric_not_bool(frame: pd.DataFrame, column: str, *, error: str) -> pd.Ser
     return pd.to_numeric(frame[column], errors="coerce")
 
 
-def _timestamp_series(frame: pd.DataFrame, column: str, *, error: str) -> pd.Series:
-    values = pd.to_datetime(frame[column], errors="coerce")
-    if values.isna().any():
-        raise ValueError(error)
-    return values
+def _strict_timestamp_column(
+    frame: pd.DataFrame,
+    column: str,
+    *,
+    error: str,
+) -> pd.Series:
+    return strict_timestamp_series(frame[column], error=error)
 
 
 def _validate_depth_contract(frame: pd.DataFrame) -> None:
@@ -333,7 +336,7 @@ def _stabilize_panel_schema(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     result["market_id"] = result["market_id"].astype(str)
     result["asset_id"] = result["asset_id"].astype(str)
-    result["timestamp"] = _timestamp_series(
+    result["timestamp"] = _strict_timestamp_column(
         result,
         "timestamp",
         error="invalid_crypto_panel_timestamp",

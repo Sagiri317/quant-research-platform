@@ -16,6 +16,7 @@ from quant_research_platform.contracts.data import (
     horizon_unit_suffix,
 )
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research.time_series.contiguity import (
     contiguous_segment_ids,
     iter_grouped_timestamps,
@@ -165,10 +166,10 @@ def _validate_label_input_frame(
     result = frame.copy()
     for value in result[asset_column].tolist():
         _strict_asset_key_value(value)
-    timestamps = pd.to_datetime(result[date_column], errors="coerce")
-    if timestamps.isna().any():
-        raise ValueError("invalid_forward_return_timestamp")
-    result[date_column] = timestamps
+    result[date_column] = strict_timestamp_series(
+        result[date_column],
+        error="invalid_forward_return_timestamp",
+    )
     if result.duplicated([asset_column, date_column]).any():
         raise ValueError("duplicate_forward_return_asset_timestamp")
     return result
