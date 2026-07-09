@@ -53,7 +53,13 @@ src/quant_research_platform/agents
 `artifacts/` owns artifact membership validation for generated outputs. Generic
 artifact validation checks DataFrame membership values directly and must not use
 hash-set conversion when untrusted artifact columns may contain unhashable
-values.
+values. Membership checks compare the exact stored identifiers and do not strip or
+coerce generated artifact membership values.
+
+Research assembly uses session planning for date-session datasets and exact
+timestamp chunking for intraday datasets. Intraday timestamps are not normalized
+to dates or routed through the date-session planner. Local verification validates
+prediction windows only for profiles that build prediction specs.
 
 ## Interfaces
 

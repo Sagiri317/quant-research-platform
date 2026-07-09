@@ -94,6 +94,8 @@ class LocalVerificationRunResult:
 
 _RUN_SCHEMA_ID = "qrp-run"
 _WORKFLOW_ID = "local_verification"
+_PROFILE_PREDICTION_PREVIEW_TRAIN_END = "2000-01-01"
+_PROFILE_PREDICTION_PREVIEW_TEST_START = "2000-01-02"
 
 
 def run_local_verification(
@@ -537,6 +539,14 @@ def _resolve_effective_windows(
         raise ValueError("evaluation_start_date_after_end_date")
     if evaluation_start < run_start or evaluation_end > run_end:
         raise ValueError("evaluation_window_out_of_run_range")
+    if not _profile_builds_prediction_specs(config.profile):
+        return {
+            "evaluation_start_date": evaluation_start_date,
+            "evaluation_end_date": evaluation_end_date,
+            "prediction_train_end": None,
+            "prediction_test_start": None,
+            "prediction_test_end": None,
+        }
 
     prediction_train_end = config.prediction_train_end
     prediction_test_start = config.prediction_test_start
@@ -567,6 +577,15 @@ def _resolve_effective_windows(
         "prediction_test_start": prediction_test_start,
         "prediction_test_end": prediction_test_end,
     }
+
+
+def _profile_builds_prediction_specs(profile: ResearchProfile) -> bool:
+    preview = profile.build_prediction_catalog(
+        train_end=_PROFILE_PREDICTION_PREVIEW_TRAIN_END,
+        test_start=_PROFILE_PREDICTION_PREVIEW_TEST_START,
+        test_end=None,
+    )
+    return bool(preview.list())
 
 
 def _local_verification_bound(value: str) -> date | datetime:

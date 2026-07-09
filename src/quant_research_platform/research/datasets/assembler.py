@@ -14,7 +14,7 @@ from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, is_intraday_time_window
 from quant_research_platform.markets.session_windows import (
     SessionWindowPlanner,
     normalize_session_dates,
@@ -96,38 +96,40 @@ def _iter_joined_processed_chunks(
         base_spec.kind,
         base_spec.data_id,
     )
-    sessions = _sessions_from_base_input(
+    time_keys = _time_keys_from_base_input(
         base_root,
         primary_key=dataset_spec.primary_key,
         time_window=time_window,
     )
-    if not sessions:
+    if not time_keys:
         raise ValueError("no_research_dataset_sessions")
     estimated = _estimate_research_join_bytes_per_session(
         layout=layout,
         dataset_spec=dataset_spec,
         processed_catalog=processed_catalog,
-        sessions=sessions,
+        time_keys=time_keys,
         time_window=time_window,
         base_data_id=base_data_id,
     )
     policy = resource_policy or active_runtime_resource_policy()
     resource_plan = ResourceChunkPlanner(policy).plan_sessions(
         axis=ChunkAxis.TIME,
-        session_count=len(sessions),
+        session_count=len(time_keys),
         estimated_bytes_per_session=estimated,
     )
-    windows = SessionWindowPlanner.from_sessions(
-        sessions,
-        target_core_session_count=resource_plan.target_core_session_count,
-    ).windows(time_window, reason="research_assembly")
+    chunk_windows = _research_chunk_windows(
+        time_keys,
+        time_window=time_window,
+        target_core_count=resource_plan.target_core_session_count,
+        reason="research_assembly",
+    )
 
-    for window in windows:
+    for chunk_window in chunk_windows:
         chunk = _join_processed_inputs(
             layout=layout,
             dataset_spec=dataset_spec,
             processed_catalog=processed_catalog,
-            time_window=window.core,
+            time_window=chunk_window,
             base_data_id=base_data_id,
         )
         validate_research_dataset(chunk, dataset_spec)
@@ -184,7 +186,7 @@ def _join_processed_inputs(
     return assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
 
 
-def _sessions_from_base_input(
+def _time_keys_from_base_input(
     base_root: Path,
     *,
     primary_key: tuple[str, ...],
@@ -199,7 +201,31 @@ def _sessions_from_base_input(
     timestamps: list[pd.Timestamp] = []
     for chunk in chunks:
         timestamps.extend(chunk["timestamp"].dropna().unique())
+    if is_intraday_time_window(time_window):
+        return tuple(sorted({pd.Timestamp(value) for value in timestamps}))
     return normalize_session_dates(timestamps)
+
+
+def _research_chunk_windows(
+    time_keys: tuple[pd.Timestamp, ...],
+    *,
+    time_window: TimeWindow,
+    target_core_count: int,
+    reason: str,
+) -> tuple[TimeWindow, ...]:
+    if not is_intraday_time_window(time_window):
+        return tuple(
+            window.core
+            for window in SessionWindowPlanner.from_sessions(
+                time_keys,
+                target_core_session_count=target_core_count,
+            ).windows(time_window, reason=reason)
+        )
+    return tuple(
+        TimeWindow(chunk[0].to_pydatetime(), chunk[-1].to_pydatetime())
+        for start_index in range(0, len(time_keys), target_core_count)
+        if (chunk := time_keys[start_index : start_index + target_core_count])
+    )
 
 
 def _base_input_data_id(dataset_spec: ResearchDatasetSpec) -> str:
@@ -520,26 +546,28 @@ def _estimate_research_join_bytes_per_session(
     layout: StorageLayout,
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
-    sessions: tuple[pd.Timestamp, ...],
+    time_keys: tuple[pd.Timestamp, ...],
     time_window: TimeWindow,
     base_data_id: str,
 ) -> int:
-    sample_session_count = min(len(sessions), SIZING_SAMPLE_SESSION_CAP)
-    sample = SessionWindowPlanner.from_sessions(
-        sessions,
-        target_core_session_count=sample_session_count,
-    ).windows(time_window, reason="research_sizing")[0]
+    sample_time_key_count = min(len(time_keys), SIZING_SAMPLE_SESSION_CAP)
+    sample_window = _research_chunk_windows(
+        time_keys,
+        time_window=time_window,
+        target_core_count=sample_time_key_count,
+        reason="research_sizing",
+    )[0]
     frame = _join_processed_inputs(
         layout=layout,
         dataset_spec=dataset_spec,
         processed_catalog=processed_catalog,
-        time_window=sample.core,
+        time_window=sample_window,
         base_data_id=base_data_id,
     )
     return _measured_bytes_per_session(
         frame,
-        sample_sessions=sample.core_sessions,
-        target_session_count=len(sessions),
+        sample_sessions=time_keys[:sample_time_key_count],
+        target_session_count=len(time_keys),
     )
 
 

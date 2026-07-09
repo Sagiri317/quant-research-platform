@@ -16,6 +16,12 @@ sources/binance/raw_exports.py
 
 `sources/binance/` owns raw envelope validation, file discovery, and interim normalization. It does not own market alpha semantics.
 
+The crypto research profile imports Binance interim data across the processed
+dependency window required by factor warmup and label lookahead. The dependency
+window remains owned by `markets/implementations/crypto/processed/`;
+`sources/binance/` still owns only raw/interim normalization and does not own
+factor or label semantics.
+
 `markets/implementations/crypto/processed/` owns crypto market binding and processed semantics. Processed source-input selector 为当前 crypto profile 选择必需的 source-normalized interim input data ids；Binance 是 `crypto_binance_1m` 中当前唯一注册的 source owner。Source-input bridge 要求 expected input ids 精确匹配，missing、duplicate 或 extra ids 都 fail closed。`processed/panels.py` owns pure crypto market-panel calculation, and `processed/materialize_panel.py` only orchestrates IO/chunking. Processed materializers read upstream datasets through `DatasetReadMode.CHUNKED` and use `RuntimeResourcePolicy` to keep the control path chunk-aware.
 
 `research/factors/microstructure/` owns generic microstructure factor definitions and dataframe calculations. It does not import crypto market implementation modules and does not write files.

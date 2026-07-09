@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.sources.binance import interim
 from quant_research_platform.sources.binance.interim import materialize_interim_data
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -161,6 +162,29 @@ def test_binance_datetime_interim_end_filters_precisely(tmp_path: Path) -> None:
     assert read_dataset(result.artifact_roots["depth_levels_tick"])[
         "timestamp"
     ].nunique() == 1
+
+
+def test_binance_interim_materializer_writes_empty_schema_after_filtering(
+    tmp_path: Path,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    _append_jsonl(
+        raw_root / "spot" / "agg_trades" / "BTCUSDT" / "2026-07-06.jsonl",
+        _trade_envelope(0),
+    )
+
+    result = materialize_interim_data(
+        layout=StorageLayout(project_root=tmp_path),
+        start_date="2026-07-07",
+        end_date="2026-07-07",
+        data_ids=("aggregate_trades_tick",),
+    )
+
+    trades = read_dataset(result.artifact_roots["aggregate_trades_tick"])
+    assert trades.empty
+    assert tuple(trades.columns) == interim.INTERIM_COLUMNS_BY_DATA_ID[
+        "aggregate_trades_tick"
+    ]
 
 
 def _append_jsonl(path: Path, row: dict[str, object]) -> None:

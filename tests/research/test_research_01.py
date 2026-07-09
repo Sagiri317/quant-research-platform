@@ -21,10 +21,13 @@ from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
+from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
+    ProcessedDataKind,
+    ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
@@ -52,7 +55,7 @@ from quant_research_platform.research.models import fit_model_result
 from quant_research_platform.research.predictions import (
     build_prediction_result_from_research_dataset,
 )
-from quant_research_platform.storage.datasets import inspect_dataset
+from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
     make_demo_processed_catalog,
@@ -207,6 +210,107 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
         dataset_catalog.get("demo"),
         input_columns=("mom_20d",),
     )
+
+
+def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    primary_key = platform_entity_time_key()
+    factor_spec = ProcessedDataSpec(
+        data_id="minute_factors",
+        market_id=MarketId("crypto"),
+        kind=ProcessedDataKind.FACTOR,
+        frequency=DataFrequency.MINUTE,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "minute_factor": ColumnRole.FACTOR,
+        },
+        primary_key=primary_key,
+        partition_columns=("year",),
+    )
+    label_spec = ProcessedDataSpec(
+        data_id="minute_labels",
+        market_id=MarketId("crypto"),
+        kind=ProcessedDataKind.LABEL,
+        frequency=DataFrequency.MINUTE,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "minute_label": ColumnRole.LABEL,
+        },
+        primary_key=primary_key,
+        partition_columns=("year",),
+    )
+    processed_catalog = ProcessedDataCatalog()
+    processed_catalog.register(factor_spec)
+    processed_catalog.register(label_spec)
+    dataset_catalog = make_research_dataset_catalog(
+        data_id="minute_research",
+        market_id="crypto",
+        input_data_ids=("minute_factors", "minute_labels"),
+        base_input_data_id="minute_factors",
+        factor_columns=("minute_factor",),
+        label_columns=("minute_label",),
+        filter_columns=(),
+        context_columns=(),
+        frequency=DataFrequency.MINUTE,
+        grain=DataGrain.ASSET_TIMESTAMP,
+    )
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-06T00:00:00",
+            "2026-07-06T00:01:00",
+            "2026-07-06T00:02:00",
+        ]
+    )
+    keys = pd.DataFrame(
+        [
+            {
+                "market_id": "crypto",
+                "asset_id": asset_id,
+                "timestamp": timestamp,
+            }
+            for timestamp in timestamps
+            for asset_id in ("asset_a", "asset_b")
+        ]
+    )
+    for spec, value_column in (
+        (factor_spec, "minute_factor"),
+        (label_spec, "minute_label"),
+    ):
+        frame = keys.assign(**{value_column: range(len(keys))})
+        write_dataset(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            frame,
+            spec=spec,
+        )
+
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="minute_research",
+        time_window=TimeWindow(
+            "2026-07-06T00:01:00",
+            "2026-07-06T00:02:00",
+        ),
+    )
+    result = read_research_dataset(
+        layout,
+        market_id=MarketId("crypto"),
+        dataset_id="minute_research",
+        time_window=TimeWindow(
+            "2026-07-06T00:01:00",
+            "2026-07-06T00:02:00",
+        ),
+    )
+
+    assert len(result) == 4
+    assert sorted(result["timestamp"].unique()) == list(timestamps[1:])
 
 
 def test_research_dataset_assembler_generates_feature_transforms_from_factors(

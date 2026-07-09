@@ -229,6 +229,55 @@ def test_portfolio_outputs_reject_invalid_return_source_membership_values(
         )
 
 
+@pytest.mark.parametrize(
+    "padded_signal",
+    [" signal", "signal ", "\tsignal", "signal\n"],
+)
+def test_portfolio_outputs_reject_padded_signal_membership_values(
+    tmp_path: Path,
+    padded_signal: str,
+) -> None:
+    spec = make_output_edge_portfolio_spec()
+    artifacts = make_output_edge_portfolio_artifacts()
+    artifacts["positions"] = artifacts["positions"].assign(signal=padded_signal)
+
+    with pytest.raises(ValueError, match="portfolio_artifact_signal_mismatch"):
+        write_output_edge_portfolio_chunks(
+            artifacts,
+            spec=spec,
+            output_spec=make_output_edge_report_spec(
+                "portfolio_outputs",
+                spec.portfolio_id,
+                "portfolio",
+            ),
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+
+@pytest.mark.parametrize("padded_return_source", [" label", "label "])
+def test_portfolio_outputs_reject_padded_return_source_membership_values(
+    tmp_path: Path,
+    padded_return_source: str,
+) -> None:
+    spec = make_output_edge_portfolio_spec()
+    artifacts = make_output_edge_portfolio_artifacts()
+    artifacts["portfolio_returns"] = artifacts["portfolio_returns"].assign(
+        return_source_column=padded_return_source
+    )
+
+    with pytest.raises(ValueError, match="portfolio_return_source_column_mismatch"):
+        write_output_edge_portfolio_chunks(
+            artifacts,
+            spec=spec,
+            output_spec=make_output_edge_report_spec(
+                "portfolio_outputs",
+                spec.portfolio_id,
+                "portfolio",
+            ),
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+
 def test_portfolio_validation_rejects_invalid_membership_values() -> None:
     spec = make_output_edge_portfolio_spec()
     artifacts = make_output_edge_portfolio_artifacts()

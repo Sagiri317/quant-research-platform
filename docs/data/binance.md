@@ -70,6 +70,11 @@ depth       -> depth_levels_tick
 
 Interim materialization reads raw envelopes in bounded batches, validates `data_id` and raw `data_kind` before normalization, applies requested start/end filtering to source timestamps, and writes source-normalized datasets through `storage.write_dataset`. `sources/` owns provider field mapping only; market semantics and research factors are owned by `markets/implementations/crypto/` and `research/`.
 
+When raw files exist but requested filtering removes every row, interim
+materialization still writes an empty schema dataset for that `data_id`. Empty
+schema datasets are valid for optional feeds such as aggregate trades or depth in
+narrow windows; a `data_id` with no discovered raw files remains skipped.
+
 ## Safety Boundary
 
 Binance public market data is still treated as local input until transformed into REVIEW_SAFE summaries or generated test fixtures. Do not copy raw connector payloads into docs, handoff, reports, final answers, or REVIEW_SAFE evidence.

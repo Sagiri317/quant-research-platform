@@ -24,6 +24,7 @@ from tests.workflows.local_verification_fixtures import (
     fake_prediction_result,
     make_local_verification_config,
     persist_fake_research_root,
+    profile_with_empty_prediction_and_portfolio_builders,
     profile_with_materializers,
     repo_run_root,
     smoke_prediction_specs,
@@ -265,6 +266,30 @@ def test_local_verification_requires_prediction_window_order() -> None:
                 portfolio_execution_lag_steps=SMOKE_PORTFOLIO_EXECUTION_LAG_STEPS,
             )
         )
+
+
+def test_local_verification_skips_prediction_window_validation_for_predictionless_profile(  # noqa: E501
+) -> None:
+    windows = module._resolve_effective_windows(
+        LocalVerificationRunConfig(
+            run_root=Path("unused"),
+            start_date="2026-07-06",
+            end_date="2026-07-06",
+            profile=profile_with_empty_prediction_and_portfolio_builders(),
+            prediction_train_end="2026-07-06",
+            prediction_test_start="2026-07-06",
+            portfolio_frequency=SMOKE_PORTFOLIO_FREQUENCY,
+            portfolio_execution_lag_steps=SMOKE_PORTFOLIO_EXECUTION_LAG_STEPS,
+        )
+    )
+
+    assert windows == {
+        "evaluation_start_date": "2026-07-06",
+        "evaluation_end_date": "2026-07-06",
+        "prediction_train_end": None,
+        "prediction_test_start": None,
+        "prediction_test_end": None,
+    }
 
 
 def test_local_verification_resolves_only_profile_dataset_and_evaluation() -> None:

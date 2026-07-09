@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 
 from quant_research_platform.artifacts.definitions import output_catalog
@@ -79,6 +80,9 @@ from quant_research_platform.markets.implementations.crypto.labels import (
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
     catalog as crypto_processed_catalog_module,
+)
+from quant_research_platform.markets.implementations.crypto.processed import (
+    materialization_dependencies as crypto_materialization_dependencies,
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
     materializer as crypto_processed_materializer_module,
@@ -295,12 +299,21 @@ def _materialize_crypto_binance_interim_data(
     start_date: str,
     end_date: str,
 ) -> object:
+    dependency = crypto_materialization_dependencies.panel_dependency_window(
+        TimeWindow(start_date, end_date)
+    )
     return _materialize_binance_interim_data(
         layout=layout,
         raw_root=raw_root,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=_time_bound_to_iso(dependency.start),
+        end_date=_time_bound_to_iso(dependency.end),
     )
+
+
+def _time_bound_to_iso(value: date | datetime) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="seconds")
+    return value.isoformat()
 
 
 def _materialize_processed_data(

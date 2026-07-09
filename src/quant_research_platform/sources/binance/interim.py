@@ -126,15 +126,29 @@ def iter_interim_frames(
     )
     if isinstance(input_files, str) or not isinstance(input_files, tuple | list):
         raise ValueError("invalid_binance_raw_input_files")
+    yielded = False
+    empty_schema_frame: pd.DataFrame | None = None
     for input_file in sorted(input_files):
         for batch in _iter_batches(
             iter_raw_envelopes(input_file),
             batch_size=row_batch_size,
         ):
-            frame = normalize_raw_envelopes(batch, data_id=data_id)
-            frame = _filter_time_window(frame, start_date=start_date, end_date=end_date)
-            if not frame.empty:
-                yield frame
+            normalized = normalize_raw_envelopes(batch, data_id=data_id)
+            empty_schema_frame = normalized.iloc[:0].copy()
+            filtered = _filter_time_window(
+                normalized,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if not filtered.empty:
+                yielded = True
+                yield filtered
+    if input_files and not yielded:
+        yield (
+            empty_schema_frame
+            if empty_schema_frame is not None
+            else _empty_interim_frame(data_id)
+        )
 
 
 def normalize_raw_envelopes(
@@ -279,6 +293,13 @@ def _filter_time_window(
     if end is not None:
         mask &= timestamps.le(end) if end_inclusive else timestamps.lt(end)
     return frame.loc[mask.fillna(False)].copy()
+
+
+def _empty_interim_frame(data_id: str) -> pd.DataFrame:
+    columns = INTERIM_COLUMNS_BY_DATA_ID.get(data_id)
+    if columns is None:
+        raise ValueError(f"unsupported_binance_data_id: {data_id}")
+    return pd.DataFrame(columns=columns)
 
 
 def _timestamp_filter_interval(
