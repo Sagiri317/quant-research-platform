@@ -313,7 +313,7 @@ def test_aggregates_filtering_and_calendar_helpers() -> None:
     calendar = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-            "is_trading_day": [True, False],
+            "is_trading_day": [True, "False"],
         }
     )
     assert aggregates._trading_sessions_from_calendar(calendar) == (
@@ -324,8 +324,8 @@ def test_aggregates_filtering_and_calendar_helpers() -> None:
 
     frame = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03", pd.NaT]),
-            "value": [1, 2, 3],
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "value": [1, 2],
         }
     )
     filtered = aggregates.filter_output_sessions(
@@ -333,6 +333,12 @@ def test_aggregates_filtering_and_calendar_helpers() -> None:
         (pd.Timestamp("2024-01-03"),),
     )
     assert filtered["value"].tolist() == [2]
+
+    with pytest.raises(ValueError, match="invalid_output_session_timestamp"):
+        aggregates.filter_output_sessions(
+            pd.DataFrame({"timestamp": ["not-a-date"], "value": [1]}),
+            (pd.Timestamp("2024-01-03"),),
+        )
 
 
 def test_local_verification_summary_uses_inventory(

@@ -6,6 +6,9 @@ from dataclasses import asdict
 
 import pandas as pd
 
+from quant_research_platform.artifacts._membership_validation import (
+    validate_string_membership_column,
+)
 from quant_research_platform.artifacts._output_common_validation import (
     validate_filter_metadata,
 )
@@ -138,6 +141,8 @@ def validate_evaluation_artifact_structure(
     spec: EvaluationSpec,
     n_groups: int,
 ) -> None:
+    for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
+        _validate_signal_label_membership(frame, spec=spec)
     _reject_duplicate_keys(metrics, ("timestamp", "signal", "label"), "metrics")
     _reject_duplicate_keys(
         grouped_label_values,
@@ -150,8 +155,6 @@ def validate_evaluation_artifact_structure(
         ("signal", "label"),
         "group_spread_summary",
     )
-    for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
-        _validate_signal_label_membership(frame, spec=spec)
     strict_non_negative_count_series(metrics["n_obs"])
     strict_non_negative_count_series(grouped_label_values["n_obs"])
     groups = strict_positive_group_series(grouped_label_values["group"])
@@ -196,7 +199,15 @@ def _validate_signal_label_membership(
     spec: EvaluationSpec,
 ) -> None:
     signal_ids = {signal.signal_id for signal in spec.signals}
-    if not set(frame["signal"]).issubset(signal_ids) or not set(
-        frame["label"]
-    ).issubset(set(spec.label_columns)):
-        raise ValueError("evaluation_artifact_signal_label_mismatch")
+    validate_string_membership_column(
+        frame,
+        "signal",
+        signal_ids,
+        "evaluation_artifact_signal_label_mismatch",
+    )
+    validate_string_membership_column(
+        frame,
+        "label",
+        spec.label_columns,
+        "evaluation_artifact_signal_label_mismatch",
+    )

@@ -25,16 +25,25 @@ internal-provider raw root
 ## sources 层
 
 sources 层负责内部供应商 raw schema、字段映射、raw/interim 转换和内部输入标识。它不承载 A 股市场语义、研究算法或对外数据源选择面。
+source implementation owns provider raw-to-interim normalization：供应商股票代码和
+指数代码在 source 层 fail closed，不反向依赖 A-share market owner。
 
 ## markets 层
 
 `markets/` 是通用市场领域层，不绑定 A 股。通用 session window 位于 `markets/session_windows.py`。`markets/implementations/a_share/` 负责 A 股 calendar、processed data、mask、factor/label binding、profile 和 scenario。
+`markets/implementations/a_share/validation/strict_values.py` owns A-share
+semantic strict values，包括 stock source asset id、index source asset id、
+market type、trading-day bool 和 A-share owner-local timestamp validation。
 
 A-share active processed profile 仍为日频。minute/tick 只由通用 data frequency contract 表达，A-share processed materialization 对 active profile 以日频 fail-closed。mask owner 是 `markets/implementations/a_share/processed/annotations.py`；research/factors、research/labels 和 research/evaluations 不重算 A-share mask。
 
 `markets/implementations/a_share/processed/materializer.py` 保留 `materialize_processed_data()` 入口和窄 orchestration。内部输入映射由 processed owner-local mapping module 负责；dependency graph、profile frequency、input contract 和 required column validation 位于 `materialization_validation.py`；dataset root、processed input read、chunk iteration 和 write/inspect 位于 `materialization_io.py`。panel、annotation、factor 和 label materialization 继续通过当前 processed owner modules 调用 panel compute、`annotations.derive_annotations()`、factor definitions 和 label definitions。
 
 processed owner 内部跨文件生产 helper 使用非下划线 owner-local 名称，并且不从 `processed/__init__.py` 重导出。下划线 helper 只表示同文件私有实现细节。
+
+A-share coverage uses trading sessions. Coverage helpers must reject invalid
+asset keys and timestamps instead of silently dropping them. Crypto coverage
+uses its own minute-grid semantics and must not reuse A-share calendar rules.
 
 ## storage 层
 

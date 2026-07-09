@@ -30,6 +30,9 @@ from quant_research_platform.markets.implementations.a_share.research_scenarios 
     default_prediction_oos_period,
     default_prediction_smoke_id,
 )
+from quant_research_platform.markets.implementations.a_share.validation import (
+    strict_values,
+)
 from quant_research_platform.markets.session_windows import (
     SessionWindowPlanner,
     normalize_session_dates,
@@ -757,7 +760,10 @@ def _trading_sessions_from_calendar(
 ) -> tuple[pd.Timestamp, ...]:
     if "timestamp" not in trading_calendar or "is_trading_day" not in trading_calendar:
         raise ValueError("trading_calendar_columns_missing")
-    mask = trading_calendar["is_trading_day"].astype(bool)
+    mask = strict_values.strict_trading_bool_series(
+        trading_calendar["is_trading_day"],
+        error="invalid_is_trading_day",
+    )
     return normalize_session_dates(trading_calendar.loc[mask, "timestamp"])
 
 
@@ -766,10 +772,13 @@ def filter_output_sessions(
     sessions: tuple[pd.Timestamp, ...],
 ) -> pd.DataFrame:
     output = frame.copy()
-    output["timestamp"] = pd.to_datetime(output["timestamp"], errors="coerce")
+    output["timestamp"] = strict_values.strict_timestamp_value_series(
+        output["timestamp"],
+        error="invalid_output_session_timestamp",
+    )
     session_dates_set = {session.date() for session in sessions}
     dates = output["timestamp"].dt.date
-    return output.loc[dates.isin(session_dates_set).fillna(False)].copy()
+    return output.loc[dates.isin(session_dates_set)].copy()
 
 
 def _time_window_from_years(years: tuple[int, ...] | None) -> TimeWindow | None:

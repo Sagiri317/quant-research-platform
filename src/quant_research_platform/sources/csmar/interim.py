@@ -17,6 +17,7 @@ from quant_research_platform.contracts.data import (
     InterimDataSpec,
 )
 from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.validation import strict_string_series
 from quant_research_platform.sources.csmar.field_mappings import (
     map_columns,
     normalize_stock_code,
@@ -292,7 +293,10 @@ def normalize_raw_frame(
     if "stock_code" in mapped.columns:
         mapped["stock_code"] = normalize_stock_code(mapped["stock_code"])
     if "index_code" in mapped.columns:
-        mapped["index_code"] = mapped["index_code"].astype(str).str.strip()
+        mapped["index_code"] = strict_string_series(
+            mapped["index_code"],
+            error="invalid_csmar_index_code",
+        )
 
     if data_id == "trading_calendar":
         return _normalize_trading_calendar_frame(mapped)

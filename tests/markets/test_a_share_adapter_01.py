@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.catalog.fields import platform_interim_column_names
 from quant_research_platform.markets.implementations.a_share.adapter import (
@@ -42,3 +43,32 @@ def test_a_share_adapter_generates_index_asset_namespace() -> None:
     )
 
     assert result.loc[0, "asset_id"] == "index:000985"
+
+
+@pytest.mark.parametrize("value", [None, pd.NA, "", True, -1, 1.5, [], {}, set()])
+def test_a_share_adapter_rejects_invalid_stock_source_asset_id(value: object) -> None:
+    adapter = MarketAdapter()
+
+    with pytest.raises(ValueError, match="invalid_stock_source_asset_id"):
+        adapter.with_market_bar_canonical_fields(
+            pd.DataFrame({"stock_code": [value], "trade_date": ["2014-01-02"]}),
+            source_id="csmar",
+            source_asset_column="stock_code",
+            session_date_column="trade_date",
+        )
+
+
+@pytest.mark.parametrize("value", [None, pd.NA, "", 123, [], {}, set()])
+def test_a_share_adapter_rejects_invalid_non_stock_source_asset_id(
+    value: object,
+) -> None:
+    adapter = MarketAdapter()
+
+    with pytest.raises(ValueError, match="invalid_source_asset_id"):
+        adapter.with_market_bar_canonical_fields(
+            pd.DataFrame({"index_code": [value], "trade_date": ["2014-01-02"]}),
+            source_id="csmar",
+            source_asset_column="index_code",
+            session_date_column="trade_date",
+            asset_namespace="index",
+        )

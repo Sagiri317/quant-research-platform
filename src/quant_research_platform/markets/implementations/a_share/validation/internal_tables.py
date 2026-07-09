@@ -7,6 +7,9 @@ import pandas as pd
 from quant_research_platform.markets.implementations.a_share.processed import (
     source_ids,
 )
+from quant_research_platform.markets.implementations.a_share.validation import (
+    strict_values,
+)
 
 from .quality_report import (
     QualityIssue,
@@ -88,7 +91,11 @@ def check_market_bars(
         if issue is not None
     ]
     if "is_a_share_scope" in result.columns:
-        outside_scope = int((~result["is_a_share_scope"].astype(bool)).sum())
+        scope = strict_values.strict_trading_bool_series(
+            result["is_a_share_scope"],
+            error="invalid_is_a_share_scope",
+        )
+        outside_scope = int((~scope).sum())
         if outside_scope:
             issues.append(
                 QualityIssue(
@@ -129,7 +136,11 @@ def check_benchmark_index_market(
     result["timestamp"] = to_datetime(result["timestamp"])
     ohlc_validation_issue = None
     if "ohlc_valid" in result.columns:
-        invalid_count = int((~result["ohlc_valid"].astype(bool)).sum())
+        ohlc_valid = strict_values.strict_trading_bool_series(
+            result["ohlc_valid"],
+            error="invalid_ohlc_valid",
+        )
+        invalid_count = int((~ohlc_valid).sum())
         if invalid_count:
             ohlc_validation_issue = QualityIssue(
                 dataset="benchmark_index_market",

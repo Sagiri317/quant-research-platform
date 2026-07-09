@@ -8,6 +8,12 @@ import pandas as pd
 
 from quant_research_platform.catalog.fields import canonical_field_names
 from quant_research_platform.contracts.data import DataFrequency
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_integer_series,
+    strict_string_series,
+    strict_timestamp_series,
+)
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
     compute_listing_age_trading_days,
@@ -15,6 +21,9 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 from quant_research_platform.markets.implementations.a_share.ids import (
     MARKET_ID,
     require_supported_panel_frequency,
+)
+from quant_research_platform.markets.implementations.a_share.validation import (
+    strict_values,
 )
 
 _CANONICAL_NAMES = canonical_field_names()
@@ -44,7 +53,11 @@ def compute_market_panel(
         ["timestamp", "session_date", "available_at"],
     ).copy()
     market_bars = _with_market_semantics(market_bars)
-    market_bars = market_bars.loc[market_bars["is_a_share_scope"].astype(bool)].copy()
+    scope = strict_values.strict_trading_bool_series(
+        market_bars["is_a_share_scope"],
+        error="invalid_is_a_share_scope",
+    )
+    market_bars = market_bars.loc[scope].copy()
     missing_canonical = [
         column
         for column in MARKET_PANEL_KEY_COLUMNS
@@ -129,8 +142,12 @@ def compute_market_panel(
         panel["share_change_date"] = pd.Series(dtype="datetime64[ns]")
         panel["total_shares"] = pd.Series(dtype="float64")
         panel["a_float_shares"] = pd.Series(dtype="float64")
-    volume = pd.to_numeric(panel["volume"], errors="coerce")
-    a_float_shares = pd.to_numeric(panel["a_float_shares"], errors="coerce")
+    volume = strict_finite_numeric_series(panel["volume"], error="invalid_volume")
+    a_float_shares = strict_finite_numeric_series(
+        panel["a_float_shares"],
+        error="invalid_a_float_shares",
+        allow_null=True,
+    )
     panel["turnover"] = volume.div(a_float_shares.where(a_float_shares.gt(0)))
     panel = panel.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
         drop=True
@@ -167,7 +184,10 @@ def _with_asset_keys(frame: pd.DataFrame) -> pd.DataFrame:
     if "asset_id" not in result.columns:
         if "source_asset_id" not in result.columns:
             raise ValueError("missing_source_asset_id")
-        result["asset_id"] = result["source_asset_id"].astype(str)
+        result["asset_id"] = strict_string_series(
+            result["source_asset_id"],
+            error="invalid_source_asset_id",
+        )
     result["market_id"] = MARKET_ID
     return result
 
@@ -176,7 +196,10 @@ def _with_time_fields(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     if "timestamp" not in result.columns:
         raise ValueError("missing_source_timestamp")
-    timestamp = pd.to_datetime(result["timestamp"], errors="coerce")
+    timestamp = strict_values.strict_timestamp_value_series(
+        result["timestamp"],
+        error="invalid_source_timestamp",
+    )
     result["timestamp"] = timestamp
     result["session_date"] = timestamp
     result["available_at"] = timestamp
@@ -185,14 +208,24 @@ def _with_time_fields(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _with_market_semantics(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
-    result["trading_status_code"] = pd.to_numeric(
+    result["trading_status_code"] = strict_values.strict_market_type_series(
         result["trading_status_code"],
-        errors="coerce",
+        error="invalid_trading_status_code",
     )
-    result["filling_flag"] = pd.to_numeric(result["filling_flag"], errors="coerce")
-    result["market_type"] = pd.to_numeric(result["market_type"], errors="coerce")
+    result["filling_flag"] = strict_values.strict_market_type_series(
+        result["filling_flag"],
+        error="invalid_filling_flag",
+    )
+    result["market_type"] = strict_values.strict_market_type_series(
+        result["market_type"],
+        error="invalid_source_market_type",
+    )
     raw_limit_status = result["limit_status"]
-    result["limit_status"] = pd.to_numeric(raw_limit_status, errors="coerce")
+    result["limit_status"] = strict_integer_series(
+        raw_limit_status,
+        error="invalid_limit_status",
+        allow_null=True,
+    )
     invalid_non_null = result["limit_status"].isna() & raw_limit_status.notna()
     invalid_value = result["limit_status"].notna() & ~result["limit_status"].isin(
         [-1, 0, 1]
@@ -213,7 +246,11 @@ def _ensure_datetime(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     result = frame.copy()
     for column in columns:
         if column in result.columns:
-            result[column] = pd.to_datetime(result[column], errors="coerce")
+            result[column] = strict_timestamp_series(
+                result[column],
+                error=f"invalid_timestamp_column: {column}",
+                allow_null=True,
+            )
     return result
 
 
@@ -289,13 +326,21 @@ def _empty_stock_master_column(column: str) -> pd.Series:
 
 def _stock_master_effective_date(stocks: pd.DataFrame) -> pd.Series:
     effective = (
-        pd.to_datetime(stocks["status_change_date"], errors="coerce")
+        strict_timestamp_series(
+            stocks["status_change_date"],
+            error="invalid_stock_master_effective_timestamp",
+            allow_null=True,
+        )
         if "status_change_date" in stocks
         else pd.Series(pd.NaT, index=stocks.index)
     )
     if "listing_date" in stocks:
         effective = effective.combine_first(
-            pd.to_datetime(stocks["listing_date"], errors="coerce")
+            strict_timestamp_series(
+                stocks["listing_date"],
+                error="invalid_stock_master_effective_timestamp",
+                allow_null=True,
+            )
         )
     return effective
 

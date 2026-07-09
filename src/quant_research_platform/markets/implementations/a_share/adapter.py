@@ -8,6 +8,10 @@ from quant_research_platform.catalog.fields import (
     canonical_field_names,
     platform_interim_column_names,
 )
+from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.markets.implementations.a_share.validation import (
+    strict_values,
+)
 
 
 class MarketAdapter:
@@ -64,7 +68,11 @@ class MarketAdapter:
         for column in time_columns:
             if column not in result.columns:
                 continue
-            parsed = pd.to_datetime(result[column], errors="coerce")
+            parsed = strict_timestamp_series(
+                result[column],
+                error="invalid_metadata_timestamp",
+                allow_null=True,
+            )
             result[column] = parsed
             timestamp = timestamp.combine_first(parsed)
         timestamp = timestamp.dt.normalize()
@@ -85,10 +93,16 @@ class MarketAdapter:
         *,
         asset_namespace: str,
     ) -> pd.Series:
-        result = values.astype(str).str.strip()
-        if asset_namespace == "stock":
-            return result.str.zfill(6)
-        return result
+        error = (
+            "invalid_stock_source_asset_id"
+            if asset_namespace == "stock"
+            else "invalid_source_asset_id"
+        )
+        return strict_values.strict_source_asset_id_series(
+            values,
+            asset_namespace=asset_namespace,
+            error=error,
+        )
 
     def asset_id(
         self,

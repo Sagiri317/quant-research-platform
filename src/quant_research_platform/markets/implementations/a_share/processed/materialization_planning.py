@@ -12,6 +12,7 @@ from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.time import TimeWindow, require_date_window
+from quant_research_platform.contracts.validation import strict_hashable_key_series
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
 )
@@ -22,6 +23,9 @@ from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
 from quant_research_platform.markets.implementations.a_share.processed import panels
+from quant_research_platform.markets.implementations.a_share.validation import (
+    strict_values,
+)
 from quant_research_platform.markets.session_windows import (
     SessionWindow,
     SessionWindowPlanner,
@@ -47,10 +51,13 @@ def filter_output_sessions(
     sessions: tuple[pd.Timestamp, ...],
 ) -> pd.DataFrame:
     output = frame.copy()
-    output["timestamp"] = pd.to_datetime(output["timestamp"], errors="coerce")
+    output["timestamp"] = strict_values.strict_timestamp_value_series(
+        output["timestamp"],
+        error="invalid_output_session_timestamp",
+    )
     session_dates_set = {session.date() for session in sessions}
     dates = output["timestamp"].dt.date
-    return output.loc[dates.isin(session_dates_set).fillna(False)].copy()
+    return output.loc[dates.isin(session_dates_set)].copy()
 
 
 def require_dataset_coverage(
@@ -91,8 +98,11 @@ def _dataset_session_dates(
     )
     dates: set[object] = set()
     for chunk in chunks:
-        timestamp = pd.to_datetime(chunk["timestamp"], errors="coerce")
-        dates.update(timestamp.dropna().dt.date)
+        timestamp = strict_values.strict_timestamp_value_series(
+            chunk["timestamp"],
+            error="invalid_dataset_session_timestamp",
+        )
+        dates.update(timestamp.dt.date)
     return dates
 
 
@@ -121,8 +131,14 @@ def processed_panel_key_coverage(
         if chunk.empty:
             continue
         keys = chunk.loc[:, ["asset_id", "timestamp"]].copy()
-        keys["timestamp"] = pd.to_datetime(keys["timestamp"], errors="coerce")
-        keys = keys.dropna(subset=["asset_id", "timestamp"])
+        keys["asset_id"] = strict_hashable_key_series(
+            keys["asset_id"],
+            error="invalid_processed_panel_asset_id",
+        )
+        keys["timestamp"] = strict_values.strict_timestamp_value_series(
+            keys["timestamp"],
+            error="invalid_processed_panel_timestamp",
+        )
         for asset_id, asset_rows in keys.groupby("asset_id", sort=False):
             asset_dates = coverage.setdefault(asset_id, set())
             asset_dates.update(asset_rows["timestamp"].dt.normalize())
@@ -140,13 +156,16 @@ def available_trading_sessions(
     source_id: SourceId,
 ) -> tuple[pd.Timestamp, ...]:
     calendar = read_dataset(layout.interim_data_root(source_id, "trading_calendar"))
-    source_market_type = pd.to_numeric(
+    source_market_type = strict_values.strict_market_type_series(
         calendar["source_market_type"],
-        errors="coerce",
+        error="invalid_source_market_type",
+    )
+    trading = strict_values.strict_trading_bool_series(
+        calendar["is_trading_day"],
+        error="invalid_is_trading_day",
     )
     mask = (
-        calendar["is_trading_day"].astype(bool)
-        & source_market_type.isin(CURRENT_MARKET_TYPES)
+        trading & source_market_type.isin(CURRENT_MARKET_TYPES)
     )
     return normalize_session_dates(calendar.loc[mask, "timestamp"])
 

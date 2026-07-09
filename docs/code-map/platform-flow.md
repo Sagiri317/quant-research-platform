@@ -46,9 +46,14 @@ src/quant_research_platform/agents
 
 ## Layer Contracts
 
-`policy/` owns share safety, identifier safety, and check status aggregation. `contracts/` owns structure only. `catalog/` owns generic registry classes. `profiles/` is the composition root used by API, CLI, agents, and workflows.
+`policy/` owns share safety, identifier safety, and check status aggregation. `contracts/` owns structure and generic strict validation primitives only. It may validate types, nulls, finite values, integer-ness, strings, membership, timestamps, booleans, and hashable keys; market-specific asset semantics stay in market owner layers. `catalog/` owns generic registry classes. `profiles/` is the composition root used by API, CLI, agents, and workflows.
 
 `research/` builds results only and does not write files. `workflows/diagnostics/` reads storage datasets when a report needs schema or validation payloads. `reports/` builds and renders prepared evidence/report content only; it does not read storage datasets. `artifacts/` writes LOCAL_ONLY outputs and REVIEW_SAFE evidence files. `workflows/` only orchestrates research -> diagnostics payload -> reports -> artifacts. `storage/` only owns dataset IO and data layout.
+
+`artifacts/` owns artifact membership validation for generated outputs. Generic
+artifact validation checks DataFrame membership values directly and must not use
+hash-set conversion when untrusted artifact columns may contain unhashable
+values.
 
 ## Interfaces
 
@@ -81,3 +86,6 @@ qrp research-datasets requirements <dataset_id>
 `markets/implementations/crypto` owns crypto market binding and processed semantics: canonical crypto asset ids, processed source-input selection, pure market-panel calculation, observation diagnostics, factor/label dataset materialization, research dataset specs, and evaluation scenarios.
 
 `research/factors/microstructure` owns generic microstructure factor definitions and calculations. Market implementations bind those generic definitions to market ids and required input data ids; they do not duplicate generic factor construction.
+
+Crypto coverage remains minute-grid based and owner-local to crypto processed
+flows. It is not mixed with A-share trading-session coverage.

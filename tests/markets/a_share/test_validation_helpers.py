@@ -104,6 +104,16 @@ def test_internal_market_bars_daily_validation_excludes_annotation_fields() -> N
     assert "negative_liquidity_or_market_cap" in checks
 
 
+def test_internal_market_bars_validation_parses_explicit_false_scope() -> None:
+    frame = _market_bars_daily_validation_frame().assign(
+        is_a_share_scope=["False", "True"]
+    )
+
+    report = internal_tables.check_market_bars(frame)
+
+    assert {issue.check for issue in report.issues} == {"outside_a_share_scope"}
+
+
 def test_internal_benchmark_validation_uses_flag_or_ohlc_checks() -> None:
     frame = pd.DataFrame(
         {
@@ -130,6 +140,28 @@ def test_internal_benchmark_validation_uses_flag_or_ohlc_checks() -> None:
     assert "flagged_ohlc_invalid" in checks
     assert "date_outside_expected_year" in checks
     assert "negative_liquidity" in checks
+
+
+def test_internal_benchmark_validation_parses_explicit_false_ohlc_flag() -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["bench"],
+            "timestamp": pd.to_datetime(["2024-01-02"]),
+            "open": [10.0],
+            "high": [11.0],
+            "low": [9.0],
+            "close": [10.5],
+            "period_return": [0.01],
+            "volume_10k_shares": [1.0],
+            "amount_10k_cny": [1.0],
+            "ohlc_valid": ["False"],
+        }
+    )
+
+    report = internal_tables.check_benchmark_index_market(frame)
+
+    assert {issue.check for issue in report.issues} == {"flagged_ohlc_invalid"}
 
 
 def _market_bars_daily_validation_frame() -> pd.DataFrame:

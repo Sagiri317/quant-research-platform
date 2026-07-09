@@ -464,6 +464,35 @@ def test_write_paths_read_processed_inputs_via_helper(
     }
 
 
+def test_processed_panel_key_coverage_rejects_invalid_keys(monkeypatch) -> None:
+    monkeypatch.setattr(
+        materialization_planning,
+        "inspect_dataset",
+        lambda _root: SimpleNamespace(columns=("asset_id", "timestamp")),
+    )
+    monkeypatch.setattr(
+        materialization_planning,
+        "read_dataset",
+        lambda *args, **kwargs: (
+            pd.DataFrame({"asset_id": [[]], "timestamp": ["2024-01-02"]}),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="invalid_processed_panel_asset_id"):
+        materialization_planning.processed_panel_key_coverage(Path("panel"))
+
+    monkeypatch.setattr(
+        materialization_planning,
+        "read_dataset",
+        lambda *args, **kwargs: (
+            pd.DataFrame({"asset_id": ["asset_a"], "timestamp": ["not-a-date"]}),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="invalid_processed_panel_timestamp"):
+        materialization_planning.processed_panel_key_coverage(Path("panel"))
+
+
 def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
     tmp_path: Path,
 ) -> None:

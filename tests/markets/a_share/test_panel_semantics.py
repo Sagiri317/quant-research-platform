@@ -61,6 +61,36 @@ def test_a_share_calendar_helpers_use_source_normalized_calendar() -> None:
         )
 
 
+def test_a_share_calendar_parses_explicit_false_without_truthy_coercion() -> None:
+    frame = pd.DataFrame(
+        {
+            "calendar_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "source_market_type": [1, 1],
+            "is_trading_day": [True, "False"],
+        }
+    )
+
+    assert calendar.market_type_trading_sessions(frame, 1).tolist() == [
+        pd.Timestamp("2024-01-02")
+    ]
+
+
+@pytest.mark.parametrize("source_market_type", [True, 1.5, float("nan"), float("inf")])
+def test_a_share_calendar_rejects_invalid_source_market_type(
+    source_market_type: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_source_market_type"):
+        calendar.unified_trading_sessions(
+            pd.DataFrame(
+                {
+                    "calendar_date": pd.to_datetime(["2024-01-02"]),
+                    "source_market_type": [source_market_type],
+                    "is_trading_day": [True],
+                }
+            )
+        )
+
+
 def test_a_share_calendar_warmup_start_uses_open_sessions() -> None:
     frame = pd.DataFrame(
         {
@@ -314,6 +344,32 @@ def test_compute_market_panel_fails_closed_on_missing_source_keys() -> None:
         compute_market_panel(
             make_synthetic_market_bars_daily(["2020-01-02"]).drop(
                 columns=["timestamp"]
+            ),
+            stock_master=make_synthetic_a_share_stock_master(),
+            market_cap=make_synthetic_a_share_market_cap(),
+            trading_calendar=make_synthetic_a_share_trading_calendar(
+                pd.to_datetime(["2020-01-02"])
+            ),
+        )
+
+
+def test_compute_market_panel_rejects_invalid_source_key_and_timestamp_values() -> None:
+    with pytest.raises(ValueError, match="invalid_source_asset_id"):
+        compute_market_panel(
+            make_synthetic_market_bars_daily(["2020-01-02"]).assign(
+                source_asset_id=[[]]
+            ),
+            stock_master=make_synthetic_a_share_stock_master(),
+            market_cap=make_synthetic_a_share_market_cap(),
+            trading_calendar=make_synthetic_a_share_trading_calendar(
+                pd.to_datetime(["2020-01-02"])
+            ),
+        )
+
+    with pytest.raises(ValueError, match="invalid_source_timestamp"):
+        compute_market_panel(
+            make_synthetic_market_bars_daily(["2020-01-02"]).assign(
+                timestamp=["not-a-date"]
             ),
             stock_master=make_synthetic_a_share_stock_master(),
             market_cap=make_synthetic_a_share_market_cap(),

@@ -6,8 +6,12 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.data import ProcessedDataKind
+from quant_research_platform.contracts.validation import strict_integer_series
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
+)
+from quant_research_platform.markets.implementations.a_share.validation import (
+    strict_values,
 )
 
 
@@ -79,26 +83,53 @@ def _with_annotation_masks(
     missing = [column for column in required if column not in result.columns]
     if missing:
         raise ValueError("missing_annotation_input_columns: " + ", ".join(missing))
+    listing_age = strict_integer_series(
+        result["listing_age_trading_days"],
+        error="invalid_annotation_numeric",
+    )
+    amount = strict_values.strict_numeric_value_series(
+        result["amount"],
+        error="invalid_annotation_numeric",
+    )
+    volume = strict_values.strict_numeric_value_series(
+        result["volume"],
+        error="invalid_annotation_numeric",
+    )
+    turnover = strict_values.strict_numeric_value_series(
+        result["turnover"],
+        error="invalid_annotation_numeric",
+        allow_null=True,
+    )
+    is_scope = strict_values.strict_trading_bool_series(
+        result["is_a_share_scope"],
+        error="invalid_annotation_bool",
+    )
+    is_trading = strict_values.strict_trading_bool_series(
+        result["is_trading"],
+        error="invalid_annotation_bool",
+    )
+    is_st = strict_values.strict_trading_bool_series(
+        result["is_st"],
+        error="invalid_annotation_bool",
+    )
+    is_pt = strict_values.strict_trading_bool_series(
+        result["is_pt"],
+        error="invalid_annotation_bool",
+    )
     result["eligible_after_listing_age"] = (
-        pd.to_numeric(result["listing_age_trading_days"], errors="coerce")
-        >= min_listing_trading_days
-    )
+        listing_age >= min_listing_trading_days
+    ).astype(bool)
     result["eligible_liquidity"] = (
-        pd.to_numeric(result["amount"], errors="coerce").gt(0)
-        & pd.to_numeric(result["volume"], errors="coerce").gt(0)
-        & pd.to_numeric(result["turnover"], errors="coerce").ge(0)
-    )
-    result["eligible_base"] = (
-        result["is_a_share_scope"].astype(bool)
-        & result["is_trading"].astype(bool)
-        & ~result["is_st"].astype(bool)
-        & ~result["is_pt"].astype(bool)
-    )
+        amount.gt(0)
+        & volume.gt(0)
+        & turnover.fillna(-1).ge(0)
+    ).astype(bool)
+    result["eligible_base"] = (is_scope & is_trading & ~is_st & ~is_pt).astype(bool)
     result["eligible"] = (
         result["eligible_base"]
         & result["eligible_after_listing_age"]
         & result["eligible_liquidity"]
-    )
+    ).astype(bool)
     result = _add_one_word_limit_masks(result)
     grouped = result.groupby("asset_id", sort=False)
     result["next_bar_is_trading"] = _shifted_bool_mask(grouped["is_trading"])
@@ -107,12 +138,19 @@ def _with_annotation_masks(
     next_one_word_limit_down = _shifted_bool_mask(grouped["one_word_limit_down"])
     result["can_enter"] = (
         result["eligible"]
-        & result["next_bar_is_trading"].astype(bool)
+        & strict_values.strict_trading_bool_series(
+            result["next_bar_is_trading"],
+            error="invalid_annotation_bool",
+        )
         & ~next_one_word_limit_up
-    )
-    result["can_exit"] = result["next_bar_is_trading"].astype(bool) & (
-        ~next_one_word_limit_down
-    )
+    ).astype(bool)
+    result["can_exit"] = (
+        strict_values.strict_trading_bool_series(
+            result["next_bar_is_trading"],
+            error="invalid_annotation_bool",
+        )
+        & ~next_one_word_limit_down
+    ).astype(bool)
     return result
 
 
@@ -137,13 +175,21 @@ def _add_one_word_limit_masks(panel: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(
             "missing_one_word_limit_inference_columns: " + ", ".join(missing)
         )
-    prices = result.loc[:, ["open", "high", "low", "close"]].apply(
-        pd.to_numeric,
-        errors="coerce",
+    prices = pd.DataFrame(
+        {
+            column: strict_values.strict_numeric_value_series(
+                result[column],
+                error="invalid_one_word_limit_inference_values",
+            )
+            for column in ("open", "high", "low", "close")
+        },
+        index=result.index,
     )
-    if prices.isna().any(axis=None):
-        raise ValueError("invalid_one_word_limit_inference_values")
-    status = pd.to_numeric(result["limit_status"], errors="coerce")
+    status = strict_integer_series(
+        result["limit_status"],
+        error="invalid_one_word_limit_status",
+        allow_null=True,
+    )
     invalid_non_null = status.isna() & result["limit_status"].notna()
     invalid_value = status.notna() & ~status.isin([-1, 0, 1])
     if invalid_non_null.any() or invalid_value.any():
@@ -162,17 +208,28 @@ def _add_one_word_limit_masks(panel: pd.DataFrame) -> pd.DataFrame:
 
 def _shifted_bool_mask(series: pd.core.groupby.SeriesGroupBy) -> pd.Series:
     shifted = series.shift(-1)
-    return shifted.where(shifted.notna(), False).astype(bool)
+    parsed = strict_values.strict_trading_bool_series(
+        shifted.where(shifted.notna(), False),
+        error="invalid_annotation_bool",
+    )
+    return parsed.astype(bool)
 
 
 def _bool_like_column(frame: pd.DataFrame, column: str) -> pd.Series:
     series = frame[column]
     if bool(series.isna().any()):
         raise ValueError(f"null_one_word_limit_column: {column}")
-    if series.dtype == bool:
-        return series.astype(bool)
-    numeric = pd.to_numeric(series, errors="coerce")
-    if numeric.isna().any() or not set(numeric.unique()).issubset({0, 1}):
+    try:
+        return strict_values.strict_trading_bool_series(
+            series,
+            error=f"invalid_one_word_limit_column: {column}",
+        )
+    except ValueError:
+        numeric = strict_integer_series(
+            series,
+            error=f"invalid_one_word_limit_column: {column}",
+        )
+    if not set(numeric.unique()).issubset({0, 1}):
         raise ValueError(f"invalid_one_word_limit_column: {column}")
     return numeric.astype(bool)
 

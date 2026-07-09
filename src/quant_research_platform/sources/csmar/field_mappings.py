@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from numbers import Integral, Real
+
 import pandas as pd
 
 from quant_research_platform.contracts.data import DataFrequency
@@ -241,12 +244,54 @@ def map_columns(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
     return frame.rename(columns={**alias_mapping, **mapping}).copy()
 
 
+_STOCK_CODE_PATTERN = re.compile(r"^[0-9]+(?:\.0)?$")
+
+
+def normalize_provider_stock_code_series(
+    values: pd.Series,
+    *,
+    error: str = "invalid_csmar_stock_code",
+) -> pd.Series:
+    """Normalize provider stock codes to six-character strings."""
+
+    result: list[str] = []
+    for value in pd.Series(values).tolist():
+        result.append(_normalize_provider_stock_code_value(value, error=error))
+    return pd.Series(result, index=pd.Series(values).index, dtype="object")
+
+
 def normalize_stock_code(series: pd.Series) -> pd.Series:
     """Normalize provider stock codes to six-character strings."""
 
-    return (
-        series.astype(str).str.strip().str.replace(r"\.0$", "", regex=True).str.zfill(6)
-    )
+    return normalize_provider_stock_code_series(series)
+
+
+def _normalize_provider_stock_code_value(value: object, *, error: str) -> str:
+    if isinstance(value, bool):
+        raise ValueError(error)
+    if isinstance(value, Integral):
+        number = int(value)
+        if number < 0:
+            raise ValueError(error)
+        return _format_stock_code(number, error=error)
+    if isinstance(value, Real):
+        if pd.isna(value) or not float(value).is_integer() or value < 0:
+            raise ValueError(error)
+        return _format_stock_code(int(value), error=error)
+    if not isinstance(value, str):
+        raise ValueError(error)
+    text = value.strip()
+    if text in {"", "nan", "None"} or _STOCK_CODE_PATTERN.fullmatch(text) is None:
+        raise ValueError(error)
+    normalized = text[:-2] if text.endswith(".0") else text
+    return _format_stock_code(int(normalized), error=error)
+
+
+def _format_stock_code(value: int, *, error: str) -> str:
+    text = str(value)
+    if len(text) > 6:
+        raise ValueError(error)
+    return text.zfill(6)
 
 
 __all__ = [
@@ -258,5 +303,6 @@ __all__ = [
     "map_columns",
     "missing_raw_column_names",
     "missing_raw_columns",
+    "normalize_provider_stock_code_series",
     "normalize_stock_code",
 ]

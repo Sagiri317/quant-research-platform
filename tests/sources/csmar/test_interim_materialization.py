@@ -486,6 +486,29 @@ def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
     assert report["data_id"] == frequency_ids.MARKET_BARS_DATA_ID
 
 
+@pytest.mark.parametrize("index_code", [None, pd.NA, "", [], {}, set(), 123])
+def test_csmar_index_info_rejects_invalid_index_code(index_code: object) -> None:
+    raw = pd.DataFrame(
+        {
+            "Indexcd": [index_code],
+            "Idxinfo01": ["index"],
+            "Idxinfo11": ["2014-01-01"],
+            "Idxinfo02": ["2014-01-01"],
+            "Idxinfo03": [1000.0],
+            "Idxinfo04": ["scope"],
+            "Idxinfo05": ["method"],
+            "Idxinfo06": ["publisher"],
+            "Idxinfo07": ["class"],
+            "Idxinfo08": ["type"],
+            "Idxinfo09": ["market"],
+            "Idxinfo10": ["formula"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_csmar_index_code"):
+        interim.normalize_raw_frame(raw, "index_info")
+
+
 def test_csmar_narrow_market_bars_optional_raw_columns_do_not_block_mapping() -> None:
     data_id = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
     optional_columns = (

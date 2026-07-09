@@ -6,6 +6,10 @@ from collections.abc import Iterable
 
 import pandas as pd
 
+from quant_research_platform.markets.implementations.a_share.validation import (
+    strict_values,
+)
+
 CURRENT_MARKET_TYPES = frozenset({1, 4, 16, 32})
 NORMALIZED_CALENDAR_COLUMNS = frozenset(
     {"calendar_date", "source_market_type", "is_trading_day"}
@@ -20,13 +24,15 @@ def unified_trading_sessions(
     """Return sorted unique current-scope A-share trading sessions."""
 
     normalized = _require_normalized_calendar(calendar)
-    source_market_types = pd.to_numeric(
+    source_market_types = strict_values.strict_market_type_series(
         normalized["source_market_type"],
-        errors="coerce",
+        error="invalid_source_market_type",
     )
-    mask = source_market_types.isin(set(market_types)) & normalized[
-        "is_trading_day"
-    ].astype(bool)
+    trading = strict_values.strict_trading_bool_series(
+        normalized["is_trading_day"],
+        error="invalid_is_trading_day",
+    )
+    mask = source_market_types.isin(set(market_types)) & trading
     return _sorted_unique_sessions(normalized.loc[mask, "calendar_date"])
 
 
@@ -37,13 +43,19 @@ def market_type_trading_sessions(
     """Return sorted unique trading sessions for one source market type."""
 
     normalized = _require_normalized_calendar(calendar)
-    source_market_types = pd.to_numeric(
+    source_market_types = strict_values.strict_market_type_series(
         normalized["source_market_type"],
-        errors="coerce",
+        error="invalid_source_market_type",
     )
-    mask = source_market_types.eq(int(market_type)) & normalized[
-        "is_trading_day"
-    ].astype(bool)
+    trading = strict_values.strict_trading_bool_series(
+        normalized["is_trading_day"],
+        error="invalid_is_trading_day",
+    )
+    requested_market_type = strict_values.strict_market_type_series(
+        pd.Series([market_type]),
+        error="invalid_source_market_type",
+    ).iloc[0]
+    mask = source_market_types.eq(requested_market_type) & trading
     return _sorted_unique_sessions(normalized.loc[mask, "calendar_date"])
 
 
@@ -92,13 +104,13 @@ def compute_listing_age_trading_days(
     ):
         raise ValueError("duplicate_trading_calendar_key")
 
-    observation_dates = pd.to_datetime(
+    observation_dates = strict_values.strict_timestamp_value_series(
         frame[observation_date_column],
-        errors="coerce",
+        error="invalid_listing_age_timestamp",
     ).dt.normalize()
-    listing_dates = pd.to_datetime(
+    listing_dates = strict_values.strict_timestamp_value_series(
         frame[listing_date_column],
-        errors="coerce",
+        error="invalid_listing_age_timestamp",
     ).dt.normalize()
     valid = (
         listing_dates.notna()
@@ -111,14 +123,21 @@ def compute_listing_age_trading_days(
 
     assigned = pd.Series(False, index=frame.index, dtype=bool)
     market_types = (
-        pd.to_numeric(frame[market_type_column], errors="coerce")
+        strict_values.strict_market_type_series(
+            frame[market_type_column],
+            error="invalid_source_market_type",
+        )
         if market_type_column is not None and market_type_column in frame.columns
         else pd.Series(pd.NA, index=frame.index, dtype="Float64")
     )
 
-    available_market_types = pd.to_numeric(
-        normalized.loc[normalized["is_trading_day"].astype(bool), "source_market_type"],
-        errors="coerce",
+    trading = strict_values.strict_trading_bool_series(
+        normalized["is_trading_day"],
+        error="invalid_is_trading_day",
+    )
+    available_market_types = strict_values.strict_market_type_series(
+        normalized.loc[trading, "source_market_type"],
+        error="invalid_source_market_type",
     ).dropna()
     for market_type in sorted(int(value) for value in available_market_types.unique()):
         market_mask = valid & market_types.eq(market_type)
@@ -151,7 +170,10 @@ def _require_normalized_calendar(calendar: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError("calendar_missing_normalized_columns: " + ", ".join(missing))
     result = calendar.copy()
-    result["calendar_date"] = pd.to_datetime(result["calendar_date"], errors="raise")
+    result["calendar_date"] = strict_values.strict_timestamp_value_series(
+        result["calendar_date"],
+        error="invalid_calendar_date",
+    )
     result["calendar_date"] = result["calendar_date"].dt.normalize()
     return result
 
