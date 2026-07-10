@@ -28,6 +28,16 @@ def compute_market_panel(
 ) -> pd.DataFrame:
     if not isinstance(max_quote_age, pd.Timedelta) or max_quote_age < pd.Timedelta(0):
         raise ValueError("invalid_crypto_max_quote_age")
+    panel = _prepare_panel_bars(bars)
+    return _calculate_market_panel(
+        panel,
+        trade_aggregates=_signed_trade_volume(trades),
+        quote_snapshots=_quote_snapshots(depth),
+        max_quote_age=max_quote_age,
+    )
+
+
+def _prepare_panel_bars(bars: pd.DataFrame) -> pd.DataFrame:
     panel = bars.copy().reset_index(drop=True)
     panel["timestamp"] = _strict_timestamp_column(
         panel,
@@ -47,6 +57,16 @@ def compute_market_panel(
     _validate_one_minute_bar_contract(panel)
     panel["market_id"] = str(MARKET_ID)
     panel["asset_id"] = _crypto_asset_id_series(panel["source_asset_id"])
+    return panel
+
+
+def _calculate_market_panel(
+    panel: pd.DataFrame,
+    *,
+    trade_aggregates: pd.DataFrame,
+    quote_snapshots: pd.DataFrame,
+    max_quote_age: pd.Timedelta,
+) -> pd.DataFrame:
     open_price = _required_numeric(panel, "open", error="invalid_crypto_ohlc")
     high_price = _required_numeric(panel, "high", error="invalid_crypto_ohlc")
     low_price = _required_numeric(panel, "low", error="invalid_crypto_ohlc")
@@ -84,7 +104,7 @@ def compute_market_panel(
     )
     panel["taker_sell_volume"] = (volume - taker_buy_volume).where(valid_bar_quantity)
     panel = panel.merge(
-        _signed_trade_volume(trades),
+        trade_aggregates,
         how="left",
         on=("asset_id", "timestamp"),
     )
@@ -96,7 +116,11 @@ def compute_market_panel(
     panel.loc[zero_trade, "signed_volume"] = 0.0
     panel.loc[zero_trade, "trade_flow_observed"] = True
     panel = panel.merge(
-        _asof_quotes(panel, depth, max_quote_age=max_quote_age),
+        _match_quotes_asof_bar_close(
+            panel,
+            quote_snapshots,
+            max_quote_age=max_quote_age,
+        ),
         how="left",
         on=("asset_id", "timestamp"),
     )
@@ -137,9 +161,17 @@ def compute_market_panel(
 
 
 def _signed_trade_volume(trades: pd.DataFrame) -> pd.DataFrame:
-    columns = ["asset_id", "timestamp", "signed_volume", "trade_flow_observed"]
+    state: dict[tuple[str, pd.Timestamp], float] = {}
+    _accumulate_trade_aggregate_state(state, trades)
+    return _trade_aggregates_from_state(state)
+
+
+def _accumulate_trade_aggregate_state(
+    state: dict[tuple[str, pd.Timestamp], float],
+    trades: pd.DataFrame,
+) -> None:
     if trades.empty:
-        return pd.DataFrame(columns=columns)
+        return
     frame = trades.copy()
     _validate_spot_source_market_type(
         frame,
@@ -150,28 +182,46 @@ def _signed_trade_volume(trades: pd.DataFrame) -> pd.DataFrame:
         frame,
         "timestamp",
         error="invalid_crypto_trade_timestamp",
-    ).dt.floor(
-        "min"
-    )
+    ).dt.floor("min")
     frame["signed_quantity"] = _required_numeric(
         frame,
         "signed_quantity",
         error="invalid_crypto_signed_quantity",
     )
-    grouped = (
-        frame.groupby(["asset_id", "timestamp"], as_index=False, sort=False)[
-            "signed_quantity"
-        ]
-        .sum()
-        .rename(columns={"signed_quantity": "signed_volume"})
-    )
-    grouped["trade_flow_observed"] = True
-    return grouped.loc[:, columns]
+    partial = frame.groupby(
+        ["asset_id", "timestamp"],
+        as_index=False,
+        sort=False,
+    )["signed_quantity"].sum()
+    for asset_id, timestamp, signed_quantity in partial.itertuples(
+        index=False,
+        name=None,
+    ):
+        key = (str(asset_id), pd.Timestamp(timestamp))
+        state[key] = state.get(key, 0.0) + float(signed_quantity)
 
 
-def _asof_quotes(
+def _trade_aggregates_from_state(
+    state: dict[tuple[str, pd.Timestamp], float],
+) -> pd.DataFrame:
+    columns = ["asset_id", "timestamp", "signed_volume", "trade_flow_observed"]
+    if not state:
+        return pd.DataFrame(columns=columns)
+    rows = [
+        {
+            "asset_id": asset_id,
+            "timestamp": timestamp,
+            "signed_volume": signed_volume,
+            "trade_flow_observed": True,
+        }
+        for (asset_id, timestamp), signed_volume in sorted(state.items())
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _match_quotes_asof_bar_close(
     bars: pd.DataFrame,
-    depth: pd.DataFrame,
+    quotes: pd.DataFrame,
     *,
     max_quote_age: pd.Timedelta,
 ) -> pd.DataFrame:
@@ -190,98 +240,163 @@ def _asof_quotes(
     ]
     if bars.empty:
         return pd.DataFrame(columns=columns)
-    if depth.empty:
-        result = bars.loc[:, ["asset_id", "timestamp"]].copy()
+    left = bars.loc[:, ["asset_id", "timestamp", "close_time"]].copy()
+    left["_bar_position"] = range(len(left))
+    if quotes.empty:
+        result = left
         for column in columns:
             if column not in result:
                 result[column] = pd.NA
         result["quote_observed"] = False
         return result.loc[:, columns]
-    quotes = _quote_snapshots(depth)
-    result_rows: list[dict[str, object]] = []
-    ordered_bars = bars.sort_values(["asset_id", "timestamp"], kind="mergesort")
-    for _, bar in ordered_bars.iterrows():
-        candidates = quotes.loc[
-            quotes["asset_id"].eq(bar["asset_id"])
-            & quotes["quote_timestamp"].le(bar["close_time"])
-        ]
-        row = {"asset_id": bar["asset_id"], "timestamp": bar["timestamp"]}
-        if candidates.empty:
-            row["quote_observed"] = False
-            result_rows.append(row)
-            continue
-        quote = candidates.iloc[-1]
-        age = pd.Timestamp(bar["close_time"]) - pd.Timestamp(quote["quote_timestamp"])
-        observed = pd.notna(age) and age <= max_quote_age and bool(quote["quote_valid"])
-        row.update(quote.drop(labels=["quote_timestamp", "quote_valid"]).to_dict())
-        row["quote_age_seconds"] = age.total_seconds() if observed else pd.NA
-        row["quote_observed"] = bool(observed)
-        result_rows.append(row)
-    return pd.DataFrame(result_rows, columns=columns)
+    ordered_left = left.sort_values(
+        ["close_time", "asset_id", "_bar_position"],
+        kind="mergesort",
+    )
+    ordered_quotes = quotes.sort_values(
+        ["quote_timestamp", "asset_id"],
+        kind="mergesort",
+    )
+    matched = pd.merge_asof(
+        ordered_left,
+        ordered_quotes,
+        left_on="close_time",
+        right_on="quote_timestamp",
+        by="asset_id",
+        tolerance=max_quote_age,
+        direction="backward",
+        allow_exact_matches=True,
+    )
+    matched["quote_observed"] = matched["quote_timestamp"].notna() & matched[
+        "quote_valid"
+    ].fillna(False)
+    age_seconds = (
+        matched["close_time"] - matched["quote_timestamp"]
+    ).dt.total_seconds()
+    matched["quote_age_seconds"] = age_seconds.where(matched["quote_observed"])
+    return (
+        matched.sort_values("_bar_position", kind="mergesort")
+        .reset_index(drop=True)
+        .loc[:, columns]
+    )
 
 
 def _quote_snapshots(depth: pd.DataFrame) -> pd.DataFrame:
+    state: dict[
+        tuple[str, pd.Timestamp],
+        dict[str, dict[int, tuple[float, float]]],
+    ] = {}
+    _accumulate_depth_snapshot_state(state, depth)
+    return _quote_snapshots_from_state(state)
+
+
+def _accumulate_depth_snapshot_state(
+    state: dict[
+        tuple[str, pd.Timestamp],
+        dict[str, dict[int, tuple[float, float]]],
+    ],
+    depth: pd.DataFrame,
+) -> None:
+    if depth.empty:
+        return
     frame = depth.copy()
-    frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
     _validate_spot_source_market_type(
         frame,
         error="invalid_crypto_depth_source_market_type",
     )
+    frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
     frame["quote_timestamp"] = _strict_timestamp_column(
         frame,
         "timestamp",
         error="invalid_crypto_depth_timestamp",
     )
-    _validate_depth_contract(frame)
-    frame["price"] = _required_numeric(
-        frame,
-        "price",
-        error="invalid_crypto_depth_price",
-    )
-    frame["quantity"] = _required_numeric(
-        frame,
-        "quantity",
-        error="invalid_crypto_depth_quantity",
-    )
-    best = frame.loc[frame["level"].eq(1)].pivot_table(
-        index=["asset_id", "quote_timestamp"],
-        columns="side",
-        values=["price", "quantity"],
-        aggfunc="first",
-    )
-    depth_totals = frame.pivot_table(
-        index=["asset_id", "quote_timestamp"],
-        columns="side",
-        values="quantity",
-        aggfunc="sum",
-    )
-    quotes = pd.DataFrame(index=best.index)
-    quotes["best_bid"] = _pivot_value(best, ("price", "bid"))
-    quotes["best_ask"] = _pivot_value(best, ("price", "ask"))
-    quotes["bid_quantity"] = _pivot_value(best, ("quantity", "bid"))
-    quotes["ask_quantity"] = _pivot_value(best, ("quantity", "ask"))
-    quotes["bid_depth"] = _pivot_value(depth_totals, "bid")
-    quotes["ask_depth"] = _pivot_value(depth_totals, "ask")
-    quotes["mid_price"] = (quotes["best_bid"] + quotes["best_ask"]) / 2.0
-    required = ("best_bid", "best_ask", "bid_quantity", "ask_quantity")
-    quotes["quote_valid"] = (
-        quotes.loc[:, required].notna().all(axis=1)
-        & quotes["best_bid"].gt(0.0)
-        & quotes["best_ask"].gt(0.0)
-        & quotes["bid_quantity"].gt(0.0)
-        & quotes["ask_quantity"].gt(0.0)
-        & quotes["best_bid"].lt(quotes["best_ask"])
-    )
-    return quotes.reset_index().sort_values(
-        ["asset_id", "quote_timestamp"],
-        kind="mergesort",
-    )
+    _validate_depth_level_values(frame)
+    for (asset_id, quote_timestamp, side), rows in frame.groupby(
+        ["asset_id", "quote_timestamp", "side"],
+        sort=False,
+        dropna=False,
+    ):
+        snapshot = state.setdefault(
+            (str(asset_id), pd.Timestamp(quote_timestamp)),
+            {},
+        )
+        levels = snapshot.setdefault(str(side), {})
+        for level, price, quantity in rows.loc[
+            :, ["level", "price", "quantity"]
+        ].itertuples(index=False, name=None):
+            level_number = int(level)
+            if level_number in levels:
+                raise ValueError("duplicate_crypto_depth_level")
+            levels[level_number] = (float(price), float(quantity))
 
 
-def _pivot_value(frame: pd.DataFrame, key: object) -> pd.Series:
-    if key in frame:
-        return pd.to_numeric(frame[key], errors="coerce")
-    return pd.Series(pd.NA, index=frame.index, dtype="Float64")
+def _quote_snapshots_from_state(
+    state: dict[
+        tuple[str, pd.Timestamp],
+        dict[str, dict[int, tuple[float, float]]],
+    ],
+) -> pd.DataFrame:
+    columns = [
+        "asset_id",
+        "quote_timestamp",
+        "best_bid",
+        "best_ask",
+        "bid_quantity",
+        "ask_quantity",
+        "bid_depth",
+        "ask_depth",
+        "mid_price",
+        "quote_valid",
+    ]
+    rows: list[dict[str, object]] = []
+    for (asset_id, quote_timestamp), sides in sorted(state.items()):
+        row: dict[str, object] = {
+            "asset_id": asset_id,
+            "quote_timestamp": quote_timestamp,
+            "best_bid": pd.NA,
+            "best_ask": pd.NA,
+            "bid_quantity": pd.NA,
+            "ask_quantity": pd.NA,
+            "bid_depth": pd.NA,
+            "ask_depth": pd.NA,
+        }
+        for side, levels in sides.items():
+            ordered_levels = sorted(levels)
+            if ordered_levels != list(range(1, len(ordered_levels) + 1)):
+                raise ValueError("invalid_crypto_depth_level_sequence")
+            prices = [levels[level][0] for level in ordered_levels]
+            if side == "bid" and any(
+                current >= previous
+                for previous, current in zip(prices, prices[1:], strict=False)
+            ):
+                raise ValueError("invalid_crypto_bid_price_order")
+            if side == "ask" and any(
+                current <= previous
+                for previous, current in zip(prices, prices[1:], strict=False)
+            ):
+                raise ValueError("invalid_crypto_ask_price_order")
+            best_price, best_quantity = levels[1]
+            row[f"best_{side}"] = best_price
+            row[f"{side}_quantity"] = best_quantity
+            row[f"{side}_depth"] = sum(
+                levels[level][1] for level in ordered_levels
+            )
+        required = ("best_bid", "best_ask", "bid_quantity", "ask_quantity")
+        quote_valid = all(pd.notna(row[column]) for column in required)
+        if quote_valid:
+            row["mid_price"] = (float(row["best_bid"]) + float(row["best_ask"])) / 2
+            quote_valid = bool(
+                float(row["best_bid"]) > 0
+                and float(row["best_ask"]) > 0
+                and float(row["bid_quantity"]) > 0
+                and float(row["ask_quantity"]) > 0
+                and float(row["best_bid"]) < float(row["best_ask"])
+            )
+        else:
+            row["mid_price"] = pd.NA
+        row["quote_valid"] = quote_valid
+        rows.append(row)
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _crypto_asset_id_series(series: pd.Series) -> pd.Series:
@@ -320,7 +435,7 @@ def _strict_timestamp_column(
     return strict_timestamp_series(frame[column], error=error)
 
 
-def _validate_depth_contract(frame: pd.DataFrame) -> None:
+def _validate_depth_level_values(frame: pd.DataFrame) -> None:
     for side in frame["side"]:
         if not isinstance(side, str) or side not in {"bid", "ask"}:
             raise ValueError("invalid_crypto_depth_side")
@@ -347,19 +462,6 @@ def _validate_depth_contract(frame: pd.DataFrame) -> None:
         raise ValueError("invalid_crypto_depth_quantity")
     frame["price"] = prices
     frame["quantity"] = quantities
-    for (*_snapshot_key, side), group in frame.groupby(
-        ["asset_id", "quote_timestamp", "side"],
-        sort=False,
-        dropna=False,
-    ):
-        ordered = group.sort_values("level", kind="mergesort")
-        if ordered["level"].tolist() != list(range(1, len(ordered) + 1)):
-            raise ValueError("invalid_crypto_depth_level_sequence")
-        price_changes = ordered["price"].diff().dropna()
-        if side == "bid" and not bool(price_changes.lt(0.0).all()):
-            raise ValueError("invalid_crypto_bid_price_order")
-        if side == "ask" and not bool(price_changes.gt(0.0).all()):
-            raise ValueError("invalid_crypto_ask_price_order")
 
 
 def _validate_one_minute_bar_contract(frame: pd.DataFrame) -> None:

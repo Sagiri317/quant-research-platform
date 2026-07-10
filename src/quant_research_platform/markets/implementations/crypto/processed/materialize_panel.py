@@ -98,51 +98,82 @@ def _iter_panel_chunks(
     ):
         if bars_chunk.empty:
             continue
-        matching_trades = _read_matching_chunks(
-            trade_root,
-            bars_chunk,
-            max_quote_age=pd.Timedelta(0),
-            source_asset_error="invalid_crypto_matching_trade_source_asset_id",
-            timestamp_error="invalid_crypto_matching_trade_timestamp",
-        )
-        matching_depth = _read_matching_chunks(
-            depth_root,
-            bars_chunk,
-            max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
-            source_asset_error="invalid_crypto_matching_depth_source_asset_id",
-            timestamp_error="invalid_crypto_matching_depth_timestamp",
-        )
         for bars in _split_frame_by_policy(bars_chunk, resource_policy):
             if bars.empty:
                 continue
-            trades = _filter_matching_frame(
-                matching_trades,
+            _validate_matching_bar_keys(bars)
+            prepared_bars = panels._prepare_panel_bars(bars)
+            trade_aggregates = _read_trade_aggregates(
+                trade_root,
                 bars,
-                max_quote_age=pd.Timedelta(0),
-                source_asset_error="invalid_crypto_matching_trade_source_asset_id",
-                timestamp_error="invalid_crypto_matching_trade_timestamp",
             )
-            depth = _filter_matching_frame(
-                matching_depth,
+            quote_snapshots = _read_quote_snapshots(
+                depth_root,
                 bars,
+            )
+            yield panels._calculate_market_panel(
+                prepared_bars,
+                trade_aggregates=trade_aggregates,
+                quote_snapshots=quote_snapshots,
                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
-                source_asset_error="invalid_crypto_matching_depth_source_asset_id",
-                timestamp_error="invalid_crypto_matching_depth_timestamp",
-            )
-            yield panels.compute_market_panel(bars, trades=trades, depth=depth).loc[
-                :,
-                spec.required_columns,
-            ]
+            ).loc[:, spec.required_columns]
 
 
-def _read_matching_chunks(
+def _read_trade_aggregates(
     dataset_root,
+    bars: pd.DataFrame,
+) -> pd.DataFrame:
+    asset_ids, start, end, read_window = _matching_read_scope(
+        bars,
+        max_quote_age=pd.Timedelta(0),
+    )
+    state: dict[tuple[str, pd.Timestamp], float] = {}
+    for chunk in _iter_matching_chunks(
+        dataset_root,
+        asset_ids=asset_ids,
+        start=start,
+        end=end,
+        time_window=read_window,
+        max_quote_age=pd.Timedelta(0),
+        source_asset_error="invalid_crypto_matching_trade_source_asset_id",
+        timestamp_error="invalid_crypto_matching_trade_timestamp",
+    ):
+        panels._accumulate_trade_aggregate_state(state, chunk)
+    return panels._trade_aggregates_from_state(state)
+
+
+def _read_quote_snapshots(
+    dataset_root,
+    bars: pd.DataFrame,
+) -> pd.DataFrame:
+    max_quote_age = panels.DEFAULT_MAX_QUOTE_AGE
+    asset_ids, start, end, read_window = _matching_read_scope(
+        bars,
+        max_quote_age=max_quote_age,
+    )
+    state: dict[
+        tuple[str, pd.Timestamp],
+        dict[str, dict[int, tuple[float, float]]],
+    ] = {}
+    for chunk in _iter_matching_chunks(
+        dataset_root,
+        asset_ids=asset_ids,
+        start=start,
+        end=end,
+        time_window=read_window,
+        max_quote_age=max_quote_age,
+        source_asset_error="invalid_crypto_matching_depth_source_asset_id",
+        timestamp_error="invalid_crypto_matching_depth_timestamp",
+    ):
+        panels._accumulate_depth_snapshot_state(state, chunk)
+    return panels._quote_snapshots_from_state(state)
+
+
+def _matching_read_scope(
     bars: pd.DataFrame,
     *,
     max_quote_age: pd.Timedelta,
-    source_asset_error: str,
-    timestamp_error: str,
-) -> pd.DataFrame:
+) -> tuple[set[str], pd.Timestamp, pd.Timestamp, TimeWindow]:
     asset_ids = set(
         _strict_source_asset_ids(
             bars,
@@ -159,25 +190,32 @@ def _read_matching_chunks(
         "close_time",
         "invalid_crypto_matching_bar_close_time",
     ).max()
-    read_window = TimeWindow(
-        (start - max_quote_age).to_pydatetime(),
-        end.to_pydatetime(),
+    return (
+        asset_ids,
+        start,
+        end,
+        TimeWindow(
+            (start - max_quote_age).to_pydatetime(),
+            end.to_pydatetime(),
+        ),
     )
-    chunks = _iter_matching_chunks(
-        dataset_root,
-        asset_ids=asset_ids,
-        start=start,
-        end=end,
-        time_window=read_window,
-        max_quote_age=max_quote_age,
-        source_asset_error=source_asset_error,
-        timestamp_error=timestamp_error,
+
+
+def _validate_matching_bar_keys(bars: pd.DataFrame) -> None:
+    _strict_source_asset_ids(
+        bars,
+        error="invalid_crypto_matching_bar_source_asset_id",
     )
-    try:
-        first = next(chunks)
-    except StopIteration:
-        return pd.DataFrame()
-    return pd.concat(_prepend(first, chunks), ignore_index=True)
+    _strict_timestamp_column(
+        bars,
+        "timestamp",
+        "invalid_crypto_matching_bar_timestamp",
+    )
+    _strict_timestamp_column(
+        bars,
+        "close_time",
+        "invalid_crypto_matching_bar_close_time",
+    )
 
 
 def _iter_matching_chunks(
@@ -211,45 +249,6 @@ def _iter_matching_chunks(
         ].copy()
         if not matching.empty:
             yield matching
-
-
-def _filter_matching_frame(
-    frame: pd.DataFrame,
-    bars: pd.DataFrame,
-    *,
-    max_quote_age: pd.Timedelta,
-    source_asset_error: str,
-    timestamp_error: str,
-) -> pd.DataFrame:
-    if frame.empty or bars.empty:
-        return pd.DataFrame(columns=frame.columns)
-    asset_ids = set(
-        _strict_source_asset_ids(
-            bars,
-            error="invalid_crypto_matching_bar_source_asset_id",
-        )
-    )
-    start = _strict_timestamp_column(
-        bars,
-        "timestamp",
-        "invalid_crypto_matching_bar_timestamp",
-    ).min()
-    end = _strict_timestamp_column(
-        bars,
-        "close_time",
-        "invalid_crypto_matching_bar_close_time",
-    ).max()
-    return frame.loc[
-        _matching_window_mask(
-            frame,
-            asset_ids=asset_ids,
-            start=start,
-            end=end,
-            max_quote_age=max_quote_age,
-            source_asset_error=source_asset_error,
-            timestamp_error=timestamp_error,
-        )
-    ].copy()
 
 
 def _matching_window_mask(
@@ -290,14 +289,6 @@ def _strict_timestamp_column(
     error: str,
 ) -> pd.Series:
     return strict_timestamp_series(frame[column], error=error)
-
-
-def _prepend(
-    first: pd.DataFrame,
-    remaining: Iterator[pd.DataFrame],
-) -> Iterator[pd.DataFrame]:
-    yield first
-    yield from remaining
 
 
 def _split_frame_by_policy(

@@ -64,6 +64,10 @@ quote_age_seconds
 
 Quotes are selected as-of bar `close_time`, never after bar close. `quote_observed=True` only when the as-of quote timestamp is less than or equal to bar `close_time`, `quote_age_seconds <= DEFAULT_MAX_QUOTE_AGE`, `best_bid > 0`, `best_ask > 0`, `best_bid < best_ask`, `bid_quantity > 0`, and `ask_quantity > 0`. Missing, stale, crossed, one-sided, zero-size, or invalid quotes leave quote-derived fields null and `quote_observed=False`.
 
+Panel materialization first splits each bars storage chunk into core windows derived from `RuntimeResourcePolicy`. Each core window then reads trades and depth in `DatasetReadMode.CHUNKED`; one raw auxiliary chunk is validated and reduced before the next chunk is requested. Trade rows reduce into per-asset/per-minute signed-volume state. Depth levels reduce into bounded per-snapshot state that can merge one snapshot split across storage chunks while retaining duplicate, level-continuity, price-order, and quantity validation. Raw auxiliary rows are not concatenated across chunks and are not written to metadata or artifacts.
+
+Quote matching uses asset-isolated, backward `merge_asof` at bar close with exact matches allowed and `DEFAULT_MAX_QUOTE_AGE` as tolerance. The latest snapshot is selected before `quote_valid` is applied, so an invalid latest quote never falls back to an older valid quote. Matching retains the original bar key and the final panel remains deterministically sorted by `(market_id, asset_id, timestamp)`.
+
 ## Current Evaluation Signals
 
 The crypto evaluation scenario uses the approved microstructure factor set:

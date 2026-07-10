@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 import warnings
 
@@ -7,9 +8,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.markets.implementations.crypto.processed.panels import (
-    compute_market_panel,
+from quant_research_platform.markets.implementations.crypto.processed import (
+    panels,
 )
+
+compute_market_panel = panels.compute_market_panel
 
 
 class _StringLikeCryptoSymbol:
@@ -199,6 +202,133 @@ def test_quote_after_close_not_used() -> None:
 
     assert bool(panel.loc[0, "quote_observed"]) is False
     assert math.isnan(panel.loc[0, "best_bid"])
+
+
+def test_quote_matching_allows_exact_close_time() -> None:
+    close_time = _bars_frame().loc[0, "close_time"]
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT", "BTCUSDT"],
+            "timestamp": [close_time, close_time],
+            "side": ["bid", "ask"],
+            "level": [1, 1],
+            "price": [100.0, 100.2],
+            "quantity": [1.5, 1.0],
+            "source_market_type": ["spot", "spot"],
+        }
+    )
+
+    panel = compute_market_panel(_bars_frame(), trades=pd.DataFrame(), depth=depth)
+
+    assert bool(panel.loc[0, "quote_observed"]) is True
+    assert panel.loc[0, "quote_age_seconds"] == 0.0
+
+
+def test_latest_invalid_quote_does_not_fall_back_to_older_valid_quote() -> None:
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"] * 4,
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-07-06 00:00:50",
+                    "2026-07-06 00:00:50",
+                    "2026-07-06 00:00:58",
+                    "2026-07-06 00:00:58",
+                ]
+            ),
+            "side": ["bid", "ask", "bid", "ask"],
+            "level": [1, 1, 1, 1],
+            "price": [100.0, 100.2, 100.3, 100.1],
+            "quantity": [1.5, 1.0, 1.5, 1.0],
+            "source_market_type": ["spot"] * 4,
+        }
+    )
+
+    panel = compute_market_panel(_bars_frame(), trades=pd.DataFrame(), depth=depth)
+
+    assert bool(panel.loc[0, "quote_observed"]) is False
+    assert math.isnan(panel.loc[0, "best_bid"])
+
+
+def test_quote_matching_isolates_assets() -> None:
+    bars = pd.concat(
+        (
+            _bars_frame(),
+            _bars_frame().assign(source_asset_id="ETHUSDT"),
+        ),
+        ignore_index=True,
+    )
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT", "BTCUSDT", "ETHUSDT", "ETHUSDT"],
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58"] * 4),
+            "side": ["bid", "ask", "bid", "ask"],
+            "level": [1, 1, 1, 1],
+            "price": [100.0, 100.2, 200.0, 200.4],
+            "quantity": [1.5, 1.0, 2.5, 2.0],
+            "source_market_type": ["spot"] * 4,
+        }
+    )
+
+    panel = compute_market_panel(bars, trades=pd.DataFrame(), depth=depth)
+
+    assert panel.set_index("asset_id")["best_bid"].to_dict() == {
+        "btc_usdt": 100.0,
+        "eth_usdt": 200.0,
+    }
+
+
+def test_depth_snapshot_state_merges_levels_across_chunks() -> None:
+    first = _depth_levels_frame().loc[lambda frame: frame["level"].eq(1)].copy()
+    second = _depth_levels_frame().loc[lambda frame: frame["level"].eq(2)].copy()
+    state: dict[object, object] = {}
+
+    panels._accumulate_depth_snapshot_state(state, first)
+    panels._accumulate_depth_snapshot_state(state, second)
+    quotes = panels._quote_snapshots_from_state(state)
+
+    assert quotes.loc[0, "best_bid"] == 100.0
+    assert quotes.loc[0, "best_ask"] == 100.2
+    assert quotes.loc[0, "bid_depth"] == 2.5
+    assert quotes.loc[0, "ask_depth"] == 2.0
+
+
+def test_depth_snapshot_state_rejects_duplicate_level_across_chunks() -> None:
+    state: dict[object, object] = {}
+    level_one = _depth_levels_frame().loc[
+        lambda frame: frame["level"].eq(1)
+    ].copy()
+
+    panels._accumulate_depth_snapshot_state(state, level_one)
+
+    with pytest.raises(ValueError, match="duplicate_crypto_depth_level"):
+        panels._accumulate_depth_snapshot_state(state, level_one)
+
+
+def test_trade_aggregate_state_reduces_dense_chunks_incrementally() -> None:
+    timestamps = pd.date_range("2026-07-06 00:00:01", periods=2_000, freq="ms")
+    trades = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"] * len(timestamps),
+            "timestamp": timestamps,
+            "signed_quantity": np.where(np.arange(len(timestamps)) % 2, -0.5, 1.0),
+            "source_market_type": ["spot"] * len(timestamps),
+        }
+    )
+    state: dict[tuple[str, pd.Timestamp], float] = {}
+
+    panels._accumulate_trade_aggregate_state(state, trades.iloc[:1_000])
+    panels._accumulate_trade_aggregate_state(state, trades.iloc[1_000:])
+    aggregates = panels._trade_aggregates_from_state(state)
+
+    assert aggregates["signed_volume"].tolist() == [500.0]
+    assert aggregates["trade_flow_observed"].tolist() == [True]
+
+
+def test_quote_matching_has_no_per_bar_dataframe_scan() -> None:
+    source = inspect.getsource(panels)
+    assert ".iterrows(" not in source
+    assert "merge_asof(" in source
 
 
 @pytest.mark.parametrize(
@@ -689,5 +819,19 @@ def _bars_frame() -> pd.DataFrame:
             "taker_buy_quote_volume": [402.0],
             "source_market_type": ["spot"],
             "interval": ["1m"],
+        }
+    )
+
+
+def _depth_levels_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"] * 4,
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58"] * 4),
+            "side": ["bid", "ask", "bid", "ask"],
+            "level": [1, 1, 2, 2],
+            "price": [100.0, 100.2, 99.9, 100.3],
+            "quantity": [1.5, 1.0, 1.0, 1.0],
+            "source_market_type": ["spot"] * 4,
         }
     )
