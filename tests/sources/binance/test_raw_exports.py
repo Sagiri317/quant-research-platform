@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.sources.binance.raw_exports import (
     dataset_files_by_id,
     iter_raw_envelopes,
+)
+from quant_research_platform.sources.binance.validation import (
+    strict_millisecond_timestamp,
 )
 
 
@@ -303,6 +307,68 @@ def test_binance_raw_exports_rejects_invalid_millisecond_timestamps(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_open_time"):
+        tuple(iter_raw_envelopes(path))
+
+
+@pytest.mark.parametrize("milliseconds", [0, 1783296000000])
+def test_binance_millisecond_timestamp_accepts_ns_representable_values(
+    milliseconds: int,
+) -> None:
+    timestamp = strict_millisecond_timestamp(milliseconds, error="stable_error")
+
+    assert timestamp.tz is not None
+    assert timestamp == pd.Timestamp(milliseconds, unit="ms", tz="UTC")
+    assert timestamp.as_unit("ns").unit == "ns"
+
+
+def test_binance_millisecond_timestamp_accepts_maximum_ns_millisecond() -> None:
+    maximum = pd.Timestamp.max.value // pd.Timedelta(milliseconds=1).value
+
+    timestamp = strict_millisecond_timestamp(maximum, error="stable_error")
+
+    assert timestamp == pd.Timestamp(maximum, unit="ms", tz="UTC").as_unit("ns")
+
+
+@pytest.mark.parametrize(
+    "milliseconds",
+    [
+        pd.Timestamp.max.value // pd.Timedelta(milliseconds=1).value + 1,
+        10**100,
+    ],
+)
+def test_binance_millisecond_timestamp_rejects_values_above_ns_range(
+    milliseconds: int,
+) -> None:
+    with pytest.raises(ValueError, match="stable_error"):
+        strict_millisecond_timestamp(milliseconds, error="stable_error")
+
+
+def test_binance_raw_kline_maps_ns_range_failure_to_owner_error(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "out-of-range-kline.jsonl"
+    envelope = _envelope(data_kind="klines")
+    payload = list(envelope["payload"])
+    payload[0] = pd.Timestamp.max.value // pd.Timedelta(milliseconds=1).value + 1
+    envelope["payload"] = payload
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_kline_open_time"):
+        tuple(iter_raw_envelopes(path))
+
+
+def test_binance_raw_aggregate_trade_maps_ns_range_failure_to_owner_error(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "out-of-range-trade.jsonl"
+    envelope = _envelope(data_kind="agg_trades")
+    envelope["payload"] = {
+        **envelope["payload"],
+        "T": pd.Timestamp.max.value // pd.Timedelta(milliseconds=1).value + 1,
+    }
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_agg_trade_timestamp"):
         tuple(iter_raw_envelopes(path))
 
 

@@ -119,6 +119,32 @@ def test_binance_interim_rejects_naive_depth_captured_at() -> None:
         )
 
 
+def test_binance_interim_maps_millisecond_range_failure_to_owner_error() -> None:
+    maximum = pd.Timestamp.max.value // pd.Timedelta(milliseconds=1).value
+    envelope = {
+        "source": "binance",
+        "market_type": "spot",
+        "data_kind": "agg_trades",
+        "symbol": "BTCUSDT",
+        "captured_at": "2026-07-06T00:00:02Z",
+        "payload": {
+            "a": 1,
+            "p": "100.0",
+            "q": "1.0",
+            "f": 1,
+            "l": 1,
+            "T": maximum + 1,
+            "m": False,
+        },
+    }
+
+    with pytest.raises(ValueError, match="invalid_binance_millisecond_timestamp"):
+        normalize_raw_envelopes(
+            (envelope,),
+            data_id="aggregate_trades_tick",
+        )
+
+
 @pytest.mark.parametrize("row_batch_size", [True, 1.5, "100"])
 def test_binance_interim_rejects_non_strict_row_batch_size(
     row_batch_size: object,

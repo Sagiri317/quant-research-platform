@@ -40,6 +40,8 @@ Strict scalar rules:
 - `1m` kline 的 `open_time` 必须整分钟对齐，`close_time` 必须严格等于 `open_time + 59_999ms`。名义 `1m` 但时间窗口不闭合的 payload 在 raw owner fail closed。
 - aggregate trade `timestamp` / `T` 在 raw owner 校验，不把非法时间延迟到 interim normalization。
 
+Binance market payload 的 millisecond timestamp 还必须落在 QRP 下游可安全表示的 pandas nanosecond timestamp 范围内。上界由 `pd.Timestamp.max` 推导；epoch zero、上界内的值返回 UTC-aware nanosecond `Timestamp`，首个越界值和更大的整数都由 Binance source owner fail closed。Raw kline、raw aggregate trade 与 interim normalization 复用同一范围合同。
+
 `klines` 的 `payload` 是 connector 返回的 kline array，允许 connector 追加额外字段；当前语义校验只读取已批准字段。`agg_trades` 和 `depth` 的 `payload` 是 connector 返回的 object。裸 payload、非 envelope JSON、非 JSONL 文件和 unsupported data kind 都不是当前合同。
 
 Raw envelope structure 不因语义校验而改变。当前 raw validation 会检查 kline 时间窗口、OHLC、volume、trade count、aggregate trade timestamp/price/quantity/id range，以及 depth price/quantity。Kline semantic validation 还要求 `taker_buy_volume <= volume`、`taker_buy_quote_volume <= quote_volume`，numeric payload 拒绝 `NaN`、`inf`、`-inf` 和 nonnumeric values。双边 best bid/ask 同时存在时必须满足 bid < ask；one-sided depth payload 可保留为 raw valid，后续 panel 层用 quote observation diagnostics 表达不可用 quote。

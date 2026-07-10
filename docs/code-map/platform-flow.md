@@ -52,6 +52,10 @@ src/quant_research_platform/agents
 
 `storage/` also owns the generic dataset instance-metadata schema. `input_dataset_identities` is an exact JSON-safe mapping from input dataset id to that dataset's `spec.json` and `_manifest/manifest.json` hashes. Storage validates this generic shape but does not decide market lineage, dependency coverage, or materialization ordering; those lifecycle semantics remain in the relevant market implementation.
 
+`storage/_dataset_reading.py` owns the single physical Parquet batch iterator used by both materialized and chunked reads. Logical `DatasetReadMode.CHUNKED` boundaries do not imply whole-file reads: row-group metadata derives a conservative record-batch size, oversized pandas batches are split again, and a single row above the requested physical target fails closed. Projection, time-window filtering, path order, and final row order remain dataset contracts; physical chunk boundaries do not.
+
+`storage/_dataset_key_tracking.py` owns exact spillable primary-key tracking for dataset writes. It stores canonical full key payloads in a temporary SQLite uniqueness index, including naive-nanosecond timestamp identity, so duplicate detection is exact without retaining a Python key set proportional to total rows. Temporary indexes are outside final dataset artifacts and are cleaned after success or failure; staged-write atomicity is unchanged.
+
 `artifacts/` owns artifact membership validation for generated outputs. Generic
 artifact validation checks DataFrame membership values directly and must not use
 hash-set conversion when untrusted artifact columns may contain unhashable

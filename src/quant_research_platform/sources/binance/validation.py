@@ -8,10 +8,14 @@ from collections.abc import Sequence
 from typing import Any
 
 import pandas as pd
+from pandas.errors import OutOfBoundsDatetime
 
 BINANCE_SPOT_MARKET_TYPE = "spot"
 BINANCE_DATA_KINDS = frozenset({"klines", "agg_trades", "depth"})
 _SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]+$")
+_NANOSECOND_TIMESTAMP_MAX_MILLISECONDS = (
+    pd.Timestamp.max.value // pd.Timedelta(milliseconds=1).value
+)
 
 
 def strict_non_empty_string(value: object, *, error: str) -> str:
@@ -113,7 +117,12 @@ def strict_boolean(value: object, *, error: str) -> bool:
 
 def strict_millisecond_timestamp(value: object, *, error: str) -> pd.Timestamp:
     milliseconds = strict_non_negative_integer(value, error=error)
-    return pd.Timestamp(milliseconds, unit="ms", tz="UTC")
+    if milliseconds > _NANOSECOND_TIMESTAMP_MAX_MILLISECONDS:
+        raise ValueError(error)
+    try:
+        return pd.Timestamp(milliseconds, unit="ms", tz="UTC").as_unit("ns")
+    except (OutOfBoundsDatetime, OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(error) from exc
 
 
 def strict_iso_timestamp(value: object, *, error: str) -> pd.Timestamp:
