@@ -678,6 +678,46 @@ def test_exact_primary_key_tracker_is_spillable_exact_and_cleans_up(
     assert list(tracker_root.iterdir()) == []
 
 
+def test_exact_key_index_cleans_scratch_when_sqlite_connect_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+    index = module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    )
+
+    def fail_connect(*_args, **_kwargs):
+        raise module.sqlite3.OperationalError("synthetic_connect_failure")
+
+    monkeypatch.setattr(module.sqlite3, "connect", fail_connect)
+
+    with pytest.raises(module.sqlite3.OperationalError):
+        index.__enter__()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_exact_key_index_inserts_unique_rows_from_duplicate_chunk(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+
+    with module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        assert index.add_frame(pd.DataFrame({"key": ["a", "a", "b"]})) == 1
+        assert index.add_frame(pd.DataFrame({"key": ["b"]})) == 1
+
+
 def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
     tmp_path: Path,
 ) -> None:

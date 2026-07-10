@@ -67,8 +67,9 @@ class ExactPrimaryKeyIndex:
             prefix=f".k-{os.getpid()}-",
             dir=self._scratch_parent,
         )
-        connection = sqlite3.connect(self.database_path)
+        connection: sqlite3.Connection | None = None
         try:
+            connection = sqlite3.connect(self.database_path)
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA temp_store=FILE")
@@ -82,10 +83,12 @@ class ExactPrimaryKeyIndex:
             )
             connection.commit()
         except Exception:
-            connection.close()
+            if connection is not None:
+                connection.close()
             self._temporary_directory.cleanup()
             self._temporary_directory = None
             raise
+        assert connection is not None
         self._connection = connection
         return self
 
@@ -150,11 +153,12 @@ class ExactPrimaryKeyIndex:
         pandas_keys = keys.to_pandas(use_threads=False)
         if bool(pandas_keys.isna().any(axis=None)):
             raise ValueError("dataset_primary_key_null")
-        local_duplicate_count = int(
-            pandas_keys.duplicated(list(self._primary_key)).sum()
-        )
+        local_duplicate_mask = pandas_keys.duplicated(list(self._primary_key))
+        local_duplicate_count = int(local_duplicate_mask.sum())
         if local_duplicate_count:
-            return local_duplicate_count
+            keep_mask = ~local_duplicate_mask
+            keys = keys.filter(pa.array(keep_mask.to_numpy(dtype=bool)))
+            pandas_keys = pandas_keys.loc[keep_mask].reset_index(drop=True)
         before = connection.total_changes
         with connection:
             connection.executemany(
@@ -166,7 +170,7 @@ class ExactPrimaryKeyIndex:
                 ),
             )
         inserted = connection.total_changes - before
-        return int(len(keys) - inserted)
+        return local_duplicate_count + int(len(keys) - inserted)
 
     def difference_counts(
         self,
