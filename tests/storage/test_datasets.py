@@ -485,6 +485,44 @@ def test_physical_batch_size_accounts_for_arrow_to_pandas_expansion(
     assert pandas_bytes <= target_chunk_bytes
 
 
+def test_fixed_width_batch_estimate_uses_parquet_leaf_paths(tmp_path: Path) -> None:
+    path = tmp_path / "nested-before-fixed-width.parquet"
+    row_count = 10_000
+    table = pa.table(
+        {
+            "metadata": pa.StructArray.from_arrays(
+                (
+                    pa.array([True] * row_count),
+                    pa.array([False] * row_count),
+                ),
+                names=("first", "second"),
+            ),
+            "payload": pa.array(
+                [b"x" * 1024] * row_count,
+                type=pa.binary(1024),
+            ),
+        }
+    )
+    pq.write_table(table, path, compression="zstd")
+    parquet_file = pq.ParquetFile(path)
+    target_chunk_bytes = 64 * 1024
+
+    batch_rows = dataset_reading._target_batch_rows(
+        parquet_file,
+        columns=("payload",),
+        target_chunk_bytes=target_chunk_bytes,
+    )
+    batch = next(
+        parquet_file.iter_batches(
+            batch_size=batch_rows,
+            columns=["payload"],
+            use_threads=False,
+        )
+    )
+
+    assert batch.nbytes <= target_chunk_bytes // 4
+
+
 def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
     tmp_path: Path,
 ) -> None:

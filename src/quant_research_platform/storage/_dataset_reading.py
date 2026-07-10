@@ -398,13 +398,16 @@ def _target_batch_rows(
     target_chunk_bytes: int,
 ) -> int:
     selected_fields = tuple(parquet_file.schema_arrow.field(name) for name in columns)
-    if any(_is_variable_width(field.type) for field in selected_fields):
+    fixed_row_bytes = tuple(
+        _fixed_width_arrow_row_bytes(field.type) for field in selected_fields
+    )
+    if any(value is None for value in fixed_row_bytes):
         return 1
-    column_positions = {
-        name: index for index, name in enumerate(parquet_file.schema_arrow.names)
-    }
-    selected_positions = [column_positions[column] for column in columns]
-    maximum_row_bytes = 1
+    selected_positions = _projected_parquet_leaf_positions(
+        parquet_file,
+        columns,
+    )
+    maximum_row_bytes = max(1, sum(value or 0 for value in fixed_row_bytes))
     metadata = parquet_file.metadata
     for row_group_index in range(metadata.num_row_groups):
         row_group = metadata.row_group(row_group_index)
@@ -422,6 +425,26 @@ def _target_batch_rows(
     conservative_row_bytes = maximum_row_bytes * _PARQUET_TO_PANDAS_EXPANSION_FACTOR
     arrow_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
     return max(1, arrow_budget // conservative_row_bytes)
+
+
+def _projected_parquet_leaf_positions(
+    parquet_file: pq.ParquetFile,
+    columns: tuple[str, ...],
+) -> tuple[int, ...]:
+    positions: list[int] = []
+    for column in columns:
+        matches = [
+            index
+            for index in range(parquet_file.metadata.num_columns)
+            if (
+                parquet_file.schema.column(index).path == column
+                or parquet_file.schema.column(index).path.startswith(f"{column}.")
+            )
+        ]
+        if not matches:
+            raise ValueError("dataset_column_not_found")
+        positions.extend(matches)
+    return tuple(positions)
 
 
 def _iter_filtered_arrow_batches(
@@ -601,16 +624,29 @@ def _empty_frame(
 
 
 def _is_variable_width(data_type: pa.DataType) -> bool:
-    return bool(
-        pa.types.is_string(data_type)
-        or pa.types.is_large_string(data_type)
-        or pa.types.is_binary(data_type)
-        or pa.types.is_large_binary(data_type)
-        or pa.types.is_dictionary(data_type)
-        or pa.types.is_list(data_type)
-        or pa.types.is_large_list(data_type)
-        or pa.types.is_struct(data_type)
-    )
+    return _fixed_width_arrow_row_bytes(data_type) is None
+
+
+def _fixed_width_arrow_row_bytes(data_type: pa.DataType) -> int | None:
+    if pa.types.is_null(data_type):
+        return 1
+    if pa.types.is_boolean(data_type):
+        return 1
+    if pa.types.is_fixed_size_binary(data_type):
+        return int(data_type.byte_width)
+    if pa.types.is_decimal(data_type):
+        return max(1, int(data_type.bit_width) // 8)
+    if (
+        pa.types.is_signed_integer(data_type)
+        or pa.types.is_unsigned_integer(data_type)
+        or pa.types.is_floating(data_type)
+        or pa.types.is_date(data_type)
+        or pa.types.is_time(data_type)
+        or pa.types.is_timestamp(data_type)
+        or pa.types.is_duration(data_type)
+    ):
+        return max(1, int(data_type.bit_width) // 8)
+    return None
 
 
 def _arrow_batch_to_bounded_pandas(
