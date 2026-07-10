@@ -10,6 +10,9 @@ from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.markets.implementations.crypto.ids import (
+    canonical_crypto_asset_id,
+)
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_resources,
     materialization_validation,
@@ -98,39 +101,85 @@ def _iter_panel_chunks(
         source_id,
         source_ids.depth_levels_source_data_id(spec),
     )
-    bar_context = build_dataset_read_context(
+    bar_asset_context = build_dataset_read_context(
         bar_root,
-        columns=None,
+        columns=("source_asset_id",),
         time_window=time_window,
     )
-    for bars in iter_dataset_chunks(
-        bar_context,
+    source_assets = _canonical_source_assets(
+        bar_asset_context,
         target_chunk_bytes=chunk_target_bytes,
+        target_state_bytes=budget.carry_bytes,
+    )
+    for source_asset_id in source_assets:
+        bar_context = build_dataset_read_context(
+            bar_root,
+            columns=None,
+            time_window=time_window,
+            row_filters=(("source_asset_id", "==", source_asset_id),),
+        )
+        for bars in iter_dataset_chunks(
+            bar_context,
+            target_chunk_bytes=chunk_target_bytes,
+        ):
+            if bars.empty:
+                continue
+            _validate_matching_bar_keys(bars)
+            prepared_bars = panels._prepare_panel_bars(bars)
+            trade_aggregates = _read_trade_aggregates(
+                trade_root,
+                prepared_bars,
+                target_chunk_bytes=chunk_target_bytes,
+                target_state_bytes=budget.reducer_state_bytes,
+                target_output_bytes=budget.output_bytes,
+            )
+            quote_snapshots = _read_quote_snapshots(
+                depth_root,
+                prepared_bars,
+                target_chunk_bytes=chunk_target_bytes,
+                target_state_bytes=budget.reducer_state_bytes,
+                target_output_bytes=budget.output_bytes,
+            )
+            yield panels._calculate_market_panel(
+                prepared_bars,
+                trade_aggregates=trade_aggregates,
+                quote_snapshots=quote_snapshots,
+                max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
+            ).loc[:, spec.required_columns]
+
+
+def _canonical_source_assets(
+    context,
+    *,
+    target_chunk_bytes: int,
+    target_state_bytes: int,
+) -> tuple[str, ...]:
+    source_by_canonical: dict[str, str] = {}
+    for chunk in iter_dataset_chunks(
+        context,
+        target_chunk_bytes=target_chunk_bytes,
     ):
-        if bars.empty:
+        if chunk.empty:
             continue
-        _validate_matching_bar_keys(bars)
-        prepared_bars = panels._prepare_panel_bars(bars)
-        trade_aggregates = _read_trade_aggregates(
-            trade_root,
-            prepared_bars,
-            target_chunk_bytes=chunk_target_bytes,
-            target_state_bytes=budget.reducer_state_bytes,
-            target_output_bytes=budget.output_bytes,
+        for source_asset_id in _strict_source_asset_ids(
+            chunk,
+            error="invalid_crypto_matching_bar_source_asset_id",
+        ).unique():
+            source_value = str(source_asset_id)
+            canonical = canonical_crypto_asset_id(source_value)
+            existing = source_by_canonical.setdefault(canonical, source_value)
+            if existing != source_value:
+                raise ValueError("duplicate_crypto_canonical_asset_id")
+        state_bytes = sum(
+            256 + 2 * (len(canonical) + len(source))
+            for canonical, source in source_by_canonical.items()
         )
-        quote_snapshots = _read_quote_snapshots(
-            depth_root,
-            prepared_bars,
-            target_chunk_bytes=chunk_target_bytes,
-            target_state_bytes=budget.reducer_state_bytes,
-            target_output_bytes=budget.output_bytes,
-        )
-        yield panels._calculate_market_panel(
-            prepared_bars,
-            trade_aggregates=trade_aggregates,
-            quote_snapshots=quote_snapshots,
-            max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
-        ).loc[:, spec.required_columns]
+        if state_bytes > target_state_bytes:
+            raise ValueError("crypto_panel_asset_index_exceeds_resource_budget")
+    return tuple(
+        source_by_canonical[canonical]
+        for canonical in sorted(source_by_canonical)
+    )
 
 
 def _read_trade_aggregates(
@@ -266,6 +315,11 @@ def _iter_matching_chunks(
         dataset_root,
         columns=None,
         time_window=time_window,
+        row_filters=(
+            (("source_asset_id", "==", next(iter(asset_ids))),)
+            if len(asset_ids) == 1
+            else ()
+        ),
     )
     for chunk in iter_dataset_chunks(
         context,

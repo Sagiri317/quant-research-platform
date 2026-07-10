@@ -932,7 +932,7 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
         "depth_levels_tick": 0,
     }
     yielded_chunks = {"market_bars_1m": 0}
-    core_windows = {"count": 0}
+    bar_scans = {"asset_discovery": 0, "core": 0}
     real_iterator = materialize_panel.iter_dataset_chunks
 
     def wrapped_iterator(context, *, target_chunk_bytes):
@@ -944,7 +944,10 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
             target_chunk_bytes=target_chunk_bytes,
         )
         if root_name == "market_bars_1m":
-            core_windows["count"] += 1
+            if context.logical_columns == ("source_asset_id",):
+                bar_scans["asset_discovery"] += 1
+                return result
+            bar_scans["core"] += 1
             return _count_yielded_chunks(result, yielded_chunks, root_name)
         return result
 
@@ -962,9 +965,9 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
         ),
     )
 
-    assert call_counts["market_bars_1m"] == 1
+    assert call_counts["market_bars_1m"] == 3
+    assert bar_scans == {"asset_discovery": 1, "core": 2}
     assert yielded_chunks["market_bars_1m"] > 1
-    assert core_windows["count"] == 1
     assert call_counts["aggregate_trades_tick"] == yielded_chunks["market_bars_1m"]
     assert call_counts["depth_levels_tick"] == yielded_chunks["market_bars_1m"]
 
@@ -1576,6 +1579,103 @@ def test_crypto_processed_chunk_boundaries_match_full_frame_calculations(
     pd.testing.assert_frame_equal(
         labels.reset_index(drop=True),
         expected_labels.reset_index(drop=True),
+    )
+
+
+def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = processed_catalog().get("market_panel_1m")
+    timestamps = pd.to_datetime(["2026-07-06 00:00"])
+    bar_chunks = (
+        pd.DataFrame({"source_asset_id": ["ETHFIUSDT"], "timestamp": timestamps}),
+        pd.DataFrame({"source_asset_id": ["ETHUSDT"], "timestamp": timestamps}),
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_read_context",
+        lambda *_args, **kwargs: kwargs,
+    )
+
+    def iter_bars(context, **_kwargs):
+        filters = context.get("row_filters", ())
+        if not filters:
+            return iter(tuple(chunk.copy() for chunk in bar_chunks))
+        source_asset_id = str(filters[0][2])
+        return iter(
+            tuple(
+                chunk.loc[chunk["source_asset_id"].eq(source_asset_id)].copy()
+                for chunk in bar_chunks
+                if chunk["source_asset_id"].eq(source_asset_id).any()
+            )
+        )
+
+    monkeypatch.setattr(
+        materialize_panel,
+        "iter_dataset_chunks",
+        iter_bars,
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "_validate_matching_bar_keys",
+        lambda _x: None,
+    )
+
+    def prepare(bars: pd.DataFrame) -> pd.DataFrame:
+        asset_id = {
+            "ETHFIUSDT": "ethfi_usdt",
+            "ETHUSDT": "eth_usdt",
+        }[str(bars.loc[0, "source_asset_id"])]
+        output = pd.DataFrame(
+            {
+                "market_id": ["crypto"],
+                "asset_id": [asset_id],
+                "timestamp": bars["timestamp"].reset_index(drop=True),
+            }
+        )
+        for column in spec.required_columns:
+            if column not in output:
+                output[column] = 1.0
+        return output
+
+    monkeypatch.setattr(materialize_panel.panels, "_prepare_panel_bars", prepare)
+    monkeypatch.setattr(
+        materialize_panel,
+        "_read_trade_aggregates",
+        lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "_read_quote_snapshots",
+        lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        materialize_panel.panels,
+        "_calculate_market_panel",
+        lambda panel, **_kwargs: panel.sort_values(
+            ["market_id", "asset_id", "timestamp"], kind="mergesort"
+        ).reset_index(drop=True),
+    )
+
+    chunks = list(
+        materialize_panel._iter_panel_chunks(
+            spec,
+            layout=StorageLayout(project_root=tmp_path),
+            source_id=SourceId("binance"),
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        )
+    )
+    keys = pd.concat(chunks, ignore_index=True).loc[
+        :, ["market_id", "asset_id", "timestamp"]
+    ]
+
+    pd.testing.assert_frame_equal(
+        keys,
+        keys.sort_values(
+            ["market_id", "asset_id", "timestamp"], kind="mergesort"
+        ).reset_index(drop=True),
     )
 
 
