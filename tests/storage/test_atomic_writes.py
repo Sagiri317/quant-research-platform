@@ -40,11 +40,12 @@ def test_atomic_write_directory_retries_transient_permission_error(
     final_root = tmp_path / "outputs" / "local" / "a_share" / "bundle"
     original_rename = Path.rename
     calls = 0
+    scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
 
     def flaky_rename(self: Path, target: Path) -> Path:
         nonlocal calls
         if (
-            self.name.startswith(".bundle.tmp-")
+            self.name.startswith(scratch_prefix)
             and Path(target) == final_root
             and calls == 0
         ):
@@ -68,8 +69,9 @@ def test_atomic_write_directory_does_not_clean_unclaimed_collision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     final_root = tmp_path / "bundle"
+    scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
     live_temp = final_root.with_name(
-        owned_scratch_name(".bundle.tmp-", "c" * 12)
+        owned_scratch_name(scratch_prefix, "c" * 12)
     )
     live_temp.mkdir()
     (live_temp / "live.txt").write_text("live\n", encoding="utf-8")
@@ -86,7 +88,8 @@ def test_atomic_write_directory_recovers_dead_owner_when_final_exists(
 ) -> None:
     final_root = tmp_path / "bundle"
     final_root.mkdir()
-    stale = final_root.with_name(".bundle.tmp-deadbeef")
+    scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
+    stale = final_root.with_name(f"{scratch_prefix}deadbeef")
     stale.mkdir()
     (stale / "partial.bin").write_bytes(b"partial")
 

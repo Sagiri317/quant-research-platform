@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -77,7 +78,7 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
 def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
     final_root = Path(root)
     final_root.parent.mkdir(parents=True, exist_ok=True)
-    scratch_prefix = f".{final_root.name}.tmp-"
+    scratch_prefix = _atomic_directory_scratch_prefix(final_root)
     _cleanup_stale_atomic_directories(final_root, prefix=scratch_prefix)
     reject_if_exists(final_root)
     temp_root = final_root.with_name(
@@ -108,6 +109,11 @@ def _cleanup_stale_atomic_directories(
         if scratch_owner_is_alive(temp_root, prefix=prefix):
             continue
         _remove_path(temp_root)
+
+
+def _atomic_directory_scratch_prefix(final_root: Path) -> str:
+    target_digest = hashlib.sha256(final_root.name.encode("utf-8")).hexdigest()[:8]
+    return f".atomic-{target_digest}-"
 
 
 def _temp_sibling(path: Path) -> Path:
