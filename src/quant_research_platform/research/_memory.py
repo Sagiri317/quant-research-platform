@@ -7,6 +7,7 @@ from math import ceil
 
 import pandas as pd
 
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
     ResourceChunkPlanner,
@@ -30,9 +31,9 @@ def iter_time_sized_frames(
         yield frame
         return
 
-    timestamps = pd.to_datetime(frame[timestamp_column], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("invalid_time_chunk_timestamp_values")
+    timestamps = strict_timestamp_series(
+        frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
+    )
 
     sessions = pd.Index(timestamps.dropna().unique()).sort_values()
     if len(sessions) <= 1:
@@ -139,10 +140,9 @@ def _validated_time_chunk_timestamps(
     *,
     timestamp_column: str,
 ) -> pd.Series:
-    timestamps = pd.to_datetime(frame[timestamp_column], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("invalid_time_chunk_timestamp_values")
-    return timestamps
+    return strict_timestamp_series(
+        frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
+    )
 
 
 def _concat_time_boundary_frames(

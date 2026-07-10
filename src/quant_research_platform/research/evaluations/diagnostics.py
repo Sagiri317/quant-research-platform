@@ -20,6 +20,7 @@ from quant_research_platform.contracts.evaluations import (
     strict_non_negative_count_series,
     strict_non_negative_count_value,
 )
+from quant_research_platform.contracts.validation import strict_timestamp_series
 
 
 def summarize_signal_label_coverage(
@@ -41,9 +42,9 @@ def summarize_signal_label_coverage(
     missing = sorted({timestamp_column, "n_obs"}.difference(metrics.columns))
     if missing:
         raise ValueError(f"missing_evaluation_metric_columns: {', '.join(missing)}")
-    timestamps = pd.to_datetime(metrics[timestamp_column], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("invalid_evaluation_timestamp_values")
+    timestamps = strict_timestamp_series(
+        metrics[timestamp_column], error="invalid_evaluation_timestamp_values"
+    )
     n_obs = strict_non_negative_count_series(metrics["n_obs"])
     return {
         "metric_rows": int(len(metrics)),

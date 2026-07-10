@@ -23,6 +23,7 @@ from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
 )
+from quant_research_platform.contracts.validation import strict_timestamp_series
 
 EVALUATION_METRICS_COLUMNS = ("timestamp", "signal", "label", "ic", "rankic", "n_obs")
 EVALUATION_GROUPED_LABEL_VALUE_COLUMNS = (
@@ -94,9 +95,9 @@ def validate_evaluation_diagnostics_consistency(
         definition=evaluation_diagnostics.filter_definition,
         error_name="evaluation_diagnostics_inconsistent",
     )
-    timestamps = pd.to_datetime(metrics["timestamp"], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("evaluation_diagnostics_inconsistent")
+    timestamps = strict_timestamp_series(
+        metrics["timestamp"], error="evaluation_diagnostics_inconsistent"
+    )
     expected_timestamp_count = int(timestamps.nunique()) if not timestamps.empty else 0
     expected_min_timestamp = (
         pd.Timestamp(timestamps.min()).date().isoformat()

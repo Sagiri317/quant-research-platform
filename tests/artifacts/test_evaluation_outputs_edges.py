@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import replace
+from datetime import timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts import outputs
+from quant_research_platform.artifacts import (
+    _evaluation_output_validation as evaluation_output_validation,
+)
+from quant_research_platform.artifacts import (
+    outputs,
+)
 from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
@@ -104,7 +112,6 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
             output_spec=report_spec,
             layout=layout,
         )
-
     bad_filter_mode = replace(
         make_output_edge_evaluation_diagnostics(),
         filter_mode="unfiltered",
@@ -175,6 +182,52 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
             spec=spec,
             output_spec=report_spec,
             layout=layout,
+        )
+
+
+def test_evaluation_diagnostics_accept_equivalent_timezone_representations() -> None:
+    metrics = pd.concat(
+        [
+            make_artifact_evaluation_metrics_frame().assign(
+                timestamp=pd.Timestamp(
+                    "2024-01-02T12:00:00",
+                    tz=timezone(timedelta(hours=1)),
+                ),
+                n_obs=1,
+            ),
+            make_artifact_evaluation_metrics_frame().assign(
+                timestamp=pd.Timestamp(
+                    "2024-01-02T12:01:00",
+                    tz=ZoneInfo("Europe/Paris"),
+                ),
+                n_obs=1,
+            ),
+        ],
+        ignore_index=True,
+    )
+    spec = EvaluationSpec(
+        run_id="eval_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    diagnostics = replace(
+        make_output_edge_evaluation_diagnostics(),
+        metric_rows=2,
+        timestamp_count=2,
+        skipped_timestamp_count=2,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        evaluation_output_validation.validate_evaluation_diagnostics_consistency(
+            metrics=metrics,
+            grouped_label_values=make_artifact_evaluation_grouped_label_values_frame(),
+            ic_summary=make_artifact_evaluation_ic_summary_frame(),
+            group_spread_summary=make_artifact_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=diagnostics,
+            spec=spec,
         )
 
 

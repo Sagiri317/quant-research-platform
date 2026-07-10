@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import warnings
+from datetime import timedelta, timezone
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnosticsConfig,
     PortfolioSpec,
 )
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.research.portfolios.runner import _portfolio_read_columns
+from quant_research_platform.research.portfolios import runner as portfolio_runner
 from tests.helpers import frequency_ids
 
 
@@ -33,7 +39,7 @@ def test_portfolio_read_columns_include_diagnostics_config_columns() -> None:
         ),
     )
 
-    assert _portfolio_read_columns(spec) == (
+    assert portfolio_runner._portfolio_read_columns(spec) == (
         "market_id",
         "asset_id",
         "timestamp",
@@ -44,3 +50,29 @@ def test_portfolio_read_columns_include_diagnostics_config_columns() -> None:
         "beta",
         "industry",
     )
+
+
+def test_portfolio_runner_accepts_equivalent_timezone_representations() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp(
+                    "2024-01-15T12:00:00",
+                    tz=timezone(timedelta(hours=1)),
+                ),
+                pd.Timestamp(
+                    "2024-01-15T12:01:00",
+                    tz=ZoneInfo("Europe/Berlin"),
+                ),
+            ]
+        }
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        timestamps = portfolio_runner._timestamp_set(frame)
+
+    assert timestamps == {
+        pd.Timestamp("2024-01-15T11:00:00"),
+        pd.Timestamp("2024-01-15T11:01:00"),
+    }

@@ -17,6 +17,7 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
 )
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.portfolios.engine import (
@@ -224,9 +225,9 @@ def _portfolio_return_summary_records(
     if portfolio_returns.empty:
         return []
     selected = portfolio_returns.loc[:, RETURNS_COLUMNS].copy()
-    selected["timestamp"] = pd.to_datetime(selected["timestamp"], errors="coerce")
-    if bool(selected["timestamp"].isna().any()):
-        raise ValueError("invalid_portfolio_timestamp_values")
+    selected["timestamp"] = strict_timestamp_series(
+        selected["timestamp"], error="invalid_portfolio_timestamp_values"
+    )
     return selected.sort_values(["signal", "timestamp"], kind="mergesort").to_dict(
         "records"
     )
@@ -240,9 +241,9 @@ def _update_position_period_summary(
     if positions.empty:
         return
     frame = positions.loc[:, POSITION_COLUMNS].copy()
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
-    if bool(frame["timestamp"].isna().any()):
-        raise ValueError("invalid_portfolio_timestamp_values")
+    frame["timestamp"] = strict_timestamp_series(
+        frame["timestamp"], error="invalid_portfolio_timestamp_values"
+    )
     frame["position"] = pd.to_numeric(frame["position"], errors="coerce").fillna(0.0)
     frame["abs_position"] = frame["position"].abs()
     for (signal, _timestamp), group in frame.groupby(
@@ -305,7 +306,9 @@ def _portfolio_returns_summary_frame(
     if not records:
         return _empty_summary_frame(RETURNS_COLUMNS)
     frame = pd.DataFrame.from_records(records, columns=RETURNS_COLUMNS)
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    frame["timestamp"] = strict_timestamp_series(
+        frame["timestamp"], error="invalid_portfolio_timestamp_values"
+    )
     return frame.sort_values(["signal", "timestamp"], kind="mergesort").reset_index(
         drop=True
     )
@@ -428,9 +431,9 @@ def _combine_context_and_chunk(
 
 
 def _timestamp_set(frame: pd.DataFrame) -> set[pd.Timestamp]:
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("invalid_portfolio_timestamp_values")
+    timestamps = strict_timestamp_series(
+        frame["timestamp"], error="invalid_portfolio_timestamp_values"
+    )
     return set(pd.Index(timestamps).unique())
 
 
@@ -440,16 +443,16 @@ def _select_actual_timestamps(
 ) -> pd.DataFrame:
     if frame.empty:
         return frame.copy()
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("invalid_portfolio_timestamp_values")
+    timestamps = strict_timestamp_series(
+        frame["timestamp"], error="invalid_portfolio_timestamp_values"
+    )
     return frame.loc[timestamps.isin(actual_timestamps)].copy()
 
 
 def _trailing_timestamp_context(frame: pd.DataFrame, *, periods: int) -> pd.DataFrame:
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("invalid_portfolio_timestamp_values")
+    timestamps = strict_timestamp_series(
+        frame["timestamp"], error="invalid_portfolio_timestamp_values"
+    )
     trailing = pd.Index(timestamps.unique()).sort_values().tolist()[-periods:]
     return frame.loc[timestamps.isin(trailing)].copy()
 

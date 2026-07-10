@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -150,6 +151,75 @@ def test_strict_timestamp_series_rejects_dst_mixed_offsets() -> None:
                 values,
                 error="invalid_contract_timestamp",
             )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [
+            pd.Timestamp("2024-01-15T12:00:00", tz=timezone(timedelta(hours=1))),
+            pd.Timestamp("2024-01-15T12:00:00", tz=ZoneInfo("Europe/Paris")),
+        ],
+        [
+            pd.Timestamp("2024-01-15T12:00:00", tz=ZoneInfo("Europe/Paris")),
+            pd.Timestamp("2024-01-15T12:00:00", tz=ZoneInfo("Europe/Berlin")),
+        ],
+        [
+            pd.Timestamp("2024-01-15T12:00:00", tz=timezone(timedelta(hours=-5))),
+            pd.Timestamp("2024-01-15T12:00:00", tz=ZoneInfo("America/New_York")),
+        ],
+    ],
+    ids=["fixed-paris", "paris-berlin", "fixed-new-york"],
+)
+def test_strict_timestamp_series_accepts_equivalent_timezone_representations(
+    values: list[pd.Timestamp],
+) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = validation.strict_timestamp_series(
+            pd.Series(values, index=["first", "second"]),
+            error="invalid_contract_timestamp",
+        )
+
+    assert result.index.tolist() == ["first", "second"]
+    assert result.dtype == "datetime64[ns]"
+    assert result.dt.tz is None
+    assert result.iloc[0] == result.iloc[1]
+
+
+def test_strict_timestamp_series_falls_back_when_vectorized_parse_loses_value(
+    monkeypatch,
+) -> None:
+    values = pd.Series(
+        ["2024-01-01T00:00:00", "2024-01-02T00:00:00"],
+        index=["first", "second"],
+    )
+    original_to_datetime = validation.pd.to_datetime
+    calls: list[object] = []
+
+    def lossy_vectorized_parse(values, *args, **kwargs):
+        calls.append(values)
+        if len(calls) == 1:
+            return pd.Series(
+                [pd.NaT, pd.Timestamp("2024-01-02T00:00:00")],
+                index=values.index,
+            )
+        return original_to_datetime(values, *args, **kwargs)
+
+    monkeypatch.setattr(validation.pd, "to_datetime", lossy_vectorized_parse)
+
+    result = validation.strict_timestamp_series(
+        values,
+        error="invalid_contract_timestamp",
+    )
+
+    assert len(calls) == 3
+    assert isinstance(calls[0], pd.Series)
+    assert result.index.tolist() == ["first", "second"]
+    assert result.tolist() == [
+        pd.Timestamp("2024-01-01T00:00:00"),
+        pd.Timestamp("2024-01-02T00:00:00"),
+    ]
 
 
 @pytest.mark.parametrize(

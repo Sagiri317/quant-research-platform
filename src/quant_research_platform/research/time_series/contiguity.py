@@ -6,6 +6,8 @@ from collections.abc import Hashable, Iterable, Mapping, Sequence
 
 import pandas as pd
 
+from quant_research_platform.contracts.validation import strict_timestamp_series
+
 
 def contiguous_segment_ids(
     frame: pd.DataFrame,
@@ -27,7 +29,9 @@ def contiguous_segment_ids(
     work = frame.loc[:, [*group_columns, timestamp_column]].copy()
     _validate_group_key_frame(work, group_columns)
     work["_qrp_original_position"] = range(len(frame))
-    work[timestamp_column] = _strict_timestamps(work[timestamp_column])
+    work[timestamp_column] = strict_timestamp_series(
+        work[timestamp_column], error="invalid_grouped_timestamp_values"
+    )
     work = work.sort_values(
         [*group_columns, timestamp_column, "_qrp_original_position"],
         kind="mergesort",
@@ -64,7 +68,9 @@ def iter_grouped_timestamps(
             raise ValueError("panel_key_columns_missing")
         keys = panel_keys.loc[:, [*group_columns, timestamp_column]].copy()
         _validate_group_key_frame(keys, group_columns)
-        keys[timestamp_column] = _strict_timestamps(keys[timestamp_column])
+        keys[timestamp_column] = strict_timestamp_series(
+            keys[timestamp_column], error="invalid_grouped_timestamp_values"
+        )
         if keys.empty:
             return
         keys = keys.sort_values([*group_columns, timestamp_column], kind="mergesort")
@@ -75,17 +81,12 @@ def iter_grouped_timestamps(
         _validate_mapping_group_key(key)
         if timestamps is None:
             raise ValueError("invalid_grouped_timestamp_values")
-        dates = pd.Series(_strict_timestamps(pd.Series(tuple(timestamps))))
+        dates = strict_timestamp_series(
+            pd.Series(tuple(timestamps)), error="invalid_grouped_timestamp_values"
+        )
         dates = dates.sort_values(kind="mergesort").reset_index(drop=True)
         if not dates.empty:
             yield dates
-
-
-def _strict_timestamps(values: pd.Series) -> pd.Series:
-    timestamps = pd.to_datetime(values, errors="coerce")
-    if timestamps.isna().any():
-        raise ValueError("invalid_grouped_timestamp_values")
-    return timestamps
 
 
 def _strict_expected_interval(expected_interval: object) -> pd.Timedelta:

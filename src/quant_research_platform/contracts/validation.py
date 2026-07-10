@@ -77,7 +77,11 @@ def strict_timestamp_series(
         )
     invalid = parsed.isna() & ~(null_mask & allow_null)
     if bool(invalid.any()):
-        raise ValueError(error)
+        return _strict_timestamp_series_fallback(
+            series,
+            null_mask=null_mask,
+            error=error,
+        )
     if isinstance(parsed.dtype, pd.DatetimeTZDtype):
         local_naive = parsed.dt.tz_localize(None)
         utc_naive = parsed.dt.tz_convert("UTC").dt.tz_localize(None)

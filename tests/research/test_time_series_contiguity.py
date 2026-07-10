@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import warnings
+from datetime import timedelta, timezone
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import pytest
 
@@ -140,6 +144,33 @@ def test_iter_grouped_timestamps_rejects_invalid_timestamp_values() -> None:
 
     with pytest.raises(ValueError, match="invalid_grouped_timestamp_values"):
         tuple(iter_grouped_timestamps(frame))
+
+
+def test_iter_grouped_timestamps_accepts_equivalent_timezone_representations() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["asset", "asset"],
+            "timestamp": [
+                pd.Timestamp(
+                    "2024-01-15T12:00:00",
+                    tz=timezone(timedelta(hours=1)),
+                ),
+                pd.Timestamp(
+                    "2024-01-15T12:01:00",
+                    tz=ZoneInfo("Europe/Paris"),
+                ),
+            ],
+        }
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        (timestamps,) = tuple(iter_grouped_timestamps(frame))
+
+    assert timestamps.tolist() == [
+        pd.Timestamp("2024-01-15T11:00:00"),
+        pd.Timestamp("2024-01-15T11:01:00"),
+    ]
 
 
 @pytest.mark.parametrize("asset_id", [None, pd.NA, [], {}, set()])

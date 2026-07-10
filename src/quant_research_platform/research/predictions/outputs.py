@@ -13,6 +13,7 @@ from quant_research_platform.contracts.filtering import (
     required_filter_columns,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.prediction import (
@@ -100,9 +101,9 @@ class _PredictionBuildState:
     def record_prediction_output(self, output: pd.DataFrame) -> None:
         if output.empty:
             return
-        timestamps = pd.to_datetime(output["timestamp"], errors="coerce")
-        if bool(timestamps.isna().any()):
-            raise ValueError("invalid_prediction_timestamp_values")
+        timestamps = strict_timestamp_series(
+            output["timestamp"], error="invalid_prediction_timestamp_values"
+        )
         current_end = date_string(timestamps.max())
         if self.effective_test_end is None or pd.Timestamp(current_end) > pd.Timestamp(
             self.effective_test_end
@@ -252,9 +253,9 @@ def validate_prediction_outputs(frame: pd.DataFrame, spec: PredictionSpec) -> No
         raise ValueError("unregistered_prediction_output_columns: " + ", ".join(extra))
     if frame.empty:
         raise ValueError("empty_prediction_window")
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("invalid_prediction_timestamp_values")
+    timestamps = strict_timestamp_series(
+        frame["timestamp"], error="invalid_prediction_timestamp_values"
+    )
     if bool((timestamps < pd.Timestamp(spec.test_start)).any()):
         raise ValueError("prediction_output_before_test_start")
     if spec.test_end is not None and bool(

@@ -15,6 +15,7 @@ from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
 )
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research.datasets import validate_prediction_input
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.filtering import apply_filter_mode
@@ -369,10 +370,9 @@ def _prediction_train_chunks(
 def _prediction_timestamps(chunk: pd.DataFrame) -> pd.Series:
     if "timestamp" not in chunk.columns:
         raise ValueError("missing_prediction_columns: timestamp")
-    timestamps = pd.to_datetime(chunk["timestamp"], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("invalid_prediction_timestamp_values")
-    return timestamps
+    return strict_timestamp_series(
+        chunk["timestamp"], error="invalid_prediction_timestamp_values"
+    )
 
 
 __all__ = [

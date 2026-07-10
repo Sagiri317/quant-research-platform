@@ -16,6 +16,7 @@ from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
     PredictionSpec,
 )
+from quant_research_platform.contracts.validation import strict_timestamp_series
 
 _MODEL_METADATA_BASE_KEYS = frozenset(
     {
@@ -446,9 +447,9 @@ def validate_prediction_metadata_consistency(
     spec: PredictionSpec,
     frame: pd.DataFrame,
 ) -> None:
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("prediction_metadata_inconsistent")
+    timestamps = strict_timestamp_series(
+        frame["timestamp"], error="prediction_metadata_inconsistent"
+    )
     effective_test_end = pd.Timestamp(timestamps.max()).date().isoformat()
     validate_prediction_metadata_consistency_from_summary(
         metadata,

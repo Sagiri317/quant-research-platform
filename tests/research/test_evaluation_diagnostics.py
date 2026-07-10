@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import warnings
+from datetime import timedelta, timezone
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import pytest
 
@@ -48,6 +52,32 @@ def test_summarize_signal_label_coverage_counts_minimum_observation_skips() -> N
     assert summary["min_timestamp"] == "2024-01-02"
     assert summary["max_timestamp"] == "2024-01-03"
     assert summary["skipped_timestamp_count"] == 1
+
+
+def test_summarize_signal_label_coverage_accepts_equivalent_timezones() -> None:
+    metrics = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp(
+                    "2024-01-15T12:00:00",
+                    tz=timezone(timedelta(hours=1)),
+                ),
+                pd.Timestamp(
+                    "2024-01-15T12:00:00",
+                    tz=ZoneInfo("Europe/Paris"),
+                ),
+            ],
+            "n_obs": [2, 2],
+        }
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        summary = summarize_signal_label_coverage(metrics)
+
+    assert summary["timestamp_count"] == 1
+    assert summary["min_timestamp"] == "2024-01-15"
+    assert summary["max_timestamp"] == "2024-01-15"
 
 
 def test_summarize_period_ic_makes_all_nan_behavior_explicit() -> None:

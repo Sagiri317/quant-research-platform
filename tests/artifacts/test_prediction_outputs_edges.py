@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import warnings
+from datetime import timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -461,6 +464,87 @@ def test_prediction_outputs_reject_unparseable_prediction_timestamp(
             spec=spec,
             output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
+        )
+
+
+def test_prediction_outputs_accept_equivalent_timezone_representations(
+    tmp_path: Path,
+) -> None:
+    spec = make_output_edge_prediction_spec()
+    report_spec = make_output_edge_report_spec(
+        "prediction_outputs",
+        spec.prediction_id,
+        "prediction",
+    )
+    original = make_artifact_prediction_output_frame()
+    frame = pd.concat(
+        [original, original.assign(asset_id="asset_b")],
+        ignore_index=True,
+    )
+    frame["timestamp"] = [
+        pd.Timestamp(
+            "2024-01-02T12:00:00",
+            tz=timezone(timedelta(hours=1)),
+        ),
+        pd.Timestamp(
+            "2024-01-02T12:00:00",
+            tz=ZoneInfo("Europe/Paris"),
+        ),
+    ]
+    frame.attrs = original.attrs
+    frame.attrs["prediction_metadata"] = {
+        **original.attrs["prediction_metadata"],
+        "prediction_rows": 2,
+    }
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        outputs.write_prediction_outputs(
+            frame,
+            spec=spec,
+            output_spec=report_spec,
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+
+def test_chunked_prediction_outputs_accept_equivalent_timezone_representations(
+    tmp_path: Path,
+) -> None:
+    spec = make_output_edge_prediction_spec()
+    report_spec = make_output_edge_report_spec(
+        "prediction_outputs",
+        spec.prediction_id,
+        "prediction",
+    )
+    original = make_artifact_prediction_output_frame()
+    chunk = pd.concat(
+        [original, original.assign(asset_id="asset_b")],
+        ignore_index=True,
+    )
+    chunk["timestamp"] = [
+        pd.Timestamp(
+            "2024-01-02T12:00:00",
+            tz=timezone(timedelta(hours=1)),
+        ),
+        pd.Timestamp(
+            "2024-01-02T12:01:00",
+            tz=ZoneInfo("Europe/Paris"),
+        ),
+    ]
+    prediction_metadata = {
+        **original.attrs["prediction_metadata"],
+        "prediction_rows": 2,
+    }
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        outputs.write_prediction_outputs(
+            spec=spec,
+            output_spec=report_spec,
+            layout=StorageLayout(project_root=tmp_path),
+            output_chunks=(chunk,),
+            model_metadata=original.attrs["model_metadata"],
+            prediction_metadata_factory=lambda: prediction_metadata,
         )
 
 

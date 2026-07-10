@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import warnings
+from datetime import timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -19,6 +22,9 @@ from quant_research_platform.research.datasets import assemble_research_dataset
 from quant_research_platform.research.predictions import (
     build_prediction_result_from_frames,
     build_prediction_result_from_research_dataset,
+)
+from quant_research_platform.research.predictions.outputs import (
+    validate_prediction_outputs,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
@@ -503,6 +509,36 @@ def test_prediction_outputs_fail_closed_errors_are_specific() -> None:
             coefficients=np.asarray([0.0, 0.01]),
             input_columns=("factor",),
         )
+
+
+def test_prediction_outputs_accept_equivalent_timezone_representations() -> None:
+    spec = PredictionSpec(
+        prediction_id="pred_equivalent_timezones",
+        model_id="linear_eligible",
+        research_dataset_id="demo_filter",
+        train_end="2024-01-01",
+        test_start="2024-01-02",
+    )
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["asset_a", "asset_b"],
+            "timestamp": [
+                pd.Timestamp(
+                    "2024-01-02T12:00:00",
+                    tz=timezone(timedelta(hours=1)),
+                ),
+                pd.Timestamp(
+                    "2024-01-02T12:00:00",
+                    tz=ZoneInfo("Europe/Paris"),
+                ),
+            ],
+            PREDICTION_SCORE_COLUMN: [0.1, 0.2],
+        }
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        validate_prediction_outputs(frame, spec)
 
     with pytest.raises(
         ValueError,

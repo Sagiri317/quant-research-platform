@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import warnings
+from datetime import timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.catalog.models import ModelCatalog
@@ -10,6 +14,7 @@ from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.research.predictions import runner as prediction_runner
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
 )
@@ -210,6 +215,32 @@ def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
             prediction_catalog=prediction_catalog,
             prediction_id="prediction_demo",
         )
+
+
+def test_prediction_runner_accepts_equivalent_timezone_representations() -> None:
+    chunk = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp(
+                    "2024-01-15T12:00:00",
+                    tz=timezone(timedelta(hours=-5)),
+                ),
+                pd.Timestamp(
+                    "2024-01-15T12:01:00",
+                    tz=ZoneInfo("America/New_York"),
+                ),
+            ]
+        }
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        timestamps = prediction_runner._prediction_timestamps(chunk)
+
+    assert timestamps.tolist() == [
+        pd.Timestamp("2024-01-15T17:00:00"),
+        pd.Timestamp("2024-01-15T17:01:00"),
+    ]
 
 
 def _model_catalog(*models: ModelSpec) -> ModelCatalog:

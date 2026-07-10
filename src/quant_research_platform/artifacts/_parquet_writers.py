@@ -12,6 +12,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.storage.atomic import reject_if_exists
 
 
@@ -48,9 +49,9 @@ def write_parquet_chunks(
             )
             if selected.empty:
                 continue
-            timestamps = pd.to_datetime(selected["timestamp"], errors="coerce")
-            if bool(timestamps.isna().any()):
-                raise ValueError("prediction_metadata_inconsistent")
+            timestamps = strict_timestamp_series(
+                selected["timestamp"], error="prediction_metadata_inconsistent"
+            )
             current_end = pd.Timestamp(timestamps.max()).date().isoformat()
             if effective_test_end is None or pd.Timestamp(current_end) > pd.Timestamp(
                 effective_test_end
