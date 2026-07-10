@@ -40,9 +40,7 @@ from quant_research_platform.storage._dataset_schema import (
 )
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
-    remove_scratch_owner_identity,
     scratch_owner_is_alive,
-    write_scratch_owner_identity,
 )
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 
@@ -270,11 +268,9 @@ def _staged_write_directory(
     )
     try:
         temp_root.mkdir()
-        write_scratch_owner_identity(temp_root)
         writer(temp_root)
         if final_root.exists():
             raise ValueError("dataset_exists")
-        remove_scratch_owner_identity(temp_root)
         temp_root.rename(final_root)
     except Exception:
         _remove_tree(temp_root)

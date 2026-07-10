@@ -7,9 +7,6 @@ from pathlib import Path
 
 import psutil
 
-_CREATE_TIME_SCALE = 1_000
-_OWNER_MARKER = ".owner.start"
-
 
 def owned_scratch_name(prefix: str, unique: str) -> str:
     """Return a compact scratch name bound to this process incarnation."""
@@ -24,24 +21,7 @@ def owned_scratch_prefix(prefix: str) -> str:
 
     if not prefix:
         raise ValueError("invalid_storage_scratch_name")
-    pid, _ = _current_process_identity()
-    return f"{prefix}{_base36(pid)}-"
-
-
-def write_scratch_owner_identity(path: Path) -> None:
-    """Persist the process-incarnation token before scratch receives private data."""
-
-    _, create_time_token = _current_process_identity()
-    (Path(path) / _OWNER_MARKER).write_text(
-        _base36(create_time_token),
-        encoding="ascii",
-    )
-
-
-def remove_scratch_owner_identity(path: Path) -> None:
-    """Remove the owner token before a staged directory is published."""
-
-    (Path(path) / _OWNER_MARKER).unlink()
+    return f"{prefix}{_base36(os.getpid())}-"
 
 
 def scratch_owner_is_alive(path: Path, *, prefix: str) -> bool:
@@ -61,32 +41,14 @@ def scratch_owner_is_alive(path: Path, *, prefix: str) -> bool:
         return False
     try:
         process = psutil.Process(pid)
-        observed_create_time = _create_time_token(process.create_time())
-        try:
-            expected_create_time = int(
-                (Path(path) / _OWNER_MARKER).read_text(encoding="ascii"),
-                36,
-            )
-        except (FileNotFoundError, OSError, UnicodeError, ValueError):
-            return process.is_running()
         return (
-            expected_create_time > 0
-            and process.is_running()
-            and observed_create_time == expected_create_time
+            process.is_running()
+            and Path(path).stat().st_ctime >= float(process.create_time())
         )
-    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+    except (FileNotFoundError, psutil.NoSuchProcess, psutil.ZombieProcess):
         return False
     except psutil.AccessDenied:
         return True
-
-
-def _current_process_identity() -> tuple[int, int]:
-    pid = os.getpid()
-    return pid, _create_time_token(psutil.Process(pid).create_time())
-
-
-def _create_time_token(create_time: float) -> int:
-    return max(1, int(round(float(create_time) * _CREATE_TIME_SCALE)))
 
 
 def _base36(value: int) -> str:

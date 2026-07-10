@@ -19,7 +19,6 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_prefix,
     scratch_owner_is_alive,
-    write_scratch_owner_identity,
 )
 
 
@@ -66,7 +65,6 @@ class ExactPrimaryKeyIndex:
             prefix=owned_scratch_prefix(".k-"),
             dir=self._scratch_parent,
         )
-        write_scratch_owner_identity(Path(self._temporary_directory.name))
         connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(self.database_path)

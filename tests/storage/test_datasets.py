@@ -4,11 +4,13 @@ import importlib
 import importlib.util
 import json
 import math
+import os
 import sys
 from datetime import date, datetime
 from decimal import Decimal
 from inspect import signature
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -866,7 +868,6 @@ def test_exact_key_index_preserves_live_pid_named_sibling(tmp_path: Path) -> Non
     )
     live = tmp_path / ownership.owned_scratch_name(".k-", "concurrent")
     live.mkdir()
-    ownership.write_scratch_owner_identity(live)
 
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
@@ -876,12 +877,14 @@ def test_exact_key_index_preserves_live_pid_named_sibling(tmp_path: Path) -> Non
         assert live.is_dir()
         assert index.add_frame(pd.DataFrame({"key": ["safe"]})) == 0
 
-    ownership.remove_scratch_owner_identity(live)
     live.rmdir()
     assert list(tmp_path.iterdir()) == []
 
 
-def test_exact_key_index_removes_reused_pid_sibling(tmp_path: Path) -> None:
+def test_exact_key_index_removes_reused_pid_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     module = importlib.import_module(
         "quant_research_platform.storage._dataset_key_tracking"
     )
@@ -892,8 +895,16 @@ def test_exact_key_index_removes_reused_pid_sibling(tmp_path: Path) -> None:
     owner_pid = live_name.split("-", 3)[1]
     reused = tmp_path / f".k-{owner_pid}-0-reused"
     reused.mkdir()
-    (reused / ".owner.start").write_text("0", encoding="ascii")
     (reused / "k.sqlite3").write_bytes(b"scratch")
+    live_process = ownership.psutil.Process(os.getpid())
+    monkeypatch.setattr(
+        ownership.psutil,
+        "Process",
+        lambda _pid: SimpleNamespace(
+            create_time=lambda: live_process.create_time() + 60,
+            is_running=lambda: True,
+        ),
+    )
 
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
@@ -946,7 +957,6 @@ def test_dataset_write_does_not_remove_live_concurrent_key_scratch(
     )
     live_scratch = live_stage / ".k-concurrent"
     live_scratch.mkdir(parents=True)
-    ownership.write_scratch_owner_identity(live_stage)
     (live_scratch / "k.sqlite3").write_bytes(b"live")
 
     write_dataset(
@@ -958,7 +968,10 @@ def test_dataset_write_does_not_remove_live_concurrent_key_scratch(
     assert live_scratch.is_dir()
 
 
-def test_dataset_write_removes_reused_pid_staged_scratch(tmp_path: Path) -> None:
+def test_dataset_write_removes_reused_pid_staged_scratch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = make_dataset_artifact_root(tmp_path, "reused_pid_stage")
     ownership = importlib.import_module(
         "quant_research_platform.storage._scratch_ownership"
@@ -971,8 +984,16 @@ def test_dataset_write_removes_reused_pid_staged_scratch(tmp_path: Path) -> None
     reused_stage = root.parent / f".reused_pid_stage.tmp-{owner_pid}-0-reused"
     reused_scratch = reused_stage / ".k-reused"
     reused_scratch.mkdir(parents=True)
-    (reused_stage / ".owner.start").write_text("0", encoding="ascii")
     (reused_scratch / "k.sqlite3").write_bytes(b"scratch")
+    live_process = ownership.psutil.Process(os.getpid())
+    monkeypatch.setattr(
+        ownership.psutil,
+        "Process",
+        lambda _pid: SimpleNamespace(
+            create_time=lambda: live_process.create_time() + 60,
+            is_running=lambda: True,
+        ),
+    )
 
     write_dataset(
         root,
@@ -991,6 +1012,8 @@ def test_storage_scratch_ownership_has_one_process_identity_path() -> None:
 
     assert ".owner.pid" not in key_source
     assert ".owner.pid" not in writer_source
+    assert ".owner.start" not in key_source
+    assert ".owner.start" not in writer_source
 
 
 def test_staged_owner_liveness_check_never_signals_processes() -> None:

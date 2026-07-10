@@ -171,9 +171,9 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
 
     sessions = pd.date_range("2014-01-02", periods=6, freq="B")
     policy = aggregates.RuntimeResourcePolicy(
-        available_memory_bytes=100,
+        available_memory_bytes=250,
         memory_budget_fraction=1.0,
-        chunk_target_bytes=50,
+        chunk_target_bytes=250,
         memory_safety_factor=1.0,
     )
 

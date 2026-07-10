@@ -83,9 +83,8 @@ def read_dataset(
         time_window=time_window,
     )
 
-    chunks = iter_dataset_chunks(context)
     if mode is DatasetReadMode.CHUNKED:
-        return chunks
+        return iter_dataset_chunks(context)
     if mode is not DatasetReadMode.MATERIALIZED:
         raise ValueError("unsupported_dataset_read_mode")
     return materialize_dataset_context(context)
