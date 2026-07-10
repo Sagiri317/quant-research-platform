@@ -50,6 +50,8 @@ src/quant_research_platform/agents
 
 `research/` builds results only and does not write files. `workflows/diagnostics/` reads storage datasets when a report needs schema or validation payloads. `reports/` builds and renders prepared evidence/report content only; it does not read storage datasets. `artifacts/` writes LOCAL_ONLY outputs and REVIEW_SAFE evidence files. `workflows/` only orchestrates research -> diagnostics payload -> reports -> artifacts. `storage/` only owns dataset IO and data layout.
 
+`storage/` also owns the generic dataset instance-metadata schema. `input_dataset_identities` is an exact JSON-safe mapping from input dataset id to that dataset's `spec.json` and `_manifest/manifest.json` hashes. Storage validates this generic shape but does not decide market lineage, dependency coverage, or materialization ordering; those lifecycle semantics remain in the relevant market implementation.
+
 `artifacts/` owns artifact membership validation for generated outputs. Generic
 artifact validation checks DataFrame membership values directly and must not use
 hash-set conversion when untrusted artifact columns may contain unhashable

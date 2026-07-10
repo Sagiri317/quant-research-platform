@@ -4,15 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-import pandas as pd
-
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.ids import SourceId
-from quant_research_platform.contracts.time import (
-    TimeWindow,
-    time_window_timestamp_interval,
-)
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     MARKET_PANEL_DATA_ID,
@@ -23,6 +17,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_dependencies,
+    materialization_validation,
     materialize_factors,
     materialize_labels,
     materialize_panel,
@@ -34,7 +29,6 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     inspect_dataset,
-    read_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -93,6 +87,7 @@ def materialize_processed_data(
             written[data_id] = _inspect_existing_dependency(
                 layout,
                 spec,
+                source_id=source_id,
                 time_window=target_time_window,
             )
             continue
@@ -114,69 +109,29 @@ def _inspect_existing_dependency(
     layout: StorageLayout,
     spec: ProcessedDataSpec,
     *,
+    source_id: SourceId,
     time_window: TimeWindow,
 ) -> DatasetInspection:
-    inspection = inspect_dataset(_processed_root(layout, spec), time_window=time_window)
-    if not _inspection_covers_window(layout, spec, inspection, time_window):
-        raise ValueError("insufficient_crypto_dependency_coverage")
-    return inspection
-
-
-def _inspection_covers_window(
-    layout: StorageLayout,
-    spec: ProcessedDataSpec,
-    inspection: DatasetInspection,
-    time_window: TimeWindow,
-) -> bool:
-    if inspection.row_count <= 0:
-        return False
-    timestamp_columns = [
-        column
-        for column in spec.primary_key
-        if str(column) == "timestamp"
-    ]
-    if len(timestamp_columns) != 1:
-        raise ValueError("time_window_not_supported")
-    timestamp_column = timestamp_columns[0]
-    asset_columns = [column for column in spec.primary_key if str(column) == "asset_id"]
-    read_columns = tuple((*asset_columns, timestamp_column))
-    frame = read_dataset(
-        _processed_root(layout, spec),
-        columns=read_columns,
+    input_inspections = materialization_validation.panel_input_inspections(
+        layout=layout,
+        source_id=source_id,
+        spec=spec,
+    )
+    expected_input_identities = materialization_validation.input_dataset_identities(
+        input_inspections
+    )
+    inspection = inspect_dataset(
+        _processed_root(layout, spec), time_window=time_window
+    )
+    materialization_validation.validate_panel_materialization(
+        inspection,
+        layout=layout,
+        source_id=source_id,
+        spec=spec,
         time_window=time_window,
+        expected_input_identities=expected_input_identities,
     )
-    try:
-        timestamps = strict_timestamp_series(
-            frame[timestamp_column],
-            error="invalid_crypto_dependency_coverage_timestamp",
-        )
-    except ValueError:
-        return False
-    if timestamps.empty:
-        return False
-    start_bound, end_bound, end_inclusive = time_window_timestamp_interval(time_window)
-    required_start = pd.Timestamp(start_bound)
-    required_end = pd.Timestamp(end_bound)
-    if not end_inclusive:
-        required_end = required_end - pd.Timedelta(minutes=1)
-    if required_end < required_start:
-        return False
-    expected_timestamps = set(
-        pd.date_range(required_start, required_end, freq="min")
-    )
-    if not expected_timestamps:
-        return False
-    frame = frame.assign(**{timestamp_column: timestamps})
-    if asset_columns:
-        asset_column = asset_columns[0]
-        if frame[asset_column].isna().any():
-            return False
-        for _, asset_rows in frame.groupby(asset_column, sort=False, dropna=False):
-            observed_timestamps = set(asset_rows[timestamp_column])
-            if not expected_timestamps.issubset(observed_timestamps):
-                return False
-        return True
-    return expected_timestamps.issubset(set(timestamps))
+    return inspection
 
 
 def _include_dependencies(

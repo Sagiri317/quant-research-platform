@@ -21,6 +21,7 @@ from quant_research_platform.markets.implementations.crypto.labels.definitions i
     CRYPTO_FORWARD_RETURN_HORIZONS,
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
+    materialization_validation,
     materialize_factors,
     materialize_labels,
     materialize_panel,
@@ -43,6 +44,7 @@ from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.sources.binance.interim import materialize_interim_data
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
+    inspect_dataset,
     read_dataset,
     write_dataset,
 )
@@ -79,6 +81,21 @@ def test_crypto_processed_materializer_builds_panel_factors_and_labels(
     labels = read_dataset(
         layout.processed_data_root("crypto", ProcessedDataKind.LABEL, "forward_returns")
     )
+    panel_inspection = inspect_dataset(
+        layout.processed_data_root(
+            "crypto", ProcessedDataKind.PANEL, "market_panel_1m"
+        )
+    )
+    factor_inspection = inspect_dataset(
+        layout.processed_data_root(
+            "crypto", ProcessedDataKind.FACTOR, "microstructure"
+        )
+    )
+    label_inspection = inspect_dataset(
+        layout.processed_data_root(
+            "crypto", ProcessedDataKind.LABEL, "forward_returns"
+        )
+    )
 
     assert panel.loc[0, "market_id"] == "crypto"
     assert panel.loc[0, "asset_id"] == "btc_usdt"
@@ -97,6 +114,17 @@ def test_crypto_processed_materializer_builds_panel_factors_and_labels(
     assert {"forward_return_1m", "forward_return_5m", "forward_return_15m"}.issubset(
         set(labels.columns)
     )
+    assert set(panel_inspection.manifest["input_dataset_identities"]) == {
+        "aggregate_trades_tick",
+        "depth_levels_tick",
+        "market_bars_1m",
+    }
+    assert set(factor_inspection.manifest["input_dataset_identities"]) == {
+        "market_panel_1m"
+    }
+    assert set(label_inspection.manifest["input_dataset_identities"]) == {
+        "market_panel_1m"
+    }
 
 
 def test_crypto_processed_materializer_uses_chunked_reads(
@@ -385,16 +413,11 @@ def test_crypto_materializer_reuses_sufficient_existing_panel_dependency(
     monkeypatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    catalog = processed_catalog()
-    panel_spec = catalog.get("market_panel_1m")
-    write_dataset(
-        layout.processed_data_root(
-            "crypto",
-            ProcessedDataKind.PANEL,
-            "market_panel_1m",
-        ),
+    source_id = SourceId("synthetic_crypto")
+    _write_existing_panel_dependency(
+        layout,
+        source_id,
         _panel_frame(minutes=30),
-        spec=panel_spec,
     )
     calls: list[tuple[str, TimeWindow]] = []
 
@@ -410,7 +433,7 @@ def test_crypto_materializer_reuses_sufficient_existing_panel_dependency(
 
     result = materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("synthetic_crypto"),
+        source_id=source_id,
         time_window=TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00"),
         data_ids=("microstructure",),
     )
@@ -421,20 +444,42 @@ def test_crypto_materializer_reuses_sufficient_existing_panel_dependency(
     ]
 
 
+def test_crypto_materializer_rejects_cross_source_panel_dependency_reuse(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    first_source = SourceId("synthetic_crypto_a")
+    second_source = SourceId("synthetic_crypto_b")
+    _write_existing_panel_dependency(
+        layout,
+        first_source,
+        _panel_frame(minutes=30),
+    )
+    _write_synthetic_crypto_interim(layout, second_source, minutes=30)
+
+    with pytest.raises(
+        ValueError,
+        match="crypto_panel_input_dataset_identity_mismatch",
+    ):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=second_source,
+            time_window=TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00"),
+            data_ids=("microstructure",),
+        )
+
+
 def test_crypto_materializer_rejects_insufficient_existing_panel_dependency(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    panel_spec = processed_catalog().get("market_panel_1m")
-    write_dataset(
-        layout.processed_data_root(
-            "crypto",
-            ProcessedDataKind.PANEL,
-            "market_panel_1m",
-        ),
+    source_id = SourceId("synthetic_crypto")
+    _write_existing_panel_dependency(
+        layout,
+        source_id,
         _panel_frame(minutes=12),
-        spec=panel_spec,
+        source_minutes=30,
     )
 
     def fail_panel_write(*_: Any, **__: Any) -> object:
@@ -442,10 +487,10 @@ def test_crypto_materializer_rejects_insufficient_existing_panel_dependency(
 
     monkeypatch.setattr(materialize_panel, "write_panel", fail_panel_write)
 
-    with pytest.raises(ValueError, match="insufficient_crypto_dependency_coverage"):
+    with pytest.raises(ValueError, match="invalid_crypto_panel_key_coverage"):
         materializer.materialize_processed_data(
             layout=layout,
-            source_id=SourceId("synthetic_crypto"),
+            source_id=source_id,
             time_window=TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00"),
             data_ids=("microstructure",),
         )
@@ -456,36 +501,40 @@ def test_crypto_materializer_invalid_dependency_timestamp_is_not_coverage(
     monkeypatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    panel_spec = processed_catalog().get("market_panel_1m")
-    write_dataset(
-        layout.processed_data_root(
-            "crypto",
-            ProcessedDataKind.PANEL,
-            "market_panel_1m",
-        ),
+    source_id = SourceId("synthetic_crypto")
+    _write_existing_panel_dependency(
+        layout,
+        source_id,
         _panel_frame(minutes=30),
-        spec=panel_spec,
     )
+    real_read_dataset = materialization_validation.read_dataset
+
+    def invalid_target_read(dataset_root, **kwargs):
+        if Path(dataset_root).name == "market_panel_1m":
+            return pd.DataFrame(
+                {
+                    "market_id": ["crypto"],
+                    "asset_id": ["btc_usdt"],
+                    "timestamp": ["bad"],
+                }
+            )
+        return real_read_dataset(dataset_root, **kwargs)
+
     monkeypatch.setattr(
-        materializer,
+        materialization_validation,
         "read_dataset",
-        lambda *_args, **_kwargs: pd.DataFrame(
-            {
-                "asset_id": ["crypto:BTCUSDT", "crypto:BTCUSDT"],
-                "timestamp": ["bad", "2026-07-06T00:12:00"],
-            }
-        ),
+        invalid_target_read,
     )
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
         with pytest.raises(
             ValueError,
-            match="insufficient_crypto_dependency_coverage",
+            match="invalid_crypto_panel_key_coverage",
         ):
             materializer.materialize_processed_data(
                 layout=layout,
-                source_id=SourceId("synthetic_crypto"),
+                source_id=source_id,
                 time_window=TimeWindow(
                     "2026-07-06T00:10:00",
                     "2026-07-06T00:12:00",
@@ -499,7 +548,7 @@ def test_crypto_materializer_rejects_panel_dependency_with_middle_minute_gap(
     monkeypatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    panel_spec = processed_catalog().get("market_panel_1m")
+    source_id = SourceId("synthetic_crypto")
     gapped = pd.concat(
         (
             _panel_frame(minutes=1).assign(timestamp=pd.Timestamp("2026-07-06 00:06")),
@@ -507,14 +556,11 @@ def test_crypto_materializer_rejects_panel_dependency_with_middle_minute_gap(
         ),
         ignore_index=True,
     )
-    write_dataset(
-        layout.processed_data_root(
-            "crypto",
-            ProcessedDataKind.PANEL,
-            "market_panel_1m",
-        ),
+    _write_existing_panel_dependency(
+        layout,
+        source_id,
         gapped,
-        spec=panel_spec,
+        source_minutes=30,
     )
 
     def fail_panel_write(*_: Any, **__: Any) -> object:
@@ -522,10 +568,10 @@ def test_crypto_materializer_rejects_panel_dependency_with_middle_minute_gap(
 
     monkeypatch.setattr(materialize_panel, "write_panel", fail_panel_write)
 
-    with pytest.raises(ValueError, match="insufficient_crypto_dependency_coverage"):
+    with pytest.raises(ValueError, match="invalid_crypto_panel_key_coverage"):
         materializer.materialize_processed_data(
             layout=layout,
-            source_id=SourceId("synthetic_crypto"),
+            source_id=source_id,
             time_window=TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:12:00"),
             data_ids=("microstructure",),
         )
@@ -604,6 +650,38 @@ def test_crypto_factor_label_emit_only_core_window(tmp_path: Path) -> None:
     assert labels["timestamp"].tolist() == expected_timestamps
     assert not factors["trade_intensity_5m"].isna().any()
     assert not labels["forward_return_15m"].isna().any()
+    full_panel = _panel_frame(minutes=30)
+    expected_factors = calculate_microstructure_factors(full_panel).loc[
+        lambda frame: frame["timestamp"].between(
+            pd.Timestamp("2026-07-06 00:10:00"),
+            pd.Timestamp("2026-07-06 00:12:00"),
+        ),
+        factor_spec.required_columns,
+    ]
+    expected_labels = add_forward_return_labels(
+        full_panel,
+        horizons=CRYPTO_FORWARD_RETURN_HORIZONS,
+        frequency=DataFrequency.MINUTE,
+        execution_price_column="close",
+        expected_interval=pd.Timedelta(minutes=1),
+        require_contiguous=True,
+    ).loc[
+        lambda frame: frame["timestamp"].between(
+            pd.Timestamp("2026-07-06 00:10:00"),
+            pd.Timestamp("2026-07-06 00:12:00"),
+        ),
+        label_spec.required_columns,
+    ]
+    pd.testing.assert_frame_equal(
+        factors.reset_index(drop=True),
+        expected_factors.reset_index(drop=True),
+        check_dtype=False,
+    )
+    pd.testing.assert_frame_equal(
+        labels.reset_index(drop=True),
+        expected_labels.reset_index(drop=True),
+        check_dtype=False,
+    )
 
 
 @pytest.mark.parametrize("index", [[10, 20, 30], [0, 0, 1]])
@@ -699,6 +777,7 @@ def test_crypto_panel_matching_rejects_invalid_timestamps(
         raise AssertionError(f"unexpected_dataset_root:{root_name}")
 
     monkeypatch.setattr(materialize_panel, "read_dataset", fake_read_dataset)
+    _patch_panel_lifecycle_validation(monkeypatch)
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
@@ -970,6 +1049,31 @@ def _patch_matching_panel_reads(monkeypatch, frames: dict[str, pd.DataFrame]) ->
         raise AssertionError(f"unexpected_dataset_root:{root_name}")
 
     monkeypatch.setattr(materialize_panel, "read_dataset", fake_read_dataset)
+    _patch_panel_lifecycle_validation(monkeypatch)
+
+
+def _patch_panel_lifecycle_validation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        materialization_validation,
+        "panel_input_inspections",
+        lambda **_kwargs: {"synthetic": object()},
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "input_dataset_identities",
+        lambda _inspections: {
+            "synthetic": {
+                "data_id": "synthetic",
+                "manifest_hash": "0" * 64,
+                "spec_hash": "1" * 64,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "validate_panel_materialization",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 def _existing_processed_frame(spec, *, minutes: int) -> pd.DataFrame:
@@ -987,26 +1091,32 @@ def _existing_processed_frame(spec, *, minutes: int) -> pd.DataFrame:
     return pd.DataFrame(values)
 
 
-def _write_synthetic_crypto_interim(layout: StorageLayout, source_id: SourceId) -> None:
+def _write_synthetic_crypto_interim(
+    layout: StorageLayout,
+    source_id: SourceId,
+    *,
+    minutes: int = 1,
+) -> None:
+    timestamps = pd.date_range("2026-07-06 00:00:00", periods=minutes, freq="min")
     write_dataset(
         layout.interim_data_root(source_id, "market_bars_1m"),
         pd.DataFrame(
             {
-                "source_asset_id": ["BTCUSDT"],
-                "timestamp": pd.to_datetime(["2026-07-06 00:00:00"]),
-                "open_time": pd.to_datetime(["2026-07-06 00:00:00"]),
-                "close_time": pd.to_datetime(["2026-07-06 00:00:59.999"]),
-                "open": [100.0],
-                "high": [101.0],
-                "low": [99.0],
-                "close": [100.5],
-                "volume": [10.0],
-                "quote_volume": [1005.0],
-                "trade_count": [1],
-                "taker_buy_volume": [4.0],
-                "taker_buy_quote_volume": [402.0],
-                "source_market_type": ["spot"],
-                "interval": ["1m"],
+                "source_asset_id": ["BTCUSDT"] * minutes,
+                "timestamp": timestamps,
+                "open_time": timestamps,
+                "close_time": timestamps + pd.Timedelta(milliseconds=59_999),
+                "open": [100.0] * minutes,
+                "high": [101.0] * minutes,
+                "low": [99.0] * minutes,
+                "close": [100.5] * minutes,
+                "volume": [10.0] * minutes,
+                "quote_volume": [1005.0] * minutes,
+                "trade_count": [1] * minutes,
+                "taker_buy_volume": [4.0] * minutes,
+                "taker_buy_quote_volume": [402.0] * minutes,
+                "source_market_type": ["spot"] * minutes,
+                "interval": ["1m"] * minutes,
             }
         ),
         spec=_interim_spec(
@@ -1105,6 +1215,38 @@ def _write_synthetic_crypto_interim(layout: StorageLayout, source_id: SourceId) 
             frequency=DataFrequency.TICK,
             grain=DataGrain.ORDER_BOOK_LEVEL,
         ),
+    )
+
+
+def _write_existing_panel_dependency(
+    layout: StorageLayout,
+    source_id: SourceId,
+    panel: pd.DataFrame,
+    *,
+    source_minutes: int | None = None,
+) -> None:
+    _write_synthetic_crypto_interim(
+        layout,
+        source_id,
+        minutes=source_minutes if source_minutes is not None else len(panel),
+    )
+    panel_spec = processed_catalog().get("market_panel_1m")
+    identities = materialization_validation.input_dataset_identities(
+        materialization_validation.panel_input_inspections(
+            layout=layout,
+            source_id=source_id,
+            spec=panel_spec,
+        )
+    )
+    write_dataset(
+        layout.processed_data_root(
+            "crypto",
+            ProcessedDataKind.PANEL,
+            "market_panel_1m",
+        ),
+        panel,
+        spec=panel_spec,
+        instance_metadata={"input_dataset_identities": identities},
     )
 
 

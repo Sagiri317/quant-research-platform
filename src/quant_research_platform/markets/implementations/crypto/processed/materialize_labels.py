@@ -21,6 +21,7 @@ from quant_research_platform.markets.implementations.crypto.labels.definitions i
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_dependencies,
+    materialization_validation,
 )
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
@@ -54,6 +55,9 @@ def write_labels(
         MARKET_PANEL_DATA_ID,
     )
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    input_identities = materialization_validation.input_dataset_identities(
+        materialization_validation.panel_dependency_inspections(layout=layout)
+    )
     write_dataset(
         root,
         _iter_label_chunks(
@@ -62,8 +66,17 @@ def write_labels(
             time_window=time_window,
         ),
         spec=spec,
+        instance_metadata={"input_dataset_identities": input_identities},
     )
-    return inspect_dataset(root, time_window=time_window)
+    inspection = inspect_dataset(root, time_window=time_window)
+    materialization_validation.validate_panel_dependent_materialization(
+        inspection,
+        layout=layout,
+        spec=spec,
+        time_window=time_window,
+        expected_input_identities=input_identities,
+    )
+    return inspection
 
 
 def _iter_label_chunks(
@@ -73,6 +86,7 @@ def _iter_label_chunks(
     time_window: TimeWindow,
 ) -> Iterator[pd.DataFrame]:
     buffer = pd.DataFrame()
+    watermarks: dict[tuple[str, str], pd.Timestamp] = {}
     for panel in read_dataset(
         panel_root,
         time_window=materialization_dependencies.label_read_window(time_window),
@@ -80,6 +94,11 @@ def _iter_label_chunks(
     ):
         if panel.empty:
             continue
+        panel = materialization_validation.validated_ordered_dependency_chunk(
+            panel,
+            watermarks=watermarks,
+            error="out_of_order_crypto_label_dependency",
+        )
         panel = panel.copy()
         panel[_CORE_ROW] = _core_mask(panel, time_window)
         buffer = _ordered_panel(

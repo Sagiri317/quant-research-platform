@@ -21,7 +21,9 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.storage.manifests import require_qrp_json_identity
 
-_DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset({"input_fingerprints"})
+_DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset(
+    {"input_dataset_identities", "input_fingerprints"}
+)
 _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
     {
         "schema_version",
@@ -77,6 +79,9 @@ _DATASET_INPUT_FINGERPRINT_KEYS = frozenset(
 _DATASET_PARTITION_FINGERPRINT_KEYS = frozenset(
     {"partition", "row_count", "content_hash"}
 )
+_DATASET_INPUT_IDENTITY_KEYS = frozenset(
+    {"data_id", "manifest_hash", "spec_hash"}
+)
 
 
 def merge_dataset_instance_metadata(
@@ -98,6 +103,8 @@ def merge_dataset_instance_metadata(
             raise ValueError(f"unsupported_dataset_instance_metadata_key: {key}")
         if key == "input_fingerprints":
             metadata[key] = _validate_input_fingerprints_metadata(value)
+        if key == "input_dataset_identities":
+            metadata[key] = _validate_input_dataset_identities_metadata(value)
     _require_json_serializable(metadata)
     result.update(metadata)
     return result
@@ -121,6 +128,81 @@ def _validate_input_fingerprints_metadata(value: Any) -> dict[str, Any]:
             raise ValueError("invalid_input_fingerprints_metadata")
         fingerprints[data_id] = _validate_input_fingerprint_payload(fingerprint)
     return fingerprints
+
+
+def _validate_input_dataset_identities_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("invalid_input_dataset_identities_metadata")
+    identities: dict[str, Any] = {}
+    for data_id, identity in value.items():
+        if not isinstance(data_id, str) or not data_id:
+            raise ValueError("invalid_input_dataset_identities_metadata")
+        identities[data_id] = _validate_input_dataset_identity_payload(
+            identity,
+            expected_data_id=data_id,
+        )
+    return identities
+
+
+def _validate_input_dataset_identity_payload(
+    value: Any,
+    *,
+    expected_data_id: str,
+) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != _DATASET_INPUT_IDENTITY_KEYS:
+        raise ValueError("invalid_input_dataset_identities_metadata")
+    data_id = value["data_id"]
+    if data_id != expected_data_id:
+        raise ValueError("invalid_input_dataset_identities_metadata")
+    return {
+        "data_id": expected_data_id,
+        "spec_hash": _require_identity_hash(value["spec_hash"]),
+        "manifest_hash": _require_identity_hash(value["manifest_hash"]),
+    }
+
+
+def _require_identity_hash(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value.lower())
+    ):
+        raise ValueError("invalid_input_dataset_identities_metadata")
+    return value.lower()
+
+
+def dataset_identity_payload(
+    spec: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> dict[str, str]:
+    data_id = spec.get("data_id")
+    if not isinstance(data_id, str) or not data_id:
+        raise ValueError("invalid_dataset_identity")
+    return {
+        "data_id": data_id,
+        "spec_hash": sha256_json(spec),
+        "manifest_hash": sha256_json(manifest),
+    }
+
+
+def validate_dataset_manifest_instance_metadata(
+    manifest: Mapping[str, Any],
+) -> None:
+    unknown = set(manifest).difference(
+        _DATASET_MANIFEST_RESERVED_KEYS,
+        _DATASET_INSTANCE_METADATA_ALLOWED_KEYS,
+        {"schema_id"},
+    )
+    if unknown:
+        raise ValueError(
+            "unsupported_dataset_instance_metadata_key: " + ", ".join(sorted(unknown))
+        )
+    if "input_fingerprints" in manifest:
+        _validate_input_fingerprints_metadata(manifest["input_fingerprints"])
+    if "input_dataset_identities" in manifest:
+        _validate_input_dataset_identities_metadata(
+            manifest["input_dataset_identities"]
+        )
 
 
 def _validate_input_fingerprint_payload(value: Any) -> dict[str, Any]:

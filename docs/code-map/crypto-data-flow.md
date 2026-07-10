@@ -24,6 +24,12 @@ factor or label semantics.
 
 `markets/implementations/crypto/processed/` owns crypto market binding and processed semantics. Processed source-input selector 为当前 crypto profile 选择必需的 source-normalized interim input data ids；Binance 是 `crypto_binance_1m` 中当前唯一注册的 source owner。Source-input bridge 要求 expected input ids 精确匹配，missing、duplicate 或 extra ids 都 fail closed。`processed/panels.py` owns pure crypto market-panel calculation, and `processed/materialize_panel.py` only orchestrates IO/chunking. Processed materializers read upstream datasets through `DatasetReadMode.CHUNKED` and use `RuntimeResourcePolicy` to keep the control path chunk-aware.
 
+`processed/materialization_validation.py` owns crypto materialization lifecycle validation. Every panel records immutable identities for its direct interim inputs, and every factor or label records the identity of its direct panel input. Each identity contains only the input dataset id plus hashes of `spec.json` and `_manifest/manifest.json`; it does not read row-level content or call `fingerprint_dataset`. A newly written dependency and a reused dependency pass through the same identity and exact-key validation.
+
+Dependency coverage compares the complete registered primary key. Panel expected keys come from current source bars after canonical crypto asset and market binding; factor and label expected keys come from panel rows in the requested core window. Missing assets, missing intermediate minutes, extra keys, duplicates, or any `market_id` / `asset_id` / `timestamp` mismatch fail closed. Warmup and lookahead rows remain read-only dependencies and are not emitted as core output.
+
+Factor and label streaming readers maintain a timestamp watermark per `(market_id, asset_id)`. Rows may be stably sorted inside one storage chunk, but a later chunk must begin strictly after that key's previous watermark. Reversed, overlapping, or regressing chunks fail before rolling-factor carry or forward-label buffering is updated.
+
 `research/factors/microstructure/` owns generic microstructure factor definitions and dataframe calculations. It does not import crypto market implementation modules and does not write files.
 
 `research/labels/forward_returns.py` owns generic forward-return label calculation. It does not write files.

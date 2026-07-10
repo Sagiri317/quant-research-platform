@@ -54,6 +54,21 @@ def _input_fingerprint_payload(
     return payload
 
 
+def _input_dataset_identity_payload(
+    data_id: str = "demo_input",
+    *,
+    extra: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "data_id": data_id,
+        "spec_hash": "d" * 64,
+        "manifest_hash": "e" * 64,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 def count_candidate_data_file_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     calls = {"count": 0}
     original = dataset_reading.candidate_data_files
@@ -131,6 +146,68 @@ def test_write_dataset_merges_allowed_instance_metadata(tmp_path: Path) -> None:
 
     inspection = inspect_dataset(root)
     assert inspection.manifest["input_fingerprints"] == input_fingerprints
+
+
+def test_write_dataset_merges_exact_input_dataset_identities(tmp_path: Path) -> None:
+    root = make_dataset_artifact_root(tmp_path, "identity_metadata")
+    identities = {"demo_input": _input_dataset_identity_payload()}
+
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("identity_metadata"),
+        instance_metadata={"input_dataset_identities": identities},
+    )
+
+    inspection = inspect_dataset(root)
+    assert inspection.manifest["input_dataset_identities"] == identities
+
+
+@pytest.mark.parametrize(
+    "identities",
+    [
+        [],
+        {"demo_input": _input_dataset_identity_payload(extra={"unexpected": "x"})},
+        {"demo_input": _input_dataset_identity_payload(data_id="other_input")},
+        {"demo_input": _input_dataset_identity_payload(extra={"spec_hash": 1})},
+        {"demo_input": _input_dataset_identity_payload(extra={"manifest_hash": "x"})},
+        {1: _input_dataset_identity_payload()},
+    ],
+)
+def test_write_dataset_rejects_malformed_input_dataset_identities(
+    tmp_path: Path,
+    identities: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_input_dataset_identities_metadata"):
+        write_dataset(
+            make_dataset_artifact_root(tmp_path, "bad_identity_metadata"),
+            make_default_dataset_frame(),
+            spec=make_processed_dataset_spec("bad_identity_metadata"),
+            instance_metadata={"input_dataset_identities": identities},
+        )
+
+
+def test_inspect_dataset_rejects_tampered_input_dataset_identity(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "tampered_identity_metadata")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("tampered_identity_metadata"),
+        instance_metadata={
+            "input_dataset_identities": {
+                "demo_input": _input_dataset_identity_payload()
+            }
+        },
+    )
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["input_dataset_identities"]["demo_input"]["unknown"] = "x"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid_input_dataset_identities_metadata"):
+        inspect_dataset(root)
 
 
 def test_write_dataset_rejects_malformed_input_fingerprints_metadata(

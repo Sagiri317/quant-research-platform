@@ -27,6 +27,7 @@ from quant_research_platform.storage._dataset_paths import (
 )
 from quant_research_platform.storage._dataset_schema import (
     sha256_json,
+    validate_dataset_manifest_instance_metadata,
     validated_schema,
 )
 from quant_research_platform.storage._dataset_types import (
@@ -103,6 +104,7 @@ def build_dataset_read_context(
         expected_schema_id="qrp-dataset-manifest",
         error="dataset_manifest_schema_id_invalid",
     )
+    validate_dataset_manifest_instance_metadata(manifest)
     if not manifest_has_runtime_metadata(manifest):
         raise ValueError("manifest_runtime_metadata_missing")
     all_paths = tuple(candidate_data_files(data_root, spec=spec_payload))

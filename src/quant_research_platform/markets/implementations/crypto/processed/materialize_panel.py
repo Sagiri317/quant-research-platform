@@ -11,6 +11,7 @@ from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.markets.implementations.crypto.processed import (
+    materialization_validation,
     panels,
     source_ids,
 )
@@ -38,6 +39,13 @@ def write_panel(
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    input_identities = materialization_validation.input_dataset_identities(
+        materialization_validation.panel_input_inspections(
+            layout=layout,
+            source_id=source_id,
+            spec=spec,
+        )
+    )
     write_dataset(
         root,
         _iter_panel_chunks(
@@ -48,8 +56,18 @@ def write_panel(
             resource_policy=resource_policy,
         ),
         spec=spec,
+        instance_metadata={"input_dataset_identities": input_identities},
     )
-    return inspect_dataset(root, time_window=time_window)
+    inspection = inspect_dataset(root, time_window=time_window)
+    materialization_validation.validate_panel_materialization(
+        inspection,
+        layout=layout,
+        source_id=source_id,
+        spec=spec,
+        time_window=time_window,
+        expected_input_identities=input_identities,
+    )
+    return inspection
 
 
 def _iter_panel_chunks(
