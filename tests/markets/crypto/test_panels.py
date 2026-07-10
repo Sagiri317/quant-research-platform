@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import inspect
 import math
 import warnings
@@ -278,14 +280,19 @@ def test_quote_matching_isolates_assets() -> None:
     }
 
 
-def test_depth_snapshot_state_merges_levels_across_chunks() -> None:
-    first = _depth_levels_frame().loc[lambda frame: frame["level"].eq(1)].copy()
-    second = _depth_levels_frame().loc[lambda frame: frame["level"].eq(2)].copy()
-    state: dict[object, object] = {}
+def test_depth_reducer_merges_snapshot_across_chunks() -> None:
+    module = _panel_input_reducers_module()
+    depth = _ordered_depth_levels_frame()
+    reducer = module.DepthSnapshotReducer(
+        bars=panels._prepare_panel_bars(_bars_frame()),
+        target_state_bytes=16 * 1024,
+        normalize_chunk=panels.normalize_depth_chunk,
+        finalize_snapshot=panels.finalize_depth_snapshot,
+    )
 
-    panels._accumulate_depth_snapshot_state(state, first)
-    panels._accumulate_depth_snapshot_state(state, second)
-    quotes = panels._quote_snapshots_from_state(state)
+    reducer.add_chunk(depth.iloc[:2].copy())
+    reducer.add_chunk(depth.iloc[2:].copy())
+    quotes = reducer.finish()
 
     assert quotes.loc[0, "best_bid"] == 100.0
     assert quotes.loc[0, "best_ask"] == 100.2
@@ -293,16 +300,90 @@ def test_depth_snapshot_state_merges_levels_across_chunks() -> None:
     assert quotes.loc[0, "ask_depth"] == 2.0
 
 
-def test_depth_snapshot_state_rejects_duplicate_level_across_chunks() -> None:
-    state: dict[object, object] = {}
-    level_one = _depth_levels_frame().loc[
-        lambda frame: frame["level"].eq(1)
-    ].copy()
+    assert reducer.candidate_count == 1
+    assert reducer.current_level_count == 0
 
-    panels._accumulate_depth_snapshot_state(state, level_one)
 
-    with pytest.raises(ValueError, match="duplicate_crypto_depth_level"):
-        panels._accumulate_depth_snapshot_state(state, level_one)
+def test_depth_reducer_rejects_out_of_order_across_chunks() -> None:
+    module = _panel_input_reducers_module()
+    depth = _ordered_depth_levels_frame()
+    reducer = module.DepthSnapshotReducer(
+        bars=panels._prepare_panel_bars(_bars_frame()),
+        target_state_bytes=16 * 1024,
+        normalize_chunk=panels.normalize_depth_chunk,
+        finalize_snapshot=panels.finalize_depth_snapshot,
+    )
+
+    reducer.add_chunk(depth.iloc[2:].copy())
+
+    with pytest.raises(ValueError, match="out_of_order_crypto_depth_dependency"):
+        reducer.add_chunk(depth.iloc[:2].copy())
+
+
+def test_depth_reducer_fails_when_one_snapshot_exceeds_state_budget() -> None:
+    module = _panel_input_reducers_module()
+    levels = 32
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"] * levels,
+            "timestamp": [pd.Timestamp("2026-07-06 00:00:58")] * levels,
+            "side": ["ask"] * levels,
+            "level": range(1, levels + 1),
+            "price": [100.2 + index / 100 for index in range(levels)],
+            "quantity": [1.0] * levels,
+            "source_market_type": ["spot"] * levels,
+        }
+    )
+    reducer = module.DepthSnapshotReducer(
+        bars=panels._prepare_panel_bars(_bars_frame()),
+        target_state_bytes=512,
+        normalize_chunk=panels.normalize_depth_chunk,
+        finalize_snapshot=panels.finalize_depth_snapshot,
+    )
+
+    with pytest.raises(ValueError, match="crypto_depth_state_exceeds_resource_budget"):
+        reducer.add_chunk(depth)
+
+
+def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
+    module = _panel_input_reducers_module()
+    snapshot_count = 200
+    timestamps = pd.date_range(
+        "2026-07-06 00:00:00",
+        periods=snapshot_count,
+        freq="100ms",
+    )
+    depth = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"] * snapshot_count * 2,
+            "timestamp": [value for value in timestamps for _ in range(2)],
+            "side": [side for _ in timestamps for side in ("ask", "bid")],
+            "level": [1] * snapshot_count * 2,
+            "price": [price for _ in timestamps for price in (100.2, 100.0)],
+            "quantity": [1.0] * snapshot_count * 2,
+            "source_market_type": ["spot"] * snapshot_count * 2,
+        }
+    )
+    reducer = module.DepthSnapshotReducer(
+        bars=panels._prepare_panel_bars(_bars_frame()),
+        target_state_bytes=64 * 1024,
+        normalize_chunk=panels.normalize_depth_chunk,
+        finalize_snapshot=panels.finalize_depth_snapshot,
+    )
+
+    for start in range(0, len(depth), 17):
+        reducer.add_chunk(depth.iloc[start : start + 17].copy())
+    reducer.finish()
+
+    assert reducer.candidate_count <= len(_bars_frame())
+    assert reducer.current_level_count == 0
+
+
+def test_old_depth_full_window_helpers_are_absent() -> None:
+    source = inspect.getsource(panels)
+
+    assert "_accumulate_depth_snapshot_state" not in source
+    assert "_quote_snapshots_from_state" not in source
 
 
 def test_trade_aggregate_state_reduces_dense_chunks_incrementally() -> None:
@@ -835,3 +916,20 @@ def _depth_levels_frame() -> pd.DataFrame:
             "source_market_type": ["spot"] * 4,
         }
     )
+
+
+def _ordered_depth_levels_frame() -> pd.DataFrame:
+    return _depth_levels_frame().sort_values(
+        ["source_asset_id", "timestamp", "side", "level"],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+
+def _panel_input_reducers_module():
+    module_name = (
+        "quant_research_platform.markets.implementations.crypto.processed."
+        "panel_input_reducers"
+    )
+    module_spec = importlib.util.find_spec(module_name)
+    assert module_spec is not None, "crypto panel input reducer module is missing"
+    return importlib.import_module(module_name)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 
 import pandas as pd
 from pandas.api.types import is_bool_dtype
@@ -11,6 +12,9 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.markets.implementations.crypto.ids import (
     MARKET_ID,
     canonical_crypto_asset_id,
+)
+from quant_research_platform.markets.implementations.crypto.processed import (
+    panel_input_reducers,
 )
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     PANEL_COLUMNS,
@@ -32,7 +36,7 @@ def compute_market_panel(
     return _calculate_market_panel(
         panel,
         trade_aggregates=_signed_trade_volume(trades),
-        quote_snapshots=_quote_snapshots(depth),
+        quote_snapshots=_quote_snapshots(panel, depth),
         max_quote_age=max_quote_age,
     )
 
@@ -281,24 +285,34 @@ def _match_quotes_asof_bar_close(
     )
 
 
-def _quote_snapshots(depth: pd.DataFrame) -> pd.DataFrame:
-    state: dict[
-        tuple[str, pd.Timestamp],
-        dict[str, dict[int, tuple[float, float]]],
-    ] = {}
-    _accumulate_depth_snapshot_state(state, depth)
-    return _quote_snapshots_from_state(state)
-
-
-def _accumulate_depth_snapshot_state(
-    state: dict[
-        tuple[str, pd.Timestamp],
-        dict[str, dict[int, tuple[float, float]]],
-    ],
+def _quote_snapshots(
+    bars: pd.DataFrame,
     depth: pd.DataFrame,
-) -> None:
+) -> pd.DataFrame:
+    input_bytes = int(depth.memory_usage(index=True, deep=True).sum())
+    reducer = panel_input_reducers.DepthSnapshotReducer(
+        bars=bars,
+        target_state_bytes=max(1, input_bytes * 2 + len(bars) * 512),
+        normalize_chunk=_normalize_sorted_depth_chunk,
+        finalize_snapshot=finalize_depth_snapshot,
+    )
+    if not depth.empty:
+        reducer.add_chunk(depth)
+    return reducer.finish()
+
+
+def normalize_depth_chunk(depth: pd.DataFrame) -> pd.DataFrame:
+    columns = (
+        "source_asset_id",
+        "asset_id",
+        "quote_timestamp",
+        "side",
+        "level",
+        "price",
+        "quantity",
+    )
     if depth.empty:
-        return
+        return pd.DataFrame(columns=list(columns))
     frame = depth.copy()
     _validate_spot_source_market_type(
         frame,
@@ -311,92 +325,67 @@ def _accumulate_depth_snapshot_state(
         error="invalid_crypto_depth_timestamp",
     )
     _validate_depth_level_values(frame)
-    for (asset_id, quote_timestamp, side), rows in frame.groupby(
-        ["asset_id", "quote_timestamp", "side"],
-        sort=False,
-        dropna=False,
-    ):
-        snapshot = state.setdefault(
-            (str(asset_id), pd.Timestamp(quote_timestamp)),
-            {},
+    return frame.loc[:, list(columns)]
+
+
+def _normalize_sorted_depth_chunk(depth: pd.DataFrame) -> pd.DataFrame:
+    return normalize_depth_chunk(depth).sort_values(
+        ["source_asset_id", "quote_timestamp", "side", "level"],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+
+def finalize_depth_snapshot(
+    asset_id: str,
+    quote_timestamp: pd.Timestamp,
+    sides: Mapping[str, Mapping[int, tuple[float, float]]],
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "asset_id": asset_id,
+        "quote_timestamp": quote_timestamp,
+        "best_bid": pd.NA,
+        "best_ask": pd.NA,
+        "bid_quantity": pd.NA,
+        "ask_quantity": pd.NA,
+        "bid_depth": pd.NA,
+        "ask_depth": pd.NA,
+    }
+    for side, levels in sides.items():
+        ordered_levels = sorted(levels)
+        if ordered_levels != list(range(1, len(ordered_levels) + 1)):
+            raise ValueError("invalid_crypto_depth_level_sequence")
+        prices = [levels[level][0] for level in ordered_levels]
+        if side == "bid" and any(
+            current >= previous
+            for previous, current in zip(prices, prices[1:], strict=False)
+        ):
+            raise ValueError("invalid_crypto_bid_price_order")
+        if side == "ask" and any(
+            current <= previous
+            for previous, current in zip(prices, prices[1:], strict=False)
+        ):
+            raise ValueError("invalid_crypto_ask_price_order")
+        best_price, best_quantity = levels[1]
+        row[f"best_{side}"] = best_price
+        row[f"{side}_quantity"] = best_quantity
+        row[f"{side}_depth"] = sum(
+            levels[level][1] for level in ordered_levels
         )
-        levels = snapshot.setdefault(str(side), {})
-        for level, price, quantity in rows.loc[
-            :, ["level", "price", "quantity"]
-        ].itertuples(index=False, name=None):
-            level_number = int(level)
-            if level_number in levels:
-                raise ValueError("duplicate_crypto_depth_level")
-            levels[level_number] = (float(price), float(quantity))
-
-
-def _quote_snapshots_from_state(
-    state: dict[
-        tuple[str, pd.Timestamp],
-        dict[str, dict[int, tuple[float, float]]],
-    ],
-) -> pd.DataFrame:
-    columns = [
-        "asset_id",
-        "quote_timestamp",
-        "best_bid",
-        "best_ask",
-        "bid_quantity",
-        "ask_quantity",
-        "bid_depth",
-        "ask_depth",
-        "mid_price",
-        "quote_valid",
-    ]
-    rows: list[dict[str, object]] = []
-    for (asset_id, quote_timestamp), sides in sorted(state.items()):
-        row: dict[str, object] = {
-            "asset_id": asset_id,
-            "quote_timestamp": quote_timestamp,
-            "best_bid": pd.NA,
-            "best_ask": pd.NA,
-            "bid_quantity": pd.NA,
-            "ask_quantity": pd.NA,
-            "bid_depth": pd.NA,
-            "ask_depth": pd.NA,
-        }
-        for side, levels in sides.items():
-            ordered_levels = sorted(levels)
-            if ordered_levels != list(range(1, len(ordered_levels) + 1)):
-                raise ValueError("invalid_crypto_depth_level_sequence")
-            prices = [levels[level][0] for level in ordered_levels]
-            if side == "bid" and any(
-                current >= previous
-                for previous, current in zip(prices, prices[1:], strict=False)
-            ):
-                raise ValueError("invalid_crypto_bid_price_order")
-            if side == "ask" and any(
-                current <= previous
-                for previous, current in zip(prices, prices[1:], strict=False)
-            ):
-                raise ValueError("invalid_crypto_ask_price_order")
-            best_price, best_quantity = levels[1]
-            row[f"best_{side}"] = best_price
-            row[f"{side}_quantity"] = best_quantity
-            row[f"{side}_depth"] = sum(
-                levels[level][1] for level in ordered_levels
-            )
-        required = ("best_bid", "best_ask", "bid_quantity", "ask_quantity")
-        quote_valid = all(pd.notna(row[column]) for column in required)
-        if quote_valid:
-            row["mid_price"] = (float(row["best_bid"]) + float(row["best_ask"])) / 2
-            quote_valid = bool(
-                float(row["best_bid"]) > 0
-                and float(row["best_ask"]) > 0
-                and float(row["bid_quantity"]) > 0
-                and float(row["ask_quantity"]) > 0
-                and float(row["best_bid"]) < float(row["best_ask"])
-            )
-        else:
-            row["mid_price"] = pd.NA
-        row["quote_valid"] = quote_valid
-        rows.append(row)
-    return pd.DataFrame(rows, columns=columns)
+    required = ("best_bid", "best_ask", "bid_quantity", "ask_quantity")
+    quote_valid = all(pd.notna(row[column]) for column in required)
+    if quote_valid:
+        row["mid_price"] = (float(row["best_bid"]) + float(row["best_ask"])) / 2
+        quote_valid = bool(
+            float(row["best_bid"]) > 0
+            and float(row["best_ask"]) > 0
+            and float(row["bid_quantity"]) > 0
+            and float(row["ask_quantity"]) > 0
+            and float(row["best_bid"]) < float(row["best_ask"])
+        )
+    else:
+        row["mid_price"] = pd.NA
+    row["quote_valid"] = quote_valid
+    return row
 
 
 def _crypto_asset_id_series(series: pd.Series) -> pd.Series:

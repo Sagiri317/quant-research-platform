@@ -20,12 +20,14 @@ from quant_research_platform.research.factors.microstructure import (
     calculate_microstructure_factors,
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
-from quant_research_platform.storage._dataset_reading import filter_frame_by_time_window
+from quant_research_platform.storage._dataset_reading import (
+    build_dataset_read_context,
+    filter_frame_by_time_window,
+    iter_dataset_chunks,
+)
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
-    DatasetReadMode,
     inspect_dataset,
-    read_dataset,
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -58,6 +60,7 @@ def write_factors(
             spec,
             panel_root=panel_root,
             time_window=time_window,
+            resource_policy=resource_policy,
         ),
         spec=spec,
         instance_metadata={"input_dataset_identities": input_identities},
@@ -69,6 +72,7 @@ def write_factors(
         spec=spec,
         time_window=time_window,
         expected_input_identities=input_identities,
+        resource_policy=resource_policy,
     )
     return inspection
 
@@ -78,19 +82,28 @@ def _iter_factor_chunks(
     *,
     panel_root,
     time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
+    chunk_target_bytes = materialization_validation.materialization_chunk_target_bytes(
+        resource_policy,
+        working_set_parts=8,
+    )
     carry_by_market_asset: dict[tuple[str, str], pd.DataFrame] = {}
-    watermarks: dict[tuple[str, str], pd.Timestamp] = {}
-    for panel in read_dataset(
+    order_state = materialization_validation.OrderedDependencyState()
+    context = build_dataset_read_context(
         panel_root,
+        columns=None,
         time_window=materialization_dependencies.factor_read_window(time_window),
-        mode=DatasetReadMode.CHUNKED,
+    )
+    for panel in iter_dataset_chunks(
+        context,
+        target_chunk_bytes=chunk_target_bytes,
     ):
         if panel.empty:
             continue
         panel = materialization_validation.validated_ordered_dependency_chunk(
             panel,
-            watermarks=watermarks,
+            state=order_state,
             error="out_of_order_crypto_factor_dependency",
         )
         core = panel.copy()
@@ -103,8 +116,10 @@ def _iter_factor_chunks(
             trade_flow_observed_column="trade_flow_observed",
         )
         output = factors.loc[factors[_CORE_ROW]].copy()
-        yield output.loc[:, spec.required_columns]
         _update_factor_carry(combined, carry_by_market_asset)
+        if _factor_carry_bytes(carry_by_market_asset) > chunk_target_bytes:
+            raise ValueError("crypto_factor_state_exceeds_resource_budget")
+        yield output.loc[:, spec.required_columns]
 
 
 def _with_factor_carry(
@@ -141,6 +156,15 @@ def _update_factor_carry(
             .tail(MICROSTRUCTURE_ROLLING_CARRY_BARS)
             .copy()
         )
+
+
+def _factor_carry_bytes(
+    carry_by_market_asset: dict[tuple[str, str], pd.DataFrame],
+) -> int:
+    return sum(
+        int(frame.memory_usage(index=True, deep=True).sum())
+        for frame in carry_by_market_asset.values()
+    )
 
 
 def _core_mask(frame: pd.DataFrame, time_window: TimeWindow) -> pd.Series:

@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_validation,
@@ -16,7 +17,11 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     processed_catalog,
 )
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage._dataset_types import DatasetInspection
+from quant_research_platform.storage.layout import StorageLayout
+
+RESOURCE_POLICY = RuntimeResourcePolicy(available_memory_bytes=1024**3)
 
 
 def test_input_dataset_identities_distinguish_source_and_manifest() -> None:
@@ -112,31 +117,108 @@ def test_exact_dependency_key_coverage_rejects_any_full_key_delta(
 
     with pytest.raises(ValueError, match="invalid_crypto_dependency_key_coverage"):
         materialization_validation.validate_exact_dependency_key_coverage(
+            iter((expected.iloc[:2].copy(), expected.iloc[2:].copy())),
+            iter((actual.iloc[:3].copy(), actual.iloc[3:].copy())),
+            primary_key=("market_id", "asset_id", "timestamp"),
+            error="invalid_crypto_dependency_key_coverage",
+            resource_policy=RESOURCE_POLICY,
+        )
+
+
+def test_exact_dependency_key_coverage_accepts_equal_bounded_streams() -> None:
+    expected = _key_frame()
+
+    materialization_validation.validate_exact_dependency_key_coverage(
+        iter((expected.iloc[:1], expected.iloc[1:4], expected.iloc[4:])),
+        iter((expected.iloc[:2], expected.iloc[2:5], expected.iloc[5:])),
+        primary_key=("market_id", "asset_id", "timestamp"),
+        error="invalid_crypto_dependency_key_coverage",
+        resource_policy=RESOURCE_POLICY,
+    )
+
+
+@pytest.mark.parametrize("empty_side", ["expected", "actual"])
+def test_exact_dependency_key_coverage_rejects_one_empty_stream(
+    empty_side: str,
+) -> None:
+    populated = iter((_key_frame(),))
+    expected = iter(()) if empty_side == "expected" else populated
+    actual = iter(()) if empty_side == "actual" else populated
+
+    with pytest.raises(ValueError, match="invalid_crypto_dependency_key_coverage"):
+        materialization_validation.validate_exact_dependency_key_coverage(
             expected,
             actual,
             primary_key=("market_id", "asset_id", "timestamp"),
             error="invalid_crypto_dependency_key_coverage",
+            resource_policy=RESOURCE_POLICY,
         )
 
 
-def test_dependency_chunk_order_sorts_within_chunk_and_rejects_overlap() -> None:
-    watermarks: dict[tuple[str, str], pd.Timestamp] = {}
+def test_exact_dependency_key_coverage_accepts_two_empty_streams() -> None:
+    materialization_validation.validate_exact_dependency_key_coverage(
+        iter(()),
+        iter(()),
+        primary_key=("market_id", "asset_id", "timestamp"),
+        error="invalid_crypto_dependency_key_coverage",
+        resource_policy=RESOURCE_POLICY,
+    )
+
+
+@pytest.mark.parametrize("stream_name", ["expected", "actual"])
+@pytest.mark.parametrize("mutation", ["duplicate_across_chunk", "out_of_order"])
+def test_exact_dependency_key_coverage_rejects_invalid_individual_streams(
+    stream_name: str,
+    mutation: str,
+) -> None:
+    baseline = _key_frame()
+    if mutation == "duplicate_across_chunk":
+        mutated = iter((baseline.iloc[:2], baseline.iloc[1:].copy()))
+    else:
+        mutated = iter((baseline.iloc[3:].copy(), baseline.iloc[:3].copy()))
+    expected = mutated if stream_name == "expected" else iter((baseline,))
+    actual = mutated if stream_name == "actual" else iter((baseline,))
+
+    with pytest.raises(ValueError, match="invalid_crypto_dependency_key_coverage"):
+        materialization_validation.validate_exact_dependency_key_coverage(
+            expected,
+            actual,
+            primary_key=("market_id", "asset_id", "timestamp"),
+            error="invalid_crypto_dependency_key_coverage",
+            resource_policy=RESOURCE_POLICY,
+        )
+
+
+def test_exact_dependency_validator_has_no_full_key_collectors() -> None:
+    source = inspect.getsource(
+        materialization_validation.validate_exact_dependency_key_coverage
+    )
+
+    assert "set(" not in source
+    assert "pd.concat" not in source
+
+
+def test_dependency_chunk_order_rejects_unsorted_and_overlap() -> None:
+    state = materialization_validation.OrderedDependencyState()
     first = _key_frame().iloc[[2, 0, 1, 5, 3, 4]].copy()
 
-    ordered = materialization_validation.validated_ordered_dependency_chunk(
-        first,
-        watermarks=watermarks,
+    with pytest.raises(ValueError, match="out_of_order_crypto_factor_dependency"):
+        materialization_validation.validated_ordered_dependency_chunk(
+            first,
+            state=state,
+            error="out_of_order_crypto_factor_dependency",
+        )
+
+    ordered = first.sort_values(
+        ["market_id", "asset_id", "timestamp"], kind="mergesort"
+    ).reset_index(drop=True)
+    result = materialization_validation.validated_ordered_dependency_chunk(
+        ordered,
+        state=state,
         error="out_of_order_crypto_factor_dependency",
     )
-
-    pd.testing.assert_frame_equal(
-        ordered,
-        first.sort_values(
-            ["market_id", "asset_id", "timestamp"], kind="mergesort"
-        ).reset_index(drop=True),
-        check_dtype=False,
-    )
-    assert watermarks == {
+    pd.testing.assert_frame_equal(result, ordered, check_dtype=False)
+    assert state.asset_watermarks == {
         ("crypto", "asset_a"): pd.Timestamp("2026-07-06 00:02"),
         ("crypto", "asset_b"): pd.Timestamp("2026-07-06 00:02"),
     }
@@ -144,9 +226,110 @@ def test_dependency_chunk_order_sorts_within_chunk_and_rejects_overlap() -> None
     with pytest.raises(ValueError, match="out_of_order_crypto_factor_dependency"):
         materialization_validation.validated_ordered_dependency_chunk(
             _key_frame().iloc[[2]].copy(),
-            watermarks=watermarks,
+            state=state,
             error="out_of_order_crypto_factor_dependency",
         )
+
+
+def test_existing_dependency_reuse_passes_same_resource_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        chunk_target_bytes=4096,
+        memory_safety_factor=1.0,
+    )
+    inspection = _inspection("market_panel_1m")
+    observed: list[RuntimeResourcePolicy] = []
+    monkeypatch.setattr(
+        materialization_validation,
+        "panel_input_inspections",
+        lambda **_kwargs: {"market_bars_1m": _inspection("market_bars_1m")},
+    )
+    monkeypatch.setattr(
+        materializer,
+        "inspect_dataset",
+        lambda *_args, **_kwargs: inspection,
+    )
+
+    def record_validation(*_args, resource_policy, **_kwargs) -> None:
+        observed.append(resource_policy)
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "validate_panel_materialization",
+        record_validation,
+    )
+
+    result = materializer._inspect_existing_dependency(
+        StorageLayout(project_root=tmp_path),
+        processed_catalog().get("market_panel_1m"),
+        source_id=SourceId("synthetic_crypto"),
+        time_window=TimeWindow("2026-07-06", "2026-07-06"),
+        resource_policy=policy,
+    )
+
+    assert result is inspection
+    assert observed == [policy]
+
+
+def test_crypto_materializers_use_storage_physical_iterator_without_split_wrapper(
+) -> None:
+    for module in (materialize_factors, materialize_labels):
+        source = inspect.getsource(module)
+        assert "iter_dataset_chunks(" in source
+        assert "read_dataset(" not in source
+
+
+@pytest.mark.parametrize(
+    ("module", "iterator_name", "error"),
+    [
+        (
+            materialize_factors,
+            "_iter_factor_chunks",
+            "crypto_factor_state_exceeds_resource_budget",
+        ),
+        (
+            materialize_labels,
+            "_iter_label_chunks",
+            "crypto_label_state_exceeds_resource_budget",
+        ),
+    ],
+)
+def test_factor_and_label_state_fail_closed_when_fixed_carry_exceeds_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    module,
+    iterator_name: str,
+    error: str,
+) -> None:
+    panel = _panel_frame(start=0, minutes=30)
+    monkeypatch.setattr(
+        module,
+        "build_dataset_read_context",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        module,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter((panel,)),
+    )
+    spec = processed_catalog().get(
+        "microstructure" if module is materialize_factors else "forward_returns"
+    )
+    iterator = getattr(module, iterator_name)(
+        spec,
+        panel_root=Path("unused"),
+        time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:29"),
+        resource_policy=RuntimeResourcePolicy(
+            available_memory_bytes=1024,
+            chunk_target_bytes=512,
+            memory_safety_factor=1.0,
+        ),
+    )
+
+    with pytest.raises(ValueError, match=error):
+        list(iterator)
 
 
 @pytest.mark.parametrize(
@@ -174,20 +357,28 @@ def test_factor_and_label_materializers_reject_non_monotonic_chunks(
     module = materialize_factors if module_name == "factor" else materialize_labels
     monkeypatch.setattr(
         module,
-        "read_dataset",
+        "build_dataset_read_context",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        module,
+        "iter_dataset_chunks",
         lambda *_args, **_kwargs: iter((first, second)),
     )
+    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
     iterator = (
         module._iter_factor_chunks(
             spec,
             panel_root=Path("unused"),
             time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:10"),
+            resource_policy=policy,
         )
         if module_name == "factor"
         else module._iter_label_chunks(
             spec,
             panel_root=Path("unused"),
             time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:10"),
+            resource_policy=policy,
         )
     )
 

@@ -89,6 +89,7 @@ def materialize_processed_data(
                 spec,
                 source_id=source_id,
                 time_window=target_time_window,
+                resource_policy=policy,
             )
             continue
         written[data_id] = _materialize_one(
@@ -111,6 +112,7 @@ def _inspect_existing_dependency(
     *,
     source_id: SourceId,
     time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
     input_inspections = materialization_validation.panel_input_inspections(
         layout=layout,
@@ -130,6 +132,7 @@ def _inspect_existing_dependency(
         spec=spec,
         time_window=time_window,
         expected_input_identities=expected_input_identities,
+        resource_policy=resource_policy,
     )
     return inspection
 

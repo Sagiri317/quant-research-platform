@@ -44,7 +44,6 @@ from quant_research_platform.research.labels.forward_returns import (
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.sources.binance.interim import materialize_interim_data
 from quant_research_platform.storage.datasets import (
-    DatasetReadMode,
     inspect_dataset,
     read_dataset,
     write_dataset,
@@ -128,37 +127,39 @@ def test_crypto_processed_materializer_builds_panel_factors_and_labels(
     }
 
 
-def test_crypto_processed_materializer_uses_chunked_reads(
+def test_crypto_processed_materializer_uses_policy_bounded_physical_reads(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     _write_binance_fixture(tmp_path)
     layout = StorageLayout(project_root=tmp_path)
     materialize_interim_data(layout=layout, row_batch_size=2)
-    calls: list[tuple[str, str, DatasetReadMode]] = []
-    real_read_dataset = read_dataset
+    calls: list[tuple[str, str, int]] = []
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        chunk_target_bytes=128 * 1024,
+        memory_safety_factor=1.0,
+    )
 
-    def spy(module_name: str):
-        def wrapped(dataset_root, **kwargs):
-            mode = kwargs.get("mode", DatasetReadMode.MATERIALIZED)
-            root_name = Path(dataset_root).name
-            calls.append((module_name, root_name, mode))
-            if root_name in {
-                "market_bars_1m",
-                "aggregate_trades_tick",
-                "depth_levels_tick",
-                "market_panel_1m",
-            } and mode is not DatasetReadMode.CHUNKED:
-                raise AssertionError(
-                    f"crypto_processed_requires_chunked_read:{module_name}:{root_name}"
-                )
-            return real_read_dataset(dataset_root, **kwargs)
+    def spy(module_name: str, module):
+        real_iterator = module.iter_dataset_chunks
+
+        def wrapped(context, *, target_chunk_bytes):
+            calls.append((module_name, context.root.name, target_chunk_bytes))
+            return real_iterator(
+                context,
+                target_chunk_bytes=target_chunk_bytes,
+            )
 
         return wrapped
 
-    monkeypatch.setattr(materialize_panel, "read_dataset", spy("panel"))
-    monkeypatch.setattr(materialize_factors, "read_dataset", spy("factors"))
-    monkeypatch.setattr(materialize_labels, "read_dataset", spy("labels"))
+    for name, module in (
+        ("panel", materialize_panel),
+        ("factors", materialize_factors),
+        ("labels", materialize_labels),
+        ("validation", materialization_validation),
+    ):
+        monkeypatch.setattr(module, "iter_dataset_chunks", spy(name, module))
 
     materializer.materialize_processed_data(
         layout=layout,
@@ -171,13 +172,22 @@ def test_crypto_processed_materializer_uses_chunked_reads(
                 ProcessedDataKind.LABEL,
             }
         ),
+        resource_policy=policy,
     )
 
-    assert ("panel", "market_bars_1m", DatasetReadMode.CHUNKED) in calls
-    assert ("panel", "aggregate_trades_tick", DatasetReadMode.CHUNKED) in calls
-    assert ("panel", "depth_levels_tick", DatasetReadMode.CHUNKED) in calls
-    assert ("factors", "market_panel_1m", DatasetReadMode.CHUNKED) in calls
-    assert ("labels", "market_panel_1m", DatasetReadMode.CHUNKED) in calls
+    assert {item[:2] for item in calls}.issuperset(
+        {
+            ("panel", "market_bars_1m"),
+            ("panel", "aggregate_trades_tick"),
+            ("panel", "depth_levels_tick"),
+            ("factors", "market_panel_1m"),
+            ("labels", "market_panel_1m"),
+            ("validation", "market_panel_1m"),
+        }
+    )
+    assert {target for _, _, target in calls} == {
+        policy.effective_chunk_bytes // 8
+    }
 
 
 def test_crypto_factor_time_window_uses_prior_warmup_minutes() -> None:
@@ -508,22 +518,26 @@ def test_crypto_materializer_invalid_dependency_timestamp_is_not_coverage(
         source_id,
         _panel_frame(minutes=30),
     )
-    real_read_dataset = materialization_validation.read_dataset
+    real_iterator = materialization_validation.iter_dataset_chunks
 
-    def invalid_target_read(dataset_root, **kwargs):
-        if Path(dataset_root).name == "market_panel_1m":
-            return pd.DataFrame(
-                {
-                    "market_id": ["crypto"],
-                    "asset_id": ["btc_usdt"],
-                    "timestamp": ["bad"],
-                }
+    def invalid_target_read(context, **kwargs):
+        if context.root.name == "market_panel_1m":
+            return iter(
+                (
+                    pd.DataFrame(
+                        {
+                            "market_id": ["crypto"],
+                            "asset_id": ["btc_usdt"],
+                            "timestamp": ["bad"],
+                        }
+                    ),
+                )
             )
-        return real_read_dataset(dataset_root, **kwargs)
+        return real_iterator(context, **kwargs)
 
     monkeypatch.setattr(
         materialization_validation,
-        "read_dataset",
+        "iter_dataset_chunks",
         invalid_target_read,
     )
 
@@ -717,14 +731,21 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
     def read_panel(*_: Any, **__: Any):
         return iter((panel.copy(),))
 
-    monkeypatch.setattr(materialize_factors, "read_dataset", read_panel)
-    monkeypatch.setattr(materialize_labels, "read_dataset", read_panel)
+    for module in (materialize_factors, materialize_labels):
+        monkeypatch.setattr(
+            module,
+            "build_dataset_read_context",
+            lambda *_args, **_kwargs: object(),
+        )
+        monkeypatch.setattr(module, "iter_dataset_chunks", read_panel)
+    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
 
     factors = pd.concat(
         materialize_factors._iter_factor_chunks(
             processed_catalog().get("microstructure"),
             panel_root=Path("unused"),
             time_window=core,
+            resource_policy=policy,
         ),
         ignore_index=True,
     )
@@ -733,6 +754,7 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
             processed_catalog().get("forward_returns"),
             panel_root=Path("unused"),
             time_window=core,
+            resource_policy=policy,
         ),
         ignore_index=True,
     )
@@ -765,20 +787,7 @@ def test_crypto_panel_matching_rejects_invalid_timestamps(
     frames[frame_name][column] = frames[frame_name][column].astype(object)
     frames[frame_name].loc[0, column] = "bad"
 
-    def fake_read_dataset(dataset_root, **kwargs):
-        root_name = Path(dataset_root).name
-        if kwargs.get("mode") is not DatasetReadMode.CHUNKED:
-            raise AssertionError("crypto_panel_matching_requires_chunked_reads")
-        if root_name == "market_bars_1m":
-            return iter((frames["bars"],))
-        if root_name == "aggregate_trades_tick":
-            return iter((frames["trades"],))
-        if root_name == "depth_levels_tick":
-            return iter((frames["depth"],))
-        raise AssertionError(f"unexpected_dataset_root:{root_name}")
-
-    monkeypatch.setattr(materialize_panel, "read_dataset", fake_read_dataset)
-    _patch_panel_lifecycle_validation(monkeypatch)
+    _patch_matching_panel_reads(monkeypatch, frames)
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
@@ -921,33 +930,22 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
     }
     yielded_chunks = {"market_bars_1m": 0}
     core_windows = {"count": 0}
-    real_read_dataset = read_dataset
-    real_split_frame_by_policy = materialize_panel._split_frame_by_policy
+    real_iterator = materialize_panel.iter_dataset_chunks
 
-    def wrapped_read_dataset(dataset_root, **kwargs):
-        root_name = Path(dataset_root).name
-        if kwargs.get("mode") is DatasetReadMode.CHUNKED and root_name in call_counts:
+    def wrapped_iterator(context, *, target_chunk_bytes):
+        root_name = context.root.name
+        if root_name in call_counts:
             call_counts[root_name] += 1
-        result = real_read_dataset(dataset_root, **kwargs)
-        if (
-            kwargs.get("mode") is DatasetReadMode.CHUNKED
-            and root_name in yielded_chunks
-        ):
+        result = real_iterator(
+            context,
+            target_chunk_bytes=target_chunk_bytes,
+        )
+        if root_name == "market_bars_1m":
+            core_windows["count"] += 1
             return _count_yielded_chunks(result, yielded_chunks, root_name)
         return result
 
-    monkeypatch.setattr(materialize_panel, "read_dataset", wrapped_read_dataset)
-
-    def counted_core_windows(frame, policy):
-        for window in real_split_frame_by_policy(frame, policy):
-            core_windows["count"] += 1
-            yield window
-
-    monkeypatch.setattr(
-        materialize_panel,
-        "_split_frame_by_policy",
-        counted_core_windows,
-    )
+    monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", wrapped_iterator)
 
     materialize_panel.write_panel(
         processed_catalog().get("market_panel_1m"),
@@ -955,17 +953,17 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
         source_id=SourceId("binance"),
         time_window=TimeWindow("2026-07-06", "2026-07-06"),
         resource_policy=RuntimeResourcePolicy(
-            available_memory_bytes=1024,
-            chunk_target_bytes=1,
+            available_memory_bytes=1024**2,
+            chunk_target_bytes=64 * 1024,
             memory_safety_factor=1.0,
         ),
     )
 
     assert call_counts["market_bars_1m"] == 1
     assert yielded_chunks["market_bars_1m"] > 1
-    assert core_windows["count"] > yielded_chunks["market_bars_1m"]
-    assert call_counts["aggregate_trades_tick"] == core_windows["count"]
-    assert call_counts["depth_levels_tick"] == core_windows["count"]
+    assert core_windows["count"] == 1
+    assert call_counts["aggregate_trades_tick"] == yielded_chunks["market_bars_1m"]
+    assert call_counts["depth_levels_tick"] == yielded_chunks["market_bars_1m"]
 
 
 def test_crypto_panel_materializer_never_concatenates_raw_auxiliary_chunks() -> None:
@@ -980,29 +978,26 @@ def test_crypto_panel_materializer_merges_depth_snapshot_across_storage_chunks(
     frames = _matching_panel_frames()
     level_two = frames["depth"].assign(
         level=2,
-        price=[99.9, 100.3],
+        price=[100.3, 99.9],
         quantity=[1.0, 1.0],
     )
     depth = pd.concat((frames["depth"], level_two), ignore_index=True)
+    depth = depth.sort_values(
+        ["source_asset_id", "timestamp", "side", "level"],
+        kind="mergesort",
+    ).reset_index(drop=True)
 
-    def fake_read_dataset(dataset_root, **kwargs):
-        if kwargs.get("mode") is not DatasetReadMode.CHUNKED:
-            raise AssertionError("crypto_panel_matching_requires_chunked_reads")
-        root_name = Path(dataset_root).name
-        if root_name == "market_bars_1m":
-            return iter((frames["bars"],))
-        if root_name == "aggregate_trades_tick":
-            return iter((frames["trades"],))
-        if root_name == "depth_levels_tick":
-            return iter(
-                (
-                    depth.loc[depth["level"].eq(1)].copy(),
-                    depth.loc[depth["level"].eq(2)].copy(),
-                )
-            )
-        raise AssertionError(f"unexpected_dataset_root:{root_name}")
-
-    monkeypatch.setattr(materialize_panel, "read_dataset", fake_read_dataset)
+    _patch_panel_physical_chunks(
+        monkeypatch,
+        {
+            "market_bars_1m": (frames["bars"],),
+            "aggregate_trades_tick": (frames["trades"],),
+            "depth_levels_tick": (
+                depth.iloc[:2].copy(),
+                depth.iloc[2:].copy(),
+            ),
+        },
+    )
     _patch_panel_lifecycle_validation(monkeypatch)
     layout = StorageLayout(project_root=tmp_path)
 
@@ -1029,14 +1024,20 @@ def test_crypto_panel_bar_contract_fails_before_auxiliary_reads(
     frames["bars"].loc[0, "interval"] = "5m"
     auxiliary_reads: list[str] = []
 
-    def fake_read_dataset(dataset_root, **kwargs):
-        root_name = Path(dataset_root).name
+    def fake_iterator(context, *, target_chunk_bytes):
+        assert target_chunk_bytes > 0
+        root_name = Path(context).name
         if root_name == "market_bars_1m":
             return iter((frames["bars"],))
         auxiliary_reads.append(root_name)
         return iter(())
 
-    monkeypatch.setattr(materialize_panel, "read_dataset", fake_read_dataset)
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_read_context",
+        lambda dataset_root, **_kwargs: Path(dataset_root),
+    )
+    monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", fake_iterator)
     _patch_panel_lifecycle_validation(monkeypatch)
 
     with pytest.raises(ValueError, match="invalid_crypto_bar_interval"):
@@ -1060,11 +1061,11 @@ def test_crypto_panel_small_and_large_resource_windows_match(tmp_path: Path) -> 
         ),
         (
             "small",
-            RuntimeResourcePolicy(
-                available_memory_bytes=1024,
-                chunk_target_bytes=1,
-                memory_safety_factor=1.0,
-            ),
+                RuntimeResourcePolicy(
+                    available_memory_bytes=1024**2,
+                    chunk_target_bytes=64 * 1024,
+                    memory_safety_factor=1.0,
+                ),
         ),
     ):
         project_root = tmp_path / name
@@ -1163,10 +1164,10 @@ def _matching_panel_frames() -> dict[str, pd.DataFrame]:
             "timestamp": pd.to_datetime(
                 ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
             ),
-            "side": ["bid", "ask"],
+            "side": ["ask", "bid"],
             "level": [1, 1],
-            "price": [100.0, 100.2],
-            "quantity": [1.5, 1.0],
+            "price": [100.2, 100.0],
+            "quantity": [1.0, 1.5],
             "source_market_type": ["spot", "spot"],
         }
     )
@@ -1174,20 +1175,35 @@ def _matching_panel_frames() -> dict[str, pd.DataFrame]:
 
 
 def _patch_matching_panel_reads(monkeypatch, frames: dict[str, pd.DataFrame]) -> None:
-    def fake_read_dataset(dataset_root, **kwargs):
-        root_name = Path(dataset_root).name
-        if kwargs.get("mode") is not DatasetReadMode.CHUNKED:
-            raise AssertionError("crypto_panel_matching_requires_chunked_reads")
-        if root_name == "market_bars_1m":
-            return iter((frames["bars"],))
-        if root_name == "aggregate_trades_tick":
-            return iter((frames["trades"],))
-        if root_name == "depth_levels_tick":
-            return iter((frames["depth"],))
-        raise AssertionError(f"unexpected_dataset_root:{root_name}")
-
-    monkeypatch.setattr(materialize_panel, "read_dataset", fake_read_dataset)
+    _patch_panel_physical_chunks(
+        monkeypatch,
+        {
+            "market_bars_1m": (frames["bars"],),
+            "aggregate_trades_tick": (frames["trades"],),
+            "depth_levels_tick": (frames["depth"],),
+        },
+    )
     _patch_panel_lifecycle_validation(monkeypatch)
+
+
+def _patch_panel_physical_chunks(
+    monkeypatch,
+    chunks_by_root: dict[str, tuple[pd.DataFrame, ...]],
+) -> None:
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_read_context",
+        lambda dataset_root, **_kwargs: Path(dataset_root),
+    )
+
+    def fake_iterator(context, *, target_chunk_bytes):
+        assert target_chunk_bytes > 0
+        root_name = Path(context).name
+        if root_name not in chunks_by_root:
+            raise AssertionError(f"unexpected_dataset_root:{root_name}")
+        return iter(chunks_by_root[root_name])
+
+    monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", fake_iterator)
 
 
 def _patch_panel_lifecycle_validation(monkeypatch) -> None:
@@ -1330,10 +1346,10 @@ def _write_synthetic_crypto_interim(
                 "timestamp": pd.to_datetime(
                     ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
                 ),
-                "side": ["bid", "ask"],
+                "side": ["ask", "bid"],
                 "level": [1, 1],
-                "price": [100.0, 100.2],
-                "quantity": [1.5, 1.0],
+                "price": [100.2, 100.0],
+                "quantity": [1.0, 1.5],
                 "source_market_type": ["spot", "spot"],
             }
         ),

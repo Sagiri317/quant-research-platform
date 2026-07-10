@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -19,10 +20,27 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     canonical_crypto_asset_id,
 )
 from quant_research_platform.markets.implementations.crypto.processed import source_ids
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.storage._dataset_reading import (
+    build_dataset_read_context,
+    iter_dataset_chunks,
+)
 from quant_research_platform.storage._dataset_schema import dataset_identity_payload
 from quant_research_platform.storage._dataset_types import DatasetInspection
-from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
+from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
+
+_DEPENDENCY_VALIDATION_WORKING_SET_PARTS = 8
+
+
+@dataclass
+class OrderedDependencyState:
+    """Bounded ordering state shared across dependency chunks."""
+
+    asset_watermarks: dict[tuple[str, str], pd.Timestamp] = field(
+        default_factory=dict
+    )
+    last_key: tuple[str, str, pd.Timestamp] | None = None
 
 
 def panel_input_inspections(
@@ -88,6 +106,7 @@ def validate_panel_materialization(
     spec: ProcessedDataSpec,
     time_window: TimeWindow,
     expected_input_identities: Mapping[str, Mapping[str, str]],
+    resource_policy: RuntimeResourcePolicy,
 ) -> None:
     validate_materialization_input_identities(
         inspection,
@@ -98,26 +117,35 @@ def validate_panel_materialization(
         source_id,
         source_ids.market_bars_source_data_id(spec),
     )
-    bars = _materialized_frame(
-        read_dataset(
-            bar_root,
-            columns=("source_asset_id", "timestamp"),
-            time_window=time_window,
-        )
+    chunk_target_bytes = materialization_chunk_target_bytes(
+        resource_policy,
+        working_set_parts=_DEPENDENCY_VALIDATION_WORKING_SET_PARTS,
     )
-    expected = _panel_primary_keys(bars, primary_key=spec.primary_key)
-    actual = _materialized_frame(
-        read_dataset(
-            inspection.root,
-            columns=spec.primary_key,
-            time_window=time_window,
-        )
+    bar_context = build_dataset_read_context(
+        bar_root,
+        columns=("source_asset_id", "timestamp"),
+        time_window=time_window,
+    )
+    actual_context = build_dataset_read_context(
+        inspection.root,
+        columns=spec.primary_key,
+        time_window=time_window,
     )
     validate_exact_dependency_key_coverage(
-        expected,
-        actual,
+        _iter_panel_primary_key_chunks(
+            iter_dataset_chunks(
+                bar_context,
+                target_chunk_bytes=chunk_target_bytes,
+            ),
+            primary_key=spec.primary_key,
+        ),
+        iter_dataset_chunks(
+            actual_context,
+            target_chunk_bytes=chunk_target_bytes,
+        ),
         primary_key=spec.primary_key,
         error="invalid_crypto_panel_key_coverage",
+        resource_policy=resource_policy,
     )
 
 
@@ -128,6 +156,7 @@ def validate_panel_dependent_materialization(
     spec: ProcessedDataSpec,
     time_window: TimeWindow,
     expected_input_identities: Mapping[str, Mapping[str, str]],
+    resource_policy: RuntimeResourcePolicy,
 ) -> None:
     validate_materialization_input_identities(
         inspection,
@@ -139,52 +168,116 @@ def validate_panel_dependent_materialization(
         ProcessedDataKind.PANEL,
         MARKET_PANEL_DATA_ID,
     )
-    expected = _materialized_frame(
-        read_dataset(
-            panel_root,
-            columns=spec.primary_key,
-            time_window=time_window,
-        )
+    chunk_target_bytes = materialization_chunk_target_bytes(
+        resource_policy,
+        working_set_parts=_DEPENDENCY_VALIDATION_WORKING_SET_PARTS,
     )
-    actual = _materialized_frame(
-        read_dataset(
-            inspection.root,
-            columns=spec.primary_key,
-            time_window=time_window,
-        )
+    expected_context = build_dataset_read_context(
+        panel_root,
+        columns=spec.primary_key,
+        time_window=time_window,
+    )
+    actual_context = build_dataset_read_context(
+        inspection.root,
+        columns=spec.primary_key,
+        time_window=time_window,
     )
     validate_exact_dependency_key_coverage(
-        expected,
-        actual,
+        iter_dataset_chunks(
+            expected_context,
+            target_chunk_bytes=chunk_target_bytes,
+        ),
+        iter_dataset_chunks(
+            actual_context,
+            target_chunk_bytes=chunk_target_bytes,
+        ),
         primary_key=spec.primary_key,
         error="invalid_crypto_processed_key_coverage",
+        resource_policy=resource_policy,
     )
 
 
 def validate_exact_dependency_key_coverage(
-    expected: pd.DataFrame,
-    actual: pd.DataFrame,
+    expected: Iterable[pd.DataFrame],
+    actual: Iterable[pd.DataFrame],
     *,
     primary_key: tuple[str, ...],
     error: str,
+    resource_policy: RuntimeResourcePolicy,
 ) -> None:
     if not primary_key:
         raise ValueError(error)
-    expected_keys = _normalized_primary_keys(expected, primary_key, error=error)
-    actual_keys = _normalized_primary_keys(actual, primary_key, error=error)
-    if (
-        bool(expected_keys.duplicated(list(primary_key)).any())
-        or bool(actual_keys.duplicated(list(primary_key)).any())
-        or set(expected_keys.itertuples(index=False, name=None))
-        != set(actual_keys.itertuples(index=False, name=None))
-    ):
-        raise ValueError(error)
+    chunk_target_bytes = materialization_chunk_target_bytes(
+        resource_policy,
+        working_set_parts=_DEPENDENCY_VALIDATION_WORKING_SET_PARTS,
+    )
+    expected_keys = _iter_normalized_ordered_keys(
+        expected,
+        primary_key=primary_key,
+        chunk_target_bytes=chunk_target_bytes,
+        error=error,
+    )
+    actual_keys = _iter_normalized_ordered_keys(
+        actual,
+        primary_key=primary_key,
+        chunk_target_bytes=chunk_target_bytes,
+        error=error,
+    )
+    missing = object()
+    while True:
+        expected_key = next(expected_keys, missing)
+        actual_key = next(actual_keys, missing)
+        if expected_key is missing and actual_key is missing:
+            return
+        if (
+            expected_key is missing
+            or actual_key is missing
+            or expected_key != actual_key
+        ):
+            raise ValueError(error)
+
+
+def materialization_chunk_target_bytes(
+    resource_policy: RuntimeResourcePolicy,
+    *,
+    working_set_parts: int,
+) -> int:
+    resource_policy.require_valid_chunk_budget()
+    if isinstance(working_set_parts, bool) or working_set_parts <= 0:
+        raise ValueError("invalid_crypto_materialization_working_set_parts")
+    return max(1, resource_policy.effective_chunk_bytes // working_set_parts)
+
+
+def _iter_normalized_ordered_keys(
+    frames: Iterable[pd.DataFrame],
+    *,
+    primary_key: tuple[str, ...],
+    chunk_target_bytes: int,
+    error: str,
+) -> Iterator[tuple[object, ...]]:
+    previous: tuple[object, ...] | None = None
+    for frame in frames:
+        if not isinstance(frame, pd.DataFrame):
+            raise ValueError(error)
+        keys = _normalized_primary_keys(frame, primary_key, error=error)
+        if int(keys.memory_usage(index=True, deep=True).sum()) > chunk_target_bytes:
+            raise ValueError(error)
+        for row in keys.itertuples(index=False, name=None):
+            key = tuple(row)
+            if previous is not None:
+                try:
+                    if key <= previous:
+                        raise ValueError(error)
+                except TypeError as exc:
+                    raise ValueError(error) from exc
+            previous = key
+            yield key
 
 
 def validated_ordered_dependency_chunk(
     frame: pd.DataFrame,
     *,
-    watermarks: dict[tuple[str, str], pd.Timestamp],
+    state: OrderedDependencyState,
     error: str,
 ) -> pd.DataFrame:
     required = ("market_id", "asset_id", "timestamp")
@@ -200,10 +293,13 @@ def validated_ordered_dependency_chunk(
         ordered["timestamp"],
         error=error,
     )
-    ordered = ordered.sort_values(list(required), kind="mergesort").reset_index(
-        drop=True
-    )
-    next_watermarks = dict(watermarks)
+    next_watermarks = dict(state.asset_watermarks)
+    previous_key = state.last_key
+    for row in ordered.loc[:, list(required)].itertuples(index=False, name=None):
+        key = (str(row[0]), str(row[1]), pd.Timestamp(row[2]))
+        if previous_key is not None and key <= previous_key:
+            raise ValueError(error)
+        previous_key = key
     for (market_id, asset_id), rows in ordered.groupby(
         ["market_id", "asset_id"],
         sort=False,
@@ -218,9 +314,10 @@ def validated_ordered_dependency_chunk(
         if previous is not None and earliest <= previous:
             raise ValueError(error)
         next_watermarks[key] = pd.Timestamp(timestamps.iloc[-1])
-    watermarks.clear()
-    watermarks.update(next_watermarks)
-    return ordered
+    state.asset_watermarks.clear()
+    state.asset_watermarks.update(next_watermarks)
+    state.last_key = previous_key
+    return ordered.reset_index(drop=True)
 
 
 def _normalized_primary_keys(
@@ -265,10 +362,15 @@ def _panel_primary_keys(
     return expected.loc[:, list(primary_key)]
 
 
-def _materialized_frame(value: object) -> pd.DataFrame:
-    if not isinstance(value, pd.DataFrame):
-        raise TypeError("materialized_dataset_read_required")
-    return value
+def _iter_panel_primary_key_chunks(
+    bars: Iterable[pd.DataFrame],
+    *,
+    primary_key: tuple[str, ...],
+) -> Iterator[pd.DataFrame]:
+    for chunk in bars:
+        if chunk.empty:
+            continue
+        yield _panel_primary_keys(chunk, primary_key=primary_key)
 
 
 __all__ = [
