@@ -109,10 +109,10 @@ RUN_RESULT_AND_RUN_ID_SCAN_ROOTS = (
 MATERIALIZED_SCAN_ALLOWLIST = {
     (
         Path("src/quant_research_platform/storage/_dataset_reading.py"),
-        "read_dataset",
+        "materialize_dataset_context",
     ): (
-        "materialized read mode is the explicit storage materialization boundary, "
-        "not a workflow or private full-run hot path"
+        "the single internal storage materialization boundary consumes only the "
+        "bounded physical iterator and is shared by every materialized caller"
     ),
     (
         Path("src/quant_research_platform/research/models/validation_split.py"),

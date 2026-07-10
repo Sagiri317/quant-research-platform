@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -87,9 +88,22 @@ def read_dataset(
         return chunks
     if mode is not DatasetReadMode.MATERIALIZED:
         raise ValueError("unsupported_dataset_read_mode")
-    frames = list(chunks)
-    if not frames:
-        return _empty_frame(context, context.logical_columns)
+    return materialize_dataset_context(context)
+
+
+def materialize_dataset_context(
+    context: DatasetReadContext,
+    *,
+    target_chunk_bytes: int | None = None,
+) -> pd.DataFrame:
+    """Materialize one validated context through the unique physical iterator."""
+
+    frames = list(
+        iter_dataset_chunks(
+            context,
+            target_chunk_bytes=target_chunk_bytes,
+        )
+    )
     return pd.concat(frames, ignore_index=True)
 
 
@@ -204,11 +218,7 @@ def iter_dataset_chunks(
         columns=context.physical_columns,
         target_chunk_bytes=target_bytes,
     ):
-        filtered = filter_frame_by_time_window(
-            frame,
-            spec=context.spec,
-            time_window=context.time_window,
-        ).loc[:, list(context.logical_columns)]
+        filtered = frame.loc[:, list(context.logical_columns)]
         for chunk in _bounded_frame_chunks(
             filtered,
             target_chunk_bytes=target_bytes,
@@ -228,36 +238,67 @@ def iter_dataset_file_batches(
     """Yield deterministic file batches after Arrow-level bounded conversion."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
+    null_columns = _dataset_null_columns(context.all_paths, columns)
     for path in context.read_paths:
-        parquet_file = pq.ParquetFile(path)
-        try:
-            selected_fields = tuple(
-                parquet_file.schema_arrow.field(name) for name in columns
-            )
-            variable_width = any(
-                _is_variable_width(field.type) for field in selected_fields
-            )
-            batch_size = _target_batch_rows(
-                parquet_file,
-                columns=columns,
-                target_chunk_bytes=target_bytes,
-            )
-        finally:
-            parquet_file.close()
-        batches = _iter_filtered_arrow_batches(
+        for frame in iter_parquet_file_batches(
             path,
             columns=columns,
             parquet_filters=context.parquet_filters,
-            batch_size=batch_size,
             target_chunk_bytes=target_bytes,
-            probe_variable_width=variable_width,
+            null_columns=null_columns,
+        ):
+            yield path, frame
+
+
+def iter_parquet_file_batches(
+    path: Path,
+    *,
+    target_chunk_bytes: int,
+    columns: tuple[str, ...] | None = None,
+    parquet_filters: list[tuple[str, str, Any]] | None = None,
+    null_columns: frozenset[str] | None = None,
+) -> Iterator[pd.DataFrame]:
+    """Yield bounded Pandas batches from one Parquet file."""
+
+    target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
+    parquet_file = pq.ParquetFile(path)
+    try:
+        selected_columns = columns or tuple(parquet_file.schema_arrow.names)
+        selected_fields = tuple(
+            parquet_file.schema_arrow.field(name) for name in selected_columns
         )
-        for batch in batches:
-            for frame in _arrow_batch_to_bounded_pandas(
-                batch,
-                target_chunk_bytes=target_bytes,
-            ):
-                yield path, frame
+        variable_width = any(
+            _is_variable_width(field.type) for field in selected_fields
+        )
+        batch_size = _target_batch_rows(
+            parquet_file,
+            columns=selected_columns,
+            target_chunk_bytes=target_bytes,
+        )
+        observed_null_columns = (
+            _parquet_null_columns(parquet_file, selected_columns)
+            if null_columns is None
+            else null_columns
+        )
+        dtype_overrides = _pandas_dtype_overrides(
+            pa.schema(selected_fields),
+            observed_null_columns,
+        )
+    finally:
+        parquet_file.close()
+    for batch in _iter_filtered_arrow_batches(
+        path,
+        columns=selected_columns,
+        parquet_filters=parquet_filters,
+        batch_size=batch_size,
+        target_chunk_bytes=target_bytes,
+        probe_variable_width=variable_width,
+    ):
+        yield from _arrow_batch_to_bounded_pandas(
+            batch,
+            target_chunk_bytes=target_bytes,
+            dtype_overrides=dtype_overrides,
+        )
 
 
 def dataset_primary_key_schema(
@@ -304,12 +345,7 @@ def build_dataset_equality_group_plan(
         columns=discovery_columns,
         target_chunk_bytes=target_chunk_bytes,
     ):
-        filtered = filter_frame_by_time_window(
-            frame,
-            spec=context.spec,
-            time_window=context.time_window,
-        )
-        for row in filtered.loc[:, list(columns)].itertuples(index=False, name=None):
+        for row in frame.loc[:, list(columns)].itertuples(index=False, name=None):
             key = tuple(row)
             if any(
                 not pd.api.types.is_scalar(value) or bool(pd.isna(value))
@@ -446,6 +482,58 @@ def _projected_parquet_leaf_positions(
     return tuple(positions)
 
 
+def _parquet_null_columns(
+    parquet_file: pq.ParquetFile,
+    columns: tuple[str, ...],
+) -> frozenset[str]:
+    null_columns: set[str] = set()
+    for column in columns:
+        positions = _projected_parquet_leaf_positions(parquet_file, (column,))
+        for row_group_index in range(parquet_file.metadata.num_row_groups):
+            row_group = parquet_file.metadata.row_group(row_group_index)
+            statistics = tuple(
+                row_group.column(position).statistics for position in positions
+            )
+            if any(
+                item is None or item.null_count is None or int(item.null_count) > 0
+                for item in statistics
+            ):
+                null_columns.add(column)
+                break
+    return frozenset(null_columns)
+
+
+def _dataset_null_columns(
+    paths: tuple[Path, ...],
+    columns: tuple[str, ...],
+) -> frozenset[str]:
+    null_columns: set[str] = set()
+    for path in paths:
+        parquet_file = pq.ParquetFile(path)
+        try:
+            null_columns.update(
+                _parquet_null_columns(parquet_file, columns)
+            )
+        finally:
+            parquet_file.close()
+    return frozenset(null_columns)
+
+
+def _pandas_dtype_overrides(
+    schema: pa.Schema,
+    null_columns: frozenset[str],
+) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for field in schema:
+        if field.name not in null_columns:
+            continue
+        if pa.types.is_integer(field.type):
+            overrides[field.name] = "float64"
+        elif pa.types.is_boolean(field.type):
+            overrides[field.name] = "object"
+    return overrides
+
+
 def _iter_filtered_arrow_batches(
     path: Path,
     *,
@@ -456,48 +544,100 @@ def _iter_filtered_arrow_batches(
     probe_variable_width: bool,
 ) -> Iterator[pa.RecordBatch]:
     arrow_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
-    if not probe_variable_width:
-        for batch in _physical_arrow_batches(
+    if probe_variable_width:
+        yield from _iter_variable_width_arrow_batches(
             path,
             columns=columns,
             parquet_filters=parquet_filters,
-            batch_size=batch_size,
-        ):
-            _require_arrow_batch_budget(batch, arrow_budget=arrow_budget)
-            yield batch
-        return
-
-    probe = iter(
-        _physical_arrow_batches(
-            path,
-            columns=columns,
-            parquet_filters=parquet_filters,
-            batch_size=1,
+            arrow_budget=arrow_budget,
         )
-    )
-    try:
-        first = next(probe)
-    except StopIteration:
         return
-    _require_arrow_batch_budget(first, arrow_budget=arrow_budget)
-    probe_frame = first.to_pandas(use_threads=False)
-    pandas_bytes = int(probe_frame.memory_usage(index=True, deep=True).sum())
-    if pandas_bytes > arrow_budget:
-        raise ValueError("dataset_row_exceeds_target_chunk_bytes")
-    measured_row_bytes = max(1, first.nbytes, pandas_bytes)
-    adaptive_rows = max(
-        1,
-        arrow_budget // measured_row_bytes,
+    source_budget = (
+        arrow_budget
+        if not parquet_filters
+        else max(1, arrow_budget // 2)
     )
-    del probe_frame, first, probe
-    for batch in _physical_arrow_batches(
+    for source_batch in _raw_arrow_batches(
         path,
         columns=columns,
         parquet_filters=parquet_filters,
-        batch_size=adaptive_rows,
+        batch_size=batch_size,
     ):
-        _require_arrow_batch_budget(batch, arrow_budget=arrow_budget)
-        yield batch
+        _require_arrow_batch_budget(source_batch, arrow_budget=source_budget)
+        filtered = _filter_arrow_batch(source_batch, parquet_filters)
+        if filtered is not source_batch:
+            _require_arrow_batch_budget(filtered, arrow_budget=source_budget)
+        if filtered.num_rows:
+            yield filtered
+
+
+def _iter_variable_width_arrow_batches(
+    path: Path,
+    *,
+    columns: tuple[str, ...],
+    parquet_filters: list[tuple[str, str, Any]] | None,
+    arrow_budget: int,
+) -> Iterator[pa.RecordBatch]:
+    component_budget = max(1, arrow_budget // 2)
+    buffered: list[pa.RecordBatch] = []
+    buffered_arrow_bytes = 0
+    buffered_python_bytes = sys.getsizeof(buffered)
+    for source_batch in _raw_arrow_batches(
+        path,
+        columns=columns,
+        parquet_filters=parquet_filters,
+        batch_size=1,
+    ):
+        _require_arrow_batch_budget(source_batch, arrow_budget=component_budget)
+        filtered = _filter_arrow_batch(source_batch, parquet_filters)
+        del source_batch
+        if filtered.num_rows == 0:
+            continue
+        batch_arrow_bytes = filtered.nbytes
+        batch_python_bytes = sys.getsizeof(filtered)
+        if batch_arrow_bytes > component_budget or batch_python_bytes > arrow_budget:
+            raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+        prior_list_bytes = sys.getsizeof(buffered)
+        buffered.append(filtered)
+        candidate_arrow_bytes = buffered_arrow_bytes + batch_arrow_bytes
+        candidate_python_bytes = (
+            buffered_python_bytes
+            - prior_list_bytes
+            + sys.getsizeof(buffered)
+            + batch_python_bytes
+        )
+        if len(buffered) > 1 and (
+            candidate_arrow_bytes > component_budget
+            or candidate_python_bytes > arrow_budget
+        ):
+            buffered.pop()
+            yield _coalesced_record_batch(buffered, arrow_budget=arrow_budget)
+            buffered = [filtered]
+            buffered_arrow_bytes = batch_arrow_bytes
+            buffered_python_bytes = sys.getsizeof(buffered) + batch_python_bytes
+            continue
+        buffered_arrow_bytes = candidate_arrow_bytes
+        buffered_python_bytes = candidate_python_bytes
+    if buffered:
+        yield _coalesced_record_batch(buffered, arrow_budget=arrow_budget)
+
+
+def _coalesced_record_batch(
+    batches: list[pa.RecordBatch],
+    *,
+    arrow_budget: int,
+) -> pa.RecordBatch:
+    if len(batches) == 1:
+        output = batches[0]
+    else:
+        table = pa.Table.from_batches(batches).combine_chunks()
+        output_batches = table.to_batches(max_chunksize=table.num_rows)
+        if len(output_batches) != 1:
+            raise ValueError("invalid_dataset_arrow_batch")
+        output = output_batches[0]
+        del table, output_batches
+    _require_arrow_batch_budget(output, arrow_budget=arrow_budget)
+    return output
 
 
 def _require_arrow_batch_budget(
@@ -512,7 +652,7 @@ def _require_arrow_batch_budget(
     raise ValueError("dataset_arrow_batch_exceeds_target_chunk_bytes")
 
 
-def _physical_arrow_batches(
+def _raw_arrow_batches(
     path: Path,
     *,
     columns: tuple[str, ...],
@@ -522,15 +662,12 @@ def _physical_arrow_batches(
     parquet_file = pq.ParquetFile(path)
     try:
         row_groups = _matching_row_groups(parquet_file, parquet_filters)
-        for batch in parquet_file.iter_batches(
+        yield from parquet_file.iter_batches(
             batch_size=batch_size,
             row_groups=row_groups,
             columns=list(columns),
             use_threads=False,
-        ):
-            filtered = _filter_arrow_batch(batch, parquet_filters)
-            if filtered.num_rows:
-                yield filtered
+        )
     finally:
         parquet_file.close()
 
@@ -632,7 +769,9 @@ def _empty_frame(
     try:
         schema = parquet_file.schema_arrow
         selected = pa.schema([schema.field(column) for column in columns])
-        return pa.Table.from_batches([], schema=selected).to_pandas(use_threads=False)
+        frame = pa.Table.from_batches([], schema=selected).to_pandas(use_threads=False)
+        null_columns = _dataset_null_columns(context.all_paths, columns)
+        return frame.astype(_pandas_dtype_overrides(selected, null_columns))
     finally:
         parquet_file.close()
 
@@ -667,10 +806,15 @@ def _arrow_batch_to_bounded_pandas(
     batch: pa.RecordBatch,
     *,
     target_chunk_bytes: int,
+    dtype_overrides: Mapping[str, str] | None = None,
 ) -> Iterator[pd.DataFrame]:
     if batch.num_rows == 0:
         return
     pandas_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
+    overrides = dict(dtype_overrides or {})
+    conversion_budget = (
+        max(1, pandas_budget // 2) if overrides else pandas_budget
+    )
     arrow_row_bytes = max(1, (batch.nbytes + batch.num_rows - 1) // batch.num_rows)
     expansion = (
         _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR
@@ -682,7 +826,7 @@ def _arrow_batch_to_bounded_pandas(
         min(
             batch.num_rows,
             _PANDAS_PROBE_ROWS,
-            pandas_budget // max(1, arrow_row_bytes * expansion),
+            conversion_budget // max(1, arrow_row_bytes * expansion),
         ),
     )
     start = 0
@@ -691,21 +835,32 @@ def _arrow_batch_to_bounded_pandas(
         arrow_slice = batch.slice(start, stop - start)
         frame = arrow_slice.to_pandas(use_threads=False)
         frame_bytes = int(frame.memory_usage(index=True, deep=True).sum())
-        if frame_bytes > pandas_budget:
+        if frame_bytes > conversion_budget:
             if len(frame) == 1:
                 raise ValueError("dataset_row_exceeds_target_chunk_bytes")
             rows_per_slice = max(1, rows_per_slice // 2)
             continue
-        yield frame
+        output = frame.astype(overrides) if overrides else frame
+        output_bytes = int(output.memory_usage(index=True, deep=True).sum())
+        if frame_bytes + output_bytes > pandas_budget and output is not frame:
+            if len(frame) == 1:
+                raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+            rows_per_slice = max(1, rows_per_slice // 2)
+            continue
+        yield output
         start = stop
         if start >= batch.num_rows:
             continue
-        measured_row_bytes = max(1, (frame_bytes + len(frame) - 1) // len(frame))
+        measured_bytes = max(frame_bytes, output_bytes)
+        measured_row_bytes = max(
+            1,
+            (measured_bytes + len(frame) - 1) // len(frame),
+        )
         rows_per_slice = max(
             1,
             min(
                 batch.num_rows - start,
-                pandas_budget // measured_row_bytes,
+                conversion_budget // measured_row_bytes,
             ),
         )
 

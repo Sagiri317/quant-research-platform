@@ -47,6 +47,7 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
+from quant_research_platform.storage._dataset_reading import iter_parquet_file_batches
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
@@ -753,12 +754,16 @@ def _summarize_output_bundles(roots: tuple[Path, ...]) -> AggregateSummary:
 
 
 def _iter_output_frames(roots: tuple[Path, ...]) -> Iterator[pd.DataFrame]:
+    target_chunk_bytes = active_runtime_resource_policy().effective_chunk_bytes
     for root in roots:
         files = tuple(sorted(Path(root).rglob("*.parquet")))
         if not files:
             raise FileNotFoundError("aggregates_input_missing")
         for file in files:
-            yield pd.read_parquet(file, engine="pyarrow")
+            yield from iter_parquet_file_batches(
+                file,
+                target_chunk_bytes=target_chunk_bytes,
+            )
 
 
 def _summarize_dataset_root(

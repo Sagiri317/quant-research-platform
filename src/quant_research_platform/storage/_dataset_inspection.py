@@ -16,7 +16,6 @@ from quant_research_platform.storage._dataset_paths import relative_partition_la
 from quant_research_platform.storage._dataset_reading import (
     DatasetReadContext,
     build_dataset_read_context,
-    filter_frame_by_time_window,
     iter_dataset_file_batches,
 )
 from quant_research_platform.storage._dataset_schema import date_string
@@ -77,21 +76,16 @@ def _inspection_runtime_metadata(
         context,
         columns=(timestamp_column,),
     ):
-        filtered = filter_frame_by_time_window(
-            frame,
-            spec=context.spec,
-            time_window=context.time_window,
-        )
-        if filtered.empty:
+        if frame.empty:
             continue
         observed_paths.add(path)
         partition = relative_partition_label(context.data_root, path)
         partition_row_counts[partition] = partition_row_counts.get(partition, 0) + len(
-            filtered
+            frame
         )
-        row_count += len(filtered)
+        row_count += len(frame)
         values = strict_timestamp_series(
-            filtered[timestamp_column],
+            frame[timestamp_column],
             error="invalid_time_window_timestamp_value",
         ).dropna()
         if not values.empty:

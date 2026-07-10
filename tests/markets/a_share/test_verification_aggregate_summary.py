@@ -64,19 +64,41 @@ def test_aggregates_output_frames_are_lazy(
     (report_root / "second.parquet").write_bytes(b"")
     read_order: list[str] = []
 
-    def fake_read_parquet(path, **kwargs):  # noqa: ANN001
-        assert kwargs == {"engine": "pyarrow"}
+    observed_targets: list[int] = []
+
+    def fake_iter_parquet_file_batches(  # noqa: ANN001
+        path,
+        *,
+        target_chunk_bytes,
+    ):
+        observed_targets.append(target_chunk_bytes)
         read_order.append(path.name)
-        return _base_frame().iloc[:1].copy()
+        yield _base_frame().iloc[:1].copy()
 
-    monkeypatch.setattr(aggregates.pd, "read_parquet", fake_read_parquet)
-    frames = aggregates._iter_output_frames((report_root,))
+    def reject_full_file_read(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("output bundle bypassed bounded physical reader")
 
-    assert read_order == []
-    next(frames)
-    assert read_order == ["first.parquet"]
-    next(frames)
-    assert read_order == ["first.parquet", "second.parquet"]
+    monkeypatch.setattr(
+        aggregates,
+        "iter_parquet_file_batches",
+        fake_iter_parquet_file_batches,
+        raising=False,
+    )
+    monkeypatch.setattr(aggregates.pd, "read_parquet", reject_full_file_read)
+    policy = aggregates.RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        chunk_target_bytes=64 * 1024,
+        memory_safety_factor=1.0,
+    )
+    with aggregates.runtime_resource_policy_scope(policy):
+        frames = aggregates._iter_output_frames((report_root,))
+
+        assert read_order == []
+        next(frames)
+        assert read_order == ["first.parquet"]
+        next(frames)
+        assert read_order == ["first.parquet", "second.parquet"]
+    assert observed_targets == [policy.effective_chunk_bytes] * 2
 
 
 def test_aggregates_summary_detects_single_value_change(tmp_path) -> None:

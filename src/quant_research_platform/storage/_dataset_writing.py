@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -12,7 +11,6 @@ from uuid import uuid4
 
 import numpy as np
 import pandas as pd
-import psutil
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -39,6 +37,12 @@ from quant_research_platform.storage._dataset_schema import (
     merge_dataset_instance_metadata,
     sha256_json,
     validate_dataset_spec,
+)
+from quant_research_platform.storage._scratch_ownership import (
+    owned_scratch_name,
+    remove_scratch_owner_identity,
+    scratch_owner_is_alive,
+    write_scratch_owner_identity,
 )
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 
@@ -260,17 +264,17 @@ def _staged_write_directory(
 ) -> None:
     final_root.parent.mkdir(parents=True, exist_ok=True)
     _cleanup_stale_staged_scratch(final_root)
+    scratch_prefix = f".{final_root.name}.tmp-"
     temp_root = final_root.with_name(
-        f".{final_root.name}.tmp-{uuid4().hex[:12]}"
+        owned_scratch_name(scratch_prefix, uuid4().hex[:6])
     )
     try:
         temp_root.mkdir()
-        owner_marker = temp_root / ".owner.pid"
-        owner_marker.write_text(str(os.getpid()), encoding="ascii")
+        write_scratch_owner_identity(temp_root)
         writer(temp_root)
         if final_root.exists():
             raise ValueError("dataset_exists")
-        owner_marker.unlink()
+        remove_scratch_owner_identity(temp_root)
         temp_root.rename(final_root)
     except Exception:
         _remove_tree(temp_root)
@@ -285,24 +289,13 @@ def _remove_tree(path: Path) -> None:
 
 
 def _cleanup_stale_staged_scratch(final_root: Path) -> None:
-    for staged_root in final_root.parent.glob(f".{final_root.name}.tmp-*"):
+    scratch_prefix = f".{final_root.name}.tmp-"
+    for staged_root in final_root.parent.glob(f"{scratch_prefix}*"):
         if not staged_root.is_dir():
             continue
-        if _staged_owner_is_alive(staged_root):
+        if scratch_owner_is_alive(staged_root, prefix=scratch_prefix):
             continue
-        for scratch in staged_root.glob(".k-*"):
-            _remove_tree(scratch)
-
-
-def _staged_owner_is_alive(staged_root: Path) -> bool:
-    marker = staged_root / ".owner.pid"
-    try:
-        owner_pid = int(marker.read_text(encoding="ascii"))
-    except (FileNotFoundError, OSError, UnicodeError, ValueError):
-        return False
-    if owner_pid <= 0:
-        return False
-    return psutil.pid_exists(owner_pid)
+        _remove_tree(staged_root)
 
 
 def _write_contents(

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 import shutil
 import sqlite3
 import struct
@@ -14,10 +13,14 @@ from pathlib import Path
 from types import TracebackType
 
 import pandas as pd
-import psutil
 import pyarrow as pa
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.storage._scratch_ownership import (
+    owned_scratch_prefix,
+    scratch_owner_is_alive,
+    write_scratch_owner_identity,
+)
 
 
 class ExactPrimaryKeyIndex:
@@ -60,9 +63,10 @@ class ExactPrimaryKeyIndex:
         self._scratch_parent.mkdir(parents=True, exist_ok=True)
         _cleanup_stale_key_scratch(self._scratch_parent)
         self._temporary_directory = tempfile.TemporaryDirectory(
-            prefix=f".k-{os.getpid()}-",
+            prefix=owned_scratch_prefix(".k-"),
             dir=self._scratch_parent,
         )
+        write_scratch_owner_identity(Path(self._temporary_directory.name))
         connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(self.database_path)
@@ -265,22 +269,6 @@ def _framed(tag: bytes, payload: bytes) -> bytes:
 
 def _cleanup_stale_key_scratch(parent: Path) -> None:
     for scratch in parent.glob(".k-*"):
-        if not scratch.is_dir() or _scratch_owner_is_alive(scratch):
+        if not scratch.is_dir() or scratch_owner_is_alive(scratch, prefix=".k-"):
             continue
         shutil.rmtree(scratch)
-
-
-def _scratch_owner_is_alive(scratch: Path) -> bool:
-    name_parts = scratch.name.split("-", 3)
-    if len(name_parts) >= 2:
-        try:
-            name_pid = int(name_parts[1])
-        except ValueError:
-            pass
-        else:
-            return name_pid > 0 and psutil.pid_exists(name_pid)
-    try:
-        owner_pid = int((scratch / ".owner.pid").read_text(encoding="ascii"))
-    except (FileNotFoundError, OSError, UnicodeError, ValueError):
-        return False
-    return owner_pid > 0 and psutil.pid_exists(owner_pid)

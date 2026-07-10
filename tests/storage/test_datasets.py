@@ -4,7 +4,7 @@ import importlib
 import importlib.util
 import json
 import math
-import os
+import sys
 from datetime import date, datetime
 from decimal import Decimal
 from inspect import signature
@@ -405,6 +405,7 @@ def test_writer_key_index_scratch_is_inside_staged_dataset_root(
         for path in observed_database_paths
     )
     assert not any(path.exists() for path in observed_database_paths)
+    assert not list(root.rglob(".owner.start"))
 
 
 def test_physical_batch_size_accounts_for_arrow_to_pandas_expansion(
@@ -519,8 +520,9 @@ def test_variable_width_probe_adapts_above_probe_size_for_small_values(
     assert maximum_rows > dataset_reading._PANDAS_PROBE_ROWS
 
 
-def test_variable_width_batch_fails_before_pandas_when_probe_underestimates(
+def test_variable_width_batch_adapts_before_arrow_allocation_when_probe_underestimates(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     path = tmp_path / "variable-width-spike.parquet"
     pq.write_table(
@@ -530,20 +532,92 @@ def test_variable_width_batch_fails_before_pandas_when_probe_underestimates(
         use_dictionary=True,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="dataset_arrow_batch_exceeds_target_chunk_bytes",
-    ):
-        tuple(
-            dataset_reading._iter_filtered_arrow_batches(
-                path,
-                columns=("value",),
-                parquet_filters=None,
-                batch_size=1,
-                target_chunk_bytes=64 * 1024,
-                probe_variable_width=True,
-            )
+    observed_batch_bytes: list[int] = []
+    require_budget = dataset_reading._require_arrow_batch_budget
+
+    def record_budget_check(batch, *, arrow_budget):  # noqa: ANN001
+        observed_batch_bytes.append(batch.nbytes)
+        require_budget(batch, arrow_budget=arrow_budget)
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_require_arrow_batch_budget",
+        record_budget_check,
+    )
+    batches = tuple(
+        dataset_reading._iter_filtered_arrow_batches(
+            path,
+            columns=("value",),
+            parquet_filters=None,
+            batch_size=1,
+            target_chunk_bytes=64 * 1024,
+            probe_variable_width=True,
         )
+    )
+
+    assert sum(batch.num_rows for batch in batches) == 201
+    assert max(observed_batch_bytes) <= 64 * 1024 // 4
+
+
+def test_variable_width_batch_accounts_for_python_batch_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "variable-width-python-state.parquet"
+    pq.write_table(
+        pa.table({"value": ["x"] * 2_000}),
+        path,
+        compression="zstd",
+        use_dictionary=True,
+    )
+    observed_state_bytes: list[int] = []
+    coalesce = dataset_reading._coalesced_record_batch
+
+    def record_state(batches, *, arrow_budget):  # noqa: ANN001
+        observed_state_bytes.append(sum(sys.getsizeof(batch) for batch in batches))
+        return coalesce(batches, arrow_budget=arrow_budget)
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_coalesced_record_batch",
+        record_state,
+    )
+
+    tuple(
+        dataset_reading._iter_filtered_arrow_batches(
+            path,
+            columns=("value",),
+            parquet_filters=None,
+            batch_size=1,
+            target_chunk_bytes=64 * 1024,
+            probe_variable_width=True,
+        )
+    )
+
+    assert max(observed_state_bytes) <= 64 * 1024 // 4
+
+
+def test_chunked_and_materialized_reads_share_nullable_numeric_dtype(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "nullable_numeric_dtype")
+    first = make_default_dataset_frame().iloc[:1].copy()
+    second = make_default_dataset_frame().iloc[1:2].copy()
+    first["value"] = pd.Series([1], dtype="Int64")
+    second["value"] = pd.Series([pd.NA], dtype="Int64")
+
+    write_dataset(
+        root,
+        (first, second),
+        spec=make_processed_dataset_spec("nullable_numeric_dtype"),
+    )
+
+    chunks = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+    materialized = read_dataset(root)
+
+    assert {str(chunk["value"].dtype) for chunk in chunks} == {
+        str(materialized["value"].dtype)
+    }
 
 
 def test_inspect_and_fingerprint_reuse_physical_batch_reader() -> None:
@@ -769,7 +843,6 @@ def test_exact_key_index_recovers_dead_sibling_scratch(tmp_path: Path) -> None:
     )
     stale = tmp_path / ".k-deadbeef"
     stale.mkdir()
-    (stale / ".owner.pid").write_text("999999999", encoding="ascii")
     for name in ("k.sqlite3", "k.sqlite3-journal", "k.sqlite3-wal", "k.sqlite3-shm"):
         (stale / name).write_bytes(b"scratch")
 
@@ -788,8 +861,12 @@ def test_exact_key_index_preserves_live_pid_named_sibling(tmp_path: Path) -> Non
     module = importlib.import_module(
         "quant_research_platform.storage._dataset_key_tracking"
     )
-    live = tmp_path / f".k-{os.getpid()}-concurrent"
+    ownership = importlib.import_module(
+        "quant_research_platform.storage._scratch_ownership"
+    )
+    live = tmp_path / ownership.owned_scratch_name(".k-", "concurrent")
     live.mkdir()
+    ownership.write_scratch_owner_identity(live)
 
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
@@ -799,7 +876,33 @@ def test_exact_key_index_preserves_live_pid_named_sibling(tmp_path: Path) -> Non
         assert live.is_dir()
         assert index.add_frame(pd.DataFrame({"key": ["safe"]})) == 0
 
+    ownership.remove_scratch_owner_identity(live)
     live.rmdir()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_exact_key_index_removes_reused_pid_sibling(tmp_path: Path) -> None:
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+    ownership = importlib.import_module(
+        "quant_research_platform.storage._scratch_ownership"
+    )
+    live_name = ownership.owned_scratch_name(".k-", "live")
+    owner_pid = live_name.split("-", 3)[1]
+    reused = tmp_path / f".k-{owner_pid}-0-reused"
+    reused.mkdir()
+    (reused / ".owner.start").write_text("0", encoding="ascii")
+    (reused / "k.sqlite3").write_bytes(b"scratch")
+
+    with module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        assert not reused.exists()
+        assert index.add_frame(pd.DataFrame({"key": ["safe"]})) == 0
+
     assert list(tmp_path.iterdir()) == []
 
 
@@ -824,6 +927,7 @@ def test_dataset_write_recovers_stale_key_scratch_without_publishing_it(
         spec=make_processed_dataset_spec("stale_key_scratch"),
     )
 
+    assert not stale_stage.exists()
     assert not stale_scratch.exists()
     assert not list(root.rglob("*.sqlite3"))
     assert not list(root.rglob("*.sqlite3-*"))
@@ -833,10 +937,16 @@ def test_dataset_write_does_not_remove_live_concurrent_key_scratch(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "live_key_scratch")
-    live_stage = root.parent / ".live_key_scratch.tmp-concurrent"
+    ownership = importlib.import_module(
+        "quant_research_platform.storage._scratch_ownership"
+    )
+    live_stage = root.parent / ownership.owned_scratch_name(
+        ".live_key_scratch.tmp-",
+        "concurrent",
+    )
     live_scratch = live_stage / ".k-concurrent"
     live_scratch.mkdir(parents=True)
-    (live_stage / ".owner.pid").write_text(str(os.getpid()), encoding="ascii")
+    ownership.write_scratch_owner_identity(live_stage)
     (live_scratch / "k.sqlite3").write_bytes(b"live")
 
     write_dataset(
@@ -846,6 +956,41 @@ def test_dataset_write_does_not_remove_live_concurrent_key_scratch(
     )
 
     assert live_scratch.is_dir()
+
+
+def test_dataset_write_removes_reused_pid_staged_scratch(tmp_path: Path) -> None:
+    root = make_dataset_artifact_root(tmp_path, "reused_pid_stage")
+    ownership = importlib.import_module(
+        "quant_research_platform.storage._scratch_ownership"
+    )
+    live_name = ownership.owned_scratch_name(
+        ".reused_pid_stage.tmp-",
+        "live",
+    )
+    owner_pid = live_name.removeprefix(".reused_pid_stage.tmp-").split("-", 1)[0]
+    reused_stage = root.parent / f".reused_pid_stage.tmp-{owner_pid}-0-reused"
+    reused_scratch = reused_stage / ".k-reused"
+    reused_scratch.mkdir(parents=True)
+    (reused_stage / ".owner.start").write_text("0", encoding="ascii")
+    (reused_scratch / "k.sqlite3").write_bytes(b"scratch")
+
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("reused_pid_stage"),
+    )
+
+    assert not reused_scratch.exists()
+
+
+def test_storage_scratch_ownership_has_one_process_identity_path() -> None:
+    key_source = Path(dataset_reading.__file__).with_name(
+        "_dataset_key_tracking.py"
+    ).read_text(encoding="utf-8")
+    writer_source = Path(dataset_writing.__file__).read_text(encoding="utf-8")
+
+    assert ".owner.pid" not in key_source
+    assert ".owner.pid" not in writer_source
 
 
 def test_staged_owner_liveness_check_never_signals_processes() -> None:

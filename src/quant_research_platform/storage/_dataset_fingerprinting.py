@@ -16,7 +16,6 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_reading import (
     build_dataset_read_context,
-    filter_frame_by_time_window,
     iter_dataset_file_batches,
     read_columns_for_time_window,
 )
@@ -55,17 +54,12 @@ def fingerprint_dataset(
         context,
         columns=hash_physical_columns,
     ):
-        chunk = filter_frame_by_time_window(
-            chunk,
-            spec=context.spec,
-            time_window=context.time_window,
-        )
         chunk = chunk.loc[:, list(hash_columns)]
         if chunk.empty:
             continue
         observed_paths.add(path)
         hashes = pd.util.hash_pandas_object(
-            _hashable_fingerprint_frame(chunk.loc[:, list(hash_columns)]),
+            _hashable_fingerprint_frame(chunk),
             index=False,
         ).to_numpy("uint64")
         chunk_sum = int(hashes.sum(dtype=np.uint64))
