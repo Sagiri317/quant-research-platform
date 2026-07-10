@@ -1415,6 +1415,52 @@ def test_time_window_filter_is_applied_before_arrow_to_pandas_conversion(
     assert converted_rows <= 2
 
 
+def test_time_window_row_group_pruning_uses_parquet_leaf_path(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "nested_before_timestamp")
+    spec = ProcessedDataSpec(
+        data_id="nested_before_timestamp",
+        market_id=MarketId("a_share"),
+        kind=ProcessedDataKind.FACTOR,
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "context": ColumnRole.CONTEXT,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "value": ColumnRole.FACTOR,
+        },
+        primary_key=("market_id", "asset_id", "timestamp"),
+        partition_columns=("year",),
+    )
+    target = pd.Timestamp("2026-01-02")
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["asset_a"],
+            "context": [
+                {
+                    "first": pd.Timestamp("2000-01-01"),
+                    "second": pd.Timestamp("2000-01-02"),
+                }
+            ],
+            "timestamp": [target],
+            "value": [1.0],
+        }
+    )
+    write_dataset(root, frame, spec=spec)
+
+    result = read_dataset(
+        root,
+        time_window=TimeWindow(target.to_pydatetime(), target.to_pydatetime()),
+    )
+
+    assert len(result) == 1
+    assert result.loc[0, "timestamp"] == target
+
+
 def test_storage_datasets_public_api_is_hard_cutover() -> None:
     import quant_research_platform.storage as storage
 

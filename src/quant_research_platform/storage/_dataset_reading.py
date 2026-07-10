@@ -224,17 +224,20 @@ def iter_dataset_file_batches(
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     for path in context.read_paths:
         parquet_file = pq.ParquetFile(path)
-        selected_fields = tuple(
-            parquet_file.schema_arrow.field(name) for name in columns
-        )
-        variable_width = any(
-            _is_variable_width(field.type) for field in selected_fields
-        )
-        batch_size = _target_batch_rows(
-            parquet_file,
-            columns=columns,
-            target_chunk_bytes=target_bytes,
-        )
+        try:
+            selected_fields = tuple(
+                parquet_file.schema_arrow.field(name) for name in columns
+            )
+            variable_width = any(
+                _is_variable_width(field.type) for field in selected_fields
+            )
+            batch_size = _target_batch_rows(
+                parquet_file,
+                columns=columns,
+                target_chunk_bytes=target_bytes,
+            )
+        finally:
+            parquet_file.close()
         batches = _iter_filtered_arrow_batches(
             path,
             columns=columns,
@@ -255,13 +258,16 @@ def dataset_primary_key_schema(
     context: DatasetReadContext,
     primary_key: tuple[str, ...],
 ) -> pa.Schema:
-    parquet_schema = pq.ParquetFile(context.all_paths[0]).schema_arrow
+    parquet_file = pq.ParquetFile(context.all_paths[0])
     try:
+        parquet_schema = parquet_file.schema_arrow
         return pa.schema(
             [parquet_schema.field(column) for column in primary_key]
         )
     except KeyError as exc:
         raise ValueError("missing_dataset_primary_key_column") from exc
+    finally:
+        parquet_file.close()
 
 
 def _validated_target_chunk_bytes(value: int | None) -> int:
@@ -386,15 +392,17 @@ def _matching_row_groups(
     indexes = list(range(parquet_file.metadata.num_row_groups))
     if not filters:
         return indexes
-    positions = {
-        name: index for index, name in enumerate(parquet_file.schema_arrow.names)
-    }
+    positions = _top_level_parquet_leaf_positions(parquet_file, filters)
     matching: list[int] = []
     for row_group_index in indexes:
         row_group = parquet_file.metadata.row_group(row_group_index)
         if all(
             _row_group_may_match(
-                row_group.column(positions[column]).statistics,
+                (
+                    None
+                    if positions[column] is None
+                    else row_group.column(positions[column]).statistics
+                ),
                 operator=operator,
                 value=value,
             )
@@ -402,6 +410,21 @@ def _matching_row_groups(
         ):
             matching.append(row_group_index)
     return matching
+
+
+def _top_level_parquet_leaf_positions(
+    parquet_file: pq.ParquetFile,
+    filters: list[tuple[str, str, Any]],
+) -> dict[str, int | None]:
+    positions: dict[str, int | None] = {}
+    for column, _, _ in filters:
+        matches = [
+            index
+            for index in range(parquet_file.metadata.num_columns)
+            if parquet_file.schema.column(index).path == column
+        ]
+        positions[column] = matches[0] if len(matches) == 1 else None
+    return positions
 
 
 def _row_group_may_match(
@@ -455,9 +478,13 @@ def _empty_frame(
     context: DatasetReadContext,
     columns: tuple[str, ...],
 ) -> pd.DataFrame:
-    schema = pq.ParquetFile(context.all_paths[0]).schema_arrow
-    selected = pa.schema([schema.field(column) for column in columns])
-    return pa.Table.from_batches([], schema=selected).to_pandas(use_threads=False)
+    parquet_file = pq.ParquetFile(context.all_paths[0])
+    try:
+        schema = parquet_file.schema_arrow
+        selected = pa.schema([schema.field(column) for column in columns])
+        return pa.Table.from_batches([], schema=selected).to_pandas(use_threads=False)
+    finally:
+        parquet_file.close()
 
 
 def _is_variable_width(data_type: pa.DataType) -> bool:
