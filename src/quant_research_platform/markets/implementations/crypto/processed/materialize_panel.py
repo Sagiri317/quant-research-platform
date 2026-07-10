@@ -53,8 +53,11 @@ def write_panel(
             spec=spec,
         )
     )
-    write_dataset(
-        root,
+    materialization_resources.require_materialization_disk_headroom(
+        resource_policy,
+        root.parent,
+    )
+    chunks = materialization_resources.iter_disk_guarded_chunks(
         _iter_panel_chunks(
             spec,
             layout=layout,
@@ -62,6 +65,12 @@ def write_panel(
             time_window=time_window,
             resource_policy=resource_policy,
         ),
+        policy=resource_policy,
+        scratch_parent=root.parent,
+    )
+    write_dataset(
+        root,
+        chunks,
         spec=spec,
         instance_metadata={"input_dataset_identities": input_identities},
     )
@@ -133,26 +142,47 @@ def _iter_panel_chunks(
                 continue
             _validate_matching_bar_keys(bars)
             prepared_bars = panels._prepare_panel_bars(bars)
+            materialization_resources.require_frame_within_budget(
+                prepared_bars,
+                target_bytes=budget.allocations["core_window"],
+                error="crypto_panel_core_window_exceeds_resource_budget",
+            )
             trade_aggregates = _read_trade_aggregates(
                 trade_root,
                 prepared_bars,
                 target_chunk_bytes=chunk_target_bytes,
                 target_state_bytes=budget.reducer_state_bytes,
-                target_output_bytes=budget.output_bytes,
+                target_output_bytes=budget.trade_output_bytes,
+            )
+            materialization_resources.require_frame_within_budget(
+                trade_aggregates,
+                target_bytes=budget.trade_output_bytes,
+                error="crypto_trade_output_exceeds_resource_budget",
             )
             quote_snapshots = _read_quote_snapshots(
                 depth_root,
                 prepared_bars,
                 target_chunk_bytes=chunk_target_bytes,
                 target_state_bytes=budget.reducer_state_bytes,
-                target_output_bytes=budget.output_bytes,
+                target_output_bytes=budget.depth_output_bytes,
             )
-            yield panels._calculate_market_panel(
+            materialization_resources.require_frame_within_budget(
+                quote_snapshots,
+                target_bytes=budget.depth_output_bytes,
+                error="crypto_depth_output_exceeds_resource_budget",
+            )
+            output = panels._calculate_market_panel(
                 prepared_bars,
                 trade_aggregates=trade_aggregates,
                 quote_snapshots=quote_snapshots,
                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
             ).loc[:, spec.required_columns]
+            materialization_resources.require_frame_within_budget(
+                output,
+                target_bytes=budget.materialized_output_bytes,
+                error="crypto_panel_output_exceeds_resource_budget",
+            )
+            yield output
 
 
 def _canonical_source_assets(

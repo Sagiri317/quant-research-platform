@@ -10,6 +10,7 @@ import pytest
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.processed import (
+    materialization_resources,
     materialization_validation,
     materialize_factors,
     materialize_labels,
@@ -570,19 +571,71 @@ def test_crypto_rechecks_disk_before_each_materialization_stage(
 
 
 def test_materialization_budget_allocations_close_under_effective_budget() -> None:
-    from quant_research_platform.markets.implementations.crypto.processed import (
-        materialization_resources,
-    )
-
     budget = materialization_resources.MaterializationBudget.from_policy(
         RESOURCE_POLICY
     )
 
     assert sum(budget.allocations.values()) <= RESOURCE_POLICY.effective_chunk_bytes
+    assert not hasattr(budget, "effective_bytes")
     assert budget.physical_batch_bytes > 0
     assert budget.reducer_state_bytes > 0
-    assert budget.output_bytes > 0
+    assert budget.trade_output_bytes > 0
+    assert budget.depth_output_bytes > 0
+    assert budget.materialized_output_bytes > 0
     assert budget.dependency_key_index_bytes > 0
+    assert {
+        "trade_output",
+        "depth_output",
+        "materialized_output",
+    }.issubset(budget.allocations)
+    panel_source = inspect.getsource(materialize_panel._iter_panel_chunks)
+    assert "budget.trade_output_bytes" in panel_source
+    assert "budget.depth_output_bytes" in panel_source
+    assert "budget.materialized_output_bytes" in panel_source
+
+
+def test_crypto_disk_guard_rechecks_between_chunks_and_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[Path, int]] = []
+    monkeypatch.setattr(
+        materialization_resources,
+        "require_free_disk_headroom",
+        lambda _policy, path, *, reserve_bytes: observed.append(
+            (Path(path), reserve_bytes)
+        ),
+    )
+    frames = (
+        pd.DataFrame({"value": [1]}),
+        pd.DataFrame({"value": [2, 3]}),
+    )
+
+    result = list(
+        materialization_resources.iter_disk_guarded_chunks(
+            frames,
+            policy=RESOURCE_POLICY,
+            scratch_parent=tmp_path,
+        )
+    )
+
+    assert [len(frame) for frame in result] == [1, 2]
+    assert [path for path, _ in observed] == [tmp_path, tmp_path, tmp_path]
+    assert all(
+        reserve > RESOURCE_POLICY.effective_chunk_bytes
+        for _, reserve in observed
+    )
+
+
+def test_crypto_direct_dataset_writers_cannot_bypass_disk_guard() -> None:
+    for module, function_name in (
+        (materialize_panel, "write_panel"),
+        (materialize_factors, "write_factors"),
+        (materialize_labels, "write_labels"),
+    ):
+        source = inspect.getsource(getattr(module, function_name))
+        assert "require_materialization_disk_headroom(" in source
+        assert "iter_disk_guarded_chunks(" in source
 
 
 def test_crypto_materializers_use_storage_physical_iterator_without_split_wrapper(
@@ -624,6 +677,11 @@ def test_factor_and_label_state_fail_closed_when_fixed_carry_exceeds_budget(
         module,
         "iter_dataset_chunks",
         lambda *_args, **_kwargs: iter((panel,)),
+    )
+    monkeypatch.setattr(
+        module.materialization_resources,
+        "require_frame_within_budget",
+        lambda *_args, **_kwargs: None,
     )
     _patch_mock_group_plan(monkeypatch, module, (("crypto", "btc_usdt"),))
     spec = processed_catalog().get(

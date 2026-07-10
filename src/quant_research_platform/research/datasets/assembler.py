@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from math import ceil
 from pathlib import Path
 
@@ -71,14 +71,23 @@ def assemble_research_dataset(
         dataset_spec=spec,
         processed_catalog=processed_catalog,
     )
-    chunks = _iter_joined_processed_chunks(
-        layout=layout,
-        dataset_spec=spec,
-        processed_catalog=processed_catalog,
-        time_window=time_window,
-        resource_policy=policy,
-    )
     artifact_root = layout.research_dataset_root(spec.market_id, spec.data_id)
+    require_free_disk_headroom(
+        policy,
+        artifact_root.parent,
+        reserve_bytes=2 * policy.effective_chunk_bytes,
+    )
+    chunks = _iter_disk_guarded_output_chunks(
+        _iter_joined_processed_chunks(
+            layout=layout,
+            dataset_spec=spec,
+            processed_catalog=processed_catalog,
+            time_window=time_window,
+            resource_policy=policy,
+        ),
+        policy=policy,
+        scratch_parent=artifact_root.parent,
+    )
     write_dataset(
         artifact_root,
         chunks,
@@ -86,6 +95,30 @@ def assemble_research_dataset(
         instance_metadata={"input_dataset_identities": input_identities},
     )
     return artifact_root
+
+
+def _iter_disk_guarded_output_chunks(
+    chunks: Iterable[pd.DataFrame],
+    *,
+    policy: RuntimeResourcePolicy,
+    scratch_parent: Path,
+) -> Iterator[pd.DataFrame]:
+    for chunk in chunks:
+        chunk_bytes = int(chunk.memory_usage(index=True, deep=True).sum())
+        require_free_disk_headroom(
+            policy,
+            scratch_parent,
+            reserve_bytes=(
+                2 * policy.effective_chunk_bytes
+                + RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER * chunk_bytes
+            ),
+        )
+        yield chunk
+    require_free_disk_headroom(
+        policy,
+        scratch_parent,
+        reserve_bytes=2 * policy.effective_chunk_bytes,
+    )
 
 
 def _iter_joined_processed_chunks(

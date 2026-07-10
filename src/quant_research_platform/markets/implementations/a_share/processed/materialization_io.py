@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +11,10 @@ from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    require_free_disk_headroom,
+)
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     inspect_dataset,
@@ -27,11 +31,21 @@ def write_and_inspect(
     layout: StorageLayout,
     time_window: TimeWindow,
     written: dict[str, DatasetInspection],
+    resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
     root = processed_root(layout, spec)
     if root.exists():
         raise ValueError("dataset_exists")
-    output = iter_sorted_output_chunks(frame, spec)
+    require_free_disk_headroom(
+        resource_policy,
+        root.parent,
+        reserve_bytes=2 * resource_policy.effective_chunk_bytes,
+    )
+    output = _iter_disk_guarded_output_chunks(
+        iter_sorted_output_chunks(frame, spec),
+        policy=resource_policy,
+        scratch_parent=root.parent,
+    )
     write_dataset(root, output, spec=spec)
     inspection = inspect_dataset(root, time_window=time_window)
     written[spec.data_id] = inspection
@@ -75,6 +89,30 @@ def iter_sorted_output_chunks(
         if output.empty:
             continue
         yield output.sort_values(list(spec.primary_key)).reset_index(drop=True)
+
+
+def _iter_disk_guarded_output_chunks(
+    chunks: Iterable[pd.DataFrame],
+    *,
+    policy: RuntimeResourcePolicy,
+    scratch_parent: Path,
+) -> Iterator[pd.DataFrame]:
+    for chunk in chunks:
+        chunk_bytes = int(chunk.memory_usage(index=True, deep=True).sum())
+        require_free_disk_headroom(
+            policy,
+            scratch_parent,
+            reserve_bytes=(
+                2 * policy.effective_chunk_bytes
+                + 4 * chunk_bytes
+            ),
+        )
+        yield chunk
+    require_free_disk_headroom(
+        policy,
+        scratch_parent,
+        reserve_bytes=2 * policy.effective_chunk_bytes,
+    )
 
 
 def read_source_inputs_for_spec(

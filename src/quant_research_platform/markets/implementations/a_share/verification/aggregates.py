@@ -229,31 +229,6 @@ def build_local_verification_inventory_payload(
     }
 
 
-def _build_aggregate_payloads(
-    project_root: Path = Path("."),
-    *,
-    generated_at: datetime | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    root = Path(project_root)
-    generated_at = generated_at or datetime.now(UTC)
-    policy = resource_policy or active_runtime_resource_policy()
-    summary_cache: _SummaryCache = {}
-    with runtime_resource_policy_scope(policy):
-        evidence_payload = _build_review_safe_aggregate_evidence_payload_with_cache(
-            root,
-            generated_at=generated_at,
-            summary_cache=summary_cache,
-        )
-        inventory_payload = _build_local_verification_inventory_payload_with_cache(
-            root,
-            evidence_payload=evidence_payload,
-            generated_at=generated_at,
-            summary_cache=summary_cache,
-        )
-    return evidence_payload, inventory_payload
-
-
 def _build_review_safe_aggregate_evidence_payload_with_cache(
     root: Path,
     *,

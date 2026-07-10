@@ -729,10 +729,6 @@ def _generated_text_paths(output_bundles: tuple[Path, ...]) -> tuple[Path, ...]:
     )
 
 
-def _dataset_id(dataset_root: Path) -> str:
-    return dataset_root.name
-
-
 def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 

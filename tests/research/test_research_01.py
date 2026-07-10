@@ -55,6 +55,7 @@ from quant_research_platform.research.models import fit_model_result
 from quant_research_platform.research.predictions import (
     build_prediction_result_from_research_dataset,
 )
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
@@ -210,6 +211,34 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
         result,
         dataset_catalog.get("demo"),
         input_columns=("mom_20d",),
+    )
+
+
+def test_research_output_disk_guard_rechecks_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
+    observed: list[Path] = []
+    monkeypatch.setattr(
+        assembler_module,
+        "require_free_disk_headroom",
+        lambda _policy, path, **_kwargs: observed.append(Path(path)),
+    )
+    frames = (pd.DataFrame({"value": [1]}), pd.DataFrame({"value": [2]}))
+
+    result = list(
+        assembler_module._iter_disk_guarded_output_chunks(
+            frames,
+            policy=policy,
+            scratch_parent=tmp_path,
+        )
+    )
+
+    assert [len(frame) for frame in result] == [1, 1]
+    assert observed == [tmp_path, tmp_path, tmp_path]
+    assert "_iter_disk_guarded_output_chunks(" in inspect.getsource(
+        assembler_module.assemble_research_dataset
     )
 
 

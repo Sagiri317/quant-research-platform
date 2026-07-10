@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     market_panel_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_io,
     materialization_planning,
     materialize_factors,
     materialize_labels,
@@ -69,6 +71,34 @@ def test_processed_materialization_checks_disk_before_staged_write(
                 min_free_disk_bytes=10**30,
             ),
         )
+
+
+def test_a_share_output_disk_guard_rechecks_each_chunk_and_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
+    observed: list[Path] = []
+    monkeypatch.setattr(
+        materialization_io,
+        "require_free_disk_headroom",
+        lambda _policy, path, **_kwargs: observed.append(Path(path)),
+    )
+    frames = (pd.DataFrame({"value": [1]}), pd.DataFrame({"value": [2]}))
+
+    result = list(
+        materialization_io._iter_disk_guarded_output_chunks(
+            frames,
+            policy=policy,
+            scratch_parent=tmp_path,
+        )
+    )
+
+    assert [len(frame) for frame in result] == [1, 1]
+    assert observed == [tmp_path, tmp_path, tmp_path]
+    source = inspect.getsource(materialization_io.write_and_inspect)
+    assert "resource_policy" in source
+    assert "_iter_disk_guarded_output_chunks(" in source
 FORWARD_RETURN_1D_COLUMN = forward_return_label_column(1)
 MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 

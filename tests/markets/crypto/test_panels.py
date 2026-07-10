@@ -411,8 +411,14 @@ def test_depth_reducer_merges_snapshot_across_chunks() -> None:
     assert quotes.loc[0, "ask_depth"] == 2.0
 
 
-    assert reducer.candidate_count == 1
-    assert reducer.current_level_count == 0
+    assert len(reducer._candidates) == 1
+    assert sum(len(levels) for levels in reducer._current_levels.values()) == 0
+    for dead_property in (
+        "candidate_count",
+        "current_level_count",
+        "retained_snapshot_count",
+    ):
+        assert not hasattr(reducer, dead_property)
 
 
 def test_depth_reducer_rejects_out_of_order_across_chunks() -> None:
@@ -489,8 +495,8 @@ def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
         reducer.add_chunk(depth.iloc[start : start + 17].copy())
     reducer.finish()
 
-    assert reducer.candidate_count <= len(_bars_frame())
-    assert reducer.current_level_count == 0
+    assert len(reducer._candidates) <= len(_bars_frame())
+    assert sum(len(levels) for levels in reducer._current_levels.values()) == 0
 
 
 def test_old_depth_full_window_helpers_are_absent() -> None:
@@ -540,6 +546,7 @@ def test_trade_aggregate_state_reduces_dense_chunks_incrementally() -> None:
     assert aggregates["quantity_sum"].tolist() == [2_000.0]
     assert aggregates["covered_trade_count"].tolist() == [2_000]
     assert aggregates["trade_flow_observed"].tolist() == [True]
+    assert not hasattr(reducer, "aggregate_count")
 
 
 def test_trade_reducer_checks_range_continuity_across_chunks() -> None:
@@ -612,6 +619,29 @@ def test_reducer_state_budget_counts_deep_python_key_payloads() -> None:
             normalize_chunk=panels.normalize_depth_chunk,
             finalize_snapshot=panels.finalize_depth_snapshot,
         )
+
+
+def test_trade_state_budget_tracks_actual_large_integer_payloads() -> None:
+    module = _panel_input_reducers_module()
+    small = module._TradeBarState(
+        covered_trade_count=1,
+        first_trade_id=1,
+        last_trade_id=1,
+        first_aggregate_trade_id=1,
+        last_aggregate_trade_id=1,
+    )
+    large_value = 10**200
+    large = module._TradeBarState(
+        covered_trade_count=large_value,
+        first_trade_id=large_value,
+        last_trade_id=large_value,
+        first_aggregate_trade_id=large_value,
+        last_aggregate_trade_id=large_value,
+    )
+
+    assert module._trade_bar_state_budget_bytes(large) > (
+        module._trade_bar_state_budget_bytes(small)
+    )
 
 
 def test_depth_budget_checks_do_not_rescan_all_targets_per_update() -> None:

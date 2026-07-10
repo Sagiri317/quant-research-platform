@@ -63,14 +63,23 @@ def write_labels(
     input_identities = materialization_validation.input_dataset_identities(
         materialization_validation.panel_dependency_inspections(layout=layout)
     )
-    write_dataset(
-        root,
+    materialization_resources.require_materialization_disk_headroom(
+        resource_policy,
+        root.parent,
+    )
+    chunks = materialization_resources.iter_disk_guarded_chunks(
         _iter_label_chunks(
             spec,
             panel_root=panel_root,
             time_window=time_window,
             resource_policy=resource_policy,
         ),
+        policy=resource_policy,
+        scratch_parent=root.parent,
+    )
+    write_dataset(
+        root,
+        chunks,
         spec=spec,
         instance_metadata={"input_dataset_identities": input_identities},
     )
@@ -142,6 +151,11 @@ def _iter_label_chunks(
                 elif market_asset != active_market_asset:
                     finalized = _final_label_output(buffer, spec)
                     if not finalized.empty:
+                        materialization_resources.require_frame_within_budget(
+                            finalized,
+                            target_bytes=budget.materialized_output_bytes,
+                            error="crypto_label_output_exceeds_resource_budget",
+                        )
                         yield finalized
                     buffer = pd.DataFrame()
                     active_market_asset = market_asset
@@ -155,13 +169,24 @@ def _iter_label_chunks(
                 )
                 if emit_mask.any():
                     labeled = _label_frame(buffer)
-                    yield labeled.loc[emit_mask].loc[:, spec.required_columns]
+                    output = labeled.loc[emit_mask].loc[:, spec.required_columns]
+                    materialization_resources.require_frame_within_budget(
+                        output,
+                        target_bytes=budget.materialized_output_bytes,
+                        error="crypto_label_output_exceeds_resource_budget",
+                    )
+                    yield output
                     buffer = buffer.loc[~emit_mask].copy()
                 if _frame_bytes(buffer) > budget.carry_bytes:
                     raise ValueError("crypto_label_state_exceeds_resource_budget")
     if not buffer.empty:
         finalized = _final_label_output(buffer, spec)
         if not finalized.empty:
+            materialization_resources.require_frame_within_budget(
+                finalized,
+                target_bytes=budget.materialized_output_bytes,
+                error="crypto_label_output_exceeds_resource_budget",
+            )
             yield finalized
 
 

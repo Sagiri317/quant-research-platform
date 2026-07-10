@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+import pandas as pd
+
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    require_free_disk_headroom,
+)
 
 _ALLOCATION_WEIGHTS = {
     "arrow_batch": 1,
@@ -14,8 +21,9 @@ _ALLOCATION_WEIGHTS = {
     "carry_or_label_buffer": 1,
     "dependency_key_index": 1,
     "reducer_state": 1,
-    "output_rows": 1,
-    "output_frame": 1,
+    "trade_output": 2,
+    "depth_output": 2,
+    "materialized_output": 2,
     "sqlite_cache": 1,
     "allocator_headroom": 3,
 }
@@ -25,7 +33,6 @@ _ALLOCATION_WEIGHTS = {
 class MaterializationBudget:
     """Allocate one effective chunk budget across simultaneously live state."""
 
-    effective_bytes: int
     allocations: dict[str, int]
 
     @classmethod
@@ -46,7 +53,7 @@ class MaterializationBudget:
         allocations["allocator_headroom"] += effective - sum(
             allocations.values()
         )
-        return cls(effective_bytes=effective, allocations=allocations)
+        return cls(allocations=allocations)
 
     @property
     def physical_batch_bytes(self) -> int:
@@ -57,11 +64,16 @@ class MaterializationBudget:
         return self.allocations["reducer_state"]
 
     @property
-    def output_bytes(self) -> int:
-        return (
-            self.allocations["output_rows"]
-            + self.allocations["output_frame"]
-        )
+    def trade_output_bytes(self) -> int:
+        return self.allocations["trade_output"]
+
+    @property
+    def depth_output_bytes(self) -> int:
+        return self.allocations["depth_output"]
+
+    @property
+    def materialized_output_bytes(self) -> int:
+        return self.allocations["materialized_output"]
 
     @property
     def carry_bytes(self) -> int:
@@ -74,3 +86,50 @@ class MaterializationBudget:
     @property
     def sqlite_cache_bytes(self) -> int:
         return self.allocations["sqlite_cache"]
+
+
+def require_materialization_disk_headroom(
+    policy: RuntimeResourcePolicy,
+    scratch_parent: Path,
+) -> None:
+    require_free_disk_headroom(
+        policy,
+        scratch_parent,
+        reserve_bytes=2 * policy.effective_chunk_bytes,
+    )
+
+
+def iter_disk_guarded_chunks(
+    chunks: Iterable[pd.DataFrame],
+    *,
+    policy: RuntimeResourcePolicy,
+    scratch_parent: Path,
+) -> Iterator[pd.DataFrame]:
+    for chunk in chunks:
+        chunk_bytes = _frame_bytes(chunk)
+        require_free_disk_headroom(
+            policy,
+            scratch_parent,
+            reserve_bytes=(
+                2 * policy.effective_chunk_bytes
+                + 4 * chunk_bytes
+            ),
+        )
+        yield chunk
+    require_materialization_disk_headroom(policy, scratch_parent)
+
+
+def require_frame_within_budget(
+    frame: pd.DataFrame,
+    *,
+    target_bytes: int,
+    error: str,
+) -> None:
+    if _frame_bytes(frame) > target_bytes:
+        raise ValueError(error)
+
+
+def _frame_bytes(frame: pd.DataFrame) -> int:
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("invalid_crypto_materialization_chunk")
+    return int(frame.memory_usage(index=True, deep=True).sum())

@@ -139,6 +139,7 @@ def write_factors(
         layout=layout,
         time_window=time_window,
         written=written,
+        resource_policy=policy,
     )
 
 

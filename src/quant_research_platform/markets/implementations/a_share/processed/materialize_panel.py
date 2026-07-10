@@ -98,6 +98,7 @@ def write_panel(
         layout=layout,
         time_window=time_window,
         written=written,
+        resource_policy=policy,
     )
 
 

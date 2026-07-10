@@ -57,14 +57,23 @@ def write_factors(
     input_identities = materialization_validation.input_dataset_identities(
         materialization_validation.panel_dependency_inspections(layout=layout)
     )
-    write_dataset(
-        root,
+    materialization_resources.require_materialization_disk_headroom(
+        resource_policy,
+        root.parent,
+    )
+    chunks = materialization_resources.iter_disk_guarded_chunks(
         _iter_factor_chunks(
             spec,
             panel_root=panel_root,
             time_window=time_window,
             resource_policy=resource_policy,
         ),
+        policy=resource_policy,
+        scratch_parent=root.parent,
+    )
+    write_dataset(
+        root,
+        chunks,
         spec=spec,
         instance_metadata={"input_dataset_identities": input_identities},
     )
@@ -146,7 +155,13 @@ def _iter_factor_chunks(
                 if _frame_bytes(active_carry) > budget.carry_bytes:
                     raise ValueError("crypto_factor_state_exceeds_resource_budget")
                 if not output.empty:
-                    yield output.loc[:, spec.required_columns]
+                    result = output.loc[:, spec.required_columns]
+                    materialization_resources.require_frame_within_budget(
+                        result,
+                        target_bytes=budget.materialized_output_bytes,
+                        error="crypto_factor_output_exceeds_resource_budget",
+                    )
+                    yield result
 
 
 def _append_active_factor_carry(

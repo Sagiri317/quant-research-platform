@@ -89,10 +89,6 @@ class AggregateTradeReducer:
         self._finished = False
         self._require_budget()
 
-    @property
-    def aggregate_count(self) -> int:
-        return len(self._states)
-
     def add_chunk(self, trades: pd.DataFrame) -> None:
         if self._finished:
             raise RuntimeError("crypto_trade_reducer_already_finished")
@@ -158,6 +154,7 @@ class AggregateTradeReducer:
                         + _deep_size(key)
                         + _trade_bar_state_budget_bytes(state)
                     )
+                previous_state_bytes = _trade_bar_state_budget_bytes(state)
                 state.signed_quantity_sum += signed_quantity
                 state.quantity_sum += quantity
                 state.covered_trade_count += last_trade_id - first_trade_id + 1
@@ -166,6 +163,9 @@ class AggregateTradeReducer:
                     state.first_aggregate_trade_id = aggregate_trade_id
                 state.last_trade_id = last_trade_id
                 state.last_aggregate_trade_id = aggregate_trade_id
+                self._state_entries_bytes += (
+                    _trade_bar_state_budget_bytes(state) - previous_state_bytes
+                )
             self._require_budget()
 
     def finish(self) -> pd.DataFrame:
@@ -282,22 +282,6 @@ class DepthSnapshotReducer:
         self._candidate_entries_bytes = sys.getsizeof(self._candidates)
         self._finished = False
         self._require_budget()
-
-    @property
-    def candidate_count(self) -> int:
-        return len(self._candidates)
-
-    @property
-    def current_level_count(self) -> int:
-        return sum(len(levels) for levels in self._current_levels.values())
-
-    @property
-    def retained_snapshot_count(self) -> int:
-        return (
-            int(self._current_key is not None)
-            + int(self._latest_snapshot is not None)
-            + len(self._candidates)
-        )
 
     def add_chunk(self, depth: pd.DataFrame) -> None:
         if self._finished:
@@ -469,10 +453,17 @@ def _validated_output_budget(value: int, *, error: str) -> int:
 
 
 def _trade_bar_state_budget_bytes(state: _TradeBarState) -> int:
-    return (
-        sys.getsizeof(state)
-        + 2 * sys.getsizeof(0.0)
-        + 5 * sys.getsizeof(0)
+    return sys.getsizeof(state) + sum(
+        sys.getsizeof(getattr(state, field_name))
+        for field_name in (
+            "signed_quantity_sum",
+            "quantity_sum",
+            "covered_trade_count",
+            "first_trade_id",
+            "last_trade_id",
+            "first_aggregate_trade_id",
+            "last_aggregate_trade_id",
+        )
     )
 
 

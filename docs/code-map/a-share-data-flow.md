@@ -41,6 +41,11 @@ A-share active processed profile 仍为日频。minute/tick 只由通用 data fr
 
 processed owner 内部跨文件生产 helper 使用非下划线 owner-local 名称，并且不从 `processed/__init__.py` 重导出。下划线 helper 只表示同文件私有实现细节。
 
+A-share processed output IO owns the resource-policy disk gate for its staged
+dataset lifecycle. It checks same-volume free space before scratch creation,
+between produced chunks, and before staged publication; storage remains unaware
+of `RuntimeResourcePolicy`.
+
 A-share coverage uses trading sessions. Coverage helpers must reject invalid
 asset keys and timestamps instead of silently dropping them. Crypto coverage
 uses its own minute-grid semantics and must not reuse A-share calendar rules.
