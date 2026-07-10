@@ -207,6 +207,27 @@ def runtime_resource_policy_scope(
         _ACTIVE_RUNTIME_RESOURCE_POLICY.reset(policy_context_handle)
 
 
+def require_free_disk_headroom(
+    policy: RuntimeResourcePolicy,
+    path: Path,
+    *,
+    reserve_bytes: int,
+) -> None:
+    """Require the policy floor plus owner-estimated staged-write headroom."""
+
+    if isinstance(reserve_bytes, bool) or not isinstance(reserve_bytes, int):
+        raise ValueError("invalid_runtime_resource_disk_reserve")
+    if reserve_bytes < 0:
+        raise ValueError("invalid_runtime_resource_disk_reserve")
+    policy.require_minimum_free_disk(path)
+    candidate = Path(path)
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    free = shutil.disk_usage(candidate.resolve()).free
+    if free < policy.min_free_disk_bytes + reserve_bytes:
+        raise RuntimeError("insufficient_free_disk")
+
+
 @dataclass(frozen=True)
 class ResourceChunkPlan:
     """Resource-derived chunk target for one semantic axis."""

@@ -47,6 +47,7 @@ from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRe
 from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -116,6 +117,11 @@ def run_local_verification(
     layout = LocalVerificationLayout.from_run_root(run_root)
     _create_layout_directories(layout)
     resource_policy = RuntimeResourcePolicy.from_environment()
+    require_free_disk_headroom(
+        resource_policy,
+        run_root,
+        reserve_bytes=resource_policy.effective_chunk_bytes * 2,
+    )
 
     with runtime_resource_policy_scope(resource_policy):
         return _run_local_verification_with_policy(

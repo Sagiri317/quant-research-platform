@@ -25,6 +25,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    require_free_disk_headroom,
 )
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
@@ -60,6 +61,11 @@ def materialize_processed_data(
         requested = tuple(spec for spec in catalog.list() if spec.kind in kinds)
     if not requested:
         raise ValueError("no_processed_targets")
+    require_free_disk_headroom(
+        policy,
+        layout.project_root,
+        reserve_bytes=policy.effective_chunk_bytes * 2,
+    )
     for spec in requested:
         if _processed_root(layout, spec).exists():
             raise ValueError("dataset_exists")

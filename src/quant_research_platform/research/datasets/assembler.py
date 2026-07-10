@@ -30,6 +30,7 @@ from quant_research_platform.runtime.resources import (
     ResourceChunkPlanner,
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    require_free_disk_headroom,
 )
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
@@ -57,6 +58,13 @@ def assemble_research_dataset(
     """Assemble one registered research dataset from processed inputs."""
 
     spec = dataset_catalog.get(dataset_id)
+    policy = resource_policy or active_runtime_resource_policy()
+    policy.require_valid_chunk_budget()
+    require_free_disk_headroom(
+        policy,
+        layout.project_root,
+        reserve_bytes=policy.effective_chunk_bytes * 2,
+    )
     _validate_research_input_specs(spec, processed_catalog)
     input_fingerprints = _input_fingerprints(
         layout=layout,
@@ -69,7 +77,7 @@ def assemble_research_dataset(
         dataset_spec=spec,
         processed_catalog=processed_catalog,
         time_window=time_window,
-        resource_policy=resource_policy,
+        resource_policy=policy,
     )
     artifact_root = layout.research_dataset_root(spec.market_id, spec.data_id)
     write_dataset(

@@ -53,6 +53,22 @@ SYNTHETIC_SOURCE_ID = SourceId("synthetic_vendor_a")
 MARKET_BARS_DATA_ID = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
 MARKET_PANEL_DATA_ID = market_panel_data_id()
 MARKET_CONTEXT_DATA_ID = market_context_data_id()
+
+
+def test_processed_materialization_checks_disk_before_staged_write(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="insufficient_free_disk"):
+        materializer.materialize_processed_data(
+            layout=StorageLayout(project_root=tmp_path),
+            source_id=SYNTHETIC_SOURCE_ID,
+            time_window=TimeWindow("2020-01-02", "2020-01-03"),
+            data_ids=(MARKET_PANEL_DATA_ID,),
+            resource_policy=RuntimeResourcePolicy(
+                available_memory_bytes=1024**3,
+                min_free_disk_bytes=10**30,
+            ),
+        )
 FORWARD_RETURN_1D_COLUMN = forward_return_label_column(1)
 MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 

@@ -26,6 +26,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    require_free_disk_headroom,
 )
 from quant_research_platform.storage.datasets import DatasetInspection, inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -45,6 +46,7 @@ def materialize_processed_data(
     """Materialize registered A-share processed datasets."""
 
     policy = resource_policy or active_runtime_resource_policy()
+    policy.require_valid_chunk_budget()
     if (data_ids is None) == (kinds is None):
         raise ValueError("data_ids_xor_kinds_required")
     catalog = processed_catalog()
@@ -55,6 +57,11 @@ def materialize_processed_data(
         targets = tuple(spec for spec in catalog.list() if spec.kind in kinds)
     if not targets:
         raise ValueError("no_processed_targets")
+    require_free_disk_headroom(
+        policy,
+        layout.project_root,
+        reserve_bytes=policy.effective_chunk_bytes * 2,
+    )
     materialization_validation.validate_processed_dependency_graph(catalog, targets)
     materialization_validation.validate_active_processed_profile_frequencies(
         catalog,
