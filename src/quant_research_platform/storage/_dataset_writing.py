@@ -42,6 +42,7 @@ from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
     scratch_owner_is_alive,
 )
+from quant_research_platform.storage.atomic import publish_no_replace
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 
 
@@ -287,7 +288,7 @@ def _staged_write_directory(
         writer(temp_root)
         if final_root.exists():
             raise ValueError("dataset_exists")
-        temp_root.rename(final_root)
+        publish_no_replace(temp_root, final_root)
     except Exception:
         if claimed_temp:
             _remove_tree(temp_root)

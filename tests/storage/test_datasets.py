@@ -1137,6 +1137,34 @@ def test_dataset_staged_write_does_not_clean_unclaimed_name_collision(
     assert (live_stage / "live.txt").read_text(encoding="utf-8") == "live\n"
 
 
+def test_dataset_staged_write_uses_no_replace_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_root = tmp_path / "dataset"
+
+    def racing_publish(source: Path, target: Path) -> None:
+        del source
+        target.mkdir()
+        (target / "winner.txt").write_text("concurrent-winner\n", encoding="utf-8")
+        raise FileExistsError(target)
+
+    monkeypatch.setattr(dataset_writing, "publish_no_replace", racing_publish)
+
+    with pytest.raises(FileExistsError):
+        dataset_writing._staged_write_directory(
+            final_root,
+            lambda staged_root: (staged_root / "candidate.txt").write_text(
+                "candidate\n",
+                encoding="utf-8",
+            ),
+        )
+
+    assert (final_root / "winner.txt").read_text(encoding="utf-8") == (
+        "concurrent-winner\n"
+    )
+
+
 def test_dataset_write_recovers_dead_stage_when_final_exists(
     tmp_path: Path,
 ) -> None:
