@@ -34,7 +34,6 @@ from quant_research_platform.storage._dataset_schema import (
     validated_schema,
 )
 from quant_research_platform.storage._dataset_types import (
-    DatasetInspection,
     DatasetReadMode,
 )
 from quant_research_platform.storage.manifests import read_qrp_json
@@ -810,20 +809,6 @@ def parquet_filters_for_time_window(
         (timestamp_column, ">=", pd.Timestamp(start)),
         (timestamp_column, upper_operator, pd.Timestamp(end)),
     ]
-
-
-def resolve_columns(
-    inspection: DatasetInspection,
-    columns: tuple[str, ...] | list[str] | None,
-) -> tuple[str, ...]:
-    if columns is None:
-        requested = tuple(str(column) for column in inspection.spec["required_columns"])
-    else:
-        requested = tuple(str(column) for column in columns)
-    missing = [column for column in requested if column not in inspection.columns]
-    if missing:
-        raise ValueError("dataset_column_not_found")
-    return requested
 
 
 def resolve_columns_from_schema(

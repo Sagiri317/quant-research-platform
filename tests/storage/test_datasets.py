@@ -43,26 +43,6 @@ from tests.storage.low_level_fixtures import (
 )
 
 
-def _input_fingerprint_payload(
-    *,
-    extra: dict[str, object] | None = None,
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "schema_hash": "a" * 64,
-        "row_count": 3,
-        "key_columns": ["market_id", "asset_id", "timestamp"],
-        "content_hash": "b" * 64,
-        "partition_fingerprints": [
-            {"partition": "year=2014", "row_count": 1, "content_hash": "c" * 64}
-        ],
-        "file_count": 1,
-        "column_names": ["market_id", "asset_id", "timestamp", "value"],
-    }
-    if extra:
-        payload.update(extra)
-    return payload
-
-
 def _input_dataset_identity_payload(
     data_id: str = "demo_input",
     *,
@@ -142,19 +122,19 @@ def test_write_dataset_partitions_without_groupby_sort_copy(
     assert manifest["partition_row_counts"] == {"year=2014": 1, "year=2015": 2}
 
 
-def test_write_dataset_merges_allowed_instance_metadata(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    input_fingerprints = {"demo_input": _input_fingerprint_payload()}
-
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec(),
-        instance_metadata={"input_fingerprints": input_fingerprints},
-    )
-
-    inspection = inspect_dataset(root)
-    assert inspection.manifest["input_fingerprints"] == input_fingerprints
+def test_write_dataset_rejects_parallel_input_fingerprint_lineage(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="unsupported_dataset_instance_metadata_key: input_fingerprints",
+    ):
+        write_dataset(
+            make_dataset_artifact_root(tmp_path),
+            make_default_dataset_frame(),
+            spec=make_processed_dataset_spec(),
+            instance_metadata={"input_fingerprints": {}},
+        )
 
 
 def test_write_dataset_merges_exact_input_dataset_identities(tmp_path: Path) -> None:
@@ -219,39 +199,25 @@ def test_inspect_dataset_rejects_tampered_input_dataset_identity(
         inspect_dataset(root)
 
 
-def test_write_dataset_rejects_malformed_input_fingerprints_metadata(
+def test_inspect_dataset_rejects_parallel_input_fingerprint_lineage(
     tmp_path: Path,
 ) -> None:
-    cases = [
-        {"demo_input": _input_fingerprint_payload(extra={"unexpected": "x"})},
-        {"demo_input": _input_fingerprint_payload(extra={"stock_code_sample": "x"})},
-        {"demo_input": _input_fingerprint_payload(extra={"row_count": math.nan})},
-        {
-            "demo_input": _input_fingerprint_payload(
-                extra={
-                    "partition_fingerprints": [
-                        {
-                            "partition": "year=2014",
-                            "row_count": 1,
-                            "content_hash": "c" * 64,
-                            "sample": ["x"],
-                        }
-                    ]
-                }
-            )
-        },
-    ]
+    root = make_dataset_artifact_root(tmp_path, "parallel_fingerprint_lineage")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("parallel_fingerprint_lineage"),
+    )
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["input_fingerprints"] = {}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    for index, input_fingerprints in enumerate(cases):
-        with pytest.raises(ValueError, match="invalid_input_fingerprints_metadata"):
-            write_dataset(
-                make_dataset_artifact_root(
-                    tmp_path, f"bad_fingerprint_metadata_{index}"
-                ),
-                make_default_dataset_frame(),
-                spec=make_processed_dataset_spec(f"bad_fingerprint_metadata_{index}"),
-                instance_metadata={"input_fingerprints": input_fingerprints},
-            )
+    with pytest.raises(
+        ValueError,
+        match="unsupported_dataset_instance_metadata_key: input_fingerprints",
+    ):
+        inspect_dataset(root)
 
 
 def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata(
@@ -272,22 +238,6 @@ def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata
             spec=make_processed_dataset_spec("reserved_metadata"),
             instance_metadata={"row_count": 999},
         )
-
-    unsafe_root = make_dataset_artifact_root(tmp_path, "unsafe_metadata")
-    unsafe_fingerprint = _input_fingerprint_payload(
-        extra={"content_hash": "data/raw/internal-provider/export.csv"}
-    )
-    with pytest.raises(ValueError, match="unsafe_internal_artifact_metadata"):
-        write_dataset(
-            unsafe_root,
-            make_default_dataset_frame(),
-            spec=make_processed_dataset_spec("unsafe_metadata"),
-            instance_metadata={
-                "input_fingerprints": {"demo_input": unsafe_fingerprint}
-            },
-        )
-    assert not unsafe_root.exists()
-
 
 def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) -> None:
     materialized_root = make_dataset_artifact_root(tmp_path, "materialized")
@@ -718,6 +668,35 @@ def test_exact_key_index_inserts_unique_rows_from_duplicate_chunk(
         assert index.add_frame(pd.DataFrame({"key": ["b"]})) == 1
 
 
+def test_exact_key_index_keeps_sqlite_temp_state_in_memory(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+
+    with module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        assert index._connection is not None
+        temp_store = int(
+            index._connection.execute("PRAGMA temp_store").fetchone()[0]
+        )
+        index.add_frame(pd.DataFrame({"key": ["a", "b"]}), namespace="left")
+        index.add_frame(pd.DataFrame({"key": ["b", "c"]}), namespace="right")
+
+        assert temp_store == 2
+        assert index.difference_counts(
+            expected_namespace="left",
+            actual_namespace="right",
+        ) == (1, 1)
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert " EXCEPT " not in source
+
+
 def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
     tmp_path: Path,
 ) -> None:
@@ -761,6 +740,7 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
         scratch_parent=tmp_path,
         key_schema=pa.schema([pa.field("key", pa.string())]),
     ) as strings:
+        assert not hasattr(strings, "key_schema")
         assert strings.add_frame(pd.DataFrame({"key": ["é"]})) == 0
         assert strings.add_frame(pd.DataFrame({"key": ["e\u0301"]})) == 0
 
@@ -1425,7 +1405,9 @@ def test_compare_datasets_ignores_allowed_instance_metadata_for_same_content(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("right_metadata"),
         instance_metadata={
-            "input_fingerprints": {"demo_input": _input_fingerprint_payload()}
+            "input_dataset_identities": {
+                "demo_input": _input_dataset_identity_payload()
+            }
         },
     )
 

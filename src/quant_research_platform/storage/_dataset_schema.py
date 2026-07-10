@@ -21,9 +21,7 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.storage.manifests import require_qrp_json_identity
 
-_DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset(
-    {"input_dataset_identities", "input_fingerprints"}
-)
+_DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset({"input_dataset_identities"})
 _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
     {
         "schema_version",
@@ -65,20 +63,6 @@ _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
         "validation_status",
     }
 )
-_DATASET_INPUT_FINGERPRINT_KEYS = frozenset(
-    {
-        "schema_hash",
-        "row_count",
-        "key_columns",
-        "content_hash",
-        "partition_fingerprints",
-        "file_count",
-        "column_names",
-    }
-)
-_DATASET_PARTITION_FINGERPRINT_KEYS = frozenset(
-    {"partition", "row_count", "content_hash"}
-)
 _DATASET_INPUT_IDENTITY_KEYS = frozenset(
     {"data_id", "manifest_hash", "spec_hash"}
 )
@@ -101,8 +85,6 @@ def merge_dataset_instance_metadata(
             raise ValueError(f"reserved_dataset_instance_metadata_key: {key}")
         if key not in _DATASET_INSTANCE_METADATA_ALLOWED_KEYS:
             raise ValueError(f"unsupported_dataset_instance_metadata_key: {key}")
-        if key == "input_fingerprints":
-            metadata[key] = _validate_input_fingerprints_metadata(value)
         if key == "input_dataset_identities":
             metadata[key] = _validate_input_dataset_identities_metadata(value)
     _require_json_serializable(metadata)
@@ -117,17 +99,6 @@ def _require_json_serializable(value: Mapping[str, Any]) -> None:
         raise ValueError("dataset_instance_metadata_not_json_serializable") from exc
     except ValueError as exc:
         raise ValueError("dataset_instance_metadata_not_json_serializable") from exc
-
-
-def _validate_input_fingerprints_metadata(value: Any) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError("invalid_input_fingerprints_metadata")
-    fingerprints: dict[str, Any] = {}
-    for data_id, fingerprint in value.items():
-        if not isinstance(data_id, str) or not data_id:
-            raise ValueError("invalid_input_fingerprints_metadata")
-        fingerprints[data_id] = _validate_input_fingerprint_payload(fingerprint)
-    return fingerprints
 
 
 def _validate_input_dataset_identities_metadata(value: Any) -> dict[str, Any]:
@@ -197,70 +168,10 @@ def validate_dataset_manifest_instance_metadata(
         raise ValueError(
             "unsupported_dataset_instance_metadata_key: " + ", ".join(sorted(unknown))
         )
-    if "input_fingerprints" in manifest:
-        _validate_input_fingerprints_metadata(manifest["input_fingerprints"])
     if "input_dataset_identities" in manifest:
         _validate_input_dataset_identities_metadata(
             manifest["input_dataset_identities"]
         )
-
-
-def _validate_input_fingerprint_payload(value: Any) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError("invalid_input_fingerprints_metadata")
-    keys = set(value)
-    if keys != _DATASET_INPUT_FINGERPRINT_KEYS:
-        raise ValueError("invalid_input_fingerprints_metadata")
-    return {
-        "schema_hash": _require_string(value["schema_hash"]),
-        "row_count": _require_non_negative_int(value["row_count"]),
-        "key_columns": _require_string_list(value["key_columns"]),
-        "content_hash": _require_string(value["content_hash"]),
-        "partition_fingerprints": [
-            _validate_partition_fingerprint_payload(item)
-            for item in _require_list(value["partition_fingerprints"])
-        ],
-        "file_count": _require_non_negative_int(value["file_count"]),
-        "column_names": _require_string_list(value["column_names"]),
-    }
-
-
-def _validate_partition_fingerprint_payload(value: Any) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError("invalid_input_fingerprints_metadata")
-    keys = set(value)
-    if keys != _DATASET_PARTITION_FINGERPRINT_KEYS:
-        raise ValueError("invalid_input_fingerprints_metadata")
-    return {
-        "partition": _require_string(value["partition"]),
-        "row_count": _require_non_negative_int(value["row_count"]),
-        "content_hash": _require_string(value["content_hash"]),
-    }
-
-
-def _require_string(value: Any) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError("invalid_input_fingerprints_metadata")
-    return value
-
-
-def _require_string_list(value: Any) -> list[str]:
-    values = _require_list(value)
-    if any(not isinstance(item, str) or not item for item in values):
-        raise ValueError("invalid_input_fingerprints_metadata")
-    return list(values)
-
-
-def _require_list(value: Any) -> list[Any]:
-    if not isinstance(value, (list, tuple)):
-        raise ValueError("invalid_input_fingerprints_metadata")
-    return list(value)
-
-
-def _require_non_negative_int(value: Any) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError("invalid_input_fingerprints_metadata")
-    return int(value)
 
 
 def validate_dataset_spec(spec: DataSpec) -> str | None:

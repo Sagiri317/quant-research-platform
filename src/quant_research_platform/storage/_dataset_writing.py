@@ -263,7 +263,6 @@ def _staged_write_directory(
     temp_root = final_root.with_name(
         f".{final_root.name}.tmp-{uuid4().hex[:12]}"
     )
-    backup_root = final_root.with_name(f".replace-{uuid4().hex[:12]}")
     try:
         temp_root.mkdir()
         owner_marker = temp_root / ".owner.pid"
@@ -275,8 +274,6 @@ def _staged_write_directory(
         temp_root.rename(final_root)
     except Exception:
         _remove_tree(temp_root)
-        if backup_root.exists() and not final_root.exists():
-            backup_root.rename(final_root)
         raise
 
 

@@ -54,10 +54,6 @@ class ExactPrimaryKeyIndex:
             raise RuntimeError("exact_primary_key_index_not_open")
         return Path(self._temporary_directory.name) / "k.sqlite3"
 
-    @property
-    def key_schema(self) -> pa.Schema | None:
-        return self._key_schema
-
     def __enter__(self) -> ExactPrimaryKeyIndex:
         if self._connection is not None:
             raise RuntimeError("exact_primary_key_index_already_open")
@@ -72,7 +68,7 @@ class ExactPrimaryKeyIndex:
             connection = sqlite3.connect(self.database_path)
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
-            connection.execute("PRAGMA temp_store=FILE")
+            connection.execute("PRAGMA temp_store=MEMORY")
             connection.execute(f"PRAGMA cache_size=-{self._sqlite_cache_kib}")
             connection.execute(
                 "CREATE TABLE exact_keys ("
@@ -182,16 +178,18 @@ class ExactPrimaryKeyIndex:
         if connection is None:
             raise RuntimeError("exact_primary_key_index_not_open")
         missing = connection.execute(
-            "SELECT COUNT(*) FROM ("
-            "SELECT payload FROM exact_keys WHERE namespace = ? "
-            "EXCEPT SELECT payload FROM exact_keys WHERE namespace = ?"
+            "SELECT COUNT(*) FROM exact_keys AS expected "
+            "WHERE expected.namespace = ? AND NOT EXISTS ("
+            "SELECT 1 FROM exact_keys AS actual "
+            "WHERE actual.namespace = ? AND actual.payload = expected.payload"
             ")",
             (expected_namespace, actual_namespace),
         ).fetchone()
         extra = connection.execute(
-            "SELECT COUNT(*) FROM ("
-            "SELECT payload FROM exact_keys WHERE namespace = ? "
-            "EXCEPT SELECT payload FROM exact_keys WHERE namespace = ?"
+            "SELECT COUNT(*) FROM exact_keys AS actual "
+            "WHERE actual.namespace = ? AND NOT EXISTS ("
+            "SELECT 1 FROM exact_keys AS expected "
+            "WHERE expected.namespace = ? AND expected.payload = actual.payload"
             ")",
             (actual_namespace, expected_namespace),
         ).fetchone()
