@@ -11,6 +11,7 @@ from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.markets.implementations.crypto.processed import (
+    materialization_resources,
     materialization_validation,
     panel_input_reducers,
     panels,
@@ -81,10 +82,10 @@ def _iter_panel_chunks(
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
     resource_policy.require_valid_chunk_budget()
-    chunk_target_bytes = materialization_validation.materialization_chunk_target_bytes(
-        resource_policy,
-        working_set_parts=8,
+    budget = materialization_resources.MaterializationBudget.from_policy(
+        resource_policy
     )
+    chunk_target_bytes = budget.physical_batch_bytes
     bar_root = layout.interim_data_root(
         source_id,
         source_ids.market_bars_source_data_id(spec),
@@ -114,11 +115,15 @@ def _iter_panel_chunks(
             trade_root,
             prepared_bars,
             target_chunk_bytes=chunk_target_bytes,
+            target_state_bytes=budget.reducer_state_bytes,
+            target_output_bytes=budget.output_bytes,
         )
         quote_snapshots = _read_quote_snapshots(
             depth_root,
             prepared_bars,
             target_chunk_bytes=chunk_target_bytes,
+            target_state_bytes=budget.reducer_state_bytes,
+            target_output_bytes=budget.output_bytes,
         )
         yield panels._calculate_market_panel(
             prepared_bars,
@@ -133,6 +138,8 @@ def _read_trade_aggregates(
     bars: pd.DataFrame,
     *,
     target_chunk_bytes: int,
+    target_state_bytes: int,
+    target_output_bytes: int,
 ) -> pd.DataFrame:
     asset_ids, start, end, read_window = _matching_read_scope(
         bars,
@@ -140,7 +147,8 @@ def _read_trade_aggregates(
     )
     reducer = panel_input_reducers.AggregateTradeReducer(
         bars=bars,
-        target_state_bytes=target_chunk_bytes,
+        target_state_bytes=target_state_bytes,
+        target_output_bytes=target_output_bytes,
         normalize_chunk=panels.normalize_trade_chunk,
     )
     for chunk in _iter_matching_chunks(
@@ -163,6 +171,8 @@ def _read_quote_snapshots(
     bars: pd.DataFrame,
     *,
     target_chunk_bytes: int,
+    target_state_bytes: int,
+    target_output_bytes: int,
 ) -> pd.DataFrame:
     max_quote_age = panels.DEFAULT_MAX_QUOTE_AGE
     asset_ids, start, end, read_window = _matching_read_scope(
@@ -171,7 +181,8 @@ def _read_quote_snapshots(
     )
     reducer = panel_input_reducers.DepthSnapshotReducer(
         bars=bars,
-        target_state_bytes=target_chunk_bytes,
+        target_state_bytes=target_state_bytes,
+        target_output_bytes=target_output_bytes,
         normalize_chunk=panels.normalize_depth_chunk,
         finalize_snapshot=panels.finalize_depth_snapshot,
     )

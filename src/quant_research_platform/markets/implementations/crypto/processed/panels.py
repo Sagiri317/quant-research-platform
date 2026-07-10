@@ -198,6 +198,10 @@ def _trade_aggregates(
     reducer = panel_input_reducers.AggregateTradeReducer(
         bars=bars,
         target_state_bytes=max(1, input_bytes * 2 + len(bars) * 512),
+        target_output_bytes=max(
+            16 * 1024,
+            input_bytes * 4 + len(bars) * 4_096,
+        ),
         normalize_chunk=normalize_trade_chunk,
     )
     if not trades.empty:
@@ -335,6 +339,10 @@ def _quote_snapshots(
     reducer = panel_input_reducers.DepthSnapshotReducer(
         bars=bars,
         target_state_bytes=max(1, input_bytes * 2 + len(bars) * 512),
+        target_output_bytes=max(
+            16 * 1024,
+            input_bytes * 4 + len(bars) * 4_096,
+        ),
         normalize_chunk=_normalize_sorted_depth_chunk,
         finalize_snapshot=finalize_depth_snapshot,
     )

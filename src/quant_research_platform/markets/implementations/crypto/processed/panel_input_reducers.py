@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
@@ -60,6 +61,7 @@ class AggregateTradeReducer:
         *,
         bars: pd.DataFrame,
         target_state_bytes: int,
+        target_output_bytes: int,
         normalize_chunk: Callable[[pd.DataFrame], pd.DataFrame],
     ) -> None:
         if (
@@ -79,6 +81,10 @@ class AggregateTradeReducer:
             )
         )
         self._target_state_bytes = target_state_bytes
+        self._target_output_bytes = _validated_output_budget(
+            target_output_bytes,
+            error="invalid_crypto_trade_output_budget",
+        )
         self._normalize_chunk = normalize_chunk
         self._states: dict[tuple[str, pd.Timestamp], _TradeBarState] = {}
         self._last_order_key: tuple[str, pd.Timestamp, int] | None = None
@@ -175,7 +181,12 @@ class AggregateTradeReducer:
                     "trade_flow_observed": True,
                 }
             )
-        return pd.DataFrame(rows, columns=list(_TRADE_AGGREGATE_COLUMNS))
+        return _bounded_output_frame(
+            rows,
+            columns=_TRADE_AGGREGATE_COLUMNS,
+            target_output_bytes=self._target_output_bytes,
+            error="crypto_trade_output_exceeds_resource_budget",
+        )
 
     def _require_budget(self) -> None:
         estimated_state_bytes = (
@@ -195,6 +206,7 @@ class DepthSnapshotReducer:
         *,
         bars: pd.DataFrame,
         target_state_bytes: int,
+        target_output_bytes: int,
         normalize_chunk: Callable[[pd.DataFrame], pd.DataFrame],
         finalize_snapshot: Callable[
             [
@@ -230,6 +242,10 @@ class DepthSnapshotReducer:
             asset_id: 0 for asset_id in self._targets_by_asset
         }
         self._target_state_bytes = target_state_bytes
+        self._target_output_bytes = _validated_output_budget(
+            target_output_bytes,
+            error="invalid_crypto_depth_output_budget",
+        )
         self._normalize_chunk = normalize_chunk
         self._finalize_snapshot = finalize_snapshot
         self._last_order_key: tuple[str, pd.Timestamp, str, int] | None = None
@@ -317,7 +333,12 @@ class DepthSnapshotReducer:
             self._candidates[key]
             for key in sorted(self._candidates)
         ]
-        return pd.DataFrame(rows, columns=list(_QUOTE_COLUMNS))
+        return _bounded_output_frame(
+            rows,
+            columns=_QUOTE_COLUMNS,
+            target_output_bytes=self._target_output_bytes,
+            error="crypto_depth_output_exceeds_resource_budget",
+        )
 
     def _finalize_current_snapshot(self) -> None:
         if self._current_key is None:
@@ -373,3 +394,43 @@ class DepthSnapshotReducer:
         )
         if estimated_state_bytes > self._target_state_bytes:
             raise ValueError("crypto_depth_state_exceeds_resource_budget")
+
+
+def _validated_output_budget(value: int, *, error: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(error)
+    return value
+
+
+def _bounded_output_frame(
+    rows: list[dict[str, object]],
+    *,
+    columns: tuple[str, ...],
+    target_output_bytes: int,
+    error: str,
+) -> pd.DataFrame:
+    rows_bytes = _deep_size(rows)
+    if rows_bytes > target_output_bytes // 2:
+        raise ValueError(error)
+    frame = pd.DataFrame(rows, columns=list(columns))
+    frame_bytes = int(frame.memory_usage(index=True, deep=True).sum())
+    if rows_bytes + frame_bytes > target_output_bytes:
+        raise ValueError(error)
+    return frame
+
+
+def _deep_size(value: object, seen: set[int] | None = None) -> int:
+    observed = set() if seen is None else seen
+    identity = id(value)
+    if identity in observed:
+        return 0
+    observed.add(identity)
+    size = sys.getsizeof(value)
+    if isinstance(value, dict):
+        return size + sum(
+            _deep_size(key, observed) + _deep_size(item, observed)
+            for key, item in value.items()
+        )
+    if isinstance(value, list | tuple | set | frozenset):
+        return size + sum(_deep_size(item, observed) for item in value)
+    return size

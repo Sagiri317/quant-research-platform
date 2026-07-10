@@ -21,6 +21,7 @@ from quant_research_platform.markets.implementations.crypto.labels.definitions i
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_dependencies,
+    materialization_resources,
     materialization_validation,
 )
 from quant_research_platform.research.labels.forward_returns import (
@@ -90,10 +91,10 @@ def _iter_label_chunks(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
-    chunk_target_bytes = materialization_validation.materialization_chunk_target_bytes(
-        resource_policy,
-        working_set_parts=8,
+    budget = materialization_resources.MaterializationBudget.from_policy(
+        resource_policy
     )
+    chunk_target_bytes = budget.physical_batch_bytes
     buffer = pd.DataFrame()
     active_market_asset: tuple[str, str] | None = None
     order_state = materialization_validation.OrderedDependencyState()
@@ -141,7 +142,7 @@ def _iter_label_chunks(
                 labeled = _label_frame(buffer)
                 yield labeled.loc[emit_mask].loc[:, spec.required_columns]
                 buffer = buffer.loc[~emit_mask].copy()
-            if _frame_bytes(buffer) > chunk_target_bytes:
+            if _frame_bytes(buffer) > budget.carry_bytes:
                 raise ValueError("crypto_label_state_exceeds_resource_budget")
     if not buffer.empty:
         finalized = _final_label_output(buffer, spec)

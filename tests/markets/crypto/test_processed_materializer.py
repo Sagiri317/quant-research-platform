@@ -22,6 +22,7 @@ from quant_research_platform.markets.implementations.crypto.labels.definitions i
     CRYPTO_FORWARD_RETURN_HORIZONS,
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
+    materialization_resources,
     materialization_validation,
     materialize_factors,
     materialize_labels,
@@ -186,7 +187,9 @@ def test_crypto_processed_materializer_uses_policy_bounded_physical_reads(
         }
     )
     assert {target for _, _, target in calls} == {
-        policy.effective_chunk_bytes // 8
+        materialization_resources.MaterializationBudget.from_policy(
+            policy
+        ).physical_batch_bytes
     }
 
 

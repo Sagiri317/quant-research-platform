@@ -396,6 +396,7 @@ def test_depth_reducer_merges_snapshot_across_chunks() -> None:
     reducer = module.DepthSnapshotReducer(
         bars=panels._prepare_panel_bars(_bars_frame()),
         target_state_bytes=16 * 1024,
+        target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
         finalize_snapshot=panels.finalize_depth_snapshot,
     )
@@ -420,6 +421,7 @@ def test_depth_reducer_rejects_out_of_order_across_chunks() -> None:
     reducer = module.DepthSnapshotReducer(
         bars=panels._prepare_panel_bars(_bars_frame()),
         target_state_bytes=16 * 1024,
+        target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
         finalize_snapshot=panels.finalize_depth_snapshot,
     )
@@ -447,6 +449,7 @@ def test_depth_reducer_fails_when_one_snapshot_exceeds_state_budget() -> None:
     reducer = module.DepthSnapshotReducer(
         bars=panels._prepare_panel_bars(_bars_frame()),
         target_state_bytes=512,
+        target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
         finalize_snapshot=panels.finalize_depth_snapshot,
     )
@@ -477,6 +480,7 @@ def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
     reducer = module.DepthSnapshotReducer(
         bars=panels._prepare_panel_bars(_bars_frame()),
         target_state_bytes=64 * 1024,
+        target_output_bytes=64 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
         finalize_snapshot=panels.finalize_depth_snapshot,
     )
@@ -524,6 +528,7 @@ def test_trade_aggregate_state_reduces_dense_chunks_incrementally() -> None:
     reducer = module.AggregateTradeReducer(
         bars=panels._prepare_panel_bars(bars),
         target_state_bytes=64 * 1024,
+        target_output_bytes=64 * 1024,
         normalize_chunk=panels.normalize_trade_chunk,
     )
 
@@ -545,6 +550,7 @@ def test_trade_reducer_checks_range_continuity_across_chunks() -> None:
     reducer = module.AggregateTradeReducer(
         bars=panels._prepare_panel_bars(bars),
         target_state_bytes=16 * 1024,
+        target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_trade_chunk,
     )
 
@@ -552,6 +558,35 @@ def test_trade_reducer_checks_range_continuity_across_chunks() -> None:
 
     with pytest.raises(ValueError, match="invalid_crypto_trade_flow_coverage"):
         reducer.add_chunk(trades.iloc[1:].copy())
+
+
+def test_trade_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> None:
+    module = _panel_input_reducers_module()
+    reducer = module.AggregateTradeReducer(
+        bars=panels._prepare_panel_bars(_bars_frame()),
+        target_state_bytes=512,
+        target_output_bytes=512,
+        normalize_chunk=panels.normalize_trade_chunk,
+    )
+    reducer.add_chunk(_aggregate_trades_frame().iloc[:1].copy())
+
+    with pytest.raises(ValueError, match="crypto_trade_output_exceeds_resource_budget"):
+        reducer.finish()
+
+
+def test_depth_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> None:
+    module = _panel_input_reducers_module()
+    reducer = module.DepthSnapshotReducer(
+        bars=panels._prepare_panel_bars(_bars_frame()),
+        target_state_bytes=1_024,
+        target_output_bytes=1_024,
+        normalize_chunk=panels.normalize_depth_chunk,
+        finalize_snapshot=panels.finalize_depth_snapshot,
+    )
+    reducer.add_chunk(_ordered_depth_levels_frame())
+
+    with pytest.raises(ValueError, match="crypto_depth_output_exceeds_resource_budget"):
+        reducer.finish()
 
 
 def test_quote_matching_has_no_per_bar_dataframe_scan() -> None:

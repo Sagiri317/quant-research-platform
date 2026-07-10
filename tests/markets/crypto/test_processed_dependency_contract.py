@@ -90,6 +90,7 @@ def test_materialization_input_identity_validation_is_exact() -> None:
 )
 def test_exact_dependency_key_coverage_rejects_any_full_key_delta(
     mutation: str,
+    tmp_path: Path,
 ) -> None:
     expected = _key_frame()
     actual = expected.copy()
@@ -122,10 +123,13 @@ def test_exact_dependency_key_coverage_rejects_any_full_key_delta(
             primary_key=("market_id", "asset_id", "timestamp"),
             error="invalid_crypto_dependency_key_coverage",
             resource_policy=RESOURCE_POLICY,
+            scratch_parent=tmp_path,
         )
 
 
-def test_exact_dependency_key_coverage_accepts_equal_bounded_streams() -> None:
+def test_exact_dependency_key_coverage_accepts_equal_bounded_streams(
+    tmp_path: Path,
+) -> None:
     expected = _key_frame()
 
     materialization_validation.validate_exact_dependency_key_coverage(
@@ -134,12 +138,126 @@ def test_exact_dependency_key_coverage_accepts_equal_bounded_streams() -> None:
         primary_key=("market_id", "asset_id", "timestamp"),
         error="invalid_crypto_dependency_key_coverage",
         resource_policy=RESOURCE_POLICY,
+        scratch_parent=tmp_path,
+    )
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 5])
+def test_exact_dependency_key_coverage_is_order_and_chunk_independent(
+    chunk_size: int,
+    tmp_path: Path,
+) -> None:
+    expected = _key_frame()
+    actual = expected.iloc[[5, 1, 3, 0, 4, 2]].reset_index(drop=True)
+
+    materialization_validation.validate_exact_dependency_key_coverage(
+        (
+            expected.iloc[start : start + chunk_size].copy()
+            for start in range(0, len(expected), chunk_size)
+        ),
+        (
+            actual.iloc[start : start + chunk_size].copy()
+            for start in range(0, len(actual), chunk_size)
+        ),
+        primary_key=("market_id", "asset_id", "timestamp"),
+        error="invalid_crypto_dependency_key_coverage",
+        resource_policy=RESOURCE_POLICY,
+        scratch_parent=tmp_path,
+    )
+
+
+def test_panel_key_coverage_accepts_non_order_preserving_asset_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mapping = {"SOURCE_A": "asset_z", "SOURCE_B": "asset_a"}
+    monkeypatch.setattr(
+        materialization_validation,
+        "canonical_crypto_asset_id",
+        mapping.__getitem__,
+    )
+    bars = pd.DataFrame(
+        {
+            "source_asset_id": ["SOURCE_A", "SOURCE_B"],
+            "timestamp": [pd.Timestamp("2026-07-06")] * 2,
+        }
+    )
+    primary_key = ("market_id", "asset_id", "timestamp")
+    expected = materialization_validation._panel_primary_keys(
+        bars,
+        primary_key=primary_key,
+    )
+    actual = expected.iloc[::-1].reset_index(drop=True)
+
+    materialization_validation.validate_exact_dependency_key_coverage(
+        iter((expected,)),
+        iter((actual,)),
+        primary_key=primary_key,
+        error="invalid_crypto_dependency_key_coverage",
+        resource_policy=RESOURCE_POLICY,
+        scratch_parent=tmp_path,
+    )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_factor_carry_processing_is_linear_in_asset_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset_count = 64
+    rows_per_asset = 6
+    chunks = tuple(
+        _panel_frame(start=0, minutes=rows_per_asset).assign(
+            asset_id=f"asset_{asset_index:04d}"
+        )
+        for asset_index in range(asset_count)
+    )
+    processed_rows = 0
+
+    def record_rows(frame: pd.DataFrame, **_kwargs) -> pd.DataFrame:
+        nonlocal processed_rows
+        processed_rows += len(frame)
+        output = frame.copy()
+        for column in processed_catalog().get("microstructure").required_columns:
+            if column not in output:
+                output[column] = 0.0
+        return output
+
+    monkeypatch.setattr(
+        materialize_factors,
+        "build_dataset_read_context",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        materialize_factors,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter(chunks),
+    )
+    monkeypatch.setattr(
+        materialize_factors,
+        "calculate_microstructure_factors",
+        record_rows,
+    )
+    spec = processed_catalog().get("microstructure")
+
+    list(
+        materialize_factors._iter_factor_chunks(
+            spec,
+            panel_root=Path("unused"),
+            time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:05"),
+            resource_policy=RESOURCE_POLICY,
+        )
+    )
+
+    assert processed_rows <= asset_count * (
+        rows_per_asset + materialize_factors.MICROSTRUCTURE_ROLLING_CARRY_BARS
     )
 
 
 @pytest.mark.parametrize("empty_side", ["expected", "actual"])
 def test_exact_dependency_key_coverage_rejects_one_empty_stream(
     empty_side: str,
+    tmp_path: Path,
 ) -> None:
     populated = iter((_key_frame(),))
     expected = iter(()) if empty_side == "expected" else populated
@@ -152,30 +270,30 @@ def test_exact_dependency_key_coverage_rejects_one_empty_stream(
             primary_key=("market_id", "asset_id", "timestamp"),
             error="invalid_crypto_dependency_key_coverage",
             resource_policy=RESOURCE_POLICY,
+            scratch_parent=tmp_path,
         )
 
 
-def test_exact_dependency_key_coverage_accepts_two_empty_streams() -> None:
+def test_exact_dependency_key_coverage_accepts_two_empty_streams(
+    tmp_path: Path,
+) -> None:
     materialization_validation.validate_exact_dependency_key_coverage(
         iter(()),
         iter(()),
         primary_key=("market_id", "asset_id", "timestamp"),
         error="invalid_crypto_dependency_key_coverage",
         resource_policy=RESOURCE_POLICY,
+        scratch_parent=tmp_path,
     )
 
 
 @pytest.mark.parametrize("stream_name", ["expected", "actual"])
-@pytest.mark.parametrize("mutation", ["duplicate_across_chunk", "out_of_order"])
 def test_exact_dependency_key_coverage_rejects_invalid_individual_streams(
     stream_name: str,
-    mutation: str,
+    tmp_path: Path,
 ) -> None:
     baseline = _key_frame()
-    if mutation == "duplicate_across_chunk":
-        mutated = iter((baseline.iloc[:2], baseline.iloc[1:].copy()))
-    else:
-        mutated = iter((baseline.iloc[3:].copy(), baseline.iloc[:3].copy()))
+    mutated = iter((baseline.iloc[:2], baseline.iloc[1:].copy()))
     expected = mutated if stream_name == "expected" else iter((baseline,))
     actual = mutated if stream_name == "actual" else iter((baseline,))
 
@@ -186,6 +304,7 @@ def test_exact_dependency_key_coverage_rejects_invalid_individual_streams(
             primary_key=("market_id", "asset_id", "timestamp"),
             error="invalid_crypto_dependency_key_coverage",
             resource_policy=RESOURCE_POLICY,
+            scratch_parent=tmp_path,
         )
 
 
@@ -218,10 +337,11 @@ def test_dependency_chunk_order_rejects_unsorted_and_overlap() -> None:
         error="out_of_order_crypto_factor_dependency",
     )
     pd.testing.assert_frame_equal(result, ordered, check_dtype=False)
-    assert state.asset_watermarks == {
-        ("crypto", "asset_a"): pd.Timestamp("2026-07-06 00:02"),
-        ("crypto", "asset_b"): pd.Timestamp("2026-07-06 00:02"),
-    }
+    assert state.last_key == (
+        "crypto",
+        "asset_b",
+        pd.Timestamp("2026-07-06 00:02"),
+    )
 
     with pytest.raises(ValueError, match="out_of_order_crypto_factor_dependency"):
         materialization_validation.validated_ordered_dependency_chunk(
@@ -272,6 +392,39 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
 
     assert result is inspection
     assert observed == [policy]
+
+
+def test_crypto_materialization_checks_disk_before_staged_write(
+    tmp_path: Path,
+) -> None:
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        min_free_disk_bytes=10**30,
+    )
+
+    with pytest.raises(RuntimeError, match="insufficient_free_disk"):
+        materializer.materialize_processed_data(
+            layout=StorageLayout(project_root=tmp_path),
+            source_id=SourceId("synthetic_crypto"),
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            data_ids=("market_panel_1m",),
+            resource_policy=policy,
+        )
+
+
+def test_materialization_budget_allocations_close_under_effective_budget() -> None:
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        materialization_resources,
+    )
+
+    budget = materialization_resources.MaterializationBudget.from_policy(
+        RESOURCE_POLICY
+    )
+
+    assert sum(budget.allocations.values()) <= RESOURCE_POLICY.effective_chunk_bytes
+    assert budget.physical_batch_bytes > 0
+    assert budget.reducer_state_bytes > 0
+    assert budget.output_bytes > 0
 
 
 def test_crypto_materializers_use_storage_physical_iterator_without_split_wrapper(

@@ -14,6 +14,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_dependencies,
+    materialization_resources,
     materialization_validation,
 )
 from quant_research_platform.research.factors.microstructure import (
@@ -84,11 +85,12 @@ def _iter_factor_chunks(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
-    chunk_target_bytes = materialization_validation.materialization_chunk_target_bytes(
-        resource_policy,
-        working_set_parts=8,
+    budget = materialization_resources.MaterializationBudget.from_policy(
+        resource_policy
     )
-    carry_by_market_asset: dict[tuple[str, str], pd.DataFrame] = {}
+    chunk_target_bytes = budget.physical_batch_bytes
+    active_key: tuple[str, str] | None = None
+    active_carry: pd.DataFrame | None = None
     order_state = materialization_validation.OrderedDependencyState()
     context = build_dataset_read_context(
         panel_root,
@@ -106,65 +108,54 @@ def _iter_factor_chunks(
             state=order_state,
             error="out_of_order_crypto_factor_dependency",
         )
-        core = panel.copy()
-        core[_CORE_ROW] = _core_mask(core, time_window)
-        combined = _with_factor_carry(core, carry_by_market_asset)
-        factors = calculate_microstructure_factors(
-            combined,
-            expected_interval=pd.Timedelta(minutes=1),
-            min_periods=MICROSTRUCTURE_ROLLING_WINDOW_MINUTES,
-            trade_flow_observed_column="trade_flow_observed",
-        )
-        output = factors.loc[factors[_CORE_ROW]].copy()
-        _update_factor_carry(combined, carry_by_market_asset)
-        if _factor_carry_bytes(carry_by_market_asset) > chunk_target_bytes:
-            raise ValueError("crypto_factor_state_exceeds_resource_budget")
-        yield output.loc[:, spec.required_columns]
+        panel = panel.copy()
+        panel[_CORE_ROW] = _core_mask(panel, time_window)
+        for (market_id, asset_id), segment in panel.groupby(
+            ["market_id", "asset_id"],
+            sort=False,
+            dropna=False,
+        ):
+            key = (str(market_id), str(asset_id))
+            if active_key != key:
+                active_key = key
+                active_carry = None
+            combined = _append_active_factor_carry(segment, active_carry)
+            factors = calculate_microstructure_factors(
+                combined,
+                expected_interval=pd.Timedelta(minutes=1),
+                min_periods=MICROSTRUCTURE_ROLLING_WINDOW_MINUTES,
+                trade_flow_observed_column="trade_flow_observed",
+            )
+            output = factors.loc[factors[_CORE_ROW]].copy()
+            active_carry = _next_factor_carry(combined)
+            if _frame_bytes(active_carry) > budget.carry_bytes:
+                raise ValueError("crypto_factor_state_exceeds_resource_budget")
+            if not output.empty:
+                yield output.loc[:, spec.required_columns]
 
 
-def _with_factor_carry(
-    core: pd.DataFrame,
-    carry_by_market_asset: dict[tuple[str, str], pd.DataFrame],
+def _append_active_factor_carry(
+    segment: pd.DataFrame,
+    active_carry: pd.DataFrame | None,
 ) -> pd.DataFrame:
-    if not carry_by_market_asset:
-        return core
+    if active_carry is None or active_carry.empty:
+        return segment
     return pd.concat(
-        (
-            *(
-                carry.assign(**{_CORE_ROW: False})
-                for carry in carry_by_market_asset.values()
-            ),
-            core,
-        ),
+        (active_carry.assign(**{_CORE_ROW: False}), segment),
         ignore_index=True,
     )
 
 
-def _update_factor_carry(
-    frame: pd.DataFrame,
-    carry_by_market_asset: dict[tuple[str, str], pd.DataFrame],
-) -> None:
-    ordered = frame.sort_values(
-        ["market_id", "asset_id", "timestamp"],
-        kind="mergesort",
+def _next_factor_carry(frame: pd.DataFrame) -> pd.DataFrame:
+    return (
+        frame.drop(columns=[_CORE_ROW])
+        .tail(MICROSTRUCTURE_ROLLING_CARRY_BARS)
+        .copy()
     )
-    for (market_id, asset_id), asset_rows in ordered.groupby(
-        ["market_id", "asset_id"], sort=False
-    ):
-        carry_by_market_asset[(str(market_id), str(asset_id))] = (
-            asset_rows.drop(columns=[_CORE_ROW])
-            .tail(MICROSTRUCTURE_ROLLING_CARRY_BARS)
-            .copy()
-        )
 
 
-def _factor_carry_bytes(
-    carry_by_market_asset: dict[tuple[str, str], pd.DataFrame],
-) -> int:
-    return sum(
-        int(frame.memory_usage(index=True, deep=True).sum())
-        for frame in carry_by_market_asset.values()
-    )
+def _frame_bytes(frame: pd.DataFrame) -> int:
+    return int(frame.memory_usage(index=True, deep=True).sum())
 
 
 def _core_mask(frame: pd.DataFrame, time_window: TimeWindow) -> pd.Series:
