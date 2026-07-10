@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.time import (
     TimeWindow,
@@ -35,6 +36,9 @@ from quant_research_platform.storage._dataset_types import (
     DatasetReadMode,
 )
 from quant_research_platform.storage.manifests import read_qrp_json
+
+_DEFAULT_TARGET_CHUNK_BYTES = 64 * 1024 * 1024
+_PARQUET_TO_PANDAS_EXPANSION_FACTOR = 4
 
 
 @dataclass(frozen=True)
@@ -67,7 +71,7 @@ def read_dataset(
         time_window=time_window,
     )
 
-    chunks = _read_dataset_chunks(context)
+    chunks = iter_dataset_chunks(context)
     if mode is DatasetReadMode.CHUNKED:
         return chunks
     if mode is not DatasetReadMode.MATERIALIZED:
@@ -161,25 +165,114 @@ def build_dataset_read_context(
     )
 
 
-def _read_dataset_chunks(
+def iter_dataset_chunks(
     context: DatasetReadContext,
+    *,
+    target_chunk_bytes: int | None = None,
 ) -> Iterator[pd.DataFrame]:
+    target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     if not context.read_paths:
         yield pd.DataFrame(columns=list(context.logical_columns))
         return
+    yielded = False
     for path in context.read_paths:
-        frame = pd.read_parquet(
-            path,
+        parquet_file = pq.ParquetFile(path)
+        batch_size = _target_batch_rows(
+            parquet_file,
+            columns=context.physical_columns,
+            target_chunk_bytes=target_bytes,
+        )
+        for batch in parquet_file.iter_batches(
+            batch_size=batch_size,
             columns=list(context.physical_columns),
-            engine="pyarrow",
-            filters=context.parquet_filters,
+            use_threads=False,
+        ):
+            frame = batch.to_pandas(use_threads=False)
+            filtered = filter_frame_by_time_window(
+                frame,
+                spec=context.spec,
+                time_window=context.time_window,
+            ).loc[:, list(context.logical_columns)]
+            for chunk in _bounded_frame_chunks(
+                filtered,
+                target_chunk_bytes=target_bytes,
+            ):
+                yielded = True
+                yield chunk
+    if not yielded:
+        yield pd.DataFrame(columns=list(context.logical_columns))
+
+
+def _validated_target_chunk_bytes(value: int | None) -> int:
+    if value is None:
+        return _DEFAULT_TARGET_CHUNK_BYTES
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("invalid_target_chunk_bytes")
+    return value
+
+
+def _target_batch_rows(
+    parquet_file: pq.ParquetFile,
+    *,
+    columns: tuple[str, ...],
+    target_chunk_bytes: int,
+) -> int:
+    column_positions = {
+        name: index for index, name in enumerate(parquet_file.schema_arrow.names)
+    }
+    selected_positions = [column_positions[column] for column in columns]
+    maximum_row_bytes = 1
+    metadata = parquet_file.metadata
+    for row_group_index in range(metadata.num_row_groups):
+        row_group = metadata.row_group(row_group_index)
+        if row_group.num_rows <= 0:
+            continue
+        projected_bytes = sum(
+            max(0, int(row_group.column(index).total_uncompressed_size))
+            for index in selected_positions
         )
-        filtered = filter_frame_by_time_window(
-            frame,
-            spec=context.spec,
-            time_window=context.time_window,
+        row_bytes = max(
+            1,
+            (projected_bytes + row_group.num_rows - 1) // row_group.num_rows,
         )
-        yield filtered.loc[:, list(context.logical_columns)]
+        maximum_row_bytes = max(maximum_row_bytes, row_bytes)
+    conservative_row_bytes = (
+        maximum_row_bytes * _PARQUET_TO_PANDAS_EXPANSION_FACTOR
+    )
+    return max(1, target_chunk_bytes // conservative_row_bytes)
+
+
+def _bounded_frame_chunks(
+    frame: pd.DataFrame,
+    *,
+    target_chunk_bytes: int,
+) -> Iterator[pd.DataFrame]:
+    if frame.empty:
+        return
+    frame_bytes = int(frame.memory_usage(index=True, deep=True).sum())
+    rows_per_chunk = max(
+        1,
+        min(
+            len(frame),
+            len(frame) * target_chunk_bytes // max(1, frame_bytes),
+        ),
+    )
+    start = 0
+    while start < len(frame):
+        stop = min(len(frame), start + rows_per_chunk)
+        candidate = frame.iloc[start:stop]
+        candidate_bytes = int(
+            candidate.memory_usage(index=True, deep=True).sum()
+        )
+        if candidate_bytes > target_chunk_bytes:
+            if len(candidate) == 1:
+                raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+            rows_per_chunk = max(1, rows_per_chunk // 2)
+            continue
+        yield candidate.copy()
+        start = stop
+        if start < len(frame) and candidate_bytes * 2 < target_chunk_bytes:
+            rows_per_chunk = min(len(frame) - start, rows_per_chunk * 2)
 
 
 def filter_frame_by_time_window(

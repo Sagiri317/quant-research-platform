@@ -16,6 +16,9 @@ import pyarrow.parquet as pq
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.storage._dataset_key_tracking import (
+    ExactPrimaryKeyTracker,
+)
 from quant_research_platform.storage._dataset_manifest_validation import (
     validate_written_artifact,
 )
@@ -41,6 +44,7 @@ from quant_research_platform.storage.manifests import write_internal_artifact_ma
 class _WriteStats:
     spec: DataSpec
     data_root: Path
+    key_tracker: ExactPrimaryKeyTracker
     row_count: int = 0
     file_count: int = 0
     file_size_bytes: int = 0
@@ -55,7 +59,6 @@ class _WriteStats:
     partition_row_counts: dict[str, int] = field(default_factory=dict)
     columns: tuple[str, ...] | None = None
     schema_hash: str | None = None
-    _seen_key_hashes: set[int] = field(default_factory=set)
     _schema: tuple[tuple[str, str], ...] | None = None
 
     def update_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
@@ -130,22 +133,16 @@ class _WriteStats:
         return payload
 
     def _update_keys(self, frame: pd.DataFrame) -> None:
+        has_null_key = False
         for column in self.spec.primary_key:
             self.null_count_summary.setdefault(column, 0)
-            self.null_count_summary[column] += int(frame[column].isna().sum())
-        if frame.empty:
+            null_count = int(frame[column].isna().sum())
+            self.null_count_summary[column] += null_count
+            has_null_key = has_null_key or null_count > 0
+        if frame.empty or has_null_key:
             return
         keys = frame.loc[:, list(self.spec.primary_key)]
-        local_duplicates = int(keys.duplicated(list(self.spec.primary_key)).sum())
-        hashes = pd.util.hash_pandas_object(keys, index=False).to_numpy("uint64")
-        cross_duplicates = 0
-        for value in hashes:
-            key_hash = int(value)
-            if key_hash in self._seen_key_hashes:
-                cross_duplicates += 1
-            else:
-                self._seen_key_hashes.add(key_hash)
-        self.duplicate_primary_key_count += local_duplicates + cross_duplicates
+        self.duplicate_primary_key_count += self.key_tracker.add_frame(keys)
 
     def _update_dates(self, frame: pd.DataFrame) -> None:
         timestamp_column = timestamp_primary_key_column_from_spec(self.spec)
@@ -266,31 +263,44 @@ def _write_contents(
     spec: DataSpec,
 ) -> _WriteStats:
     timestamp_column = validate_dataset_spec(spec)
-    accumulator = _WriteStats(spec=spec, data_root=root)
-    part_indices: dict[str, int] = {}
-    empty_schema_frame: pd.DataFrame | None = None
-    for chunk in chunks:
-        frame = accumulator.update_frame(chunk)
-        if frame.empty:
+    timestamp_columns = tuple(
+        column
+        for column in spec.primary_key
+        if spec.column_roles.get(column) is ColumnRole.TIMESTAMP
+    )
+    with ExactPrimaryKeyTracker(
+        primary_key=spec.primary_key,
+        timestamp_columns=timestamp_columns,
+    ) as key_tracker:
+        accumulator = _WriteStats(
+            spec=spec,
+            data_root=root,
+            key_tracker=key_tracker,
+        )
+        part_indices: dict[str, int] = {}
+        empty_schema_frame: pd.DataFrame | None = None
+        for chunk in chunks:
+            frame = accumulator.update_frame(chunk)
+            if frame.empty:
+                if empty_schema_frame is None:
+                    empty_schema_frame = frame
+                continue
+            for partition, partition_frame in partition_frames(
+                frame,
+                timestamp_column=timestamp_column,
+                partition_columns=spec.partition_columns,
+            ):
+                part_index = part_indices.get(partition, 0)
+                part_indices[partition] = part_index + 1
+                output_path = partition_part_path(root, partition, part_index)
+                write_parquet_file(partition_frame, output_path)
+                accumulator.record_file(output_path, row_count=len(partition_frame))
+        if accumulator.row_count == 0:
             if empty_schema_frame is None:
-                empty_schema_frame = frame
-            continue
-        for partition, partition_frame in partition_frames(
-            frame,
-            timestamp_column=timestamp_column,
-            partition_columns=spec.partition_columns,
-        ):
-            part_index = part_indices.get(partition, 0)
-            part_indices[partition] = part_index + 1
-            output_path = partition_part_path(root, partition, part_index)
-            write_parquet_file(partition_frame, output_path)
-            accumulator.record_file(output_path, row_count=len(partition_frame))
-    if accumulator.row_count == 0:
-        if empty_schema_frame is None:
-            raise ValueError("empty_dataset_schema_missing")
-        output_path = partition_part_path(root, "", 0)
-        write_parquet_file(empty_schema_frame, output_path)
-        accumulator.record_file(output_path, row_count=0)
+                raise ValueError("empty_dataset_schema_missing")
+            output_path = partition_part_path(root, "", 0)
+            write_parquet_file(empty_schema_frame, output_path)
+            accumulator.record_file(output_path, row_count=0)
     return accumulator
 
 

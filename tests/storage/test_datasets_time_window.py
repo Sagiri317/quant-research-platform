@@ -17,7 +17,10 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage._dataset_inspection import (
     _inspection_runtime_metadata,
 )
-from quant_research_platform.storage._dataset_reading import DatasetReadContext
+from quant_research_platform.storage._dataset_reading import (
+    DatasetReadContext,
+    build_dataset_read_context,
+)
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
@@ -68,7 +71,6 @@ def test_read_dataset_time_window_uses_closed_interval(tmp_path: Path) -> None:
 
 def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_columns(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "read_pruned")
     write_dataset(
@@ -77,15 +79,17 @@ def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_column
         spec=make_processed_dataset_spec("read_pruned"),
     )
     full = read_dataset(root)
-    read_paths = capture_read_parquet_paths(
-        monkeypatch,
-        "quant_research_platform.storage._dataset_reading.pd.read_parquet",
+    window = TimeWindow("2015-01-01", "2015-01-05")
+    context = build_dataset_read_context(
+        root,
+        columns=["asset_id", "value"],
+        time_window=window,
     )
 
     result = read_dataset(
         root,
         columns=["asset_id", "value"],
-        time_window=TimeWindow("2015-01-01", "2015-01-05"),
+        time_window=window,
     )
     manual = full.loc[
         (full["timestamp"].dt.date >= pd.Timestamp("2015-01-01").date())
@@ -95,7 +99,7 @@ def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_column
 
     assert list(result.columns) == ["asset_id", "value"]
     pd.testing.assert_frame_equal(result, manual)
-    assert {path.parent.name for path in read_paths} == {"year=2015"}
+    assert {path.parent.name for path in context.read_paths} == {"year=2015"}
 
 
 def test_read_dataset_datetime_time_window_filters_intraday_precisely(

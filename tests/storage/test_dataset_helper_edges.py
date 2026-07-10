@@ -8,6 +8,9 @@ import pytest
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage import datasets
+from quant_research_platform.storage._dataset_key_tracking import (
+    ExactPrimaryKeyTracker,
+)
 from quant_research_platform.storage._dataset_manifest_validation import (
     validate_manifest_runtime_metadata_shape,
 )
@@ -33,54 +36,88 @@ from tests.storage.low_level_fixtures import (
 
 def test_write_stats_fail_closed_paths() -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    stats = _WriteStats(spec=spec, data_root=Path("data"))
-
-    with pytest.raises(ValueError, match="unregistered_output_columns"):
-        stats.update_frame(
-            make_helper_edges_dataset_frame(market_id="dummy").assign(
-                extra=1
-            )
+    with ExactPrimaryKeyTracker(
+        primary_key=spec.primary_key,
+        timestamp_columns=("timestamp",),
+    ) as tracker:
+        stats = _WriteStats(
+            spec=spec,
+            data_root=Path("data"),
+            key_tracker=tracker,
         )
-    with pytest.raises(ValueError, match="missing_required_columns"):
-        stats.update_frame(
-            make_helper_edges_dataset_frame(market_id="dummy").drop(
-                columns=["value"]
-            )
-        )
-    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
-        frame = make_helper_edges_dataset_frame(market_id="dummy")
-        stats.update_frame(pd.concat([frame, frame.iloc[[0]]]))
 
-    with pytest.raises(ValueError, match="dataset_schema_missing"):
-        _WriteStats(spec=spec, data_root=Path("data")).payload()
+        with pytest.raises(ValueError, match="unregistered_output_columns"):
+            stats.update_frame(
+                make_helper_edges_dataset_frame(market_id="dummy").assign(
+                    extra=1
+                )
+            )
+        with pytest.raises(ValueError, match="missing_required_columns"):
+            stats.update_frame(
+                make_helper_edges_dataset_frame(market_id="dummy").drop(
+                    columns=["value"]
+                )
+            )
+        with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
+            frame = make_helper_edges_dataset_frame(market_id="dummy")
+            stats.update_frame(pd.concat([frame, frame.iloc[[0]]]))
+
+        with pytest.raises(ValueError, match="dataset_schema_missing"):
+            _WriteStats(
+                spec=spec,
+                data_root=Path("data"),
+                key_tracker=tracker,
+            ).payload()
 
 
 def test_write_stats_tracks_null_and_non_finite_failures() -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-
-    with pytest.raises(ValueError, match="dataset_primary_key_null"):
-        _WriteStats(spec=spec, data_root=Path("data")).update_frame(
-            make_helper_edges_dataset_frame(market_id="dummy").assign(
-                asset_id=["asset_a", None]
+    with ExactPrimaryKeyTracker(
+        primary_key=spec.primary_key,
+        timestamp_columns=("timestamp",),
+    ) as null_tracker:
+        with pytest.raises(ValueError, match="dataset_primary_key_null"):
+            _WriteStats(
+                spec=spec,
+                data_root=Path("data"),
+                key_tracker=null_tracker,
+            ).update_frame(
+                make_helper_edges_dataset_frame(market_id="dummy").assign(
+                    asset_id=["asset_a", pd.NA]
+                )
             )
-        )
-    with pytest.raises(ValueError, match="dataset_infinite_value"):
-        _WriteStats(spec=spec, data_root=Path("data")).update_frame(
-            make_helper_edges_dataset_frame(market_id="dummy").assign(
-                value=[1.0, float("inf")]
+    with ExactPrimaryKeyTracker(
+        primary_key=spec.primary_key,
+        timestamp_columns=("timestamp",),
+    ) as numeric_tracker:
+        with pytest.raises(ValueError, match="dataset_infinite_value"):
+            _WriteStats(
+                spec=spec,
+                data_root=Path("data"),
+                key_tracker=numeric_tracker,
+            ).update_frame(
+                make_helper_edges_dataset_frame(market_id="dummy").assign(
+                    value=[1.0, float("inf")]
+                )
             )
-        )
 
 
 def test_write_stats_rejects_invalid_non_null_timestamp() -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-
-    with pytest.raises(ValueError, match="invalid_dataset_timestamp_value"):
-        _WriteStats(spec=spec, data_root=Path("data")).update_frame(
-            make_helper_edges_dataset_frame(market_id="dummy").assign(
-                timestamp=["2024-01-02", "bad-date"]
+    with ExactPrimaryKeyTracker(
+        primary_key=spec.primary_key,
+        timestamp_columns=("timestamp",),
+    ) as tracker:
+        with pytest.raises(ValueError, match="invalid_dataset_timestamp_value"):
+            _WriteStats(
+                spec=spec,
+                data_root=Path("data"),
+                key_tracker=tracker,
+            ).update_frame(
+                make_helper_edges_dataset_frame(market_id="dummy").assign(
+                    timestamp=["2024-01-02", "bad-date"]
+                )
             )
-        )
 
 
 def test_dataset_compare_and_filter_fail_closed_paths(tmp_path: Path) -> None:

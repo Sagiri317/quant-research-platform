@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
 import math
 from inspect import signature
@@ -9,6 +11,7 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.storage._dataset_reading as dataset_reading
+import quant_research_platform.storage._dataset_writing as dataset_writing
 import quant_research_platform.storage.datasets as datasets
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -387,6 +390,94 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
     assert not missing_root.exists()
 
 
+def test_exact_primary_key_tracker_is_spillable_exact_and_cleans_up(
+    tmp_path: Path,
+) -> None:
+    module_spec = importlib.util.find_spec(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+    assert module_spec is not None, "storage exact key tracker module is missing"
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+    tracker_root = tmp_path / "tracker"
+    tracker_root.mkdir()
+    tracker = module.ExactPrimaryKeyTracker(
+        primary_key=("asset_id", "timestamp"),
+        timestamp_columns=("timestamp",),
+        temp_parent=tracker_root,
+    )
+    first = pd.DataFrame(
+        {
+            "asset_id": ["asset_a", "asset_b"],
+            "timestamp": pd.to_datetime(
+                ["2026-01-01T00:00:00", "2026-01-01T00:01:00"]
+            ),
+        }
+    )
+    duplicate_same_instant = pd.DataFrame(
+        {
+            "asset_id": ["asset_a"],
+            "timestamp": [pd.Timestamp("2026-01-01T00:00:00Z")],
+        }
+    )
+
+    with tracker:
+        database_path = tracker.database_path
+        assert database_path.is_file()
+        assert tracker.add_frame(first) == 0
+        assert tracker.add_frame(duplicate_same_instant) == 1
+
+    assert not database_path.exists()
+    assert list(tracker_root.iterdir()) == []
+
+    numeric = module.ExactPrimaryKeyTracker(
+        primary_key=("numeric_key",),
+        timestamp_columns=(),
+        temp_parent=tracker_root,
+    )
+    with numeric:
+        assert numeric.add_frame(pd.DataFrame({"numeric_key": [-0.0]})) == 0
+        assert numeric.add_frame(pd.DataFrame({"numeric_key": [0.0]})) == 1
+    assert list(tracker_root.iterdir()) == []
+
+    exceptional = module.ExactPrimaryKeyTracker(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        temp_parent=tracker_root,
+    )
+    with pytest.raises(RuntimeError, match="stop"):
+        with exceptional:
+            exceptional_path = exceptional.database_path
+            raise RuntimeError("stop")
+    assert not exceptional_path.exists()
+    assert list(tracker_root.iterdir()) == []
+
+
+def test_dataset_writer_does_not_retain_row_proportional_python_key_state() -> None:
+    source = Path(dataset_writing.__file__).read_text(encoding="utf-8")
+
+    assert "_seen_key_hashes" not in source
+    assert "hash_pandas_object" not in source
+
+
+def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
+    tmp_path: Path,
+) -> None:
+    frame = make_default_dataset_frame().iloc[:2].reset_index(drop=True)
+    root = make_dataset_artifact_root(tmp_path, "duplicate_across_chunks")
+
+    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
+        write_dataset(
+            root,
+            iter((frame, frame.iloc[[0]].copy())),
+            spec=make_processed_dataset_spec("duplicate_across_chunks"),
+        )
+
+    assert not root.exists()
+    assert list(root.parent.glob(".duplicate_across_chunks.tmp-*")) == []
+
+
 def test_write_dataset_rejects_existing_root_without_overwrite(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path)
     write_dataset(
@@ -444,6 +535,143 @@ def test_read_dataset_materialized_chunked_projection_and_time_window(
     assert materialized["asset_id"].tolist() == ["asset_001"]
     assert len(chunks) == 2
     assert all(isinstance(chunk, pd.DataFrame) for chunk in chunks)
+
+
+def test_internal_physical_reader_uses_bounded_record_batches(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(
+        tmp_path,
+        "bounded_reader",
+        market_id="dummy",
+    )
+    frame = pd.DataFrame(
+        {
+            "market_id": ["dummy"] * 64,
+            "asset_id": [f"asset_{index:04d}" for index in range(64)],
+            "timestamp": pd.date_range("2026-01-01", periods=64, freq="min"),
+            "value": [float(index) for index in range(64)],
+        }
+    )
+    ordered_input = pd.concat(
+        (frame.iloc[32:].copy(), frame.iloc[:32].copy()),
+        ignore_index=True,
+    )
+    write_dataset(
+        root,
+        (frame.iloc[32:].copy(), frame.iloc[:32].copy()),
+        spec=make_processed_dataset_spec("bounded_reader", market_id="dummy"),
+    )
+    assert hasattr(dataset_reading, "iter_dataset_chunks")
+    context = dataset_reading.build_dataset_read_context(
+        root,
+        columns=None,
+        time_window=None,
+    )
+    target_chunk_bytes = 1_024
+
+    chunks = list(
+        dataset_reading.iter_dataset_chunks(
+            context,
+            target_chunk_bytes=target_chunk_bytes,
+        )
+    )
+
+    assert len(chunks) > 1
+    assert all(
+        int(chunk.memory_usage(index=True, deep=True).sum()) <= target_chunk_bytes
+        for chunk in chunks
+    )
+    pd.testing.assert_frame_equal(
+        pd.concat(chunks, ignore_index=True),
+        ordered_input,
+    )
+
+    window = TimeWindow(
+        frame.loc[28, "timestamp"],
+        frame.loc[36, "timestamp"],
+    )
+    projected_context = dataset_reading.build_dataset_read_context(
+        root,
+        columns=("asset_id", "value"),
+        time_window=window,
+    )
+    projected = pd.concat(
+        dataset_reading.iter_dataset_chunks(
+            projected_context,
+            target_chunk_bytes=target_chunk_bytes,
+        ),
+        ignore_index=True,
+    )
+    expected_projected = ordered_input.loc[
+        ordered_input["timestamp"].between(
+            pd.Timestamp(window.start),
+            pd.Timestamp(window.end),
+        ),
+        ["asset_id", "value"],
+    ].reset_index(drop=True)
+    pd.testing.assert_frame_equal(projected, expected_projected)
+
+
+def test_internal_physical_reader_rejects_single_row_over_target(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(
+        tmp_path,
+        "oversized_reader_row",
+        market_id="dummy",
+    )
+    frame = pd.DataFrame(
+        {
+            "market_id": ["dummy"],
+            "asset_id": ["asset_a"],
+            "timestamp": [pd.Timestamp("2026-01-01")],
+            "value": ["x" * 8_192],
+        }
+    )
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec(
+            "oversized_reader_row",
+            market_id="dummy",
+        ),
+    )
+    assert hasattr(dataset_reading, "iter_dataset_chunks")
+    context = dataset_reading.build_dataset_read_context(
+        root,
+        columns=None,
+        time_window=None,
+    )
+
+    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
+        list(
+            dataset_reading.iter_dataset_chunks(
+                context,
+                target_chunk_bytes=512,
+            )
+        )
+
+
+def test_bounded_dataset_read_path_never_calls_full_file_pandas_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "no_full_file_reader")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("no_full_file_reader"),
+    )
+
+    def fail_read_parquet(*args: object, **kwargs: object) -> object:
+        raise AssertionError("bounded_dataset_read_must_not_call_pd_read_parquet")
+
+    monkeypatch.setattr(dataset_reading.pd, "read_parquet", fail_read_parquet)
+
+    chunks = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+
+    assert sum(len(chunk) for chunk in chunks) == 3
 
 
 def test_read_dataset_reuses_one_candidate_file_listing(
