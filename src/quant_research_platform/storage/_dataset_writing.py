@@ -286,7 +286,7 @@ def _cleanup_stale_staged_scratch(final_root: Path) -> None:
     for staged_root in final_root.parent.glob(f".{final_root.name}.tmp-*"):
         if not staged_root.is_dir():
             continue
-        for scratch in staged_root.glob(".qrp-exact-key-index-*"):
+        for scratch in staged_root.glob(".k-*"):
             _remove_tree(scratch)
 
 

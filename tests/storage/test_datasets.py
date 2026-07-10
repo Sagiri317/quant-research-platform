@@ -618,13 +618,13 @@ def test_dataset_write_recovers_stale_key_scratch_without_publishing_it(
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "stale_key_scratch")
     stale_stage = root.parent / ".stale_key_scratch.tmp-deadbeef"
-    stale_scratch = stale_stage / ".qrp-exact-key-index-deadbeef"
+    stale_scratch = stale_stage / ".k-deadbeef"
     stale_scratch.mkdir(parents=True)
     for name in (
-        "primary-keys.sqlite3",
-        "primary-keys.sqlite3-journal",
-        "primary-keys.sqlite3-wal",
-        "primary-keys.sqlite3-shm",
+        "k.sqlite3",
+        "k.sqlite3-journal",
+        "k.sqlite3-wal",
+        "k.sqlite3-shm",
     ):
         (stale_scratch / name).write_bytes(b"scratch")
 

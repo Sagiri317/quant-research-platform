@@ -41,7 +41,7 @@ class ExactPrimaryKeyIndex:
     def database_path(self) -> Path:
         if self._temporary_directory is None:
             raise RuntimeError("exact_primary_key_index_not_open")
-        return Path(self._temporary_directory.name) / "primary-keys.sqlite3"
+        return Path(self._temporary_directory.name) / "k.sqlite3"
 
     @property
     def key_schema(self) -> pa.Schema | None:
@@ -52,7 +52,7 @@ class ExactPrimaryKeyIndex:
             raise RuntimeError("exact_primary_key_index_already_open")
         self._scratch_parent.mkdir(parents=True, exist_ok=True)
         self._temporary_directory = tempfile.TemporaryDirectory(
-            prefix=".qrp-exact-key-index-",
+            prefix=".k-",
             dir=self._scratch_parent,
         )
         connection = sqlite3.connect(self.database_path)
