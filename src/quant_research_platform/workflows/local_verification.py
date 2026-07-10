@@ -109,6 +109,12 @@ def run_local_verification(
     effective_windows = _resolve_effective_windows(config)
     run_root = Path(config.run_root).resolve(strict=False)
     run_id = resolve_local_verification_run_id(config.run_id, run_root)
+    resource_policy = RuntimeResourcePolicy.from_environment()
+    require_free_disk_headroom(
+        resource_policy,
+        run_root,
+        reserve_bytes=resource_policy.effective_chunk_bytes * 2,
+    )
     _prepare_run_root(
         run_root,
         run_id=run_id,
@@ -116,12 +122,6 @@ def run_local_verification(
     )
     layout = LocalVerificationLayout.from_run_root(run_root)
     _create_layout_directories(layout)
-    resource_policy = RuntimeResourcePolicy.from_environment()
-    require_free_disk_headroom(
-        resource_policy,
-        run_root,
-        reserve_bytes=resource_policy.effective_chunk_bytes * 2,
-    )
 
     with runtime_resource_policy_scope(resource_policy):
         return _run_local_verification_with_policy(

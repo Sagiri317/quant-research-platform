@@ -65,6 +65,31 @@ def test_local_verification_workflow_rejects_invalid_date_range(tmp_path):
         run_local_verification(config)
 
 
+def test_local_verification_checks_disk_before_creating_run_root(
+    tmp_path,
+    monkeypatch,
+):
+    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "disk-gate")
+    config = make_local_verification_config(
+        run_root=run_root,
+        start_date="2014-01-01",
+        end_date="2016-12-31",
+        profile=research_profile(),
+    )
+    monkeypatch.setattr(
+        module,
+        "require_free_disk_headroom",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("insufficient_free_disk")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="insufficient_free_disk"):
+        run_local_verification(config)
+
+    assert not run_root.exists()
+
+
 def test_local_verification_workflow_rejects_invalid_date_string(tmp_path):
     config = make_local_verification_config(
         run_root=tmp_path / "local-verification-output" / "bad-date",
