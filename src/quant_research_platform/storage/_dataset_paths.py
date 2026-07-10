@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -16,6 +18,8 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.policy.share_safety import is_local_only_path
+
+_PART_FILE_PATTERN = re.compile(r"^part-(\d+)\.parquet$")
 
 
 def partition_timestamp_series(
@@ -195,22 +199,69 @@ def candidate_data_files(
     partition_columns = tuple(
         str(column) for column in spec.get("partition_columns", ())
     )
-    unpartitioned = sorted(root.glob("part-*.parquet"))
-    if unpartitioned:
-        return unpartitioned
     if partition_columns == ():
-        return []
+        paths = _validated_part_paths(root)
+        _require_only_expected_parquet_paths(root, paths)
+        return paths
     if partition_columns != ("year",):
         raise ValueError("unsupported_partitioning")
-    available_years = {
-        path.name.split("=", 1)[1]
-        for path in root.glob("year=*")
-        if path.is_dir() and list(path.glob("*.parquet"))
-    }
+    unpartitioned = _validated_part_paths(root)
+    if unpartitioned:
+        if any(
+            int(pq.ParquetFile(path).metadata.num_rows) != 0
+            for path in unpartitioned
+        ):
+            raise ValueError("invalid_dataset_part_files")
+        _require_only_expected_parquet_paths(root, unpartitioned)
+        return unpartitioned
+    year_directories: list[tuple[int, Path]] = []
+    for path in root.glob("year=*"):
+        if not path.is_dir():
+            continue
+        value = path.name.removeprefix("year=")
+        if not value.isdigit():
+            raise ValueError("invalid_dataset_part_files")
+        year_directories.append((int(value), path))
     paths: list[Path] = []
-    for year in sorted(available_years, key=lambda value: int(value)):
-        paths.extend(sorted((root / f"year={year}").glob("*.parquet")))
+    for _, directory in sorted(year_directories):
+        paths.extend(_validated_part_paths(directory))
+    _require_only_expected_parquet_paths(root, paths)
     return paths
+
+
+def _validated_part_paths(directory: Path) -> list[Path]:
+    root = Path(directory)
+    indexed: list[tuple[int, Path]] = []
+    observed_indices: set[int] = set()
+    for path in root.glob("*.parquet"):
+        match = _PART_FILE_PATTERN.fullmatch(path.name)
+        if match is None or not path.is_file():
+            raise ValueError("invalid_dataset_part_files")
+        try:
+            if not path.resolve().is_relative_to(root.resolve()):
+                raise ValueError("invalid_dataset_part_files")
+        except OSError as exc:
+            raise ValueError("invalid_dataset_part_files") from exc
+        index = int(match.group(1))
+        if index in observed_indices:
+            raise ValueError("invalid_dataset_part_files")
+        observed_indices.add(index)
+        indexed.append((index, path))
+    return [path for _, path in sorted(indexed, key=lambda item: item[0])]
+
+
+def _require_only_expected_parquet_paths(
+    data_root: Path,
+    expected: list[Path],
+) -> None:
+    observed = {
+        path.resolve()
+        for path in Path(data_root).rglob("*.parquet")
+        if path.is_file()
+    }
+    allowed = {path.resolve() for path in expected}
+    if observed != allowed:
+        raise ValueError("invalid_dataset_part_files")
 
 
 def timestamp_primary_key_column_from_spec(spec: DataSpec) -> str | None:

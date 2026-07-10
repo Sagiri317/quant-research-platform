@@ -11,13 +11,14 @@ from uuid import uuid4
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.storage._dataset_key_tracking import (
-    ExactPrimaryKeyTracker,
+    ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage._dataset_manifest_validation import (
     validate_written_artifact,
@@ -44,7 +45,7 @@ from quant_research_platform.storage.manifests import write_internal_artifact_ma
 class _WriteStats:
     spec: DataSpec
     data_root: Path
-    key_tracker: ExactPrimaryKeyTracker
+    key_tracker: ExactPrimaryKeyIndex
     row_count: int = 0
     file_count: int = 0
     file_size_bytes: int = 0
@@ -60,6 +61,7 @@ class _WriteStats:
     columns: tuple[str, ...] | None = None
     schema_hash: str | None = None
     _schema: tuple[tuple[str, str], ...] | None = None
+    _arrow_schema: pa.Schema | None = None
 
     def update_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
         unregistered = sorted(set(frame.columns).difference(self.spec.column_roles))
@@ -69,8 +71,28 @@ class _WriteStats:
         if missing:
             raise ValueError(f"missing_required_columns: {', '.join(missing)}")
         output = frame.loc[:, list(self.spec.required_columns)].copy()
+        for column in self.spec.primary_key:
+            if self.spec.column_roles.get(column) is ColumnRole.TIMESTAMP:
+                output[column] = strict_timestamp_series(
+                    output[column],
+                    error="invalid_dataset_timestamp_value",
+                    allow_null=True,
+                )
+        table = pa.Table.from_pandas(output, preserve_index=False)
+        if self._arrow_schema is None:
+            self._arrow_schema = table.schema.remove_metadata()
+        else:
+            try:
+                table = table.cast(self._arrow_schema, safe=True)
+            except (
+                pa.ArrowInvalid,
+                pa.ArrowNotImplementedError,
+                pa.ArrowTypeError,
+            ) as exc:
+                raise ValueError("dataset_schema_mismatch") from exc
+        output = table.to_pandas(use_threads=False)
         self.row_count += int(len(output))
-        self._update_keys(output)
+        self._update_keys(output, table=table)
         self._update_dates(output)
         self._update_numeric_profiles(output)
         _raise_accumulated_failures(self)
@@ -132,7 +154,7 @@ class _WriteStats:
         )
         return payload
 
-    def _update_keys(self, frame: pd.DataFrame) -> None:
+    def _update_keys(self, frame: pd.DataFrame, *, table: pa.Table) -> None:
         has_null_key = False
         for column in self.spec.primary_key:
             self.null_count_summary.setdefault(column, 0)
@@ -141,8 +163,9 @@ class _WriteStats:
             has_null_key = has_null_key or null_count > 0
         if frame.empty or has_null_key:
             return
-        keys = frame.loc[:, list(self.spec.primary_key)]
-        self.duplicate_primary_key_count += self.key_tracker.add_frame(keys)
+        self.duplicate_primary_key_count += self.key_tracker.add_table(
+            table.select(self.spec.primary_key)
+        )
 
     def _update_dates(self, frame: pd.DataFrame) -> None:
         timestamp_column = timestamp_primary_key_column_from_spec(self.spec)
@@ -234,7 +257,10 @@ def _staged_write_directory(
     writer: Any,
 ) -> None:
     final_root.parent.mkdir(parents=True, exist_ok=True)
-    temp_root = final_root.with_name(f".tmp-{uuid4().hex[:12]}")
+    _cleanup_stale_staged_scratch(final_root)
+    temp_root = final_root.with_name(
+        f".{final_root.name}.tmp-{uuid4().hex[:12]}"
+    )
     backup_root = final_root.with_name(f".replace-{uuid4().hex[:12]}")
     try:
         temp_root.mkdir()
@@ -256,6 +282,14 @@ def _remove_tree(path: Path) -> None:
         path.unlink()
 
 
+def _cleanup_stale_staged_scratch(final_root: Path) -> None:
+    for staged_root in final_root.parent.glob(f".{final_root.name}.tmp-*"):
+        if not staged_root.is_dir():
+            continue
+        for scratch in staged_root.glob(".qrp-exact-key-index-*"):
+            _remove_tree(scratch)
+
+
 def _write_contents(
     chunks: Iterator[pd.DataFrame],
     root: Path,
@@ -268,9 +302,10 @@ def _write_contents(
         for column in spec.primary_key
         if spec.column_roles.get(column) is ColumnRole.TIMESTAMP
     )
-    with ExactPrimaryKeyTracker(
+    with ExactPrimaryKeyIndex(
         primary_key=spec.primary_key,
         timestamp_columns=timestamp_columns,
+        scratch_parent=root.parent,
     ) as key_tracker:
         accumulator = _WriteStats(
             spec=spec,
@@ -293,13 +328,21 @@ def _write_contents(
                 part_index = part_indices.get(partition, 0)
                 part_indices[partition] = part_index + 1
                 output_path = partition_part_path(root, partition, part_index)
-                write_parquet_file(partition_frame, output_path)
+                write_parquet_file(
+                    partition_frame,
+                    output_path,
+                    schema=accumulator._arrow_schema,
+                )
                 accumulator.record_file(output_path, row_count=len(partition_frame))
         if accumulator.row_count == 0:
             if empty_schema_frame is None:
                 raise ValueError("empty_dataset_schema_missing")
             output_path = partition_part_path(root, "", 0)
-            write_parquet_file(empty_schema_frame, output_path)
+            write_parquet_file(
+                empty_schema_frame,
+                output_path,
+                schema=accumulator._arrow_schema,
+            )
             accumulator.record_file(output_path, row_count=0)
     return accumulator
 
@@ -325,7 +368,15 @@ def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
         raise ValueError("dataset_infinite_value")
 
 
-def write_parquet_file(frame: pd.DataFrame, path: Path) -> Path:
+def write_parquet_file(
+    frame: pd.DataFrame,
+    path: Path,
+    *,
+    schema: pa.Schema | None = None,
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_parquet(path, engine="pyarrow", compression="zstd", index=False)
+    table = pa.Table.from_pandas(frame, preserve_index=False)
+    if schema is not None:
+        table = table.cast(schema, safe=True)
+    pq.write_table(table, path, compression="zstd")
     return path

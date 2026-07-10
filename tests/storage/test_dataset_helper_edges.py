@@ -3,13 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage import datasets
 from quant_research_platform.storage._dataset_key_tracking import (
-    ExactPrimaryKeyTracker,
+    ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage._dataset_manifest_validation import (
     validate_manifest_runtime_metadata_shape,
@@ -34,11 +36,12 @@ from tests.storage.low_level_fixtures import (
 )
 
 
-def test_write_stats_fail_closed_paths() -> None:
+def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    with ExactPrimaryKeyTracker(
+    with ExactPrimaryKeyIndex(
         primary_key=spec.primary_key,
         timestamp_columns=("timestamp",),
+        scratch_parent=tmp_path,
     ) as tracker:
         stats = _WriteStats(
             spec=spec,
@@ -70,11 +73,12 @@ def test_write_stats_fail_closed_paths() -> None:
             ).payload()
 
 
-def test_write_stats_tracks_null_and_non_finite_failures() -> None:
+def test_write_stats_tracks_null_and_non_finite_failures(tmp_path: Path) -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    with ExactPrimaryKeyTracker(
+    with ExactPrimaryKeyIndex(
         primary_key=spec.primary_key,
         timestamp_columns=("timestamp",),
+        scratch_parent=tmp_path,
     ) as null_tracker:
         with pytest.raises(ValueError, match="dataset_primary_key_null"):
             _WriteStats(
@@ -86,9 +90,10 @@ def test_write_stats_tracks_null_and_non_finite_failures() -> None:
                     asset_id=["asset_a", pd.NA]
                 )
             )
-    with ExactPrimaryKeyTracker(
+    with ExactPrimaryKeyIndex(
         primary_key=spec.primary_key,
         timestamp_columns=("timestamp",),
+        scratch_parent=tmp_path,
     ) as numeric_tracker:
         with pytest.raises(ValueError, match="dataset_infinite_value"):
             _WriteStats(
@@ -102,11 +107,12 @@ def test_write_stats_tracks_null_and_non_finite_failures() -> None:
             )
 
 
-def test_write_stats_rejects_invalid_non_null_timestamp() -> None:
+def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    with ExactPrimaryKeyTracker(
+    with ExactPrimaryKeyIndex(
         primary_key=spec.primary_key,
         timestamp_columns=("timestamp",),
+        scratch_parent=tmp_path,
     ) as tracker:
         with pytest.raises(ValueError, match="invalid_dataset_timestamp_value"):
             _WriteStats(
@@ -275,3 +281,50 @@ def test_dataset_timestamp_and_candidate_file_helpers(tmp_path: Path) -> None:
         )
     with pytest.raises(ValueError, match="dataset_data_dir_missing"):
         validated_schema([])
+
+
+def test_candidate_data_files_orders_numeric_part_indices(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    for index in (1001, 999, 1000, 998):
+        pq.write_table(
+            pa.table({"value": [index]}),
+            data_root / f"part-{index}.parquet",
+        )
+
+    paths = candidate_data_files(
+        data_root,
+        spec={"partition_columns": []},
+    )
+
+    assert [path.name for path in paths] == [
+        "part-998.parquet",
+        "part-999.parquet",
+        "part-1000.parquet",
+        "part-1001.parquet",
+    ]
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("part-invalid.parquet",),
+        ("part-1.parquet", "part-001.parquet"),
+        ("part-000.parquet", "stray.parquet"),
+    ],
+    ids=["invalid", "duplicate-index", "stray"],
+)
+def test_candidate_data_files_rejects_invalid_or_ambiguous_parts(
+    tmp_path: Path,
+    names: tuple[str, ...],
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    for name in names:
+        pq.write_table(pa.table({"value": [1]}), data_root / name)
+
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        candidate_data_files(
+            data_root,
+            spec={"partition_columns": []},
+        )

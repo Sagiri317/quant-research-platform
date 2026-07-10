@@ -5,6 +5,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.storage._dataset_fingerprinting as dataset_fingerprinting
+import quant_research_platform.storage._dataset_inspection as dataset_inspection
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -36,18 +38,22 @@ from tests.storage.low_level_fixtures import (
 )
 
 
-def capture_read_parquet_paths(
+def capture_file_batch_paths(
     monkeypatch: pytest.MonkeyPatch,
-    target: str,
 ) -> list[Path]:
-    original_read_parquet = pd.read_parquet
+    original = dataset_fingerprinting.iter_dataset_file_batches
     read_paths: list[Path] = []
 
-    def record_read_parquet(path, *args, **kwargs):
-        read_paths.append(Path(path))
-        return original_read_parquet(path, *args, **kwargs)
+    def record_file_batches(*args, **kwargs):
+        for path, frame in original(*args, **kwargs):
+            read_paths.append(Path(path))
+            yield path, frame
 
-    monkeypatch.setattr(target, record_read_parquet)
+    monkeypatch.setattr(
+        dataset_fingerprinting,
+        "iter_dataset_file_batches",
+        record_file_batches,
+    )
     return read_paths
 
 
@@ -269,8 +275,11 @@ def test_inspection_runtime_metadata_rejects_invalid_timestamp_values(
     )
 
     monkeypatch.setattr(
-        "quant_research_platform.storage._dataset_inspection.pd.read_parquet",
-        lambda *_, **__: pd.DataFrame({"timestamp": ["2024-01-02", "bad-date"]}),
+        dataset_inspection,
+        "iter_dataset_file_batches",
+        lambda *_args, **_kwargs: iter(
+            ((path, pd.DataFrame({"timestamp": ["2024-01-02", "bad-date"]})),)
+        ),
     )
     with pytest.raises(ValueError, match="invalid_time_window_timestamp_value"):
         _inspection_runtime_metadata(context)
@@ -351,10 +360,7 @@ def test_fingerprint_dataset_time_window_prunes_year_partitions(
         make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("fingerprint_pruned"),
     )
-    read_paths = capture_read_parquet_paths(
-        monkeypatch,
-        "quant_research_platform.storage._dataset_fingerprinting.pd.read_parquet",
-    )
+    read_paths = capture_file_batch_paths(monkeypatch)
 
     fingerprint = fingerprint_dataset(
         root,

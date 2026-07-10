@@ -12,6 +12,7 @@ from quant_research_platform.storage._dataset_paths import relative_partition_la
 from quant_research_platform.storage._dataset_reading import (
     build_dataset_read_context,
     filter_frame_by_time_window,
+    iter_dataset_file_batches,
     read_columns_for_time_window,
 )
 from quant_research_platform.storage._dataset_schema import sha256_json
@@ -43,15 +44,12 @@ def fingerprint_dataset(
     partition_rows: dict[str, int] = {}
     partition_hash_sum: dict[str, int] = {}
     partition_hash_xor: dict[str, int] = {}
-    file_count = 0
 
-    for path in context.read_paths:
-        chunk = pd.read_parquet(
-            path,
-            columns=list(hash_physical_columns),
-            engine="pyarrow",
-            filters=context.parquet_filters,
-        )
+    observed_paths: set[Path] = set()
+    for path, chunk in iter_dataset_file_batches(
+        context,
+        columns=hash_physical_columns,
+    ):
         chunk = filter_frame_by_time_window(
             chunk,
             spec=context.spec,
@@ -60,7 +58,7 @@ def fingerprint_dataset(
         chunk = chunk.loc[:, list(hash_columns)]
         if chunk.empty:
             continue
-        file_count += 1
+        observed_paths.add(path)
         hashes = pd.util.hash_pandas_object(
             chunk.loc[:, list(hash_columns)],
             index=False,
@@ -107,7 +105,7 @@ def fingerprint_dataset(
         key_columns=key_columns,
         content_hash=content_hash,
         partition_fingerprints=partition_fingerprints,
-        file_count=file_count,
+        file_count=len(observed_paths),
         column_names=output_columns,
     )
 

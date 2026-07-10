@@ -17,6 +17,7 @@ from quant_research_platform.storage._dataset_reading import (
     DatasetReadContext,
     build_dataset_read_context,
     filter_frame_by_time_window,
+    iter_dataset_file_batches,
 )
 from quant_research_platform.storage._dataset_schema import date_string
 from quant_research_platform.storage._dataset_types import DatasetInspection
@@ -68,17 +69,14 @@ def _inspection_runtime_metadata(
     if timestamp_column is None:
         raise ValueError("time_window_not_supported")
     row_count = 0
-    file_count = 0
     partition_row_counts: dict[str, int] = {}
     date_min: pd.Timestamp | None = None
     date_max: pd.Timestamp | None = None
-    for path in context.read_paths:
-        frame = pd.read_parquet(
-            path,
-            columns=[timestamp_column],
-            engine="pyarrow",
-            filters=context.parquet_filters,
-        )
+    observed_paths: set[Path] = set()
+    for path, frame in iter_dataset_file_batches(
+        context,
+        columns=(timestamp_column,),
+    ):
         filtered = filter_frame_by_time_window(
             frame,
             spec=context.spec,
@@ -86,7 +84,7 @@ def _inspection_runtime_metadata(
         )
         if filtered.empty:
             continue
-        file_count += 1
+        observed_paths.add(path)
         partition = relative_partition_label(context.data_root, path)
         partition_row_counts[partition] = partition_row_counts.get(partition, 0) + len(
             filtered
@@ -102,7 +100,7 @@ def _inspection_runtime_metadata(
             date_min = current_min if date_min is None else min(date_min, current_min)
             date_max = current_max if date_max is None else max(date_max, current_max)
     return {
-        "file_count": file_count,
+        "file_count": len(observed_paths),
         "row_count": int(row_count),
         "partitions": tuple(sorted(partition_row_counts)),
         "partition_row_counts": dict(sorted(partition_row_counts.items())),

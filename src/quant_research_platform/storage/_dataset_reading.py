@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.time import (
@@ -39,6 +40,9 @@ from quant_research_platform.storage.manifests import read_qrp_json
 
 _DEFAULT_TARGET_CHUNK_BYTES = 64 * 1024 * 1024
 _PARQUET_TO_PANDAS_EXPANSION_FACTOR = 4
+_VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR = 32
+_PHYSICAL_WORKING_SET_PARTS = 4
+_PANDAS_PROBE_ROWS = 64
 
 
 @dataclass(frozen=True)
@@ -175,32 +179,65 @@ def iter_dataset_chunks(
         yield pd.DataFrame(columns=list(context.logical_columns))
         return
     yielded = False
+    for _, frame in iter_dataset_file_batches(
+        context,
+        columns=context.physical_columns,
+        target_chunk_bytes=target_bytes,
+    ):
+        filtered = filter_frame_by_time_window(
+            frame,
+            spec=context.spec,
+            time_window=context.time_window,
+        ).loc[:, list(context.logical_columns)]
+        for chunk in _bounded_frame_chunks(
+            filtered,
+            target_chunk_bytes=target_bytes,
+        ):
+            yielded = True
+            yield chunk
+    if not yielded:
+        yield pd.DataFrame(columns=list(context.logical_columns))
+
+
+def iter_dataset_file_batches(
+    context: DatasetReadContext,
+    *,
+    columns: tuple[str, ...],
+    target_chunk_bytes: int | None = None,
+) -> Iterator[tuple[Path, pd.DataFrame]]:
+    """Yield deterministic file batches after Arrow-level bounded conversion."""
+
+    target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     for path in context.read_paths:
         parquet_file = pq.ParquetFile(path)
         batch_size = _target_batch_rows(
             parquet_file,
-            columns=context.physical_columns,
+            columns=columns,
             target_chunk_bytes=target_bytes,
         )
         for batch in parquet_file.iter_batches(
             batch_size=batch_size,
-            columns=list(context.physical_columns),
+            columns=list(columns),
             use_threads=False,
         ):
-            frame = batch.to_pandas(use_threads=False)
-            filtered = filter_frame_by_time_window(
-                frame,
-                spec=context.spec,
-                time_window=context.time_window,
-            ).loc[:, list(context.logical_columns)]
-            for chunk in _bounded_frame_chunks(
-                filtered,
+            for frame in _arrow_batch_to_bounded_pandas(
+                batch,
                 target_chunk_bytes=target_bytes,
             ):
-                yielded = True
-                yield chunk
-    if not yielded:
-        yield pd.DataFrame(columns=list(context.logical_columns))
+                yield path, frame
+
+
+def dataset_primary_key_schema(
+    context: DatasetReadContext,
+    primary_key: tuple[str, ...],
+) -> pa.Schema:
+    parquet_schema = pq.ParquetFile(context.all_paths[0]).schema_arrow
+    try:
+        return pa.schema(
+            [parquet_schema.field(column) for column in primary_key]
+        )
+    except KeyError as exc:
+        raise ValueError("missing_dataset_primary_key_column") from exc
 
 
 def _validated_target_chunk_bytes(value: int | None) -> int:
@@ -236,10 +273,75 @@ def _target_batch_rows(
             (projected_bytes + row_group.num_rows - 1) // row_group.num_rows,
         )
         maximum_row_bytes = max(maximum_row_bytes, row_bytes)
-    conservative_row_bytes = (
-        maximum_row_bytes * _PARQUET_TO_PANDAS_EXPANSION_FACTOR
+    selected_fields = tuple(parquet_file.schema_arrow.field(name) for name in columns)
+    expansion_factor = (
+        _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR
+        if any(_is_variable_width(field.type) for field in selected_fields)
+        else _PARQUET_TO_PANDAS_EXPANSION_FACTOR
     )
-    return max(1, target_chunk_bytes // conservative_row_bytes)
+    conservative_row_bytes = maximum_row_bytes * expansion_factor
+    arrow_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
+    return max(1, arrow_budget // conservative_row_bytes)
+
+
+def _is_variable_width(data_type: pa.DataType) -> bool:
+    return bool(
+        pa.types.is_string(data_type)
+        or pa.types.is_large_string(data_type)
+        or pa.types.is_binary(data_type)
+        or pa.types.is_large_binary(data_type)
+        or pa.types.is_dictionary(data_type)
+        or pa.types.is_list(data_type)
+        or pa.types.is_large_list(data_type)
+        or pa.types.is_struct(data_type)
+    )
+
+
+def _arrow_batch_to_bounded_pandas(
+    batch: pa.RecordBatch,
+    *,
+    target_chunk_bytes: int,
+) -> Iterator[pd.DataFrame]:
+    if batch.num_rows == 0:
+        return
+    pandas_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
+    arrow_row_bytes = max(1, (batch.nbytes + batch.num_rows - 1) // batch.num_rows)
+    expansion = (
+        _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR
+        if any(_is_variable_width(field.type) for field in batch.schema)
+        else _PARQUET_TO_PANDAS_EXPANSION_FACTOR
+    )
+    rows_per_slice = max(
+        1,
+        min(
+            batch.num_rows,
+            _PANDAS_PROBE_ROWS,
+            pandas_budget // max(1, arrow_row_bytes * expansion),
+        ),
+    )
+    start = 0
+    while start < batch.num_rows:
+        stop = min(batch.num_rows, start + rows_per_slice)
+        arrow_slice = batch.slice(start, stop - start)
+        frame = arrow_slice.to_pandas(use_threads=False)
+        frame_bytes = int(frame.memory_usage(index=True, deep=True).sum())
+        if frame_bytes > pandas_budget:
+            if len(frame) == 1:
+                raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+            rows_per_slice = max(1, rows_per_slice // 2)
+            continue
+        yield frame
+        start = stop
+        if start >= batch.num_rows:
+            continue
+        measured_row_bytes = max(1, (frame_bytes + len(frame) - 1) // len(frame))
+        rows_per_slice = max(
+            1,
+            min(
+                batch.num_rows - start,
+                pandas_budget // measured_row_bytes,
+            ),
+        )
 
 
 def _bounded_frame_chunks(

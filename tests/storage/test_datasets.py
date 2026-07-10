@@ -4,10 +4,14 @@ import importlib
 import importlib.util
 import json
 import math
+from datetime import date, datetime
 from inspect import signature
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import quant_research_platform.storage._dataset_reading as dataset_reading
@@ -390,6 +394,111 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
     assert not missing_root.exists()
 
 
+@pytest.mark.parametrize(
+    "equivalent_asset_ids",
+    [
+        pd.Series([1, 1.0], dtype="object"),
+        pd.Series([np.int64(1), 1], dtype="object"),
+        pd.Series([date(2026, 1, 1), datetime(2026, 1, 1)], dtype="object"),
+    ],
+    ids=["int-float", "numpy-python", "date-datetime"],
+)
+def test_write_dataset_rejects_keys_equal_after_arrow_conversion(
+    tmp_path: Path,
+    equivalent_asset_ids: pd.Series,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "arrow_key_identity")
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share", "a_share"],
+            "asset_id": equivalent_asset_ids,
+            "timestamp": [pd.Timestamp("2026-01-02")] * 2,
+            "value": [1.0, 2.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
+        write_dataset(
+            root,
+            frame,
+            spec=make_processed_dataset_spec("arrow_key_identity"),
+        )
+
+
+def test_writer_key_index_scratch_is_inside_staged_dataset_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_database_paths: list[Path] = []
+    original_tracker = dataset_writing.ExactPrimaryKeyIndex
+
+    class RecordingTracker(original_tracker):
+        def add_table(self, table: pa.Table, *, namespace: str = "dataset") -> int:
+            observed_database_paths.append(self.database_path)
+            return super().add_table(table, namespace=namespace)
+
+    monkeypatch.setattr(dataset_writing, "ExactPrimaryKeyIndex", RecordingTracker)
+    root = make_dataset_artifact_root(tmp_path, "staged_key_scratch")
+
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("staged_key_scratch"),
+    )
+
+    assert observed_database_paths
+    assert all(
+        path.is_relative_to(root.parent)
+        and path.parts[len(root.parent.parts)].startswith(".staged_key_scratch.tmp-")
+        for path in observed_database_paths
+    )
+    assert not any(path.exists() for path in observed_database_paths)
+
+
+def test_physical_batch_size_accounts_for_arrow_to_pandas_expansion(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "repeated-strings.parquet"
+    table = pa.table({"value": ["x"] * 20_000})
+    pq.write_table(table, path, compression="zstd", use_dictionary=True)
+    parquet_file = pq.ParquetFile(path)
+    target_chunk_bytes = 16 * 1024
+
+    batch_rows = dataset_reading._target_batch_rows(
+        parquet_file,
+        columns=("value",),
+        target_chunk_bytes=target_chunk_bytes,
+    )
+    batch = next(
+        parquet_file.iter_batches(
+            batch_size=batch_rows,
+            columns=["value"],
+            use_threads=False,
+        )
+    )
+    pandas_bytes = int(
+        batch.to_pandas(use_threads=False).memory_usage(index=True, deep=True).sum()
+    )
+
+    assert pandas_bytes <= target_chunk_bytes
+
+
+def test_inspect_and_fingerprint_reuse_physical_batch_reader() -> None:
+    inspection_source = Path(
+        importlib.import_module(
+            "quant_research_platform.storage._dataset_inspection"
+        ).__file__
+    ).read_text(encoding="utf-8")
+    fingerprint_source = Path(
+        importlib.import_module(
+            "quant_research_platform.storage._dataset_fingerprinting"
+        ).__file__
+    ).read_text(encoding="utf-8")
+
+    assert "pd.read_parquet" not in inspection_source
+    assert "pd.read_parquet" not in fingerprint_source
+
+
 def test_exact_primary_key_tracker_is_spillable_exact_and_cleans_up(
     tmp_path: Path,
 ) -> None:
@@ -402,10 +511,10 @@ def test_exact_primary_key_tracker_is_spillable_exact_and_cleans_up(
     )
     tracker_root = tmp_path / "tracker"
     tracker_root.mkdir()
-    tracker = module.ExactPrimaryKeyTracker(
+    tracker = module.ExactPrimaryKeyIndex(
         primary_key=("asset_id", "timestamp"),
         timestamp_columns=("timestamp",),
-        temp_parent=tracker_root,
+        scratch_parent=tracker_root,
     )
     first = pd.DataFrame(
         {
@@ -431,20 +540,20 @@ def test_exact_primary_key_tracker_is_spillable_exact_and_cleans_up(
     assert not database_path.exists()
     assert list(tracker_root.iterdir()) == []
 
-    numeric = module.ExactPrimaryKeyTracker(
+    numeric = module.ExactPrimaryKeyIndex(
         primary_key=("numeric_key",),
         timestamp_columns=(),
-        temp_parent=tracker_root,
+        scratch_parent=tracker_root,
     )
     with numeric:
         assert numeric.add_frame(pd.DataFrame({"numeric_key": [-0.0]})) == 0
         assert numeric.add_frame(pd.DataFrame({"numeric_key": [0.0]})) == 1
     assert list(tracker_root.iterdir()) == []
 
-    exceptional = module.ExactPrimaryKeyTracker(
+    exceptional = module.ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        temp_parent=tracker_root,
+        scratch_parent=tracker_root,
     )
     with pytest.raises(RuntimeError, match="stop"):
         with exceptional:
@@ -556,6 +665,9 @@ def test_internal_physical_reader_uses_bounded_record_batches(
     ordered_input = pd.concat(
         (frame.iloc[32:].copy(), frame.iloc[:32].copy()),
         ignore_index=True,
+    )
+    ordered_input["timestamp"] = ordered_input["timestamp"].astype(
+        "datetime64[ns]"
     )
     write_dataset(
         root,
