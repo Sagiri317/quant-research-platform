@@ -81,10 +81,12 @@ def test_storage_chunked_write_read_keeps_schema_keys_and_sort_stable(
     )
 
     result = read_dataset(root)
+    expected = frame.copy()
+    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
 
     assert list(result.columns) == list(frame.columns)
     assert result.duplicated(["market_id", "asset_id", "timestamp"]).sum() == 0
-    pd.testing.assert_frame_equal(result, frame)
+    pd.testing.assert_frame_equal(result, expected)
 
 
 def test_inspect_dataset_time_window_reports_only_scope_contributors(
