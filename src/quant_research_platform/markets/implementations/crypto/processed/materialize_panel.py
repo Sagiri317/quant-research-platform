@@ -161,18 +161,19 @@ def _canonical_source_assets(
     target_state_bytes: int,
 ) -> tuple[str, ...]:
     source_by_canonical: dict[str, str] = {}
+    state_bytes = 0
     for key in keys:
         if len(key) != 1 or not isinstance(key[0], str) or not key[0]:
             raise ValueError("invalid_crypto_matching_bar_source_asset_id")
         source_value = key[0]
         canonical = canonical_crypto_asset_id(source_value)
-        existing = source_by_canonical.setdefault(canonical, source_value)
-        if existing != source_value:
-            raise ValueError("duplicate_crypto_canonical_asset_id")
-        state_bytes = sum(
-            256 + 2 * (len(canonical) + len(source))
-            for canonical, source in source_by_canonical.items()
-        )
+        existing = source_by_canonical.get(canonical)
+        if existing is not None:
+            if existing != source_value:
+                raise ValueError("duplicate_crypto_canonical_asset_id")
+            continue
+        source_by_canonical[canonical] = source_value
+        state_bytes += 256 + 2 * (len(canonical) + len(source_value))
         if state_bytes > target_state_bytes:
             raise ValueError("crypto_panel_asset_index_exceeds_resource_budget")
     return tuple(

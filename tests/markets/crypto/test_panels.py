@@ -448,7 +448,7 @@ def test_depth_reducer_fails_when_one_snapshot_exceeds_state_budget() -> None:
     )
     reducer = module.DepthSnapshotReducer(
         bars=panels._prepare_panel_bars(_bars_frame()),
-        target_state_bytes=512,
+        target_state_bytes=2 * 1024,
         target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
         finalize_snapshot=panels.finalize_depth_snapshot,
@@ -564,7 +564,7 @@ def test_trade_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> No
     module = _panel_input_reducers_module()
     reducer = module.AggregateTradeReducer(
         bars=panels._prepare_panel_bars(_bars_frame()),
-        target_state_bytes=512,
+        target_state_bytes=16 * 1024,
         target_output_bytes=512,
         normalize_chunk=panels.normalize_trade_chunk,
     )
@@ -578,7 +578,7 @@ def test_depth_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> No
     module = _panel_input_reducers_module()
     reducer = module.DepthSnapshotReducer(
         bars=panels._prepare_panel_bars(_bars_frame()),
-        target_state_bytes=1_024,
+        target_state_bytes=16 * 1024,
         target_output_bytes=1_024,
         normalize_chunk=panels.normalize_depth_chunk,
         finalize_snapshot=panels.finalize_depth_snapshot,
@@ -586,6 +586,88 @@ def test_depth_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> No
     reducer.add_chunk(_ordered_depth_levels_frame())
 
     with pytest.raises(ValueError, match="crypto_depth_output_exceeds_resource_budget"):
+        reducer.finish()
+
+
+def test_reducer_state_budget_counts_deep_python_key_payloads() -> None:
+    module = _panel_input_reducers_module()
+    long_asset_id = "asset_" + "x" * 4096
+    trade_bars = panels._prepare_panel_bars(_bars_frame()).assign(
+        asset_id=long_asset_id
+    )
+
+    with pytest.raises(ValueError, match="crypto_trade_state_exceeds_resource_budget"):
+        module.AggregateTradeReducer(
+            bars=trade_bars,
+            target_state_bytes=512,
+            target_output_bytes=16 * 1024,
+            normalize_chunk=panels.normalize_trade_chunk,
+        )
+
+    with pytest.raises(ValueError, match="crypto_depth_state_exceeds_resource_budget"):
+        module.DepthSnapshotReducer(
+            bars=trade_bars,
+            target_state_bytes=512,
+            target_output_bytes=16 * 1024,
+            normalize_chunk=panels.normalize_depth_chunk,
+            finalize_snapshot=panels.finalize_depth_snapshot,
+        )
+
+
+def test_depth_budget_checks_do_not_rescan_all_targets_per_update() -> None:
+    module = _panel_input_reducers_module()
+    reducer = module.DepthSnapshotReducer(
+        bars=panels._prepare_panel_bars(_bars_frame()),
+        target_state_bytes=1024**3,
+        target_output_bytes=16 * 1024,
+        normalize_chunk=panels.normalize_depth_chunk,
+        finalize_snapshot=panels.finalize_depth_snapshot,
+    )
+    work = {"units": 0}
+
+    class CountingTargets(dict):
+        def values(self):
+            work["units"] += len(self)
+            return super().values()
+
+    reducer._targets_by_asset = CountingTargets(
+        {
+            f"asset_{index:04d}": (pd.Timestamp("2026-01-01"),)
+            for index in range(100)
+        }
+    )
+
+    for _ in range(100):
+        reducer._require_budget()
+
+    assert work["units"] <= 100
+
+
+def test_trade_output_budget_fails_before_building_full_rows_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _panel_input_reducers_module()
+    reducer = module.AggregateTradeReducer(
+        bars=panels._prepare_panel_bars(_bars_frame()),
+        target_state_bytes=1024**3,
+        target_output_bytes=512,
+        normalize_chunk=panels.normalize_trade_chunk,
+    )
+    reducer._states = {
+        ("asset_a", pd.Timestamp("2026-01-01") + pd.Timedelta(minutes=index)):
+        module._TradeBarState()
+        for index in range(20)
+    }
+    original_deep_size = module._deep_size
+
+    def reject_full_rows_list(value, seen=None):
+        if isinstance(value, list) and len(value) > 1:
+            raise AssertionError("full_rows_list_built_before_budget_check")
+        return original_deep_size(value, seen)
+
+    monkeypatch.setattr(module, "_deep_size", reject_full_rows_list)
+
+    with pytest.raises(ValueError, match="crypto_trade_output_exceeds_resource_budget"):
         reducer.finish()
 
 

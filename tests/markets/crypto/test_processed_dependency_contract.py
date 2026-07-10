@@ -282,6 +282,36 @@ def test_factor_carry_processing_is_linear_in_asset_count(
     )
 
 
+def test_canonical_asset_budget_accounting_is_linear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset_count = 200
+    work = {"len_calls": 0}
+
+    class CountingString(str):
+        def __len__(self) -> int:
+            work["len_calls"] += 1
+            return super().__len__()
+
+    keys = tuple(
+        (CountingString(f"source_{index:04d}"),)
+        for index in range(asset_count)
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "canonical_crypto_asset_id",
+        lambda value: CountingString(f"canonical_{value}"),
+    )
+
+    observed = materialize_panel._canonical_source_assets(
+        keys,
+        target_state_bytes=1024**2,
+    )
+
+    assert len(observed) == asset_count
+    assert work["len_calls"] <= asset_count * 5
+
+
 @pytest.mark.parametrize(
     ("module", "iterator_name", "data_id"),
     [

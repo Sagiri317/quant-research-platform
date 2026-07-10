@@ -8,13 +8,6 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-_BAR_TARGET_STATE_BYTES = 128
-_SNAPSHOT_BASE_STATE_BYTES = 256
-_DEPTH_LEVEL_STATE_BYTES = 96
-_CANDIDATE_STATE_BYTES = 256
-_TRADE_BAR_STATE_BYTES = 256
-_TRADE_WATERMARK_STATE_BYTES = 128
-
 _QUOTE_COLUMNS = (
     "asset_id",
     "quote_timestamp",
@@ -42,7 +35,7 @@ _TRADE_AGGREGATE_COLUMNS = (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class _TradeBarState:
     signed_quantity_sum: float = 0.0
     quantity_sum: float = 0.0
@@ -80,6 +73,7 @@ class AggregateTradeReducer:
                 name=None,
             )
         )
+        self._target_keys_bytes = _deep_size(self._target_keys)
         self._target_state_bytes = target_state_bytes
         self._target_output_bytes = _validated_output_budget(
             target_output_bytes,
@@ -87,6 +81,7 @@ class AggregateTradeReducer:
         )
         self._normalize_chunk = normalize_chunk
         self._states: dict[tuple[str, pd.Timestamp], _TradeBarState] = {}
+        self._state_entries_bytes = sys.getsizeof(self._states)
         self._last_order_key: tuple[str, pd.Timestamp, int] | None = None
         self._active_source_asset_id: str | None = None
         self._last_aggregate_trade_id: int | None = None
@@ -152,7 +147,17 @@ class AggregateTradeReducer:
             self._last_underlying_trade_id = last_trade_id
             key = (asset_id, timestamp)
             if key in self._target_keys:
-                state = self._states.setdefault(key, _TradeBarState())
+                state = self._states.get(key)
+                if state is None:
+                    state = _TradeBarState()
+                    previous_container_bytes = sys.getsizeof(self._states)
+                    self._states[key] = state
+                    self._state_entries_bytes += (
+                        sys.getsizeof(self._states)
+                        - previous_container_bytes
+                        + _deep_size(key)
+                        + _trade_bar_state_budget_bytes(state)
+                    )
                 state.signed_quantity_sum += signed_quantity
                 state.quantity_sum += quantity
                 state.covered_trade_count += last_trade_id - first_trade_id + 1
@@ -165,7 +170,10 @@ class AggregateTradeReducer:
 
     def finish(self) -> pd.DataFrame:
         self._finished = True
-        rows = []
+        rows = _BoundedOutputRows(
+            target_output_bytes=self._target_output_bytes,
+            error="crypto_trade_output_exceeds_resource_budget",
+        )
         for (asset_id, timestamp), state in sorted(self._states.items()):
             rows.append(
                 {
@@ -190,9 +198,16 @@ class AggregateTradeReducer:
 
     def _require_budget(self) -> None:
         estimated_state_bytes = (
-            len(self._target_keys) * _BAR_TARGET_STATE_BYTES
-            + len(self._states) * _TRADE_BAR_STATE_BYTES
-            + int(self._last_order_key is not None) * _TRADE_WATERMARK_STATE_BYTES
+            self._target_keys_bytes
+            + self._state_entries_bytes
+            + _deep_size(
+                (
+                    self._last_order_key,
+                    self._active_source_asset_id,
+                    self._last_aggregate_trade_id,
+                    self._last_underlying_trade_id,
+                )
+            )
         )
         if estimated_state_bytes > self._target_state_bytes:
             raise ValueError("crypto_trade_state_exceeds_resource_budget")
@@ -241,6 +256,9 @@ class DepthSnapshotReducer:
         self._target_positions = {
             asset_id: 0 for asset_id in self._targets_by_asset
         }
+        self._target_maps_bytes = _deep_size(
+            (self._targets_by_asset, self._target_positions)
+        )
         self._target_state_bytes = target_state_bytes
         self._target_output_bytes = _validated_output_budget(
             target_output_bytes,
@@ -254,11 +272,14 @@ class DepthSnapshotReducer:
             str,
             dict[int, tuple[float, float]],
         ] = {}
+        self._current_levels_bytes = sys.getsizeof(self._current_levels)
         self._latest_snapshot: dict[str, object] | None = None
+        self._latest_snapshot_is_candidate = False
         self._candidates: dict[
             tuple[str, pd.Timestamp],
             dict[str, object],
         ] = {}
+        self._candidate_entries_bytes = sys.getsizeof(self._candidates)
         self._finished = False
         self._require_budget()
 
@@ -309,15 +330,35 @@ class DepthSnapshotReducer:
                 if asset_id != previous_asset_id:
                     self._flush_remaining_targets(previous_asset_id)
                     self._latest_snapshot = None
+                    self._latest_snapshot_is_candidate = False
                 else:
                     self._flush_targets_before(asset_id, quote_timestamp)
             if self._current_key is None:
                 self._current_key = snapshot_key
                 self._current_levels = {}
-            levels = self._current_levels.setdefault(side, {})
+                self._current_levels_bytes = sys.getsizeof(self._current_levels)
+            levels = self._current_levels.get(side)
+            if levels is None:
+                previous_container_bytes = sys.getsizeof(self._current_levels)
+                levels = {}
+                self._current_levels[side] = levels
+                self._current_levels_bytes += (
+                    sys.getsizeof(self._current_levels)
+                    - previous_container_bytes
+                    + _deep_size(side)
+                    + sys.getsizeof(levels)
+                )
             if level in levels:
                 raise ValueError("duplicate_crypto_depth_level")
-            levels[level] = (float(row[5]), float(row[6]))
+            level_value = (float(row[5]), float(row[6]))
+            previous_level_bytes = sys.getsizeof(levels)
+            levels[level] = level_value
+            self._current_levels_bytes += (
+                sys.getsizeof(levels)
+                - previous_level_bytes
+                + _deep_size(level)
+                + _deep_size(level_value)
+            )
             self._last_order_key = order_key
             self._require_budget()
 
@@ -329,10 +370,12 @@ class DepthSnapshotReducer:
                 self._flush_remaining_targets(active_asset_id)
             self._finished = True
             self._require_budget()
-        rows = [
-            self._candidates[key]
-            for key in sorted(self._candidates)
-        ]
+        rows = _BoundedOutputRows(
+            target_output_bytes=self._target_output_bytes,
+            error="crypto_depth_output_exceeds_resource_budget",
+        )
+        for key in sorted(self._candidates):
+            rows.append(self._candidates[key])
         return _bounded_output_frame(
             rows,
             columns=_QUOTE_COLUMNS,
@@ -349,8 +392,10 @@ class DepthSnapshotReducer:
             quote_timestamp,
             self._current_levels,
         )
+        self._latest_snapshot_is_candidate = False
         self._current_key = None
         self._current_levels = {}
+        self._current_levels_bytes = sys.getsizeof(self._current_levels)
         self._require_budget()
 
     def _flush_targets_before(
@@ -379,18 +424,39 @@ class DepthSnapshotReducer:
         quote_timestamp = pd.Timestamp(
             self._latest_snapshot["quote_timestamp"]
         )
-        self._candidates[(asset_id, quote_timestamp)] = self._latest_snapshot
+        key = (asset_id, quote_timestamp)
+        if key not in self._candidates:
+            previous_container_bytes = sys.getsizeof(self._candidates)
+            self._candidates[key] = self._latest_snapshot
+            self._candidate_entries_bytes += (
+                sys.getsizeof(self._candidates)
+                - previous_container_bytes
+                + _candidate_entry_budget_bytes(
+                    key,
+                    self._latest_snapshot,
+                )
+            )
+        else:
+            self._candidates[key] = self._latest_snapshot
+        self._latest_snapshot_is_candidate = True
         self._require_budget()
 
     def _require_budget(self) -> None:
         estimated_state_bytes = (
-            sum(len(values) for values in self._targets_by_asset.values())
-            * _BAR_TARGET_STATE_BYTES
-            + int(self._current_key is not None) * _SNAPSHOT_BASE_STATE_BYTES
-            + self.current_level_count * _DEPTH_LEVEL_STATE_BYTES
-            + int(self._latest_snapshot is not None)
-            * _SNAPSHOT_BASE_STATE_BYTES
-            + len(self._candidates) * _CANDIDATE_STATE_BYTES
+            self._target_maps_bytes
+            + self._current_levels_bytes
+            + self._candidate_entries_bytes
+            + _deep_size(
+                (
+                    self._last_order_key,
+                    self._current_key,
+                    (
+                        None
+                        if self._latest_snapshot_is_candidate
+                        else self._latest_snapshot
+                    ),
+                )
+            )
         )
         if estimated_state_bytes > self._target_state_bytes:
             raise ValueError("crypto_depth_state_exceeds_resource_budget")
@@ -402,19 +468,60 @@ def _validated_output_budget(value: int, *, error: str) -> int:
     return value
 
 
+def _trade_bar_state_budget_bytes(state: _TradeBarState) -> int:
+    return (
+        sys.getsizeof(state)
+        + 2 * sys.getsizeof(0.0)
+        + 5 * sys.getsizeof(0)
+    )
+
+
+def _candidate_entry_budget_bytes(
+    key: tuple[str, pd.Timestamp],
+    snapshot: Mapping[str, object],
+) -> int:
+    observed: set[int] = set()
+    size = _deep_size(key, observed) + sys.getsizeof(snapshot)
+    return size + sum(
+        _deep_size(value, observed) for value in snapshot.values()
+    )
+
+
+class _BoundedOutputRows:
+    def __init__(self, *, target_output_bytes: int, error: str) -> None:
+        self._target_rows_bytes = target_output_bytes // 2
+        self._error = error
+        self._rows: list[dict[str, object]] = []
+        self._payload_bytes = 0
+
+    @property
+    def values(self) -> list[dict[str, object]]:
+        return self._rows
+
+    @property
+    def observed_bytes(self) -> int:
+        return sys.getsizeof(self._rows) + self._payload_bytes
+
+    def append(self, row: dict[str, object]) -> None:
+        row_bytes = _deep_size(row)
+        self._rows.append(row)
+        observed_bytes = sys.getsizeof(self._rows) + self._payload_bytes + row_bytes
+        if observed_bytes > self._target_rows_bytes:
+            self._rows.pop()
+            raise ValueError(self._error)
+        self._payload_bytes += row_bytes
+
+
 def _bounded_output_frame(
-    rows: list[dict[str, object]],
+    rows: _BoundedOutputRows,
     *,
     columns: tuple[str, ...],
     target_output_bytes: int,
     error: str,
 ) -> pd.DataFrame:
-    rows_bytes = _deep_size(rows)
-    if rows_bytes > target_output_bytes // 2:
-        raise ValueError(error)
-    frame = pd.DataFrame(rows, columns=list(columns))
+    frame = pd.DataFrame(rows.values, columns=list(columns))
     frame_bytes = int(frame.memory_usage(index=True, deep=True).sum())
-    if rows_bytes + frame_bytes > target_output_bytes:
+    if rows.observed_bytes + frame_bytes > target_output_bytes:
         raise ValueError(error)
     return frame
 

@@ -74,12 +74,3 @@ class MaterializationBudget:
     @property
     def sqlite_cache_bytes(self) -> int:
         return self.allocations["sqlite_cache"]
-
-    def require_observed(self, **component_bytes: int) -> None:
-        if any(
-            isinstance(value, bool) or not isinstance(value, int) or value < 0
-            for value in component_bytes.values()
-        ):
-            raise ValueError("invalid_crypto_materialization_component_bytes")
-        if sum(component_bytes.values()) > self.effective_bytes:
-            raise ValueError("crypto_materialization_working_set_exceeds_budget")

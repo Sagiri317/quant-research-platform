@@ -195,9 +195,13 @@ def _trade_aggregates(
     trades: pd.DataFrame,
 ) -> pd.DataFrame:
     input_bytes = int(trades.memory_usage(index=True, deep=True).sum())
+    bar_bytes = int(bars.memory_usage(index=True, deep=True).sum())
     reducer = panel_input_reducers.AggregateTradeReducer(
         bars=bars,
-        target_state_bytes=max(1, input_bytes * 2 + len(bars) * 512),
+        target_state_bytes=max(
+            64 * 1024,
+            input_bytes * 4 + bar_bytes * 4,
+        ),
         target_output_bytes=max(
             16 * 1024,
             input_bytes * 4 + len(bars) * 4_096,
@@ -336,9 +340,13 @@ def _quote_snapshots(
     depth: pd.DataFrame,
 ) -> pd.DataFrame:
     input_bytes = int(depth.memory_usage(index=True, deep=True).sum())
+    bar_bytes = int(bars.memory_usage(index=True, deep=True).sum())
     reducer = panel_input_reducers.DepthSnapshotReducer(
         bars=bars,
-        target_state_bytes=max(1, input_bytes * 2 + len(bars) * 512),
+        target_state_bytes=max(
+            64 * 1024,
+            input_bytes * 4 + bar_bytes * 4,
+        ),
         target_output_bytes=max(
             16 * 1024,
             input_bytes * 4 + len(bars) * 4_096,
