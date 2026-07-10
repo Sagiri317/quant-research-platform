@@ -53,7 +53,7 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 from quant_research_platform.sources.csmar import ids as csmar_ids
-from quant_research_platform.storage.datasets import DatasetReadMode, write_dataset
+from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
 MARKET_BARS_DATA_ID = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
@@ -108,10 +108,61 @@ def test_panel_materializer_skips_market_bars_source_preload(
         layout=layout,
         source_id=source_id,
         market_bars_data_id=source_ids.market_bars_source_data_id(spec),
+        resource_policy=materialization_io.RuntimeResourcePolicy(
+            available_memory_bytes=1024**3
+        ),
     )
 
     assert set(inputs) == {"trading_calendar"}
     assert all(isinstance(frame, pd.DataFrame) for frame in inputs.values())
+
+
+def test_source_input_physical_reads_use_owner_resource_policy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    source_id = SourceId("synthetic_vendor_a")
+    spec = _processed_spec(
+        MARKET_PANEL_DATA_ID,
+        kind=ProcessedDataKind.PANEL,
+        source_input_data_ids=(MARKET_BARS_DATA_ID, "trading_calendar"),
+    )
+    policy = materialization_io.RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        chunk_target_bytes=32 * 1024,
+        memory_safety_factor=1.0,
+    )
+    observed_targets: list[int] = []
+
+    monkeypatch.setattr(
+        materialization_io,
+        "build_dataset_read_context",
+        lambda root, **_kwargs: root,
+        raising=False,
+    )
+
+    def fake_materialize_dataset_context(context, *, target_chunk_bytes):  # noqa: ANN001
+        observed_targets.append(target_chunk_bytes)
+        return _key_frame()
+
+    monkeypatch.setattr(
+        materialization_io,
+        "materialize_dataset_context",
+        fake_materialize_dataset_context,
+        raising=False,
+    )
+
+    inputs = materialization_io.read_source_inputs_for_spec(
+        spec,
+        layout=layout,
+        source_id=source_id,
+        market_bars_data_id=source_ids.market_bars_source_data_id(spec),
+        resource_policy=policy,
+    )
+
+    assert set(inputs) == {"trading_calendar"}
+    assert observed_targets == [policy.effective_chunk_bytes]
 
 
 def test_panel_materializer_rejects_unapproved_market_bars_source_variant() -> None:
@@ -149,6 +200,9 @@ def test_materializer_reads_processed_inputs_from_spec_processed_input_data_ids(
         target,
         layout=layout,
         processed_catalog=_catalog(panel_spec, target),
+        resource_policy=materialization_io.RuntimeResourcePolicy(
+            available_memory_bytes=1024**3
+        ),
     )
 
     assert set(inputs) == {MARKET_PANEL_DATA_ID}
@@ -344,11 +398,9 @@ def test_write_paths_read_processed_inputs_via_helper(
         calls["label_key_coverage"] += 1
         return read_window
 
-    def read_dataset_by_mode(*args: object, **kwargs: object):
-        del args
-        if kwargs.get("mode") is DatasetReadMode.CHUNKED:
-            return (_key_frame(),)
-        return _key_frame()
+    def iter_dataset_chunks_with_policy(*args: object, **kwargs: object):
+        del args, kwargs
+        return iter((_key_frame(),))
 
     monkeypatch.setattr(
         materialization_planning,
@@ -369,9 +421,9 @@ def test_write_paths_read_processed_inputs_via_helper(
         fake_read_processed_inputs,
     )
     monkeypatch.setattr(
-        materialization_planning,
-        "read_dataset",
-        read_dataset_by_mode,
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
+        iter_dataset_chunks_with_policy,
     )
     monkeypatch.setattr(
         materialize_annotations.annotations,
@@ -471,26 +523,36 @@ def test_processed_panel_key_coverage_rejects_invalid_keys(monkeypatch) -> None:
         lambda _root: SimpleNamespace(columns=("asset_id", "timestamp")),
     )
     monkeypatch.setattr(
-        materialization_planning,
-        "read_dataset",
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
         lambda *args, **kwargs: (
             pd.DataFrame({"asset_id": [[]], "timestamp": ["2024-01-02"]}),
         ),
     )
 
     with pytest.raises(ValueError, match="invalid_processed_panel_asset_id"):
-        materialization_planning.processed_panel_key_coverage(Path("panel"))
+        materialization_planning.processed_panel_key_coverage(
+            Path("panel"),
+            resource_policy=materialization_io.RuntimeResourcePolicy(
+                available_memory_bytes=1024**3
+            ),
+        )
 
     monkeypatch.setattr(
-        materialization_planning,
-        "read_dataset",
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
         lambda *args, **kwargs: (
             pd.DataFrame({"asset_id": ["asset_a"], "timestamp": ["not-a-date"]}),
         ),
     )
 
     with pytest.raises(ValueError, match="invalid_processed_panel_timestamp"):
-        materialization_planning.processed_panel_key_coverage(Path("panel"))
+        materialization_planning.processed_panel_key_coverage(
+            Path("panel"),
+            resource_policy=materialization_io.RuntimeResourcePolicy(
+                available_memory_bytes=1024**3
+            ),
+        )
 
 
 def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
@@ -519,6 +581,9 @@ def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
         target,
         layout=layout,
         processed_catalog=_catalog(panel_spec, execution_spec, target),
+        resource_policy=materialization_io.RuntimeResourcePolicy(
+            available_memory_bytes=1024**3
+        ),
     )
 
     assert set(inputs) == {MARKET_PANEL_DATA_ID, "execution"}

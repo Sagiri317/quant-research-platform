@@ -99,6 +99,12 @@ def test_resource_chunk_planner_handles_empty_and_invalid_inputs() -> None:
             session_count=1,
             estimated_bytes_per_session=0,
         )
+    with pytest.raises(ValueError, match="session_estimate_exceeds_chunk_budget"):
+        planner.plan_sessions(
+            axis=ChunkAxis.TIME,
+            session_count=1,
+            estimated_bytes_per_session=1025,
+        )
 
 
 def test_runtime_resource_policy_checks_disk_space(monkeypatch, tmp_path: Path) -> None:

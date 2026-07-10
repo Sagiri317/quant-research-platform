@@ -31,11 +31,14 @@ from quant_research_platform.runtime.resources import (
     active_runtime_resource_policy,
     require_free_disk_headroom,
 )
+from quant_research_platform.storage._dataset_reading import (
+    build_dataset_read_context,
+    iter_dataset_chunks,
+    materialize_dataset_context,
+)
 from quant_research_platform.storage._dataset_schema import dataset_identity_payload
 from quant_research_platform.storage.datasets import (
-    DatasetReadMode,
     inspect_dataset,
-    read_dataset,
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -44,6 +47,7 @@ SIZING_SAMPLE_SESSION_CAP = 20
 # Research assembly temporarily holds merge/sort/write copies of the joined frame,
 # so session sizing must reserve peak headroom beyond the steady-state frame size.
 RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER = 4
+RESEARCH_TIME_KEY_STATE_BYTES = 160
 
 
 def assemble_research_dataset(
@@ -129,6 +133,7 @@ def _iter_joined_processed_chunks(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy | None,
 ) -> Iterator[pd.DataFrame]:
+    policy = resource_policy or active_runtime_resource_policy()
     base_data_id = _base_input_data_id(dataset_spec)
     base_spec = processed_catalog.get(base_data_id)
     base_root = layout.processed_data_root(
@@ -140,6 +145,7 @@ def _iter_joined_processed_chunks(
         base_root,
         primary_key=dataset_spec.primary_key,
         time_window=time_window,
+        resource_policy=policy,
     )
     if not time_keys:
         raise ValueError("no_research_dataset_sessions")
@@ -150,8 +156,8 @@ def _iter_joined_processed_chunks(
         time_keys=time_keys,
         time_window=time_window,
         base_data_id=base_data_id,
+        resource_policy=policy,
     )
-    policy = resource_policy or active_runtime_resource_policy()
     resource_plan = ResourceChunkPlanner(policy).plan_sessions(
         axis=ChunkAxis.TIME,
         session_count=len(time_keys),
@@ -171,6 +177,7 @@ def _iter_joined_processed_chunks(
             processed_catalog=processed_catalog,
             time_window=chunk_window,
             base_data_id=base_data_id,
+            resource_policy=policy,
         )
         validate_research_dataset(chunk, dataset_spec)
         yield (
@@ -187,6 +194,7 @@ def _join_processed_inputs(
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow,
     base_data_id: str | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> pd.DataFrame:
     ordered_input_ids = _ordered_input_data_ids(
         dataset_spec,
@@ -202,6 +210,7 @@ def _join_processed_inputs(
             processed_spec=processed_spec,
             existing_columns=tuple(assembled.columns) if assembled is not None else (),
             time_window=time_window,
+            resource_policy=resource_policy,
         )
         if assembled is None:
             assembled = input_frame
@@ -231,18 +240,27 @@ def _time_keys_from_base_input(
     *,
     primary_key: tuple[str, ...],
     time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy,
 ) -> tuple[pd.Timestamp, ...]:
-    chunks = read_dataset(
+    context = build_dataset_read_context(
         base_root,
-        columns=list(primary_key),
+        columns=primary_key,
         time_window=time_window,
-        mode=DatasetReadMode.CHUNKED,
     )
-    timestamps: list[pd.Timestamp] = []
-    for chunk in chunks:
-        timestamps.extend(chunk["timestamp"].dropna().unique())
+    timestamps: set[pd.Timestamp] = set()
+    physical_target_bytes = max(1, resource_policy.effective_chunk_bytes // 2)
+    target_state_bytes = resource_policy.effective_chunk_bytes - physical_target_bytes
+    for chunk in iter_dataset_chunks(
+        context,
+        target_chunk_bytes=physical_target_bytes,
+    ):
+        timestamps.update(
+            pd.Timestamp(value) for value in chunk["timestamp"].dropna().unique()
+        )
+        if len(timestamps) * RESEARCH_TIME_KEY_STATE_BYTES > target_state_bytes:
+            raise ValueError("research_time_key_state_exceeds_chunk_budget")
     if is_intraday_time_window(time_window):
-        return tuple(sorted({pd.Timestamp(value) for value in timestamps}))
+        return tuple(sorted(timestamps))
     return normalize_session_dates(timestamps)
 
 
@@ -336,6 +354,7 @@ def _read_processed_input(
     processed_spec: ProcessedDataSpec,
     existing_columns: tuple[str, ...],
     time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy,
 ) -> pd.DataFrame:
     columns = _processed_input_columns(
         dataset_spec,
@@ -348,10 +367,14 @@ def _read_processed_input(
         processed_spec.data_id,
     )
     try:
-        return read_dataset(
+        context = build_dataset_read_context(
             data_root,
             time_window=time_window,
-            columns=columns,
+            columns=tuple(columns),
+        )
+        return materialize_dataset_context(
+            context,
+            target_chunk_bytes=resource_policy.effective_chunk_bytes,
         )
     except ValueError as exc:
         if str(exc) == "dataset_column_not_found":
@@ -590,6 +613,7 @@ def _estimate_research_join_bytes_per_session(
     time_keys: tuple[pd.Timestamp, ...],
     time_window: TimeWindow,
     base_data_id: str,
+    resource_policy: RuntimeResourcePolicy,
 ) -> int:
     sample_time_key_count = min(len(time_keys), SIZING_SAMPLE_SESSION_CAP)
     sample_window = _research_chunk_windows(
@@ -604,6 +628,7 @@ def _estimate_research_join_bytes_per_session(
         processed_catalog=processed_catalog,
         time_window=sample_window,
         base_data_id=base_data_id,
+        resource_policy=resource_policy,
     )
     return _measured_bytes_per_session(
         frame,

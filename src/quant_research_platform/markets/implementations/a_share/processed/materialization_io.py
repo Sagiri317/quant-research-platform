@@ -15,10 +15,14 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     require_free_disk_headroom,
 )
+from quant_research_platform.storage._dataset_reading import (
+    build_dataset_read_context,
+    iter_dataset_chunks,
+    materialize_dataset_context,
+)
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     inspect_dataset,
-    read_dataset,
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -63,12 +67,14 @@ def read_processed_inputs_for_spec(
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow | None = None,
     columns_by_data_id: dict[str, Sequence[str]] | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
     for data_id in spec.processed_input_data_ids:
         dependency = processed_catalog.get(data_id)
-        inputs[data_id] = read_dataset(
+        inputs[data_id] = read_materialized_dataset(
             processed_root(layout, dependency),
+            resource_policy=resource_policy,
             time_window=time_window,
             columns=(
                 None
@@ -121,6 +127,7 @@ def read_source_inputs_for_spec(
     layout: StorageLayout,
     source_id: SourceId,
     market_bars_data_id: str | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
     market_bars_data_id = (
@@ -130,8 +137,47 @@ def read_source_inputs_for_spec(
         if spec.kind is ProcessedDataKind.PANEL and data_id == market_bars_data_id:
             continue
         root = layout.interim_data_root(source_id, data_id)
-        inputs[data_id] = read_dataset(root)
+        inputs[data_id] = read_materialized_dataset(
+            root,
+            resource_policy=resource_policy,
+        )
     return inputs
+
+
+def read_materialized_dataset(
+    root: Path,
+    *,
+    resource_policy: RuntimeResourcePolicy,
+    time_window: TimeWindow | None = None,
+    columns: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    context = build_dataset_read_context(
+        root,
+        columns=None if columns is None else tuple(columns),
+        time_window=time_window,
+    )
+    return materialize_dataset_context(
+        context,
+        target_chunk_bytes=resource_policy.effective_chunk_bytes,
+    )
+
+
+def iter_dataset_chunks_with_policy(
+    root: Path,
+    *,
+    resource_policy: RuntimeResourcePolicy,
+    time_window: TimeWindow | None = None,
+    columns: Sequence[str] | None = None,
+) -> Iterator[pd.DataFrame]:
+    context = build_dataset_read_context(
+        root,
+        columns=None if columns is None else tuple(columns),
+        time_window=time_window,
+    )
+    yield from iter_dataset_chunks(
+        context,
+        target_chunk_bytes=resource_policy.effective_chunk_bytes,
+    )
 
 
 __all__ = [

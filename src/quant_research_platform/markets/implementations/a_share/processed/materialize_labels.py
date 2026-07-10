@@ -78,6 +78,7 @@ def write_labels(
     panel_key_coverage = materialization_planning.processed_panel_key_coverage(
         panel_root,
         cache=panel_key_coverages,
+        resource_policy=policy,
     )
     estimated = materialization_planning.estimate_label_bytes_per_session(
         sessions,
@@ -88,6 +89,7 @@ def write_labels(
         panel_input_columns=panel_input_columns,
         required_columns=spec.required_columns,
         definitions=definitions,
+        resource_policy=policy,
     )
     windows = materialization_planning.planned_session_windows(
         sessions,
@@ -115,6 +117,7 @@ def write_labels(
                 columns_by_data_id={
                     contract.primary_input_data_id: panel_input_columns,
                 },
+                resource_policy=policy,
             )
             materialization_validation.validate_processed_input_contract(
                 spec,

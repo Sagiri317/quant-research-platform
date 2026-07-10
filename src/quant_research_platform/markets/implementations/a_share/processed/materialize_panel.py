@@ -19,7 +19,6 @@ from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     inspect_dataset,
-    read_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -40,6 +39,7 @@ def write_panel(
         layout=layout,
         source_id=source_id,
         market_bars_data_id=market_bars_data_id,
+        resource_policy=policy,
     )
     materialization_validation.require_source_inputs_for_spec(spec, source_inputs)
     stock_master = source_inputs["stock_master"]
@@ -61,6 +61,7 @@ def write_panel(
         market_cap=market_cap,
         trading_calendar=trading_calendar,
         required_columns=spec.required_columns,
+        resource_policy=policy,
     )
     windows = materialization_planning.planned_session_windows(
         sessions,
@@ -74,7 +75,11 @@ def write_panel(
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
-            market_bars = read_dataset(market_bars_root, time_window=window.read)
+            market_bars = materialization_io.read_materialized_dataset(
+                market_bars_root,
+                time_window=window.read,
+                resource_policy=policy,
+            )
             materialization_validation.require_source_input_columns(
                 market_bars_data_id,
                 market_bars,

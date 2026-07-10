@@ -25,6 +25,10 @@ def assert_forced_tiny_processed_chunks_match_default(
     end_date: str,
     time_window: TimeWindow,
 ) -> None:
+    tiny_chunk_bytes = {
+        "execution": 8 * 1024,
+        "forward_returns": 16 * 1024,
+    }.get(data_id, 4 * 1024)
     default_layout = StorageLayout(project_root=tmp_path / "default")
     tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
     source_id = SourceId("csmar")
@@ -53,9 +57,9 @@ def assert_forced_tiny_processed_chunks_match_default(
         time_window=time_window,
         data_ids=(data_id,),
         resource_policy=RuntimeResourcePolicy(
-            available_memory_bytes=1_000,
+            available_memory_bytes=tiny_chunk_bytes,
             memory_budget_fraction=1.0,
-            chunk_target_bytes=250,
+            chunk_target_bytes=tiny_chunk_bytes,
             memory_safety_factor=1.0,
         ),
     )

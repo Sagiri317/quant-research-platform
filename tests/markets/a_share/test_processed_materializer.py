@@ -174,7 +174,7 @@ def test_panel_materializer_does_not_preload_full_market_bars(
         SYNTHETIC_SOURCE_ID,
         MARKET_BARS_DATA_ID,
     )
-    original = materialize_panel.read_dataset
+    original = materialize_panel.materialization_io.read_materialized_dataset
     full_market_bars_reads = 0
     windowed_market_bars_reads = 0
 
@@ -187,7 +187,11 @@ def test_panel_materializer_does_not_preload_full_market_bars(
                 windowed_market_bars_reads += 1
         return original(root, **kwargs)
 
-    monkeypatch.setattr(materialize_panel, "read_dataset", spy_read_dataset)
+    monkeypatch.setattr(
+        materialize_panel.materialization_io,
+        "read_materialized_dataset",
+        spy_read_dataset,
+    )
 
     materializer.materialize_processed_data(
         layout=layout,
@@ -195,9 +199,9 @@ def test_panel_materializer_does_not_preload_full_market_bars(
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
         data_ids=(MARKET_PANEL_DATA_ID,),
         resource_policy=RuntimeResourcePolicy(
-            available_memory_bytes=1_000,
+            available_memory_bytes=4 * 1024,
             memory_budget_fraction=1.0,
-            chunk_target_bytes=250,
+            chunk_target_bytes=4 * 1024,
             memory_safety_factor=1.0,
         ),
     )
@@ -838,6 +842,10 @@ def _assert_forced_tiny_chunks_match_default(
     end_date: str,
     time_window: TimeWindow,
 ) -> None:
+    tiny_chunk_bytes = {
+        "execution": 8 * 1024,
+        "forward_returns": 16 * 1024,
+    }.get(data_id, 4 * 1024)
     default_layout = StorageLayout(project_root=tmp_path / "default")
     tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
     write_synthetic_interim_inputs(
@@ -865,9 +873,9 @@ def _assert_forced_tiny_chunks_match_default(
         time_window=time_window,
         data_ids=(data_id,),
         resource_policy=RuntimeResourcePolicy(
-            available_memory_bytes=1_000,
+            available_memory_bytes=tiny_chunk_bytes,
             memory_budget_fraction=1.0,
-            chunk_target_bytes=250,
+            chunk_target_bytes=tiny_chunk_bytes,
             memory_safety_factor=1.0,
         ),
     )

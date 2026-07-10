@@ -258,6 +258,11 @@ class ResourceChunkPlanner:
             raise ValueError("invalid_session_count")
         if estimated_bytes_per_session <= 0:
             raise ValueError("invalid_estimated_bytes_per_session")
+        if (
+            session_count > 0
+            and estimated_bytes_per_session > self.policy.effective_chunk_bytes
+        ):
+            raise ValueError("session_estimate_exceeds_chunk_budget")
         if session_count == 0:
             target_core_session_count = 1
             chunk_count = 0

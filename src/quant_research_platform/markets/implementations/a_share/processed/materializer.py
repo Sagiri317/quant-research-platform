@@ -67,7 +67,11 @@ def materialize_processed_data(
         catalog,
         targets,
     )
-    sessions = materialization_planning.available_trading_sessions(layout, source_id)
+    sessions = materialization_planning.available_trading_sessions(
+        layout,
+        source_id,
+        resource_policy=policy,
+    )
     materialization_planning.require_target_sessions(sessions, time_window)
     dependency_windows = (
         materialization_dependencies.planned_processed_dependency_windows(
@@ -123,6 +127,7 @@ def _materialize_one(
             root,
             time_window,
             sessions=sessions,
+            resource_policy=policy,
         )
         return inspect_dataset(root, time_window=time_window)
     catalog = processed_catalog()

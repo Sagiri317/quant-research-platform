@@ -69,6 +69,7 @@ def ensure_processed_dependencies(
                 dependency_root,
                 required_window,
                 sessions=sessions,
+                resource_policy=policy,
             )
             continue
         materialize_one(

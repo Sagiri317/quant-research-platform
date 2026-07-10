@@ -22,7 +22,10 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
-from quant_research_platform.markets.implementations.a_share.processed import panels
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_io,
+    panels,
+)
 from quant_research_platform.markets.implementations.a_share.validation import (
     strict_values,
 )
@@ -38,9 +41,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
-    DatasetReadMode,
     inspect_dataset,
-    read_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -65,11 +66,16 @@ def require_dataset_coverage(
     time_window: TimeWindow,
     *,
     sessions: tuple[pd.Timestamp, ...],
+    resource_policy: RuntimeResourcePolicy,
 ) -> None:
     require_date_window(time_window, context="a_share_dataset_coverage")
     target = _target_sessions(sessions, time_window)
     coverage_window = TimeWindow(target[0].date(), target[-1].date())
-    available_sessions = _dataset_session_dates(root, coverage_window)
+    available_sessions = _dataset_session_dates(
+        root,
+        coverage_window,
+        resource_policy=resource_policy,
+    )
     missing_sessions = [
         session.date()
         for session in target
@@ -86,15 +92,17 @@ def require_dataset_coverage(
 def _dataset_session_dates(
     root: Path,
     time_window: TimeWindow,
+    *,
+    resource_policy: RuntimeResourcePolicy,
 ) -> set[object]:
     inspection = inspect_dataset(root)
     if "timestamp" not in inspection.columns:
         raise ValueError("time_window_not_supported")
-    chunks = read_dataset(
+    chunks = materialization_io.iter_dataset_chunks_with_policy(
         root,
         columns=["timestamp"],
         time_window=time_window,
-        mode=DatasetReadMode.CHUNKED,
+        resource_policy=resource_policy,
     )
     dates: set[object] = set()
     for chunk in chunks:
@@ -110,6 +118,7 @@ def processed_panel_key_coverage(
     root: Path,
     *,
     cache: dict[Path, dict[object, tuple[pd.Timestamp, ...]]] | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> dict[object, tuple[pd.Timestamp, ...]]:
     cache_key = root.resolve()
     if cache is not None and cache_key in cache:
@@ -120,14 +129,14 @@ def processed_panel_key_coverage(
         raise ValueError(
             "missing_processed_panel_key_columns: " + ", ".join(sorted(missing))
         )
-    chunks = read_dataset(
+    chunks = materialization_io.iter_dataset_chunks_with_policy(
         root,
         columns=["asset_id", "timestamp"],
-        mode=DatasetReadMode.CHUNKED,
+        time_window=None,
+        resource_policy=resource_policy,
     )
-    key_chunks = (chunks,) if isinstance(chunks, pd.DataFrame) else chunks
     coverage: dict[object, set[pd.Timestamp]] = {}
-    for chunk in key_chunks:
+    for chunk in chunks:
         if chunk.empty:
             continue
         keys = chunk.loc[:, ["asset_id", "timestamp"]].copy()
@@ -154,8 +163,13 @@ def processed_panel_key_coverage(
 def available_trading_sessions(
     layout: StorageLayout,
     source_id: SourceId,
+    *,
+    resource_policy: RuntimeResourcePolicy,
 ) -> tuple[pd.Timestamp, ...]:
-    calendar = read_dataset(layout.interim_data_root(source_id, "trading_calendar"))
+    calendar = materialization_io.read_materialized_dataset(
+        layout.interim_data_root(source_id, "trading_calendar"),
+        resource_policy=resource_policy,
+    )
     source_market_type = strict_values.strict_market_type_series(
         calendar["source_market_type"],
         error="invalid_source_market_type",
@@ -243,6 +257,7 @@ def estimate_panel_bytes_per_session(
     market_cap: pd.DataFrame,
     trading_calendar: pd.DataFrame,
     required_columns: tuple[str, ...],
+    resource_policy: RuntimeResourcePolicy,
 ) -> int:
     sample = _sample_window(
         sessions,
@@ -250,7 +265,11 @@ def estimate_panel_bytes_per_session(
         lookahead_sessions=1,
         reason="panel_sizing",
     )
-    market_bars = read_dataset(market_bars_root, time_window=sample.read)
+    market_bars = materialization_io.read_materialized_dataset(
+        market_bars_root,
+        time_window=sample.read,
+        resource_policy=resource_policy,
+    )
     panel = panels.compute_market_panel(
         market_bars,
         stock_master=stock_master,
@@ -278,6 +297,7 @@ def estimate_factor_bytes_per_session(
     panel_input_columns: tuple[str, ...],
     required_columns: tuple[str, ...],
     definitions: Sequence[FactorDefinition],
+    resource_policy: RuntimeResourcePolicy,
 ) -> int:
     sample = _sample_window(
         sessions,
@@ -285,10 +305,11 @@ def estimate_factor_bytes_per_session(
         warmup_sessions=lookback_days,
         reason="factor_sizing",
     )
-    panel = read_dataset(
+    panel = materialization_io.read_materialized_dataset(
         panel_root,
         time_window=sample.read,
         columns=panel_input_columns,
+        resource_policy=resource_policy,
     )
     factors = factor_calculations.calculate_factors_for_panel(
         panel,
@@ -315,6 +336,7 @@ def estimate_label_bytes_per_session(
     panel_input_columns: tuple[str, ...],
     required_columns: tuple[str, ...],
     definitions: Sequence[LabelDefinition],
+    resource_policy: RuntimeResourcePolicy,
 ) -> int:
     sample = _sample_window(
         sessions,
@@ -322,10 +344,11 @@ def estimate_label_bytes_per_session(
         lookahead_sessions=lookahead_sessions,
         reason="label_sizing",
     )
-    panel = read_dataset(
+    panel = materialization_io.read_materialized_dataset(
         panel_root,
         time_window=sample.read,
         columns=panel_input_columns,
+        resource_policy=resource_policy,
     )
     labels = label_calculations.calculate_labels_for_panel(
         panel,

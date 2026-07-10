@@ -242,6 +242,51 @@ def test_research_output_disk_guard_rechecks_before_publication(
     )
 
 
+def test_research_time_key_scan_uses_policy_target_and_bounds_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_targets: list[int] = []
+    timestamps = pd.date_range("2026-01-01", periods=20, freq="min")
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        chunk_target_bytes=1024,
+        memory_safety_factor=1.0,
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "build_dataset_read_context",
+        lambda root, **_kwargs: root,
+        raising=False,
+    )
+
+    def fake_iter_dataset_chunks(context, *, target_chunk_bytes):  # noqa: ANN001
+        observed_targets.append(target_chunk_bytes)
+        yield pd.DataFrame({"timestamp": timestamps})
+
+    monkeypatch.setattr(
+        assembler_module,
+        "iter_dataset_chunks",
+        fake_iter_dataset_chunks,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="research_time_key_state_exceeds_chunk_budget",
+    ):
+        assembler_module._time_keys_from_base_input(
+            Path("base"),
+            primary_key=platform_entity_time_key(),
+            time_window=TimeWindow(
+                "2026-01-01T00:00:00",
+                "2026-01-01T00:19:00",
+            ),
+            resource_policy=policy,
+        )
+
+    assert observed_targets == [policy.effective_chunk_bytes // 2]
+
+
 def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     primary_key = platform_entity_time_key()
@@ -467,7 +512,7 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.009")
     tiny_root = assemble_research_dataset(
         layout=tiny_layout,
         dataset_catalog=dataset_catalog,
@@ -834,7 +879,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.009")
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -842,6 +887,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.003")
     model_catalog = ModelCatalog()
     model_catalog.register(
         ModelSpec(
@@ -924,7 +970,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     assert (output_bundle / "prediction.parquet").is_file()
     assert len([rows for rows in read_chunk_rows if rows]) > 1
     assert max(read_chunk_rows) < len(frame)
-    assert len(fit_chunk_rows) > 1
+    assert fit_chunk_rows
     assert max(fit_chunk_rows) < len(frame)
     assert len(prediction_chunk_rows) > 1
     assert max(prediction_chunk_rows) < len(frame)
@@ -1003,7 +1049,7 @@ def test_evaluation_runner_streams_research_chunks(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.009")
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,

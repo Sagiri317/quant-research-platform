@@ -56,6 +56,7 @@ def write_annotations(
                 layout=layout,
                 processed_catalog=catalog,
                 time_window=window.read,
+                resource_policy=policy,
             )
             materialization_validation.validate_processed_input_contract(
                 spec,

@@ -632,7 +632,7 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design(
 
     assert result.coefficients.tolist() == pytest.approx(expected.tolist())
 
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.003")
     tiny_result = fit_model_result(frame, spec)
 
     assert tiny_result.coefficients.tolist() == pytest.approx(
