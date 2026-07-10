@@ -228,8 +228,6 @@ def write_dataset(
     final_root = Path(dataset_root)
     validate_dataset_spec(spec)
     validate_dataset_artifact_root(final_root, spec)
-    if final_root.exists():
-        raise ValueError("dataset_exists")
 
     def _writer(temp_root: Path) -> None:
         accumulator = _write_contents(
@@ -262,6 +260,8 @@ def _staged_write_directory(
 ) -> None:
     final_root.parent.mkdir(parents=True, exist_ok=True)
     _cleanup_stale_staged_scratch(final_root)
+    if final_root.exists():
+        raise ValueError("dataset_exists")
     scratch_prefix = f".{final_root.name}.tmp-"
     temp_root = final_root.with_name(
         owned_scratch_name(scratch_prefix, uuid4().hex[:6])

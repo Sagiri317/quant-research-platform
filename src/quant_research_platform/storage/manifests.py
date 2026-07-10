@@ -62,30 +62,6 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     return atomic_write_text(path, text, encoding="utf-8")
 
 
-def replace_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Path:
-    """Atomically replace an existing private artifact manifest."""
-
-    _require_schema_id(payload)
-    assert_internal_artifact_metadata_safe(payload)
-    final_path = Path(path)
-    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = final_path.with_name(f".tmp-{uuid4().hex[:12]}")
-    claimed_temp = False
-    try:
-        with temp_path.open("x", encoding="utf-8") as handle:
-            claimed_temp = True
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temp_path.replace(final_path)
-    except Exception:
-        if claimed_temp and temp_path.exists():
-            temp_path.unlink()
-        raise
-    return final_path
-
-
 def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
     """Atomically replace a QRP-owned JSON object after share-safety validation."""
 
@@ -239,7 +215,6 @@ __all__ = [
     "read_manifest",
     "read_qrp_json",
     "replace_qrp_json",
-    "replace_internal_artifact_manifest",
     "require_qrp_json_identity",
     "write_internal_artifact_manifest",
     "write_manifest",

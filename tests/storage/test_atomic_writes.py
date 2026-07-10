@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.storage.atomic as atomic
+from quant_research_platform.storage._scratch_ownership import owned_scratch_name
 from quant_research_platform.storage.atomic import (
     atomic_write_csv,
     atomic_write_directory,
@@ -19,7 +20,7 @@ class _FixedUuid:
 
 
 def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -> None:
-    final_root = tmp_path / "outputs" / "local" / "a_share" / "run"
+    final_root = tmp_path / "outputs" / "local" / "a_share" / "bundle"
 
     def failing_writer(temp_root: Path) -> None:
         (temp_root / "partial.txt").write_text("partial\n", encoding="utf-8")
@@ -36,13 +37,17 @@ def test_atomic_write_directory_retries_transient_permission_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    final_root = tmp_path / "outputs" / "local" / "a_share" / "run"
+    final_root = tmp_path / "outputs" / "local" / "a_share" / "bundle"
     original_rename = Path.rename
     calls = 0
 
     def flaky_rename(self: Path, target: Path) -> Path:
         nonlocal calls
-        if self.name.startswith(".tmp-") and Path(target) == final_root and calls == 0:
+        if (
+            self.name.startswith(".bundle.tmp-")
+            and Path(target) == final_root
+            and calls == 0
+        ):
             calls += 1
             raise PermissionError(5, "Access is denied")
         return original_rename(self, target)
@@ -62,8 +67,10 @@ def test_atomic_write_directory_does_not_clean_unclaimed_collision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    final_root = tmp_path / "run"
-    live_temp = final_root.with_name(f".tmp-{'c' * 12}")
+    final_root = tmp_path / "bundle"
+    live_temp = final_root.with_name(
+        owned_scratch_name(".bundle.tmp-", "c" * 12)
+    )
     live_temp.mkdir()
     (live_temp / "live.txt").write_text("live\n", encoding="utf-8")
     monkeypatch.setattr(atomic, "uuid4", lambda: _FixedUuid())
@@ -72,6 +79,21 @@ def test_atomic_write_directory_does_not_clean_unclaimed_collision(
         atomic_write_directory(final_root, lambda _root: None)
 
     assert (live_temp / "live.txt").read_text(encoding="utf-8") == "live\n"
+
+
+def test_atomic_write_directory_recovers_dead_owner_when_final_exists(
+    tmp_path: Path,
+) -> None:
+    final_root = tmp_path / "bundle"
+    final_root.mkdir()
+    stale = final_root.with_name(".bundle.tmp-deadbeef")
+    stale.mkdir()
+    (stale / "partial.bin").write_bytes(b"partial")
+
+    with pytest.raises(ValueError, match="output_already_exists"):
+        atomic_write_directory(final_root, lambda _root: None)
+
+    assert not stale.exists()
 
 
 def test_atomic_write_text_creates_nested_temp_parent(tmp_path: Path) -> None:

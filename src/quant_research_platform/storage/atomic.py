@@ -12,6 +12,10 @@ from uuid import uuid4
 
 import pandas as pd
 
+from quant_research_platform.storage._scratch_ownership import (
+    owned_scratch_name,
+    scratch_owner_is_alive,
+)
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
 
@@ -72,9 +76,13 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
 
 def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
     final_root = Path(root)
-    reject_if_exists(final_root)
     final_root.parent.mkdir(parents=True, exist_ok=True)
-    temp_root = _temp_sibling(final_root)
+    scratch_prefix = f".{final_root.name}.tmp-"
+    _cleanup_stale_atomic_directories(final_root, prefix=scratch_prefix)
+    reject_if_exists(final_root)
+    temp_root = final_root.with_name(
+        owned_scratch_name(scratch_prefix, uuid4().hex[:12])
+    )
     claimed_temp = False
     try:
         temp_root.mkdir()
@@ -87,6 +95,19 @@ def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
             _remove_path(temp_root)
         raise
     return result
+
+
+def _cleanup_stale_atomic_directories(
+    final_root: Path,
+    *,
+    prefix: str,
+) -> None:
+    for temp_root in final_root.parent.glob(f"{prefix}*"):
+        if not temp_root.is_dir():
+            continue
+        if scratch_owner_is_alive(temp_root, prefix=prefix):
+            continue
+        _remove_path(temp_root)
 
 
 def _temp_sibling(path: Path) -> Path:

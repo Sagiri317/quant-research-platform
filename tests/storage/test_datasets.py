@@ -636,6 +636,49 @@ def test_chunked_and_materialized_reads_share_nullable_numeric_dtype(
     }
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [DatasetReadMode.CHUNKED, DatasetReadMode.MATERIALIZED],
+)
+def test_read_dataset_rejects_empty_column_projection(
+    tmp_path: Path,
+    mode: DatasetReadMode,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, f"empty_projection_{mode.value}")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec(f"empty_projection_{mode.value}"),
+    )
+
+    with pytest.raises(ValueError, match="dataset_columns_empty"):
+        read_dataset(root, columns=[], mode=mode)
+
+
+def test_materialized_read_unions_categorical_dictionaries_across_parts(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "categorical_parts")
+    first = make_default_dataset_frame().iloc[:1].copy()
+    second = make_default_dataset_frame().iloc[1:2].copy()
+    first["asset_id"] = first["asset_id"].astype("category")
+    second["asset_id"] = second["asset_id"].astype("category")
+    write_dataset(
+        root,
+        (first, second),
+        spec=make_processed_dataset_spec("categorical_parts"),
+    )
+
+    chunks = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+    materialized = read_dataset(root)
+
+    assert {str(chunk["asset_id"].dtype) for chunk in chunks} == {"category"}
+    assert str(materialized["asset_id"].dtype) == "category"
+    assert set(materialized["asset_id"].cat.categories) == set(
+        pd.concat((first["asset_id"].astype(str), second["asset_id"].astype(str)))
+    )
+
+
 def test_inspect_and_fingerprint_reuse_physical_batch_reader() -> None:
     inspection_source = Path(
         importlib.import_module(
@@ -1040,6 +1083,23 @@ def test_dataset_staged_write_does_not_clean_unclaimed_name_collision(
         dataset_writing._staged_write_directory(final_root, lambda _root: None)
 
     assert (live_stage / "live.txt").read_text(encoding="utf-8") == "live\n"
+
+
+def test_dataset_write_recovers_dead_stage_when_final_exists(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "published_with_dead_stage")
+    spec = make_processed_dataset_spec("published_with_dead_stage")
+    write_dataset(root, make_default_dataset_frame(), spec=spec)
+    stale_stage = root.with_name(".published_with_dead_stage.tmp-deadbeef")
+    stale_scratch = stale_stage / ".k-deadbeef"
+    stale_scratch.mkdir(parents=True)
+    (stale_scratch / "k.sqlite3").write_bytes(b"scratch")
+
+    with pytest.raises(ValueError, match="dataset_exists"):
+        write_dataset(root, make_default_dataset_frame(), spec=spec)
+
+    assert not stale_stage.exists()
 
 
 def test_storage_scratch_ownership_has_one_process_identity_path() -> None:

@@ -12,6 +12,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from pandas.api.types import union_categoricals
 
 from quant_research_platform.contracts.time import (
     TimeWindow,
@@ -103,7 +104,26 @@ def materialize_dataset_context(
             target_chunk_bytes=target_chunk_bytes,
         )
     )
-    return pd.concat(frames, ignore_index=True)
+    categorical_columns = tuple(
+        column
+        for column in frames[0].columns
+        if all(
+            isinstance(frame[column].dtype, pd.CategoricalDtype)
+            for frame in frames
+        )
+    )
+    categorical_values: dict[str, pd.Categorical] = {}
+    for column in categorical_columns:
+        try:
+            categorical_values[column] = union_categoricals(
+                [frame[column].array for frame in frames]
+            )
+        except TypeError as exc:
+            raise ValueError("dataset_categorical_dtype_mismatch") from exc
+    output = pd.concat(frames, ignore_index=True)
+    for column, values in categorical_values.items():
+        output[column] = pd.Series(values)
+    return output
 
 
 def build_dataset_read_context(
@@ -1067,6 +1087,8 @@ def resolve_columns_from_schema(
         requested = tuple(str(column) for column in spec["required_columns"])
     else:
         requested = tuple(str(column) for column in columns)
+    if not requested:
+        raise ValueError("dataset_columns_empty")
     missing = [column for column in requested if column not in schema_columns]
     if missing:
         raise ValueError("dataset_column_not_found")
