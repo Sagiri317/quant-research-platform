@@ -19,7 +19,6 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.storage.manifests import require_qrp_json_identity
 
 _DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset({"input_dataset_identities"})
 _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
@@ -271,19 +270,6 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
             }
         )
     return payload
-
-
-def require_qrp_json_schema_id(
-    payload: object,
-    *,
-    expected: str,
-    error: str,
-) -> None:
-    require_qrp_json_identity(
-        payload,
-        expected_schema_id=expected,
-        error=error,
-    )
 
 
 def date_string(value: pd.Timestamp | None) -> str | None:

@@ -17,6 +17,13 @@ from quant_research_platform.markets.implementations.a_share.verification import
 from tests.helpers import frequency_ids
 
 
+def test_verification_aggregates_has_no_parallel_inventory_builder() -> None:
+    assert not hasattr(
+        aggregates,
+        "_build_local_verification_inventory_payload_with_cache",
+    )
+
+
 def test_aggregates_summarizes_frames_without_row_level_output(tmp_path: Path) -> None:
     frame = pd.DataFrame(
         {

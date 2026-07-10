@@ -152,7 +152,12 @@ def _iter_factor_chunks(
                 )
                 output = factors.loc[factors[_CORE_ROW]].copy()
                 active_carry = _next_factor_carry(combined)
-                if _frame_bytes(active_carry) > budget.carry_bytes:
+                if (
+                    materialization_resources.materialization_frame_bytes(
+                        active_carry
+                    )
+                    > budget.carry_bytes
+                ):
                     raise ValueError("crypto_factor_state_exceeds_resource_budget")
                 if not output.empty:
                     result = output.loc[:, spec.required_columns]
@@ -182,10 +187,6 @@ def _next_factor_carry(frame: pd.DataFrame) -> pd.DataFrame:
         .tail(MICROSTRUCTURE_ROLLING_CARRY_BARS)
         .copy()
     )
-
-
-def _frame_bytes(frame: pd.DataFrame) -> int:
-    return int(frame.memory_usage(index=True, deep=True).sum())
 
 
 def _core_mask(frame: pd.DataFrame, time_window: TimeWindow) -> pd.Series:

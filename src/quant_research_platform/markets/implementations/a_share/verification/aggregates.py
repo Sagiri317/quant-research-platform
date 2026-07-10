@@ -269,49 +269,6 @@ def _build_review_safe_aggregate_evidence_payload_with_cache(
     }
 
 
-def _build_local_verification_inventory_payload_with_cache(
-    root: Path,
-    *,
-    evidence_payload: dict[str, Any],
-    generated_at: datetime,
-    summary_cache: _SummaryCache,
-) -> dict[str, Any]:
-    inventory = _dataset_inventory(root, summary_cache=summary_cache)
-    covered_roots = [
-        item["logical_root"] for item in inventory if item["covered_by_evidence_area"]
-    ]
-    uncovered_roots = [
-        item["logical_root"]
-        for item in inventory
-        if not item["covered_by_evidence_area"]
-    ]
-    allowed_unverified_roots: list[dict[str, str]] = []
-    handoff_ready = (
-        bool(evidence_payload.get("handoff_ready"))
-        and not uncovered_roots
-        and not allowed_unverified_roots
-    )
-    return {
-        "schema_id": "qrp-a-share-verification-inventory",
-        "project_version": PROJECT_VERSION,
-        "verification_kind": "local_result_aggregate_inventory",
-        "generated_at": generated_at.replace(microsecond=0)
-        .isoformat()
-        .replace(
-            "+00:00",
-            "Z",
-        ),
-        "output_scope": OUTPUT_SCOPE,
-        "source_data_visibility": "local_only",
-        "row_level_output_committed": False,
-        "dataset_inventory": inventory,
-        "covered_roots": covered_roots,
-        "uncovered_roots": uncovered_roots,
-        "allowed_unverified_roots": allowed_unverified_roots,
-        "handoff_ready": handoff_ready,
-    }
-
-
 def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     processed = root / "data" / "processed" / MARKET_ID
     outputs_root = root / "outputs"

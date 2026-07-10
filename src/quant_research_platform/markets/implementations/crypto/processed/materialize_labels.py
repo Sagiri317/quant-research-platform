@@ -177,7 +177,10 @@ def _iter_label_chunks(
                     )
                     yield output
                     buffer = buffer.loc[~emit_mask].copy()
-                if _frame_bytes(buffer) > budget.carry_bytes:
+                if (
+                    materialization_resources.materialization_frame_bytes(buffer)
+                    > budget.carry_bytes
+                ):
                     raise ValueError("crypto_label_state_exceeds_resource_budget")
     if not buffer.empty:
         finalized = _final_label_output(buffer, spec)
@@ -188,10 +191,6 @@ def _iter_label_chunks(
                 error="crypto_label_output_exceeds_resource_budget",
             )
             yield finalized
-
-
-def _frame_bytes(frame: pd.DataFrame) -> int:
-    return int(frame.memory_usage(index=True, deep=True).sum())
 
 
 def _final_label_output(

@@ -874,9 +874,15 @@ def test_exact_key_index_honors_configured_sqlite_cache_budget(
 
 def test_dataset_writer_does_not_retain_row_proportional_python_key_state() -> None:
     source = Path(dataset_writing.__file__).read_text(encoding="utf-8")
+    schema_source = Path(
+        importlib.import_module(
+            "quant_research_platform.storage._dataset_schema"
+        ).__file__
+    ).read_text(encoding="utf-8")
 
     assert "_seen_key_hashes" not in source
     assert "hash_pandas_object" not in source
+    assert "def require_qrp_json_schema_id(" not in schema_source
 
 
 def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(

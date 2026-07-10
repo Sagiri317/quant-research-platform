@@ -106,7 +106,7 @@ def iter_disk_guarded_chunks(
     scratch_parent: Path,
 ) -> Iterator[pd.DataFrame]:
     for chunk in chunks:
-        chunk_bytes = _frame_bytes(chunk)
+        chunk_bytes = materialization_frame_bytes(chunk)
         require_free_disk_headroom(
             policy,
             scratch_parent,
@@ -125,11 +125,11 @@ def require_frame_within_budget(
     target_bytes: int,
     error: str,
 ) -> None:
-    if _frame_bytes(frame) > target_bytes:
+    if materialization_frame_bytes(frame) > target_bytes:
         raise ValueError(error)
 
 
-def _frame_bytes(frame: pd.DataFrame) -> int:
+def materialization_frame_bytes(frame: pd.DataFrame) -> int:
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("invalid_crypto_materialization_chunk")
     return int(frame.memory_usage(index=True, deep=True).sum())

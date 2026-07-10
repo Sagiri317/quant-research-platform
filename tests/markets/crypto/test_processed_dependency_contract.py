@@ -644,6 +644,8 @@ def test_crypto_materializers_use_storage_physical_iterator_without_split_wrappe
         source = inspect.getsource(module)
         assert "iter_dataset_chunks(" in source
         assert "read_dataset(" not in source
+        assert "def _frame_bytes(" not in source
+        assert "materialization_resources.materialization_frame_bytes(" in source
 
 
 @pytest.mark.parametrize(
