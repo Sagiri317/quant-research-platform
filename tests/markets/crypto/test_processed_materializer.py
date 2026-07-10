@@ -1727,20 +1727,20 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
                 output[column] = 1.0
         return output
 
-    monkeypatch.setattr(materialize_panel.panels, "_prepare_panel_bars", prepare)
+    monkeypatch.setattr(materialize_panel.panels, "prepare_panel_bars", prepare)
     monkeypatch.setattr(
         materialize_panel,
-        "_read_trade_aggregates",
-        lambda *_args, **_kwargs: pd.DataFrame(),
+        "_iter_matching_trade_chunks",
+        lambda *_args, **_kwargs: iter(()),
     )
     monkeypatch.setattr(
         materialize_panel,
-        "_read_quote_snapshots",
-        lambda *_args, **_kwargs: pd.DataFrame(),
+        "_iter_matching_depth_chunks",
+        lambda *_args, **_kwargs: iter(()),
     )
     monkeypatch.setattr(
         materialize_panel.panels,
-        "_calculate_market_panel",
+        "calculate_market_panel_from_chunks",
         lambda panel, **_kwargs: panel.sort_values(
             ["market_id", "asset_id", "timestamp"], kind="mergesort"
         ).reset_index(drop=True),

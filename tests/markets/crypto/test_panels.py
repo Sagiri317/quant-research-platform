@@ -14,7 +14,26 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     panels,
 )
 
-compute_market_panel = panels.compute_market_panel
+
+def compute_market_panel(
+    bars: pd.DataFrame,
+    *,
+    trades: pd.DataFrame,
+    depth: pd.DataFrame,
+    max_quote_age: pd.Timedelta = panels.DEFAULT_MAX_QUOTE_AGE,
+) -> pd.DataFrame:
+    prepared = panels.prepare_panel_bars(bars)
+    test_budget = 512 * 1024 * 1024
+    return panels.calculate_market_panel_from_chunks(
+        prepared,
+        trade_chunks=(trades,),
+        depth_chunks=(depth,),
+        trade_state_bytes=test_budget,
+        trade_output_bytes=test_budget,
+        depth_state_bytes=test_budget,
+        depth_output_bytes=test_budget,
+        max_quote_age=max_quote_age,
+    )
 
 
 class _StringLikeCryptoSymbol:
@@ -394,7 +413,7 @@ def test_depth_reducer_merges_snapshot_across_chunks() -> None:
     module = _panel_input_reducers_module()
     depth = _ordered_depth_levels_frame()
     reducer = module.DepthSnapshotReducer(
-        bars=panels._prepare_panel_bars(_bars_frame()),
+        bars=panels.prepare_panel_bars(_bars_frame()),
         target_state_bytes=16 * 1024,
         target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
@@ -425,7 +444,7 @@ def test_depth_reducer_rejects_out_of_order_across_chunks() -> None:
     module = _panel_input_reducers_module()
     depth = _ordered_depth_levels_frame()
     reducer = module.DepthSnapshotReducer(
-        bars=panels._prepare_panel_bars(_bars_frame()),
+        bars=panels.prepare_panel_bars(_bars_frame()),
         target_state_bytes=16 * 1024,
         target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
@@ -453,7 +472,7 @@ def test_depth_reducer_fails_when_one_snapshot_exceeds_state_budget() -> None:
         }
     )
     reducer = module.DepthSnapshotReducer(
-        bars=panels._prepare_panel_bars(_bars_frame()),
+        bars=panels.prepare_panel_bars(_bars_frame()),
         target_state_bytes=2 * 1024,
         target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
@@ -484,7 +503,7 @@ def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
         }
     )
     reducer = module.DepthSnapshotReducer(
-        bars=panels._prepare_panel_bars(_bars_frame()),
+        bars=panels.prepare_panel_bars(_bars_frame()),
         target_state_bytes=64 * 1024,
         target_output_bytes=64 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
@@ -502,6 +521,7 @@ def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
 def test_old_depth_full_window_helpers_are_absent() -> None:
     source = inspect.getsource(panels)
 
+    assert "def compute_market_panel(" not in source
     assert "_accumulate_depth_snapshot_state" not in source
     assert "_quote_snapshots_from_state" not in source
     assert "_accumulate_trade_aggregate_state" not in source
@@ -532,7 +552,7 @@ def test_trade_aggregate_state_reduces_dense_chunks_incrementally() -> None:
         ),
     )
     reducer = module.AggregateTradeReducer(
-        bars=panels._prepare_panel_bars(bars),
+        bars=panels.prepare_panel_bars(bars),
         target_state_bytes=64 * 1024,
         target_output_bytes=64 * 1024,
         normalize_chunk=panels.normalize_trade_chunk,
@@ -555,7 +575,7 @@ def test_trade_reducer_checks_range_continuity_across_chunks() -> None:
     bars.loc[0, "trade_count"] = 2
     trades = _aggregate_trades_frame(first_trade_ids=(10, 12), last_trade_ids=(10, 12))
     reducer = module.AggregateTradeReducer(
-        bars=panels._prepare_panel_bars(bars),
+        bars=panels.prepare_panel_bars(bars),
         target_state_bytes=16 * 1024,
         target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_trade_chunk,
@@ -570,7 +590,7 @@ def test_trade_reducer_checks_range_continuity_across_chunks() -> None:
 def test_trade_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> None:
     module = _panel_input_reducers_module()
     reducer = module.AggregateTradeReducer(
-        bars=panels._prepare_panel_bars(_bars_frame()),
+        bars=panels.prepare_panel_bars(_bars_frame()),
         target_state_bytes=16 * 1024,
         target_output_bytes=512,
         normalize_chunk=panels.normalize_trade_chunk,
@@ -584,7 +604,7 @@ def test_trade_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> No
 def test_depth_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> None:
     module = _panel_input_reducers_module()
     reducer = module.DepthSnapshotReducer(
-        bars=panels._prepare_panel_bars(_bars_frame()),
+        bars=panels.prepare_panel_bars(_bars_frame()),
         target_state_bytes=16 * 1024,
         target_output_bytes=1_024,
         normalize_chunk=panels.normalize_depth_chunk,
@@ -599,7 +619,7 @@ def test_depth_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> No
 def test_reducer_state_budget_counts_deep_python_key_payloads() -> None:
     module = _panel_input_reducers_module()
     long_asset_id = "asset_" + "x" * 4096
-    trade_bars = panels._prepare_panel_bars(_bars_frame()).assign(
+    trade_bars = panels.prepare_panel_bars(_bars_frame()).assign(
         asset_id=long_asset_id
     )
 
@@ -647,7 +667,7 @@ def test_trade_state_budget_tracks_actual_large_integer_payloads() -> None:
 def test_depth_budget_checks_do_not_rescan_all_targets_per_update() -> None:
     module = _panel_input_reducers_module()
     reducer = module.DepthSnapshotReducer(
-        bars=panels._prepare_panel_bars(_bars_frame()),
+        bars=panels.prepare_panel_bars(_bars_frame()),
         target_state_bytes=1024**3,
         target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
@@ -678,7 +698,7 @@ def test_trade_output_budget_fails_before_building_full_rows_list(
 ) -> None:
     module = _panel_input_reducers_module()
     reducer = module.AggregateTradeReducer(
-        bars=panels._prepare_panel_bars(_bars_frame()),
+        bars=panels.prepare_panel_bars(_bars_frame()),
         target_state_bytes=1024**3,
         target_output_bytes=512,
         normalize_chunk=panels.normalize_trade_chunk,

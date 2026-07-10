@@ -10,6 +10,7 @@ PROJECT_SRC = Path("src/quant_research_platform")
 OWNER_LOCAL_INTERNAL_API_ROOTS = (
     PROJECT_SRC / "artifacts",
     PROJECT_SRC / "markets" / "implementations" / "a_share" / "processed",
+    PROJECT_SRC / "markets" / "implementations" / "crypto" / "processed",
     PROJECT_SRC / "research" / "models",
     PROJECT_SRC / "research" / "datasets",
     PROJECT_SRC / "research" / "evaluations",
@@ -33,6 +34,8 @@ RETIRED_OWNER_LOCAL_PRIVATE_SYMBOLS = {
     "_estimate_label_bytes_per_session",
     "_select_factor_definitions_for_spec",
     "_select_label_definitions_for_spec",
+    "_prepare_panel_bars",
+    "_calculate_market_panel",
     "_linear_regression_estimator",
     "_SingleFactorBaseline",
     "_RankEnsemblePredictor",

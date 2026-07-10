@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 import pandas as pd
 from pandas.api.types import is_bool_dtype
@@ -27,25 +27,7 @@ _SIGNED_QUANTITY_RELATIVE_TOLERANCE = 1e-12
 _SIGNED_QUANTITY_ABSOLUTE_TOLERANCE = 1e-12
 
 
-def compute_market_panel(
-    bars: pd.DataFrame,
-    *,
-    trades: pd.DataFrame,
-    depth: pd.DataFrame,
-    max_quote_age: pd.Timedelta = DEFAULT_MAX_QUOTE_AGE,
-) -> pd.DataFrame:
-    if not isinstance(max_quote_age, pd.Timedelta) or max_quote_age < pd.Timedelta(0):
-        raise ValueError("invalid_crypto_max_quote_age")
-    panel = _prepare_panel_bars(bars)
-    return _calculate_market_panel(
-        panel,
-        trade_aggregates=_trade_aggregates(panel, trades),
-        quote_snapshots=_quote_snapshots(panel, depth),
-        max_quote_age=max_quote_age,
-    )
-
-
-def _prepare_panel_bars(bars: pd.DataFrame) -> pd.DataFrame:
+def prepare_panel_bars(bars: pd.DataFrame) -> pd.DataFrame:
     panel = bars.copy().reset_index(drop=True)
     panel["timestamp"] = _strict_timestamp_column(
         panel,
@@ -66,6 +48,48 @@ def _prepare_panel_bars(bars: pd.DataFrame) -> pd.DataFrame:
     panel["market_id"] = str(MARKET_ID)
     panel["asset_id"] = _crypto_asset_id_series(panel["source_asset_id"])
     return panel
+
+
+def calculate_market_panel_from_chunks(
+    prepared_bars: pd.DataFrame,
+    *,
+    trade_chunks: Iterable[pd.DataFrame],
+    depth_chunks: Iterable[pd.DataFrame],
+    trade_state_bytes: int,
+    trade_output_bytes: int,
+    depth_state_bytes: int,
+    depth_output_bytes: int,
+    max_quote_age: pd.Timedelta = DEFAULT_MAX_QUOTE_AGE,
+) -> pd.DataFrame:
+    if not isinstance(max_quote_age, pd.Timedelta) or max_quote_age < pd.Timedelta(0):
+        raise ValueError("invalid_crypto_max_quote_age")
+    trade_reducer = panel_input_reducers.AggregateTradeReducer(
+        bars=prepared_bars,
+        target_state_bytes=trade_state_bytes,
+        target_output_bytes=trade_output_bytes,
+        normalize_chunk=normalize_trade_chunk,
+    )
+    for chunk in trade_chunks:
+        if not chunk.empty:
+            trade_reducer.add_chunk(chunk)
+    trade_aggregates = trade_reducer.finish()
+    depth_reducer = panel_input_reducers.DepthSnapshotReducer(
+        bars=prepared_bars,
+        target_state_bytes=depth_state_bytes,
+        target_output_bytes=depth_output_bytes,
+        normalize_chunk=_normalize_depth_chunk_for_reducer,
+        finalize_snapshot=finalize_depth_snapshot,
+    )
+    for chunk in depth_chunks:
+        if not chunk.empty:
+            depth_reducer.add_chunk(chunk)
+    quote_snapshots = depth_reducer.finish()
+    return _calculate_market_panel(
+        prepared_bars,
+        trade_aggregates=trade_aggregates,
+        quote_snapshots=quote_snapshots,
+        max_quote_age=max_quote_age,
+    )
 
 
 def _calculate_market_panel(
@@ -190,29 +214,6 @@ def _calculate_market_panel(
     )
 
 
-def _trade_aggregates(
-    bars: pd.DataFrame,
-    trades: pd.DataFrame,
-) -> pd.DataFrame:
-    input_bytes = int(trades.memory_usage(index=True, deep=True).sum())
-    bar_bytes = int(bars.memory_usage(index=True, deep=True).sum())
-    reducer = panel_input_reducers.AggregateTradeReducer(
-        bars=bars,
-        target_state_bytes=max(
-            64 * 1024,
-            input_bytes * 4 + bar_bytes * 4,
-        ),
-        target_output_bytes=max(
-            16 * 1024,
-            input_bytes * 4 + len(bars) * 4_096,
-        ),
-        normalize_chunk=normalize_trade_chunk,
-    )
-    if not trades.empty:
-        reducer.add_chunk(trades)
-    return reducer.finish()
-
-
 def normalize_trade_chunk(trades: pd.DataFrame) -> pd.DataFrame:
     columns = (
         "source_asset_id",
@@ -335,30 +336,6 @@ def _match_quotes_asof_bar_close(
     )
 
 
-def _quote_snapshots(
-    bars: pd.DataFrame,
-    depth: pd.DataFrame,
-) -> pd.DataFrame:
-    input_bytes = int(depth.memory_usage(index=True, deep=True).sum())
-    bar_bytes = int(bars.memory_usage(index=True, deep=True).sum())
-    reducer = panel_input_reducers.DepthSnapshotReducer(
-        bars=bars,
-        target_state_bytes=max(
-            64 * 1024,
-            input_bytes * 4 + bar_bytes * 4,
-        ),
-        target_output_bytes=max(
-            16 * 1024,
-            input_bytes * 4 + len(bars) * 4_096,
-        ),
-        normalize_chunk=_normalize_sorted_depth_chunk,
-        finalize_snapshot=finalize_depth_snapshot,
-    )
-    if not depth.empty:
-        reducer.add_chunk(depth)
-    return reducer.finish()
-
-
 def normalize_depth_chunk(depth: pd.DataFrame) -> pd.DataFrame:
     columns = (
         "source_asset_id",
@@ -386,7 +363,7 @@ def normalize_depth_chunk(depth: pd.DataFrame) -> pd.DataFrame:
     return frame.loc[:, list(columns)]
 
 
-def _normalize_sorted_depth_chunk(depth: pd.DataFrame) -> pd.DataFrame:
+def _normalize_depth_chunk_for_reducer(depth: pd.DataFrame) -> pd.DataFrame:
     return normalize_depth_chunk(depth).sort_values(
         ["source_asset_id", "quote_timestamp", "side", "level"],
         kind="mergesort",
@@ -610,4 +587,7 @@ def _strict_bool_series(series: pd.Series, *, error: str) -> pd.Series:
     return pd.Series(series.to_numpy(dtype=bool), index=series.index)
 
 
-__all__ = ["compute_market_panel"]
+__all__ = [
+    "calculate_market_panel_from_chunks",
+    "prepare_panel_bars",
+]
