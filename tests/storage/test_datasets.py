@@ -485,6 +485,26 @@ def test_physical_batch_size_accounts_for_arrow_to_pandas_expansion(
     assert pandas_bytes <= target_chunk_bytes
 
 
+def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dictionary-long-strings.parquet"
+    value = "x" * (64 * 1024)
+    pq.write_table(
+        pa.table({"value": [value] * 1_024}),
+        path,
+        compression="zstd",
+        use_dictionary=True,
+    )
+    parquet_file = pq.ParquetFile(path)
+
+    assert dataset_reading._target_batch_rows(
+        parquet_file,
+        columns=("value",),
+        target_chunk_bytes=64 * 1024,
+    ) == 1
+
+
 def test_inspect_and_fingerprint_reuse_physical_batch_reader() -> None:
     inspection_source = Path(
         importlib.import_module(
@@ -612,6 +632,64 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
     ) as strings:
         assert strings.add_frame(pd.DataFrame({"key": ["é"]})) == 0
         assert strings.add_frame(pd.DataFrame({"key": ["e\u0301"]})) == 0
+
+
+def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "categorical_keys")
+    frame = make_default_dataset_frame()
+    frame["asset_id"] = frame["asset_id"].astype("category")
+
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec("categorical_keys"),
+    )
+
+    assert sorted(read_dataset(root)["asset_id"].astype(str).tolist()) == sorted(
+        frame["asset_id"].astype(str).tolist()
+    )
+
+
+def test_exact_key_index_recovers_dead_sibling_scratch(tmp_path: Path) -> None:
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+    stale = tmp_path / ".k-deadbeef"
+    stale.mkdir()
+    (stale / ".owner.pid").write_text("999999999", encoding="ascii")
+    for name in ("k.sqlite3", "k.sqlite3-journal", "k.sqlite3-wal", "k.sqlite3-shm"):
+        (stale / name).write_bytes(b"scratch")
+
+    with module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        assert not stale.exists()
+        assert index.add_frame(pd.DataFrame({"key": ["safe"]})) == 0
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_exact_key_index_preserves_live_pid_named_sibling(tmp_path: Path) -> None:
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+    live = tmp_path / f".k-{os.getpid()}-concurrent"
+    live.mkdir()
+
+    with module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        assert live.is_dir()
+        assert index.add_frame(pd.DataFrame({"key": ["safe"]})) == 0
+
+    live.rmdir()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_dataset_write_recovers_stale_key_scratch_without_publishing_it(
@@ -1224,6 +1302,91 @@ def test_compare_datasets_ignores_allowed_instance_metadata_for_same_content(
 
     assert comparison.status == "MATCH"
     assert comparison.matches
+
+
+def test_fingerprint_supports_writer_accepted_nested_columns(tmp_path: Path) -> None:
+    root = make_dataset_artifact_root(tmp_path, "nested_values")
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    frame["value"] = [[1, 2], [3]]
+
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec("nested_values"),
+    )
+
+    comparison = compare_datasets(root, root)
+    assert comparison.status == "MATCH"
+    assert comparison.matches
+
+
+def test_empty_materialized_and_chunked_reads_preserve_stored_dtypes(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "empty_dtypes")
+    expected = make_default_dataset_frame().iloc[:0].copy()
+    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
+    write_dataset(
+        root,
+        expected,
+        spec=make_processed_dataset_spec("empty_dtypes"),
+    )
+
+    materialized = read_dataset(root)
+    chunked = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+
+    assert len(chunked) == 1
+    assert materialized.dtypes.astype(str).to_dict() == expected.dtypes.astype(
+        str
+    ).to_dict()
+    assert chunked[0].dtypes.astype(str).to_dict() == expected.dtypes.astype(
+        str
+    ).to_dict()
+
+
+def test_time_window_filter_is_applied_before_arrow_to_pandas_conversion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "physical_time_filter")
+    row_count = 1_024
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * row_count,
+            "asset_id": ["asset_a"] * row_count,
+            "timestamp": pd.date_range(
+                "2026-01-01", periods=row_count, freq="min"
+            ),
+            "value": np.arange(row_count, dtype="float64"),
+        }
+    )
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec("physical_time_filter"),
+    )
+    converted_rows = 0
+    original = dataset_reading._arrow_batch_to_bounded_pandas
+
+    def record_rows(batch: pa.RecordBatch, **kwargs):
+        nonlocal converted_rows
+        converted_rows += batch.num_rows
+        yield from original(batch, **kwargs)
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_arrow_batch_to_bounded_pandas",
+        record_rows,
+    )
+    target = frame.loc[900, "timestamp"]
+
+    result = read_dataset(
+        root,
+        time_window=TimeWindow(target.to_pydatetime(), target.to_pydatetime()),
+    )
+
+    assert len(result) == 1
+    assert converted_rows <= 2
 
 
 def test_storage_datasets_public_api_is_hard_cutover() -> None:

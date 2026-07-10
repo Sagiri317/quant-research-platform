@@ -25,7 +25,10 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_resources,
     source_ids,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    require_free_disk_headroom,
+)
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage._dataset_reading import (
     build_dataset_read_context,
@@ -149,7 +152,7 @@ def validate_panel_materialization(
         primary_key=spec.primary_key,
         error="invalid_crypto_panel_key_coverage",
         resource_policy=resource_policy,
-        scratch_parent=inspection.root,
+        scratch_parent=inspection.root.parent,
         key_schema=dataset_primary_key_schema(actual_context, spec.primary_key),
     )
 
@@ -200,7 +203,7 @@ def validate_panel_dependent_materialization(
         primary_key=spec.primary_key,
         error="invalid_crypto_processed_key_coverage",
         resource_policy=resource_policy,
-        scratch_parent=inspection.root,
+        scratch_parent=inspection.root.parent,
         key_schema=dataset_primary_key_schema(actual_context, spec.primary_key),
     )
 
@@ -224,6 +227,11 @@ def validate_exact_dependency_key_coverage(
     timestamp_columns = tuple(
         column for column in primary_key if column == "timestamp"
     )
+    require_free_disk_headroom(
+        resource_policy,
+        scratch_parent,
+        reserve_bytes=2 * chunk_target_bytes + budget.sqlite_cache_bytes,
+    )
     with ExactPrimaryKeyIndex(
         primary_key=primary_key,
         timestamp_columns=timestamp_columns,
@@ -239,6 +247,11 @@ def validate_exact_dependency_key_coverage(
                 key_bytes = int(keys.memory_usage(index=True, deep=True).sum())
                 if key_bytes > chunk_target_bytes:
                     raise ValueError(error)
+                require_free_disk_headroom(
+                    resource_policy,
+                    scratch_parent,
+                    reserve_bytes=4 * key_bytes + chunk_target_bytes,
+                )
                 try:
                     duplicates = index.add_frame(keys, namespace=namespace)
                 except ValueError as exc:

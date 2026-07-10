@@ -318,6 +318,17 @@ def test_exact_dependency_validator_has_no_full_key_collectors() -> None:
     assert "pd.concat" not in source
 
 
+def test_published_dataset_validation_places_key_scratch_outside_artifact() -> None:
+    source = inspect.getsource(
+        materialization_validation.validate_panel_materialization
+    ) + inspect.getsource(
+        materialization_validation.validate_panel_dependent_materialization
+    )
+
+    assert source.count("scratch_parent=inspection.root.parent") == 2
+    assert "scratch_parent=inspection.root," not in source
+
+
 def test_dependency_chunk_order_rejects_unsorted_and_overlap() -> None:
     state = materialization_validation.OrderedDependencyState()
     first = _key_frame().iloc[[2, 0, 1, 5, 3, 4]].copy()

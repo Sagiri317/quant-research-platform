@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import os
+import shutil
 import sqlite3
 import struct
 import tempfile
@@ -12,6 +14,7 @@ from pathlib import Path
 from types import TracebackType
 
 import pandas as pd
+import psutil
 import pyarrow as pa
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
@@ -59,8 +62,9 @@ class ExactPrimaryKeyIndex:
         if self._connection is not None:
             raise RuntimeError("exact_primary_key_index_already_open")
         self._scratch_parent.mkdir(parents=True, exist_ok=True)
+        _cleanup_stale_key_scratch(self._scratch_parent)
         self._temporary_directory = tempfile.TemporaryDirectory(
-            prefix=".k-",
+            prefix=f".k-{os.getpid()}-",
             dir=self._scratch_parent,
         )
         connection = sqlite3.connect(self.database_path)
@@ -208,7 +212,12 @@ class ExactPrimaryKeyIndex:
 
 def _canonical_arrow_scalar_payload(value: object, data_type: pa.DataType) -> bytes:
     type_payload = str(data_type).encode("ascii")
-    if pa.types.is_timestamp(data_type):
+    if pa.types.is_dictionary(data_type):
+        value_payload = _canonical_arrow_scalar_payload(
+            value,
+            data_type.value_type,
+        )
+    elif pa.types.is_timestamp(data_type):
         value_payload = struct.pack(">q", int(pd.Timestamp(value).value))
     elif pa.types.is_boolean(data_type):
         value_payload = b"1" if bool(value) else b"0"
@@ -250,3 +259,26 @@ def _framed(tag: bytes, payload: bytes) -> bytes:
         + struct.pack(">Q", len(payload))
         + payload
     )
+
+
+def _cleanup_stale_key_scratch(parent: Path) -> None:
+    for scratch in parent.glob(".k-*"):
+        if not scratch.is_dir() or _scratch_owner_is_alive(scratch):
+            continue
+        shutil.rmtree(scratch)
+
+
+def _scratch_owner_is_alive(scratch: Path) -> bool:
+    name_parts = scratch.name.split("-", 3)
+    if len(name_parts) >= 2:
+        try:
+            name_pid = int(name_parts[1])
+        except ValueError:
+            pass
+        else:
+            return name_pid > 0 and psutil.pid_exists(name_pid)
+    try:
+        owner_pid = int((scratch / ".owner.pid").read_text(encoding="ascii"))
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return False
+    return owner_pid > 0 and psutil.pid_exists(owner_pid)

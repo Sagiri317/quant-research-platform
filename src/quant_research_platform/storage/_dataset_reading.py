@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as pads
 import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.time import (
@@ -82,7 +83,7 @@ def read_dataset(
         raise ValueError("unsupported_dataset_read_mode")
     frames = list(chunks)
     if not frames:
-        return pd.DataFrame(columns=list(context.logical_columns))
+        return _empty_frame(context, context.logical_columns)
     return pd.concat(frames, ignore_index=True)
 
 
@@ -91,6 +92,7 @@ def build_dataset_read_context(
     *,
     columns: tuple[str, ...] | list[str] | None,
     time_window: TimeWindow | None,
+    row_filters: tuple[tuple[str, str, Any], ...] = (),
 ) -> DatasetReadContext:
     root = require_artifact_root(Path(dataset_root))
     spec_path = root / "spec.json"
@@ -142,6 +144,16 @@ def build_dataset_read_context(
         spec=spec_payload,
         time_window=time_window,
     )
+    physical_filters = parquet_filters_for_time_window(
+        timestamp_column=timestamp_column,
+        time_window=time_window,
+    ) or []
+    for column, operator, value in row_filters:
+        if column not in schema_columns:
+            raise ValueError("dataset_filter_column_not_found")
+        if operator != "==":
+            raise ValueError("unsupported_dataset_physical_filter")
+        physical_filters.append((column, operator, value))
     return DatasetReadContext(
         root=root,
         data_root=data_root,
@@ -162,10 +174,7 @@ def build_dataset_read_context(
         time_window=time_window,
         schema=schema,
         schema_hash=schema_hash,
-        parquet_filters=parquet_filters_for_time_window(
-            timestamp_column=timestamp_column,
-            time_window=time_window,
-        ),
+        parquet_filters=physical_filters or None,
     )
 
 
@@ -176,7 +185,7 @@ def iter_dataset_chunks(
 ) -> Iterator[pd.DataFrame]:
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     if not context.read_paths:
-        yield pd.DataFrame(columns=list(context.logical_columns))
+        yield _empty_frame(context, context.logical_columns)
         return
     yielded = False
     for _, frame in iter_dataset_file_batches(
@@ -196,7 +205,7 @@ def iter_dataset_chunks(
             yielded = True
             yield chunk
     if not yielded:
-        yield pd.DataFrame(columns=list(context.logical_columns))
+        yield _empty_frame(context, context.logical_columns)
 
 
 def iter_dataset_file_batches(
@@ -210,16 +219,26 @@ def iter_dataset_file_batches(
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     for path in context.read_paths:
         parquet_file = pq.ParquetFile(path)
+        selected_fields = tuple(
+            parquet_file.schema_arrow.field(name) for name in columns
+        )
+        variable_width = any(
+            _is_variable_width(field.type) for field in selected_fields
+        )
         batch_size = _target_batch_rows(
             parquet_file,
             columns=columns,
             target_chunk_bytes=target_bytes,
         )
-        for batch in parquet_file.iter_batches(
+        batches = _iter_filtered_arrow_batches(
+            path,
+            columns=columns,
+            parquet_filters=context.parquet_filters,
             batch_size=batch_size,
-            columns=list(columns),
-            use_threads=False,
-        ):
+            target_chunk_bytes=target_bytes,
+            probe_variable_width=variable_width,
+        )
+        for batch in batches:
             for frame in _arrow_batch_to_bounded_pandas(
                 batch,
                 target_chunk_bytes=target_bytes,
@@ -254,6 +273,9 @@ def _target_batch_rows(
     columns: tuple[str, ...],
     target_chunk_bytes: int,
 ) -> int:
+    selected_fields = tuple(parquet_file.schema_arrow.field(name) for name in columns)
+    if any(_is_variable_width(field.type) for field in selected_fields):
+        return 1
     column_positions = {
         name: index for index, name in enumerate(parquet_file.schema_arrow.names)
     }
@@ -273,15 +295,113 @@ def _target_batch_rows(
             (projected_bytes + row_group.num_rows - 1) // row_group.num_rows,
         )
         maximum_row_bytes = max(maximum_row_bytes, row_bytes)
-    selected_fields = tuple(parquet_file.schema_arrow.field(name) for name in columns)
-    expansion_factor = (
-        _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR
-        if any(_is_variable_width(field.type) for field in selected_fields)
-        else _PARQUET_TO_PANDAS_EXPANSION_FACTOR
-    )
-    conservative_row_bytes = maximum_row_bytes * expansion_factor
+    conservative_row_bytes = maximum_row_bytes * _PARQUET_TO_PANDAS_EXPANSION_FACTOR
     arrow_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
     return max(1, arrow_budget // conservative_row_bytes)
+
+
+def _iter_filtered_arrow_batches(
+    path: Path,
+    *,
+    columns: tuple[str, ...],
+    parquet_filters: list[tuple[str, str, Any]] | None,
+    batch_size: int,
+    target_chunk_bytes: int,
+    probe_variable_width: bool,
+) -> Iterator[pa.RecordBatch]:
+    dataset = pads.dataset(path, format="parquet")
+    expression = _dataset_filter_expression(parquet_filters)
+    if not probe_variable_width:
+        yield from _scanner_batches(
+            dataset,
+            columns=columns,
+            expression=expression,
+            batch_size=batch_size,
+        )
+        return
+
+    probe = iter(
+        _scanner_batches(
+            dataset,
+            columns=columns,
+            expression=expression,
+            batch_size=1,
+        )
+    )
+    try:
+        first = next(probe)
+    except StopIteration:
+        return
+    arrow_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
+    if first.nbytes > arrow_budget:
+        raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+    probe_frame = first.to_pandas(use_threads=False)
+    pandas_bytes = int(probe_frame.memory_usage(index=True, deep=True).sum())
+    if pandas_bytes > arrow_budget:
+        raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+    measured_row_bytes = max(1, first.nbytes, pandas_bytes)
+    adaptive_rows = max(
+        1,
+        min(
+            _PANDAS_PROBE_ROWS,
+            arrow_budget // measured_row_bytes,
+        ),
+    )
+    del probe_frame, first, probe
+    yield from _scanner_batches(
+        dataset,
+        columns=columns,
+        expression=expression,
+        batch_size=adaptive_rows,
+    )
+
+
+def _scanner_batches(
+    dataset: pads.Dataset,
+    *,
+    columns: tuple[str, ...],
+    expression: pads.Expression | None,
+    batch_size: int,
+) -> Iterator[pa.RecordBatch]:
+    scanner = dataset.scanner(
+        columns=list(columns),
+        filter=expression,
+        batch_size=batch_size,
+        batch_readahead=0,
+        fragment_readahead=1,
+        use_threads=False,
+    )
+    for batch in scanner.to_batches():
+        if batch.num_rows:
+            yield batch
+
+
+def _dataset_filter_expression(
+    filters: list[tuple[str, str, Any]] | None,
+) -> pads.Expression | None:
+    expression: pads.Expression | None = None
+    for column, operator, value in filters or ():
+        field = pads.field(column)
+        condition = {
+            ">=": field >= value,
+            ">": field > value,
+            "<=": field <= value,
+            "<": field < value,
+            "==": field == value,
+        }.get(operator)
+        if condition is None:
+            raise ValueError("unsupported_dataset_physical_filter")
+        expression = condition if expression is None else expression & condition
+    return expression
+
+
+def _empty_frame(
+    context: DatasetReadContext,
+    columns: tuple[str, ...],
+) -> pd.DataFrame:
+    schema = pq.ParquetFile(context.all_paths[0]).schema_arrow
+    selected = pa.schema([schema.field(column) for column in columns])
+    return pa.Table.from_batches([], schema=selected).to_pandas(use_threads=False)
 
 
 def _is_variable_width(data_type: pa.DataType) -> bool:

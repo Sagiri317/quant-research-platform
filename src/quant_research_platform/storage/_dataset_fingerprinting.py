@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -60,7 +62,7 @@ def fingerprint_dataset(
             continue
         observed_paths.add(path)
         hashes = pd.util.hash_pandas_object(
-            chunk.loc[:, list(hash_columns)],
+            _hashable_fingerprint_frame(chunk.loc[:, list(hash_columns)]),
             index=False,
         ).to_numpy("uint64")
         chunk_sum = int(hashes.sum(dtype=np.uint64))
@@ -108,6 +110,51 @@ def fingerprint_dataset(
         file_count=len(observed_paths),
         column_names=output_columns,
     )
+
+
+def _hashable_fingerprint_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    output = frame.copy()
+    for column in output.columns:
+        try:
+            pd.util.hash_pandas_object(output[column], index=False)
+        except TypeError:
+            output[column] = output[column].map(_canonical_nested_value)
+    return output
+
+
+def _canonical_nested_value(value: Any) -> str:
+    return "qrp-nested:" + json.dumps(
+        _json_nested_value(value),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _json_nested_value(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return {"array": [_json_nested_value(item) for item in value.tolist()]}
+    if isinstance(value, np.generic):
+        return _json_nested_value(value.item())
+    if isinstance(value, list):
+        return {"list": [_json_nested_value(item) for item in value]}
+    if isinstance(value, tuple):
+        return {"tuple": [_json_nested_value(item) for item in value]}
+    if isinstance(value, dict):
+        return {
+            "dict": [
+                [str(key), _json_nested_value(item)]
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            ]
+        }
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if isinstance(value, pd.Timestamp):
+        return {"timestamp_ns": int(value.value)}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise ValueError("unsupported_dataset_fingerprint_value")
 
 
 def partition_keys(fingerprint: DatasetFingerprint) -> tuple[str, ...]:
