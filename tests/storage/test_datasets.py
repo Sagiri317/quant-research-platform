@@ -4,7 +4,6 @@ import importlib
 import importlib.util
 import json
 import math
-import os
 import sys
 from datetime import date, datetime
 from decimal import Decimal
@@ -896,12 +895,11 @@ def test_exact_key_index_removes_reused_pid_sibling(
     reused = tmp_path / f".k-{owner_pid}-0-reused"
     reused.mkdir()
     (reused / "k.sqlite3").write_bytes(b"scratch")
-    live_process = ownership.psutil.Process(os.getpid())
     monkeypatch.setattr(
         ownership.psutil,
         "Process",
         lambda _pid: SimpleNamespace(
-            create_time=lambda: live_process.create_time() + 60,
+            create_time=lambda: reused.stat().st_ctime + 60,
             is_running=lambda: True,
         ),
     )
@@ -985,12 +983,11 @@ def test_dataset_write_removes_reused_pid_staged_scratch(
     reused_scratch = reused_stage / ".k-reused"
     reused_scratch.mkdir(parents=True)
     (reused_scratch / "k.sqlite3").write_bytes(b"scratch")
-    live_process = ownership.psutil.Process(os.getpid())
     monkeypatch.setattr(
         ownership.psutil,
         "Process",
         lambda _pid: SimpleNamespace(
-            create_time=lambda: live_process.create_time() + 60,
+            create_time=lambda: reused_stage.stat().st_ctime + 60,
             is_running=lambda: True,
         ),
     )
