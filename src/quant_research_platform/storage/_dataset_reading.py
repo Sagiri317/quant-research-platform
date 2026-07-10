@@ -298,6 +298,7 @@ def build_dataset_equality_group_plan(
     )
     discovery_columns = tuple(dict.fromkeys((*columns, *filter_columns)))
     paths_by_key: dict[tuple[Any, ...], set[Path]] = {}
+    state_bytes = 0
     path_order = {path: index for index, path in enumerate(context.read_paths)}
     for path, frame in iter_dataset_file_batches(
         context,
@@ -320,9 +321,18 @@ def build_dataset_equality_group_plan(
                 hash(key)
             except TypeError as exc:
                 raise ValueError("invalid_dataset_equality_group_key") from exc
-            paths_by_key.setdefault(key, set()).add(path)
-        if _equality_group_plan_bytes(paths_by_key) > target_state_bytes:
-            raise ValueError("dataset_equality_group_index_exceeds_target_bytes")
+            is_new_key = key not in paths_by_key
+            candidate_paths = paths_by_key.setdefault(key, set())
+            is_new_path = path not in candidate_paths
+            candidate_paths.add(path)
+            state_bytes = _equality_group_plan_bytes(
+                state_bytes,
+                key=key,
+                is_new_key=is_new_key,
+                is_new_path=is_new_path,
+            )
+            if state_bytes > target_state_bytes:
+                raise ValueError("dataset_equality_group_index_exceeds_target_bytes")
     ordered_paths = {
         key: tuple(sorted(paths, key=path_order.__getitem__))
         for key, paths in paths_by_key.items()
@@ -356,13 +366,20 @@ def dataset_context_for_equality_group(
 
 
 def _equality_group_plan_bytes(
-    paths_by_key: dict[tuple[Any, ...], set[Path]],
+    current_bytes: int,
+    *,
+    key: tuple[Any, ...],
+    is_new_key: bool,
+    is_new_path: bool,
 ) -> int:
-    return sum(
-        256
-        + sum(64 + 2 * len(str(value)) for value in key)
-        + 64 * len(paths)
-        for key, paths in paths_by_key.items()
+    return (
+        current_bytes
+        + (
+            256 + sum(64 + 2 * len(str(value)) for value in key)
+            if is_new_key
+            else 0
+        )
+        + (64 if is_new_path else 0)
     )
 
 

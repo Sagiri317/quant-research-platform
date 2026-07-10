@@ -1517,6 +1517,54 @@ def test_equality_group_plan_indexes_only_candidate_part_paths(tmp_path: Path) -
     assert observed["asset_id"].tolist() == ["asset_002"]
 
 
+def test_equality_group_plan_state_accounting_work_is_linear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row_count = 200
+    root = make_dataset_artifact_root(tmp_path, "linear_equality_groups")
+    write_dataset(
+        root,
+        pd.DataFrame(
+            {
+                "market_id": ["a_share"] * row_count,
+                "asset_id": [f"asset_{index:04d}" for index in range(row_count)],
+                "timestamp": pd.date_range("2026-01-01", periods=row_count, freq="min"),
+                "value": np.arange(row_count, dtype="float64"),
+            }
+        ),
+        spec=make_processed_dataset_spec("linear_equality_groups"),
+    )
+    context = dataset_reading.build_dataset_read_context(
+        root,
+        columns=None,
+        time_window=None,
+    )
+    original = dataset_reading._equality_group_plan_bytes
+    observed_work = {"units": 0}
+
+    def record_accounting_work(*args, **kwargs):
+        current = args[0]
+        observed_work["units"] += len(current) if isinstance(current, dict) else 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_equality_group_plan_bytes",
+        record_accounting_work,
+    )
+
+    plan = dataset_reading.build_dataset_equality_group_plan(
+        context,
+        columns=("market_id", "asset_id"),
+        target_chunk_bytes=2048,
+        target_state_bytes=1024**2,
+    )
+
+    assert len(plan.keys) == row_count
+    assert observed_work["units"] <= row_count * 2
+
+
 def test_storage_datasets_public_api_is_hard_cutover() -> None:
     import quant_research_platform.storage as storage
 
