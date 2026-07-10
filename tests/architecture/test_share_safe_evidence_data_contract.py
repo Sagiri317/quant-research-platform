@@ -272,7 +272,10 @@ def test_verification_summary_does_not_keep_legacy_chunk_policy_helpers(
         assert not hasattr(aggregates, name)
 
 
-def test_aggregate_summary_checksum_is_invariant_to_chunking(aggregates) -> None:
+def test_aggregate_summary_checksum_is_invariant_to_chunking(
+    aggregates,
+    tmp_path: Path,
+) -> None:
     combined = pd.DataFrame(
         {
             "market_id": ["a_share"] * 12,
@@ -286,8 +289,14 @@ def test_aggregate_summary_checksum_is_invariant_to_chunking(aggregates) -> None
         for start in range(0, len(combined), 3)
     )
 
-    full_summary = aggregates._summarize_frames((combined,))
-    chunk_summary = aggregates._summarize_frames(chunks)
+    full_summary = aggregates._summarize_frames(
+        (combined,),
+        scratch_parent=tmp_path,
+    )
+    chunk_summary = aggregates._summarize_frames(
+        chunks,
+        scratch_parent=tmp_path,
+    )
 
     assert "numeric_sum" not in full_summary.content_summary["timestamp"]
     assert "numeric_sum" not in full_summary.content_summary["value"]
@@ -296,6 +305,7 @@ def test_aggregate_summary_checksum_is_invariant_to_chunking(aggregates) -> None
 
 def test_aggregate_summary_detects_duplicate_keys_across_chunks(
     aggregates,
+    tmp_path: Path,
 ) -> None:
     first = pd.DataFrame(
         {
@@ -314,7 +324,10 @@ def test_aggregate_summary_detects_duplicate_keys_across_chunks(
         }
     )
 
-    summary = aggregates._summarize_frames((first, second))
+    summary = aggregates._summarize_frames(
+        (first, second),
+        scratch_parent=tmp_path,
+    )
 
     assert summary.row_count == 2
     assert summary.key_count == 1

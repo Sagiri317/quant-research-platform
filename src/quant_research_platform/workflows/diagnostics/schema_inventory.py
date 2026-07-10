@@ -5,11 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Collection, Iterable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from quant_research_platform.runtime.resources import (
+    active_runtime_resource_policy,
+    require_free_disk_headroom,
+)
+from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
@@ -82,6 +88,11 @@ def _inventory_item(
         columns,
         primary_key,
         important_null_count_columns=important_null_count_columns,
+        exact_duplicate_count=(
+            int(inspection.manifest["duplicate_primary_key_count"])
+            if "duplicate_primary_key_count" in inspection.manifest
+            else None
+        ),
     )
     layer, kind, artifact_id = _logical_identifiers(logical_root)
     return {
@@ -98,9 +109,7 @@ def _inventory_item(
         "row_count_by_year": stats["row_count_by_year"],
         "min_timestamp": stats["min_timestamp"],
         "max_timestamp": stats["max_timestamp"],
-        "duplicate_primary_key_count": int(
-            inspection.manifest["duplicate_primary_key_count"]
-        ),
+        "duplicate_primary_key_count": stats["duplicate_primary_key_count"],
         "null_key_counts": stats["null_key_counts"],
         "selected_important_column_null_counts": (
             stats["selected_important_column_null_counts"]
@@ -121,6 +130,7 @@ def _aggregate_dataset_stats(
     primary_key: tuple[str, ...],
     *,
     important_null_count_columns: frozenset[str],
+    exact_duplicate_count: int | None,
 ) -> dict[str, Any]:
     dtypes: dict[str, str] = {}
     row_count = 0
@@ -132,36 +142,72 @@ def _aggregate_dataset_stats(
     important_null_counts = {column: 0 for column in important_columns}
     min_timestamp: pd.Timestamp | None = None
     max_timestamp: pd.Timestamp | None = None
+    duplicate_primary_key_count = (
+        0 if exact_duplicate_count is None else exact_duplicate_count
+    )
 
     chunks = read_dataset(artifact_root, mode=DatasetReadMode.CHUNKED)
-    for frame in chunks:
-        row_count += int(len(frame))
-        for column in frame.columns:
-            dtypes.setdefault(str(column), str(frame[column].dtype))
-        if "timestamp" in frame.columns:
-            timestamps = pd.to_datetime(frame["timestamp"], errors="coerce").dropna()
-            if not timestamps.empty:
-                year_counts = timestamps.dt.year.astype(str).value_counts()
-                for year, count in year_counts.items():
-                    row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
-                        count
+    with ExitStack() as stack:
+        key_index: ExactPrimaryKeyIndex | None = None
+        policy = None
+        if exact_duplicate_count is None and primary_key:
+            policy = active_runtime_resource_policy()
+            require_free_disk_headroom(
+                policy,
+                artifact_root.parent,
+                reserve_bytes=policy.effective_chunk_bytes * 2,
+            )
+            key_index = stack.enter_context(
+                ExactPrimaryKeyIndex(
+                    primary_key=primary_key,
+                    timestamp_columns=tuple(
+                        column for column in primary_key if column == "timestamp"
+                    ),
+                    scratch_parent=artifact_root.parent,
+                )
+            )
+        for frame in chunks:
+            row_count += int(len(frame))
+            for column in frame.columns:
+                dtypes.setdefault(str(column), str(frame[column].dtype))
+            if "timestamp" in frame.columns:
+                timestamps = pd.to_datetime(
+                    frame["timestamp"], errors="coerce"
+                ).dropna()
+                if not timestamps.empty:
+                    year_counts = timestamps.dt.year.astype(str).value_counts()
+                    for year, count in year_counts.items():
+                        row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
+                            count
+                        )
+                    chunk_min = timestamps.min()
+                    chunk_max = timestamps.max()
+                    min_timestamp = (
+                        chunk_min
+                        if min_timestamp is None
+                        else min(min_timestamp, chunk_min)
                     )
-                chunk_min = timestamps.min()
-                chunk_max = timestamps.max()
-                min_timestamp = (
-                    chunk_min
-                    if min_timestamp is None
-                    else min(min_timestamp, chunk_min)
+                    max_timestamp = (
+                        chunk_max
+                        if max_timestamp is None
+                        else max(max_timestamp, chunk_max)
+                    )
+            for column in primary_key:
+                null_key_counts[column] += int(frame[column].isna().sum())
+            for column in important_columns:
+                important_null_counts[column] += int(frame[column].isna().sum())
+            if key_index is not None:
+                key_frame = frame.loc[:, list(primary_key)]
+                key_bytes = int(
+                    key_frame.memory_usage(index=True, deep=True).sum()
                 )
-                max_timestamp = (
-                    chunk_max
-                    if max_timestamp is None
-                    else max(max_timestamp, chunk_max)
+                assert policy is not None
+                require_free_disk_headroom(
+                    policy,
+                    artifact_root.parent,
+                    reserve_bytes=policy.effective_chunk_bytes + 4 * key_bytes,
                 )
-        for column in primary_key:
-            null_key_counts[column] += int(frame[column].isna().sum())
-        for column in important_columns:
-            important_null_counts[column] += int(frame[column].isna().sum())
+                duplicate_primary_key_count += key_index.add_frame(key_frame)
 
     return {
         "dtypes": {column: dtypes.get(column, "") for column in columns},
@@ -170,6 +216,7 @@ def _aggregate_dataset_stats(
         "min_timestamp": _format_timestamp(min_timestamp),
         "max_timestamp": _format_timestamp(max_timestamp),
         "null_key_counts": dict(sorted(null_key_counts.items())),
+        "duplicate_primary_key_count": duplicate_primary_key_count,
         "selected_important_column_null_counts": dict(
             sorted(important_null_counts.items())
         ),
