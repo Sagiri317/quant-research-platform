@@ -112,7 +112,7 @@ def _iter_panel_chunks(
         prepared_bars = panels._prepare_panel_bars(bars)
         trade_aggregates = _read_trade_aggregates(
             trade_root,
-            bars,
+            prepared_bars,
             target_chunk_bytes=chunk_target_bytes,
         )
         quote_snapshots = _read_quote_snapshots(
@@ -138,7 +138,11 @@ def _read_trade_aggregates(
         bars,
         max_quote_age=pd.Timedelta(0),
     )
-    state: dict[tuple[str, pd.Timestamp], float] = {}
+    reducer = panel_input_reducers.AggregateTradeReducer(
+        bars=bars,
+        target_state_bytes=target_chunk_bytes,
+        normalize_chunk=panels.normalize_trade_chunk,
+    )
     for chunk in _iter_matching_chunks(
         dataset_root,
         asset_ids=asset_ids,
@@ -150,8 +154,8 @@ def _read_trade_aggregates(
         timestamp_error="invalid_crypto_matching_trade_timestamp",
         target_chunk_bytes=target_chunk_bytes,
     ):
-        panels._accumulate_trade_aggregate_state(state, chunk)
-    return panels._trade_aggregates_from_state(state)
+        reducer.add_chunk(chunk)
+    return reducer.finish()
 
 
 def _read_quote_snapshots(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -10,6 +11,8 @@ _BAR_TARGET_STATE_BYTES = 128
 _SNAPSHOT_BASE_STATE_BYTES = 256
 _DEPTH_LEVEL_STATE_BYTES = 96
 _CANDIDATE_STATE_BYTES = 256
+_TRADE_BAR_STATE_BYTES = 256
+_TRADE_WATERMARK_STATE_BYTES = 128
 
 _QUOTE_COLUMNS = (
     "asset_id",
@@ -23,6 +26,165 @@ _QUOTE_COLUMNS = (
     "mid_price",
     "quote_valid",
 )
+
+_TRADE_AGGREGATE_COLUMNS = (
+    "asset_id",
+    "timestamp",
+    "signed_volume",
+    "quantity_sum",
+    "covered_trade_count",
+    "first_trade_id",
+    "last_trade_id",
+    "first_aggregate_trade_id",
+    "last_aggregate_trade_id",
+    "trade_flow_observed",
+)
+
+
+@dataclass
+class _TradeBarState:
+    signed_quantity_sum: float = 0.0
+    quantity_sum: float = 0.0
+    covered_trade_count: int = 0
+    first_trade_id: int | None = None
+    last_trade_id: int | None = None
+    first_aggregate_trade_id: int | None = None
+    last_aggregate_trade_id: int | None = None
+
+
+class AggregateTradeReducer:
+    """Reduce ordered aggregate trades to bounded per-bar validation state."""
+
+    def __init__(
+        self,
+        *,
+        bars: pd.DataFrame,
+        target_state_bytes: int,
+        normalize_chunk: Callable[[pd.DataFrame], pd.DataFrame],
+    ) -> None:
+        if (
+            isinstance(target_state_bytes, bool)
+            or not isinstance(target_state_bytes, int)
+            or target_state_bytes <= 0
+        ):
+            raise ValueError("invalid_crypto_trade_state_budget")
+        required = ("asset_id", "timestamp")
+        if any(column not in bars for column in required):
+            raise ValueError("invalid_crypto_trade_bar_targets")
+        self._target_keys = frozenset(
+            (str(asset_id), pd.Timestamp(timestamp))
+            for asset_id, timestamp in bars.loc[:, list(required)].itertuples(
+                index=False,
+                name=None,
+            )
+        )
+        self._target_state_bytes = target_state_bytes
+        self._normalize_chunk = normalize_chunk
+        self._states: dict[tuple[str, pd.Timestamp], _TradeBarState] = {}
+        self._last_order_key: tuple[str, pd.Timestamp, int] | None = None
+        self._active_source_asset_id: str | None = None
+        self._last_aggregate_trade_id: int | None = None
+        self._last_underlying_trade_id: int | None = None
+        self._finished = False
+        self._require_budget()
+
+    @property
+    def aggregate_count(self) -> int:
+        return len(self._states)
+
+    def add_chunk(self, trades: pd.DataFrame) -> None:
+        if self._finished:
+            raise RuntimeError("crypto_trade_reducer_already_finished")
+        normalized = self._normalize_chunk(trades)
+        columns = (
+            "source_asset_id",
+            "asset_id",
+            "event_timestamp",
+            "timestamp",
+            "aggregate_trade_id",
+            "quantity",
+            "first_trade_id",
+            "last_trade_id",
+            "signed_quantity",
+        )
+        for row in normalized.loc[:, list(columns)].itertuples(
+            index=False,
+            name=None,
+        ):
+            source_asset_id = str(row[0])
+            asset_id = str(row[1])
+            event_timestamp = pd.Timestamp(row[2])
+            timestamp = pd.Timestamp(row[3])
+            aggregate_trade_id = int(row[4])
+            quantity = float(row[5])
+            first_trade_id = int(row[6])
+            last_trade_id = int(row[7])
+            signed_quantity = float(row[8])
+            order_key = (
+                source_asset_id,
+                event_timestamp,
+                aggregate_trade_id,
+            )
+            if self._last_order_key is not None and order_key <= self._last_order_key:
+                raise ValueError("out_of_order_crypto_trade_dependency")
+            if source_asset_id != self._active_source_asset_id:
+                self._active_source_asset_id = source_asset_id
+                self._last_aggregate_trade_id = None
+                self._last_underlying_trade_id = None
+            if (
+                self._last_aggregate_trade_id is not None
+                and aggregate_trade_id <= self._last_aggregate_trade_id
+            ):
+                raise ValueError("out_of_order_crypto_trade_dependency")
+            if (
+                self._last_underlying_trade_id is not None
+                and first_trade_id != self._last_underlying_trade_id + 1
+            ):
+                raise ValueError("invalid_crypto_trade_flow_coverage")
+            self._last_order_key = order_key
+            self._last_aggregate_trade_id = aggregate_trade_id
+            self._last_underlying_trade_id = last_trade_id
+            key = (asset_id, timestamp)
+            if key in self._target_keys:
+                state = self._states.setdefault(key, _TradeBarState())
+                state.signed_quantity_sum += signed_quantity
+                state.quantity_sum += quantity
+                state.covered_trade_count += last_trade_id - first_trade_id + 1
+                if state.first_trade_id is None:
+                    state.first_trade_id = first_trade_id
+                    state.first_aggregate_trade_id = aggregate_trade_id
+                state.last_trade_id = last_trade_id
+                state.last_aggregate_trade_id = aggregate_trade_id
+            self._require_budget()
+
+    def finish(self) -> pd.DataFrame:
+        self._finished = True
+        rows = []
+        for (asset_id, timestamp), state in sorted(self._states.items()):
+            rows.append(
+                {
+                    "asset_id": asset_id,
+                    "timestamp": timestamp,
+                    "signed_volume": state.signed_quantity_sum,
+                    "quantity_sum": state.quantity_sum,
+                    "covered_trade_count": state.covered_trade_count,
+                    "first_trade_id": state.first_trade_id,
+                    "last_trade_id": state.last_trade_id,
+                    "first_aggregate_trade_id": state.first_aggregate_trade_id,
+                    "last_aggregate_trade_id": state.last_aggregate_trade_id,
+                    "trade_flow_observed": True,
+                }
+            )
+        return pd.DataFrame(rows, columns=list(_TRADE_AGGREGATE_COLUMNS))
+
+    def _require_budget(self) -> None:
+        estimated_state_bytes = (
+            len(self._target_keys) * _BAR_TARGET_STATE_BYTES
+            + len(self._states) * _TRADE_BAR_STATE_BYTES
+            + int(self._last_order_key is not None) * _TRADE_WATERMARK_STATE_BYTES
+        )
+        if estimated_state_bytes > self._target_state_bytes:
+            raise ValueError("crypto_trade_state_exceeds_resource_budget")
 
 
 class DepthSnapshotReducer:

@@ -971,6 +971,96 @@ def test_crypto_panel_materializer_never_concatenates_raw_auxiliary_chunks() -> 
     assert "pd.concat(" not in source
 
 
+def test_crypto_panel_materializer_validates_complete_trades_across_chunks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    frames = _matching_panel_frames()
+    frames["bars"].loc[0, "trade_count"] = 2
+    trades = pd.concat(
+        (
+            frames["trades"].assign(
+                quantity=6.0,
+                signed_quantity=6.0,
+            ),
+            frames["trades"].assign(
+                timestamp=pd.Timestamp("2026-07-06 00:00:02"),
+                aggregate_trade_id=2,
+                quantity=4.0,
+                first_trade_id=2,
+                last_trade_id=2,
+                signed_quantity=-4.0,
+            ),
+        ),
+        ignore_index=True,
+    )
+    _patch_panel_physical_chunks(
+        monkeypatch,
+        {
+            "market_bars_1m": (frames["bars"],),
+            "aggregate_trades_tick": (
+                trades.iloc[:1].copy(),
+                trades.iloc[1:].copy(),
+            ),
+            "depth_levels_tick": (frames["depth"],),
+        },
+    )
+    _patch_panel_lifecycle_validation(monkeypatch)
+    layout = StorageLayout(project_root=tmp_path)
+
+    materialize_panel.write_panel(
+        processed_catalog().get("market_panel_1m"),
+        layout=layout,
+        source_id=SourceId("synthetic_crypto"),
+        time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
+        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+    )
+
+    panel = read_dataset(
+        layout.processed_data_root("crypto", ProcessedDataKind.PANEL, "market_panel_1m")
+    )
+    assert panel.loc[0, "signed_volume"] == 2.0
+    assert bool(panel.loc[0, "trade_flow_observed"]) is True
+
+
+def test_crypto_panel_materializer_rejects_incomplete_trade_range_across_chunks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    frames = _matching_panel_frames()
+    frames["bars"].loc[0, "trade_count"] = 2
+    second = frames["trades"].assign(
+        timestamp=pd.Timestamp("2026-07-06 00:00:02"),
+        aggregate_trade_id=2,
+        quantity=4.0,
+        first_trade_id=3,
+        last_trade_id=3,
+        signed_quantity=-4.0,
+    )
+    first = frames["trades"].assign(quantity=6.0, signed_quantity=6.0)
+    _patch_panel_physical_chunks(
+        monkeypatch,
+        {
+            "market_bars_1m": (frames["bars"],),
+            "aggregate_trades_tick": (first, second),
+            "depth_levels_tick": (frames["depth"],),
+        },
+    )
+    _patch_panel_lifecycle_validation(monkeypatch)
+
+    with pytest.raises(ValueError, match="invalid_crypto_trade_flow_coverage"):
+        materialize_panel.write_panel(
+            processed_catalog().get("market_panel_1m"),
+            layout=StorageLayout(project_root=tmp_path),
+            source_id=SourceId("synthetic_crypto"),
+            time_window=TimeWindow(
+                "2026-07-06T00:00:00",
+                "2026-07-06T00:00:00",
+            ),
+            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        )
+
+
 def test_crypto_panel_materializer_merges_depth_snapshot_across_storage_chunks(
     tmp_path: Path,
     monkeypatch,
@@ -1154,7 +1244,11 @@ def _matching_panel_frames() -> dict[str, pd.DataFrame]:
         {
             "source_asset_id": ["BTCUSDT"],
             "timestamp": pd.to_datetime(["2026-07-06 00:00:01"]),
-            "signed_quantity": [2.0],
+            "aggregate_trade_id": [1],
+            "quantity": [10.0],
+            "first_trade_id": [1],
+            "last_trade_id": [1],
+            "signed_quantity": [10.0],
             "source_market_type": ["spot"],
         }
     )
@@ -1306,13 +1400,13 @@ def _write_synthetic_crypto_interim(
                 "timestamp": pd.to_datetime(["2026-07-06 00:00:01"]),
                 "aggregate_trade_id": [1],
                 "price": [100.1],
-                "quantity": [2.0],
-                "quote_quantity": [200.2],
+                "quantity": [10.0],
+                "quote_quantity": [1001.0],
                 "first_trade_id": [1],
                 "last_trade_id": [1],
                 "is_buyer_maker": [False],
                 "taker_side": ["buy"],
-                "signed_quantity": [2.0],
+                "signed_quantity": [10.0],
                 "source_market_type": ["spot"],
             }
         ),
@@ -1625,9 +1719,9 @@ def _trade_envelope(
         "payload": {
             "a": offset + 1,
             "p": str(100.1 + offset),
-            "q": "2.0",
-            "f": offset * 2,
-            "l": offset * 2 + 1,
+            "q": "10.0",
+            "f": offset * 7,
+            "l": offset * 7 + 6,
             "T": open_time + 1_000,
             "m": offset % 2 == 0,
             "M": True,

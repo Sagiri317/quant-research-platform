@@ -44,13 +44,12 @@ def test_compute_market_panel_canonicalizes_source_asset_and_asof_quote() -> Non
             "interval": ["1m", "1m"],
         }
     )
-    trades = pd.DataFrame(
-        {
-            "source_asset_id": ["BTCUSDT"],
-            "timestamp": pd.to_datetime(["2026-07-06 00:00:01"]),
-            "signed_quantity": [2.0],
-            "source_market_type": ["spot"],
-        }
+    trades = _aggregate_trades_frame(
+        quantities=(10.0,),
+        signed_quantities=(10.0,),
+        aggregate_trade_ids=(1,),
+        first_trade_ids=(1,),
+        last_trade_ids=(1,),
     )
     depth = pd.DataFrame(
         {
@@ -83,7 +82,9 @@ def test_compute_market_panel_canonicalizes_source_asset_and_asof_quote() -> Non
     assert bool(panel.loc[0, "quote_observed"]) is True
     assert panel.loc[0, "quote_age_seconds"] == 1.999
     assert panel.loc[0, "best_bid"] == 100.0
+    assert bool(panel.loc[0, "trade_flow_observed"]) is True
     assert bool(panel.loc[1, "quote_observed"]) is False
+    assert bool(panel.loc[1, "trade_flow_observed"]) is False
     assert math.isnan(panel.loc[1, "best_bid"])
 
 
@@ -122,6 +123,115 @@ def test_compute_market_panel_distinguishes_missing_trade_feed_from_zero_flow() 
     assert panel.loc[0, "signed_volume"] == 0.0
     assert bool(panel.loc[1, "trade_flow_observed"]) is False
     assert math.isnan(panel.loc[1, "signed_volume"])
+
+
+def test_complete_trade_feed_is_observed_only_after_summary_validation() -> None:
+    bars = _bars_frame()
+    bars.loc[0, "trade_count"] = 2
+
+    panel = compute_market_panel(
+        bars,
+        trades=_aggregate_trades_frame(),
+        depth=pd.DataFrame(),
+    )
+
+    assert panel.loc[0, "signed_volume"] == 2.0
+    assert bool(panel.loc[0, "trade_flow_observed"]) is True
+
+
+@pytest.mark.parametrize(
+    ("quantities", "first_trade_ids", "last_trade_ids"),
+    [
+        ((5.0, 4.0), (10, 11), (10, 11)),
+        ((6.0, 4.0), (10, 11), (10, 12)),
+    ],
+)
+def test_partial_trade_feed_fails_closed(
+    quantities: tuple[float, ...],
+    first_trade_ids: tuple[int, ...],
+    last_trade_ids: tuple[int, ...],
+) -> None:
+    bars = _bars_frame()
+    bars.loc[0, "trade_count"] = 2
+
+    with pytest.raises(ValueError, match="invalid_crypto_trade_flow_coverage"):
+        compute_market_panel(
+            bars,
+            trades=_aggregate_trades_frame(
+                quantities=quantities,
+                signed_quantities=quantities,
+                first_trade_ids=first_trade_ids,
+                last_trade_ids=last_trade_ids,
+            ),
+            depth=pd.DataFrame(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("aggregate_trade_ids", "first_trade_ids", "last_trade_ids", "error"),
+    [
+        ((1, 2), (10, 12), (10, 12), "invalid_crypto_trade_flow_coverage"),
+        ((1, 2), (10, 11), (11, 11), "invalid_crypto_trade_flow_coverage"),
+        ((1, 2), (11, 11), (10, 11), "invalid_crypto_trade_flow_coverage"),
+        ((1, 1), (10, 11), (10, 11), "out_of_order_crypto_trade_dependency"),
+        ((2, 1), (10, 11), (10, 11), "out_of_order_crypto_trade_dependency"),
+    ],
+)
+def test_trade_id_contract_fails_closed(
+    aggregate_trade_ids: tuple[int, ...],
+    first_trade_ids: tuple[int, ...],
+    last_trade_ids: tuple[int, ...],
+    error: str,
+) -> None:
+    bars = _bars_frame()
+    bars.loc[0, "trade_count"] = 2
+
+    with pytest.raises(ValueError, match=error):
+        compute_market_panel(
+            bars,
+            trades=_aggregate_trades_frame(
+                aggregate_trade_ids=aggregate_trade_ids,
+                first_trade_ids=first_trade_ids,
+                last_trade_ids=last_trade_ids,
+            ),
+            depth=pd.DataFrame(),
+        )
+
+
+def test_zero_trade_bar_rejects_unexpected_trade_feed() -> None:
+    bars = _bars_frame()
+    bars.loc[0, ["volume", "quote_volume", "trade_count"]] = 0
+    bars.loc[0, ["taker_buy_volume", "taker_buy_quote_volume"]] = 0
+
+    with pytest.raises(ValueError, match="invalid_crypto_trade_flow_coverage"):
+        compute_market_panel(
+            bars,
+            trades=_aggregate_trades_frame(
+                quantities=(1.0,),
+                signed_quantities=(1.0,),
+                aggregate_trade_ids=(1,),
+                first_trade_ids=(1,),
+                last_trade_ids=(1,),
+            ),
+            depth=pd.DataFrame(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("volume", "trade_count"),
+    [(0.0, 1), (1.0, 0)],
+)
+def test_inconsistent_bar_volume_and_count_fails_closed(
+    volume: float,
+    trade_count: int,
+) -> None:
+    bars = _bars_frame()
+    bars.loc[0, "volume"] = volume
+    bars.loc[0, "trade_count"] = trade_count
+    bars.loc[0, "taker_buy_volume"] = 0.0
+
+    with pytest.raises(ValueError, match="invalid_crypto_bar_trade_summary"):
+        compute_market_panel(bars, trades=pd.DataFrame(), depth=pd.DataFrame())
 
 
 def test_one_sided_depth_maps_to_quote_observed_false() -> None:
@@ -384,26 +494,64 @@ def test_old_depth_full_window_helpers_are_absent() -> None:
 
     assert "_accumulate_depth_snapshot_state" not in source
     assert "_quote_snapshots_from_state" not in source
+    assert "_accumulate_trade_aggregate_state" not in source
+    assert "_trade_aggregates_from_state" not in source
 
 
 def test_trade_aggregate_state_reduces_dense_chunks_incrementally() -> None:
-    timestamps = pd.date_range("2026-07-06 00:00:01", periods=2_000, freq="ms")
-    trades = pd.DataFrame(
-        {
-            "source_asset_id": ["BTCUSDT"] * len(timestamps),
-            "timestamp": timestamps,
-            "signed_quantity": np.where(np.arange(len(timestamps)) % 2, -0.5, 1.0),
-            "source_market_type": ["spot"] * len(timestamps),
-        }
+    module = _panel_input_reducers_module()
+    trade_count = 2_000
+    bars = _bars_frame()
+    bars.loc[0, "volume"] = float(trade_count)
+    bars.loc[0, "trade_count"] = trade_count
+    bars.loc[0, "taker_buy_volume"] = float(trade_count // 2)
+    trades = _aggregate_trades_frame(
+        quantities=(1.0,) * trade_count,
+        signed_quantities=tuple(
+            -1.0 if index % 2 else 1.0 for index in range(trade_count)
+        ),
+        aggregate_trade_ids=tuple(range(1, trade_count + 1)),
+        first_trade_ids=tuple(range(10_000, 10_000 + trade_count)),
+        last_trade_ids=tuple(range(10_000, 10_000 + trade_count)),
+        timestamps=tuple(
+            pd.date_range(
+                "2026-07-06 00:00:01",
+                periods=trade_count,
+                freq="ms",
+            )
+        ),
     )
-    state: dict[tuple[str, pd.Timestamp], float] = {}
+    reducer = module.AggregateTradeReducer(
+        bars=panels._prepare_panel_bars(bars),
+        target_state_bytes=64 * 1024,
+        normalize_chunk=panels.normalize_trade_chunk,
+    )
 
-    panels._accumulate_trade_aggregate_state(state, trades.iloc[:1_000])
-    panels._accumulate_trade_aggregate_state(state, trades.iloc[1_000:])
-    aggregates = panels._trade_aggregates_from_state(state)
+    reducer.add_chunk(trades.iloc[:1_000].copy())
+    reducer.add_chunk(trades.iloc[1_000:].copy())
+    aggregates = reducer.finish()
 
-    assert aggregates["signed_volume"].tolist() == [500.0]
+    assert aggregates["signed_volume"].tolist() == [0.0]
+    assert aggregates["quantity_sum"].tolist() == [2_000.0]
+    assert aggregates["covered_trade_count"].tolist() == [2_000]
     assert aggregates["trade_flow_observed"].tolist() == [True]
+
+
+def test_trade_reducer_checks_range_continuity_across_chunks() -> None:
+    module = _panel_input_reducers_module()
+    bars = _bars_frame()
+    bars.loc[0, "trade_count"] = 2
+    trades = _aggregate_trades_frame(first_trade_ids=(10, 12), last_trade_ids=(10, 12))
+    reducer = module.AggregateTradeReducer(
+        bars=panels._prepare_panel_bars(bars),
+        target_state_bytes=16 * 1024,
+        normalize_chunk=panels.normalize_trade_chunk,
+    )
+
+    reducer.add_chunk(trades.iloc[:1].copy())
+
+    with pytest.raises(ValueError, match="invalid_crypto_trade_flow_coverage"):
+        reducer.add_chunk(trades.iloc[1:].copy())
 
 
 def test_quote_matching_has_no_per_bar_dataframe_scan() -> None:
@@ -793,13 +941,15 @@ def test_depth_level_sequence_and_price_order_fail_closed(
 
 @pytest.mark.parametrize("frame_name", ["trades", "depth"])
 def test_auxiliary_source_market_type_must_be_spot(frame_name: str) -> None:
-    trades = pd.DataFrame(
-        {
-            "source_asset_id": ["BTCUSDT"],
-            "timestamp": pd.to_datetime(["2026-07-06 00:00:01"]),
-            "signed_quantity": [1.0],
-            "source_market_type": ["futures" if frame_name == "trades" else "spot"],
-        }
+    trades = _aggregate_trades_frame(
+        quantities=(10.0,),
+        signed_quantities=(10.0,),
+        aggregate_trade_ids=(1,),
+        first_trade_ids=(1,),
+        last_trade_ids=(1,),
+    )
+    trades["source_market_type"] = (
+        "futures" if frame_name == "trades" else "spot"
     )
     depth = pd.DataFrame(
         {
@@ -900,6 +1050,35 @@ def _bars_frame() -> pd.DataFrame:
             "taker_buy_quote_volume": [402.0],
             "source_market_type": ["spot"],
             "interval": ["1m"],
+        }
+    )
+
+
+def _aggregate_trades_frame(
+    *,
+    quantities: tuple[float, ...] = (6.0, 4.0),
+    signed_quantities: tuple[float, ...] = (6.0, -4.0),
+    aggregate_trade_ids: tuple[int, ...] = (1, 2),
+    first_trade_ids: tuple[int, ...] = (10, 11),
+    last_trade_ids: tuple[int, ...] = (10, 11),
+    timestamps: tuple[pd.Timestamp, ...] | None = None,
+) -> pd.DataFrame:
+    size = len(quantities)
+    if timestamps is None:
+        timestamps = tuple(
+            pd.Timestamp("2026-07-06 00:00:01") + pd.Timedelta(milliseconds=index)
+            for index in range(size)
+        )
+    return pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"] * size,
+            "timestamp": list(timestamps),
+            "aggregate_trade_id": list(aggregate_trade_ids),
+            "quantity": list(quantities),
+            "first_trade_id": list(first_trade_ids),
+            "last_trade_id": list(last_trade_ids),
+            "signed_quantity": list(signed_quantities),
+            "source_market_type": ["spot"] * size,
         }
     )
 

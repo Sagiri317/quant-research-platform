@@ -21,6 +21,10 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
 )
 
 DEFAULT_MAX_QUOTE_AGE = pd.Timedelta(seconds=120)
+_TRADE_VOLUME_RELATIVE_TOLERANCE = 1e-9
+_TRADE_VOLUME_ABSOLUTE_TOLERANCE = 1e-12
+_SIGNED_QUANTITY_RELATIVE_TOLERANCE = 1e-12
+_SIGNED_QUANTITY_ABSOLUTE_TOLERANCE = 1e-12
 
 
 def compute_market_panel(
@@ -35,7 +39,7 @@ def compute_market_panel(
     panel = _prepare_panel_bars(bars)
     return _calculate_market_panel(
         panel,
-        trade_aggregates=_signed_trade_volume(trades),
+        trade_aggregates=_trade_aggregates(panel, trades),
         quote_snapshots=_quote_snapshots(panel, depth),
         max_quote_age=max_quote_age,
     )
@@ -97,6 +101,12 @@ def _calculate_market_panel(
         error="invalid_crypto_bar_quantity",
     )
     valid_trade_count = trade_count.ge(0.0) & trade_count.mod(1).eq(0.0)
+    valid_trade_summary = volume.ge(0.0) & valid_trade_count
+    inconsistent_trade_summary = valid_trade_summary & volume.eq(0.0).ne(
+        trade_count.eq(0.0)
+    )
+    if inconsistent_trade_summary.any():
+        raise ValueError("invalid_crypto_bar_trade_summary")
     valid_bar_quantity = (
         volume.ge(0.0)
         & quote_volume.ge(0.0)
@@ -112,11 +122,27 @@ def _calculate_market_panel(
         how="left",
         on=("asset_id", "timestamp"),
     )
+    feed_present = panel["trade_flow_observed"].notna()
+    zero_trade_summary = valid_trade_summary & trade_count.eq(0.0)
+    positive_trade_summary = valid_trade_summary & trade_count.gt(0.0)
+    quantity_matches = (
+        panel["quantity_sum"].sub(volume).abs()
+        <= _TRADE_VOLUME_ABSOLUTE_TOLERANCE
+        + _TRADE_VOLUME_RELATIVE_TOLERANCE * volume.abs()
+    )
+    count_matches = panel["covered_trade_count"].eq(trade_count)
+    invalid_trade_feed = (zero_trade_summary & feed_present) | (
+        positive_trade_summary
+        & feed_present
+        & ~(quantity_matches & count_matches)
+    )
+    if invalid_trade_feed.any():
+        raise ValueError("invalid_crypto_trade_flow_coverage")
     panel["trade_flow_observed"] = panel["trade_flow_observed"].where(
         panel["trade_flow_observed"].notna(),
         False,
     )
-    zero_trade = valid_bar_quantity & trade_count.eq(0) & panel["signed_volume"].isna()
+    zero_trade = zero_trade_summary & ~feed_present
     panel.loc[zero_trade, "signed_volume"] = 0.0
     panel.loc[zero_trade, "trade_flow_observed"] = True
     panel = panel.merge(
@@ -164,63 +190,79 @@ def _calculate_market_panel(
     )
 
 
-def _signed_trade_volume(trades: pd.DataFrame) -> pd.DataFrame:
-    state: dict[tuple[str, pd.Timestamp], float] = {}
-    _accumulate_trade_aggregate_state(state, trades)
-    return _trade_aggregates_from_state(state)
-
-
-def _accumulate_trade_aggregate_state(
-    state: dict[tuple[str, pd.Timestamp], float],
+def _trade_aggregates(
+    bars: pd.DataFrame,
     trades: pd.DataFrame,
-) -> None:
+) -> pd.DataFrame:
+    input_bytes = int(trades.memory_usage(index=True, deep=True).sum())
+    reducer = panel_input_reducers.AggregateTradeReducer(
+        bars=bars,
+        target_state_bytes=max(1, input_bytes * 2 + len(bars) * 512),
+        normalize_chunk=normalize_trade_chunk,
+    )
+    if not trades.empty:
+        reducer.add_chunk(trades)
+    return reducer.finish()
+
+
+def normalize_trade_chunk(trades: pd.DataFrame) -> pd.DataFrame:
+    columns = (
+        "source_asset_id",
+        "asset_id",
+        "event_timestamp",
+        "timestamp",
+        "aggregate_trade_id",
+        "quantity",
+        "first_trade_id",
+        "last_trade_id",
+        "signed_quantity",
+    )
     if trades.empty:
-        return
+        return pd.DataFrame(columns=list(columns))
     frame = trades.copy()
     _validate_spot_source_market_type(
         frame,
         error="invalid_crypto_trade_source_market_type",
     )
     frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
-    frame["timestamp"] = _strict_timestamp_column(
+    frame["event_timestamp"] = _strict_timestamp_column(
         frame,
         "timestamp",
         error="invalid_crypto_trade_timestamp",
-    ).dt.floor("min")
+    )
+    frame["timestamp"] = frame["event_timestamp"].dt.floor("min")
     frame["signed_quantity"] = _required_numeric(
         frame,
         "signed_quantity",
         error="invalid_crypto_signed_quantity",
     )
-    partial = frame.groupby(
-        ["asset_id", "timestamp"],
-        as_index=False,
-        sort=False,
-    )["signed_quantity"].sum()
-    for asset_id, timestamp, signed_quantity in partial.itertuples(
-        index=False,
-        name=None,
+    frame["quantity"] = _required_numeric(
+        frame,
+        "quantity",
+        error="invalid_crypto_trade_flow_coverage",
+    )
+    if frame["quantity"].le(0.0).any():
+        raise ValueError("invalid_crypto_trade_flow_coverage")
+    signed_quantity_matches = (
+        frame["signed_quantity"].abs().sub(frame["quantity"]).abs()
+        <= _SIGNED_QUANTITY_ABSOLUTE_TOLERANCE
+        + _SIGNED_QUANTITY_RELATIVE_TOLERANCE * frame["quantity"].abs()
+    )
+    if not signed_quantity_matches.all():
+        raise ValueError("invalid_crypto_trade_flow_coverage")
+    for column in (
+        "aggregate_trade_id",
+        "first_trade_id",
+        "last_trade_id",
     ):
-        key = (str(asset_id), pd.Timestamp(timestamp))
-        state[key] = state.get(key, 0.0) + float(signed_quantity)
-
-
-def _trade_aggregates_from_state(
-    state: dict[tuple[str, pd.Timestamp], float],
-) -> pd.DataFrame:
-    columns = ["asset_id", "timestamp", "signed_volume", "trade_flow_observed"]
-    if not state:
-        return pd.DataFrame(columns=columns)
-    rows = [
-        {
-            "asset_id": asset_id,
-            "timestamp": timestamp,
-            "signed_volume": signed_volume,
-            "trade_flow_observed": True,
-        }
-        for (asset_id, timestamp), signed_volume in sorted(state.items())
-    ]
-    return pd.DataFrame(rows, columns=columns)
+        frame[column] = _strict_non_negative_integer_column(
+            frame,
+            column,
+            error="invalid_crypto_trade_flow_coverage",
+        )
+    if frame["first_trade_id"].gt(frame["last_trade_id"]).any():
+        raise ValueError("invalid_crypto_trade_flow_coverage")
+    return frame.loc[:, list(columns)]
 
 
 def _match_quotes_asof_bar_close(
@@ -413,6 +455,23 @@ def _numeric_not_bool(frame: pd.DataFrame, column: str, *, error: str) -> pd.Ser
     if frame[column].map(lambda value: isinstance(value, bool)).any():
         raise ValueError(error)
     return pd.to_numeric(frame[column], errors="coerce")
+
+
+def _strict_non_negative_integer_column(
+    frame: pd.DataFrame,
+    column: str,
+    *,
+    error: str,
+) -> pd.Series:
+    values = _numeric_not_bool(frame, column, error=error)
+    if (
+        values.isna().any()
+        or not values.map(math.isfinite).all()
+        or values.lt(0).any()
+        or values.mod(1).ne(0).any()
+    ):
+        raise ValueError(error)
+    return values.astype("int64")
 
 
 def _strict_timestamp_column(
