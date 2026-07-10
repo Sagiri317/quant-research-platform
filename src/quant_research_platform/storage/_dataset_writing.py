@@ -266,14 +266,17 @@ def _staged_write_directory(
     temp_root = final_root.with_name(
         owned_scratch_name(scratch_prefix, uuid4().hex[:6])
     )
+    claimed_temp = False
     try:
         temp_root.mkdir()
+        claimed_temp = True
         writer(temp_root)
         if final_root.exists():
             raise ValueError("dataset_exists")
         temp_root.rename(final_root)
     except Exception:
-        _remove_tree(temp_root)
+        if claimed_temp:
+            _remove_tree(temp_root)
         raise
 
 

@@ -65,3 +65,23 @@ def test_report_parquet_writer_cleans_temp_on_failure(
             tmp_path / "report.parquet",
         )
     assert not list(tmp_path.glob("*.tmp-*"))
+
+
+def test_report_parquet_writer_does_not_overwrite_unclaimed_temp_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    final_path = tmp_path / "report.parquet"
+    live_temp = final_path.with_name(f".report.parquet.tmp-{'c' * 12}")
+    live_temp.write_text("live\n", encoding="utf-8")
+    monkeypatch.setattr(
+        parquet_writers,
+        "uuid4",
+        lambda: type("FixedUuid", (), {"hex": "c" * 32})(),
+    )
+
+    with pytest.raises(FileExistsError):
+        parquet_writers.write_parquet(pd.DataFrame({"value": [1]}), final_path)
+
+    assert live_temp.read_text(encoding="utf-8") == "live\n"
+    assert not final_path.exists()

@@ -26,15 +26,18 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Path
     final_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = _temp_sibling(final_path)
     temp_path.parent.mkdir(parents=True, exist_ok=True)
+    claimed_temp = False
     try:
-        with temp_path.open("w", encoding=encoding) as handle:
+        with temp_path.open("x", encoding=encoding) as handle:
+            claimed_temp = True
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         reject_if_exists(final_path)
         _rename_with_transient_permission_retry(temp_path, final_path)
     except Exception:
-        _remove_path(temp_path)
+        if claimed_temp:
+            _remove_path(temp_path)
         raise
     return final_path
 
@@ -53,12 +56,16 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
     final_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = _temp_sibling(final_path)
     temp_path.parent.mkdir(parents=True, exist_ok=True)
+    claimed_temp = False
     try:
+        temp_path.touch(exist_ok=False)
+        claimed_temp = True
         frame.to_csv(temp_path, **kwargs)
         reject_if_exists(final_path)
         _rename_with_transient_permission_retry(temp_path, final_path)
     except Exception:
-        _remove_path(temp_path)
+        if claimed_temp:
+            _remove_path(temp_path)
         raise
     return final_path
 
@@ -68,13 +75,16 @@ def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
     reject_if_exists(final_root)
     final_root.parent.mkdir(parents=True, exist_ok=True)
     temp_root = _temp_sibling(final_root)
+    claimed_temp = False
     try:
         temp_root.mkdir()
+        claimed_temp = True
         result = writer(temp_root)
         reject_if_exists(final_root)
         _rename_with_transient_permission_retry(temp_root, final_root)
     except Exception:
-        _remove_path(temp_root)
+        if claimed_temp:
+            _remove_path(temp_root)
         raise
     return result
 

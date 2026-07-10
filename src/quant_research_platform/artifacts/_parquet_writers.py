@@ -36,10 +36,13 @@ def write_parquet_chunks(
     temp_path = final_path.with_name(f".{final_path.name}.tmp-{uuid4().hex[:12]}")
     temp_path.parent.mkdir(parents=True, exist_ok=True)
     writer: pq.ParquetWriter | None = None
+    claimed_temp = False
     seen_keys: set[tuple[object, ...]] = set()
     row_count = 0
     effective_test_end: str | None = None
     try:
+        temp_path.touch(exist_ok=False)
+        claimed_temp = True
         for frame in frames:
             selected = _prediction_output_chunk_frame(
                 frame,
@@ -75,7 +78,7 @@ def write_parquet_chunks(
     except Exception:
         if writer is not None:
             writer.close()
-        if temp_path.exists():
+        if claimed_temp and temp_path.exists():
             temp_path.unlink()
         raise
     return _PredictionOutputWriteSummary(
@@ -118,12 +121,15 @@ def write_parquet(
     final_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = final_path.with_name(f".{final_path.name}.tmp-{uuid4().hex[:12]}")
     temp_path.parent.mkdir(parents=True, exist_ok=True)
+    claimed_temp = False
     try:
+        temp_path.touch(exist_ok=False)
+        claimed_temp = True
         frame.to_parquet(temp_path, **kwargs)
         reject_if_exists(final_path)
         _rename_with_transient_permission_retry(temp_path, final_path)
     except Exception:
-        if temp_path.exists():
+        if claimed_temp and temp_path.exists():
             temp_path.unlink()
         raise
     return final_path

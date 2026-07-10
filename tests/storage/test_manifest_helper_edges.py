@@ -33,6 +33,27 @@ def test_manifest_review_safe_and_internal_writes_are_utf8_and_safe(
     assert loaded["source_id"] == "csmar"
 
 
+def test_manifest_replace_does_not_overwrite_unclaimed_temp_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_path = tmp_path / "manifest.json"
+    final_path.write_text('{"schema_id": "old"}\n', encoding="utf-8")
+    live_temp = final_path.with_name(f".tmp-{'c' * 12}")
+    live_temp.write_text("live\n", encoding="utf-8")
+    monkeypatch.setattr(
+        manifests,
+        "uuid4",
+        lambda: type("FixedUuid", (), {"hex": "c" * 32})(),
+    )
+
+    with pytest.raises(FileExistsError):
+        manifests.replace_qrp_json(final_path, {"schema_id": "new"})
+
+    assert live_temp.read_text(encoding="utf-8") == "live\n"
+    assert manifests.read_manifest(final_path)["schema_id"] == "old"
+
+
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [

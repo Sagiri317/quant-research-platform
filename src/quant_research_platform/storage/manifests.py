@@ -71,14 +71,16 @@ def replace_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> P
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     final_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = final_path.with_name(f".tmp-{uuid4().hex[:12]}")
+    claimed_temp = False
     try:
-        with temp_path.open("w", encoding="utf-8") as handle:
+        with temp_path.open("x", encoding="utf-8") as handle:
+            claimed_temp = True
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         temp_path.replace(final_path)
     except Exception:
-        if temp_path.exists():
+        if claimed_temp and temp_path.exists():
             temp_path.unlink()
         raise
     return final_path
@@ -95,14 +97,16 @@ def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     final_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = final_path.with_name(f".tmp-{uuid4().hex[:12]}")
+    claimed_temp = False
     try:
-        with temp_path.open("w", encoding="utf-8") as handle:
+        with temp_path.open("x", encoding="utf-8") as handle:
+            claimed_temp = True
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         temp_path.replace(final_path)
     except Exception:
-        if temp_path.exists():
+        if claimed_temp and temp_path.exists():
             temp_path.unlink()
         raise
     return final_path

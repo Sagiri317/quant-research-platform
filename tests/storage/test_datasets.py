@@ -1016,6 +1016,32 @@ def test_dataset_write_removes_reused_pid_staged_scratch(
     assert not reused_scratch.exists()
 
 
+def test_dataset_staged_write_does_not_clean_unclaimed_name_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ownership = importlib.import_module(
+        "quant_research_platform.storage._scratch_ownership"
+    )
+    final_root = tmp_path / "dataset"
+    scratch_prefix = ".dataset.tmp-"
+    live_stage = final_root.with_name(
+        ownership.owned_scratch_name(scratch_prefix, "c" * 6)
+    )
+    live_stage.mkdir()
+    (live_stage / "live.txt").write_text("live\n", encoding="utf-8")
+    monkeypatch.setattr(
+        dataset_writing,
+        "uuid4",
+        lambda: SimpleNamespace(hex="c" * 32),
+    )
+
+    with pytest.raises(FileExistsError):
+        dataset_writing._staged_write_directory(final_root, lambda _root: None)
+
+    assert (live_stage / "live.txt").read_text(encoding="utf-8") == "live\n"
+
+
 def test_storage_scratch_ownership_has_one_process_identity_path() -> None:
     key_source = Path(dataset_reading.__file__).with_name(
         "_dataset_key_tracking.py"

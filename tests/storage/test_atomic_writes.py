@@ -5,12 +5,17 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.storage.atomic as atomic
 from quant_research_platform.storage.atomic import (
     atomic_write_csv,
     atomic_write_directory,
     atomic_write_json,
     atomic_write_text,
 )
+
+
+class _FixedUuid:
+    hex = "c" * 32
 
 
 def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -> None:
@@ -53,6 +58,22 @@ def test_atomic_write_directory_retries_transient_permission_error(
     assert list(final_root.parent.glob(".tmp-*")) == []
 
 
+def test_atomic_write_directory_does_not_clean_unclaimed_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_root = tmp_path / "run"
+    live_temp = final_root.with_name(f".tmp-{'c' * 12}")
+    live_temp.mkdir()
+    (live_temp / "live.txt").write_text("live\n", encoding="utf-8")
+    monkeypatch.setattr(atomic, "uuid4", lambda: _FixedUuid())
+
+    with pytest.raises(FileExistsError):
+        atomic_write_directory(final_root, lambda _root: None)
+
+    assert (live_temp / "live.txt").read_text(encoding="utf-8") == "live\n"
+
+
 def test_atomic_write_text_creates_nested_temp_parent(tmp_path: Path) -> None:
     final_path = tmp_path / "root" / "year=2014" / "part.txt"
 
@@ -79,6 +100,27 @@ def test_atomic_file_writers_reject_existing_targets_without_overwrite(
     for path in targets.values():
         assert path.read_text(encoding="utf-8") == "existing\n"
     assert list(tmp_path.glob(".*.tmp-*")) == []
+
+
+@pytest.mark.parametrize("kind", ["text", "csv"])
+def test_atomic_file_writers_do_not_overwrite_unclaimed_collision(
+    kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_path = tmp_path / "output.txt"
+    live_temp = final_path.with_name(f".tmp-{'c' * 12}")
+    live_temp.write_text("live\n", encoding="utf-8")
+    monkeypatch.setattr(atomic, "uuid4", lambda: _FixedUuid())
+
+    with pytest.raises(FileExistsError):
+        if kind == "text":
+            atomic_write_text(final_path, "new\n")
+        else:
+            atomic_write_csv(pd.DataFrame({"x": [1]}), final_path, index=False)
+
+    assert live_temp.read_text(encoding="utf-8") == "live\n"
+    assert not final_path.exists()
 
 
 def test_atomic_csv_writer_cleans_temp_file_after_mid_write_failure(
