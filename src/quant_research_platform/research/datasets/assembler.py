@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import asdict
 from math import ceil
 from pathlib import Path
 
@@ -32,9 +31,10 @@ from quant_research_platform.runtime.resources import (
     active_runtime_resource_policy,
     require_free_disk_headroom,
 )
+from quant_research_platform.storage._dataset_schema import dataset_identity_payload
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
-    fingerprint_dataset,
+    inspect_dataset,
     read_dataset,
     write_dataset,
 )
@@ -66,11 +66,10 @@ def assemble_research_dataset(
         reserve_bytes=policy.effective_chunk_bytes * 2,
     )
     _validate_research_input_specs(spec, processed_catalog)
-    input_fingerprints = _input_fingerprints(
+    input_identities = _input_dataset_identities(
         layout=layout,
         dataset_spec=spec,
         processed_catalog=processed_catalog,
-        time_window=time_window,
     )
     chunks = _iter_joined_processed_chunks(
         layout=layout,
@@ -84,7 +83,7 @@ def assemble_research_dataset(
         artifact_root,
         chunks,
         spec=spec,
-        instance_metadata={"input_fingerprints": input_fingerprints},
+        instance_metadata={"input_dataset_identities": input_identities},
     )
     return artifact_root
 
@@ -528,14 +527,13 @@ def _apply_feature_transforms(
     return apply_feature_transforms(frame, dataset_spec.feature_transforms)
 
 
-def _input_fingerprints(
+def _input_dataset_identities(
     *,
     layout: StorageLayout,
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
-    time_window: TimeWindow,
-) -> dict[str, dict[str, object]]:
-    fingerprints: dict[str, dict[str, object]] = {}
+) -> dict[str, dict[str, str]]:
+    identities: dict[str, dict[str, str]] = {}
     for data_id in dataset_spec.input_data_ids:
         processed_spec = processed_catalog.get(data_id)
         root = layout.processed_data_root(
@@ -543,10 +541,12 @@ def _input_fingerprints(
             processed_spec.kind,
             processed_spec.data_id,
         )
-        fingerprints[data_id] = asdict(
-            fingerprint_dataset(root, time_window=time_window)
+        inspection = inspect_dataset(root)
+        identities[data_id] = dataset_identity_payload(
+            inspection.spec,
+            inspection.manifest,
         )
-    return fingerprints
+    return dict(sorted(identities.items()))
 
 
 def _estimate_research_join_bytes_per_session(

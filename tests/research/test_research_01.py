@@ -194,7 +194,8 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
         "market_type",
     ]
     assert len(result) == 4
-    assert set(inspection.manifest["input_fingerprints"]) == {
+    assert "input_fingerprints" not in inspection.manifest
+    assert set(inspection.manifest["input_dataset_identities"]) == {
         "demo_factors",
         "demo_labels",
         "demo_annotations",
@@ -403,6 +404,7 @@ def test_research_dataset_assembler_does_not_mutate_storage_manifest() -> None:
 
     assert "replace_internal_artifact_manifest" not in source
     assert "_write_input_fingerprints" not in source
+    assert "fingerprint_dataset" not in source
     assert "_manifest" not in string_constants
     assert "manifest.json" not in string_constants
 

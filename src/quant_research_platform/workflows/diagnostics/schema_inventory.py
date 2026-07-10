@@ -98,7 +98,9 @@ def _inventory_item(
         "row_count_by_year": stats["row_count_by_year"],
         "min_timestamp": stats["min_timestamp"],
         "max_timestamp": stats["max_timestamp"],
-        "duplicate_primary_key_count": stats["duplicate_primary_key_count"],
+        "duplicate_primary_key_count": int(
+            inspection.manifest["duplicate_primary_key_count"]
+        ),
         "null_key_counts": stats["null_key_counts"],
         "selected_important_column_null_counts": (
             stats["selected_important_column_null_counts"]
@@ -124,8 +126,6 @@ def _aggregate_dataset_stats(
     row_count = 0
     row_count_by_year: dict[str, int] = {}
     null_key_counts = {column: 0 for column in primary_key}
-    duplicate_primary_key_count = 0
-    seen_key_hashes: set[int] = set()
     important_columns = tuple(
         column for column in columns if column in important_null_count_columns
     )
@@ -162,17 +162,6 @@ def _aggregate_dataset_stats(
             null_key_counts[column] += int(frame[column].isna().sum())
         for column in important_columns:
             important_null_counts[column] += int(frame[column].isna().sum())
-        if primary_key:
-            key_hashes = pd.util.hash_pandas_object(
-                frame.loc[:, list(primary_key)],
-                index=False,
-            ).to_numpy(dtype="uint64")
-            for key_hash in key_hashes:
-                value = int(key_hash)
-                if value in seen_key_hashes:
-                    duplicate_primary_key_count += 1
-                else:
-                    seen_key_hashes.add(value)
 
     return {
         "dtypes": {column: dtypes.get(column, "") for column in columns},
@@ -180,7 +169,6 @@ def _aggregate_dataset_stats(
         "row_count_by_year": dict(sorted(row_count_by_year.items())),
         "min_timestamp": _format_timestamp(min_timestamp),
         "max_timestamp": _format_timestamp(max_timestamp),
-        "duplicate_primary_key_count": duplicate_primary_key_count,
         "null_key_counts": dict(sorted(null_key_counts.items())),
         "selected_important_column_null_counts": dict(
             sorted(important_null_counts.items())
