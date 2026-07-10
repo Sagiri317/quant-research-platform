@@ -569,6 +569,33 @@ def test_variable_width_probe_adapts_above_probe_size_for_small_values(
     assert maximum_rows > dataset_reading._PANDAS_PROBE_ROWS
 
 
+def test_variable_width_batch_fails_before_pandas_when_probe_underestimates(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "variable-width-spike.parquet"
+    pq.write_table(
+        pa.table({"value": ["x", *(["y" * 4096] * 200)]}),
+        path,
+        compression="zstd",
+        use_dictionary=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_arrow_batch_exceeds_target_chunk_bytes",
+    ):
+        tuple(
+            dataset_reading._iter_filtered_arrow_batches(
+                path,
+                columns=("value",),
+                parquet_filters=None,
+                batch_size=1,
+                target_chunk_bytes=64 * 1024,
+                probe_variable_width=True,
+            )
+        )
+
+
 def test_inspect_and_fingerprint_reuse_physical_batch_reader() -> None:
     inspection_source = Path(
         importlib.import_module(

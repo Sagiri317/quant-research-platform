@@ -456,13 +456,16 @@ def _iter_filtered_arrow_batches(
     target_chunk_bytes: int,
     probe_variable_width: bool,
 ) -> Iterator[pa.RecordBatch]:
+    arrow_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
     if not probe_variable_width:
-        yield from _physical_arrow_batches(
+        for batch in _physical_arrow_batches(
             path,
             columns=columns,
             parquet_filters=parquet_filters,
             batch_size=batch_size,
-        )
+        ):
+            _require_arrow_batch_budget(batch, arrow_budget=arrow_budget)
+            yield batch
         return
 
     probe = iter(
@@ -477,9 +480,7 @@ def _iter_filtered_arrow_batches(
         first = next(probe)
     except StopIteration:
         return
-    arrow_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
-    if first.nbytes > arrow_budget:
-        raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+    _require_arrow_batch_budget(first, arrow_budget=arrow_budget)
     probe_frame = first.to_pandas(use_threads=False)
     pandas_bytes = int(probe_frame.memory_usage(index=True, deep=True).sum())
     if pandas_bytes > arrow_budget:
@@ -490,12 +491,26 @@ def _iter_filtered_arrow_batches(
         arrow_budget // measured_row_bytes,
     )
     del probe_frame, first, probe
-    yield from _physical_arrow_batches(
+    for batch in _physical_arrow_batches(
         path,
         columns=columns,
         parquet_filters=parquet_filters,
         batch_size=adaptive_rows,
-    )
+    ):
+        _require_arrow_batch_budget(batch, arrow_budget=arrow_budget)
+        yield batch
+
+
+def _require_arrow_batch_budget(
+    batch: pa.RecordBatch,
+    *,
+    arrow_budget: int,
+) -> None:
+    if batch.nbytes <= arrow_budget:
+        return
+    if batch.num_rows == 1:
+        raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+    raise ValueError("dataset_arrow_batch_exceeds_target_chunk_bytes")
 
 
 def _physical_arrow_batches(
