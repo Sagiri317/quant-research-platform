@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import shutil
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -39,7 +41,7 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Path
             handle.flush()
             os.fsync(handle.fileno())
         reject_if_exists(final_path)
-        _rename_with_transient_permission_retry(temp_path, final_path)
+        publish_no_replace(temp_path, final_path)
     except Exception:
         if claimed_temp:
             _remove_path(temp_path)
@@ -67,7 +69,7 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
         claimed_temp = True
         frame.to_csv(temp_path, **kwargs)
         reject_if_exists(final_path)
-        _rename_with_transient_permission_retry(temp_path, final_path)
+        publish_no_replace(temp_path, final_path)
     except Exception:
         if claimed_temp:
             _remove_path(temp_path)
@@ -102,7 +104,7 @@ def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
             os.fsync(handle.fileno())
         result = writer(temp_root)
         reject_if_exists(final_root)
-        _rename_with_transient_permission_retry(temp_root, final_root)
+        publish_no_replace(temp_root, final_root)
         _remove_atomic_target_marker(target_marker)
     except Exception:
         if claimed_temp:
@@ -181,7 +183,7 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
-def _rename_with_transient_permission_retry(
+def publish_no_replace(
     source: Path,
     target: Path,
     *,
@@ -190,12 +192,51 @@ def _rename_with_transient_permission_retry(
 ) -> None:
     for attempt in range(1, attempts + 1):
         try:
-            source.rename(target)
+            if source.is_dir():
+                _rename_directory_no_replace(source, target)
+            else:
+                os.link(source, target)
+                source.unlink()
             return
         except PermissionError:
             if attempt == attempts:
                 raise
             time.sleep(delay_seconds)
+
+
+def _rename_directory_no_replace(source: Path, target: Path) -> None:
+    if os.name == "nt":
+        source.rename(target)
+        return
+    if not sys.platform.startswith("linux"):
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic no-replace directory publication is unsupported",
+            target,
+        )
+
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(
+            errno.ENOTSUP,
+            "renameat2 is required for atomic no-replace directory publication",
+            target,
+        )
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    if renameat2(-100, os.fsencode(source), -100, os.fsencode(target), 1) == 0:
+        return
+    error_number = ctypes.get_errno()
+    raise OSError(error_number, os.strerror(error_number), target)
 
 
 __all__ = [

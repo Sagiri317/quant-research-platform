@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.storage.atomic import reject_if_exists
+from quant_research_platform.storage.atomic import publish_no_replace, reject_if_exists
 
 
 @dataclass(frozen=True)
@@ -74,7 +73,7 @@ def write_parquet_chunks(
         writer.close()
         writer = None
         reject_if_exists(final_path)
-        _rename_with_transient_permission_retry(temp_path, final_path)
+        publish_no_replace(temp_path, final_path)
     except Exception:
         if writer is not None:
             writer.close()
@@ -127,26 +126,9 @@ def write_parquet(
         claimed_temp = True
         frame.to_parquet(temp_path, **kwargs)
         reject_if_exists(final_path)
-        _rename_with_transient_permission_retry(temp_path, final_path)
+        publish_no_replace(temp_path, final_path)
     except Exception:
         if claimed_temp and temp_path.exists():
             temp_path.unlink()
         raise
     return final_path
-
-
-def _rename_with_transient_permission_retry(
-    source: Path,
-    target: Path,
-    *,
-    attempts: int = 3,
-    delay_seconds: float = 0.10,
-) -> None:
-    for attempt in range(1, attempts + 1):
-        try:
-            source.rename(target)
-            return
-        except PermissionError:
-            if attempt == attempts:
-                raise
-            time.sleep(delay_seconds)

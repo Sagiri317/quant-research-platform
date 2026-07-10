@@ -208,6 +208,28 @@ def test_atomic_file_writers_do_not_overwrite_unclaimed_collision(
     assert not final_path.exists()
 
 
+def test_publish_file_no_replace_preserves_concurrent_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "candidate.tmp"
+    target = tmp_path / "output.txt"
+    source.write_text("candidate\n", encoding="utf-8")
+    original_link = atomic.os.link
+
+    def racing_link(source_path: Path, target_path: Path) -> None:
+        Path(target_path).write_text("concurrent-winner\n", encoding="utf-8")
+        original_link(source_path, target_path)
+
+    monkeypatch.setattr(atomic.os, "link", racing_link)
+
+    with pytest.raises(FileExistsError):
+        atomic.publish_no_replace(source, target)
+
+    assert target.read_text(encoding="utf-8") == "concurrent-winner\n"
+    assert source.read_text(encoding="utf-8") == "candidate\n"
+
+
 def test_atomic_csv_writer_cleans_temp_file_after_mid_write_failure(
     tmp_path: Path,
 ) -> None:

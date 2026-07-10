@@ -547,7 +547,8 @@ def _pandas_dtype_overrides(
         if field.name not in null_columns:
             continue
         if pa.types.is_integer(field.type):
-            overrides[field.name] = "float64"
+            prefix = "Int" if pa.types.is_signed_integer(field.type) else "UInt"
+            overrides[field.name] = f"{prefix}{field.type.bit_width}"
         elif pa.types.is_boolean(field.type):
             overrides[field.name] = "object"
     return overrides

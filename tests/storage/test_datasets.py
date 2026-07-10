@@ -636,6 +636,31 @@ def test_chunked_and_materialized_reads_share_nullable_numeric_dtype(
     }
 
 
+def test_nullable_uint64_read_and_fingerprint_preserve_large_integer_identity(
+    tmp_path: Path,
+) -> None:
+    left_root = make_dataset_artifact_root(tmp_path / "left", "nullable_uint64")
+    right_root = make_dataset_artifact_root(tmp_path / "right", "nullable_uint64")
+    spec = make_processed_dataset_spec("nullable_uint64")
+    left = make_default_dataset_frame().iloc[:2].copy()
+    right = left.copy()
+    left["value"] = pd.array([2**63, pd.NA], dtype="UInt64")
+    right["value"] = pd.array([2**63 + 1, pd.NA], dtype="UInt64")
+
+    write_dataset(left_root, left, spec=spec)
+    write_dataset(right_root, right, spec=spec)
+
+    left_read = read_dataset(left_root)
+    right_read = read_dataset(right_root)
+    comparison = compare_datasets(left_root, right_root)
+
+    assert str(left_read["value"].dtype) == "UInt64"
+    assert str(right_read["value"].dtype) == "UInt64"
+    assert int(left_read["value"].dropna().iloc[0]) == 2**63
+    assert int(right_read["value"].dropna().iloc[0]) == 2**63 + 1
+    assert comparison.status == "CONTENT_MISMATCH"
+
+
 @pytest.mark.parametrize(
     "mode",
     [DatasetReadMode.CHUNKED, DatasetReadMode.MATERIALIZED],
