@@ -5,6 +5,7 @@ import importlib.util
 import json
 import math
 from datetime import date, datetime
+from decimal import Decimal
 from inspect import signature
 from pathlib import Path
 
@@ -536,6 +537,8 @@ def test_exact_primary_key_tracker_is_spillable_exact_and_cleans_up(
         assert database_path.is_file()
         assert tracker.add_frame(first) == 0
         assert tracker.add_frame(duplicate_same_instant) == 1
+        for suffix in ("-journal", "-wal", "-shm"):
+            Path(f"{database_path}{suffix}").write_bytes(b"scratch")
 
     assert not database_path.exists()
     assert list(tracker_root.iterdir()) == []
@@ -561,6 +564,79 @@ def test_exact_primary_key_tracker_is_spillable_exact_and_cleans_up(
             raise RuntimeError("stop")
     assert not exceptional_path.exists()
     assert list(tracker_root.iterdir()) == []
+
+
+def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+
+    with module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+        key_schema=pa.schema([pa.field("key", pa.float64())]),
+    ) as numeric:
+        assert numeric.add_frame(pd.DataFrame({"key": [Decimal("1.0")]})) == 0
+        assert numeric.add_frame(pd.DataFrame({"key": [1.0]})) == 1
+        assert numeric.add_frame(pd.DataFrame({"key": [-0.0]})) == 0
+        assert numeric.add_frame(pd.DataFrame({"key": [0.0]})) == 1
+        assert numeric.add_frame(pd.DataFrame({"key": [math.inf]})) == 0
+        assert numeric.add_frame(pd.DataFrame({"key": [math.inf]})) == 1
+        for null_value in (None, math.nan):
+            with pytest.raises(ValueError, match="dataset_primary_key_null"):
+                numeric.add_frame(pd.DataFrame({"key": [null_value]}))
+
+    with module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=("key",),
+        scratch_parent=tmp_path,
+        key_schema=pa.schema([pa.field("key", pa.timestamp("ns"))]),
+    ) as timestamps:
+        assert timestamps.add_frame(pd.DataFrame({"key": [date(2026, 1, 1)]})) == 0
+        assert (
+            timestamps.add_frame(
+                pd.DataFrame({"key": [datetime(2026, 1, 1)]})
+            )
+            == 1
+        )
+
+    with module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+        key_schema=pa.schema([pa.field("key", pa.string())]),
+    ) as strings:
+        assert strings.add_frame(pd.DataFrame({"key": ["é"]})) == 0
+        assert strings.add_frame(pd.DataFrame({"key": ["e\u0301"]})) == 0
+
+
+def test_dataset_write_recovers_stale_key_scratch_without_publishing_it(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "stale_key_scratch")
+    stale_stage = root.parent / ".stale_key_scratch.tmp-deadbeef"
+    stale_scratch = stale_stage / ".qrp-exact-key-index-deadbeef"
+    stale_scratch.mkdir(parents=True)
+    for name in (
+        "primary-keys.sqlite3",
+        "primary-keys.sqlite3-journal",
+        "primary-keys.sqlite3-wal",
+        "primary-keys.sqlite3-shm",
+    ):
+        (stale_scratch / name).write_bytes(b"scratch")
+
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("stale_key_scratch"),
+    )
+
+    assert not stale_scratch.exists()
+    assert not list(root.rglob("*.sqlite3"))
+    assert not list(root.rglob("*.sqlite3-*"))
 
 
 def test_dataset_writer_does_not_retain_row_proportional_python_key_state() -> None:
