@@ -17,7 +17,7 @@ from quant_research_platform.markets.implementations.a_share.verification import
 from tests.helpers import frequency_ids
 
 
-def test_aggregates_summarizes_frames_without_row_level_output() -> None:
+def test_aggregates_summarizes_frames_without_row_level_output(tmp_path: Path) -> None:
     frame = pd.DataFrame(
         {
             "market_id": ["a_share", "a_share", "a_share"],
@@ -28,7 +28,7 @@ def test_aggregates_summarizes_frames_without_row_level_output() -> None:
         }
     )
 
-    summary = aggregates._summarize_frames([frame])
+    summary = aggregates._summarize_frames([frame], scratch_parent=tmp_path)
 
     assert summary.row_count == 3
     assert summary.key_count == 2
@@ -41,7 +41,37 @@ def test_aggregates_summarizes_frames_without_row_level_output() -> None:
     assert summary.content_summary["flag"]["numeric_max"] == 1.0
 
 
-def test_aggregates_combines_summaries_and_area_records(monkeypatch) -> None:
+def test_aggregate_duplicate_truth_does_not_depend_on_64_bit_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 3,
+            "asset_id": ["asset_a", "asset_b", "asset_c"],
+            "timestamp": pd.date_range("2026-01-01", periods=3, freq="D"),
+            "value": [1.0, 2.0, 3.0],
+        }
+    )
+
+    def colliding_key_hashes(
+        values: pd.DataFrame,
+        _key_columns: list[str],
+    ):
+        yield 0, pd.Series([0] * len(values), dtype="uint64").to_numpy()
+
+    monkeypatch.setattr(aggregates, "_key_hash_blocks", colliding_key_hashes)
+
+    summary = aggregates._summarize_frames((frame,), scratch_parent=tmp_path)
+
+    assert summary.key_count == 3
+    assert summary.duplicate_key_count == 0
+
+
+def test_aggregates_combines_summaries_and_area_records(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     first = aggregates._summarize_frames(
         [
             pd.DataFrame(
@@ -53,7 +83,8 @@ def test_aggregates_combines_summaries_and_area_records(monkeypatch) -> None:
                     "value": [1.0],
                 }
             )
-        ]
+        ],
+        scratch_parent=tmp_path,
     )
     second = aggregates._summarize_frames(
         [
@@ -63,7 +94,8 @@ def test_aggregates_combines_summaries_and_area_records(monkeypatch) -> None:
                     "value": [2.0],
                 }
             )
-        ]
+        ],
+        scratch_parent=tmp_path,
     )
     combined = aggregates._combine_summaries([first, second])
 
@@ -110,7 +142,8 @@ def test_review_safe_aggregate_evidence_orchestrates_area_inputs(
                     "value": [1.0],
                 }
             )
-        ]
+        ],
+        scratch_parent=tmp_path,
     )
     monkeypatch.setattr(
         aggregates,
@@ -199,7 +232,8 @@ def test_aggregates_area_inputs_and_inventory_helpers(
                         "timestamp": pd.to_datetime(["2024-01-02"]),
                     }
                 )
-            ]
+            ],
+            scratch_parent=tmp_path,
         ),
     )
 

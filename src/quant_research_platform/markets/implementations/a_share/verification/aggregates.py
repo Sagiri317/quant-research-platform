@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Iterator
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import ceil
@@ -42,8 +43,10 @@ from quant_research_platform.runtime.resources import (
     ResourceChunkPlanner,
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
@@ -643,7 +646,9 @@ def _summarize_generated_full_market_panel(
         _iter_generated_full_market_panel_chunks(
             project_root,
             resource_policy=resource_policy,
-        )
+        ),
+        scratch_parent=project_root,
+        resource_policy=resource_policy,
     )
 
 
@@ -801,7 +806,18 @@ def _summarize_roots(
 
 
 def _summarize_output_bundles(roots: tuple[Path, ...]) -> AggregateSummary:
-    return _summarize_frames(_iter_output_frames(roots))
+    if not roots:
+        raise ValueError("aggregate_output_roots_required")
+    scratch_parent = Path(roots[0]).parent
+    if any(
+        Path(root).resolve().anchor != scratch_parent.resolve().anchor
+        for root in roots
+    ):
+        raise ValueError("aggregate_output_roots_cross_volume")
+    return _summarize_frames(
+        _iter_output_frames(roots),
+        scratch_parent=scratch_parent,
+    )
 
 
 def _iter_output_frames(roots: tuple[Path, ...]) -> Iterator[pd.DataFrame]:
@@ -829,7 +845,10 @@ def _summarize_dataset_root(
         time_window=_time_window_from_years(years),
         mode=DatasetReadMode.CHUNKED,
     )
-    summary = _summarize_frames(chunks)
+    summary = _summarize_frames(
+        chunks,
+        scratch_parent=root.parent,
+    )
     if summary_cache is not None:
         summary_cache[key] = summary
     return summary
@@ -845,11 +864,16 @@ def _summary_cache_key(
     )
 
 
-def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:
+def _summarize_frames(
+    frames: Iterable[pd.DataFrame],
+    *,
+    scratch_parent: Path,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> AggregateSummary:
     row_count = 0
-    key_count = 0
+    keyed_row_count = 0
+    unkeyed_row_count = 0
     duplicate_key_count = 0
-    seen_key_hashes: set[int] = set()
     columns: set[str] = set()
     dtype_summary: dict[str, set[str]] = {}
     null_summary: dict[str, int] = {}
@@ -857,41 +881,80 @@ def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:
     key_value_paired_summary: dict[str, dict[str, Any]] = {}
     min_date: pd.Timestamp | None = None
     max_date: pd.Timestamp | None = None
-    for frame in frames:
-        row_count += int(len(frame))
-        columns.update(str(column) for column in frame.columns)
-        for column in frame.columns:
-            column_name = str(column)
-            dtype_summary.setdefault(column_name, set()).add(str(frame[column].dtype))
-            null_summary[column_name] = null_summary.get(column_name, 0) + int(
-                frame[column].isna().sum()
-            )
-            _update_content_summary(content_summary, column_name, frame[column])
-        key_columns = _available_key_columns(frame)
-        if key_columns:
-            _update_key_value_paired_summary(
-                key_value_paired_summary,
-                frame,
-                key_columns=key_columns,
-            )
-            for _, key_hashes in _key_hash_blocks(frame, key_columns):
-                for key_hash in key_hashes:
-                    value = int(key_hash)
-                    if value in seen_key_hashes:
-                        duplicate_key_count += 1
-                    else:
-                        seen_key_hashes.add(value)
-            key_count = len(seen_key_hashes)
-        else:
-            key_count += int(len(frame))
-        date_column = _date_column(frame)
-        if date_column is not None:
-            dates = pd.to_datetime(frame[date_column], errors="coerce").dropna()
-            if not dates.empty:
-                file_min = dates.min()
-                file_max = dates.max()
-                min_date = file_min if min_date is None else min(min_date, file_min)
-                max_date = file_max if max_date is None else max(max_date, file_max)
+    exact_key_columns: tuple[str, ...] | None = None
+    exact_key_policy: RuntimeResourcePolicy | None = None
+    with ExitStack() as stack:
+        key_index: ExactPrimaryKeyIndex | None = None
+        for frame in frames:
+            row_count += int(len(frame))
+            columns.update(str(column) for column in frame.columns)
+            for column in frame.columns:
+                column_name = str(column)
+                dtype_summary.setdefault(column_name, set()).add(
+                    str(frame[column].dtype)
+                )
+                null_summary[column_name] = null_summary.get(column_name, 0) + int(
+                    frame[column].isna().sum()
+                )
+                _update_content_summary(content_summary, column_name, frame[column])
+            key_columns = tuple(_available_key_columns(frame))
+            if key_columns:
+                if exact_key_columns is None:
+                    exact_key_columns = key_columns
+                    exact_key_policy = (
+                        resource_policy or active_runtime_resource_policy()
+                    )
+                    require_free_disk_headroom(
+                        exact_key_policy,
+                        scratch_parent,
+                        reserve_bytes=exact_key_policy.effective_chunk_bytes * 2,
+                    )
+                    key_index = stack.enter_context(
+                        ExactPrimaryKeyIndex(
+                            primary_key=key_columns,
+                            timestamp_columns=tuple(
+                                column
+                                for column in key_columns
+                                if column == "timestamp"
+                            ),
+                            scratch_parent=scratch_parent,
+                        )
+                    )
+                elif key_columns != exact_key_columns:
+                    raise ValueError("aggregate_key_columns_mismatch")
+                assert key_index is not None
+                _update_key_value_paired_summary(
+                    key_value_paired_summary,
+                    frame,
+                    key_columns=list(key_columns),
+                )
+                key_frame = frame.loc[:, list(key_columns)]
+                key_bytes = int(
+                    key_frame.memory_usage(index=True, deep=True).sum()
+                )
+                assert exact_key_policy is not None
+                require_free_disk_headroom(
+                    exact_key_policy,
+                    scratch_parent,
+                    reserve_bytes=(
+                        exact_key_policy.effective_chunk_bytes + 4 * key_bytes
+                    ),
+                )
+                duplicate_key_count += key_index.add_frame(
+                    key_frame,
+                    namespace="aggregate",
+                )
+                keyed_row_count += int(len(frame))
+            else:
+                unkeyed_row_count += int(len(frame))
+            date_column = _date_column(frame)
+            if date_column is not None:
+                dates = pd.to_datetime(frame[date_column], errors="coerce").dropna()
+                if not dates.empty:
+                    file_min = dates.min()
+                    file_max = dates.max()
+                    min_date = file_min if min_date is None else min(min_date, file_min)
+                    max_date = file_max if max_date is None else max(max_date, file_max)
     normalized_dtypes = {
         column: tuple(sorted(values))
         for column, values in sorted(dtype_summary.items())
@@ -906,7 +969,7 @@ def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:
     }
     return AggregateSummary(
         row_count=row_count,
-        key_count=key_count,
+        key_count=keyed_row_count - duplicate_key_count + unkeyed_row_count,
         column_count=len(columns),
         duplicate_key_count=duplicate_key_count,
         period=_format_period(min_date, max_date),
