@@ -103,15 +103,12 @@ def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
         result = writer(temp_root)
         reject_if_exists(final_root)
         _rename_with_transient_permission_retry(temp_root, final_root)
-        try:
-            target_marker.unlink()
-        except FileNotFoundError:
-            pass
+        _remove_atomic_target_marker(target_marker)
     except Exception:
         if claimed_temp:
             _remove_path(temp_root)
         if claimed_marker:
-            target_marker.unlink(missing_ok=True)
+            _remove_atomic_target_marker(target_marker)
         raise
     return result
 
@@ -138,7 +135,7 @@ def _cleanup_stale_atomic_directories(
         elif any(temp_root.iterdir()):
             continue
         _remove_path(temp_root)
-        target_marker.unlink(missing_ok=True)
+        _remove_atomic_target_marker(target_marker)
     for target_marker in final_root.parent.glob(f"{prefix}*.target"):
         temp_root = Path(str(target_marker)[: -len(".target")])
         if temp_root.exists():
@@ -148,7 +145,7 @@ def _cleanup_stale_atomic_directories(
         except (OSError, UnicodeError):
             continue
         if observed_identity == target_identity:
-            target_marker.unlink(missing_ok=True)
+            _remove_atomic_target_marker(target_marker)
 
 
 def _atomic_directory_scratch_prefix(final_root: Path) -> str:
@@ -164,6 +161,13 @@ def _atomic_target_identity(final_root: Path) -> str:
 
 def _atomic_target_marker(temp_root: Path) -> Path:
     return Path(f"{temp_root}.target")
+
+
+def _remove_atomic_target_marker(target_marker: Path) -> None:
+    try:
+        target_marker.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _temp_sibling(path: Path) -> Path:

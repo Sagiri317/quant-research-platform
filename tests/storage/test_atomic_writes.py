@@ -137,6 +137,28 @@ def test_atomic_directory_target_identity_normalizes_windows_case_aliases(
     ) == atomic._atomic_directory_scratch_prefix(lower)
 
 
+def test_atomic_directory_marker_cleanup_does_not_reverse_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_root = tmp_path / "bundle"
+    original_unlink = Path.unlink
+
+    def deny_marker_unlink(self: Path, *args, **kwargs):  # noqa: ANN001
+        if self.name.endswith(".target"):
+            raise PermissionError(5, "Access is denied")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_marker_unlink)
+
+    atomic_write_directory(
+        final_root,
+        lambda root: (root / "done.txt").write_text("ok\n", encoding="utf-8"),
+    )
+
+    assert (final_root / "done.txt").read_text(encoding="utf-8") == "ok\n"
+
+
 def test_atomic_write_text_creates_nested_temp_parent(tmp_path: Path) -> None:
     final_path = tmp_path / "root" / "year=2014" / "part.txt"
 
