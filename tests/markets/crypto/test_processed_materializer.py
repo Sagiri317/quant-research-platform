@@ -917,7 +917,8 @@ def _matching_panel_frames() -> dict[str, pd.DataFrame]:
         {
             "source_asset_id": ["BTCUSDT"],
             "timestamp": pd.to_datetime(["2026-07-06 00:00:00"]),
-            "close_time": pd.to_datetime(["2026-07-06 00:00:59"]),
+            "open_time": pd.to_datetime(["2026-07-06 00:00:00"]),
+            "close_time": pd.to_datetime(["2026-07-06 00:00:59.999"]),
             "open": [100.0],
             "high": [101.0],
             "low": [99.0],
@@ -927,6 +928,8 @@ def _matching_panel_frames() -> dict[str, pd.DataFrame]:
             "trade_count": [1],
             "taker_buy_volume": [4.0],
             "taker_buy_quote_volume": [402.0],
+            "source_market_type": ["spot"],
+            "interval": ["1m"],
         }
     )
     trades = pd.DataFrame(
@@ -934,6 +937,7 @@ def _matching_panel_frames() -> dict[str, pd.DataFrame]:
             "source_asset_id": ["BTCUSDT"],
             "timestamp": pd.to_datetime(["2026-07-06 00:00:01"]),
             "signed_quantity": [2.0],
+            "source_market_type": ["spot"],
         }
     )
     depth = pd.DataFrame(
@@ -946,6 +950,7 @@ def _matching_panel_frames() -> dict[str, pd.DataFrame]:
             "level": [1, 1],
             "price": [100.0, 100.2],
             "quantity": [1.5, 1.0],
+            "source_market_type": ["spot", "spot"],
         }
     )
     return {"bars": bars, "trades": trades, "depth": depth}
@@ -990,7 +995,7 @@ def _write_synthetic_crypto_interim(layout: StorageLayout, source_id: SourceId) 
                 "source_asset_id": ["BTCUSDT"],
                 "timestamp": pd.to_datetime(["2026-07-06 00:00:00"]),
                 "open_time": pd.to_datetime(["2026-07-06 00:00:00"]),
-                "close_time": pd.to_datetime(["2026-07-06 00:00:59"]),
+                "close_time": pd.to_datetime(["2026-07-06 00:00:59.999"]),
                 "open": [100.0],
                 "high": [101.0],
                 "low": [99.0],

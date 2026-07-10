@@ -29,18 +29,24 @@ def compute_market_panel(
     if not isinstance(max_quote_age, pd.Timedelta) or max_quote_age < pd.Timedelta(0):
         raise ValueError("invalid_crypto_max_quote_age")
     panel = bars.copy().reset_index(drop=True)
-    panel["market_id"] = str(MARKET_ID)
-    panel["asset_id"] = _crypto_asset_id_series(panel["source_asset_id"])
     panel["timestamp"] = _strict_timestamp_column(
         panel,
         "timestamp",
         error="invalid_crypto_panel_timestamp",
+    )
+    panel["open_time"] = _strict_timestamp_column(
+        panel,
+        "open_time",
+        error="invalid_crypto_bar_open_time",
     )
     panel["close_time"] = _strict_timestamp_column(
         panel,
         "close_time",
         error="invalid_crypto_panel_close_time",
     )
+    _validate_one_minute_bar_contract(panel)
+    panel["market_id"] = str(MARKET_ID)
+    panel["asset_id"] = _crypto_asset_id_series(panel["source_asset_id"])
     open_price = _required_numeric(panel, "open", error="invalid_crypto_ohlc")
     high_price = _required_numeric(panel, "high", error="invalid_crypto_ohlc")
     low_price = _required_numeric(panel, "low", error="invalid_crypto_ohlc")
@@ -135,6 +141,10 @@ def _signed_trade_volume(trades: pd.DataFrame) -> pd.DataFrame:
     if trades.empty:
         return pd.DataFrame(columns=columns)
     frame = trades.copy()
+    _validate_spot_source_market_type(
+        frame,
+        error="invalid_crypto_trade_source_market_type",
+    )
     frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
     frame["timestamp"] = _strict_timestamp_column(
         frame,
@@ -213,12 +223,16 @@ def _asof_quotes(
 def _quote_snapshots(depth: pd.DataFrame) -> pd.DataFrame:
     frame = depth.copy()
     frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
-    _validate_depth_contract(frame)
+    _validate_spot_source_market_type(
+        frame,
+        error="invalid_crypto_depth_source_market_type",
+    )
     frame["quote_timestamp"] = _strict_timestamp_column(
         frame,
         "timestamp",
         error="invalid_crypto_depth_timestamp",
     )
+    _validate_depth_contract(frame)
     frame["price"] = _required_numeric(
         frame,
         "price",
@@ -318,7 +332,8 @@ def _validate_depth_contract(frame: pd.DataFrame) -> None:
         or frame["level"].map(lambda value: isinstance(value, bool)).any()
     ):
         raise ValueError("invalid_crypto_depth_level")
-    if frame.duplicated(["asset_id", "timestamp", "side", "level"]).any():
+    frame["level"] = levels.astype("int64")
+    if frame.duplicated(["asset_id", "quote_timestamp", "side", "level"]).any():
         raise ValueError("duplicate_crypto_depth_level")
     prices = _required_numeric(frame, "price", error="invalid_crypto_depth_price")
     quantities = _required_numeric(
@@ -330,6 +345,65 @@ def _validate_depth_contract(frame: pd.DataFrame) -> None:
         raise ValueError("invalid_crypto_depth_price")
     if quantities.lt(0.0).any():
         raise ValueError("invalid_crypto_depth_quantity")
+    frame["price"] = prices
+    frame["quantity"] = quantities
+    for (*_snapshot_key, side), group in frame.groupby(
+        ["asset_id", "quote_timestamp", "side"],
+        sort=False,
+        dropna=False,
+    ):
+        ordered = group.sort_values("level", kind="mergesort")
+        if ordered["level"].tolist() != list(range(1, len(ordered) + 1)):
+            raise ValueError("invalid_crypto_depth_level_sequence")
+        price_changes = ordered["price"].diff().dropna()
+        if side == "bid" and not bool(price_changes.lt(0.0).all()):
+            raise ValueError("invalid_crypto_bid_price_order")
+        if side == "ask" and not bool(price_changes.gt(0.0).all()):
+            raise ValueError("invalid_crypto_ask_price_order")
+
+
+def _validate_one_minute_bar_contract(frame: pd.DataFrame) -> None:
+    timestamps = frame["timestamp"]
+    if (
+        not bool(timestamps.eq(frame["open_time"]).all())
+        or not bool(timestamps.eq(timestamps.dt.floor("min")).all())
+    ):
+        raise ValueError("invalid_crypto_bar_open_time")
+    expected_close = timestamps + pd.Timedelta(milliseconds=59_999)
+    if not bool(frame["close_time"].eq(expected_close).all()):
+        raise ValueError("invalid_crypto_bar_close_time")
+    _validate_exact_string_column(
+        frame,
+        column="interval",
+        expected="1m",
+        error="invalid_crypto_bar_interval",
+    )
+    _validate_spot_source_market_type(
+        frame,
+        error="invalid_crypto_bar_source_market_type",
+    )
+
+
+def _validate_spot_source_market_type(frame: pd.DataFrame, *, error: str) -> None:
+    _validate_exact_string_column(
+        frame,
+        column="source_market_type",
+        expected="spot",
+        error=error,
+    )
+
+
+def _validate_exact_string_column(
+    frame: pd.DataFrame,
+    *,
+    column: str,
+    expected: str,
+    error: str,
+) -> None:
+    if column not in frame or not frame[column].map(
+        lambda value: isinstance(value, str) and value == expected
+    ).all():
+        raise ValueError(error)
 
 
 def _stabilize_panel_schema(frame: pd.DataFrame) -> pd.DataFrame:

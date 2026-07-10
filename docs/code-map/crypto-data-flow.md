@@ -42,6 +42,10 @@ microstructure_forward_returns
 
 `market_panel_1m` joins minute bars with aggregate trade flow and order-book snapshots. `asset_id` is the canonical crypto asset id; source-local asset identifiers stay in Binance interim data and do not enter processed or research schemas.
 
+Before any trade aggregation or quote as-of matching, the crypto market owner validates the normalized bar contract: `timestamp == open_time`, `timestamp` is minute-aligned, `close_time == timestamp + 59_999ms`, `interval == "1m"`, and `source_market_type == "spot"`. Non-empty bars, aggregate trades, and depth inputs must all carry the current crypto spot `source_market_type`; synthetic normalized sources pass through the same gate and are not assumed to have Binance raw provenance. An invalid bar close cannot extend matching into a later minute.
+
+For every `(asset_id, timestamp, side)` depth snapshot, `level` starts at 1 and is contiguous. Bid prices strictly decrease with level and ask prices strictly increase. Duplicate levels, non-positive prices, negative quantities, and malformed sides fail closed. One-sided snapshots and zero-quantity levels remain structurally valid; quote observation still requires a valid two-sided, positive-size, uncrossed best quote.
+
 Trade-flow and quote observation diagnostics are explicit context columns:
 
 ```text

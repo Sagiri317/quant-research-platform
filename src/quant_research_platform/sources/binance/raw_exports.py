@@ -7,6 +7,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from quant_research_platform.sources.binance.validation import (
     depth_side_levels,
     first_present,
@@ -141,8 +143,12 @@ def _validate_kline_payload(payload: list[object]) -> None:
         payload[6],
         error="invalid_binance_kline_close_time",
     )
+    if open_time != open_time.floor("min"):
+        raise ValueError("invalid_binance_kline_open_time_alignment")
     if close_time < open_time:
         raise ValueError("invalid_binance_kline_time_order")
+    if close_time != open_time + pd.Timedelta(milliseconds=59_999):
+        raise ValueError("invalid_binance_kline_close_time")
     open_price = strict_positive_float(payload[1], error="invalid_binance_kline_ohlc")
     high = strict_positive_float(payload[2], error="invalid_binance_kline_ohlc")
     low = strict_positive_float(payload[3], error="invalid_binance_kline_ohlc")
@@ -168,6 +174,10 @@ def _validate_kline_payload(payload: list[object]) -> None:
 
 
 def _validate_agg_trade_payload(payload: dict[str, Any]) -> None:
+    strict_millisecond_timestamp(
+        payload.get("timestamp", payload.get("T")),
+        error="invalid_binance_agg_trade_timestamp",
+    )
     strict_positive_float(
         first_present(payload, "price", "p"),
         error="invalid_binance_agg_trade_price",

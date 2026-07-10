@@ -36,11 +36,13 @@ Strict scalar rules:
 - numeric/integer 字段拒绝 `bool`、`NaN`、`inf`、`-inf` 和 nonnumeric values。
 - integer 字段拒绝 fractional numeric values。
 - boolean 字段只接受 JSON boolean，不接受字符串或 numeric alias。
-- `captured_at`、kline `open_time` 和 kline `close_time` 使用 shared Binance strict timestamp validators。`captured_at` 必须是带 UTC offset 的 ISO timestamp；kline 时间必须是 millisecond timestamp。
+- `captured_at`、kline `open_time`、kline `close_time` 和 aggregate trade `timestamp` / `T` 使用 shared Binance strict timestamp validators。`captured_at` 必须是带 UTC offset 的 ISO timestamp；market payload 时间必须是 non-negative millisecond timestamp。
+- `1m` kline 的 `open_time` 必须整分钟对齐，`close_time` 必须严格等于 `open_time + 59_999ms`。名义 `1m` 但时间窗口不闭合的 payload 在 raw owner fail closed。
+- aggregate trade `timestamp` / `T` 在 raw owner 校验，不把非法时间延迟到 interim normalization。
 
 `klines` 的 `payload` 是 connector 返回的 kline array，允许 connector 追加额外字段；当前语义校验只读取已批准字段。`agg_trades` 和 `depth` 的 `payload` 是 connector 返回的 object。裸 payload、非 envelope JSON、非 JSONL 文件和 unsupported data kind 都不是当前合同。
 
-Raw envelope structure 不因语义校验而改变。当前 raw validation 会检查 kline OHLC、volume、trade count、aggregate trade price/quantity/id range，以及 depth price/quantity。Kline semantic validation 还要求 `taker_buy_volume <= volume`、`taker_buy_quote_volume <= quote_volume`，numeric payload 拒绝 `NaN`、`inf`、`-inf` 和 nonnumeric values。双边 best bid/ask 同时存在时必须满足 bid < ask；one-sided depth payload 可保留为 raw valid，后续 panel 层用 quote observation diagnostics 表达不可用 quote。
+Raw envelope structure 不因语义校验而改变。当前 raw validation 会检查 kline 时间窗口、OHLC、volume、trade count、aggregate trade timestamp/price/quantity/id range，以及 depth price/quantity。Kline semantic validation 还要求 `taker_buy_volume <= volume`、`taker_buy_quote_volume <= quote_volume`，numeric payload 拒绝 `NaN`、`inf`、`-inf` 和 nonnumeric values。双边 best bid/ask 同时存在时必须满足 bid < ask；one-sided depth payload 可保留为 raw valid，后续 panel 层用 quote observation diagnostics 表达不可用 quote。
 
 Depth normalization 在 raw 和 interim 路径复用同一个 owner helper。`bids` 必须按 price 严格递减排列，`asks` 必须按 price 严格递增排列，每个 raw level 必须恰好是 `[price, quantity]`，level 1 表示校验后的 best bid 或 best ask。同一 asset、timestamp、side 下的 duplicate depth level 在 market-panel gate 中 fail closed。
 

@@ -320,6 +320,49 @@ def test_binance_raw_exports_rejects_kline_close_time_before_open_time(
         tuple(iter_raw_envelopes(path))
 
 
+def test_binance_raw_exports_rejects_non_minute_aligned_kline_open_time(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "misaligned-open-time.jsonl"
+    envelope = _envelope(data_kind="klines")
+    payload = list(envelope["payload"])
+    payload[0] += 1
+    payload[6] = payload[0] + 59_999
+    envelope["payload"] = payload
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_kline_open_time_alignment"):
+        tuple(iter_raw_envelopes(path))
+
+
+def test_binance_raw_exports_rejects_wrong_one_minute_kline_close_time(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "wrong-close-time.jsonl"
+    envelope = _envelope(data_kind="klines")
+    payload = list(envelope["payload"])
+    payload[6] = payload[0] + 60_000
+    envelope["payload"] = payload
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_kline_close_time"):
+        tuple(iter_raw_envelopes(path))
+
+
+@pytest.mark.parametrize("bad_timestamp", [None, True, 1783296001000.5, "bad"])
+def test_binance_raw_exports_rejects_invalid_aggregate_trade_timestamp(
+    tmp_path: Path,
+    bad_timestamp: object,
+) -> None:
+    path = tmp_path / "bad-aggregate-trade-time.jsonl"
+    envelope = _envelope(data_kind="agg_trades")
+    envelope["payload"] = {**envelope["payload"], "T": bad_timestamp}
+    _write_jsonl(path, envelope)
+
+    with pytest.raises(ValueError, match="invalid_binance_agg_trade_timestamp"):
+        tuple(iter_raw_envelopes(path))
+
+
 def test_binance_raw_exports_rejects_non_bool_aggregate_trade_side(
     tmp_path: Path,
 ) -> None:
