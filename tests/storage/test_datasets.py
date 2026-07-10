@@ -505,6 +505,32 @@ def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
     ) == 1
 
 
+def test_variable_width_probe_adapts_above_probe_size_for_small_values(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dictionary-small-strings.parquet"
+    pq.write_table(
+        pa.table({"value": ["x" * 128] * 20_000}),
+        path,
+        compression="zstd",
+        use_dictionary=True,
+    )
+    target_chunk_bytes = 4 * 1024**2
+    maximum_rows = max(
+        batch.num_rows
+        for batch in dataset_reading._iter_filtered_arrow_batches(
+            path,
+            columns=("value",),
+            parquet_filters=None,
+            batch_size=1,
+            target_chunk_bytes=target_chunk_bytes,
+            probe_variable_width=True,
+        )
+    )
+
+    assert maximum_rows > dataset_reading._PANDAS_PROBE_ROWS
+
+
 def test_inspect_and_fingerprint_reuse_physical_batch_reader() -> None:
     inspection_source = Path(
         importlib.import_module(

@@ -9,7 +9,7 @@ from typing import Any
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.dataset as pads
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.time import (
@@ -154,6 +154,11 @@ def build_dataset_read_context(
         if operator != "==":
             raise ValueError("unsupported_dataset_physical_filter")
         physical_filters.append((column, operator, value))
+    physical_columns = tuple(
+        dict.fromkeys(
+            (*physical_columns, *(column for column, _, _ in physical_filters))
+        )
+    )
     return DatasetReadContext(
         root=root,
         data_root=data_root,
@@ -309,22 +314,20 @@ def _iter_filtered_arrow_batches(
     target_chunk_bytes: int,
     probe_variable_width: bool,
 ) -> Iterator[pa.RecordBatch]:
-    dataset = pads.dataset(path, format="parquet")
-    expression = _dataset_filter_expression(parquet_filters)
     if not probe_variable_width:
-        yield from _scanner_batches(
-            dataset,
+        yield from _physical_arrow_batches(
+            path,
             columns=columns,
-            expression=expression,
+            parquet_filters=parquet_filters,
             batch_size=batch_size,
         )
         return
 
     probe = iter(
-        _scanner_batches(
-            dataset,
+        _physical_arrow_batches(
+            path,
             columns=columns,
-            expression=expression,
+            parquet_filters=parquet_filters,
             batch_size=1,
         )
     )
@@ -342,57 +345,110 @@ def _iter_filtered_arrow_batches(
     measured_row_bytes = max(1, first.nbytes, pandas_bytes)
     adaptive_rows = max(
         1,
-        min(
-            _PANDAS_PROBE_ROWS,
-            arrow_budget // measured_row_bytes,
-        ),
+        arrow_budget // measured_row_bytes,
     )
     del probe_frame, first, probe
-    yield from _scanner_batches(
-        dataset,
+    yield from _physical_arrow_batches(
+        path,
         columns=columns,
-        expression=expression,
+        parquet_filters=parquet_filters,
         batch_size=adaptive_rows,
     )
 
 
-def _scanner_batches(
-    dataset: pads.Dataset,
+def _physical_arrow_batches(
+    path: Path,
     *,
     columns: tuple[str, ...],
-    expression: pads.Expression | None,
+    parquet_filters: list[tuple[str, str, Any]] | None,
     batch_size: int,
 ) -> Iterator[pa.RecordBatch]:
-    scanner = dataset.scanner(
-        columns=list(columns),
-        filter=expression,
-        batch_size=batch_size,
-        batch_readahead=0,
-        fragment_readahead=1,
-        use_threads=False,
-    )
-    for batch in scanner.to_batches():
-        if batch.num_rows:
-            yield batch
+    parquet_file = pq.ParquetFile(path)
+    try:
+        row_groups = _matching_row_groups(parquet_file, parquet_filters)
+        for batch in parquet_file.iter_batches(
+            batch_size=batch_size,
+            row_groups=row_groups,
+            columns=list(columns),
+            use_threads=False,
+        ):
+            filtered = _filter_arrow_batch(batch, parquet_filters)
+            if filtered.num_rows:
+                yield filtered
+    finally:
+        parquet_file.close()
 
 
-def _dataset_filter_expression(
+def _matching_row_groups(
+    parquet_file: pq.ParquetFile,
     filters: list[tuple[str, str, Any]] | None,
-) -> pads.Expression | None:
-    expression: pads.Expression | None = None
+) -> list[int]:
+    indexes = list(range(parquet_file.metadata.num_row_groups))
+    if not filters:
+        return indexes
+    positions = {
+        name: index for index, name in enumerate(parquet_file.schema_arrow.names)
+    }
+    matching: list[int] = []
+    for row_group_index in indexes:
+        row_group = parquet_file.metadata.row_group(row_group_index)
+        if all(
+            _row_group_may_match(
+                row_group.column(positions[column]).statistics,
+                operator=operator,
+                value=value,
+            )
+            for column, operator, value in filters
+        ):
+            matching.append(row_group_index)
+    return matching
+
+
+def _row_group_may_match(
+    statistics: Any,
+    *,
+    operator: str,
+    value: Any,
+) -> bool:
+    if statistics is None or not statistics.has_min_max:
+        return True
+    minimum = statistics.min
+    maximum = statistics.max
+    try:
+        if operator == ">=":
+            return maximum >= value
+        if operator == ">":
+            return maximum > value
+        if operator == "<=":
+            return minimum <= value
+        if operator == "<":
+            return minimum < value
+        if operator == "==":
+            return minimum <= value <= maximum
+    except (TypeError, ValueError):
+        return True
+    raise ValueError("unsupported_dataset_physical_filter")
+
+
+def _filter_arrow_batch(
+    batch: pa.RecordBatch,
+    filters: list[tuple[str, str, Any]] | None,
+) -> pa.RecordBatch:
+    mask: pa.Array | None = None
+    operations = {
+        ">=": pc.greater_equal,
+        ">": pc.greater,
+        "<=": pc.less_equal,
+        "<": pc.less,
+        "==": pc.equal,
+    }
     for column, operator, value in filters or ():
-        field = pads.field(column)
-        condition = {
-            ">=": field >= value,
-            ">": field > value,
-            "<=": field <= value,
-            "<": field < value,
-            "==": field == value,
-        }.get(operator)
-        if condition is None:
+        operation = operations.get(operator)
+        if operation is None:
             raise ValueError("unsupported_dataset_physical_filter")
-        expression = condition if expression is None else expression & condition
-    return expression
+        condition = operation(batch.column(batch.schema.get_field_index(column)), value)
+        mask = condition if mask is None else pc.and_kleene(mask, condition)
+    return batch if mask is None else batch.filter(mask)
 
 
 def _empty_frame(
