@@ -27,6 +27,7 @@ class ExactPrimaryKeyIndex:
         timestamp_columns: Sequence[str],
         scratch_parent: Path,
         key_schema: pa.Schema | None = None,
+        sqlite_cache_bytes: int = 8 * 1024,
     ) -> None:
         self._primary_key = tuple(str(column) for column in primary_key)
         self._timestamp_columns = frozenset(
@@ -34,6 +35,13 @@ class ExactPrimaryKeyIndex:
         )
         self._scratch_parent = Path(scratch_parent)
         self._key_schema = key_schema
+        if (
+            isinstance(sqlite_cache_bytes, bool)
+            or not isinstance(sqlite_cache_bytes, int)
+            or sqlite_cache_bytes <= 0
+        ):
+            raise ValueError("invalid_exact_key_sqlite_cache_budget")
+        self._sqlite_cache_kib = max(1, sqlite_cache_bytes // 1024)
         self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
         self._connection: sqlite3.Connection | None = None
 
@@ -60,7 +68,7 @@ class ExactPrimaryKeyIndex:
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA temp_store=FILE")
-            connection.execute("PRAGMA cache_size=-2048")
+            connection.execute(f"PRAGMA cache_size=-{self._sqlite_cache_kib}")
             connection.execute(
                 "CREATE TABLE exact_keys ("
                 "namespace TEXT NOT NULL, "
@@ -147,7 +155,11 @@ class ExactPrimaryKeyIndex:
         with connection:
             connection.executemany(
                 "INSERT OR IGNORE INTO exact_keys(namespace, payload) VALUES (?, ?)",
-                self._payload_rows(keys, namespace=namespace),
+                self._payload_rows(
+                    keys,
+                    pandas_keys,
+                    namespace=namespace,
+                ),
             )
         inserted = connection.total_changes - before
         return int(len(keys) - inserted)
@@ -181,11 +193,11 @@ class ExactPrimaryKeyIndex:
     def _payload_rows(
         self,
         keys: pa.Table,
+        pandas_keys: pd.DataFrame,
         *,
         namespace: str,
     ) -> Iterator[tuple[str, bytes]]:
         fields = tuple(keys.schema.field(column) for column in self._primary_key)
-        pandas_keys = keys.to_pandas(use_threads=False)
         for row in pandas_keys.itertuples(index=False, name=None):
             payload = b"".join(
                 _canonical_arrow_scalar_payload(value, field.type)

@@ -66,6 +66,10 @@ class MaterializationBudget:
     def carry_bytes(self) -> int:
         return self.allocations["carry_or_label_buffer"]
 
+    @property
+    def sqlite_cache_bytes(self) -> int:
+        return self.allocations["sqlite_cache"]
+
     def require_observed(self, **component_bytes: int) -> None:
         if any(
             isinstance(value, bool) or not isinstance(value, int) or value < 0

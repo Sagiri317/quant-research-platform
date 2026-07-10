@@ -167,6 +167,11 @@ def _materialize_one(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
+    require_free_disk_headroom(
+        resource_policy,
+        layout.project_root,
+        reserve_bytes=resource_policy.effective_chunk_bytes * 2,
+    )
     if spec.kind is ProcessedDataKind.PANEL:
         return materialize_panel.write_panel(
             spec,

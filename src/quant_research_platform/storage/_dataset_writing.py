@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -264,9 +265,12 @@ def _staged_write_directory(
     backup_root = final_root.with_name(f".replace-{uuid4().hex[:12]}")
     try:
         temp_root.mkdir()
+        owner_marker = temp_root / ".owner.pid"
+        owner_marker.write_text(str(os.getpid()), encoding="ascii")
         writer(temp_root)
         if final_root.exists():
             raise ValueError("dataset_exists")
+        owner_marker.unlink()
         temp_root.rename(final_root)
     except Exception:
         _remove_tree(temp_root)
@@ -286,8 +290,31 @@ def _cleanup_stale_staged_scratch(final_root: Path) -> None:
     for staged_root in final_root.parent.glob(f".{final_root.name}.tmp-*"):
         if not staged_root.is_dir():
             continue
+        if _staged_owner_is_alive(staged_root):
+            continue
         for scratch in staged_root.glob(".k-*"):
             _remove_tree(scratch)
+
+
+def _staged_owner_is_alive(staged_root: Path) -> bool:
+    marker = staged_root / ".owner.pid"
+    try:
+        owner_pid = int(marker.read_text(encoding="ascii"))
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return False
+    if owner_pid <= 0:
+        return False
+    if owner_pid == os.getpid():
+        return True
+    try:
+        os.kill(owner_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _write_contents(

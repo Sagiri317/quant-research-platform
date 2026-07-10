@@ -210,6 +210,9 @@ def validate_exact_dependency_key_coverage(
     if not primary_key:
         raise ValueError(error)
     chunk_target_bytes = materialization_chunk_target_bytes(resource_policy)
+    budget = materialization_resources.MaterializationBudget.from_policy(
+        resource_policy
+    )
     timestamp_columns = tuple(
         column for column in primary_key if column == "timestamp"
     )
@@ -218,6 +221,7 @@ def validate_exact_dependency_key_coverage(
         timestamp_columns=timestamp_columns,
         scratch_parent=scratch_parent,
         key_schema=key_schema,
+        sqlite_cache_bytes=budget.sqlite_cache_bytes,
     ) as index:
         for namespace, frames in (("expected", expected), ("actual", actual)):
             for frame in frames:

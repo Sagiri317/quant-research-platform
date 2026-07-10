@@ -4,6 +4,7 @@ import importlib
 import importlib.util
 import json
 import math
+import os
 from datetime import date, datetime
 from decimal import Decimal
 from inspect import signature
@@ -637,6 +638,43 @@ def test_dataset_write_recovers_stale_key_scratch_without_publishing_it(
     assert not stale_scratch.exists()
     assert not list(root.rglob("*.sqlite3"))
     assert not list(root.rglob("*.sqlite3-*"))
+
+
+def test_dataset_write_does_not_remove_live_concurrent_key_scratch(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "live_key_scratch")
+    live_stage = root.parent / ".live_key_scratch.tmp-concurrent"
+    live_scratch = live_stage / ".k-concurrent"
+    live_scratch.mkdir(parents=True)
+    (live_stage / ".owner.pid").write_text(str(os.getpid()), encoding="ascii")
+    (live_scratch / "k.sqlite3").write_bytes(b"live")
+
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("live_key_scratch"),
+    )
+
+    assert live_scratch.is_dir()
+
+
+def test_exact_key_index_honors_configured_sqlite_cache_budget(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+    with module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+        sqlite_cache_bytes=12 * 1024,
+    ) as index:
+        assert index._connection is not None
+        cache_size = int(index._connection.execute("PRAGMA cache_size").fetchone()[0])
+
+    assert cache_size == -12
 
 
 def test_dataset_writer_does_not_retain_row_proportional_python_key_state() -> None:

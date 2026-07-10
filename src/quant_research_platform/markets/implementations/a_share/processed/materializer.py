@@ -139,6 +139,11 @@ def _materialize_one(
         panel_key_coverages=panel_key_coverages,
         materialize_one=_materialize_one,
     )
+    require_free_disk_headroom(
+        policy,
+        layout.project_root,
+        reserve_bytes=policy.effective_chunk_bytes * 2,
+    )
     if spec.kind is ProcessedDataKind.PANEL:
         return materialize_panel.write_panel(
             spec,

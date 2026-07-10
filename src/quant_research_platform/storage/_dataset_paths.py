@@ -215,13 +215,18 @@ def candidate_data_files(
         _require_only_expected_parquet_paths(root, unpartitioned)
         return unpartitioned
     year_directories: list[tuple[int, Path]] = []
+    observed_years: set[int] = set()
     for path in root.glob("year=*"):
         if not path.is_dir():
             continue
         value = path.name.removeprefix("year=")
         if not value.isdigit():
             raise ValueError("invalid_dataset_part_files")
-        year_directories.append((int(value), path))
+        year = int(value)
+        if year in observed_years:
+            raise ValueError("invalid_dataset_part_files")
+        observed_years.add(year)
+        year_directories.append((year, path))
     paths: list[Path] = []
     for _, directory in sorted(year_directories):
         paths.extend(_validated_part_paths(directory))
@@ -254,6 +259,12 @@ def _require_only_expected_parquet_paths(
     data_root: Path,
     expected: list[Path],
 ) -> None:
+    resolved_root = Path(data_root).resolve()
+    if any(
+        not path.resolve().is_relative_to(resolved_root)
+        for path in expected
+    ):
+        raise ValueError("invalid_dataset_part_files")
     observed = {
         path.resolve()
         for path in Path(data_root).rglob("*.parquet")

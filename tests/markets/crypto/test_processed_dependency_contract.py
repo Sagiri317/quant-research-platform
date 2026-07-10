@@ -12,6 +12,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_validation,
     materialize_factors,
     materialize_labels,
+    materialize_panel,
     materializer,
 )
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
@@ -410,6 +411,36 @@ def test_crypto_materialization_checks_disk_before_staged_write(
             data_ids=("market_panel_1m",),
             resource_policy=policy,
         )
+
+
+def test_crypto_rechecks_disk_before_each_materialization_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
+    observed: list[Path] = []
+    inspection = _inspection("market_panel_1m")
+    monkeypatch.setattr(
+        materializer,
+        "require_free_disk_headroom",
+        lambda _policy, path, **_kwargs: observed.append(Path(path)),
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "write_panel",
+        lambda *_args, **_kwargs: inspection,
+    )
+
+    result = materializer._materialize_one(
+        processed_catalog().get("market_panel_1m"),
+        layout=StorageLayout(project_root=tmp_path),
+        source_id=SourceId("synthetic_crypto"),
+        time_window=TimeWindow("2026-07-06", "2026-07-06"),
+        resource_policy=policy,
+    )
+
+    assert result is inspection
+    assert observed == [tmp_path]
 
 
 def test_materialization_budget_allocations_close_under_effective_budget() -> None:

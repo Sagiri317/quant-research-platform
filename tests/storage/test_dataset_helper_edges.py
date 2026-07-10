@@ -17,6 +17,7 @@ from quant_research_platform.storage._dataset_manifest_validation import (
     validate_manifest_runtime_metadata_shape,
 )
 from quant_research_platform.storage._dataset_paths import (
+    _require_only_expected_parquet_paths,
     candidate_data_files,
     partition_frames,
     timestamp_column_from_spec_payload,
@@ -328,3 +329,31 @@ def test_candidate_data_files_rejects_invalid_or_ambiguous_parts(
             data_root,
             spec={"partition_columns": []},
         )
+
+
+def test_candidate_data_files_rejects_duplicate_numeric_years(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    for year_name in ("year=1", "year=01"):
+        year_root = data_root / year_name
+        year_root.mkdir(parents=True)
+        pq.write_table(pa.table({"value": [1]}), year_root / "part-000.parquet")
+
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        candidate_data_files(
+            data_root,
+            spec={"partition_columns": ["year"]},
+        )
+
+
+def test_candidate_data_files_rejects_resolved_path_outside_root(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    external = tmp_path / "external.parquet"
+    pq.write_table(pa.table({"value": [1]}), external)
+
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        _require_only_expected_parquet_paths(data_root, [external])
