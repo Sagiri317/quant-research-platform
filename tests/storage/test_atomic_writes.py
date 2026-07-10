@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -92,11 +93,48 @@ def test_atomic_write_directory_recovers_dead_owner_when_final_exists(
     stale = final_root.with_name(f"{scratch_prefix}deadbeef")
     stale.mkdir()
     (stale / "partial.bin").write_bytes(b"partial")
+    Path(f"{stale}.target").write_text(
+        atomic._atomic_target_identity(final_root),
+        encoding="utf-8",
+    )
 
     with pytest.raises(ValueError, match="output_already_exists"):
         atomic_write_directory(final_root, lambda _root: None)
 
     assert not stale.exists()
+
+
+def test_atomic_directory_recovery_does_not_cross_exact_target_identity(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "artifact-138970"
+    second = tmp_path / "artifact-147165"
+    first_prefix = atomic._atomic_directory_scratch_prefix(first)
+    second_prefix = atomic._atomic_directory_scratch_prefix(second)
+    assert first_prefix == second_prefix
+    second_scratch = second.with_name(f"{second_prefix}deadbeef")
+    second_scratch.mkdir()
+    (second_scratch / "partial.bin").write_bytes(b"partial")
+    Path(f"{second_scratch}.target").write_text(
+        os.path.normcase(str(second.resolve())),
+        encoding="utf-8",
+    )
+
+    atomic_write_directory(first, lambda root: (root / "done").write_text("ok"))
+
+    assert second_scratch.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows filesystem alias contract")
+def test_atomic_directory_target_identity_normalizes_windows_case_aliases(
+    tmp_path: Path,
+) -> None:
+    upper = tmp_path / "Bundle"
+    lower = tmp_path / "bundle"
+
+    assert atomic._atomic_directory_scratch_prefix(
+        upper
+    ) == atomic._atomic_directory_scratch_prefix(lower)
 
 
 def test_atomic_write_text_creates_nested_temp_parent(tmp_path: Path) -> None:

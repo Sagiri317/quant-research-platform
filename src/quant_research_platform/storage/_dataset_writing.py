@@ -66,6 +66,7 @@ class _WriteStats:
     schema_hash: str | None = None
     _schema: tuple[tuple[str, str], ...] | None = None
     _arrow_schema: pa.Schema | None = None
+    _ordered_categorical_domains: dict[str, pd.Index] = field(default_factory=dict)
 
     def update_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
         unregistered = sorted(set(frame.columns).difference(self.spec.column_roles))
@@ -95,12 +96,25 @@ class _WriteStats:
             ) as exc:
                 raise ValueError("dataset_schema_mismatch") from exc
         output = table.to_pandas(use_threads=False)
+        self._validate_ordered_categorical_domains(output)
         self.row_count += int(len(output))
         self._update_keys(output, table=table)
         self._update_dates(output)
         self._update_numeric_profiles(output)
         _raise_accumulated_failures(self)
         return output
+
+    def _validate_ordered_categorical_domains(self, frame: pd.DataFrame) -> None:
+        for column in frame.columns:
+            dtype = frame[column].dtype
+            if not isinstance(dtype, pd.CategoricalDtype) or not dtype.ordered:
+                continue
+            categories = frame[column].cat.categories
+            expected = self._ordered_categorical_domains.get(column)
+            if expected is None:
+                self._ordered_categorical_domains[column] = categories.copy()
+            elif not categories.equals(expected):
+                raise ValueError("dataset_ordered_categorical_mismatch")
 
     def record_file(self, path: Path, *, row_count: int) -> None:
         parquet_file = pq.ParquetFile(path)

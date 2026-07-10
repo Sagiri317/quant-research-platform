@@ -679,6 +679,33 @@ def test_materialized_read_unions_categorical_dictionaries_across_parts(
     )
 
 
+def test_writer_rejects_inconsistent_ordered_categorical_domains(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "ordered_categorical_parts")
+    first = make_default_dataset_frame().iloc[:1].copy()
+    second = make_default_dataset_frame().iloc[1:2].copy()
+    first["asset_id"] = pd.Categorical(
+        first["asset_id"],
+        categories=[first["asset_id"].iloc[0]],
+        ordered=True,
+    )
+    second["asset_id"] = pd.Categorical(
+        second["asset_id"],
+        categories=[second["asset_id"].iloc[0]],
+        ordered=True,
+    )
+
+    with pytest.raises(ValueError, match="dataset_ordered_categorical_mismatch"):
+        write_dataset(
+            root,
+            (first, second),
+            spec=make_processed_dataset_spec("ordered_categorical_parts"),
+        )
+
+    assert not root.exists()
+
+
 def test_inspect_and_fingerprint_reuse_physical_batch_reader() -> None:
     inspection_source = Path(
         importlib.import_module(

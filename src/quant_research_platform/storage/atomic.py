@@ -78,22 +78,40 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
 def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
     final_root = Path(root)
     final_root.parent.mkdir(parents=True, exist_ok=True)
+    target_identity = _atomic_target_identity(final_root)
     scratch_prefix = _atomic_directory_scratch_prefix(final_root)
-    _cleanup_stale_atomic_directories(final_root, prefix=scratch_prefix)
+    _cleanup_stale_atomic_directories(
+        final_root,
+        prefix=scratch_prefix,
+        target_identity=target_identity,
+    )
     reject_if_exists(final_root)
     temp_root = final_root.with_name(
         owned_scratch_name(scratch_prefix, uuid4().hex[:12])
     )
+    target_marker = _atomic_target_marker(temp_root)
     claimed_temp = False
+    claimed_marker = False
     try:
         temp_root.mkdir()
         claimed_temp = True
+        with target_marker.open("x", encoding="utf-8") as handle:
+            claimed_marker = True
+            handle.write(target_identity)
+            handle.flush()
+            os.fsync(handle.fileno())
         result = writer(temp_root)
         reject_if_exists(final_root)
         _rename_with_transient_permission_retry(temp_root, final_root)
+        try:
+            target_marker.unlink()
+        except FileNotFoundError:
+            pass
     except Exception:
         if claimed_temp:
             _remove_path(temp_root)
+        if claimed_marker:
+            target_marker.unlink(missing_ok=True)
         raise
     return result
 
@@ -102,18 +120,50 @@ def _cleanup_stale_atomic_directories(
     final_root: Path,
     *,
     prefix: str,
+    target_identity: str,
 ) -> None:
     for temp_root in final_root.parent.glob(f"{prefix}*"):
         if not temp_root.is_dir():
             continue
         if scratch_owner_is_alive(temp_root, prefix=prefix):
             continue
+        target_marker = _atomic_target_marker(temp_root)
+        if target_marker.is_file():
+            try:
+                observed_identity = target_marker.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            if observed_identity != target_identity:
+                continue
+        elif any(temp_root.iterdir()):
+            continue
         _remove_path(temp_root)
+        target_marker.unlink(missing_ok=True)
+    for target_marker in final_root.parent.glob(f"{prefix}*.target"):
+        temp_root = Path(str(target_marker)[: -len(".target")])
+        if temp_root.exists():
+            continue
+        try:
+            observed_identity = target_marker.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if observed_identity == target_identity:
+            target_marker.unlink(missing_ok=True)
 
 
 def _atomic_directory_scratch_prefix(final_root: Path) -> str:
-    target_digest = hashlib.sha256(final_root.name.encode("utf-8")).hexdigest()[:8]
+    target_digest = hashlib.sha256(
+        os.path.normcase(final_root.name).encode("utf-8")
+    ).hexdigest()[:8]
     return f".atomic-{target_digest}-"
+
+
+def _atomic_target_identity(final_root: Path) -> str:
+    return os.path.normcase(str(final_root.resolve(strict=False)))
+
+
+def _atomic_target_marker(temp_root: Path) -> Path:
+    return Path(f"{temp_root}.target")
 
 
 def _temp_sibling(path: Path) -> Path:
