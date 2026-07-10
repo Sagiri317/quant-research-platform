@@ -659,6 +659,12 @@ def test_dataset_write_does_not_remove_live_concurrent_key_scratch(
     assert live_scratch.is_dir()
 
 
+def test_staged_owner_liveness_check_never_signals_processes() -> None:
+    source = Path(dataset_writing.__file__).read_text(encoding="utf-8")
+
+    assert "os.kill" not in source
+
+
 def test_exact_key_index_honors_configured_sqlite_cache_budget(
     tmp_path: Path,
 ) -> None:

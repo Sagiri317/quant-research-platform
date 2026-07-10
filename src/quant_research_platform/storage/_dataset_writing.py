@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import numpy as np
 import pandas as pd
+import psutil
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -304,17 +305,7 @@ def _staged_owner_is_alive(staged_root: Path) -> bool:
         return False
     if owner_pid <= 0:
         return False
-    if owner_pid == os.getpid():
-        return True
-    try:
-        os.kill(owner_pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return psutil.pid_exists(owner_pid)
 
 
 def _write_contents(

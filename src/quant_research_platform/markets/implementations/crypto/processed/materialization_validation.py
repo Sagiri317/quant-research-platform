@@ -119,7 +119,11 @@ def validate_panel_materialization(
         source_id,
         source_ids.market_bars_source_data_id(spec),
     )
-    chunk_target_bytes = materialization_chunk_target_bytes(resource_policy)
+    chunk_target_bytes = (
+        materialization_resources.MaterializationBudget.from_policy(
+            resource_policy
+        ).physical_batch_bytes
+    )
     bar_context = build_dataset_read_context(
         bar_root,
         columns=("source_asset_id", "timestamp"),
@@ -169,7 +173,11 @@ def validate_panel_dependent_materialization(
         ProcessedDataKind.PANEL,
         MARKET_PANEL_DATA_ID,
     )
-    chunk_target_bytes = materialization_chunk_target_bytes(resource_policy)
+    chunk_target_bytes = (
+        materialization_resources.MaterializationBudget.from_policy(
+            resource_policy
+        ).physical_batch_bytes
+    )
     expected_context = build_dataset_read_context(
         panel_root,
         columns=spec.primary_key,
@@ -209,10 +217,10 @@ def validate_exact_dependency_key_coverage(
 ) -> None:
     if not primary_key:
         raise ValueError(error)
-    chunk_target_bytes = materialization_chunk_target_bytes(resource_policy)
     budget = materialization_resources.MaterializationBudget.from_policy(
         resource_policy
     )
+    chunk_target_bytes = budget.physical_batch_bytes
     timestamp_columns = tuple(
         column for column in primary_key if column == "timestamp"
     )
@@ -243,14 +251,6 @@ def validate_exact_dependency_key_coverage(
         )
         if missing_count or extra_count:
             raise ValueError(error)
-
-
-def materialization_chunk_target_bytes(
-    resource_policy: RuntimeResourcePolicy,
-) -> int:
-    return materialization_resources.MaterializationBudget.from_policy(
-        resource_policy
-    ).physical_batch_bytes
 
 
 def validated_ordered_dependency_chunk(
