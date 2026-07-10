@@ -12,6 +12,7 @@ _ALLOCATION_WEIGHTS = {
     "normalization_copy": 1,
     "core_window": 1,
     "carry_or_label_buffer": 1,
+    "dependency_key_index": 1,
     "reducer_state": 1,
     "output_rows": 1,
     "output_frame": 1,
@@ -65,6 +66,10 @@ class MaterializationBudget:
     @property
     def carry_bytes(self) -> int:
         return self.allocations["carry_or_label_buffer"]
+
+    @property
+    def dependency_key_index_bytes(self) -> int:
+        return self.allocations["dependency_key_index"]
 
     @property
     def sqlite_cache_bytes(self) -> int:

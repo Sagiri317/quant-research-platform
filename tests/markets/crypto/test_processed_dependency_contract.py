@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -20,6 +21,7 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage._dataset_types import DatasetInspection
+from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
 RESOURCE_POLICY = RuntimeResourcePolicy(available_memory_bytes=1024**3)
@@ -227,12 +229,37 @@ def test_factor_carry_processing_is_linear_in_asset_count(
     monkeypatch.setattr(
         materialize_factors,
         "build_dataset_read_context",
-        lambda *_args, **_kwargs: object(),
+        lambda *_args, **kwargs: kwargs,
     )
+
+    def read_asset_chunks(context, **_kwargs):
+        filters = dict(
+            (column, value)
+            for column, operator, value in context.get("row_filters", ())
+            if operator == "=="
+        )
+        if not filters:
+            return iter(chunks)
+        return iter(
+            tuple(
+                chunk.loc[
+                    chunk["market_id"].eq(filters["market_id"])
+                    & chunk["asset_id"].eq(filters["asset_id"])
+                ].copy()
+                for chunk in chunks
+                if chunk["asset_id"].eq(filters["asset_id"]).any()
+            )
+        )
+
     monkeypatch.setattr(
         materialize_factors,
         "iter_dataset_chunks",
-        lambda *_args, **_kwargs: iter(chunks),
+        read_asset_chunks,
+    )
+    _patch_mock_group_plan(
+        monkeypatch,
+        materialize_factors,
+        tuple(("crypto", f"asset_{index:04d}") for index in range(asset_count)),
     )
     monkeypatch.setattr(
         materialize_factors,
@@ -252,6 +279,64 @@ def test_factor_carry_processing_is_linear_in_asset_count(
 
     assert processed_rows <= asset_count * (
         rows_per_asset + materialize_factors.MICROSTRUCTURE_ROLLING_CARRY_BARS
+    )
+
+
+@pytest.mark.parametrize(
+    ("module", "iterator_name", "data_id"),
+    [
+        (materialize_factors, "_iter_factor_chunks", "microstructure"),
+        (materialize_labels, "_iter_label_chunks", "forward_returns"),
+    ],
+)
+def test_panel_dependencies_remain_asset_major_across_year_partitions(
+    tmp_path: Path,
+    module,
+    iterator_name: str,
+    data_id: str,
+) -> None:
+    timestamps = pd.date_range("2025-12-31 23:55", periods=10, freq="min")
+    asset_a = _panel_frame(start=0, minutes=10).assign(
+        asset_id="asset_a",
+        timestamp=timestamps,
+    )
+    asset_b = _panel_frame(start=0, minutes=10).assign(
+        asset_id="asset_b",
+        timestamp=timestamps,
+    )
+    panel_root = StorageLayout(project_root=tmp_path).processed_data_root(
+        "crypto",
+        processed_catalog().get("market_panel_1m").kind,
+        "market_panel_1m",
+    )
+    write_dataset(
+        panel_root,
+        iter((asset_a, asset_b)),
+        spec=processed_catalog().get("market_panel_1m"),
+    )
+
+    outputs = list(
+        getattr(module, iterator_name)(
+            processed_catalog().get(data_id),
+            panel_root=panel_root,
+            time_window=TimeWindow(
+                "2025-12-31 23:55",
+                "2026-01-01 00:04",
+            ),
+            resource_policy=RESOURCE_POLICY,
+        )
+    )
+
+    assert outputs
+    observed = pd.concat(outputs, ignore_index=True).loc[
+        :, ["market_id", "asset_id", "timestamp"]
+    ]
+    pd.testing.assert_frame_equal(
+        observed,
+        observed.sort_values(
+            ["market_id", "asset_id", "timestamp"],
+            kind="mergesort",
+        ).reset_index(drop=True),
     )
 
 
@@ -467,6 +552,7 @@ def test_materialization_budget_allocations_close_under_effective_budget() -> No
     assert budget.physical_batch_bytes > 0
     assert budget.reducer_state_bytes > 0
     assert budget.output_bytes > 0
+    assert budget.dependency_key_index_bytes > 0
 
 
 def test_crypto_materializers_use_storage_physical_iterator_without_split_wrapper(
@@ -509,18 +595,19 @@ def test_factor_and_label_state_fail_closed_when_fixed_carry_exceeds_budget(
         "iter_dataset_chunks",
         lambda *_args, **_kwargs: iter((panel,)),
     )
+    _patch_mock_group_plan(monkeypatch, module, (("crypto", "btc_usdt"),))
     spec = processed_catalog().get(
         "microstructure" if module is materialize_factors else "forward_returns"
     )
     iterator = getattr(module, iterator_name)(
         spec,
         panel_root=Path("unused"),
-        time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:29"),
-        resource_policy=RuntimeResourcePolicy(
-            available_memory_bytes=1024,
-            chunk_target_bytes=512,
-            memory_safety_factor=1.0,
-        ),
+            time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:29"),
+            resource_policy=RuntimeResourcePolicy(
+                available_memory_bytes=8 * 1024,
+                chunk_target_bytes=4 * 1024,
+                memory_safety_factor=1.0,
+            ),
     )
 
     with pytest.raises(ValueError, match=error):
@@ -560,6 +647,7 @@ def test_factor_and_label_materializers_reject_non_monotonic_chunks(
         "iter_dataset_chunks",
         lambda *_args, **_kwargs: iter((first, second)),
     )
+    _patch_mock_group_plan(monkeypatch, module, (("crypto", "btc_usdt"),))
     policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
     iterator = (
         module._iter_factor_chunks(
@@ -664,4 +752,34 @@ def _panel_frame(*, start: int, minutes: int) -> pd.DataFrame:
             "mid_price": [100.1] * minutes,
             "eligible": [True] * minutes,
         }
+    )
+
+
+def _patch_mock_group_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    module,
+    keys: tuple[tuple[str, str], ...],
+) -> None:
+    plan = SimpleNamespace(keys=keys)
+    monkeypatch.setattr(
+        module,
+        "build_dataset_equality_group_plan",
+        lambda *_args, **_kwargs: plan,
+    )
+
+    def group_context(context, _plan, key):
+        if isinstance(context, dict):
+            return {
+                **context,
+                "row_filters": (
+                    ("market_id", "==", key[0]),
+                    ("asset_id", "==", key[1]),
+                ),
+            }
+        return context
+
+    monkeypatch.setattr(
+        module,
+        "dataset_context_for_equality_group",
+        group_context,
     )

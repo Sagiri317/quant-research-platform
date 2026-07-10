@@ -1477,6 +1477,46 @@ def test_time_window_row_group_pruning_uses_parquet_leaf_path(
     assert result.loc[0, "timestamp"] == target
 
 
+def test_equality_group_plan_indexes_only_candidate_part_paths(tmp_path: Path) -> None:
+    root = make_dataset_artifact_root(tmp_path, "equality_groups")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("equality_groups"),
+    )
+    context = dataset_reading.build_dataset_read_context(
+        root,
+        columns=None,
+        time_window=None,
+    )
+
+    plan = dataset_reading.build_dataset_equality_group_plan(
+        context,
+        columns=("market_id", "asset_id"),
+        target_chunk_bytes=1024**2,
+        target_state_bytes=1024**2,
+    )
+    group_context = dataset_reading.dataset_context_for_equality_group(
+        context,
+        plan,
+        ("a_share", "asset_002"),
+    )
+    observed = pd.concat(
+        dataset_reading.iter_dataset_chunks(
+            group_context,
+            target_chunk_bytes=1024**2,
+        ),
+        ignore_index=True,
+    )
+
+    assert plan.keys == (
+        ("a_share", "asset_001"),
+        ("a_share", "asset_002"),
+    )
+    assert len(group_context.read_paths) == 1
+    assert observed["asset_id"].tolist() == ["asset_002"]
+
+
 def test_storage_datasets_public_api_is_hard_cutover() -> None:
     import quant_research_platform.storage as storage
 

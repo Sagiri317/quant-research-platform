@@ -4,6 +4,7 @@ import inspect
 import json
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -741,6 +742,18 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
             lambda *_args, **_kwargs: object(),
         )
         monkeypatch.setattr(module, "iter_dataset_chunks", read_panel)
+        monkeypatch.setattr(
+            module,
+            "build_dataset_equality_group_plan",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                keys=(("crypto", "btc_usdt"),)
+            ),
+        )
+        monkeypatch.setattr(
+            module,
+            "dataset_context_for_equality_group",
+            lambda context, _plan, _key: context,
+        )
     policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
 
     factors = pd.concat(
@@ -933,7 +946,9 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
     }
     yielded_chunks = {"market_bars_1m": 0}
     bar_scans = {"asset_discovery": 0, "core": 0}
+    group_plan_calls = {"count": 0}
     real_iterator = materialize_panel.iter_dataset_chunks
+    real_group_plan = materialize_panel.build_dataset_equality_group_plan
 
     def wrapped_iterator(context, *, target_chunk_bytes):
         root_name = context.root.name
@@ -953,6 +968,16 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
 
     monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", wrapped_iterator)
 
+    def wrapped_group_plan(*args, **kwargs):
+        group_plan_calls["count"] += 1
+        return real_group_plan(*args, **kwargs)
+
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_equality_group_plan",
+        wrapped_group_plan,
+    )
+
     materialize_panel.write_panel(
         processed_catalog().get("market_panel_1m"),
         layout=layout,
@@ -965,8 +990,9 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
         ),
     )
 
-    assert call_counts["market_bars_1m"] == 3
-    assert bar_scans == {"asset_discovery": 1, "core": 2}
+    assert call_counts["market_bars_1m"] == 2
+    assert bar_scans == {"asset_discovery": 0, "core": 2}
+    assert group_plan_calls["count"] == 1
     assert yielded_chunks["market_bars_1m"] > 1
     assert call_counts["aggregate_trades_tick"] == yielded_chunks["market_bars_1m"]
     assert call_counts["depth_levels_tick"] == yielded_chunks["market_bars_1m"]
@@ -1134,6 +1160,16 @@ def test_crypto_panel_bar_contract_fails_before_auxiliary_reads(
         lambda dataset_root, **_kwargs: Path(dataset_root),
     )
     monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", fake_iterator)
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_equality_group_plan",
+        lambda *_args, **_kwargs: SimpleNamespace(keys=(("BTCUSDT",),)),
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "dataset_context_for_equality_group",
+        lambda context, _plan, _key: context,
+    )
     _patch_panel_lifecycle_validation(monkeypatch)
 
     with pytest.raises(ValueError, match="invalid_crypto_bar_interval"):
@@ -1296,12 +1332,46 @@ def _patch_panel_physical_chunks(
         lambda dataset_root, **_kwargs: Path(dataset_root),
     )
 
+    bars = chunks_by_root["market_bars_1m"]
+    source_asset_ids = tuple(
+        (value,)
+        for chunk in bars
+        for value in (
+            chunk["source_asset_id"].tolist()
+            if "source_asset_id" in chunk
+            else [None]
+        )
+    )
+    plan = SimpleNamespace(keys=source_asset_ids)
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_equality_group_plan",
+        lambda *_args, **_kwargs: plan,
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "dataset_context_for_equality_group",
+        lambda context, _plan, key: (context, key[0]),
+    )
+
     def fake_iterator(context, *, target_chunk_bytes):
         assert target_chunk_bytes > 0
-        root_name = Path(context).name
+        dataset_context, source_asset_id = (
+            context if isinstance(context, tuple) else (context, None)
+        )
+        root_name = Path(dataset_context).name
         if root_name not in chunks_by_root:
             raise AssertionError(f"unexpected_dataset_root:{root_name}")
-        return iter(chunks_by_root[root_name])
+        chunks = chunks_by_root[root_name]
+        if source_asset_id is None:
+            return iter(chunks)
+        return iter(
+            tuple(
+                chunk.loc[chunk["source_asset_id"].eq(source_asset_id)].copy()
+                for chunk in chunks
+                if chunk["source_asset_id"].eq(source_asset_id).any()
+            )
+        )
 
     monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", fake_iterator)
 
@@ -1615,6 +1685,24 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
         materialize_panel,
         "iter_dataset_chunks",
         iter_bars,
+    )
+    group_plan = SimpleNamespace(keys=(("ETHFIUSDT",), ("ETHUSDT",)))
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_equality_group_plan",
+        lambda *_args, **_kwargs: group_plan,
+    )
+
+    def group_context(context, _plan, key):
+        return {
+            **context,
+            "row_filters": (("source_asset_id", "==", key[0]),),
+        }
+
+    monkeypatch.setattr(
+        materialize_panel,
+        "dataset_context_for_equality_group",
+        group_context,
     )
     monkeypatch.setattr(
         materialize_panel,

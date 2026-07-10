@@ -22,7 +22,9 @@ from quant_research_platform.research.factors.microstructure import (
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage._dataset_reading import (
+    build_dataset_equality_group_plan,
     build_dataset_read_context,
+    dataset_context_for_equality_group,
     filter_frame_by_time_window,
     iter_dataset_chunks,
 )
@@ -92,46 +94,59 @@ def _iter_factor_chunks(
     active_key: tuple[str, str] | None = None
     active_carry: pd.DataFrame | None = None
     order_state = materialization_validation.OrderedDependencyState()
+    read_window = materialization_dependencies.factor_read_window(time_window)
     context = build_dataset_read_context(
         panel_root,
         columns=None,
-        time_window=materialization_dependencies.factor_read_window(time_window),
+        time_window=read_window,
     )
-    for panel in iter_dataset_chunks(
+    group_plan = build_dataset_equality_group_plan(
         context,
+        columns=("market_id", "asset_id"),
         target_chunk_bytes=chunk_target_bytes,
-    ):
-        if panel.empty:
-            continue
-        panel = materialization_validation.validated_ordered_dependency_chunk(
-            panel,
-            state=order_state,
-            error="out_of_order_crypto_factor_dependency",
+        target_state_bytes=budget.dependency_key_index_bytes,
+    )
+    for key in group_plan.keys:
+        group_context = dataset_context_for_equality_group(
+            context,
+            group_plan,
+            key,
         )
-        panel = panel.copy()
-        panel[_CORE_ROW] = _core_mask(panel, time_window)
-        for (market_id, asset_id), segment in panel.groupby(
-            ["market_id", "asset_id"],
-            sort=False,
-            dropna=False,
+        for panel in iter_dataset_chunks(
+            group_context,
+            target_chunk_bytes=chunk_target_bytes,
         ):
-            key = (str(market_id), str(asset_id))
-            if active_key != key:
-                active_key = key
-                active_carry = None
-            combined = _append_active_factor_carry(segment, active_carry)
-            factors = calculate_microstructure_factors(
-                combined,
-                expected_interval=pd.Timedelta(minutes=1),
-                min_periods=MICROSTRUCTURE_ROLLING_WINDOW_MINUTES,
-                trade_flow_observed_column="trade_flow_observed",
+            if panel.empty:
+                continue
+            panel = materialization_validation.validated_ordered_dependency_chunk(
+                panel,
+                state=order_state,
+                error="out_of_order_crypto_factor_dependency",
             )
-            output = factors.loc[factors[_CORE_ROW]].copy()
-            active_carry = _next_factor_carry(combined)
-            if _frame_bytes(active_carry) > budget.carry_bytes:
-                raise ValueError("crypto_factor_state_exceeds_resource_budget")
-            if not output.empty:
-                yield output.loc[:, spec.required_columns]
+            panel = panel.copy()
+            panel[_CORE_ROW] = _core_mask(panel, time_window)
+            for (segment_market_id, segment_asset_id), segment in panel.groupby(
+                ["market_id", "asset_id"],
+                sort=False,
+                dropna=False,
+            ):
+                key = (str(segment_market_id), str(segment_asset_id))
+                if active_key != key:
+                    active_key = key
+                    active_carry = None
+                combined = _append_active_factor_carry(segment, active_carry)
+                factors = calculate_microstructure_factors(
+                    combined,
+                    expected_interval=pd.Timedelta(minutes=1),
+                    min_periods=MICROSTRUCTURE_ROLLING_WINDOW_MINUTES,
+                    trade_flow_observed_column="trade_flow_observed",
+                )
+                output = factors.loc[factors[_CORE_ROW]].copy()
+                active_carry = _next_factor_carry(combined)
+                if _frame_bytes(active_carry) > budget.carry_bytes:
+                    raise ValueError("crypto_factor_state_exceeds_resource_budget")
+                if not output.empty:
+                    yield output.loc[:, spec.required_columns]
 
 
 def _append_active_factor_carry(

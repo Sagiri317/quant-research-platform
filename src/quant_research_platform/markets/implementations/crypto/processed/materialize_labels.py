@@ -29,7 +29,9 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage._dataset_reading import (
+    build_dataset_equality_group_plan,
     build_dataset_read_context,
+    dataset_context_for_equality_group,
     filter_frame_by_time_window,
     iter_dataset_chunks,
 )
@@ -98,52 +100,65 @@ def _iter_label_chunks(
     buffer = pd.DataFrame()
     active_market_asset: tuple[str, str] | None = None
     order_state = materialization_validation.OrderedDependencyState()
+    read_window = materialization_dependencies.label_read_window(time_window)
     context = build_dataset_read_context(
         panel_root,
         columns=None,
-        time_window=materialization_dependencies.label_read_window(time_window),
+        time_window=read_window,
     )
-    for panel in iter_dataset_chunks(
+    group_plan = build_dataset_equality_group_plan(
         context,
+        columns=("market_id", "asset_id"),
         target_chunk_bytes=chunk_target_bytes,
-    ):
-        if panel.empty:
-            continue
-        panel = materialization_validation.validated_ordered_dependency_chunk(
-            panel,
-            state=order_state,
-            error="out_of_order_crypto_label_dependency",
+        target_state_bytes=budget.dependency_key_index_bytes,
+    )
+    for key in group_plan.keys:
+        group_context = dataset_context_for_equality_group(
+            context,
+            group_plan,
+            key,
         )
-        panel = panel.copy()
-        panel[_CORE_ROW] = _core_mask(panel, time_window)
-        for (market_id, asset_id), asset_rows in panel.groupby(
-            ["market_id", "asset_id"],
-            sort=False,
-            dropna=False,
+        for panel in iter_dataset_chunks(
+            group_context,
+            target_chunk_bytes=chunk_target_bytes,
         ):
-            market_asset = (str(market_id), str(asset_id))
-            if active_market_asset is None:
-                active_market_asset = market_asset
-            elif market_asset != active_market_asset:
-                finalized = _final_label_output(buffer, spec)
-                if not finalized.empty:
-                    yield finalized
-                buffer = pd.DataFrame()
-                active_market_asset = market_asset
-            buffer = _ordered_panel(
-                asset_rows.copy()
-                if buffer.empty
-                else pd.concat((buffer, asset_rows), ignore_index=True)
+            if panel.empty:
+                continue
+            panel = materialization_validation.validated_ordered_dependency_chunk(
+                panel,
+                state=order_state,
+                error="out_of_order_crypto_label_dependency",
             )
-            emit_mask = _label_emit_mask(buffer) & buffer[_CORE_ROW].astype(
-                "boolean"
-            )
-            if emit_mask.any():
-                labeled = _label_frame(buffer)
-                yield labeled.loc[emit_mask].loc[:, spec.required_columns]
-                buffer = buffer.loc[~emit_mask].copy()
-            if _frame_bytes(buffer) > budget.carry_bytes:
-                raise ValueError("crypto_label_state_exceeds_resource_budget")
+            panel = panel.copy()
+            panel[_CORE_ROW] = _core_mask(panel, time_window)
+            for (segment_market_id, segment_asset_id), asset_rows in panel.groupby(
+                ["market_id", "asset_id"],
+                sort=False,
+                dropna=False,
+            ):
+                market_asset = (str(segment_market_id), str(segment_asset_id))
+                if active_market_asset is None:
+                    active_market_asset = market_asset
+                elif market_asset != active_market_asset:
+                    finalized = _final_label_output(buffer, spec)
+                    if not finalized.empty:
+                        yield finalized
+                    buffer = pd.DataFrame()
+                    active_market_asset = market_asset
+                buffer = _ordered_panel(
+                    asset_rows.copy()
+                    if buffer.empty
+                    else pd.concat((buffer, asset_rows), ignore_index=True)
+                )
+                emit_mask = _label_emit_mask(buffer) & buffer[_CORE_ROW].astype(
+                    "boolean"
+                )
+                if emit_mask.any():
+                    labeled = _label_frame(buffer)
+                    yield labeled.loc[emit_mask].loc[:, spec.required_columns]
+                    buffer = buffer.loc[~emit_mask].copy()
+                if _frame_bytes(buffer) > budget.carry_bytes:
+                    raise ValueError("crypto_label_state_exceeds_resource_budget")
     if not buffer.empty:
         finalized = _final_label_output(buffer, spec)
         if not finalized.empty:

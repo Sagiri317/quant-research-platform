@@ -24,7 +24,9 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
 )
 from quant_research_platform.storage._dataset_reading import (
+    build_dataset_equality_group_plan,
     build_dataset_read_context,
+    dataset_context_for_equality_group,
     iter_dataset_chunks,
 )
 from quant_research_platform.storage.datasets import (
@@ -101,25 +103,30 @@ def _iter_panel_chunks(
         source_id,
         source_ids.depth_levels_source_data_id(spec),
     )
-    bar_asset_context = build_dataset_read_context(
+    bar_context = build_dataset_read_context(
         bar_root,
-        columns=("source_asset_id",),
+        columns=None,
         time_window=time_window,
     )
-    source_assets = _canonical_source_assets(
-        bar_asset_context,
+    asset_index_budget = budget.dependency_key_index_bytes // 2
+    group_plan = build_dataset_equality_group_plan(
+        bar_context,
+        columns=("source_asset_id",),
         target_chunk_bytes=chunk_target_bytes,
-        target_state_bytes=budget.carry_bytes,
+        target_state_bytes=asset_index_budget,
+    )
+    source_assets = _canonical_source_assets(
+        group_plan.keys,
+        target_state_bytes=budget.dependency_key_index_bytes - asset_index_budget,
     )
     for source_asset_id in source_assets:
-        bar_context = build_dataset_read_context(
-            bar_root,
-            columns=None,
-            time_window=time_window,
-            row_filters=(("source_asset_id", "==", source_asset_id),),
+        group_context = dataset_context_for_equality_group(
+            bar_context,
+            group_plan,
+            (source_asset_id,),
         )
         for bars in iter_dataset_chunks(
-            bar_context,
+            group_context,
             target_chunk_bytes=chunk_target_bytes,
         ):
             if bars.empty:
@@ -149,27 +156,19 @@ def _iter_panel_chunks(
 
 
 def _canonical_source_assets(
-    context,
+    keys: tuple[tuple[object, ...], ...],
     *,
-    target_chunk_bytes: int,
     target_state_bytes: int,
 ) -> tuple[str, ...]:
     source_by_canonical: dict[str, str] = {}
-    for chunk in iter_dataset_chunks(
-        context,
-        target_chunk_bytes=target_chunk_bytes,
-    ):
-        if chunk.empty:
-            continue
-        for source_asset_id in _strict_source_asset_ids(
-            chunk,
-            error="invalid_crypto_matching_bar_source_asset_id",
-        ).unique():
-            source_value = str(source_asset_id)
-            canonical = canonical_crypto_asset_id(source_value)
-            existing = source_by_canonical.setdefault(canonical, source_value)
-            if existing != source_value:
-                raise ValueError("duplicate_crypto_canonical_asset_id")
+    for key in keys:
+        if len(key) != 1 or not isinstance(key[0], str) or not key[0]:
+            raise ValueError("invalid_crypto_matching_bar_source_asset_id")
+        source_value = key[0]
+        canonical = canonical_crypto_asset_id(source_value)
+        existing = source_by_canonical.setdefault(canonical, source_value)
+        if existing != source_value:
+            raise ValueError("duplicate_crypto_canonical_asset_id")
         state_bytes = sum(
             256 + 2 * (len(canonical) + len(source))
             for canonical, source in source_by_canonical.items()

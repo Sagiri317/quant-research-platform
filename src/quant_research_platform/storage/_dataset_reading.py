@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +61,13 @@ class DatasetReadContext:
     schema: tuple[tuple[str, str], ...]
     schema_hash: str
     parquet_filters: list[tuple[str, str, Any]] | None
+
+
+@dataclass(frozen=True)
+class DatasetEqualityGroupPlan:
+    columns: tuple[str, ...]
+    keys: tuple[tuple[Any, ...], ...]
+    paths_by_key: dict[tuple[Any, ...], tuple[Path, ...]]
 
 
 def read_dataset(
@@ -268,6 +275,95 @@ def dataset_primary_key_schema(
         raise ValueError("missing_dataset_primary_key_column") from exc
     finally:
         parquet_file.close()
+
+
+def build_dataset_equality_group_plan(
+    context: DatasetReadContext,
+    *,
+    columns: tuple[str, ...],
+    target_chunk_bytes: int,
+    target_state_bytes: int,
+) -> DatasetEqualityGroupPlan:
+    schema_columns = {name for name, _ in context.schema}
+    if not columns or any(column not in schema_columns for column in columns):
+        raise ValueError("invalid_dataset_equality_group_columns")
+    if (
+        isinstance(target_state_bytes, bool)
+        or not isinstance(target_state_bytes, int)
+        or target_state_bytes <= 0
+    ):
+        raise ValueError("invalid_dataset_equality_group_state_budget")
+    filter_columns = tuple(
+        column for column, _, _ in context.parquet_filters or ()
+    )
+    discovery_columns = tuple(dict.fromkeys((*columns, *filter_columns)))
+    paths_by_key: dict[tuple[Any, ...], set[Path]] = {}
+    path_order = {path: index for index, path in enumerate(context.read_paths)}
+    for path, frame in iter_dataset_file_batches(
+        context,
+        columns=discovery_columns,
+        target_chunk_bytes=target_chunk_bytes,
+    ):
+        filtered = filter_frame_by_time_window(
+            frame,
+            spec=context.spec,
+            time_window=context.time_window,
+        )
+        for row in filtered.loc[:, list(columns)].itertuples(index=False, name=None):
+            key = tuple(row)
+            if any(
+                not pd.api.types.is_scalar(value) or bool(pd.isna(value))
+                for value in key
+            ):
+                raise ValueError("invalid_dataset_equality_group_key")
+            try:
+                hash(key)
+            except TypeError as exc:
+                raise ValueError("invalid_dataset_equality_group_key") from exc
+            paths_by_key.setdefault(key, set()).add(path)
+        if _equality_group_plan_bytes(paths_by_key) > target_state_bytes:
+            raise ValueError("dataset_equality_group_index_exceeds_target_bytes")
+    ordered_paths = {
+        key: tuple(sorted(paths, key=path_order.__getitem__))
+        for key, paths in paths_by_key.items()
+    }
+    return DatasetEqualityGroupPlan(
+        columns=columns,
+        keys=tuple(sorted(ordered_paths)),
+        paths_by_key=ordered_paths,
+    )
+
+
+def dataset_context_for_equality_group(
+    context: DatasetReadContext,
+    plan: DatasetEqualityGroupPlan,
+    key: tuple[Any, ...],
+) -> DatasetReadContext:
+    if key not in plan.paths_by_key or len(key) != len(plan.columns):
+        raise ValueError("unknown_dataset_equality_group_key")
+    filters = [*(context.parquet_filters or ())]
+    filters.extend(
+        (column, "==", value)
+        for column, value in zip(plan.columns, key, strict=True)
+    )
+    physical_columns = tuple(dict.fromkeys((*context.physical_columns, *plan.columns)))
+    return replace(
+        context,
+        read_paths=plan.paths_by_key[key],
+        physical_columns=physical_columns,
+        parquet_filters=filters,
+    )
+
+
+def _equality_group_plan_bytes(
+    paths_by_key: dict[tuple[Any, ...], set[Path]],
+) -> int:
+    return sum(
+        256
+        + sum(64 + 2 * len(str(value)) for value in key)
+        + 64 * len(paths)
+        for key, paths in paths_by_key.items()
+    )
 
 
 def _validated_target_chunk_bytes(value: int | None) -> int:
