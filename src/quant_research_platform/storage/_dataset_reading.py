@@ -581,11 +581,11 @@ def _iter_variable_width_arrow_batches(
     buffered: list[pa.RecordBatch] = []
     buffered_arrow_bytes = 0
     buffered_python_bytes = sys.getsizeof(buffered)
-    for source_batch in _raw_arrow_batches(
+    for source_batch in _adaptive_variable_width_source_batches(
         path,
         columns=columns,
         parquet_filters=parquet_filters,
-        batch_size=1,
+        component_budget=component_budget,
     ):
         _require_arrow_batch_budget(source_batch, arrow_budget=component_budget)
         filtered = _filter_arrow_batch(source_batch, parquet_filters)
@@ -619,6 +619,98 @@ def _iter_variable_width_arrow_batches(
         buffered_python_bytes = candidate_python_bytes
     if buffered:
         yield _coalesced_record_batch(buffered, arrow_budget=arrow_budget)
+
+
+def _adaptive_variable_width_source_batches(
+    path: Path,
+    *,
+    columns: tuple[str, ...],
+    parquet_filters: list[tuple[str, str, Any]] | None,
+    component_budget: int,
+) -> Iterator[pa.RecordBatch]:
+    probe_batches = _raw_arrow_batches(
+        path,
+        columns=columns,
+        parquet_filters=parquet_filters,
+        batch_size=1,
+    )
+    try:
+        probe = next(probe_batches, None)
+        if probe is None:
+            return
+        yield probe
+        batch_size = _variable_width_source_batch_rows(
+            path,
+            columns=columns,
+            component_budget=component_budget,
+            probe=probe,
+        )
+        if batch_size == 1:
+            yield from probe_batches
+            return
+    finally:
+        probe_batches.close()
+
+    skipped_rows = probe.num_rows
+    for batch in _raw_arrow_batches(
+        path,
+        columns=columns,
+        parquet_filters=parquet_filters,
+        batch_size=batch_size,
+    ):
+        if skipped_rows:
+            if batch.num_rows <= skipped_rows:
+                skipped_rows -= batch.num_rows
+                continue
+            batch = batch.slice(skipped_rows)
+            skipped_rows = 0
+        if batch.num_rows:
+            yield batch
+
+
+def _variable_width_source_batch_rows(
+    path: Path,
+    *,
+    columns: tuple[str, ...],
+    component_budget: int,
+    probe: pa.RecordBatch,
+) -> int:
+    parquet_file = pq.ParquetFile(path)
+    try:
+        variable_columns = tuple(
+            field.name
+            for field in probe.schema
+            if _is_variable_width(field.type)
+        )
+        variable_positions = _projected_parquet_leaf_positions(
+            parquet_file,
+            variable_columns,
+        )
+        fixed_row_bytes = sum(
+            _fixed_width_arrow_row_bytes(field.type) or 0
+            for field in probe.schema
+        )
+        maximum_variable_chunk_bytes = 0
+        for row_group_index in range(parquet_file.metadata.num_row_groups):
+            row_group = parquet_file.metadata.row_group(row_group_index)
+            maximum_variable_chunk_bytes = max(
+                maximum_variable_chunk_bytes,
+                sum(
+                    max(0, int(row_group.column(index).total_uncompressed_size))
+                    for index in variable_positions
+                ),
+            )
+    finally:
+        parquet_file.close()
+    probe_row_bytes = max(
+        1,
+        (probe.nbytes + probe.num_rows - 1) // probe.num_rows,
+    )
+    conservative_row_bytes = max(
+        probe_row_bytes,
+        fixed_row_bytes + maximum_variable_chunk_bytes,
+    )
+    return max(1, component_budget // conservative_row_bytes)
 
 
 def _coalesced_record_batch(

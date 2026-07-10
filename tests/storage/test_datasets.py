@@ -497,6 +497,7 @@ def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
 
 def test_variable_width_probe_adapts_above_probe_size_for_small_values(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "dictionary-small-strings.parquet"
     pq.write_table(
@@ -506,6 +507,18 @@ def test_variable_width_probe_adapts_above_probe_size_for_small_values(
         use_dictionary=True,
     )
     target_chunk_bytes = 4 * 1024**2
+    requested_batch_sizes: list[int] = []
+    raw_batches = dataset_reading._raw_arrow_batches
+
+    def record_raw_batch_size(path, **kwargs):  # noqa: ANN001
+        requested_batch_sizes.append(kwargs["batch_size"])
+        yield from raw_batches(path, **kwargs)
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_raw_arrow_batches",
+        record_raw_batch_size,
+    )
     maximum_rows = max(
         batch.num_rows
         for batch in dataset_reading._iter_filtered_arrow_batches(
@@ -519,6 +532,8 @@ def test_variable_width_probe_adapts_above_probe_size_for_small_values(
     )
 
     assert maximum_rows > dataset_reading._PANDAS_PROBE_ROWS
+    assert requested_batch_sizes[0] == 1
+    assert max(requested_batch_sizes[1:]) > 1
 
 
 def test_variable_width_batch_adapts_before_arrow_allocation_when_probe_underestimates(
