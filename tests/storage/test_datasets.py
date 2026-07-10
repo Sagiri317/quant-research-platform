@@ -1346,6 +1346,22 @@ def test_fingerprint_supports_writer_accepted_nested_columns(tmp_path: Path) -> 
     assert comparison.matches
 
 
+def test_fingerprint_supports_nested_non_finite_float_values(tmp_path: Path) -> None:
+    root = make_dataset_artifact_root(tmp_path, "nested_non_finite")
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    frame["value"] = [[1.0, math.nan], [math.inf, -0.0]]
+
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec("nested_non_finite"),
+    )
+
+    comparison = compare_datasets(root, root)
+    assert comparison.status == "MATCH"
+    assert comparison.matches
+
+
 def test_empty_materialized_and_chunked_reads_preserve_stored_dtypes(
     tmp_path: Path,
 ) -> None:

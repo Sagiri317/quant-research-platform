@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import struct
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -152,7 +155,15 @@ def _json_nested_value(value: Any) -> Any:
         return {"bytes": value.hex()}
     if isinstance(value, pd.Timestamp):
         return {"timestamp_ns": int(value.value)}
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if isinstance(value, datetime):
+        return {"datetime": value.isoformat()}
+    if isinstance(value, date):
+        return {"date": value.isoformat()}
+    if isinstance(value, Decimal):
+        return {"decimal": str(value)}
+    if isinstance(value, float):
+        return {"float64_bits": struct.pack(">d", value).hex()}
+    if value is None or isinstance(value, (bool, int, str)):
         return value
     raise ValueError("unsupported_dataset_fingerprint_value")
 
