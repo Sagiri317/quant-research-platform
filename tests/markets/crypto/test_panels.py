@@ -574,6 +574,28 @@ def test_depth_reducer_fails_when_one_snapshot_exceeds_state_budget() -> None:
         reducer.add_chunk(depth)
 
 
+def test_depth_candidate_budget_counts_mapping_keys() -> None:
+    module = _panel_input_reducers_module()
+    key = ("btc_usdt", pd.Timestamp("2026-07-06 00:00:58"))
+    snapshot = {
+        "asset_id": "btc_usdt",
+        "quote_timestamp": pd.Timestamp("2026-07-06 00:00:58"),
+        "best_bid": 100.0,
+        "best_ask": 100.2,
+        "bid_quantity": 1.5,
+        "ask_quantity": 1.0,
+        "bid_depth": 1.5,
+        "ask_depth": 1.0,
+    }
+    observed: set[int] = set()
+    expected = module._deep_size(key, observed) + module._deep_size(
+        snapshot,
+        observed,
+    )
+
+    assert module._candidate_entry_budget_bytes(key, snapshot) == expected
+
+
 def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
     module = _panel_input_reducers_module()
     snapshot_count = 200

@@ -353,12 +353,18 @@ def test_local_verification_workflow_resolves_independent_windows(
     calls: list[str] = []
     captured_evaluation_windows: list[tuple[str, str]] = []
     captured_prediction_inputs: list[dict[str, object]] = []
+    disk_checks: list[Path] = []
 
     def assemble_dataset(**kwargs):
         calls.append("research")
         return persist_fake_research_root(**kwargs)
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
+    monkeypatch.setattr(
+        module,
+        "require_free_disk_headroom",
+        lambda _policy, path, **_kwargs: disk_checks.append(Path(path)),
+    )
     stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
@@ -446,6 +452,7 @@ def test_local_verification_workflow_resolves_independent_windows(
         *(["prediction"] * expected_prediction_count),
         "portfolio",
     ]
+    assert len(disk_checks) == 3 + expected_prediction_count
     assert captured_evaluation_windows == [
         ("2015-01-01", "2018-12-31"),
         ("2015-01-01", "2018-12-31"),

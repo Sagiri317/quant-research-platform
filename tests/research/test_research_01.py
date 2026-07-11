@@ -512,7 +512,12 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.009")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.02")
+    monkeypatch.setattr(
+        assembler_module,
+        "_estimate_research_join_bytes_per_session",
+        lambda **_kwargs: 3_000,
+    )
     tiny_root = assemble_research_dataset(
         layout=tiny_layout,
         dataset_catalog=dataset_catalog,
@@ -879,7 +884,12 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.009")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.02")
+    monkeypatch.setattr(
+        assembler_module,
+        "_estimate_research_join_bytes_per_session",
+        lambda **_kwargs: 3_000,
+    )
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -887,7 +897,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.003")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.02")
     model_catalog = ModelCatalog()
     model_catalog.register(
         ModelSpec(
@@ -1049,7 +1059,12 @@ def test_evaluation_runner_streams_research_chunks(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.009")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.02")
+    monkeypatch.setattr(
+        assembler_module,
+        "_estimate_research_join_bytes_per_session",
+        lambda **_kwargs: 3_000,
+    )
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,

@@ -27,6 +27,7 @@ _ALLOCATION_WEIGHTS = {
     "sqlite_cache": 1,
     "allocator_headroom": 3,
 }
+_MIN_ALLOCATION_UNIT_BYTES = 1024
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,7 @@ class MaterializationBudget:
         policy.require_valid_chunk_budget()
         effective = policy.effective_chunk_bytes
         total_weight = sum(_ALLOCATION_WEIGHTS.values())
-        if effective < total_weight:
+        if effective < total_weight * _MIN_ALLOCATION_UNIT_BYTES:
             raise ValueError("crypto_materialization_budget_too_small")
         unit = effective // total_weight
         allocations = {

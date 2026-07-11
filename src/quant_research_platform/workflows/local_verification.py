@@ -201,6 +201,7 @@ def _run_local_verification_with_policy(
             run_id=evaluation_run_id,
             time_window=evaluation_time_window,
         )
+        _require_output_disk_headroom(resource_policy, run_root)
         evaluation_root = write_evaluation_outputs(
             evaluation_result.metrics,
             evaluation_result.grouped_label_values,
@@ -218,53 +219,58 @@ def _run_local_verification_with_policy(
             layout=storage_layout,
         )
     with recorder.record("prediction_generation"):
-        prediction_roots = tuple(
-            _write_prediction_result(
-                build_prediction_result_from_research_dataset(
-                    layout=storage_layout,
-                    dataset_catalog=catalogs.research_datasets,
-                    model_catalog=catalogs.models,
-                    prediction_catalog=prediction_catalog,
-                    prediction_id=prediction_spec.prediction_id,
-                    time_window=time_window,
-                    prediction_train_end=effective_windows["prediction_train_end"],
-                    prediction_test_start=effective_windows["prediction_test_start"],
-                    prediction_test_end=effective_windows["prediction_test_end"],
-                ),
+        prediction_roots_list: list[Path] = []
+        for prediction_spec in _optional_prediction_specs(prediction_catalog):
+            prediction_result = build_prediction_result_from_research_dataset(
                 layout=storage_layout,
-                run_id=run_id,
-                market_id=catalogs.research_datasets.get(
-                    prediction_spec.research_dataset_id
-                ).market_id,
+                dataset_catalog=catalogs.research_datasets,
+                model_catalog=catalogs.models,
+                prediction_catalog=prediction_catalog,
+                prediction_id=prediction_spec.prediction_id,
+                time_window=time_window,
+                prediction_train_end=effective_windows["prediction_train_end"],
+                prediction_test_start=effective_windows["prediction_test_start"],
+                prediction_test_end=effective_windows["prediction_test_end"],
             )
-            for prediction_spec in _optional_prediction_specs(prediction_catalog)
-        )
-    with recorder.record("portfolio_generation"):
-        portfolio_roots = tuple(
-            write_portfolio_outputs(
-                output_chunks=portfolio_result.output_chunks,
-                summary_factory=portfolio_result.summary_factory,
-                spec=portfolio_result.spec,
-                output_spec=_output_spec(
-                    output_id=portfolio_result.spec.portfolio_id,
-                    output_definition_id="portfolio_outputs",
+            _require_output_disk_headroom(resource_policy, run_root)
+            prediction_roots_list.append(
+                _write_prediction_result(
+                    prediction_result,
+                    layout=storage_layout,
                     run_id=run_id,
-                    market_id=portfolio_result.spec.market_id,
-                    run_type=portfolio_result.spec.run_type,
-                ),
+                    market_id=catalogs.research_datasets.get(
+                        prediction_spec.research_dataset_id
+                    ).market_id,
+                )
+            )
+        prediction_roots = tuple(prediction_roots_list)
+    with recorder.record("portfolio_generation"):
+        portfolio_roots_list: list[Path] = []
+        for portfolio_id in _optional_portfolio_ids(portfolio_catalog):
+            portfolio_result = build_portfolio_result_from_research_dataset(
                 layout=storage_layout,
+                dataset_catalog=catalogs.research_datasets,
+                portfolio_catalog=portfolio_catalog,
+                portfolio_id=portfolio_id,
+                time_window=evaluation_time_window,
             )
-            for portfolio_id in _optional_portfolio_ids(portfolio_catalog)
-            for portfolio_result in (
-                build_portfolio_result_from_research_dataset(
+            _require_output_disk_headroom(resource_policy, run_root)
+            portfolio_roots_list.append(
+                write_portfolio_outputs(
+                    output_chunks=portfolio_result.output_chunks,
+                    summary_factory=portfolio_result.summary_factory,
+                    spec=portfolio_result.spec,
+                    output_spec=_output_spec(
+                        output_id=portfolio_result.spec.portfolio_id,
+                        output_definition_id="portfolio_outputs",
+                        run_id=run_id,
+                        market_id=portfolio_result.spec.market_id,
+                        run_type=portfolio_result.spec.run_type,
+                    ),
                     layout=storage_layout,
-                    dataset_catalog=catalogs.research_datasets,
-                    portfolio_catalog=portfolio_catalog,
-                    portfolio_id=portfolio_id,
-                    time_window=evaluation_time_window,
-                ),
+                )
             )
-        )
+        portfolio_roots = tuple(portfolio_roots_list)
 
     dataset_roots = _dataset_roots(
         layout,
@@ -422,6 +428,17 @@ def _write_prediction_result(
         output_chunks=result.output_chunks,
         model_metadata=result.model_metadata,
         prediction_metadata_factory=result.prediction_metadata_factory,
+    )
+
+
+def _require_output_disk_headroom(
+    resource_policy: RuntimeResourcePolicy,
+    run_root: Path,
+) -> None:
+    require_free_disk_headroom(
+        resource_policy,
+        run_root,
+        reserve_bytes=resource_policy.effective_chunk_bytes * 2,
     )
 
 

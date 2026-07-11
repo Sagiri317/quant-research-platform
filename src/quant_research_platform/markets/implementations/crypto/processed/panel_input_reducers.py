@@ -472,10 +472,7 @@ def _candidate_entry_budget_bytes(
     snapshot: Mapping[str, object],
 ) -> int:
     observed: set[int] = set()
-    size = _deep_size(key, observed) + sys.getsizeof(snapshot)
-    return size + sum(
-        _deep_size(value, observed) for value in snapshot.values()
-    )
+    return _deep_size(key, observed) + _deep_size(snapshot, observed)
 
 
 class _BoundedOutputRows:
