@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Hashable, Iterator
 
 import pandas as pd
@@ -129,6 +130,10 @@ def _iter_panel_chunks(
         target_chunk_bytes=chunk_target_bytes,
         target_state_bytes=asset_index_budget,
     )
+    materialization_validation.validate_single_asset_part_grouping(
+        group_plan,
+        error="invalid_crypto_panel_source_physical_asset_grouping",
+    )
     source_assets = _canonical_source_assets(
         group_plan.keys,
         target_state_bytes=budget.dependency_key_index_bytes - asset_index_budget,
@@ -198,7 +203,7 @@ def _canonical_source_assets(
     target_state_bytes: int,
 ) -> tuple[str, ...]:
     source_by_canonical: dict[str, str] = {}
-    state_bytes = 0
+    state_bytes = sys.getsizeof(source_by_canonical)
     for key in keys:
         if len(key) != 1 or not isinstance(key[0], str) or not key[0]:
             raise ValueError("invalid_crypto_matching_bar_source_asset_id")
@@ -209,8 +214,14 @@ def _canonical_source_assets(
             if existing != source_value:
                 raise ValueError("duplicate_crypto_canonical_asset_id")
             continue
+        prior_mapping_bytes = sys.getsizeof(source_by_canonical)
         source_by_canonical[canonical] = source_value
-        state_bytes += 256 + 2 * (len(canonical) + len(source_value))
+        state_bytes += (
+            sys.getsizeof(source_by_canonical)
+            - prior_mapping_bytes
+            + sys.getsizeof(canonical)
+            + sys.getsizeof(source_value)
+        )
         if state_bytes > target_state_bytes:
             raise ValueError("crypto_panel_asset_index_exceeds_resource_budget")
     return tuple(

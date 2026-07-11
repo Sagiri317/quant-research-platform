@@ -68,6 +68,8 @@ Panel materialization first enumerates the bounded source-asset namespace, rejec
 
 Quote matching uses asset-isolated, backward `merge_asof` at bar close with exact matches allowed and `DEFAULT_MAX_QUOTE_AGE` as tolerance. The latest snapshot is selected before `quote_valid` is applied, so an invalid latest quote never falls back to an older valid quote. Matching retains the original bar key and the final panel remains deterministically sorted by `(market_id, asset_id, timestamp)`.
 
+Panel source-asset discovery charges actual Python mapping and string storage, including non-BMP Unicode. Before any per-asset reread, the panel owner rejects a source bar part assigned to more than one source asset, so equality filtering cannot turn one mixed-asset physical part into repeated decode work.
+
 ## Current Evaluation Signals
 
 The crypto evaluation scenario uses the approved microstructure factor set:

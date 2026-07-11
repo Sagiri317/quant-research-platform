@@ -737,6 +737,70 @@ def test_crypto_timestamp_validation_has_no_thin_wrappers() -> None:
     assert not hasattr(panels, "_numeric")
 
 
+def test_crypto_panel_source_parts_require_one_asset_per_physical_part(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_path = Path("part-000.parquet")
+    group_plan = SimpleNamespace(
+        keys=(("BTCUSDT",), ("ETHUSDT",)),
+        paths_by_key={
+            ("BTCUSDT",): (shared_path,),
+            ("ETHUSDT",): (shared_path,),
+        },
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_read_context",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_equality_group_plan",
+        lambda *_args, **_kwargs: group_plan,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="invalid_crypto_panel_source_physical_asset_grouping",
+    ):
+        next(
+            materialize_panel._iter_panel_chunks(
+                processed_catalog().get("market_panel_1m"),
+                layout=StorageLayout(project_root=tmp_path),
+                source_id=SourceId("synthetic_crypto"),
+                time_window=TimeWindow("2026-07-06", "2026-07-06"),
+                resource_policy=RuntimeResourcePolicy(
+                    available_memory_bytes=1024**3
+                ),
+            )
+        )
+
+
+def _physical_group_plan(keys: tuple[tuple[object, ...], ...]) -> SimpleNamespace:
+    items = tuple(
+        (key, (Path(f"part-{index:03d}.parquet"),))
+        for index, key in enumerate(keys)
+    )
+    return SimpleNamespace(
+        keys=keys,
+        paths_by_key=SimpleNamespace(items=lambda: items),
+    )
+
+
+def test_crypto_source_asset_index_counts_unicode_object_storage() -> None:
+    source_asset_id = "𐐀" * 10_000 + "USDT"
+
+    with pytest.raises(
+        ValueError,
+        match="crypto_panel_asset_index_exceeds_resource_budget",
+    ):
+        materialize_panel._canonical_source_assets(
+            ((source_asset_id,),),
+            target_state_bytes=50_000,
+        )
+
+
 @pytest.mark.parametrize("index", [[100 + index for index in range(30)], [0] * 30])
 def test_crypto_factor_label_materialization_core_selection_uses_positions(
     monkeypatch,
@@ -1230,7 +1294,7 @@ def test_crypto_panel_bar_contract_fails_before_auxiliary_reads(
     monkeypatch.setattr(
         materialize_panel,
         "build_dataset_equality_group_plan",
-        lambda *_args, **_kwargs: SimpleNamespace(keys=(("BTCUSDT",),)),
+        lambda *_args, **_kwargs: _physical_group_plan((("BTCUSDT",),)),
     )
     monkeypatch.setattr(
         materialize_panel,
@@ -1409,7 +1473,7 @@ def _patch_panel_physical_chunks(
             else [None]
         )
     )
-    plan = SimpleNamespace(keys=source_asset_ids)
+    plan = _physical_group_plan(source_asset_ids)
     monkeypatch.setattr(
         materialize_panel,
         "build_dataset_equality_group_plan",
@@ -1753,7 +1817,7 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
         "iter_dataset_chunks",
         iter_bars,
     )
-    group_plan = SimpleNamespace(keys=(("ETHFIUSDT",), ("ETHUSDT",)))
+    group_plan = _physical_group_plan((("ETHFIUSDT",), ("ETHUSDT",)))
     monkeypatch.setattr(
         materialize_panel,
         "build_dataset_equality_group_plan",
@@ -1858,7 +1922,7 @@ def test_panel_chunks_reject_same_asset_cross_chunk_time_reversal(
     monkeypatch.setattr(
         materialize_panel,
         "build_dataset_equality_group_plan",
-        lambda *_args, **_kwargs: SimpleNamespace(keys=(("BTCUSDT",),)),
+        lambda *_args, **_kwargs: _physical_group_plan((("BTCUSDT",),)),
     )
     monkeypatch.setattr(
         materialize_panel,
