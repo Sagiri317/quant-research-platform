@@ -154,27 +154,19 @@ class ExactPrimaryKeyIndex:
                 pa.ArrowTypeError,
             ) as exc:
                 raise ValueError("invalid_dataset_primary_key_value") from exc
-        pandas_keys = keys.to_pandas(use_threads=False)
-        if bool(pandas_keys.isna().any(axis=None)):
+        if any(column.null_count for column in keys.columns):
             raise ValueError("dataset_primary_key_null")
-        local_duplicate_mask = pandas_keys.duplicated(list(self._primary_key))
-        local_duplicate_count = int(local_duplicate_mask.sum())
-        if local_duplicate_count:
-            keep_mask = ~local_duplicate_mask
-            keys = keys.filter(pa.array(keep_mask.to_numpy(dtype=bool)))
-            pandas_keys = pandas_keys.loc[keep_mask].reset_index(drop=True)
         before = connection.total_changes
         with connection:
             connection.executemany(
                 "INSERT OR IGNORE INTO exact_keys(namespace, payload) VALUES (?, ?)",
                 self._payload_rows(
                     keys,
-                    pandas_keys,
                     namespace=namespace,
                 ),
             )
         inserted = connection.total_changes - before
-        return local_duplicate_count + int(len(keys) - inserted)
+        return int(keys.num_rows - inserted)
 
     def difference_counts(
         self,
@@ -207,15 +199,18 @@ class ExactPrimaryKeyIndex:
     def _payload_rows(
         self,
         keys: pa.Table,
-        pandas_keys: pd.DataFrame,
         *,
         namespace: str,
     ) -> Iterator[tuple[str, bytes]]:
         fields = tuple(keys.schema.field(column) for column in self._primary_key)
-        for row in pandas_keys.itertuples(index=False, name=None):
+        columns = tuple(keys.column(column) for column in self._primary_key)
+        for row_index in range(keys.num_rows):
             payload = b"".join(
-                _canonical_arrow_scalar_payload(value, field.type)
-                for value, field in zip(row, fields, strict=True)
+                _canonical_arrow_scalar_payload(
+                    column[row_index].as_py(),
+                    field.type,
+                )
+                for column, field in zip(columns, fields, strict=True)
             )
             yield namespace, payload
 

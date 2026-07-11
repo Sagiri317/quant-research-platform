@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 from decimal import Decimal
@@ -40,6 +41,12 @@ from tests.storage.low_level_fixtures import (
     make_helper_edges_dataset_frame,
     make_processed_dataset_spec,
 )
+
+
+def test_exact_key_index_does_not_bypass_bounded_pandas_conversion() -> None:
+    source = inspect.getsource(ExactPrimaryKeyIndex.add_table)
+
+    assert ".to_pandas(" not in source
 
 
 def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
