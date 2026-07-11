@@ -23,11 +23,22 @@ def compute_market_panel(
     max_quote_age: pd.Timedelta = panels.DEFAULT_MAX_QUOTE_AGE,
 ) -> pd.DataFrame:
     prepared = panels.prepare_panel_bars(bars)
+    try:
+        ordered_depth = (
+            depth
+            if depth.empty
+            else depth.sort_values(
+                ["source_asset_id", "timestamp", "side", "level"],
+                kind="mergesort",
+            ).reset_index(drop=True)
+        )
+    except TypeError:
+        ordered_depth = depth
     test_budget = 512 * 1024 * 1024
     return panels.calculate_market_panel_from_chunks(
         prepared,
         trade_chunks=(trades,),
-        depth_chunks=(depth,),
+        depth_chunks=(ordered_depth,),
         trade_state_bytes=test_budget,
         trade_output_bytes=test_budget,
         depth_state_bytes=test_budget,
@@ -455,6 +466,29 @@ def test_depth_reducer_rejects_out_of_order_across_chunks() -> None:
 
     with pytest.raises(ValueError, match="out_of_order_crypto_depth_dependency"):
         reducer.add_chunk(depth.iloc[:2].copy())
+
+
+@pytest.mark.parametrize("split_chunks", [False, True])
+def test_market_panel_rejects_out_of_order_depth_independent_of_chunking(
+    split_chunks: bool,
+) -> None:
+    reversed_depth = _ordered_depth_levels_frame().iloc[::-1].reset_index(drop=True)
+    depth_chunks = (
+        (reversed_depth.iloc[:2].copy(), reversed_depth.iloc[2:].copy())
+        if split_chunks
+        else (reversed_depth,)
+    )
+
+    with pytest.raises(ValueError, match="out_of_order_crypto_depth_dependency"):
+        panels.calculate_market_panel_from_chunks(
+            panels.prepare_panel_bars(_bars_frame()),
+            trade_chunks=(),
+            depth_chunks=depth_chunks,
+            trade_state_bytes=16 * 1024,
+            trade_output_bytes=16 * 1024,
+            depth_state_bytes=16 * 1024,
+            depth_output_bytes=16 * 1024,
+        )
 
 
 def test_depth_reducer_fails_when_one_snapshot_exceeds_state_budget() -> None:

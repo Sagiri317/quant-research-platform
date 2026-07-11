@@ -364,10 +364,7 @@ def normalize_depth_chunk(depth: pd.DataFrame) -> pd.DataFrame:
 
 
 def _normalize_depth_chunk_for_reducer(depth: pd.DataFrame) -> pd.DataFrame:
-    return normalize_depth_chunk(depth).sort_values(
-        ["source_asset_id", "quote_timestamp", "side", "level"],
-        kind="mergesort",
-    ).reset_index(drop=True)
+    return normalize_depth_chunk(depth).reset_index(drop=True)
 
 
 def finalize_depth_snapshot(
