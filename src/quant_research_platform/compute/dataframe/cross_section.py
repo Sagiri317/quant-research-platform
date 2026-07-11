@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
@@ -42,40 +43,6 @@ GROUP_SPREAD_SUMMARY_COLUMNS = [
     "top_bottom_label_value_spread_hit_rate",
     "group_monotonicity_score",
 ]
-
-
-def compute_ic_by_timestamp(
-    frame: pd.DataFrame,
-    spec: ComputePanelSpec,
-) -> pd.DataFrame:
-    """Compute timestamp-signal cross-sectional IC and RankIC."""
-
-    panel = validate_compute_panel(frame, spec)
-    records: list[dict[str, object]] = []
-    for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
-        for signal in spec.signal_columns:
-            pair = _finite_pair(timestamp_frame, signal, spec.label_column)
-            n_obs = len(pair)
-            ic = np.nan
-            rankic = np.nan
-            if n_obs >= 2:
-                ic = _pearson_correlation(pair[signal], pair[spec.label_column])
-                rankic = _pearson_correlation(
-                    pair[signal].rank(method="average"),
-                    pair[spec.label_column].rank(method="average"),
-                )
-            records.append(
-                {
-                    "timestamp": timestamp,
-                    "signal": signal,
-                    "label": spec.label_column,
-                    "ic": ic,
-                    "rankic": rankic,
-                    "n_obs": n_obs,
-                }
-            )
-
-    return pd.DataFrame.from_records(records, columns=IC_RESULT_COLUMNS)
 
 
 def compute_ic_and_grouped_label_values(
@@ -159,48 +126,6 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
         pd.DataFrame.from_records(ic_records, columns=IC_RESULT_COLUMNS),
         pd.DataFrame.from_records(grouped_records, columns=GROUPED_LABEL_VALUE_COLUMNS),
     )
-
-
-def compute_grouped_label_values(
-    frame: pd.DataFrame,
-    spec: ComputePanelSpec,
-    n_groups: int = 5,
-) -> pd.DataFrame:
-    """Compute timestamp-level mean label values by signal rank group."""
-
-    if not isinstance(n_groups, int) or isinstance(n_groups, bool):
-        raise TypeError("n_groups must be an integer.")
-    if n_groups < 2:
-        raise ValueError("n_groups must be at least 2.")
-
-    panel = validate_compute_panel(frame, spec)
-    records: list[dict[str, object]] = []
-    for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
-        for signal in spec.signal_columns:
-            pair = _finite_pair(timestamp_frame, signal, spec.label_column)
-            if len(pair) < 2:
-                continue
-            groups = _assign_groups(pair[signal], n_groups).to_numpy()
-            label_values = pair[spec.label_column].to_numpy(dtype="float64", copy=False)
-            for group in sorted(np.unique(groups)):
-                group_mask = groups == group
-                records.append(
-                    {
-                        "timestamp": timestamp,
-                        "signal": signal,
-                        "label": spec.label_column,
-                        "group": int(group),
-                        "mean_label_value": float(label_values[group_mask].mean()),
-                        "n_obs": int(group_mask.sum()),
-                    }
-                )
-
-    return pd.DataFrame.from_records(records, columns=GROUPED_LABEL_VALUE_COLUMNS)
-
-
-def _finite_pair(frame: pd.DataFrame, signal: str, label: str) -> pd.DataFrame:
-    pair = frame[[signal, label]].apply(pd.to_numeric, errors="coerce")
-    return pair[np.isfinite(pair[signal]) & np.isfinite(pair[label])]
 
 
 def summarize_ic(
@@ -321,17 +246,6 @@ def summarize_group_spread(
     return summary[output_columns]
 
 
-def _assign_groups(values: pd.Series, n_groups: int) -> pd.Series:
-    groups = _assign_groups_array(values.to_numpy(dtype="float64"), n_groups)
-    return pd.Series(groups, index=values.index)
-
-
-def _pearson_correlation(left: pd.Series, right: pd.Series) -> float:
-    left_values = left.to_numpy(dtype="float64", copy=False)
-    right_values = right.to_numpy(dtype="float64", copy=False)
-    return _pearson_correlation_values(left_values, right_values)
-
-
 def _pearson_correlation_values(
     left_values: np.ndarray,
     right_values: np.ndarray,
@@ -389,14 +303,3 @@ def _summarize_correlation_values(values: pd.Series) -> dict[str, float | int]:
         "positive_rate": float((values > 0).mean()),
         "valid_count": valid_count,
     }
-
-
-def normalize_group_key(
-    group_key: object,
-    group_columns: list[str],
-) -> dict[str, object]:
-    if len(group_columns) == 1:
-        values = group_key if isinstance(group_key, tuple) else (group_key,)
-    else:
-        values = tuple(group_key)
-    return dict(zip(group_columns, values, strict=True))

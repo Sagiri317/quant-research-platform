@@ -9,29 +9,6 @@ from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import TradabilityConfig
 
 
-def validate_tradability_columns(
-    panel: pd.DataFrame,
-    tradability_config: TradabilityConfig,
-) -> None:
-    requested_columns = [
-        tradability_config.eligibility_column,
-        tradability_config.can_enter_column,
-        tradability_config.can_exit_column,
-    ]
-    missing_columns = sorted(
-        {
-            column
-            for column in requested_columns
-            if column is not None and column not in panel
-        }
-    )
-    if missing_columns:
-        raise ValueError(f"tradability columns are missing: {missing_columns}.")
-    for column in requested_columns:
-        if column is not None and not pd.api.types.is_bool_dtype(panel[column]):
-            raise TypeError(f"tradability column {column!r} must be boolean.")
-
-
 def tradability_diagnostic_counts(
     *,
     timestamp_frame: pd.DataFrame,

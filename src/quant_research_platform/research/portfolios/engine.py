@@ -16,6 +16,7 @@ from quant_research_platform.compute.dataframe.performance import (
 from quant_research_platform.compute.dataframe.portfolio_returns import (
     simulate_weighted_long_short_returns_and_cost_from_validated_panel,
 )
+from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import (
     SUPPORTED_REBALANCE_FREQUENCIES,
@@ -302,15 +303,6 @@ def _portfolio_panel(
     return panel
 
 
-def normalize_group_key(
-    group_key: object,
-    group_columns: list[str],
-) -> dict[str, object]:
-    if len(group_columns) == 1:
-        values = group_key if isinstance(group_key, tuple) else (group_key,)
-    else:
-        values = tuple(group_key)
-    return dict(zip(group_columns, values, strict=True))
 
 
 __all__ = [

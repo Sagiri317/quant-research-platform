@@ -4,6 +4,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from tests.helpers.root_config_contract import python_minor_from_requires
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 ENVIRONMENT_YML = PROJECT_ROOT / "environment.yml"
@@ -76,7 +78,7 @@ def test_python_and_ruff_contracts_follow_root_config() -> None:
     pyproject = _load_pyproject()
     requires_python = pyproject["project"]["requires-python"]
 
-    assert _python_minor_from_requires(requires_python)
+    assert python_minor_from_requires(requires_python)
     assert pyproject["tool"]["ruff"]["target-version"] == _ruff_target_from_requires(
         requires_python
     )
@@ -151,7 +153,7 @@ def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> 
 def test_environment_python_pin_matches_requires_python_lower_bound() -> None:
     pyproject = _load_pyproject()
     environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
-    expected_minor = _python_minor_from_requires(
+    expected_minor = python_minor_from_requires(
         pyproject["project"]["requires-python"]
     )
 
@@ -387,13 +389,8 @@ def _bounds(spec: str) -> set[tuple[str, str]]:
     }
 
 
-def _python_minor_from_requires(spec: str) -> str:
-    match = re.search(r">=\s*(\d+\.\d+)", spec)
-    return match.group(1) if match else ""
-
-
 def _ruff_target_from_requires(spec: str) -> str:
-    minor = _python_minor_from_requires(spec)
+    minor = python_minor_from_requires(spec)
     return "py" + minor.replace(".", "")
 
 

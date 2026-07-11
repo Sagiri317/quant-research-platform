@@ -4,9 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    cost_components,
-)
+from quant_research_platform.compute._portfolio_math import cost_components
 from quant_research_platform.contracts.portfolios import CostConfig
 
 

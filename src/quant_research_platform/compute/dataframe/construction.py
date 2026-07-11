@@ -4,24 +4,26 @@ from __future__ import annotations
 
 import pandas as pd
 
+from quant_research_platform.compute._portfolio_math import (
+    select_signals,
+    validate_segment_columns,
+    validate_tradability_columns,
+    validate_weight_columns,
+)
 from quant_research_platform.compute.dataframe.constraints import (
     build_tradability_context,
-    validate_tradability_columns,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     POSITION_COLUMNS,
     WEIGHT_DIAGNOSTIC_COLUMNS,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    normalize_group_key,
     select_signal,
-    select_signals,
-    validate_segment_columns,
-    validate_weight_columns,
 )
 from quant_research_platform.compute.dataframe.position_math import (
     build_signal_positions,
 )
+from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,

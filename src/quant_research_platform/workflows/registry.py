@@ -45,20 +45,10 @@ def workflow_node_registry(
     *,
     run_policy: WorkflowRunPolicy | str | None = None,
 ) -> WorkflowNodeRegistry:
-    policy = _normalize_workflow_run_policy(run_policy)
+    policy = WorkflowRunPolicy.normalize(run_policy)
     if policy is WorkflowRunPolicy.WRITE_ARTIFACTS:
         raise NotImplementedError("workflow_write_artifacts_not_implemented")
     return _build_workflow_node_registry_for_validation()
-
-
-def _normalize_workflow_run_policy(
-    run_policy: WorkflowRunPolicy | str | None,
-) -> WorkflowRunPolicy:
-    if run_policy is None:
-        return WorkflowRunPolicy.VALIDATE_ONLY
-    return WorkflowRunPolicy.normalize(run_policy)
-
-
 def _build_workflow_node_registry_for_validation() -> WorkflowNodeRegistry:
     registry = WorkflowNodeRegistry()
     for node_id in (

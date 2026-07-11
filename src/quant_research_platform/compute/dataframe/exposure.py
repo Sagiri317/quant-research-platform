@@ -7,10 +7,8 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     EXPOSURE_SUMMARY_COLUMNS,
 )
-from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    normalize_group_key,
-)
 from quant_research_platform.compute.dataframe.position_math import validate_positions
+from quant_research_platform.compute.grouping import normalize_group_key
 
 
 def summarize_exposure(

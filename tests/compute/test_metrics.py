@@ -10,8 +10,7 @@ from quant_research_platform.compute.backends import (
     TENSOR_BACKEND,
 )
 from quant_research_platform.compute.dataframe.cross_section import (
-    compute_grouped_label_values,
-    compute_ic_by_timestamp,
+    compute_ic_and_grouped_label_values,
     summarize_group_spread,
     summarize_ic,
 )
@@ -67,7 +66,7 @@ def test_validate_compute_panel_rejects_duplicate_timestamp_asset_keys() -> None
 def test_compute_ic_by_timestamp_computes_pearson_and_rankic() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
-    result = compute_ic_by_timestamp(
+    result, _ = compute_ic_and_grouped_label_values(
         make_perfect_cross_section_compute_panel(),
         spec,
     )
@@ -87,7 +86,7 @@ def test_compute_ic_by_timestamp_does_not_call_pandas_series_corr(
 
     monkeypatch.setattr(pd.Series, "corr", fail_corr)
 
-    result = compute_ic_by_timestamp(
+    result, _ = compute_ic_and_grouped_label_values(
         make_perfect_cross_section_compute_panel(),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
     )
@@ -99,7 +98,7 @@ def test_compute_ic_by_timestamp_does_not_call_pandas_series_corr(
 def test_compute_grouped_label_values_assigns_timestamp_level_groups() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
-    result = compute_grouped_label_values(
+    _, result = compute_ic_and_grouped_label_values(
         make_perfect_cross_section_compute_panel(),
         spec,
         n_groups=3,
@@ -122,7 +121,7 @@ def test_compute_grouped_label_values_does_not_call_pandas_qcut(monkeypatch) -> 
 
     monkeypatch.setattr(pd, "qcut", fail_qcut)
 
-    result = compute_grouped_label_values(
+    _, result = compute_ic_and_grouped_label_values(
         make_perfect_cross_section_compute_panel(),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         n_groups=3,
@@ -141,7 +140,7 @@ def test_compute_grouped_label_values_does_not_group_assigned_pairs(
 
     monkeypatch.setattr(pd.DataFrame, "assign", fail_assign)
 
-    result = compute_grouped_label_values(
+    _, result = compute_ic_and_grouped_label_values(
         make_perfect_cross_section_compute_panel(),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         n_groups=3,

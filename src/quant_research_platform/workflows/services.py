@@ -21,7 +21,7 @@ def run_registered_workflow(
     run_policy: WorkflowRunPolicy | str | None = None,
     run_id: str = "workflow-validation-run",
 ) -> dict[str, object]:
-    policy = _normalize_workflow_run_policy(run_policy)
+    policy = WorkflowRunPolicy.normalize(run_policy)
     node_registry = registry or workflow_node_registry(run_policy=policy)
     summary = run_workflow(
         spec,
@@ -42,11 +42,3 @@ def run_registered_workflow(
 
 
 __all__ = ["run_registered_workflow"]
-
-
-def _normalize_workflow_run_policy(
-    run_policy: WorkflowRunPolicy | str | None,
-) -> WorkflowRunPolicy:
-    if run_policy is None:
-        return WorkflowRunPolicy.VALIDATE_ONLY
-    return WorkflowRunPolicy.normalize(run_policy)

@@ -33,7 +33,7 @@ def run_workflow(
     run_policy: WorkflowRunPolicy | str | None = None,
     run_id: str = "workflow-validation-run",
 ) -> WorkflowRunSummary:
-    policy = _normalize_workflow_run_policy(run_policy)
+    policy = WorkflowRunPolicy.normalize(run_policy)
     if policy is WorkflowRunPolicy.WRITE_ARTIFACTS:
         raise NotImplementedError("workflow_write_artifacts_not_implemented")
     node_registry = registry or workflow_node_registry(run_policy=policy)
@@ -94,16 +94,6 @@ def workflow_run_summary(
         scope=spec.scope,
         artifact_writer_policy=spec.artifact_writer_policy.value,
     )
-
-
-def _normalize_workflow_run_policy(
-    run_policy: WorkflowRunPolicy | str | None,
-) -> WorkflowRunPolicy:
-    if run_policy is None:
-        return WorkflowRunPolicy.VALIDATE_ONLY
-    return WorkflowRunPolicy.normalize(run_policy)
-
-
 __all__ = [
     "run_workflow",
     "workflow_run_summary",

@@ -5,9 +5,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute._portfolio_math import (
+    cost_components,
+    require_return_source_column,
+    select_signals,
+    validate_segment_columns,
+    validate_tradability_columns,
+    validate_weight_columns,
+)
 from quant_research_platform.compute.dataframe.constraints import (
     build_tradability_context,
-    validate_tradability_columns,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
@@ -17,12 +24,7 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
     WEIGHT_DIAGNOSTIC_COLUMNS,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    cost_components,
-    normalize_group_key,
     select_signal,
-    select_signals,
-    validate_segment_columns,
-    validate_weight_columns,
 )
 from quant_research_platform.compute.dataframe.position_math import (
     build_signal_positions,
@@ -31,6 +33,7 @@ from quant_research_platform.compute.dataframe.turnover import (
     active_position_map,
     position_change_turnover,
 )
+from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
@@ -56,7 +59,7 @@ def simulate_weighted_long_short_returns(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Simulate portfolio returns from weighted positions."""
 
-    return_source_column = _require_return_source_column(return_source_column)
+    return_source_column = require_return_source_column(return_source_column)
     panel = validate_compute_panel(frame, spec, segment_columns=segment_columns)
     return _simulate_weighted_long_short_returns_from_validated_panel(
         panel,
@@ -144,7 +147,7 @@ def _stream_weighted_portfolio_from_validated_panel(
     if cost_config is None:
         cost_config = CostConfig()
     validate_tradability_columns(panel, tradability_config)
-    return_source_column = _require_return_source_column(return_source_column)
+    return_source_column = require_return_source_column(return_source_column)
     signals = select_signals(spec, portfolio_signals)
     group_columns = [*segment_columns, spec.timestamp_column]
 
@@ -281,11 +284,6 @@ def _timestamp_label_lookup(
     )
     return dict(zip(assets, labels, strict=True))
 
-
-def _require_return_source_column(return_source_column: str | None) -> str:
-    if not isinstance(return_source_column, str) or not return_source_column:
-        raise ValueError("portfolio_return_source_column_required")
-    return return_source_column
 
 def _build_portfolio_return_record_from_positions(
     *,

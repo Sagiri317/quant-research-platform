@@ -25,7 +25,7 @@ def panel_to_tensor(
 ) -> PanelTensor:
     """Convert a long panel into time x asset x signal arrays."""
 
-    dtype = _validate_value_dtype(value_dtype)
+    dtype = validate_value_dtype(value_dtype)
     panel = validate_compute_panel(frame, spec)
     timestamps = tuple(
         pd.Timestamp(value) for value in panel[spec.timestamp_column].unique()
@@ -78,7 +78,7 @@ def panel_to_tensor_batch(
 ) -> TensorBatch:
     """Convert a long panel into time x asset x signal x label arrays."""
 
-    dtype = _validate_value_dtype(value_dtype)
+    dtype = validate_value_dtype(value_dtype)
     _validate_batch_columns(
         frame,
         timestamp_column=timestamp_column,
@@ -141,7 +141,7 @@ def panel_to_tensor_batch(
     )
 
 
-def _validate_value_dtype(value_dtype: str) -> np.dtype:
+def validate_value_dtype(value_dtype: str) -> np.dtype:
     if value_dtype not in {"float32", "float64"}:
         raise ValueError("value_dtype must be one of ['float32', 'float64'].")
     return np.dtype(value_dtype)

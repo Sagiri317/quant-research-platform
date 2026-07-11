@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute._portfolio_math import (
-    normalize_group_key,
+    require_return_source_column,
     select_signals,
     selection_count,
     validate_segment_columns,
@@ -23,6 +23,7 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
     TURNOVER_COLUMNS,
     WEIGHT_DIAGNOSTIC_COLUMNS,
 )
+from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
@@ -33,6 +34,7 @@ from quant_research_platform.compute.tensor.constraints import (
     previous_position_vector,
     ranked_asset_indices,
 )
+from quant_research_platform.compute.tensor.conversion import validate_value_dtype
 from quant_research_platform.compute.tensor.portfolio_constants import (
     EXPOSURE_PATH_COLUMNS,
 )
@@ -114,7 +116,7 @@ def build_tensor_portfolio_artifacts(
 ) -> TensorPortfolioArtifacts:
     """Build tensor portfolio artifacts from dense path matrices."""
 
-    return_source_column = _require_return_source_column(return_source_column)
+    return_source_column = require_return_source_column(return_source_column)
     return _build_tensor_positions_core(
         panel,
         spec,
@@ -142,9 +144,9 @@ def _build_tensor_positions_core(
     value_dtype: str = "float64",
     include_path_records: bool,
 ) -> TensorPortfolioArtifacts:
-    dtype = _validate_value_dtype(value_dtype)
+    dtype = validate_value_dtype(value_dtype)
     if include_path_records:
-        return_source_column = _require_return_source_column(return_source_column)
+        return_source_column = require_return_source_column(return_source_column)
     panel = validate_compute_panel(panel, spec, segment_columns=segment_columns)
     validate_segment_columns(panel, segment_columns)
     validate_weight_columns(panel, weight_config)
@@ -563,7 +565,7 @@ def _prepare_timestamp_position_input(
     return_source_column: str | None = None,
     value_dtype: np.dtype | str = "float64",
 ) -> _TimestampPositionInput:
-    dtype = _validate_value_dtype(str(value_dtype))
+    dtype = validate_value_dtype(str(value_dtype))
     asset_values = timestamp_frame[spec.asset_column].to_numpy(
         dtype=str,
         copy=False,
@@ -581,7 +583,7 @@ def _prepare_timestamp_position_input(
             for offset, signal in enumerate(signals)
         },
         label_values=(
-            timestamp_frame[_require_return_source_column(return_source_column)].to_numpy(
+            timestamp_frame[require_return_source_column(return_source_column)].to_numpy(
                 dtype=dtype,
                 copy=False,
             )
@@ -609,17 +611,6 @@ def _prepare_timestamp_position_input(
             tradability_config.can_exit_column,
         ),
     )
-
-def _validate_value_dtype(value_dtype: str) -> np.dtype:
-    if value_dtype not in {"float32", "float64"}:
-        raise ValueError("value_dtype must be one of ['float32', 'float64'].")
-    return np.dtype(value_dtype)
-
-
-def _require_return_source_column(return_source_column: str | None) -> str:
-    if not isinstance(return_source_column, str) or not return_source_column:
-        raise ValueError("portfolio_return_source_column_required")
-    return return_source_column
 
 __all__ = [
     "TensorPortfolioArtifacts",

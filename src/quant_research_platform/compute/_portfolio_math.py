@@ -14,17 +14,6 @@ from quant_research_platform.contracts.portfolios import (
 )
 
 
-def normalize_group_key(
-    group_key: object,
-    group_columns: list[str],
-) -> dict[str, object]:
-    if len(group_columns) == 1:
-        values = group_key if isinstance(group_key, tuple) else (group_key,)
-    else:
-        values = tuple(group_key)
-    return dict(zip(group_columns, values, strict=True))
-
-
 def select_signals(
     spec: ComputePanelSpec,
     portfolio_signals: tuple[str, ...] | None,
@@ -119,6 +108,12 @@ def cost_components(
         "total_cost": buy_cost + sell_cost + slippage_cost + spread_cost + impact_cost,
         "cost_model": cost_config.impact_model or "detailed_bps",
     }
+
+
+def require_return_source_column(return_source_column: str | None) -> str:
+    if not isinstance(return_source_column, str) or not return_source_column:
+        raise ValueError("portfolio_return_source_column_required")
+    return return_source_column
 
 
 def _uses_detailed_cost_config(cost_config: CostConfig) -> bool:

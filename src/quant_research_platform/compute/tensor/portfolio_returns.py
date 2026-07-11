@@ -5,10 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute._portfolio_math import normalize_group_key
+from quant_research_platform.compute._portfolio_math import require_return_source_column
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     RETURNS_COLUMNS,
 )
+from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.compute.tensor.exposure import exposure_record_from_arrays
 from quant_research_platform.compute.tensor.portfolio_helpers import (
@@ -38,7 +39,7 @@ def calculate_tensor_long_short(
 ) -> pd.DataFrame:
     """Build a portfolio return path from tensor-shaped positions."""
 
-    return_source_column = _require_return_source_column(return_source_column)
+    return_source_column = require_return_source_column(return_source_column)
     if weight_config is None:
         weight_config = WeightConfig()
     if positions.empty:
@@ -256,9 +257,3 @@ def build_path_records_from_arrays(
 __all__ = [
     "calculate_tensor_long_short",
 ]
-
-
-def _require_return_source_column(return_source_column: str | None) -> str:
-    if not isinstance(return_source_column, str) or not return_source_column:
-        raise ValueError("portfolio_return_source_column_required")
-    return return_source_column

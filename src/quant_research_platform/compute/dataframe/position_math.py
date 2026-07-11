@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute._portfolio_math import selection_count
 from quant_research_platform.compute.dataframe.constraints import (
     apply_tradability_constraints,
     tradability_diagnostic_counts,
@@ -14,7 +15,6 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
     risk_values,
-    selection_count,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import TradabilityConfig, WeightConfig

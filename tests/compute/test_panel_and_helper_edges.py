@@ -4,21 +4,24 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
+from quant_research_platform.compute._portfolio_math import (
+    _uses_detailed_cost_config,
+    cost_components,
+    select_signals,
+    selection_count,
+    validate_segment_columns,
+    validate_tradability_columns,
+    validate_weight_columns,
+)
 from quant_research_platform.compute.dataframe import constraints
 from quant_research_platform.compute.dataframe.construction import (
     build_weighted_positions,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _uses_detailed_cost_config,
-    cost_components,
-    normalize_group_key,
     risk_values,
     select_signal,
-    select_signals,
-    selection_count,
-    validate_segment_columns,
-    validate_weight_columns,
 )
+from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
@@ -208,14 +211,14 @@ def test_dataframe_tradability_helper_edges() -> None:
         can_exit_column="can_exit",
     )
 
-    constraints.validate_tradability_columns(frame, tradability)
+    validate_tradability_columns(frame, tradability)
     with pytest.raises(ValueError, match="tradability columns are missing"):
-        constraints.validate_tradability_columns(
+        validate_tradability_columns(
             frame,
             TradabilityConfig(can_enter_column="missing"),
         )
     with pytest.raises(TypeError, match="must be boolean"):
-        constraints.validate_tradability_columns(
+        validate_tradability_columns(
             frame.assign(can_enter=[1, 0]),
             TradabilityConfig(can_enter_column="can_enter"),
         )

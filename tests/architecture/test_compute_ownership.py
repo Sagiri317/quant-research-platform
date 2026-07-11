@@ -39,6 +39,54 @@ def test_compute_ownership_symbols_live_in_owner_modules() -> None:
     }.issubset(_top_level_assignments(backends_tree))
 
 
+def test_shared_compute_and_workflow_primitives_have_single_owners() -> None:
+    definitions: dict[str, list[str]] = {
+        name: []
+        for name in (
+            "normalize_group_key",
+            "select_signals",
+            "selection_count",
+            "validate_segment_columns",
+            "validate_tradability_columns",
+            "validate_weight_columns",
+            "cost_components",
+            "require_return_source_column",
+            "validate_value_dtype",
+        )
+    }
+    for path in python_files_under((PROJECT_SRC,)):
+        tree = _parse(path)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name in definitions:
+                    definitions[node.name].append(f"{path}:{node.lineno}")
+
+    assert all(len(paths) == 1 for paths in definitions.values()), definitions
+
+    retired_parallel_wrappers = {
+        "_require_return_source_column",
+        "_validate_value_dtype",
+        "_normalize_workflow_run_policy",
+    }
+    remaining: list[str] = []
+    for path in python_files_under((PROJECT_SRC,)):
+        tree = _parse(path)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name in retired_parallel_wrappers:
+                    remaining.append(f"{path}:{node.lineno}:{node.name}")
+    assert not remaining, remaining
+
+
+def test_dataframe_cross_section_has_no_test_only_parallel_kernels() -> None:
+    functions = _top_level_functions(
+        _parse(PROJECT_SRC / "compute" / "dataframe" / "cross_section.py")
+    )
+
+    assert "compute_ic_by_timestamp" not in functions
+    assert "compute_grouped_label_values" not in functions
+
+
 def test_active_code_does_not_import_compute_protocols_or_old_exact_names() -> None:
     hits: list[str] = []
     for path in python_files_under(SCAN_ROOTS):
