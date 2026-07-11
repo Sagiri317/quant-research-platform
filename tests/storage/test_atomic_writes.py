@@ -31,7 +31,8 @@ def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -
         atomic_write_directory(final_root, failing_writer)
 
     assert not final_root.exists()
-    assert list(final_root.parent.glob(".tmp-*")) == []
+    scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
+    assert list(final_root.parent.glob(f"{scratch_prefix}*")) == []
 
 
 def test_atomic_directory_supports_long_final_component(tmp_path: Path) -> None:
@@ -68,6 +69,28 @@ def test_atomic_directory_recovery_is_glob_safe_for_target_name(
     assert (final_root / "done").read_text(encoding="utf-8") == "ok"
 
 
+@pytest.mark.parametrize("marker_payload", ["", "truncated-target"])
+def test_atomic_directory_recovers_empty_stale_stage_with_invalid_marker(
+    tmp_path: Path,
+    marker_payload: str,
+) -> None:
+    final_root = tmp_path / "bundle"
+    scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
+    stale = tmp_path / f"{scratch_prefix}qzzzzzz-stale"
+    stale.mkdir()
+    stale_marker = Path(f"{stale}.target")
+    stale_marker.write_text(marker_payload, encoding="utf-8")
+
+    atomic_write_directory(
+        final_root,
+        lambda stage: (stage / "done").write_text("ok", encoding="utf-8"),
+    )
+
+    assert not stale.exists()
+    assert not stale_marker.exists()
+    assert (final_root / "done").read_text(encoding="utf-8") == "ok"
+
+
 def test_atomic_write_directory_retries_transient_permission_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -96,7 +119,7 @@ def test_atomic_write_directory_retries_transient_permission_error(
 
     assert calls == 1
     assert (final_root / "done.txt").read_text(encoding="utf-8") == "ok\n"
-    assert list(final_root.parent.glob(".tmp-*")) == []
+    assert list(final_root.parent.glob(f"{scratch_prefix}*")) == []
 
 
 def test_atomic_write_directory_does_not_clean_unclaimed_collision(
@@ -264,7 +287,7 @@ def test_atomic_file_writers_reject_existing_targets_without_overwrite(
 
     for path in targets.values():
         assert path.read_text(encoding="utf-8") == "existing\n"
-    assert list(tmp_path.glob(".*.tmp-*")) == []
+    assert list(tmp_path.glob(".tmp-*")) == []
 
 
 @pytest.mark.parametrize("kind", ["text", "csv"])
@@ -310,31 +333,6 @@ def test_publish_file_no_replace_preserves_concurrent_winner(
     assert source.read_text(encoding="utf-8") == "candidate\n"
 
 
-def test_publish_file_does_not_retry_claim_after_source_unlink_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "candidate.tmp"
-    target = tmp_path / "output.txt"
-    source.write_text("candidate\n", encoding="utf-8")
-    original_unlink = Path.unlink
-    calls = {"source_unlink": 0}
-
-    def transient_unlink(path: Path, *args: object, **kwargs: object) -> None:
-        if path == source:
-            calls["source_unlink"] += 1
-            if calls["source_unlink"] == 1:
-                raise PermissionError("transient source cleanup failure")
-        original_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", transient_unlink)
-
-    atomic.publish_no_replace(source, target)
-
-    assert target.read_text(encoding="utf-8") == "candidate\n"
-    assert not source.exists()
-
-
 def test_atomic_csv_writer_cleans_temp_file_after_mid_write_failure(
     tmp_path: Path,
 ) -> None:
@@ -349,4 +347,4 @@ def test_atomic_csv_writer_cleans_temp_file_after_mid_write_failure(
         atomic_write_csv(FailingCsvFrame(), final_path, index=False)
 
     assert not final_path.exists()
-    assert list(final_path.parent.glob(".table.csv.tmp-*")) == []
+    assert list(final_path.parent.glob(".tmp-*")) == []

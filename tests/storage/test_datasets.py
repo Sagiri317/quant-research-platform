@@ -608,6 +608,73 @@ def test_wide_single_row_fails_before_pandas_conversion(
     assert calls["count"] == 0
 
 
+def test_wide_multi_row_bounds_each_pandas_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = pa.record_batch(
+        [pa.nulls(64) for _ in range(500)],
+        names=[f"column_{index}" for index in range(500)],
+    )
+    observed_conversion_bytes: list[int] = []
+    convert = dataset_reading._arrow_slice_to_pandas
+
+    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+        frame = convert(arrow_slice)
+        observed_conversion_bytes.append(
+            int(frame.memory_usage(index=True, deep=True).sum())
+        )
+        return frame
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_arrow_slice_to_pandas",
+        record_conversion,
+    )
+
+    chunks = tuple(
+        dataset_reading._arrow_batch_to_bounded_pandas(
+            batch,
+            target_chunk_bytes=64 * 1024,
+        )
+    )
+
+    assert sum(len(chunk) for chunk in chunks) == 64
+    assert max(observed_conversion_bytes) <= (64 * 1024) // 4
+
+
+def test_wide_struct_row_fails_before_pandas_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    struct_type = pa.struct(
+        [pa.field(f"field_{index}", pa.null()) for index in range(1_000)]
+    )
+    batch = pa.record_batch(
+        [pa.array([{}], type=struct_type)],
+        names=["payload"],
+    )
+    calls = {"count": 0}
+
+    def record_conversion(_arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+        calls["count"] += 1
+        raise AssertionError("conversion_must_not_run")
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_arrow_slice_to_pandas",
+        record_conversion,
+    )
+
+    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
+        tuple(
+            dataset_reading._arrow_batch_to_bounded_pandas(
+                batch,
+                target_chunk_bytes=60_000,
+            )
+        )
+
+    assert calls["count"] == 0
+
+
 def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
     tmp_path: Path,
 ) -> None:
@@ -1385,8 +1452,12 @@ def test_dataset_writer_uses_single_atomic_directory_lifecycle() -> None:
     assert "_cleanup_stale_staged_scratch" not in writer_source
 
 
-def test_staged_owner_liveness_check_never_signals_processes() -> None:
-    source = Path(dataset_writing.__file__).read_text(encoding="utf-8")
+def test_scratch_owner_liveness_check_never_signals_processes() -> None:
+    source = Path(
+        importlib.import_module(
+            "quant_research_platform.storage._scratch_ownership"
+        ).__file__
+    ).read_text(encoding="utf-8")
 
     assert "os.kill" not in source
 
@@ -1436,7 +1507,8 @@ def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
         )
 
     assert not root.exists()
-    assert list(root.parent.glob(".duplicate_across_chunks.tmp-*")) == []
+    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(root)
+    assert list(root.parent.glob(f"{scratch_prefix}*")) == []
 
 
 def test_write_dataset_rejects_existing_root_without_overwrite(tmp_path: Path) -> None:
@@ -1465,16 +1537,17 @@ def test_write_dataset_rejects_generic_tmp_artifact_root_fail_closed(
         )
 
 
-def test_write_dataset_allows_writer_owned_tmp_artifact_root(
+def test_write_dataset_rejects_writer_scratch_name_as_final_artifact_root(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "data" / "processed" / "a_share" / "factor" / ".x.tmp-user"
 
-    write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-    )
+    with pytest.raises(ValueError, match="invalid_processed_dataset_root"):
+        write_dataset(
+            root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+        )
 
-    assert inspect_dataset(root).spec["data_id"] == "x"
+    assert not root.exists()
 
 
 def test_read_dataset_materialized_chunked_projection_and_time_window(

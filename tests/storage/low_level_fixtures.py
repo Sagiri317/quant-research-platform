@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -18,6 +16,11 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.storage._dataset_paths import relative_partition_label
+from quant_research_platform.storage._dataset_schema import (
+    canonical_schema_from_file,
+    sha256_json,
+)
 
 
 def make_default_dataset_frame(
@@ -245,25 +248,3 @@ def _column_roles(
         else:
             roles[name] = "feature"
     return roles
-
-
-def canonical_schema_from_file(
-    parquet_file: pq.ParquetFile,
-) -> tuple[tuple[str, str], ...]:
-    return tuple((field.name, str(field.type)) for field in parquet_file.schema_arrow)
-
-
-def relative_partition_label(data_root: Path, path: Path) -> str:
-    label = path.parent.relative_to(data_root).as_posix()
-    return "unpartitioned" if label == "." else label
-
-
-def sha256_json(payload: Any) -> str:
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()

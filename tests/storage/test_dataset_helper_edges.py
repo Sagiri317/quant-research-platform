@@ -393,3 +393,35 @@ def test_candidate_data_files_rejects_resolved_path_outside_root(
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
         _require_only_expected_parquet_paths(data_root, [external])
+
+
+def test_candidate_data_files_rejects_symlinked_part_alias(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    part = data_root / "part-000.parquet"
+    pq.write_table(pa.table({"value": [1]}), part)
+    alias = data_root / "part-001.parquet"
+    try:
+        alias.symlink_to(part)
+    except OSError as exc:
+        pytest.skip(f"symlink_not_available: {exc}")
+
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        _require_only_expected_parquet_paths(data_root, [part, alias])
+
+
+def test_candidate_data_files_rejects_symlinked_partition_alias(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    year = data_root / "year=2024"
+    year.mkdir(parents=True)
+    pq.write_table(pa.table({"value": [1]}), year / "part-000.parquet")
+    alias = data_root / "year=2025"
+    try:
+        alias.symlink_to(year, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink_not_available: {exc}")
+
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        candidate_data_files(data_root, spec={"partition_columns": ["year"]})

@@ -1059,17 +1059,15 @@ def _requires_conservative_pandas_probe(data_type: pa.DataType) -> bool:
     )
 
 
-def _single_row_pandas_conversion_bound_bytes(batch: pa.RecordBatch) -> int:
-    if batch.num_rows != 1:
-        raise ValueError("single_row_batch_required")
-    return int(pd.RangeIndex(1).memory_usage(deep=True)) + sum(
+def _pandas_conversion_bound_bytes(batch: pa.RecordBatch) -> int:
+    return int(pd.RangeIndex(batch.num_rows).memory_usage(deep=True)) + sum(
         max(1, int(batch.column(position).nbytes))
-        + _single_row_pandas_object_overhead(field.type)
+        + batch.num_rows * _pandas_object_cell_overhead(field.type)
         for position, field in enumerate(batch.schema)
     )
 
 
-def _single_row_pandas_object_overhead(data_type: pa.DataType) -> int:
+def _pandas_object_cell_overhead(data_type: pa.DataType) -> int:
     if pa.types.is_null(data_type):
         return sys.getsizeof(None) + _PYTHON_POINTER_BYTES
     if pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
@@ -1088,12 +1086,31 @@ def _single_row_pandas_object_overhead(data_type: pa.DataType) -> int:
         return sys.getsizeof(date.min) + _PYTHON_POINTER_BYTES
     if pa.types.is_time(data_type):
         return sys.getsizeof(time.min) + _PYTHON_POINTER_BYTES
+    if pa.types.is_struct(data_type):
+        return (
+            sys.getsizeof({})
+            + _PYTHON_POINTER_BYTES
+            + sum(
+                sys.getsizeof(field.name)
+                + (2 * _PYTHON_POINTER_BYTES)
+                + _pandas_object_cell_overhead(field.type)
+                for field in data_type
+            )
+        )
+    if pa.types.is_fixed_size_list(data_type):
+        return (
+            sys.getsizeof([])
+            + _PYTHON_POINTER_BYTES
+            + data_type.list_size
+            * (
+                _PYTHON_POINTER_BYTES
+                + _pandas_object_cell_overhead(data_type.value_type)
+            )
+        )
     if (
         pa.types.is_list(data_type)
         or pa.types.is_large_list(data_type)
-        or pa.types.is_fixed_size_list(data_type)
         or pa.types.is_map(data_type)
-        or pa.types.is_struct(data_type)
     ):
         return sys.getsizeof([]) + _PYTHON_POINTER_BYTES
     return 0
@@ -1160,16 +1177,18 @@ def _arrow_batch_to_bounded_pandas(
     while start < batch.num_rows:
         stop = min(batch.num_rows, start + rows_per_slice)
         arrow_slice = batch.slice(start, stop - start)
-        if len(arrow_slice) == 1:
-            if (
-                _single_row_pandas_conversion_bound_bytes(arrow_slice)
-                > conversion_budget
-            ):
+        type_aware_bound = _pandas_conversion_bound_bytes(arrow_slice)
+        conversion_bound_bytes = (
+            type_aware_bound
+            if len(arrow_slice) == 1
+            else max(
+                type_aware_bound,
+                _PANDAS_FRAME_OVERHEAD_BYTES + arrow_slice.nbytes * expansion,
+            )
+        )
+        if conversion_bound_bytes > conversion_budget:
+            if len(arrow_slice) == 1:
                 raise ValueError("dataset_row_exceeds_target_chunk_bytes")
-        elif (
-            _PANDAS_FRAME_OVERHEAD_BYTES + arrow_slice.nbytes * expansion
-            > conversion_budget
-        ):
             rows_per_slice = max(1, rows_per_slice // 2)
             continue
         frame = _arrow_slice_to_pandas(arrow_slice)

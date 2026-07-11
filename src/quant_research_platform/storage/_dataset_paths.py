@@ -187,7 +187,7 @@ def _is_research_dataset_output_suffix(
 
 
 def _matches_artifact_segment(segment: str, expected: str) -> bool:
-    return segment == expected or segment.startswith(f".{expected}.tmp-")
+    return segment == expected
 
 
 def candidate_data_files(
@@ -219,6 +219,8 @@ def candidate_data_files(
     for path in root.glob("year=*"):
         if not path.is_dir():
             continue
+        if _path_or_relative_component_is_symlink(root, path):
+            raise ValueError("invalid_dataset_part_files")
         value = path.name.removeprefix("year=")
         if not value.isdigit():
             raise ValueError("invalid_dataset_part_files")
@@ -236,11 +238,17 @@ def candidate_data_files(
 
 def _validated_part_paths(directory: Path) -> list[Path]:
     root = Path(directory)
+    if root.is_symlink():
+        raise ValueError("invalid_dataset_part_files")
     indexed: list[tuple[int, Path]] = []
     observed_indices: set[int] = set()
     for path in root.glob("*.parquet"):
         match = _PART_FILE_PATTERN.fullmatch(path.name)
-        if match is None or not path.is_file():
+        if (
+            match is None
+            or not path.is_file()
+            or _path_or_relative_component_is_symlink(root, path)
+        ):
             raise ValueError("invalid_dataset_part_files")
         try:
             if not path.resolve().is_relative_to(root.resolve()):
@@ -259,20 +267,42 @@ def _require_only_expected_parquet_paths(
     data_root: Path,
     expected: list[Path],
 ) -> None:
-    resolved_root = Path(data_root).resolve()
-    if any(
-        not path.resolve().is_relative_to(resolved_root)
-        for path in expected
-    ):
+    root = Path(data_root)
+    resolved_root = root.resolve()
+    if root.is_symlink():
         raise ValueError("invalid_dataset_part_files")
-    observed = {
-        path.resolve()
-        for path in Path(data_root).rglob("*.parquet")
-        if path.is_file()
-    }
-    allowed = {path.resolve() for path in expected}
-    if observed != allowed:
+    observed_paths = [path for path in root.rglob("*.parquet") if path.is_file()]
+    all_paths = [*expected, *observed_paths]
+    try:
+        if any(
+            not path.resolve().is_relative_to(resolved_root)
+            or _path_or_relative_component_is_symlink(root, path)
+            for path in all_paths
+        ):
+            raise ValueError("invalid_dataset_part_files")
+    except OSError as exc:
+        raise ValueError("invalid_dataset_part_files") from exc
+    observed = {path.absolute() for path in observed_paths}
+    allowed = {path.absolute() for path in expected}
+    resolved_allowed = {path.resolve() for path in expected}
+    if observed != allowed or len(resolved_allowed) != len(expected):
         raise ValueError("invalid_dataset_part_files")
+
+
+def _path_or_relative_component_is_symlink(root: Path, path: Path) -> bool:
+    candidate = Path(path)
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return True
+    current = Path(root)
+    if current.is_symlink():
+        return True
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
 
 
 def timestamp_primary_key_column_from_spec(spec: DataSpec) -> str | None:

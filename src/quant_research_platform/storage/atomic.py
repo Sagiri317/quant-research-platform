@@ -127,14 +127,17 @@ def _cleanup_stale_atomic_directories(
         if not scratch_owner_is_stale(temp_root, prefix=prefix):
             continue
         target_marker = _atomic_target_marker(temp_root)
+        stage_is_empty = not any(temp_root.iterdir())
         if target_marker.is_file():
             try:
                 observed_identity = target_marker.read_text(encoding="utf-8")
             except (OSError, UnicodeError):
-                continue
-            if observed_identity != target_identity:
-                continue
-        elif any(temp_root.iterdir()):
+                if not stage_is_empty:
+                    continue
+            else:
+                if observed_identity != target_identity and not stage_is_empty:
+                    continue
+        elif not stage_is_empty:
             continue
         _remove_path(temp_root)
         _remove_atomic_target_marker(target_marker)
