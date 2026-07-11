@@ -12,6 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage.atomic import publish_no_replace, reject_if_exists
 
 
@@ -36,42 +37,54 @@ def write_parquet_chunks(
     temp_path.parent.mkdir(parents=True, exist_ok=True)
     writer: pq.ParquetWriter | None = None
     claimed_temp = False
-    seen_keys: set[tuple[object, ...]] = set()
     row_count = 0
     effective_test_end: str | None = None
     try:
         temp_path.touch(exist_ok=False)
         claimed_temp = True
-        for frame in frames:
-            selected = _prediction_output_chunk_frame(
-                frame,
-                required=required,
-                key_columns=key_columns,
-                seen_keys=seen_keys,
-            )
-            if selected.empty:
-                continue
-            timestamps = strict_timestamp_series(
-                selected["timestamp"], error="prediction_metadata_inconsistent"
-            )
-            current_end = pd.Timestamp(timestamps.max()).date().isoformat()
-            if effective_test_end is None or pd.Timestamp(current_end) > pd.Timestamp(
-                effective_test_end
-            ):
-                effective_test_end = current_end
-            table = pa.Table.from_pandas(selected, preserve_index=False)
-            if writer is None:
-                writer = pq.ParquetWriter(
-                    temp_path,
-                    table.schema,
-                    compression=compression,
+        with ExactPrimaryKeyIndex(
+            primary_key=key_columns,
+            timestamp_columns=tuple(
+                column for column in key_columns if column == "timestamp"
+            ),
+            scratch_parent=temp_path.parent,
+        ) as key_index:
+            for frame in frames:
+                selected = _prediction_output_chunk_frame(
+                    frame,
+                    required=required,
+                    key_columns=key_columns,
                 )
-            writer.write_table(table)
-            row_count += len(selected)
-        if writer is None or row_count == 0 or effective_test_end is None:
+                if selected.empty:
+                    continue
+                timestamps = strict_timestamp_series(
+                    selected["timestamp"], error="prediction_metadata_inconsistent"
+                )
+                current_end = pd.Timestamp(timestamps.max()).date().isoformat()
+                if effective_test_end is None or pd.Timestamp(
+                    current_end
+                ) > pd.Timestamp(effective_test_end):
+                    effective_test_end = current_end
+                table = pa.Table.from_pandas(selected, preserve_index=False)
+                try:
+                    duplicates = key_index.add_table(table)
+                except ValueError as exc:
+                    raise ValueError("invalid_prediction_keys") from exc
+                if duplicates:
+                    raise ValueError("duplicate_prediction_keys")
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        temp_path,
+                        table.schema,
+                        compression=compression,
+                    )
+                writer.write_table(table)
+                row_count += len(selected)
+            if writer is not None:
+                writer.close()
+                writer = None
+        if row_count == 0 or effective_test_end is None:
             raise ValueError("empty_prediction_window")
-        writer.close()
-        writer = None
         reject_if_exists(final_path)
         publish_no_replace(temp_path, final_path)
     except BaseException:
@@ -91,7 +104,6 @@ def _prediction_output_chunk_frame(
     *,
     required: tuple[str, ...],
     key_columns: tuple[str, ...],
-    seen_keys: set[tuple[object, ...]],
 ) -> pd.DataFrame:
     missing = sorted(set(required).difference(frame.columns))
     if missing:
@@ -102,11 +114,6 @@ def _prediction_output_chunk_frame(
     selected = frame.loc[:, list(required)]
     if bool(selected.duplicated(list(key_columns)).any()):
         raise ValueError("duplicate_prediction_keys")
-    for key in selected.loc[:, list(key_columns)].itertuples(index=False, name=None):
-        normalized_key = tuple(key)
-        if normalized_key in seen_keys:
-            raise ValueError("duplicate_prediction_keys")
-        seen_keys.add(normalized_key)
     return selected
 
 

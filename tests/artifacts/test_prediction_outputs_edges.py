@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import warnings
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -8,6 +9,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts import _parquet_writers as parquet_writers
 from quant_research_platform.artifacts import outputs
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.storage.layout import StorageLayout
@@ -53,6 +55,32 @@ def test_prediction_output_validation_rejects_bad_frames(
             output_spec=report_spec,
             layout=layout,
         )
+
+
+def test_prediction_chunk_writer_has_no_row_proportional_python_key_set() -> None:
+    source = inspect.getsource(parquet_writers.write_parquet_chunks)
+
+    assert "seen_keys" not in source
+
+
+def test_prediction_chunk_writer_rejects_cross_chunk_duplicate_and_cleans_scratch(
+    tmp_path: Path,
+) -> None:
+    frame = make_artifact_prediction_output_frame()
+    final_path = tmp_path / "prediction.parquet"
+
+    with pytest.raises(ValueError, match="duplicate_prediction_keys"):
+        parquet_writers.write_parquet_chunks(
+            (frame, frame.copy()),
+            final_path,
+            required=tuple(frame.columns),
+            key_columns=("asset_id", "timestamp"),
+            compression="zstd",
+        )
+
+    assert not final_path.exists()
+    assert not list(tmp_path.glob(".k-*"))
+    assert not list(tmp_path.glob(".*.tmp"))
 
 
 def test_prediction_outputs_require_standard_metadata_attrs(
