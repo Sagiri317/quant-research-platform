@@ -817,25 +817,42 @@ def _validated_output_parquet_paths(root: Path) -> tuple[Path, ...]:
     ):
         raise ValueError("invalid_aggregate_output_files")
     declared: list[Path] = []
+    logical_names: set[str] = set()
+    resolved_paths: set[Path] = set()
+    physical_files: set[tuple[int, int]] = set()
     for name in files:
         relative = PurePosixPath(name)
-        if relative.is_absolute() or len(relative.parts) != 1:
+        normalized_name = relative.as_posix()
+        logical_name = normalized_name.casefold()
+        if (
+            relative.is_absolute()
+            or len(relative.parts) != 1
+            or name != normalized_name
+            or logical_name in logical_names
+        ):
             raise ValueError("invalid_aggregate_output_files")
+        logical_names.add(logical_name)
         path = bundle_root / relative.as_posix()
         if path.suffix.casefold() != ".parquet":
             continue
         try:
             stat = path.stat()
+            resolved_path = path.resolve(strict=True)
+            physical_file = (int(stat.st_dev), int(stat.st_ino))
             if (
                 not path.is_file()
                 or path_is_filesystem_alias(path)
-                or not path.resolve(strict=True).is_relative_to(resolved_root)
+                or not resolved_path.is_relative_to(resolved_root)
                 or int(stat.st_ino) <= 0
                 or int(stat.st_nlink) != 1
+                or resolved_path in resolved_paths
+                or physical_file in physical_files
             ):
                 raise ValueError("invalid_aggregate_output_files")
         except OSError as exc:
             raise ValueError("invalid_aggregate_output_files") from exc
+        resolved_paths.add(resolved_path)
+        physical_files.add(physical_file)
         declared.append(path)
     observed = {
         path.absolute()

@@ -180,6 +180,33 @@ def test_aggregates_output_frames_reject_external_hardlink(tmp_path) -> None:
         )
 
 
+def test_aggregates_output_frames_reject_normalized_manifest_alias(tmp_path) -> None:
+    root = tmp_path / "output"
+    root.mkdir()
+    pq.write_table(pa.table({"value": [1.0]}), root / "listed.parquet")
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_id": "qrp-output-manifest",
+                "output_id": "synthetic",
+                "output_definition_id": "evaluation_outputs",
+                "run_id": "synthetic",
+                "metadata": {},
+                "files": ["listed.parquet", "./listed.parquet"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid_aggregate_output_files"):
+        list(
+            aggregates._iter_output_frames(
+                (root,),
+                target_chunk_bytes=1024**2,
+            )
+        )
+
+
 def test_aggregates_summary_detects_single_value_change(tmp_path) -> None:
     baseline = _base_frame()
     candidate = baseline.copy()
