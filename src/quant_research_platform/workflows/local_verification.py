@@ -359,6 +359,7 @@ def _run_local_verification_with_policy(
         "summary": {"markdown_path": "summary.md"},
     }
     summary_markdown = render_run_summary_markdown(run_payload)
+    _require_output_disk_headroom(resource_policy, run_root)
     replace_qrp_json(layout.run_json_path, run_payload)
     write_run_summary_markdown(layout.summary_md_path, summary_markdown)
     return LocalVerificationRunResult(

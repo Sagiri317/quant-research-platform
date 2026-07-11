@@ -5,6 +5,7 @@ import inspect
 import json
 from math import ceil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -287,6 +288,67 @@ def test_research_time_key_scan_uses_policy_target_and_bounds_state(
     assert observed_targets == [policy.effective_chunk_bytes // 2]
 
 
+def test_research_processed_input_reserves_materialized_join_working_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processed_catalog = make_demo_processed_catalog()
+    dataset_spec = make_research_dataset_catalog().get("demo")
+    processed_spec = processed_catalog.get("demo_factors")
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        chunk_target_bytes=12 * 1024,
+        memory_safety_factor=1.0,
+    )
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        assembler_module,
+        "build_dataset_read_context",
+        lambda *_args, **_kwargs: "context",
+    )
+
+    def materialize(context, **kwargs):  # noqa: ANN001
+        observed["context"] = context
+        observed.update(kwargs)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(assembler_module, "materialize_dataset_context", materialize)
+
+    assembler_module._read_processed_input(
+        layout=SimpleNamespace(processed_data_root=lambda *_args: Path("processed")),
+        dataset_spec=dataset_spec,
+        processed_spec=processed_spec,
+        existing_columns=(),
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        resource_policy=policy,
+    )
+
+    assert observed == {
+        "context": "context",
+        "target_chunk_bytes": policy.effective_chunk_bytes,
+        "materialized_budget_bytes": (
+            policy.effective_chunk_bytes
+            // assembler_module.RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER
+        ),
+    }
+
+
+def test_research_join_rejects_merge_before_combined_peak_exceeds_budget() -> None:
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        chunk_target_bytes=1_024,
+        memory_safety_factor=1.0,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="research_join_working_set_exceeds_memory_budget",
+    ):
+        assembler_module._require_research_join_working_set(
+            retained_bytes=300,
+            input_bytes=300,
+            resource_policy=policy,
+        )
+
 def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     primary_key = platform_entity_time_key()
@@ -512,11 +574,11 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.02")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 3_000,
+        lambda **_kwargs: 30_000,
     )
     tiny_root = assemble_research_dataset(
         layout=tiny_layout,
@@ -884,11 +946,11 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.02")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 3_000,
+        lambda **_kwargs: 30_000,
     )
     assemble_research_dataset(
         layout=layout,
@@ -897,7 +959,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.02")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
     model_catalog = ModelCatalog()
     model_catalog.register(
         ModelSpec(
@@ -1059,11 +1121,11 @@ def test_evaluation_runner_streams_research_chunks(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.02")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 3_000,
+        lambda **_kwargs: 30_000,
     )
     assemble_research_dataset(
         layout=layout,

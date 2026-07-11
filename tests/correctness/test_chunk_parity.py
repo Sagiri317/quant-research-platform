@@ -103,11 +103,11 @@ def test_research_assembly_session_chunks_equal_default_and_keep_nan_positions(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.02")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 3_000,
+        lambda **_kwargs: 30_000,
     )
     tiny_root = assemble_research_dataset(
         layout=tiny_layout,
@@ -173,11 +173,11 @@ def test_research_feature_transform_session_chunks_equal_default(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.02")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 3_000,
+        lambda **_kwargs: 30_000,
     )
     assemble_research_dataset(
         layout=tiny_layout,

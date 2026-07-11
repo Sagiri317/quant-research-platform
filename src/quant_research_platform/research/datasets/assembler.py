@@ -213,6 +213,11 @@ def _join_processed_inputs(
             resource_policy=resource_policy,
         )
         if assembled is None:
+            _require_research_join_working_set(
+                retained_bytes=0,
+                input_bytes=_frame_bytes(input_frame),
+                resource_policy=resource_policy,
+            )
             assembled = input_frame
             base_frame = input_frame
             continue
@@ -223,6 +228,11 @@ def _join_processed_inputs(
             dataset_spec=dataset_spec,
             input_data_id=input_data_id,
         )
+        _require_research_join_working_set(
+            retained_bytes=_frame_bytes(assembled),
+            input_bytes=_frame_bytes(input_frame),
+            resource_policy=resource_policy,
+        )
         assembled = assembled.merge(
             input_frame,
             on=list(dataset_spec.primary_key),
@@ -231,8 +241,26 @@ def _join_processed_inputs(
         )
     if assembled is None:
         raise ValueError("empty_research_dataset_inputs")
+    if 2 * _frame_bytes(assembled) > resource_policy.effective_chunk_bytes:
+        raise ValueError("research_join_working_set_exceeds_memory_budget")
     assembled = _apply_feature_transforms(assembled, dataset_spec)
+    if 2 * _frame_bytes(assembled) > resource_policy.effective_chunk_bytes:
+        raise ValueError("research_join_working_set_exceeds_memory_budget")
     return assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
+
+
+def _require_research_join_working_set(
+    *,
+    retained_bytes: int,
+    input_bytes: int,
+    resource_policy: RuntimeResourcePolicy,
+) -> None:
+    if 2 * (retained_bytes + input_bytes) > resource_policy.effective_chunk_bytes:
+        raise ValueError("research_join_working_set_exceeds_memory_budget")
+
+
+def _frame_bytes(frame: pd.DataFrame) -> int:
+    return int(frame.memory_usage(index=True, deep=True).sum())
 
 
 def _time_keys_from_base_input(
@@ -375,6 +403,10 @@ def _read_processed_input(
         return materialize_dataset_context(
             context,
             target_chunk_bytes=resource_policy.effective_chunk_bytes,
+            materialized_budget_bytes=(
+                resource_policy.effective_chunk_bytes
+                // RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER
+            ),
         )
     except ValueError as exc:
         if str(exc) == "dataset_column_not_found":
