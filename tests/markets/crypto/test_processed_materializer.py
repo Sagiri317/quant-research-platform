@@ -30,6 +30,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     materialize_labels,
     materialize_panel,
     materializer,
+    panels,
 )
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     processed_catalog,
@@ -720,8 +721,18 @@ def test_crypto_core_mask_uses_original_row_positions(index: list[int]) -> None:
     )
     core = TimeWindow("2026-07-06T00:10:00", "2026-07-06T00:10:00")
 
-    assert materialize_factors._core_mask(frame, core).tolist() == [False, True, False]
-    assert materialize_labels._core_mask(frame, core).tolist() == [False, True, False]
+    assert materialization_validation.core_time_window_mask(frame, core).tolist() == [
+        False,
+        True,
+        False,
+    ]
+    assert not hasattr(materialize_factors, "_core_mask")
+    assert not hasattr(materialize_labels, "_core_mask")
+
+
+def test_crypto_timestamp_validation_has_no_thin_wrappers() -> None:
+    assert not hasattr(materialize_panel, "_strict_timestamp_column")
+    assert not hasattr(panels, "_strict_timestamp_column")
 
 
 @pytest.mark.parametrize("index", [[100 + index for index in range(30)], [0] * 30])
@@ -747,7 +758,10 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
             module,
             "build_dataset_equality_group_plan",
             lambda *_args, **_kwargs: SimpleNamespace(
-                keys=(("crypto", "btc_usdt"),)
+                keys=(("crypto", "btc_usdt"),),
+                paths_by_key={
+                    ("crypto", "btc_usdt"): (Path("part-000.parquet"),)
+                },
             ),
         )
         monkeypatch.setattr(

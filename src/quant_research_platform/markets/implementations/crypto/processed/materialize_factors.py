@@ -25,7 +25,6 @@ from quant_research_platform.storage._dataset_reading import (
     build_dataset_equality_group_plan,
     build_dataset_read_context,
     dataset_context_for_equality_group,
-    filter_frame_by_time_window,
     iter_dataset_chunks,
 )
 from quant_research_platform.storage._dataset_writing import write_dataset
@@ -120,6 +119,10 @@ def _iter_factor_chunks(
         target_chunk_bytes=chunk_target_bytes,
         target_state_bytes=budget.dependency_key_index_bytes,
     )
+    materialization_validation.validate_single_asset_part_grouping(
+        group_plan,
+        error="invalid_crypto_panel_physical_asset_grouping",
+    )
     for key in group_plan.keys:
         group_context = dataset_context_for_equality_group(
             context,
@@ -138,7 +141,10 @@ def _iter_factor_chunks(
                 error="out_of_order_crypto_factor_dependency",
             )
             panel = panel.copy()
-            panel[_CORE_ROW] = _core_mask(panel, time_window)
+            panel[_CORE_ROW] = materialization_validation.core_time_window_mask(
+                panel,
+                time_window,
+            )
             for (segment_market_id, segment_asset_id), segment in panel.groupby(
                 ["market_id", "asset_id"],
                 sort=False,
@@ -192,23 +198,6 @@ def _next_factor_carry(frame: pd.DataFrame) -> pd.DataFrame:
         .tail(MICROSTRUCTURE_ROLLING_CARRY_BARS)
         .copy()
     )
-
-
-def _core_mask(frame: pd.DataFrame, time_window: TimeWindow) -> pd.Series:
-    spec = {
-        "column_roles": {"timestamp": "timestamp"},
-        "primary_key": ("timestamp",),
-    }
-    work = frame.loc[:, ["timestamp"]].copy()
-    work["_qrp_original_position"] = range(len(frame))
-    filtered = filter_frame_by_time_window(
-        work,
-        spec=spec,
-        time_window=time_window,
-    )
-    positions = pd.Series(False, index=range(len(frame)))
-    positions.iloc[filtered["_qrp_original_position"].to_numpy(dtype=int)] = True
-    return pd.Series(positions.to_numpy(dtype=bool), index=frame.index)
 
 
 __all__ = ["write_factors"]

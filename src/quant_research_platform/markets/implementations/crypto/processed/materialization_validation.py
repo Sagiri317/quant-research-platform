@@ -31,8 +31,11 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage._dataset_reading import (
+    DatasetEqualityGroupPlan,
+    build_dataset_equality_group_plan,
     build_dataset_read_context,
     dataset_primary_key_schema,
+    filter_frame_by_time_window,
     iter_dataset_chunks,
 )
 from quant_research_platform.storage._dataset_schema import dataset_identity_payload
@@ -46,6 +49,39 @@ class OrderedDependencyState:
     """Bounded ordering state shared across dependency chunks."""
 
     last_key: tuple[str, str, pd.Timestamp] | None = None
+
+
+def validate_single_asset_part_grouping(
+    plan: DatasetEqualityGroupPlan,
+    *,
+    error: str,
+) -> None:
+    key_by_path: dict[Path, tuple[object, ...]] = {}
+    for key, paths in plan.paths_by_key.items():
+        for path in paths:
+            existing = key_by_path.setdefault(path, key)
+            if existing != key:
+                raise ValueError(error)
+
+
+def core_time_window_mask(
+    frame: pd.DataFrame,
+    time_window: TimeWindow,
+) -> pd.Series:
+    spec = {
+        "column_roles": {"timestamp": "timestamp"},
+        "primary_key": ("timestamp",),
+    }
+    work = frame.loc[:, ["timestamp"]].copy()
+    work["_qrp_original_position"] = range(len(frame))
+    filtered = filter_frame_by_time_window(
+        work,
+        spec=spec,
+        time_window=time_window,
+    )
+    positions = pd.Series(False, index=range(len(frame)))
+    positions.iloc[filtered["_qrp_original_position"].to_numpy(dtype=int)] = True
+    return pd.Series(positions.to_numpy(dtype=bool), index=frame.index)
 
 
 def panel_input_inspections(
@@ -137,6 +173,20 @@ def validate_panel_materialization(
         inspection.root,
         columns=spec.primary_key,
         time_window=time_window,
+    )
+    actual_group_plan = build_dataset_equality_group_plan(
+        actual_context,
+        columns=("market_id", "asset_id"),
+        target_chunk_bytes=chunk_target_bytes,
+        target_state_bytes=(
+            materialization_resources.MaterializationBudget.from_policy(
+                resource_policy
+            ).dependency_key_index_bytes
+        ),
+    )
+    validate_single_asset_part_grouping(
+        actual_group_plan,
+        error="invalid_crypto_panel_physical_asset_grouping",
     )
     validate_exact_dependency_key_coverage(
         _iter_panel_primary_key_chunks(
@@ -356,6 +406,7 @@ def _iter_panel_primary_key_chunks(
 
 __all__ = [
     "input_dataset_identities",
+    "core_time_window_mask",
     "panel_dependency_inspections",
     "panel_input_inspections",
     "validate_exact_dependency_key_coverage",
@@ -363,4 +414,5 @@ __all__ = [
     "validate_panel_dependent_materialization",
     "validate_panel_materialization",
     "validated_ordered_dependency_chunk",
+    "validate_single_asset_part_grouping",
 ]

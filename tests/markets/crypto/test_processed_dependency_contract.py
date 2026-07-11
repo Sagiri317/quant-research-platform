@@ -283,6 +283,73 @@ def test_factor_carry_processing_is_linear_in_asset_count(
     )
 
 
+@pytest.mark.parametrize(
+    ("module", "output_data_id", "minutes"),
+    [
+        (materialize_factors, "microstructure", 6),
+        (materialize_labels, "forward_returns", 61),
+    ],
+)
+def test_panel_dependents_reject_mixed_asset_physical_parts_before_repeated_reads(
+    tmp_path: Path,
+    module,
+    output_data_id: str,
+    minutes: int,
+) -> None:
+    catalog = processed_catalog()
+    panel_spec = catalog.get("market_panel_1m")
+    panel_root = StorageLayout(tmp_path).processed_data_root(
+        panel_spec.market_id,
+        panel_spec.kind,
+        panel_spec.data_id,
+    )
+    mixed = pd.concat(
+        tuple(
+            _panel_frame(start=0, minutes=minutes).assign(
+                asset_id=f"asset_{index:04d}"
+            )
+            for index in range(8)
+        ),
+        ignore_index=True,
+    )
+    write_dataset(panel_root, mixed, spec=panel_spec)
+    iterator_name = (
+        "_iter_factor_chunks"
+        if output_data_id == "microstructure"
+        else "_iter_label_chunks"
+    )
+    iterator = getattr(module, iterator_name)
+
+    with pytest.raises(
+        ValueError,
+        match="invalid_crypto_panel_physical_asset_grouping",
+    ):
+        list(
+            iterator(
+                catalog.get(output_data_id),
+                panel_root=panel_root,
+                time_window=TimeWindow(
+                    pd.Timestamp("2026-07-06 00:00:00"),
+                    pd.Timestamp("2026-07-06 00:00:00")
+                    + pd.Timedelta(minutes=minutes - 1),
+                ),
+                resource_policy=RESOURCE_POLICY,
+            )
+        )
+
+
+def test_crypto_materialization_rejects_budget_below_sqlite_cache_minimum() -> None:
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=1024,
+        memory_budget_fraction=1.0,
+        chunk_target_bytes=18,
+        memory_safety_factor=1.0,
+    )
+
+    with pytest.raises(ValueError, match="crypto_materialization_budget_too_small"):
+        materialization_resources.MaterializationBudget.from_policy(policy)
+
+
 def test_canonical_asset_budget_accounting_is_linear(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -691,6 +758,14 @@ def test_factor_and_label_state_fail_closed_when_fixed_carry_exceeds_budget(
         "require_frame_within_budget",
         lambda *_args, **_kwargs: None,
     )
+    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
+    budget = materialization_resources.MaterializationBudget.from_policy(policy)
+    budget.allocations["carry_or_label_buffer"] = 1
+    monkeypatch.setattr(
+        module.materialization_resources.MaterializationBudget,
+        "from_policy",
+        classmethod(lambda _cls, _policy: budget),
+    )
     _patch_mock_group_plan(monkeypatch, module, (("crypto", "btc_usdt"),))
     spec = processed_catalog().get(
         "microstructure" if module is materialize_factors else "forward_returns"
@@ -698,12 +773,8 @@ def test_factor_and_label_state_fail_closed_when_fixed_carry_exceeds_budget(
     iterator = getattr(module, iterator_name)(
         spec,
         panel_root=Path("unused"),
-            time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:29"),
-            resource_policy=RuntimeResourcePolicy(
-                available_memory_bytes=8 * 1024,
-                chunk_target_bytes=4 * 1024,
-                memory_safety_factor=1.0,
-            ),
+        time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:29"),
+        resource_policy=policy,
     )
 
     with pytest.raises(ValueError, match=error):
@@ -856,7 +927,13 @@ def _patch_mock_group_plan(
     module,
     keys: tuple[tuple[str, str], ...],
 ) -> None:
-    plan = SimpleNamespace(keys=keys)
+    plan = SimpleNamespace(
+        keys=keys,
+        paths_by_key={
+            key: (Path(f"part-{index:03d}.parquet"),)
+            for index, key in enumerate(keys)
+        },
+    )
     monkeypatch.setattr(
         module,
         "build_dataset_equality_group_plan",

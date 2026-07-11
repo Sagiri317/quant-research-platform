@@ -272,15 +272,13 @@ def _matching_read_scope(
             error="invalid_crypto_matching_bar_source_asset_id",
         )
     )
-    start = _strict_timestamp_column(
-        bars,
-        "timestamp",
-        "invalid_crypto_matching_bar_timestamp",
+    start = strict_timestamp_series(
+        bars["timestamp"],
+        error="invalid_crypto_matching_bar_timestamp",
     ).min()
-    end = _strict_timestamp_column(
-        bars,
-        "close_time",
-        "invalid_crypto_matching_bar_close_time",
+    end = strict_timestamp_series(
+        bars["close_time"],
+        error="invalid_crypto_matching_bar_close_time",
     ).max()
     return (
         asset_ids,
@@ -298,15 +296,13 @@ def _validate_matching_bar_keys(bars: pd.DataFrame) -> None:
         bars,
         error="invalid_crypto_matching_bar_source_asset_id",
     )
-    _strict_timestamp_column(
-        bars,
-        "timestamp",
-        "invalid_crypto_matching_bar_timestamp",
+    strict_timestamp_series(
+        bars["timestamp"],
+        error="invalid_crypto_matching_bar_timestamp",
     )
-    _strict_timestamp_column(
-        bars,
-        "close_time",
-        "invalid_crypto_matching_bar_close_time",
+    strict_timestamp_series(
+        bars["close_time"],
+        error="invalid_crypto_matching_bar_close_time",
     )
 
 
@@ -363,7 +359,7 @@ def _matching_window_mask(
     source_asset_error: str,
     timestamp_error: str,
 ) -> pd.Series:
-    timestamps = _strict_timestamp_column(frame, "timestamp", timestamp_error)
+    timestamps = strict_timestamp_series(frame["timestamp"], error=timestamp_error)
     source_ids = _strict_source_asset_ids(frame, error=source_asset_error)
     mask = source_ids.isin(asset_ids)
     return mask & timestamps.ge(start - max_quote_age) & timestamps.le(end)
@@ -383,14 +379,6 @@ def _strict_source_asset_ids(frame: pd.DataFrame, *, error: str) -> pd.Series:
         ):
             raise ValueError(error)
     return values
-
-
-def _strict_timestamp_column(
-    frame: pd.DataFrame,
-    column: str,
-    error: str,
-) -> pd.Series:
-    return strict_timestamp_series(frame[column], error=error)
 
 
 __all__ = ["write_panel"]

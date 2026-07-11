@@ -29,19 +29,16 @@ _SIGNED_QUANTITY_ABSOLUTE_TOLERANCE = 1e-12
 
 def prepare_panel_bars(bars: pd.DataFrame) -> pd.DataFrame:
     panel = bars.copy().reset_index(drop=True)
-    panel["timestamp"] = _strict_timestamp_column(
-        panel,
-        "timestamp",
+    panel["timestamp"] = strict_timestamp_series(
+        panel["timestamp"],
         error="invalid_crypto_panel_timestamp",
     )
-    panel["open_time"] = _strict_timestamp_column(
-        panel,
-        "open_time",
+    panel["open_time"] = strict_timestamp_series(
+        panel["open_time"],
         error="invalid_crypto_bar_open_time",
     )
-    panel["close_time"] = _strict_timestamp_column(
-        panel,
-        "close_time",
+    panel["close_time"] = strict_timestamp_series(
+        panel["close_time"],
         error="invalid_crypto_panel_close_time",
     )
     _validate_one_minute_bar_contract(panel)
@@ -236,9 +233,8 @@ def normalize_trade_chunk(trades: pd.DataFrame) -> pd.DataFrame:
         error="invalid_crypto_trade_source_market_type",
     )
     frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
-    frame["event_timestamp"] = _strict_timestamp_column(
-        frame,
-        "timestamp",
+    frame["event_timestamp"] = strict_timestamp_series(
+        frame["timestamp"],
         error="invalid_crypto_trade_timestamp",
     )
     frame["timestamp"] = frame["event_timestamp"].dt.floor("min")
@@ -356,9 +352,8 @@ def normalize_depth_chunk(depth: pd.DataFrame) -> pd.DataFrame:
         error="invalid_crypto_depth_source_market_type",
     )
     frame["asset_id"] = _crypto_asset_id_series(frame["source_asset_id"])
-    frame["quote_timestamp"] = _strict_timestamp_column(
-        frame,
-        "timestamp",
+    frame["quote_timestamp"] = strict_timestamp_series(
+        frame["timestamp"],
         error="invalid_crypto_depth_timestamp",
     )
     _validate_depth_level_values(frame)
@@ -466,15 +461,6 @@ def _strict_non_negative_integer_column(
     return values.astype("int64")
 
 
-def _strict_timestamp_column(
-    frame: pd.DataFrame,
-    column: str,
-    *,
-    error: str,
-) -> pd.Series:
-    return strict_timestamp_series(frame[column], error=error)
-
-
 def _validate_depth_level_values(frame: pd.DataFrame) -> None:
     for side in frame["side"]:
         if not isinstance(side, str) or side not in {"bid", "ask"}:
@@ -552,9 +538,8 @@ def _stabilize_panel_schema(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     result["market_id"] = result["market_id"].astype(str)
     result["asset_id"] = result["asset_id"].astype(str)
-    result["timestamp"] = _strict_timestamp_column(
-        result,
-        "timestamp",
+    result["timestamp"] = strict_timestamp_series(
+        result["timestamp"],
         error="invalid_crypto_panel_timestamp",
     )
     for column in ("eligible", "trade_flow_observed", "quote_observed"):
