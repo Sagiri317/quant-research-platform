@@ -10,6 +10,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers import frequency_ids
 from tests.helpers.panel_keys import DEFAULT_PANEL_KEY_COLUMNS
 from tests.helpers.synthetic_a_share import (
     processed_a_share_root,
@@ -19,7 +20,7 @@ from tests.helpers.synthetic_a_share import (
 
 def tiny_processed_chunk_bytes(data_id: str) -> int:
     return {
-        "market_panel_1d": 10 * 1024,
+        frequency_ids.MARKET_PANEL_DATA_ID: 10 * 1024,
         "execution": 12 * 1024,
         "price_volume": 512 * 1024,
         "forward_returns": 512 * 1024,
