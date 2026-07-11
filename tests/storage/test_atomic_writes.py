@@ -34,6 +34,40 @@ def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -
     assert list(final_root.parent.glob(".tmp-*")) == []
 
 
+def test_atomic_directory_supports_long_final_component(tmp_path: Path) -> None:
+    component_length = min(225, 240 - len(str(tmp_path)) - 1)
+    assert component_length > 32
+    final_root = tmp_path / ("x" * component_length)
+
+    atomic_write_directory(
+        final_root,
+        lambda stage: (stage / "done").write_text("ok", encoding="utf-8"),
+    )
+
+    assert (final_root / "done").read_text(encoding="utf-8") == "ok"
+
+
+def test_atomic_directory_recovery_is_glob_safe_for_target_name(
+    tmp_path: Path,
+) -> None:
+    final_root = tmp_path / "[x]"
+    scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
+    stale = tmp_path / f"{scratch_prefix}qzzzzzz-stale"
+    stale.mkdir()
+    Path(f"{stale}.target").write_text(
+        atomic._atomic_target_identity(final_root),
+        encoding="utf-8",
+    )
+
+    atomic_write_directory(
+        final_root,
+        lambda stage: (stage / "done").write_text("ok", encoding="utf-8"),
+    )
+
+    assert not stale.exists()
+    assert (final_root / "done").read_text(encoding="utf-8") == "ok"
+
+
 def test_atomic_write_directory_retries_transient_permission_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -82,6 +116,52 @@ def test_atomic_write_directory_does_not_clean_unclaimed_collision(
         atomic_write_directory(final_root, lambda _root: None)
 
     assert (live_temp / "live.txt").read_text(encoding="utf-8") == "live\n"
+
+
+def test_atomic_directory_preserves_unclaimed_scratch_directory(
+    tmp_path: Path,
+) -> None:
+    final_root = tmp_path / "bundle"
+    scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
+    unclaimed = tmp_path / f"{scratch_prefix}user-data"
+    unclaimed.mkdir()
+    sentinel = unclaimed / "sentinel.txt"
+    sentinel.write_text("unclaimed\n", encoding="utf-8")
+
+    atomic_write_directory(
+        final_root,
+        lambda stage: (stage / "done").write_text("ok", encoding="utf-8"),
+    )
+
+    assert sentinel.read_text(encoding="utf-8") == "unclaimed\n"
+
+
+def test_atomic_directory_preserves_concurrent_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_root = tmp_path / "bundle"
+
+    def racing_publish(source: Path, target: Path) -> None:
+        del source
+        target.mkdir()
+        (target / "winner.txt").write_text("concurrent-winner\n", encoding="utf-8")
+        raise FileExistsError(target)
+
+    monkeypatch.setattr(atomic, "publish_no_replace", racing_publish)
+
+    with pytest.raises(FileExistsError):
+        atomic_write_directory(
+            final_root,
+            lambda stage: (stage / "candidate.txt").write_text(
+                "candidate\n",
+                encoding="utf-8",
+            ),
+        )
+
+    assert (final_root / "winner.txt").read_text(encoding="utf-8") == (
+        "concurrent-winner\n"
+    )
 
 
 def test_atomic_write_directory_recovers_dead_owner_when_final_exists(

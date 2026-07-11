@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
+from datetime import date, time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +48,10 @@ _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR = 32
 _PHYSICAL_WORKING_SET_PARTS = 4
 _PANDAS_PROBE_ROWS = 64
 _PANDAS_FRAME_OVERHEAD_BYTES = 192
+_PYTHON_POINTER_BYTES = max(
+    1,
+    sys.getsizeof((None,)) - sys.getsizeof(()),
+)
 
 
 @dataclass(frozen=True)
@@ -1053,13 +1059,44 @@ def _requires_conservative_pandas_probe(data_type: pa.DataType) -> bool:
     )
 
 
-def _single_row_minimum_pandas_bytes(batch: pa.RecordBatch) -> int:
+def _single_row_pandas_conversion_bound_bytes(batch: pa.RecordBatch) -> int:
     if batch.num_rows != 1:
         raise ValueError("single_row_batch_required")
     return int(pd.RangeIndex(1).memory_usage(deep=True)) + sum(
         max(1, int(batch.column(position).nbytes))
-        for position in range(batch.num_columns)
+        + _single_row_pandas_object_overhead(field.type)
+        for position, field in enumerate(batch.schema)
     )
+
+
+def _single_row_pandas_object_overhead(data_type: pa.DataType) -> int:
+    if pa.types.is_null(data_type):
+        return sys.getsizeof(None) + _PYTHON_POINTER_BYTES
+    if pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
+        return _PYTHON_POINTER_BYTES
+    if pa.types.is_dictionary(data_type):
+        return _PYTHON_POINTER_BYTES
+    if (
+        pa.types.is_binary(data_type)
+        or pa.types.is_large_binary(data_type)
+        or pa.types.is_fixed_size_binary(data_type)
+    ):
+        return sys.getsizeof(b"") + _PYTHON_POINTER_BYTES
+    if pa.types.is_decimal(data_type):
+        return sys.getsizeof(Decimal(0)) + _PYTHON_POINTER_BYTES
+    if pa.types.is_date(data_type):
+        return sys.getsizeof(date.min) + _PYTHON_POINTER_BYTES
+    if pa.types.is_time(data_type):
+        return sys.getsizeof(time.min) + _PYTHON_POINTER_BYTES
+    if (
+        pa.types.is_list(data_type)
+        or pa.types.is_large_list(data_type)
+        or pa.types.is_fixed_size_list(data_type)
+        or pa.types.is_map(data_type)
+        or pa.types.is_struct(data_type)
+    ):
+        return sys.getsizeof([]) + _PYTHON_POINTER_BYTES
+    return 0
 
 
 def _fixed_width_arrow_row_bytes(data_type: pa.DataType) -> int | None:
@@ -1124,7 +1161,10 @@ def _arrow_batch_to_bounded_pandas(
         stop = min(batch.num_rows, start + rows_per_slice)
         arrow_slice = batch.slice(start, stop - start)
         if len(arrow_slice) == 1:
-            if _single_row_minimum_pandas_bytes(arrow_slice) > conversion_budget:
+            if (
+                _single_row_pandas_conversion_bound_bytes(arrow_slice)
+                > conversion_budget
+            ):
                 raise ValueError("dataset_row_exceeds_target_chunk_bytes")
         elif (
             _PANDAS_FRAME_OVERHEAD_BYTES + arrow_slice.nbytes * expansion

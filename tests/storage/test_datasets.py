@@ -19,6 +19,7 @@ import pytest
 
 import quant_research_platform.storage._dataset_reading as dataset_reading
 import quant_research_platform.storage._dataset_writing as dataset_writing
+import quant_research_platform.storage.atomic as storage_atomic
 import quant_research_platform.storage.datasets as datasets
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -403,7 +404,9 @@ def test_writer_key_index_scratch_is_inside_staged_dataset_root(
     assert observed_database_paths
     assert all(
         path.is_relative_to(root.parent)
-        and path.parts[len(root.parent.parts)].startswith(".staged_key_scratch.tmp-")
+        and path.parts[len(root.parent.parts)].startswith(
+            storage_atomic._atomic_directory_scratch_prefix(root)
+        )
         for path in observed_database_paths
     )
     assert not any(path.exists() for path in observed_database_paths)
@@ -559,6 +562,50 @@ def test_single_short_string_key_row_uses_measured_conversion_size() -> None:
 
     assert len(chunks) == 1
     pd.testing.assert_frame_equal(chunks[0], batch.to_pandas(use_threads=False))
+
+
+@pytest.mark.parametrize(
+    "arrays",
+    [
+        [pa.nulls(1) for _ in range(500)],
+        [pa.array([b"x"], type=pa.binary(1)) for _ in range(500)],
+        [
+            pa.array([Decimal("1.23")], type=pa.decimal128(10, 2))
+            for _ in range(500)
+        ],
+        [pa.array([date(2026, 1, 1)], type=pa.date32()) for _ in range(500)],
+    ],
+    ids=["null", "fixed-binary", "decimal", "date"],
+)
+def test_wide_single_row_fails_before_pandas_conversion(
+    arrays: list[pa.Array],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = pa.record_batch(
+        arrays,
+        names=[f"column_{index}" for index in range(len(arrays))],
+    )
+    calls = {"count": 0}
+
+    def record_conversion(_arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+        calls["count"] += 1
+        raise AssertionError("conversion_must_not_run")
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_arrow_slice_to_pandas",
+        record_conversion,
+    )
+
+    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
+        tuple(
+            dataset_reading._arrow_batch_to_bounded_pandas(
+                batch,
+                target_chunk_bytes=4_096,
+            )
+        )
+
+    assert calls["count"] == 0
 
 
 def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
@@ -1197,9 +1244,14 @@ def test_dataset_write_recovers_stale_key_scratch_without_publishing_it(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "stale_key_scratch")
-    stale_stage = root.parent / ".stale_key_scratch.tmp-qzzzzzz-stale"
+    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(root)
+    stale_stage = root.parent / f"{scratch_prefix}qzzzzzz-stale"
     stale_scratch = stale_stage / ".k-qzzzzzz-stale"
     stale_scratch.mkdir(parents=True)
+    Path(f"{stale_stage}.target").write_text(
+        storage_atomic._atomic_target_identity(root),
+        encoding="utf-8",
+    )
     for name in (
         "k.sqlite3",
         "k.sqlite3-journal",
@@ -1227,12 +1279,17 @@ def test_dataset_write_does_not_remove_live_concurrent_key_scratch(
     ownership = importlib.import_module(
         "quant_research_platform.storage._scratch_ownership"
     )
+    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(root)
     live_stage = root.parent / ownership.owned_scratch_name(
-        ".live_key_scratch.tmp-",
+        scratch_prefix,
         "concurrent",
     )
     live_scratch = live_stage / ".k-concurrent"
     live_scratch.mkdir(parents=True)
+    Path(f"{live_stage}.target").write_text(
+        storage_atomic._atomic_target_identity(root),
+        encoding="utf-8",
+    )
     (live_scratch / "k.sqlite3").write_bytes(b"live")
 
     write_dataset(
@@ -1252,14 +1309,19 @@ def test_dataset_write_removes_reused_pid_staged_scratch(
     ownership = importlib.import_module(
         "quant_research_platform.storage._scratch_ownership"
     )
+    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(root)
     live_name = ownership.owned_scratch_name(
-        ".reused_pid_stage.tmp-",
+        scratch_prefix,
         "live",
     )
-    owner_pid = live_name.removeprefix(".reused_pid_stage.tmp-").split("-", 1)[0]
-    reused_stage = root.parent / f".reused_pid_stage.tmp-{owner_pid}-0-reused"
+    owner_pid = live_name.removeprefix(scratch_prefix).split("-", 1)[0]
+    reused_stage = root.parent / f"{scratch_prefix}{owner_pid}-0-reused"
     reused_scratch = reused_stage / ".k-reused"
     reused_scratch.mkdir(parents=True)
+    Path(f"{reused_stage}.target").write_text(
+        storage_atomic._atomic_target_identity(root),
+        encoding="utf-8",
+    )
     (reused_scratch / "k.sqlite3").write_bytes(b"scratch")
     monkeypatch.setattr(
         ownership.psutil,
@@ -1279,103 +1341,19 @@ def test_dataset_write_removes_reused_pid_staged_scratch(
     assert not reused_scratch.exists()
 
 
-def test_dataset_staged_write_does_not_clean_unclaimed_name_collision(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ownership = importlib.import_module(
-        "quant_research_platform.storage._scratch_ownership"
-    )
-    final_root = tmp_path / "dataset"
-    scratch_prefix = ".dataset.tmp-"
-    live_stage = final_root.with_name(
-        ownership.owned_scratch_name(scratch_prefix, "c" * 6)
-    )
-    live_stage.mkdir()
-    (live_stage / "live.txt").write_text("live\n", encoding="utf-8")
-    monkeypatch.setattr(
-        dataset_writing,
-        "uuid4",
-        lambda: SimpleNamespace(hex="c" * 32),
-    )
-
-    with pytest.raises(FileExistsError):
-        dataset_writing._staged_write_directory(final_root, lambda _root: None)
-
-    assert (live_stage / "live.txt").read_text(encoding="utf-8") == "live\n"
-
-
-def test_dataset_staged_write_preserves_unclaimed_scratch_directory(
-    tmp_path: Path,
-) -> None:
-    final_root = tmp_path / "dataset"
-    unclaimed = tmp_path / ".dataset.tmp-user-data"
-    unclaimed.mkdir()
-    sentinel = unclaimed / "sentinel.txt"
-    sentinel.write_text("unclaimed\n", encoding="utf-8")
-
-    dataset_writing._cleanup_stale_staged_scratch(final_root)
-
-    assert sentinel.read_text(encoding="utf-8") == "unclaimed\n"
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows case alias contract")
-def test_dataset_staged_write_preserves_live_case_alias(
-    tmp_path: Path,
-) -> None:
-    ownership = importlib.import_module(
-        "quant_research_platform.storage._scratch_ownership"
-    )
-    final_root = tmp_path / "data"
-    live_stage = tmp_path / ownership.owned_scratch_name(
-        ".Data.tmp-",
-        "live",
-    )
-    live_stage.mkdir()
-    sentinel = live_stage / "sentinel.txt"
-    sentinel.write_text("live\n", encoding="utf-8")
-
-    dataset_writing._cleanup_stale_staged_scratch(final_root)
-
-    assert sentinel.read_text(encoding="utf-8") == "live\n"
-
-
-def test_dataset_staged_write_uses_no_replace_publication(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    final_root = tmp_path / "dataset"
-
-    def racing_publish(source: Path, target: Path) -> None:
-        del source
-        target.mkdir()
-        (target / "winner.txt").write_text("concurrent-winner\n", encoding="utf-8")
-        raise FileExistsError(target)
-
-    monkeypatch.setattr(dataset_writing, "publish_no_replace", racing_publish)
-
-    with pytest.raises(FileExistsError):
-        dataset_writing._staged_write_directory(
-            final_root,
-            lambda staged_root: (staged_root / "candidate.txt").write_text(
-                "candidate\n",
-                encoding="utf-8",
-            ),
-        )
-
-    assert (final_root / "winner.txt").read_text(encoding="utf-8") == (
-        "concurrent-winner\n"
-    )
-
-
 def test_dataset_write_recovers_dead_stage_when_final_exists(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "published_with_dead_stage")
     spec = make_processed_dataset_spec("published_with_dead_stage")
     write_dataset(root, make_default_dataset_frame(), spec=spec)
+    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(root)
     stale_stage = root.with_name(
-        ".published_with_dead_stage.tmp-qzzzzzz-stale"
+        f"{scratch_prefix}qzzzzzz-stale"
+    )
+    Path(f"{stale_stage}.target").write_text(
+        storage_atomic._atomic_target_identity(root),
+        encoding="utf-8",
     )
     stale_scratch = stale_stage / ".k-qzzzzzz-stale"
     stale_scratch.mkdir(parents=True)
@@ -1397,6 +1375,14 @@ def test_storage_scratch_ownership_has_one_process_identity_path() -> None:
     assert ".owner.pid" not in writer_source
     assert ".owner.start" not in key_source
     assert ".owner.start" not in writer_source
+
+
+def test_dataset_writer_uses_single_atomic_directory_lifecycle() -> None:
+    writer_source = Path(dataset_writing.__file__).read_text(encoding="utf-8")
+
+    assert "atomic_write_directory" in writer_source
+    assert "_staged_write_directory" not in writer_source
+    assert "_cleanup_stale_staged_scratch" not in writer_source
 
 
 def test_staged_owner_liveness_check_never_signals_processes() -> None:

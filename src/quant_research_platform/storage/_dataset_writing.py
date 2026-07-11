@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import shutil
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -38,11 +36,8 @@ from quant_research_platform.storage._dataset_schema import (
     sha256_json,
     validate_dataset_spec,
 )
-from quant_research_platform.storage._scratch_ownership import (
-    owned_scratch_name,
-    scratch_owner_is_stale,
-)
-from quant_research_platform.storage.atomic import publish_no_replace
+from quant_research_platform.storage.atomic import atomic_write_directory
+from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 
 
@@ -269,50 +264,10 @@ def write_dataset(
         if staged_validator is not None:
             staged_validator(temp_root)
 
-    _staged_write_directory(final_root, _writer)
-
-
-def _staged_write_directory(
-    final_root: Path,
-    writer: Any,
-) -> None:
-    final_root.parent.mkdir(parents=True, exist_ok=True)
-    _cleanup_stale_staged_scratch(final_root)
-    if final_root.exists():
-        raise ValueError("dataset_exists")
-    scratch_prefix = f".{final_root.name}.tmp-"
-    temp_root = final_root.with_name(
-        owned_scratch_name(scratch_prefix, uuid4().hex[:6])
-    )
-    claimed_temp = False
     try:
-        temp_root.mkdir()
-        claimed_temp = True
-        writer(temp_root)
-        if final_root.exists():
-            raise ValueError("dataset_exists")
-        publish_no_replace(temp_root, final_root)
-    except Exception:
-        if claimed_temp:
-            _remove_tree(temp_root)
-        raise
-
-
-def _remove_tree(path: Path) -> None:
-    if path.is_dir():
-        shutil.rmtree(path)
-    elif path.exists():
-        path.unlink()
-
-
-def _cleanup_stale_staged_scratch(final_root: Path) -> None:
-    scratch_prefix = f".{final_root.name}.tmp-"
-    for staged_root in final_root.parent.glob(f"{scratch_prefix}*"):
-        if not staged_root.is_dir():
-            continue
-        if not scratch_owner_is_stale(staged_root, prefix=scratch_prefix):
-            continue
-        _remove_tree(staged_root)
+        atomic_write_directory(final_root, _writer)
+    except OutputAlreadyExistsError as exc:
+        raise ValueError("dataset_exists") from exc
 
 
 def _write_contents(

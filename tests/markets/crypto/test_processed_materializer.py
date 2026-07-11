@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
+import quant_research_platform.storage.atomic as storage_atomic
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -957,7 +958,8 @@ def test_crypto_panel_validation_failure_never_publishes_final_dataset(
     assert observed_roots[0] != final_root
     assert observed_roots[0].parent == final_root.parent
     assert not final_root.exists()
-    assert not list(final_root.parent.glob(".market_panel_1m.tmp-*"))
+    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(final_root)
+    assert not list(final_root.parent.glob(f"{scratch_prefix}*"))
 
 
 def test_synthetic_crypto_normalized_interim_can_generate_non_binance_panel(
