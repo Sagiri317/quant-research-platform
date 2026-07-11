@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import ceil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import numpy as np
@@ -49,6 +49,7 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
+from quant_research_platform.storage._dataset_paths import path_is_filesystem_alias
 from quant_research_platform.storage._dataset_reading import iter_parquet_file_batches
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.manifests import read_qrp_json
@@ -787,16 +788,63 @@ def _iter_output_frames(
     target_chunk_bytes: int,
 ) -> Iterator[pd.DataFrame]:
     for root in roots:
-        files = tuple(sorted(Path(root).rglob("*.parquet")))
-        if not files:
-            raise FileNotFoundError("aggregates_input_missing")
-        for file in files:
+        for file in _validated_output_parquet_paths(root):
             yield from iter_parquet_file_batches(
                 file,
                 target_chunk_bytes=target_chunk_bytes,
             )
 
 
+def _validated_output_parquet_paths(root: Path) -> tuple[Path, ...]:
+    bundle_root = Path(root)
+    try:
+        resolved_root = bundle_root.resolve(strict=True)
+    except OSError as exc:
+        raise FileNotFoundError("aggregates_input_missing") from exc
+    if path_is_filesystem_alias(bundle_root):
+        raise ValueError("invalid_aggregate_output_files")
+    manifest = read_qrp_json(
+        bundle_root / "manifest.json",
+        expected_schema_id="qrp-output-manifest",
+        error="output_manifest_schema_id_invalid",
+    )
+    files = manifest.get("files")
+    if (
+        not isinstance(files, list)
+        or not files
+        or any(not isinstance(name, str) or not name for name in files)
+        or len(set(files)) != len(files)
+    ):
+        raise ValueError("invalid_aggregate_output_files")
+    declared: list[Path] = []
+    for name in files:
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or len(relative.parts) != 1:
+            raise ValueError("invalid_aggregate_output_files")
+        path = bundle_root / relative.as_posix()
+        if path.suffix.casefold() != ".parquet":
+            continue
+        try:
+            stat = path.stat()
+            if (
+                not path.is_file()
+                or path_is_filesystem_alias(path)
+                or not path.resolve(strict=True).is_relative_to(resolved_root)
+                or int(stat.st_ino) <= 0
+                or int(stat.st_nlink) != 1
+            ):
+                raise ValueError("invalid_aggregate_output_files")
+        except OSError as exc:
+            raise ValueError("invalid_aggregate_output_files") from exc
+        declared.append(path)
+    observed = {
+        path.absolute()
+        for path in bundle_root.rglob("*")
+        if path.is_file() and path.suffix.casefold() == ".parquet"
+    }
+    if not declared or observed != {path.absolute() for path in declared}:
+        raise ValueError("invalid_aggregate_output_files")
+    return tuple(declared)
 def _summarize_dataset_root(
     root: Path,
     *,

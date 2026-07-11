@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Iterator
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
 
 from quant_research_platform.markets.implementations.a_share.verification import (
     aggregates,
@@ -62,6 +67,19 @@ def test_aggregates_output_frames_are_lazy(
     report_root.mkdir()
     (report_root / "first.parquet").write_bytes(b"")
     (report_root / "second.parquet").write_bytes(b"")
+    (report_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_id": "qrp-output-manifest",
+                "output_id": "synthetic",
+                "output_definition_id": "evaluation_outputs",
+                "run_id": "synthetic",
+                "metadata": {},
+                "files": ["second.parquet", "first.parquet"],
+            }
+        ),
+        encoding="utf-8",
+    )
     read_order: list[str] = []
 
     observed_targets: list[int] = []
@@ -98,10 +116,68 @@ def test_aggregates_output_frames_are_lazy(
 
         assert read_order == []
         next(frames)
-        assert read_order == ["first.parquet"]
+        assert read_order == ["second.parquet"]
         next(frames)
-        assert read_order == ["first.parquet", "second.parquet"]
+        assert read_order == ["second.parquet", "first.parquet"]
     assert observed_targets == [policy.effective_chunk_bytes] * 2
+
+
+def test_aggregates_output_frames_reject_manifest_stray_parquet(tmp_path) -> None:
+    root = tmp_path / "output"
+    root.mkdir()
+    table = pa.table({"value": [1.0]})
+    pq.write_table(table, root / "listed.parquet")
+    pq.write_table(table, root / "stray.parquet")
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_id": "qrp-output-manifest",
+                "output_id": "synthetic",
+                "output_definition_id": "evaluation_outputs",
+                "run_id": "synthetic",
+                "metadata": {},
+                "files": ["listed.parquet"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid_aggregate_output_files"):
+        list(
+            aggregates._iter_output_frames(
+                (root,),
+                target_chunk_bytes=1024**2,
+            )
+        )
+
+
+def test_aggregates_output_frames_reject_external_hardlink(tmp_path) -> None:
+    external = tmp_path / "external.parquet"
+    root = tmp_path / "output"
+    root.mkdir()
+    pq.write_table(pa.table({"value": [1.0]}), external)
+    os.link(external, root / "listed.parquet")
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_id": "qrp-output-manifest",
+                "output_id": "synthetic",
+                "output_definition_id": "evaluation_outputs",
+                "run_id": "synthetic",
+                "metadata": {},
+                "files": ["listed.parquet"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid_aggregate_output_files"):
+        list(
+            aggregates._iter_output_frames(
+                (root,),
+                target_chunk_bytes=1024**2,
+            )
+        )
 
 
 def test_aggregates_summary_detects_single_value_change(tmp_path) -> None:

@@ -238,7 +238,7 @@ def candidate_data_files(
 
 def _validated_part_paths(directory: Path) -> list[Path]:
     root = Path(directory)
-    if _path_is_filesystem_alias(root):
+    if path_is_filesystem_alias(root):
         raise ValueError("invalid_dataset_part_files")
     indexed: list[tuple[int, Path]] = []
     observed_indices: set[int] = set()
@@ -271,7 +271,7 @@ def _require_only_expected_parquet_paths(
 ) -> None:
     root = Path(data_root)
     resolved_root = root.resolve()
-    if _path_is_filesystem_alias(root):
+    if path_is_filesystem_alias(root):
         raise ValueError("invalid_dataset_part_files")
     observed_paths = [
         path
@@ -307,11 +307,11 @@ def _path_or_relative_component_is_alias(root: Path, path: Path) -> bool:
     except ValueError:
         return True
     current = Path(root)
-    if _path_is_filesystem_alias(current):
+    if path_is_filesystem_alias(current):
         return True
     for part in relative.parts:
         current /= part
-        if _path_is_filesystem_alias(current):
+        if path_is_filesystem_alias(current):
             return True
     return False
 
@@ -326,7 +326,7 @@ def _physical_file_identity(path: Path) -> tuple[int, int]:
     return int(stat.st_dev), int(stat.st_ino)
 
 
-def _path_is_filesystem_alias(path: Path) -> bool:
+def path_is_filesystem_alias(path: Path) -> bool:
     candidate = Path(path)
     return candidate.is_symlink() or (
         hasattr(candidate, "is_junction") and candidate.is_junction()
