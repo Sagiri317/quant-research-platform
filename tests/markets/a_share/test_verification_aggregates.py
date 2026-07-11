@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -22,6 +23,15 @@ def test_verification_aggregates_has_no_parallel_inventory_builder() -> None:
         aggregates,
         "_build_local_verification_inventory_payload_with_cache",
     )
+
+
+def test_generated_panel_verification_uses_bounded_owner_materialization() -> None:
+    source = inspect.getsource(
+        aggregates._iter_generated_full_market_panel_session_chunks
+    )
+
+    assert "materialization_io.read_materialized_dataset(" in source
+    assert "materialization_planning.require_materialization_working_set(" in source
 
 
 def test_aggregates_summarizes_frames_without_row_level_output(tmp_path: Path) -> None:

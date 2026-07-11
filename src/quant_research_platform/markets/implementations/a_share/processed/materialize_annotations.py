@@ -66,10 +66,17 @@ def write_annotations(
             )
             panel = processed_inputs[contract.primary_input_data_id]
             outputs = annotations.derive_annotations(panel, data_ids=(spec.data_id,))
-            yield materialization_planning.filter_output_sessions(
+            output = materialization_planning.filter_output_sessions(
                 outputs[spec.data_id],
                 window.core_sessions,
             )
+            materialization_planning.require_materialization_working_set(
+                frames=(panel, *outputs.values()),
+                output=output,
+                retained_state_bytes=0,
+                resource_policy=policy,
+            )
+            yield output
 
     return materialization_io.write_and_inspect(
         spec,

@@ -39,9 +39,22 @@ def write_panel(
         layout=layout,
         source_id=source_id,
         market_bars_data_id=market_bars_data_id,
+        columns_by_data_id={
+            "trading_calendar": (
+                "calendar_date",
+                "source_market_type",
+                "is_trading_day",
+            )
+        },
         resource_policy=policy,
     )
     materialization_validation.require_source_inputs_for_spec(spec, source_inputs)
+    materialization_planning.require_materialization_working_set(
+        frames=tuple(source_inputs.values()),
+        output=None,
+        retained_state_bytes=0,
+        resource_policy=policy,
+    )
     stock_master = source_inputs["stock_master"]
     market_cap = source_inputs["market_cap"]
     trading_calendar = source_inputs["trading_calendar"]
@@ -62,6 +75,10 @@ def write_panel(
         trading_calendar=trading_calendar,
         required_columns=spec.required_columns,
         resource_policy=policy,
+        retained_state_bytes=sum(
+            int(frame.memory_usage(index=True, deep=True).sum())
+            for frame in source_inputs.values()
+        ),
     )
     windows = materialization_planning.planned_session_windows(
         sessions,
@@ -79,6 +96,10 @@ def write_panel(
                 market_bars_root,
                 time_window=window.read,
                 resource_policy=policy,
+                retained_bytes=sum(
+                    int(frame.memory_usage(index=True, deep=True).sum())
+                    for frame in source_inputs.values()
+                ),
             )
             materialization_validation.require_source_input_columns(
                 market_bars_data_id,
@@ -95,7 +116,14 @@ def write_panel(
                 panel,
                 window.core_sessions,
             )
-            yield output.loc[:, list(spec.required_columns)].copy()
+            selected = output.loc[:, list(spec.required_columns)].copy()
+            materialization_planning.require_materialization_working_set(
+                frames=(*source_inputs.values(), market_bars, panel, output),
+                output=selected,
+                retained_state_bytes=0,
+                resource_policy=policy,
+            )
+            yield selected
 
     return materialization_io.write_and_inspect(
         spec,

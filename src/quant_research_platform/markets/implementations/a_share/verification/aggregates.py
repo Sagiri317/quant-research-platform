@@ -605,13 +605,43 @@ def _iter_generated_full_market_panel_session_chunks(
         catalog as processed_catalog,
     )
     from quant_research_platform.markets.implementations.a_share.processed import (
+        materialization_io,
+        materialization_planning,
         panels,
     )
 
     interim_root = _local_interim_root(project_root)
-    stock_master = read_dataset(interim_root / "stock_master")
-    market_cap = read_dataset(interim_root / "market_cap")
-    trading_calendar = read_dataset(interim_root / "trading_calendar")
+    policy = resource_policy or active_runtime_resource_policy()
+    stock_master = materialization_io.read_materialized_dataset(
+        interim_root / "stock_master",
+        resource_policy=policy,
+    )
+    market_cap = materialization_io.read_materialized_dataset(
+        interim_root / "market_cap",
+        resource_policy=policy,
+        retained_bytes=int(stock_master.memory_usage(index=True, deep=True).sum()),
+    )
+    trading_calendar = materialization_io.read_materialized_dataset(
+        interim_root / "trading_calendar",
+        resource_policy=policy,
+        columns=(
+            "calendar_date",
+            "source_market_type",
+            "is_trading_day",
+            "timestamp",
+        ),
+        retained_bytes=sum(
+            int(frame.memory_usage(index=True, deep=True).sum())
+            for frame in (stock_master, market_cap)
+        ),
+    )
+    retained_inputs = (stock_master, market_cap, trading_calendar)
+    materialization_planning.require_materialization_working_set(
+        frames=retained_inputs,
+        output=None,
+        retained_state_bytes=0,
+        resource_policy=policy,
+    )
     spec = processed_catalog.processed_catalog().get(market_panel_data_id())
     market_bars_root = interim_root / _local_market_bars_data_id()
     time_window = TimeWindow(FULL_HISTORY_START_DATE, FULL_HISTORY_END_DATE)
@@ -631,7 +661,6 @@ def _iter_generated_full_market_panel_session_chunks(
         1,
         ceil(estimated_bytes / max(1, len(target_sessions))),
     )
-    policy = resource_policy or active_runtime_resource_policy()
     resource_plan = ResourceChunkPlanner(policy).plan_sessions(
         axis=ChunkAxis.TIME,
         session_count=len(target_sessions),
@@ -647,10 +676,15 @@ def _iter_generated_full_market_panel_session_chunks(
     )
     market_bars_columns = tuple(inspect_dataset(market_bars_root).columns)
     for window in windows:
-        market_bars = read_dataset(
+        market_bars = materialization_io.read_materialized_dataset(
             market_bars_root,
             time_window=window.read,
             columns=market_bars_columns,
+            resource_policy=policy,
+            retained_bytes=sum(
+                int(frame.memory_usage(index=True, deep=True).sum())
+                for frame in retained_inputs
+            ),
         )
         if market_bars.empty:
             continue
@@ -661,9 +695,17 @@ def _iter_generated_full_market_panel_session_chunks(
             trading_calendar=trading_calendar,
         )
         output = panel[list(spec.required_columns)].copy()
-        yield filter_output_sessions(output, window.core_sessions).reset_index(
-            drop=True
+        selected = filter_output_sessions(
+            output,
+            window.core_sessions,
+        ).reset_index(drop=True)
+        materialization_planning.require_materialization_working_set(
+            frames=(*retained_inputs, market_bars, panel, output),
+            output=selected,
+            retained_state_bytes=0,
+            resource_policy=policy,
         )
+        yield selected
 
 
 def _local_interim_root(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+from collections import deque
 from collections.abc import Sequence
 from math import ceil
 from pathlib import Path
@@ -32,7 +34,6 @@ from quant_research_platform.markets.implementations.a_share.validation import (
 from quant_research_platform.markets.session_windows import (
     SessionWindow,
     SessionWindowPlanner,
-    normalize_session_dates,
 )
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
@@ -121,9 +122,13 @@ def processed_panel_key_coverage(
     cache: dict[Path, dict[object, tuple[pd.Timestamp, ...]]] | None = None,
     resource_policy: RuntimeResourcePolicy,
 ) -> dict[object, tuple[pd.Timestamp, ...]]:
+    state_budget = max(1, resource_policy.effective_chunk_bytes // 4)
     cache_key = root.resolve()
     if cache is not None and cache_key in cache:
-        return cache[cache_key]
+        cached = cache[cache_key]
+        if materialization_state_bytes(cached) > state_budget:
+            raise ValueError("a_share_panel_key_coverage_exceeds_resource_budget")
+        return cached
     inspection = inspect_dataset(root)
     missing = {"asset_id", "timestamp"}.difference(inspection.columns)
     if missing:
@@ -135,8 +140,10 @@ def processed_panel_key_coverage(
         columns=["asset_id", "timestamp"],
         time_window=None,
         resource_policy=resource_policy,
+        target_chunk_bytes=max(1, resource_policy.effective_chunk_bytes // 2),
     )
     coverage: dict[object, set[pd.Timestamp]] = {}
+    state_bytes = sys.getsizeof(coverage)
     for chunk in chunks:
         if chunk.empty:
             continue
@@ -150,12 +157,36 @@ def processed_panel_key_coverage(
             error="invalid_processed_panel_timestamp",
         )
         for asset_id, asset_rows in keys.groupby("asset_id", sort=False):
-            asset_dates = coverage.setdefault(asset_id, set())
-            asset_dates.update(asset_rows["timestamp"].dt.normalize())
+            asset_dates = coverage.get(asset_id)
+            if asset_dates is None:
+                previous_mapping_bytes = sys.getsizeof(coverage)
+                asset_dates = set()
+                coverage[asset_id] = asset_dates
+                state_bytes += (
+                    sys.getsizeof(coverage)
+                    - previous_mapping_bytes
+                    + sys.getsizeof(asset_id)
+                    + sys.getsizeof(asset_dates)
+                )
+            new_dates = tuple(
+                pd.Timestamp(value)
+                for value in asset_rows["timestamp"].dt.normalize().unique()
+                if pd.Timestamp(value) not in asset_dates
+            )
+            previous_set_bytes = sys.getsizeof(asset_dates)
+            asset_dates.update(new_dates)
+            state_bytes += sys.getsizeof(asset_dates) - previous_set_bytes
+            state_bytes += sum(sys.getsizeof(value) for value in new_dates)
+            if state_bytes > state_budget:
+                raise ValueError(
+                    "a_share_panel_key_coverage_exceeds_resource_budget"
+                )
     result = {
         asset_id: tuple(sorted(asset_dates))
         for asset_id, asset_dates in coverage.items()
     }
+    if materialization_state_bytes(result) > state_budget:
+        raise ValueError("a_share_panel_key_coverage_exceeds_resource_budget")
     if cache is not None:
         cache[cache_key] = result
     return result
@@ -165,24 +196,92 @@ def available_trading_sessions(
     layout: StorageLayout,
     source_id: SourceId,
     *,
+    time_window: TimeWindow,
+    lookback_sessions: int,
+    lookahead_sessions: int,
     resource_policy: RuntimeResourcePolicy,
 ) -> tuple[pd.Timestamp, ...]:
-    calendar = materialization_io.read_materialized_dataset(
+    require_date_window(time_window, context="a_share_trading_sessions")
+    if lookback_sessions < 0 or lookahead_sessions < 0:
+        raise ValueError("invalid_a_share_session_offset")
+    chunks = materialization_io.iter_dataset_chunks_with_policy(
         layout.interim_data_root(source_id, "trading_calendar"),
         resource_policy=resource_policy,
+        columns=("source_market_type", "is_trading_day", "timestamp"),
+        target_chunk_bytes=max(1, resource_policy.effective_chunk_bytes // 4),
     )
-    source_market_type = strict_values.strict_market_type_series(
-        calendar["source_market_type"],
-        error="invalid_source_market_type",
-    )
-    trading = strict_values.strict_trading_bool_series(
-        calendar["is_trading_day"],
-        error="invalid_is_trading_day",
-    )
-    mask = (
-        trading & source_market_type.isin(CURRENT_MARKET_TYPES)
-    )
-    return normalize_session_dates(calendar.loc[mask, "timestamp"])
+    before: deque[pd.Timestamp] = deque(maxlen=lookback_sessions)
+    core: list[pd.Timestamp] = []
+    after: list[pd.Timestamp] = []
+    state_budget = max(1, 3 * resource_policy.effective_chunk_bytes // 4)
+    state_bytes = sys.getsizeof(before) + sys.getsizeof(core) + sys.getsizeof(after)
+    current_session: pd.Timestamp | None = None
+    current_is_trading = False
+
+    def retain_session(session: pd.Timestamp) -> bool:
+        nonlocal state_bytes
+        if session.date() < time_window.start:
+            if lookback_sessions <= 0:
+                return False
+            removed = before[0] if len(before) == lookback_sessions else None
+            previous_bytes = sys.getsizeof(before)
+            before.append(session)
+            state_bytes += sys.getsizeof(before) - previous_bytes
+            state_bytes += sys.getsizeof(session)
+            if removed is not None:
+                state_bytes -= sys.getsizeof(removed)
+        elif session.date() <= time_window.end:
+            previous_bytes = sys.getsizeof(core)
+            core.append(session)
+            state_bytes += sys.getsizeof(core) - previous_bytes
+            state_bytes += sys.getsizeof(session)
+        elif len(after) < lookahead_sessions:
+            previous_bytes = sys.getsizeof(after)
+            after.append(session)
+            state_bytes += sys.getsizeof(after) - previous_bytes
+            state_bytes += sys.getsizeof(session)
+        if state_bytes > state_budget:
+            raise ValueError("a_share_trading_session_state_exceeds_resource_budget")
+        return session.date() > time_window.end and len(after) >= lookahead_sessions
+
+    def result() -> tuple[pd.Timestamp, ...]:
+        sessions = (*before, *core, *after)
+        if state_bytes + sys.getsizeof(sessions) > state_budget:
+            raise ValueError("a_share_trading_session_state_exceeds_resource_budget")
+        return sessions
+
+    for calendar in chunks:
+        source_market_type = strict_values.strict_market_type_series(
+            calendar["source_market_type"],
+            error="invalid_source_market_type",
+        )
+        trading = strict_values.strict_trading_bool_series(
+            calendar["is_trading_day"],
+            error="invalid_is_trading_day",
+        )
+        timestamps = strict_values.strict_timestamp_value_series(
+            calendar["timestamp"],
+            error="invalid_trading_calendar_timestamp",
+        ).dt.normalize()
+        for session, is_trading in zip(
+            timestamps,
+            trading & source_market_type.isin(CURRENT_MARKET_TYPES),
+            strict=True,
+        ):
+            normalized = pd.Timestamp(session)
+            if current_session is not None and normalized < current_session:
+                raise ValueError("out_of_order_trading_calendar")
+            if current_session is None or normalized == current_session:
+                current_session = normalized
+                current_is_trading = current_is_trading or bool(is_trading)
+                continue
+            if current_is_trading and retain_session(current_session):
+                return result()
+            current_session = normalized
+            current_is_trading = bool(is_trading)
+    if current_session is not None and current_is_trading:
+        retain_session(current_session)
+    return result()
 
 
 def _target_sessions(
@@ -259,6 +358,7 @@ def estimate_panel_bytes_per_session(
     trading_calendar: pd.DataFrame,
     required_columns: tuple[str, ...],
     resource_policy: RuntimeResourcePolicy,
+    retained_state_bytes: int = 0,
 ) -> int:
     samples = _sample_windows(
         sessions,
@@ -272,7 +372,7 @@ def estimate_panel_bytes_per_session(
             market_bars_root,
             time_window=sample.read,
             resource_policy=resource_policy,
-            materialized_budget_bytes=resource_policy.effective_chunk_bytes,
+            retained_bytes=retained_state_bytes,
         )
         panel = panels.compute_market_panel(
             market_bars,
@@ -284,7 +384,9 @@ def estimate_panel_bytes_per_session(
         selected = output.loc[:, list(required_columns)]
         estimates.append(
             _measured_peak_bytes_per_session(
-                frames=(market_bars, panel, output, selected),
+                frames=(market_bars, panel, output),
+                output=selected,
+                retained_state_bytes=retained_state_bytes,
                 row_count=len(selected),
                 sessions=sample.core_sessions,
                 inspection=inspection,
@@ -305,6 +407,7 @@ def estimate_factor_bytes_per_session(
     required_columns: tuple[str, ...],
     definitions: Sequence[FactorDefinition],
     resource_policy: RuntimeResourcePolicy,
+    retained_state_bytes: int = 0,
 ) -> int:
     samples = _sample_windows(
         sessions,
@@ -319,7 +422,7 @@ def estimate_factor_bytes_per_session(
             time_window=sample.read,
             columns=panel_input_columns,
             resource_policy=resource_policy,
-            materialized_budget_bytes=resource_policy.effective_chunk_bytes,
+            retained_bytes=retained_state_bytes,
         )
         factors = factor_calculations.calculate_factors_for_panel(
             panel,
@@ -329,7 +432,9 @@ def estimate_factor_bytes_per_session(
         selected = output.loc[:, list(required_columns)]
         estimates.append(
             _measured_peak_bytes_per_session(
-                frames=(panel, factors, output, selected),
+                frames=(panel, factors, output),
+                output=selected,
+                retained_state_bytes=retained_state_bytes,
                 row_count=len(selected),
                 sessions=sample.core_sessions,
                 inspection=inspection,
@@ -350,6 +455,7 @@ def estimate_label_bytes_per_session(
     required_columns: tuple[str, ...],
     definitions: Sequence[LabelDefinition],
     resource_policy: RuntimeResourcePolicy,
+    retained_state_bytes: int = 0,
 ) -> int:
     samples = _sample_windows(
         sessions,
@@ -364,7 +470,7 @@ def estimate_label_bytes_per_session(
             time_window=sample.read,
             columns=panel_input_columns,
             resource_policy=resource_policy,
-            materialized_budget_bytes=resource_policy.effective_chunk_bytes,
+            retained_bytes=retained_state_bytes,
         )
         labels = label_calculations.calculate_labels_for_panel(
             panel,
@@ -374,7 +480,9 @@ def estimate_label_bytes_per_session(
         selected = output.loc[:, list(required_columns)]
         estimates.append(
             _measured_peak_bytes_per_session(
-                frames=(panel, labels, output, selected),
+                frames=(panel, labels, output),
+                output=selected,
+                retained_state_bytes=retained_state_bytes,
                 row_count=len(selected),
                 sessions=sample.core_sessions,
                 inspection=inspection,
@@ -404,16 +512,18 @@ def _sample_windows(
 def _measured_peak_bytes_per_session(
     *,
     frames: tuple[pd.DataFrame, ...],
+    output: pd.DataFrame,
     row_count: int,
     sessions: tuple[pd.Timestamp, ...],
     inspection: DatasetInspection,
     target_session_count: int,
+    retained_state_bytes: int = 0,
 ) -> int:
     if row_count <= 0:
         return 1
-    sample_bytes = sum(
+    sample_bytes = retained_state_bytes + sum(
         int(frame.memory_usage(index=True, deep=True).sum()) for frame in frames
-    )
+    ) + 4 * int(output.memory_usage(index=True, deep=True).sum())
     sample_rows_per_session = max(1, row_count) / max(1, len(sessions))
     target_rows_per_session = max(
         sample_rows_per_session,
@@ -421,6 +531,53 @@ def _measured_peak_bytes_per_session(
     )
     bytes_per_row = sample_bytes / max(1, row_count)
     return max(1, ceil(bytes_per_row * target_rows_per_session))
+
+
+def require_materialization_working_set(
+    *,
+    frames: Sequence[pd.DataFrame],
+    output: pd.DataFrame | None,
+    retained_state_bytes: int,
+    resource_policy: RuntimeResourcePolicy,
+) -> None:
+    frame_bytes = sum(
+        int(frame.memory_usage(index=True, deep=True).sum()) for frame in frames
+    )
+    output_bytes = (
+        0
+        if output is None
+        else int(output.memory_usage(index=True, deep=True).sum())
+    )
+    if (
+        retained_state_bytes + frame_bytes + 4 * output_bytes
+        > resource_policy.effective_chunk_bytes
+    ):
+        raise ValueError(
+            "a_share_materialization_working_set_exceeds_resource_budget"
+        )
+
+
+def materialization_state_bytes(
+    value: object,
+    seen: set[int] | None = None,
+) -> int:
+    observed = set() if seen is None else seen
+    identity = id(value)
+    if identity in observed:
+        return 0
+    observed.add(identity)
+    size = sys.getsizeof(value)
+    if isinstance(value, dict):
+        return size + sum(
+            materialization_state_bytes(key, observed)
+            + materialization_state_bytes(item, observed)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return size + sum(
+            materialization_state_bytes(item, observed) for item in value
+        )
+    return size
 
 __all__ = [
     "available_trading_sessions",

@@ -112,6 +112,17 @@ def planned_processed_dependency_windows(
             )
     return windows
 
+
+def required_session_offsets(
+    targets: tuple[ProcessedDataSpec, ...],
+) -> tuple[int, int]:
+    offsets = tuple(_processed_dependency_session_offsets(spec) for spec in targets)
+    return (
+        max((lookback for lookback, _ in offsets), default=0),
+        max((lookahead for _, lookahead in offsets), default=0),
+    )
+
+
 def merge_time_windows(left: TimeWindow, right: TimeWindow) -> TimeWindow:
     require_date_window(left, context="a_share_dependency_window")
     require_date_window(right, context="a_share_dependency_window")
@@ -125,8 +136,27 @@ def _processed_dependency_time_window(
     time_window: TimeWindow,
     sessions: tuple[pd.Timestamp, ...],
 ) -> TimeWindow:
-    if not spec.processed_input_data_ids:
+    if spec.kind not in {ProcessedDataKind.FACTOR, ProcessedDataKind.LABEL}:
         return time_window
+    lookback, lookahead = _processed_dependency_session_offsets(spec)
+    if lookback <= 0 and lookahead <= 0:
+        return time_window
+
+    return _session_offset_time_window(
+        sessions=sessions,
+        time_window=time_window,
+        lookback_sessions=lookback,
+        lookahead_sessions=lookahead,
+    )
+
+
+def _processed_dependency_session_offsets(
+    spec: ProcessedDataSpec,
+) -> tuple[int, int]:
+    if spec.kind is ProcessedDataKind.PANEL:
+        return 0, 1
+    if spec.kind is ProcessedDataKind.ANNOTATION:
+        return 0, 1
     if spec.kind is ProcessedDataKind.FACTOR:
         definitions = materialize_factors.select_factor_definitions_for_spec(
             spec,
@@ -138,12 +168,7 @@ def _processed_dependency_time_window(
             purpose="factor",
         )
         lookback = factor_calculations.factor_lookback_bars(definitions)
-        return _session_offset_time_window(
-            sessions=sessions,
-            time_window=time_window,
-            lookback_sessions=lookback,
-            lookahead_sessions=0,
-        )
+        return lookback, 0
     if spec.kind is ProcessedDataKind.LABEL:
         definitions = materialize_labels.select_label_definitions_for_spec(
             spec,
@@ -155,13 +180,9 @@ def _processed_dependency_time_window(
             purpose="label",
         )
         lookahead = label_calculations.label_lookahead_bars(definitions)
-        return _session_offset_time_window(
-            sessions=sessions,
-            time_window=time_window,
-            lookback_sessions=0,
-            lookahead_sessions=lookahead,
-        )
-    return time_window
+        return 0, lookahead
+    return 0, 0
+
 
 def _session_offset_time_window(
     *,
@@ -199,4 +220,5 @@ __all__ = [
     "ensure_processed_dependencies",
     "merge_time_windows",
     "planned_processed_dependency_windows",
+    "required_session_offsets",
 ]

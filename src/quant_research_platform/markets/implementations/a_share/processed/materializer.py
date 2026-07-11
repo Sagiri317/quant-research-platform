@@ -67,9 +67,15 @@ def materialize_processed_data(
         catalog,
         targets,
     )
+    lookback_sessions, lookahead_sessions = (
+        materialization_dependencies.required_session_offsets(targets)
+    )
     sessions = materialization_planning.available_trading_sessions(
         layout,
         source_id,
+        time_window=time_window,
+        lookback_sessions=lookback_sessions,
+        lookahead_sessions=lookahead_sessions,
         resource_policy=policy,
     )
     materialization_planning.require_target_sessions(sessions, time_window)
