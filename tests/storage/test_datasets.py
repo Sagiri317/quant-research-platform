@@ -1285,22 +1285,22 @@ def test_inspect_and_fingerprint_reuse_physical_batch_reader() -> None:
     assert "pd.read_parquet" not in fingerprint_source
 
 
-def test_exact_primary_key_tracker_is_spillable_exact_and_cleans_up(
+def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
     tmp_path: Path,
 ) -> None:
     module_spec = importlib.util.find_spec(
         "quant_research_platform.storage._dataset_key_tracking"
     )
-    assert module_spec is not None, "storage exact key tracker module is missing"
+    assert module_spec is not None, "storage exact key index module is missing"
     module = importlib.import_module(
         "quant_research_platform.storage._dataset_key_tracking"
     )
-    tracker_root = tmp_path / "tracker"
-    tracker_root.mkdir()
-    tracker = module.ExactPrimaryKeyIndex(
+    index_root = tmp_path / "index"
+    index_root.mkdir()
+    index = module.ExactPrimaryKeyIndex(
         primary_key=("asset_id", "timestamp"),
         timestamp_columns=("timestamp",),
-        scratch_parent=tracker_root,
+        scratch_parent=index_root,
     )
     first = pd.DataFrame(
         {
@@ -1317,38 +1317,38 @@ def test_exact_primary_key_tracker_is_spillable_exact_and_cleans_up(
         }
     )
 
-    with tracker:
-        database_path = tracker.database_path
+    with index:
+        database_path = index.database_path
         assert database_path.is_file()
-        assert tracker.add_frame(first) == 0
-        assert tracker.add_frame(duplicate_same_instant) == 1
+        assert index.add_frame(first) == 0
+        assert index.add_frame(duplicate_same_instant) == 1
         for suffix in ("-journal", "-wal", "-shm"):
             Path(f"{database_path}{suffix}").write_bytes(b"scratch")
 
     assert not database_path.exists()
-    assert list(tracker_root.iterdir()) == []
+    assert list(index_root.iterdir()) == []
 
     numeric = module.ExactPrimaryKeyIndex(
         primary_key=("numeric_key",),
         timestamp_columns=(),
-        scratch_parent=tracker_root,
+        scratch_parent=index_root,
     )
     with numeric:
         assert numeric.add_frame(pd.DataFrame({"numeric_key": [-0.0]})) == 0
         assert numeric.add_frame(pd.DataFrame({"numeric_key": [0.0]})) == 1
-    assert list(tracker_root.iterdir()) == []
+    assert list(index_root.iterdir()) == []
 
     exceptional = module.ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tracker_root,
+        scratch_parent=index_root,
     )
     with pytest.raises(RuntimeError, match="stop"):
         with exceptional:
             exceptional_path = exceptional.database_path
             raise RuntimeError("stop")
     assert not exceptional_path.exists()
-    assert list(tracker_root.iterdir()) == []
+    assert list(index_root.iterdir()) == []
 
 
 def test_exact_key_index_cleans_scratch_when_sqlite_connect_fails(
@@ -2577,6 +2577,55 @@ def test_equality_group_plan_state_accounting_work_is_linear(
 
     assert len(plan.keys) == row_count
     assert observed_work["units"] <= row_count * 2
+
+
+def test_equality_group_plan_counts_non_bmp_key_storage(tmp_path: Path) -> None:
+    root = make_dataset_artifact_root(tmp_path, "non_bmp_equality_group")
+    frame = make_default_dataset_frame().iloc[[0]].copy()
+    frame["asset_id"] = chr(0x10400) * 10_000
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec("non_bmp_equality_group"),
+    )
+    context = dataset_reading.build_dataset_read_context(
+        root,
+        columns=None,
+        time_window=None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_equality_group_index_exceeds_target_bytes",
+    ):
+        dataset_reading.build_dataset_equality_group_plan(
+            context,
+            columns=("asset_id",),
+            target_chunk_bytes=1024**2,
+            target_state_bytes=30_000,
+        )
+
+
+def test_fingerprint_nested_normalization_counts_input_and_copy() -> None:
+    frame = pd.DataFrame({"nested": [["x" * 50] * 4]})
+    retained_bytes = int(frame.memory_usage(index=True, deep=True).sum())
+    canonical_bytes = dataset_fingerprinting._canonical_nested_value_bound(
+        frame.iloc[0, 0]
+    )
+    target_bytes = max(
+        4 * retained_bytes,
+        retained_bytes + 2 * canonical_bytes,
+    )
+    assert 2 * retained_bytes + 2 * canonical_bytes > target_bytes
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_fingerprint_value_exceeds_target_bytes",
+    ):
+        dataset_fingerprinting._hashable_fingerprint_frame(
+            frame,
+            target_bytes=target_bytes,
+        )
 
 
 def test_storage_datasets_public_api_is_hard_cutover() -> None:

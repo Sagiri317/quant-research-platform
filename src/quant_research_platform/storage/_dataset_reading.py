@@ -436,9 +436,8 @@ def build_dataset_equality_group_plan(
         column for column, _, _ in context.parquet_filters or ()
     )
     discovery_columns = tuple(dict.fromkeys((*columns, *filter_columns)))
-    paths_by_key: dict[tuple[Any, ...], set[Path]] = {}
-    state_bytes = 0
-    path_order = {path: index for index, path in enumerate(context.read_paths)}
+    paths_by_key: dict[tuple[Any, ...], dict[Path, None]] = {}
+    state_bytes = sys.getsizeof(paths_by_key)
     for path, frame in iter_dataset_file_batches(
         context,
         columns=discovery_columns,
@@ -455,25 +454,42 @@ def build_dataset_equality_group_plan(
                 hash(key)
             except TypeError as exc:
                 raise ValueError("invalid_dataset_equality_group_key") from exc
-            is_new_key = key not in paths_by_key
-            candidate_paths = paths_by_key.setdefault(key, set())
+            candidate_paths = paths_by_key.get(key)
+            is_new_key = candidate_paths is None
+            outer_growth = 0
+            if candidate_paths is None:
+                previous_outer_bytes = sys.getsizeof(paths_by_key)
+                candidate_paths = {}
+                paths_by_key[key] = candidate_paths
+                outer_growth = sys.getsizeof(paths_by_key) - previous_outer_bytes
             is_new_path = path not in candidate_paths
-            candidate_paths.add(path)
+            path_growth = 0
+            if is_new_path:
+                previous_path_bytes = sys.getsizeof(candidate_paths)
+                candidate_paths[path] = None
+                path_growth = sys.getsizeof(candidate_paths) - previous_path_bytes
             state_bytes = _equality_group_plan_bytes(
                 state_bytes,
                 key=key,
+                path=path,
                 is_new_key=is_new_key,
                 is_new_path=is_new_path,
+                outer_growth=outer_growth,
+                path_growth=path_growth,
             )
             if state_bytes > target_state_bytes:
                 raise ValueError("dataset_equality_group_index_exceeds_target_bytes")
+    finalization_bytes = _equality_group_plan_finalization_bytes(paths_by_key)
+    if state_bytes + finalization_bytes > target_state_bytes:
+        raise ValueError("dataset_equality_group_index_exceeds_target_bytes")
+    ordered_keys = tuple(sorted(paths_by_key))
     ordered_paths = {
-        key: tuple(sorted(paths, key=path_order.__getitem__))
-        for key, paths in paths_by_key.items()
+        key: tuple(paths_by_key[key])
+        for key in ordered_keys
     }
     return DatasetEqualityGroupPlan(
         columns=columns,
-        keys=tuple(sorted(ordered_paths)),
+        keys=ordered_keys,
         paths_by_key=ordered_paths,
     )
 
@@ -503,17 +519,51 @@ def _equality_group_plan_bytes(
     current_bytes: int,
     *,
     key: tuple[Any, ...],
+    path: Path,
     is_new_key: bool,
     is_new_path: bool,
+    outer_growth: int = 0,
+    path_growth: int = 0,
 ) -> int:
     return (
         current_bytes
         + (
-            256 + sum(64 + 2 * len(str(value)) for value in key)
+            outer_growth
+            + sys.getsizeof(key)
+            + sum(sys.getsizeof(value) for value in key)
+            + sys.getsizeof({})
             if is_new_key
             else 0
         )
-        + (64 if is_new_path else 0)
+        + (
+            path_growth
+            + sys.getsizeof(path)
+            + sys.getsizeof(path.parts)
+            + sum(sys.getsizeof(part) for part in path.parts)
+            if is_new_path
+            else 0
+        )
+    )
+
+
+def _equality_group_plan_finalization_bytes(
+    paths_by_key: Mapping[tuple[Any, ...], Mapping[Path, None]],
+) -> int:
+    key_count = len(paths_by_key)
+    pointer_bytes = _PYTHON_POINTER_BYTES
+    mapping_bound = sys.getsizeof({}) + key_count * 8 * pointer_bytes
+    sorted_list_bound = sys.getsizeof([]) + key_count * pointer_bytes
+    keys_tuple_bound = sys.getsizeof(()) + key_count * pointer_bytes
+    path_tuple_bound = sum(
+        sys.getsizeof(()) + len(paths) * pointer_bytes
+        for paths in paths_by_key.values()
+    )
+    return (
+        mapping_bound
+        + sorted_list_bound
+        + keys_tuple_bound
+        + path_tuple_bound
+        + sys.getsizeof(DatasetEqualityGroupPlan)
     )
 
 

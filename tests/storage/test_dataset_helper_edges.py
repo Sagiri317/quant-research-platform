@@ -59,6 +59,25 @@ def test_exact_key_index_rejects_sub_page_cache_budget(tmp_path: Path) -> None:
         )
 
 
+def test_exact_key_index_sqlite_page_fits_declared_cache_budget(
+    tmp_path: Path,
+) -> None:
+    cache_bytes = 1024
+
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+        sqlite_cache_bytes=cache_bytes,
+    ) as index:
+        assert index._connection is not None
+        page_size = int(
+            index._connection.execute("PRAGMA page_size").fetchone()[0]
+        )
+
+    assert page_size <= cache_bytes
+
+
 def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

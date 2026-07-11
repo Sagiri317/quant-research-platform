@@ -24,6 +24,11 @@ from quant_research_platform.storage._dataset_reading import (
 from quant_research_platform.storage._dataset_schema import sha256_json
 from quant_research_platform.storage._dataset_types import DatasetFingerprint
 
+_FINGERPRINT_PHYSICAL_TARGET_BYTES = DEFAULT_DATASET_PHYSICAL_TARGET_BYTES // 2
+_FINGERPRINT_HASH_TARGET_BYTES = (
+    DEFAULT_DATASET_PHYSICAL_TARGET_BYTES - _FINGERPRINT_PHYSICAL_TARGET_BYTES
+)
+
 
 def fingerprint_dataset(
     dataset_root: Path,
@@ -59,6 +64,7 @@ def fingerprint_dataset(
     for path, chunk in iter_dataset_file_batches(
         context,
         columns=hash_physical_columns,
+        target_chunk_bytes=_FINGERPRINT_PHYSICAL_TARGET_BYTES,
         categorical_dtypes=categorical_dtypes,
         categorical_state_bytes=categorical_state_bytes,
     ):
@@ -69,7 +75,7 @@ def fingerprint_dataset(
         hashes = pd.util.hash_pandas_object(
             _hashable_fingerprint_frame(
                 chunk,
-                target_bytes=DEFAULT_DATASET_PHYSICAL_TARGET_BYTES,
+                target_bytes=_FINGERPRINT_HASH_TARGET_BYTES,
             ),
             index=False,
         ).to_numpy("uint64")
@@ -127,8 +133,10 @@ def _hashable_fingerprint_frame(
 ) -> pd.DataFrame:
     if target_bytes <= 0:
         raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
-    output = frame.copy()
     retained_bytes = int(frame.memory_usage(index=True, deep=True).sum())
+    if 2 * retained_bytes > target_bytes:
+        raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
+    output = frame.copy()
     for column in output.columns:
         try:
             pd.util.hash_pandas_object(output[column], index=False)
@@ -136,7 +144,7 @@ def _hashable_fingerprint_frame(
             canonical_bytes = 0
             for value in output[column]:
                 canonical_bytes += _canonical_nested_value_bound(value)
-                if retained_bytes + 2 * canonical_bytes > target_bytes:
+                if 2 * retained_bytes + 2 * canonical_bytes > target_bytes:
                     raise ValueError(
                         "dataset_fingerprint_value_exceeds_target_bytes"
                     ) from None

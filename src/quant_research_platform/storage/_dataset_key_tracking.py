@@ -68,6 +68,7 @@ class ExactPrimaryKeyIndex:
         connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(self.database_path)
+            connection.execute("PRAGMA page_size=1024")
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA temp_store=MEMORY")
