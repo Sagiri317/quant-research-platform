@@ -219,7 +219,7 @@ def candidate_data_files(
     for path in root.glob("year=*"):
         if not path.is_dir():
             continue
-        if _path_or_relative_component_is_symlink(root, path):
+        if _path_or_relative_component_is_alias(root, path):
             raise ValueError("invalid_dataset_part_files")
         value = path.name.removeprefix("year=")
         if not value.isdigit():
@@ -238,16 +238,18 @@ def candidate_data_files(
 
 def _validated_part_paths(directory: Path) -> list[Path]:
     root = Path(directory)
-    if root.is_symlink():
+    if _path_is_filesystem_alias(root):
         raise ValueError("invalid_dataset_part_files")
     indexed: list[tuple[int, Path]] = []
     observed_indices: set[int] = set()
-    for path in root.glob("*.parquet"):
+    for path in root.iterdir():
+        if path.suffix.casefold() != ".parquet":
+            continue
         match = _PART_FILE_PATTERN.fullmatch(path.name)
         if (
             match is None
             or not path.is_file()
-            or _path_or_relative_component_is_symlink(root, path)
+            or _path_or_relative_component_is_alias(root, path)
         ):
             raise ValueError("invalid_dataset_part_files")
         try:
@@ -269,14 +271,18 @@ def _require_only_expected_parquet_paths(
 ) -> None:
     root = Path(data_root)
     resolved_root = root.resolve()
-    if root.is_symlink():
+    if _path_is_filesystem_alias(root):
         raise ValueError("invalid_dataset_part_files")
-    observed_paths = [path for path in root.rglob("*.parquet") if path.is_file()]
+    observed_paths = [
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.casefold() == ".parquet"
+    ]
     all_paths = [*expected, *observed_paths]
     try:
         if any(
             not path.resolve().is_relative_to(resolved_root)
-            or _path_or_relative_component_is_symlink(root, path)
+            or _path_or_relative_component_is_alias(root, path)
             for path in all_paths
         ):
             raise ValueError("invalid_dataset_part_files")
@@ -289,20 +295,27 @@ def _require_only_expected_parquet_paths(
         raise ValueError("invalid_dataset_part_files")
 
 
-def _path_or_relative_component_is_symlink(root: Path, path: Path) -> bool:
+def _path_or_relative_component_is_alias(root: Path, path: Path) -> bool:
     candidate = Path(path)
     try:
         relative = candidate.relative_to(root)
     except ValueError:
         return True
     current = Path(root)
-    if current.is_symlink():
+    if _path_is_filesystem_alias(current):
         return True
     for part in relative.parts:
         current /= part
-        if current.is_symlink():
+        if _path_is_filesystem_alias(current):
             return True
     return False
+
+
+def _path_is_filesystem_alias(path: Path) -> bool:
+    candidate = Path(path)
+    return candidate.is_symlink() or (
+        hasattr(candidate, "is_junction") and candidate.is_junction()
+    )
 
 
 def timestamp_primary_key_column_from_spec(spec: DataSpec) -> str | None:

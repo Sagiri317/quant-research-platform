@@ -91,6 +91,25 @@ def test_atomic_directory_recovers_empty_stale_stage_with_invalid_marker(
     assert (final_root / "done").read_text(encoding="utf-8") == "ok"
 
 
+@pytest.mark.parametrize("marker_payload", ["", "truncated-target"])
+def test_atomic_directory_recovers_orphan_stale_marker(
+    tmp_path: Path,
+    marker_payload: str,
+) -> None:
+    final_root = tmp_path / "bundle"
+    scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
+    stale = tmp_path / f"{scratch_prefix}qzzzzzz-stale"
+    stale_marker = Path(f"{stale}.target")
+    stale_marker.write_text(marker_payload, encoding="utf-8")
+
+    atomic_write_directory(
+        final_root,
+        lambda stage: (stage / "done").write_text("ok", encoding="utf-8"),
+    )
+
+    assert not stale_marker.exists()
+
+
 def test_atomic_write_directory_retries_transient_permission_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

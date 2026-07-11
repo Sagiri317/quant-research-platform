@@ -28,6 +28,9 @@ from quant_research_platform.storage._dataset_paths import (
     timestamp_primary_key_column_from_spec,
     validate_dataset_artifact_root,
 )
+from quant_research_platform.storage._dataset_reading import (
+    iter_parquet_arrow_batches,
+)
 from quant_research_platform.storage._dataset_schema import (
     canonical_schema_from_file,
     data_spec_payload,
@@ -39,6 +42,8 @@ from quant_research_platform.storage._dataset_schema import (
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
+
+_KEY_TRACKING_TARGET_BYTES = 8 * 1024 * 1024
 
 
 @dataclass
@@ -94,7 +99,7 @@ class _WriteStats:
         output = table.to_pandas(use_threads=False)
         self._validate_ordered_categorical_domains(output)
         self.row_count += int(len(output))
-        self._update_keys(output, table=table)
+        self._update_key_null_counts(output)
         self._update_dates(output)
         self._update_numeric_profiles(output)
         _raise_accumulated_failures(self)
@@ -114,10 +119,13 @@ class _WriteStats:
 
     def record_file(self, path: Path, *, row_count: int) -> None:
         parquet_file = pq.ParquetFile(path)
-        actual_row_count = int(parquet_file.metadata.num_rows)
-        if actual_row_count != int(row_count):
-            raise ValueError("dataset_row_count_mismatch")
-        schema = canonical_schema_from_file(parquet_file)
+        try:
+            actual_row_count = int(parquet_file.metadata.num_rows)
+            if actual_row_count != int(row_count):
+                raise ValueError("dataset_row_count_mismatch")
+            schema = canonical_schema_from_file(parquet_file)
+        finally:
+            parquet_file.close()
         if self._schema is None:
             self._schema = schema
             self.columns = tuple(name for name, _ in schema)
@@ -131,6 +139,14 @@ class _WriteStats:
         self.partition_row_counts[partition] = (
             self.partition_row_counts.get(partition, 0) + actual_row_count
         )
+        for batch in iter_parquet_arrow_batches(
+            path,
+            columns=self.spec.primary_key,
+            target_chunk_bytes=_KEY_TRACKING_TARGET_BYTES,
+        ):
+            self.duplicate_primary_key_count += self.key_tracker.add_table(
+                pa.Table.from_batches([batch])
+            )
 
     def payload(self) -> dict[str, Any]:
         if self.columns is None or self.schema_hash is None:
@@ -168,18 +184,15 @@ class _WriteStats:
         )
         return payload
 
-    def _update_keys(self, frame: pd.DataFrame, *, table: pa.Table) -> None:
-        has_null_key = False
+    def _update_key_null_counts(self, frame: pd.DataFrame) -> None:
         for column in self.spec.primary_key:
             self.null_count_summary.setdefault(column, 0)
             null_count = int(frame[column].isna().sum())
             self.null_count_summary[column] += null_count
-            has_null_key = has_null_key or null_count > 0
-        if frame.empty or has_null_key:
-            return
-        self.duplicate_primary_key_count += self.key_tracker.add_table(
-            table.select(self.spec.primary_key)
-        )
+        if not frame.empty:
+            self.duplicate_primary_key_count += int(
+                frame.duplicated(list(self.spec.primary_key)).sum()
+            )
 
     def _update_dates(self, frame: pd.DataFrame) -> None:
         timestamp_column = timestamp_primary_key_column_from_spec(self.spec)
@@ -314,6 +327,7 @@ def _write_contents(
                     schema=accumulator._arrow_schema,
                 )
                 accumulator.record_file(output_path, row_count=len(partition_frame))
+                _raise_accumulated_failures(accumulator)
         if accumulator.row_count == 0:
             if empty_schema_frame is None:
                 raise ValueError("empty_dataset_schema_missing")

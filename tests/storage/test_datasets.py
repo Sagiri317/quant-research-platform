@@ -492,7 +492,7 @@ def test_fixed_size_binary_conversion_probes_before_pandas_expansion(
     def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
         frame = convert(arrow_slice)
         observed_conversion_bytes.append(
-            int(frame.memory_usage(index=True, deep=True).sum())
+            dataset_reading._pandas_frame_bytes(frame)
         )
         return frame
 
@@ -505,12 +505,12 @@ def test_fixed_size_binary_conversion_probes_before_pandas_expansion(
     chunks = tuple(
         dataset_reading._arrow_batch_to_bounded_pandas(
             batch,
-            target_chunk_bytes=1024,
+            target_chunk_bytes=2_048,
         )
     )
 
     assert sum(len(chunk) for chunk in chunks) == 64
-    assert max(observed_conversion_bytes) <= 1024 // 4
+    assert max(observed_conversion_bytes) <= 2_048 // 4
 
 
 def test_single_row_over_conversion_estimate_fails_before_pandas(
@@ -556,7 +556,7 @@ def test_single_short_string_key_row_uses_measured_conversion_size() -> None:
     chunks = tuple(
         dataset_reading._arrow_batch_to_bounded_pandas(
             batch,
-            target_chunk_bytes=1_152,
+            target_chunk_bytes=4_096,
         )
     )
 
@@ -621,7 +621,7 @@ def test_wide_multi_row_bounds_each_pandas_conversion(
     def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
         frame = convert(arrow_slice)
         observed_conversion_bytes.append(
-            int(frame.memory_usage(index=True, deep=True).sum())
+            dataset_reading._pandas_frame_bytes(frame)
         )
         return frame
 
@@ -634,12 +634,12 @@ def test_wide_multi_row_bounds_each_pandas_conversion(
     chunks = tuple(
         dataset_reading._arrow_batch_to_bounded_pandas(
             batch,
-            target_chunk_bytes=64 * 1024,
+            target_chunk_bytes=256 * 1024,
         )
     )
 
     assert sum(len(chunk) for chunk in chunks) == 64
-    assert max(observed_conversion_bytes) <= (64 * 1024) // 4
+    assert max(observed_conversion_bytes) <= (256 * 1024) // 4
 
 
 def test_wide_struct_row_fails_before_pandas_conversion(
@@ -708,6 +708,55 @@ def test_large_map_row_fails_before_pandas_conversion(
         )
 
     assert calls["count"] == 0
+
+
+def test_wide_numeric_row_counts_column_axis_before_pandas_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = pa.record_batch(
+        [pa.array([1], type=pa.int64()) for _ in range(1_500)],
+        names=[f"column_{index}" for index in range(1_500)],
+    )
+    calls = {"count": 0}
+
+    def record_conversion(_arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+        calls["count"] += 1
+        raise AssertionError("conversion_must_not_run")
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_arrow_slice_to_pandas",
+        record_conversion,
+    )
+
+    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
+        tuple(
+            dataset_reading._arrow_batch_to_bounded_pandas(
+                batch,
+                target_chunk_bytes=64 * 1024,
+            )
+        )
+
+    assert calls["count"] == 0
+
+
+def test_wide_empty_schema_fails_before_pandas_materialization(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "wide-empty.parquet"
+    columns = tuple(f"column_{index}" for index in range(1_500))
+    pq.write_table(
+        pa.table({column: pa.array([], type=pa.int64()) for column in columns}),
+        path,
+    )
+    context = SimpleNamespace(all_paths=(path,))
+
+    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
+        dataset_reading._empty_frame(
+            context,
+            columns,
+            target_chunk_bytes=16 * 1024,
+        )
 
 
 def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
@@ -1249,7 +1298,23 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
 
 def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    key_tracking = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+    tracked_schemas: list[pa.Schema] = []
+    original_add_table = key_tracking.ExactPrimaryKeyIndex.add_table
+
+    def record_schema(index, table, **kwargs):  # noqa: ANN001
+        tracked_schemas.append(table.schema.remove_metadata())
+        return original_add_table(index, table, **kwargs)
+
+    monkeypatch.setattr(
+        key_tracking.ExactPrimaryKeyIndex,
+        "add_table",
+        record_schema,
+    )
     root = make_dataset_artifact_root(tmp_path, "categorical_keys")
     frame = make_default_dataset_frame()
     frame["asset_id"] = frame["asset_id"].astype("category")
@@ -1262,6 +1327,15 @@ def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
 
     assert sorted(read_dataset(root)["asset_id"].astype(str).tolist()) == sorted(
         frame["asset_id"].astype(str).tolist()
+    )
+    part = next((root / "data").rglob("part-*.parquet"))
+    persisted_key_schema = pa.schema(
+        [pq.ParquetFile(part).schema_arrow.field("asset_id")]
+    )
+    assert tracked_schemas
+    assert all(
+        pa.schema([schema.field("asset_id")]) == persisted_key_schema
+        for schema in tracked_schemas
     )
 
 

@@ -145,12 +145,9 @@ def _cleanup_stale_atomic_directories(
         temp_root = Path(str(target_marker)[: -len(".target")])
         if temp_root.exists():
             continue
-        try:
-            observed_identity = target_marker.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
+        if not scratch_owner_is_stale(temp_root, prefix=prefix):
             continue
-        if observed_identity == target_identity:
-            _remove_atomic_target_marker(target_marker)
+        _remove_atomic_target_marker(target_marker)
 
 
 def _atomic_directory_scratch_prefix(final_root: Path) -> str:

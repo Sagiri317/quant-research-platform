@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from decimal import Decimal
 from pathlib import Path
 
@@ -425,3 +426,35 @@ def test_candidate_data_files_rejects_symlinked_partition_alias(
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
         candidate_data_files(data_root, spec={"partition_columns": ["year"]})
+
+
+@pytest.mark.skipif(not hasattr(Path, "is_junction"), reason="junction API required")
+def test_candidate_data_files_rejects_junction_data_root(tmp_path: Path) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    pq.write_table(pa.table({"value": [1]}), external / "part-000.parquet")
+    data_root = tmp_path / "data"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(data_root), str(external)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip("junction_not_available")
+
+    assert data_root.is_junction()
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        candidate_data_files(data_root, spec={"partition_columns": []})
+
+
+def test_candidate_data_files_rejects_case_variant_parquet_suffix(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    pq.write_table(pa.table({"value": [1]}), data_root / "part-000.parquet")
+    pq.write_table(pa.table({"value": [2]}), data_root / "part-001.PARQUET")
+
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        candidate_data_files(data_root, spec={"partition_columns": []})
