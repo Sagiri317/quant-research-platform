@@ -8,6 +8,10 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from quant_research_platform.runtime._resource_accounting import (
+    python_list_container_bytes,
+)
+
 _PYTHON_POINTER_BYTES = max(
     1,
     sys.getsizeof((None,)) - sys.getsizeof(()),
@@ -187,11 +191,15 @@ class AggregateTradeReducer:
 
     def finish(self) -> pd.DataFrame:
         self._finished = True
+        self._require_budget(
+            additional_bytes=python_list_container_bytes(len(self._states))
+        )
         rows = _BoundedOutputRows(
             target_output_bytes=self._target_output_bytes,
             error="crypto_trade_output_exceeds_resource_budget",
         )
-        for (asset_id, timestamp), state in sorted(self._states.items()):
+        for asset_id, timestamp in sorted(self._states):
+            state = self._states[(asset_id, timestamp)]
             rows.append(
                 {
                     "asset_id": asset_id,
@@ -213,8 +221,8 @@ class AggregateTradeReducer:
             error="crypto_trade_output_exceeds_resource_budget",
         )
 
-    def _require_budget(self) -> None:
-        estimated_state_bytes = (
+    def _require_budget(self, *, additional_bytes: int = 0) -> None:
+        estimated_state_bytes = additional_bytes + (
             self._target_keys_bytes
             + self._state_entries_bytes
             + _deep_size(
@@ -363,6 +371,9 @@ class DepthSnapshotReducer:
                 self._flush_remaining_targets(active_asset_id)
             self._finished = True
             self._require_budget()
+        self._require_budget(
+            additional_bytes=python_list_container_bytes(len(self._candidates))
+        )
         rows = _BoundedOutputRows(
             target_output_bytes=self._target_output_bytes,
             error="crypto_depth_output_exceeds_resource_budget",

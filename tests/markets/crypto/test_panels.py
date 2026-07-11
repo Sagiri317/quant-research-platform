@@ -747,6 +747,32 @@ def test_trade_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> No
         reducer.finish()
 
 
+def test_trade_reducer_finish_preflights_sorted_key_state() -> None:
+    module = _panel_input_reducers_module()
+    reducer = module.AggregateTradeReducer(
+        bars=panels.prepare_panel_bars(_bars_frame()),
+        target_state_bytes=16 * 1024,
+        target_output_bytes=16 * 1024,
+        normalize_chunk=panels.normalize_trade_chunk,
+    )
+    reducer.add_chunk(_aggregate_trades_frame().iloc[:1].copy())
+    reducer._target_state_bytes = (
+        reducer._target_keys_bytes
+        + reducer._state_entries_bytes
+        + module._deep_size(
+            (
+                reducer._continuity_state.last_order_key,
+                reducer._continuity_state.active_source_asset_id,
+                reducer._continuity_state.last_aggregate_trade_id,
+                reducer._continuity_state.last_underlying_trade_id,
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="crypto_trade_state_exceeds_resource_budget"):
+        reducer.finish()
+
+
 def test_depth_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> None:
     module = _panel_input_reducers_module()
     reducer = module.DepthSnapshotReducer(
