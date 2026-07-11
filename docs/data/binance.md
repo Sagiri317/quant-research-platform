@@ -66,6 +66,17 @@ These paths are local input layout only. They do not define public API, public C
 
 `sources/binance/interim.py` owns raw envelope to interim normalization:
 
+Raw files and successive normalization batches must already be strictly ordered by
+the registered interim primary key.  Normalization preserves that physical order
+and carries one last-key watermark across files and batches; it does not sort a
+batch to conceal a regressing dependency.  Aggregate trades therefore advance by
+`(source_asset_id, timestamp, aggregate_trade_id)`, depth levels by
+`(source_asset_id, timestamp, side, level)`, and bars by
+`(source_asset_id, timestamp)`.  Duplicate or regressing rows fail closed with the
+same result for every batch size.  Depth emits the registered lexical side order
+within each snapshot while raw bid/ask price ordering remains governed by the
+source semantic checks above.
+
 ```text
 klines      -> market_bars_1m
 agg_trades  -> aggregate_trades_tick
