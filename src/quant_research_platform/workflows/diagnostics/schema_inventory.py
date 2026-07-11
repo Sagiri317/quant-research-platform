@@ -12,15 +12,16 @@ from typing import Any
 import pandas as pd
 
 from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
     active_runtime_resource_policy,
     require_free_disk_headroom,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage.datasets import (
-    DatasetReadMode,
-    inspect_dataset,
-    read_dataset,
+from quant_research_platform.storage._dataset_reading import (
+    build_dataset_read_context,
+    iter_dataset_chunks,
 )
+from quant_research_platform.storage.datasets import inspect_dataset
 
 
 def build_schema_inventory_payload(
@@ -146,12 +147,25 @@ def _aggregate_dataset_stats(
         0 if exact_duplicate_count is None else exact_duplicate_count
     )
 
-    chunks = read_dataset(artifact_root, mode=DatasetReadMode.CHUNKED)
+    policy = active_runtime_resource_policy()
+    sqlite_cache_bytes = (
+        _exact_key_cache_bytes(policy)
+        if exact_duplicate_count is None and primary_key
+        else 0
+    )
+    physical_target_bytes = policy.effective_chunk_bytes - sqlite_cache_bytes
+    context = build_dataset_read_context(
+        artifact_root,
+        columns=None,
+        time_window=None,
+    )
+    chunks = iter_dataset_chunks(
+        context,
+        target_chunk_bytes=physical_target_bytes,
+    )
     with ExitStack() as stack:
         key_index: ExactPrimaryKeyIndex | None = None
-        policy = None
         if exact_duplicate_count is None and primary_key:
-            policy = active_runtime_resource_policy()
             require_free_disk_headroom(
                 policy,
                 artifact_root.parent,
@@ -164,6 +178,7 @@ def _aggregate_dataset_stats(
                         column for column in primary_key if column == "timestamp"
                     ),
                     scratch_parent=artifact_root.parent,
+                    sqlite_cache_bytes=sqlite_cache_bytes,
                 )
             )
         for frame in chunks:
@@ -201,7 +216,6 @@ def _aggregate_dataset_stats(
                 key_bytes = int(
                     key_frame.memory_usage(index=True, deep=True).sum()
                 )
-                assert policy is not None
                 require_free_disk_headroom(
                     policy,
                     artifact_root.parent,
@@ -221,6 +235,15 @@ def _aggregate_dataset_stats(
             sorted(important_null_counts.items())
         ),
     }
+
+
+def _exact_key_cache_bytes(policy: RuntimeResourcePolicy) -> int:
+    effective_bytes = int(policy.effective_chunk_bytes)
+    candidate = min(8 * 1024, effective_bytes // 4)
+    cache_bytes = (candidate // 1024) * 1024
+    if cache_bytes < 1024 or effective_bytes <= cache_bytes:
+        raise ValueError("schema_inventory_resource_budget_too_small")
+    return cache_bytes
 
 
 def _logical_identifiers(logical_root: str) -> tuple[str, str, str]:

@@ -57,6 +57,9 @@ must fit one `effective_chunk_bytes` budget. Trading-session discovery retains
 only the requested lookback, core window, and lookahead while scanning bounded
 calendar chunks; panel calculation preserves complete historical calendar
 semantics while projecting only the fields required by the A-share owner.
+Dataset-session discovery splits the caller budget between bounded physical
+chunks and the deep-sized retained session namespace. Verification aggregates
+likewise reserve separate physical-read and exact-key SQLite-cache allocations.
 
 A-share coverage uses trading sessions. Coverage helpers must reject invalid
 asset keys and timestamps instead of silently dropping them. Their cached

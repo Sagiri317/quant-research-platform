@@ -23,6 +23,8 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     market_panel_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_io,
+    materialization_planning,
     source_ids,
 )
 from quant_research_platform.markets.implementations.a_share.research_scenarios import (
@@ -48,11 +50,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage._dataset_reading import iter_parquet_file_batches
-from quant_research_platform.storage.datasets import (
-    DatasetReadMode,
-    inspect_dataset,
-    read_dataset,
-)
+from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.manifests import read_qrp_json
 
 PROJECT_VERSION = "0.1.0"
@@ -604,11 +602,7 @@ def _iter_generated_full_market_panel_session_chunks(
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog as processed_catalog,
     )
-    from quant_research_platform.markets.implementations.a_share.processed import (
-        materialization_io,
-        materialization_planning,
-        panels,
-    )
+    from quant_research_platform.markets.implementations.a_share.processed import panels
 
     interim_root = _local_interim_root(project_root)
     policy = resource_policy or active_runtime_resource_policy()
@@ -695,7 +689,7 @@ def _iter_generated_full_market_panel_session_chunks(
             trading_calendar=trading_calendar,
         )
         output = panel[list(spec.required_columns)].copy()
-        selected = filter_output_sessions(
+        selected = materialization_planning.filter_output_sessions(
             output,
             window.core_sessions,
         ).reset_index(drop=True)
@@ -747,20 +741,6 @@ def _trading_sessions_from_calendar(
     return normalize_session_dates(trading_calendar.loc[mask, "timestamp"])
 
 
-def filter_output_sessions(
-    frame: pd.DataFrame,
-    sessions: tuple[pd.Timestamp, ...],
-) -> pd.DataFrame:
-    output = frame.copy()
-    output["timestamp"] = strict_values.strict_timestamp_value_series(
-        output["timestamp"],
-        error="invalid_output_session_timestamp",
-    )
-    session_dates_set = {session.date() for session in sessions}
-    dates = output["timestamp"].dt.date
-    return output.loc[dates.isin(session_dates_set)].copy()
-
-
 def _time_window_from_years(years: tuple[int, ...] | None) -> TimeWindow | None:
     if years is None:
         return None
@@ -789,14 +769,23 @@ def _summarize_output_bundles(roots: tuple[Path, ...]) -> AggregateSummary:
         for root in roots
     ):
         raise ValueError("aggregate_output_roots_cross_volume")
+    policy = active_runtime_resource_policy()
+    physical_target_bytes, sqlite_cache_bytes = _verification_resource_allocations(
+        policy
+    )
     return _summarize_frames(
-        _iter_output_frames(roots),
+        _iter_output_frames(roots, target_chunk_bytes=physical_target_bytes),
         scratch_parent=scratch_parent,
+        resource_policy=policy,
+        sqlite_cache_bytes=sqlite_cache_bytes,
     )
 
 
-def _iter_output_frames(roots: tuple[Path, ...]) -> Iterator[pd.DataFrame]:
-    target_chunk_bytes = active_runtime_resource_policy().effective_chunk_bytes
+def _iter_output_frames(
+    roots: tuple[Path, ...],
+    *,
+    target_chunk_bytes: int,
+) -> Iterator[pd.DataFrame]:
     for root in roots:
         files = tuple(sorted(Path(root).rglob("*.parquet")))
         if not files:
@@ -813,20 +802,28 @@ def _summarize_dataset_root(
     *,
     years: tuple[int, ...] | None = None,
     summary_cache: _SummaryCache | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> AggregateSummary:
     if summary_cache is not None:
         key = _summary_cache_key(root, years)
         cached = summary_cache.get(key)
         if cached is not None:
             return cached
-    chunks = read_dataset(
+    policy = resource_policy or active_runtime_resource_policy()
+    physical_target_bytes, sqlite_cache_bytes = _verification_resource_allocations(
+        policy
+    )
+    chunks = materialization_io.iter_dataset_chunks_with_policy(
         root,
         time_window=_time_window_from_years(years),
-        mode=DatasetReadMode.CHUNKED,
+        resource_policy=policy,
+        target_chunk_bytes=physical_target_bytes,
     )
     summary = _summarize_frames(
         chunks,
         scratch_parent=root.parent,
+        resource_policy=policy,
+        sqlite_cache_bytes=sqlite_cache_bytes,
     )
     if summary_cache is not None:
         summary_cache[key] = summary
@@ -848,6 +845,7 @@ def _summarize_frames(
     *,
     scratch_parent: Path,
     resource_policy: RuntimeResourcePolicy | None = None,
+    sqlite_cache_bytes: int | None = None,
 ) -> AggregateSummary:
     row_count = 0
     keyed_row_count = 0
@@ -883,6 +881,13 @@ def _summarize_frames(
                     exact_key_policy = (
                         resource_policy or active_runtime_resource_policy()
                     )
+                    exact_key_cache_bytes = (
+                        sqlite_cache_bytes
+                        if sqlite_cache_bytes is not None
+                        else _verification_resource_allocations(
+                            exact_key_policy
+                        )[1]
+                    )
                     require_free_disk_headroom(
                         exact_key_policy,
                         scratch_parent,
@@ -897,6 +902,7 @@ def _summarize_frames(
                                 if column == "timestamp"
                             ),
                             scratch_parent=scratch_parent,
+                            sqlite_cache_bytes=exact_key_cache_bytes,
                         )
                     )
                 elif key_columns != exact_key_columns:
@@ -958,6 +964,17 @@ def _summarize_frames(
         content_summary=normalized_content,
         key_value_paired_summary=normalized_key_value_pairs,
     )
+
+
+def _verification_resource_allocations(
+    policy: RuntimeResourcePolicy,
+) -> tuple[int, int]:
+    effective_bytes = policy.effective_chunk_bytes
+    candidate = min(8 * 1024, effective_bytes // 8)
+    sqlite_cache_bytes = (candidate // 1024) * 1024
+    if sqlite_cache_bytes < 1024 or effective_bytes <= sqlite_cache_bytes:
+        raise ValueError("a_share_verification_resource_budget_too_small")
+    return effective_bytes - sqlite_cache_bytes, sqlite_cache_bytes
 
 
 def _combine_summaries(summaries: list[AggregateSummary]) -> AggregateSummary:

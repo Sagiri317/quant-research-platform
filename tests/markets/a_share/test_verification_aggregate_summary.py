@@ -91,7 +91,10 @@ def test_aggregates_output_frames_are_lazy(
         memory_safety_factor=1.0,
     )
     with aggregates.runtime_resource_policy_scope(policy):
-        frames = aggregates._iter_output_frames((report_root,))
+        frames = aggregates._iter_output_frames(
+            (report_root,),
+            target_chunk_bytes=64 * 1024,
+        )
 
         assert read_order == []
         next(frames)
@@ -236,7 +239,11 @@ def test_aggregates_dataset_summary_cache_reuses_same_root(
     tmp_path,
 ) -> None:
     reader = CountingDatasetReader(_base_frame())
-    monkeypatch.setattr(aggregates, "read_dataset", reader)
+    monkeypatch.setattr(
+        aggregates.materialization_io,
+        "iter_dataset_chunks_with_policy",
+        reader,
+    )
     cache = {}
     root = tmp_path / "dataset"
 
@@ -252,7 +259,11 @@ def test_aggregates_dataset_summary_cache_keeps_year_filters_distinct(
     tmp_path,
 ) -> None:
     reader = CountingDatasetReader(_base_frame())
-    monkeypatch.setattr(aggregates, "read_dataset", reader)
+    monkeypatch.setattr(
+        aggregates.materialization_io,
+        "iter_dataset_chunks_with_policy",
+        reader,
+    )
     cache = {}
     root = tmp_path / "dataset"
 
@@ -268,7 +279,11 @@ def test_aggregates_dataset_summary_cache_normalizes_year_order(
     tmp_path,
 ) -> None:
     reader = CountingDatasetReader(_base_frame())
-    monkeypatch.setattr(aggregates, "read_dataset", reader)
+    monkeypatch.setattr(
+        aggregates.materialization_io,
+        "iter_dataset_chunks_with_policy",
+        reader,
+    )
     cache = {}
     root = tmp_path / "dataset"
 

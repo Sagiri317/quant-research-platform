@@ -7,6 +7,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_planning,
+)
 from quant_research_platform.markets.implementations.a_share.research_scenarios import (
     build_prediction_specs,
     default_evaluation_run_id,
@@ -32,6 +35,18 @@ def test_generated_panel_verification_uses_bounded_owner_materialization() -> No
 
     assert "materialization_io.read_materialized_dataset(" in source
     assert "materialization_planning.require_materialization_working_set(" in source
+
+
+def test_dataset_summary_uses_bounded_owner_materialization() -> None:
+    source = inspect.getsource(aggregates._summarize_dataset_root)
+
+    assert "read_dataset(" not in source
+    assert "materialization_io.iter_dataset_chunks_with_policy(" in source
+    assert "resource_policy=" in source
+
+
+def test_verification_has_no_parallel_output_session_filter() -> None:
+    assert not hasattr(aggregates, "filter_output_sessions")
 
 
 def test_aggregates_summarizes_frames_without_row_level_output(tmp_path: Path) -> None:
@@ -379,14 +394,14 @@ def test_aggregates_filtering_and_calendar_helpers() -> None:
             "value": [1, 2],
         }
     )
-    filtered = aggregates.filter_output_sessions(
+    filtered = materialization_planning.filter_output_sessions(
         frame,
         (pd.Timestamp("2024-01-03"),),
     )
     assert filtered["value"].tolist() == [2]
 
     with pytest.raises(ValueError, match="invalid_output_session_timestamp"):
-        aggregates.filter_output_sessions(
+        materialization_planning.filter_output_sessions(
             pd.DataFrame({"timestamp": ["not-a-date"], "value": [1]}),
             (pd.Timestamp("2024-01-03"),),
         )

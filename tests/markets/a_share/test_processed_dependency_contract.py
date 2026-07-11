@@ -277,6 +277,40 @@ def test_a_share_panel_key_coverage_state_is_bounded(
         )
 
 
+def test_dataset_session_coverage_state_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunks = (
+        pd.DataFrame(
+            {"timestamp": pd.date_range("2026-01-01", periods=100, freq="D")}
+        ),
+    )
+    monkeypatch.setattr(
+        materialization_planning,
+        "inspect_dataset",
+        lambda _root: SimpleNamespace(columns=("timestamp",)),
+    )
+    monkeypatch.setattr(
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
+        lambda *_args, **_kwargs: iter(chunks),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="a_share_dataset_session_state_exceeds_resource_budget",
+    ):
+        materialization_planning._dataset_session_dates(
+            Path("dataset"),
+            TimeWindow("2026-01-01", "2026-04-10"),
+            resource_policy=materialization_io.RuntimeResourcePolicy(
+                available_memory_bytes=1024**3,
+                chunk_target_bytes=4 * 1024,
+                memory_safety_factor=1.0,
+            ),
+        )
+
+
 def test_a_share_sizing_probe_materializes_one_core_session_at_a_time() -> None:
     sessions = tuple(pd.date_range("2026-01-01", periods=30, freq="D"))
 

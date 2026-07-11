@@ -105,7 +105,9 @@ def _dataset_session_dates(
         columns=["timestamp"],
         time_window=time_window,
         resource_policy=resource_policy,
+        target_chunk_bytes=max(1, resource_policy.effective_chunk_bytes // 2),
     )
+    state_budget = max(1, resource_policy.effective_chunk_bytes // 2)
     dates: set[object] = set()
     for chunk in chunks:
         timestamp = strict_values.strict_timestamp_value_series(
@@ -113,6 +115,10 @@ def _dataset_session_dates(
             error="invalid_dataset_session_timestamp",
         )
         dates.update(timestamp.dt.date)
+        if materialization_state_bytes(dates) > state_budget:
+            raise ValueError(
+                "a_share_dataset_session_state_exceeds_resource_budget"
+            )
     return dates
 
 

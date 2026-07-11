@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pandas as pd
@@ -69,3 +70,11 @@ def test_schema_inventory_uses_storage_exact_duplicate_fact(
     payload = schema_inventory.build_schema_inventory_payload(tmp_path)
 
     assert payload["datasets"][0]["duplicate_primary_key_count"] == 0
+
+
+def test_schema_inventory_uses_policy_bound_physical_batches() -> None:
+    source = inspect.getsource(schema_inventory._aggregate_dataset_stats)
+
+    assert "DatasetReadMode.CHUNKED" not in source
+    assert "target_chunk_bytes=" in source
+    assert "sqlite_cache_bytes=" in source
