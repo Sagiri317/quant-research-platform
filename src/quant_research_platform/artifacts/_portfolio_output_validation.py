@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import pandas as pd
 
 from quant_research_platform.artifacts._membership_validation import (
@@ -177,18 +175,6 @@ def portfolio_required_columns() -> dict[str, tuple[str, ...]]:
             PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS
         ),
     }
-
-
-def validate_portfolio_artifact_semantics(
-    artifacts: Mapping[str, pd.DataFrame],
-    spec: PortfolioSpec,
-) -> None:
-    for artifact_name, frame in artifacts.items():
-        validate_portfolio_artifact_membership_columns(
-            frame,
-            artifact_name=artifact_name,
-            spec=spec,
-        )
 
 
 def validate_portfolio_artifact_membership_columns(

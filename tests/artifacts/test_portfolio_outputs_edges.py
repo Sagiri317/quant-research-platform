@@ -6,9 +6,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.artifacts._portfolio_output_validation as validation
 import quant_research_platform.artifacts._portfolio_outputs as portfolio_outputs
 from quant_research_platform.artifacts._portfolio_output_validation import (
-    validate_portfolio_artifact_semantics,
+    validate_portfolio_artifact_membership_columns,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from tests.artifacts.output_edge_fixtures import (
@@ -284,4 +285,13 @@ def test_portfolio_validation_rejects_invalid_membership_values() -> None:
     artifacts["portfolio_returns"] = artifacts["portfolio_returns"].assign(signal=1)
 
     with pytest.raises(ValueError, match="portfolio_artifact_signal_mismatch"):
-        validate_portfolio_artifact_semantics(artifacts, spec)
+        for artifact_name, frame in artifacts.items():
+            validate_portfolio_artifact_membership_columns(
+                frame,
+                artifact_name=artifact_name,
+                spec=spec,
+            )
+
+
+def test_portfolio_validation_has_no_test_only_bulk_parallel_path() -> None:
+    assert not hasattr(validation, "validate_portfolio_artifact_semantics")

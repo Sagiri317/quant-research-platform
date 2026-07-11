@@ -52,19 +52,6 @@ def time_window_date_bounds(time_window: TimeWindow) -> tuple[date, date]:
     return start, end
 
 
-def time_window_timestamp_bounds(
-    time_window: TimeWindow,
-) -> tuple[datetime, datetime]:
-    if isinstance(time_window.start, datetime) and isinstance(
-        time_window.end,
-        datetime,
-    ):
-        return time_window.start, time_window.end
-    start = datetime.combine(time_window.start, time.min)
-    end = datetime.combine(time_window.end, time.max)
-    return start, end
-
-
 def time_window_timestamp_interval(
     time_window: TimeWindow,
 ) -> tuple[datetime, datetime, bool]:

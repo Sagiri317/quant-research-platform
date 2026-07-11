@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.contracts.time as time_contracts
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -135,6 +136,10 @@ def test_time_window_is_required_closed_interval() -> None:
     assert window.end == date(2014, 12, 31)
     with pytest.raises(ValueError, match="invalid_time_window"):
         TimeWindow("2014-12-31", "2014-01-01")
+
+
+def test_time_contract_has_no_replaced_timestamp_bounds_helper() -> None:
+    assert not hasattr(time_contracts, "time_window_timestamp_bounds")
 
 
 def test_factor_and_label_definitions_keep_future_flags_out() -> None:

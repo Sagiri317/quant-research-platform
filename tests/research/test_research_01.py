@@ -371,6 +371,24 @@ def test_research_join_budget_includes_retained_base_keys_and_coverage_merge() -
         )
 
 
+def test_research_final_write_counts_suspended_and_writer_copies() -> None:
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        chunk_target_bytes=1_000,
+        memory_safety_factor=1.0,
+    )
+    output = pd.DataFrame({"value": ["x" * 256]})
+
+    with pytest.raises(
+        ValueError,
+        match="research_final_write_working_set_exceeds_memory_budget",
+    ):
+        assembler_module._require_research_final_write_working_set(
+            output,
+            resource_policy=policy,
+        )
+
+
 def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     primary_key = platform_entity_time_key()

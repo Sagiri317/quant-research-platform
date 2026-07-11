@@ -180,11 +180,16 @@ def _iter_joined_processed_chunks(
             resource_policy=policy,
         )
         validate_research_dataset(chunk, dataset_spec)
-        yield (
+        output = (
             chunk.loc[:, list(_ordered_output_columns(dataset_spec))]
             .sort_values(list(dataset_spec.primary_key))
             .reset_index(drop=True)
         )
+        _require_research_final_write_working_set(
+            output,
+            resource_policy=policy,
+        )
+        yield output
 
 
 def _join_processed_inputs(
@@ -292,6 +297,20 @@ def _require_research_join_working_set(
 
 def _frame_bytes(frame: pd.DataFrame) -> int:
     return int(frame.memory_usage(index=True, deep=True).sum())
+
+
+def _require_research_final_write_working_set(
+    output: pd.DataFrame,
+    *,
+    resource_policy: RuntimeResourcePolicy,
+) -> None:
+    if (
+        RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER * _frame_bytes(output)
+        > resource_policy.effective_chunk_bytes
+    ):
+        raise ValueError(
+            "research_final_write_working_set_exceeds_memory_budget"
+        )
 
 
 def _time_keys_from_base_input(
