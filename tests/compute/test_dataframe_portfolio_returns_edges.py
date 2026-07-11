@@ -5,49 +5,9 @@ import pytest
 
 from quant_research_platform.compute.dataframe.portfolio_returns import (
     _build_portfolio_return_record_from_positions,
-    _calculate_long_short_from_positions,
     _timestamp_label_lookup,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
-from quant_research_platform.contracts.portfolios import WeightConfig
-from tests.helpers.compute_inputs import make_two_asset_portfolio_compute_panel
-
-
-def test_dataframe_portfolio_returns_calculates_returns_from_positions() -> None:
-    spec = ComputePanelSpec(signal_columns=("factor",), label_column="label")
-    panel = make_two_asset_portfolio_compute_panel()
-    positions = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-            "asset": ["A", "B"],
-            "signal": ["factor", "factor"],
-            "position": [1.0, -1.0],
-            "segment": ["s1", "s1"],
-        }
-    )
-    turnover = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02"]),
-            "signal": ["factor"],
-            "turnover": [2.0],
-            "segment": ["s1"],
-        }
-    )
-    cost = turnover.assign(total_cost=[0.002])
-
-    returns = _calculate_long_short_from_positions(
-        panel=panel,
-        spec=spec,
-        positions=positions,
-        turnover=turnover,
-        cost_breakdown=cost,
-        weight_config=WeightConfig(),
-        segment_columns=("segment",),
-        return_source_column="label",
-    )
-
-    assert returns["net_portfolio_return"].round(6).tolist() == [0.028]
-    assert returns["segment"].tolist() == ["s1"]
 
 
 def test_dataframe_portfolio_return_record_handles_empty_or_missing_legs() -> None:

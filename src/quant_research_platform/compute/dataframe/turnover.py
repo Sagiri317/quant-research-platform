@@ -124,32 +124,6 @@ def position_change_turnover(
             sell_turnover -= change
     return buy_turnover, sell_turnover
 
-def _lookup_turnover(
-    turnover: pd.DataFrame,
-    *,
-    group_values: dict[str, object],
-    segment_columns: tuple[str, ...],
-) -> float:
-    filters = (turnover["timestamp"] == group_values["timestamp"]) & (
-        turnover["signal"] == group_values["signal"]
-    )
-    for segment in segment_columns:
-        filters &= turnover[segment] == group_values[segment]
-    return float(turnover.loc[filters, "turnover"].iloc[0])
-
-def _lookup_cost(
-    cost_breakdown: pd.DataFrame,
-    *,
-    group_values: dict[str, object],
-    segment_columns: tuple[str, ...],
-) -> float:
-    filters = (cost_breakdown["timestamp"] == group_values["timestamp"]) & (
-        cost_breakdown["signal"] == group_values["signal"]
-    )
-    for segment in segment_columns:
-        filters &= cost_breakdown[segment] == group_values[segment]
-    return float(cost_breakdown.loc[filters, "total_cost"].iloc[0])
-
 __all__ = [
     "calculate_cost_breakdown",
     "calculate_turnover",

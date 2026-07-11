@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.compute.tensor.turnover as tensor_turnover
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.compute.tensor import constraints
 from quant_research_platform.compute.tensor.conversion import (
@@ -32,8 +33,6 @@ from quant_research_platform.compute.tensor.portfolio_returns import (
     calculate_tensor_long_short,
 )
 from quant_research_platform.compute.tensor.turnover import (
-    _current_position_state,
-    _path_turnover_and_cost_records,
     calculate_tensor_turnover_and_cost,
     path_current_state,
     path_turnover_and_cost_records_from_arrays,
@@ -249,19 +248,6 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
     assert empty_turnover.empty
     assert empty_cost.empty
 
-    turnover_record, cost_record = _path_turnover_and_cost_records(
-        context={"segment": "s1"},
-        timestamp=pd.Timestamp("2024-01-02"),
-        signal="factor",
-        previous_positions={"A": -0.5},
-        current_positions={"A": 1.0, "B": -0.25},
-        weight_config=WeightConfig(),
-        cost_config=CostConfig(slippage_bps=10),
-        segment_columns=("segment",),
-    )
-    assert turnover_record["turnover"] == pytest.approx(1.75)
-    assert cost_record["total_cost"] == pytest.approx(0.00175)
-
     array_turnover, _array_cost = path_turnover_and_cost_records_from_arrays(
         context={},
         timestamp=pd.Timestamp("2024-01-03"),
@@ -281,13 +267,8 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
     )
     assert offsets.tolist() == [1]
     assert state["position_count"] == 1
-    current, current_state = _current_position_state(
-        assets=("A", "B"),
-        positions=np.array([0.5, 0.0]),
-        nonzero_offsets=np.array([0]),
-    )
-    assert current == {"A": 0.5}
-    assert current_state["net_exposure"] == pytest.approx(0.5)
+    assert not hasattr(tensor_turnover, "_path_turnover_and_cost_records")
+    assert not hasattr(tensor_turnover, "_current_position_state")
     assert position_map_from_arrays(
         assets=("A", "B"),
         positions=np.array([0.0, -0.25]),

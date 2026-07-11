@@ -92,59 +92,6 @@ def calculate_tensor_turnover_and_cost(
         ),
     )
 
-def _path_turnover_and_cost_records(
-    *,
-    context: dict[str, object],
-    timestamp: object,
-    signal: str,
-    previous_positions: dict[str, float],
-    current_positions: dict[str, float],
-    weight_config: WeightConfig,
-    cost_config: CostConfig,
-    segment_columns: tuple[str, ...] = (),
-) -> tuple[dict[str, object], dict[str, object]]:
-    all_assets = set(previous_positions) | set(current_positions)
-    if all_assets:
-        changes = np.fromiter(
-            (
-                float(current_positions.get(asset, 0.0))
-                - float(previous_positions.get(asset, 0.0))
-                for asset in all_assets
-            ),
-            dtype="float64",
-            count=len(all_assets),
-        )
-        buy_turnover = float(np.clip(changes, 0.0, None).sum())
-        sell_turnover = float((-np.clip(changes, None, 0.0)).sum())
-    else:
-        buy_turnover = 0.0
-        sell_turnover = 0.0
-    turnover = buy_turnover + sell_turnover
-    base = {
-        **{column: context[column] for column in segment_columns},
-        "timestamp": timestamp,
-        "signal": signal,
-    }
-    costs = cost_components(
-        buy_turnover=buy_turnover,
-        sell_turnover=sell_turnover,
-        turnover=turnover,
-        cost_config=cost_config,
-    )
-    return (
-        {
-            **base,
-            "turnover": turnover,
-        },
-        {
-            **base,
-            "buy_turnover": buy_turnover,
-            "sell_turnover": sell_turnover,
-            "turnover": turnover,
-            **costs,
-        },
-    )
-
 def path_turnover_and_cost_records_from_arrays(
     *,
     context: dict[str, object],
@@ -209,23 +156,6 @@ def path_current_state(
     nonzero_offsets = np.flatnonzero(position_values != 0.0)
     nonzero_positions = position_values[nonzero_offsets]
     return nonzero_offsets, {
-        "gross_exposure": float(np.abs(nonzero_positions).sum()),
-        "net_exposure": float(nonzero_positions.sum()),
-        "position_count": len(nonzero_offsets),
-    }
-
-def _current_position_state(
-    *,
-    assets: tuple[str, ...],
-    positions: np.ndarray,
-    nonzero_offsets: np.ndarray,
-) -> tuple[dict[str, float], dict[str, float | int]]:
-    nonzero_positions = positions[nonzero_offsets]
-    current = {
-        assets[int(offset)]: float(position)
-        for offset, position in zip(nonzero_offsets, nonzero_positions, strict=True)
-    }
-    return current, {
         "gross_exposure": float(np.abs(nonzero_positions).sum()),
         "net_exposure": float(nonzero_positions.sum()),
         "position_count": len(nonzero_offsets),

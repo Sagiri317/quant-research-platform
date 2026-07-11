@@ -868,8 +868,8 @@ def test_simulation_does_not_join_timestamp_asset_labels(monkeypatch) -> None:
 def test_simulation_does_not_scan_turnover_and_cost_per_return_group(
     monkeypatch,
 ) -> None:
-    assert not hasattr(dataframe_portfolio_returns, "_lookup_turnover")
-    assert not hasattr(dataframe_portfolio_returns, "_lookup_cost")
+    assert not hasattr(dataframe_turnover, "_lookup_turnover")
+    assert not hasattr(dataframe_turnover, "_lookup_cost")
 
     simulate_weighted_long_short_returns(
         _ranking_panel(),
@@ -882,17 +882,16 @@ def test_simulation_does_not_scan_turnover_and_cost_per_return_group(
 def test_simulation_streams_portfolio_path_without_rebuilding_from_positions(
     monkeypatch,
 ) -> None:
+    assert not hasattr(
+        dataframe_portfolio_returns,
+        "_calculate_long_short_from_positions",
+    )
+
     def fail_rebuild(*args, **kwargs):
         raise AssertionError("simulation should stream turnover/cost/returns")
 
     monkeypatch.setattr(dataframe_turnover, "calculate_turnover", fail_rebuild)
     monkeypatch.setattr(dataframe_turnover, "calculate_cost_breakdown", fail_rebuild)
-    monkeypatch.setattr(
-        dataframe_portfolio_returns,
-        "_calculate_long_short_from_positions",
-        fail_rebuild,
-    )
-
     _positions, turnover, returns, _diagnostics = simulate_weighted_long_short_returns(
         _ranking_panel(),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),

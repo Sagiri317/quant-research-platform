@@ -220,15 +220,8 @@ def test_dataframe_tradability_helper_edges() -> None:
             TradabilityConfig(can_enter_column="can_enter"),
         )
 
-    assert len(constraints._filter_eligible_assets(frame, tradability)) == 1
-    assert len(
-        constraints._filter_new_entry_blocked_assets(
-            frame,
-            spec=spec,
-            tradability_config=tradability,
-            previous_positions={"B": 1.0},
-        )
-    ) == 2
+    assert not hasattr(constraints, "_filter_eligible_assets")
+    assert not hasattr(constraints, "_filter_new_entry_blocked_assets")
     counts = constraints.tradability_diagnostic_counts(
         timestamp_frame=frame,
         signal="signal",

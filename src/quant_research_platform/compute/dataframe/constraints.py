@@ -32,33 +32,6 @@ def validate_tradability_columns(
             raise TypeError(f"tradability column {column!r} must be boolean.")
 
 
-def _filter_eligible_assets(
-    ranked: pd.DataFrame,
-    tradability_config: TradabilityConfig,
-) -> pd.DataFrame:
-    if tradability_config.eligibility_column is None:
-        return ranked
-    return ranked[ranked[tradability_config.eligibility_column]].copy()
-
-
-def _filter_new_entry_blocked_assets(
-    ranked: pd.DataFrame,
-    *,
-    spec: ComputePanelSpec,
-    tradability_config: TradabilityConfig,
-    previous_positions: dict[str, float],
-) -> pd.DataFrame:
-    if tradability_config.can_enter_column is None:
-        return ranked
-    can_enter = ranked[tradability_config.can_enter_column]
-    has_previous = (
-        ranked[spec.asset_column]
-        .astype(str)
-        .map(lambda asset: previous_positions.get(asset, 0.0) != 0.0)
-    )
-    return ranked[can_enter | has_previous].copy()
-
-
 def tradability_diagnostic_counts(
     *,
     timestamp_frame: pd.DataFrame,
