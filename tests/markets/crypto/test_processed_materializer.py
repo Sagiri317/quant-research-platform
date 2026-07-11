@@ -733,6 +733,8 @@ def test_crypto_core_mask_uses_original_row_positions(index: list[int]) -> None:
 def test_crypto_timestamp_validation_has_no_thin_wrappers() -> None:
     assert not hasattr(materialize_panel, "_strict_timestamp_column")
     assert not hasattr(panels, "_strict_timestamp_column")
+    assert not hasattr(panels, "_normalize_depth_chunk_for_reducer")
+    assert not hasattr(panels, "_numeric")
 
 
 @pytest.mark.parametrize("index", [[100 + index for index in range(30)], [0] * 30])

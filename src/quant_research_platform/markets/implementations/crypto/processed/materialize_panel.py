@@ -16,6 +16,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_resources,
     materialization_validation,
+    panel_input_reducers,
     panels,
     source_ids,
 )
@@ -134,6 +135,9 @@ def _iter_panel_chunks(
     )
     order_state = materialization_validation.OrderedDependencyState()
     for source_asset_id in source_assets:
+        trade_continuity_state = (
+            panel_input_reducers.AggregateTradeContinuityState()
+        )
         group_context = dataset_context_for_equality_group(
             bar_context,
             group_plan,
@@ -177,6 +181,7 @@ def _iter_panel_chunks(
                 trade_output_bytes=budget.trade_output_bytes,
                 depth_state_bytes=budget.reducer_state_bytes,
                 depth_output_bytes=budget.depth_output_bytes,
+                trade_continuity_state=trade_continuity_state,
                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
             ).loc[:, spec.required_columns]
             materialization_resources.require_frame_within_budget(

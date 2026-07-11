@@ -56,6 +56,9 @@ def calculate_market_panel_from_chunks(
     trade_output_bytes: int,
     depth_state_bytes: int,
     depth_output_bytes: int,
+    trade_continuity_state: (
+        panel_input_reducers.AggregateTradeContinuityState | None
+    ) = None,
     max_quote_age: pd.Timedelta = DEFAULT_MAX_QUOTE_AGE,
 ) -> pd.DataFrame:
     if not isinstance(max_quote_age, pd.Timedelta) or max_quote_age < pd.Timedelta(0):
@@ -65,6 +68,7 @@ def calculate_market_panel_from_chunks(
         target_state_bytes=trade_state_bytes,
         target_output_bytes=trade_output_bytes,
         normalize_chunk=normalize_trade_chunk,
+        continuity_state=trade_continuity_state,
     )
     for chunk in trade_chunks:
         if not chunk.empty:
@@ -75,7 +79,7 @@ def calculate_market_panel_from_chunks(
         bars=prepared_bars,
         target_state_bytes=depth_state_bytes,
         target_output_bytes=depth_output_bytes,
-        normalize_chunk=_normalize_depth_chunk_for_reducer,
+        normalize_chunk=normalize_depth_chunk,
         finalize_snapshot=finalize_depth_snapshot,
     )
     for chunk in depth_chunks:
@@ -360,10 +364,6 @@ def normalize_depth_chunk(depth: pd.DataFrame) -> pd.DataFrame:
     return frame.loc[:, list(columns)]
 
 
-def _normalize_depth_chunk_for_reducer(depth: pd.DataFrame) -> pd.DataFrame:
-    return normalize_depth_chunk(depth).reset_index(drop=True)
-
-
 def finalize_depth_snapshot(
     asset_id: str,
     quote_timestamp: pd.Timestamp,
@@ -425,10 +425,6 @@ def _crypto_asset_id_series(series: pd.Series) -> pd.Series:
     if values.isna().any():
         raise ValueError("invalid_crypto_source_asset_id")
     return values
-
-
-def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:
-    return pd.to_numeric(frame[column], errors="coerce")
 
 
 def _required_numeric(frame: pd.DataFrame, column: str, *, error: str) -> pd.Series:

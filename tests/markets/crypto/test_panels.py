@@ -700,6 +700,43 @@ def test_trade_reducer_checks_range_continuity_across_chunks() -> None:
         reducer.add_chunk(trades.iloc[1:].copy())
 
 
+def test_trade_reducer_checks_range_continuity_across_bar_reducers() -> None:
+    module = _panel_input_reducers_module()
+    continuity = module.AggregateTradeContinuityState()
+    bars = _bars_frame()
+    trades = _aggregate_trades_frame(
+        first_trade_ids=(10, 12),
+        last_trade_ids=(10, 12),
+        timestamps=(
+            pd.Timestamp("2026-07-06 00:00:01"),
+            pd.Timestamp("2026-07-06 00:01:01"),
+        ),
+    )
+    first = module.AggregateTradeReducer(
+        bars=panels.prepare_panel_bars(bars.iloc[:1].copy()),
+        target_state_bytes=16 * 1024,
+        target_output_bytes=16 * 1024,
+        normalize_chunk=panels.normalize_trade_chunk,
+        continuity_state=continuity,
+    )
+    first.add_chunk(trades.iloc[:1].copy())
+    first.finish()
+    second_bars = bars.iloc[:1].copy()
+    second_bars["timestamp"] = pd.Timestamp("2026-07-06 00:01:00")
+    second_bars["open_time"] = pd.Timestamp("2026-07-06 00:01:00")
+    second_bars["close_time"] = pd.Timestamp("2026-07-06 00:01:59.999")
+    second = module.AggregateTradeReducer(
+        bars=panels.prepare_panel_bars(second_bars),
+        target_state_bytes=16 * 1024,
+        target_output_bytes=16 * 1024,
+        normalize_chunk=panels.normalize_trade_chunk,
+        continuity_state=continuity,
+    )
+
+    with pytest.raises(ValueError, match="invalid_crypto_trade_flow_coverage"):
+        second.add_chunk(trades.iloc[1:].copy())
+
+
 def test_trade_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> None:
     module = _panel_input_reducers_module()
     reducer = module.AggregateTradeReducer(
@@ -727,6 +764,31 @@ def test_depth_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> No
 
     with pytest.raises(ValueError, match="crypto_depth_output_exceeds_resource_budget"):
         reducer.finish()
+
+
+def test_depth_target_position_budget_is_stable_after_positions_advance() -> None:
+    module = _panel_input_reducers_module()
+    bars = pd.DataFrame(
+        {
+            "asset_id": [f"asset_{index:04d}" for index in range(1_000)],
+            "close_time": pd.date_range("2026-07-06", periods=1_000, freq="min"),
+        }
+    )
+    reducer = module.DepthSnapshotReducer(
+        bars=bars,
+        target_state_bytes=64 * 1024**2,
+        target_output_bytes=64 * 1024**2,
+        normalize_chunk=panels.normalize_depth_chunk,
+        finalize_snapshot=panels.finalize_depth_snapshot,
+    )
+    reducer._target_positions = {
+        asset_id: index + 10_000
+        for index, asset_id in enumerate(reducer._target_positions)
+    }
+
+    assert reducer._target_maps_bytes >= module._deep_size(
+        (reducer._targets_by_asset, reducer._target_positions)
+    )
 
 
 def test_reducer_state_budget_counts_deep_python_key_payloads() -> None:

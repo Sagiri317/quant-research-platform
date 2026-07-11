@@ -46,6 +46,16 @@ class _TradeBarState:
     last_aggregate_trade_id: int | None = None
 
 
+@dataclass(slots=True)
+class AggregateTradeContinuityState:
+    """Retain ordered aggregate-trade identity across physical bar chunks."""
+
+    last_order_key: tuple[str, pd.Timestamp, int] | None = None
+    active_source_asset_id: str | None = None
+    last_aggregate_trade_id: int | None = None
+    last_underlying_trade_id: int | None = None
+
+
 class AggregateTradeReducer:
     """Reduce ordered aggregate trades to bounded per-bar validation state."""
 
@@ -56,6 +66,7 @@ class AggregateTradeReducer:
         target_state_bytes: int,
         target_output_bytes: int,
         normalize_chunk: Callable[[pd.DataFrame], pd.DataFrame],
+        continuity_state: AggregateTradeContinuityState | None = None,
     ) -> None:
         if (
             isinstance(target_state_bytes, bool)
@@ -80,12 +91,9 @@ class AggregateTradeReducer:
             error="invalid_crypto_trade_output_budget",
         )
         self._normalize_chunk = normalize_chunk
+        self._continuity_state = continuity_state or AggregateTradeContinuityState()
         self._states: dict[tuple[str, pd.Timestamp], _TradeBarState] = {}
         self._state_entries_bytes = sys.getsizeof(self._states)
-        self._last_order_key: tuple[str, pd.Timestamp, int] | None = None
-        self._active_source_asset_id: str | None = None
-        self._last_aggregate_trade_id: int | None = None
-        self._last_underlying_trade_id: int | None = None
         self._finished = False
         self._require_budget()
 
@@ -122,25 +130,29 @@ class AggregateTradeReducer:
                 event_timestamp,
                 aggregate_trade_id,
             )
-            if self._last_order_key is not None and order_key <= self._last_order_key:
-                raise ValueError("out_of_order_crypto_trade_dependency")
-            if source_asset_id != self._active_source_asset_id:
-                self._active_source_asset_id = source_asset_id
-                self._last_aggregate_trade_id = None
-                self._last_underlying_trade_id = None
+            continuity = self._continuity_state
             if (
-                self._last_aggregate_trade_id is not None
-                and aggregate_trade_id <= self._last_aggregate_trade_id
+                continuity.last_order_key is not None
+                and order_key <= continuity.last_order_key
+            ):
+                raise ValueError("out_of_order_crypto_trade_dependency")
+            if source_asset_id != continuity.active_source_asset_id:
+                continuity.active_source_asset_id = source_asset_id
+                continuity.last_aggregate_trade_id = None
+                continuity.last_underlying_trade_id = None
+            if (
+                continuity.last_aggregate_trade_id is not None
+                and aggregate_trade_id <= continuity.last_aggregate_trade_id
             ):
                 raise ValueError("out_of_order_crypto_trade_dependency")
             if (
-                self._last_underlying_trade_id is not None
-                and first_trade_id != self._last_underlying_trade_id + 1
+                continuity.last_underlying_trade_id is not None
+                and first_trade_id != continuity.last_underlying_trade_id + 1
             ):
                 raise ValueError("invalid_crypto_trade_flow_coverage")
-            self._last_order_key = order_key
-            self._last_aggregate_trade_id = aggregate_trade_id
-            self._last_underlying_trade_id = last_trade_id
+            continuity.last_order_key = order_key
+            continuity.last_aggregate_trade_id = aggregate_trade_id
+            continuity.last_underlying_trade_id = last_trade_id
             key = (asset_id, timestamp)
             if key in self._target_keys:
                 state = self._states.get(key)
@@ -202,10 +214,10 @@ class AggregateTradeReducer:
             + self._state_entries_bytes
             + _deep_size(
                 (
-                    self._last_order_key,
-                    self._active_source_asset_id,
-                    self._last_aggregate_trade_id,
-                    self._last_underlying_trade_id,
+                    self._continuity_state.last_order_key,
+                    self._continuity_state.active_source_asset_id,
+                    self._continuity_state.last_aggregate_trade_id,
+                    self._continuity_state.last_underlying_trade_id,
                 )
             )
         )
@@ -256,8 +268,9 @@ class DepthSnapshotReducer:
         self._target_positions = {
             asset_id: 0 for asset_id in self._targets_by_asset
         }
-        self._target_maps_bytes = _deep_size(
-            (self._targets_by_asset, self._target_positions)
+        self._target_maps_bytes = _target_maps_upper_bound_bytes(
+            self._targets_by_asset,
+            self._target_positions,
         )
         self._target_state_bytes = target_state_bytes
         self._target_output_bytes = _validated_output_budget(
@@ -473,6 +486,22 @@ def _candidate_entry_budget_bytes(
 ) -> int:
     observed: set[int] = set()
     return _deep_size(key, observed) + _deep_size(snapshot, observed)
+
+
+def _target_maps_upper_bound_bytes(
+    targets_by_asset: Mapping[str, tuple[pd.Timestamp, ...]],
+    target_positions: Mapping[str, int],
+) -> int:
+    position_values_bytes = sum(
+        sys.getsizeof(len(targets_by_asset.get(asset_id, ())))
+        for asset_id in target_positions
+    )
+    return (
+        _deep_size(targets_by_asset)
+        + sys.getsizeof(target_positions)
+        + sum(_deep_size(asset_id) for asset_id in target_positions)
+        + position_values_bytes
+    )
 
 
 class _BoundedOutputRows:
