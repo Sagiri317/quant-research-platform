@@ -10,6 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import quant_research_platform.storage._dataset_comparison as dataset_comparison
 import quant_research_platform.storage._dataset_key_tracking as key_tracking
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.time import TimeWindow
@@ -59,6 +60,26 @@ def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
         ).__enter__()
 
     assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_dataset_comparison_failure_summary_does_not_expose_local_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    monkeypatch.setattr(
+        dataset_comparison,
+        "fingerprint_dataset",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError(str(tmp_path))),
+    )
+
+    comparison = datasets.compare_datasets(left, right)
+
+    assert comparison.status == "INSPECTION_FAILED"
+    assert comparison.summary == {"error": "dataset_inspection_failed"}
 
 
 def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:

@@ -37,8 +37,11 @@ def compare_datasets(
             columns=columns,
             time_window=time_window,
         )
-    except Exception as exc:
-        return _comparison("INSPECTION_FAILED", summary={"error": str(exc)})
+    except Exception:
+        return _comparison(
+            "INSPECTION_FAILED",
+            summary={"error": "dataset_inspection_failed"},
+        )
 
     layout_delta = {
         "file_count": {"left": left.file_count, "right": right.file_count},
