@@ -60,6 +60,9 @@ semantics while projecting only the fields required by the A-share owner.
 Dataset-session discovery splits the caller budget between bounded physical
 chunks and the deep-sized retained session namespace. Verification aggregates
 likewise reserve separate physical-read and exact-key SQLite-cache allocations.
+Standalone evaluation, prediction, and portfolio bundles are read in declared
+manifest order; undeclared Parquet and filesystem aliases fail closed before
+review-safe aggregate calculation.
 
 A-share coverage uses trading sessions. Coverage helpers must reject invalid
 asset keys and timestamps instead of silently dropping them. Their cached
