@@ -1062,9 +1062,111 @@ def _requires_conservative_pandas_probe(data_type: pa.DataType) -> bool:
 def _pandas_conversion_bound_bytes(batch: pa.RecordBatch) -> int:
     return int(pd.RangeIndex(batch.num_rows).memory_usage(deep=True)) + sum(
         max(1, int(batch.column(position).nbytes))
-        + batch.num_rows * _pandas_object_cell_overhead(field.type)
+        + _pandas_array_object_overhead(
+            batch.column(position),
+            field.type,
+            nested=False,
+        )
         for position, field in enumerate(batch.schema)
     )
+
+
+def _pandas_array_object_overhead(
+    array: pa.Array,
+    data_type: pa.DataType,
+    *,
+    nested: bool,
+) -> int:
+    row_count = len(array)
+    if pa.types.is_struct(data_type):
+        container_overhead = row_count * (
+            sys.getsizeof({})
+            + _PYTHON_POINTER_BYTES
+            + sum(
+                sys.getsizeof(field.name) + (2 * _PYTHON_POINTER_BYTES)
+                for field in data_type
+            )
+        )
+        return container_overhead + sum(
+            _pandas_array_object_overhead(
+                array.field(position),
+                field.type,
+                nested=True,
+            )
+            for position, field in enumerate(data_type)
+        )
+    if pa.types.is_fixed_size_list(data_type):
+        value_count = row_count * data_type.list_size
+        values = array.values.slice(array.offset * data_type.list_size, value_count)
+        return (
+            row_count * (sys.getsizeof([]) + _PYTHON_POINTER_BYTES)
+            + value_count * _PYTHON_POINTER_BYTES
+            + _pandas_array_object_overhead(
+                values,
+                data_type.value_type,
+                nested=True,
+            )
+        )
+    if pa.types.is_list(data_type) or pa.types.is_large_list(data_type):
+        start, stop = _list_value_bounds(array)
+        values = array.values.slice(start, stop - start)
+        return (
+            row_count * (sys.getsizeof([]) + _PYTHON_POINTER_BYTES)
+            + (stop - start) * _PYTHON_POINTER_BYTES
+            + _pandas_array_object_overhead(
+                values,
+                data_type.value_type,
+                nested=True,
+            )
+        )
+    if pa.types.is_map(data_type):
+        start, stop = _list_value_bounds(array)
+        value_count = stop - start
+        return (
+            row_count * (sys.getsizeof([]) + _PYTHON_POINTER_BYTES)
+            + value_count * sys.getsizeof((None, None))
+            + _pandas_array_object_overhead(
+                array.keys.slice(start, value_count),
+                data_type.key_type,
+                nested=True,
+            )
+            + _pandas_array_object_overhead(
+                array.items.slice(start, value_count),
+                data_type.item_type,
+                nested=True,
+            )
+        )
+    if nested:
+        return row_count * _nested_pandas_scalar_overhead(data_type)
+    return row_count * _pandas_object_cell_overhead(data_type)
+
+
+def _list_value_bounds(array: pa.Array) -> tuple[int, int]:
+    offsets = array.offsets
+    return int(offsets[0].as_py()), int(offsets[-1].as_py())
+
+
+def _nested_pandas_scalar_overhead(data_type: pa.DataType) -> int:
+    if pa.types.is_dictionary(data_type):
+        return _nested_pandas_scalar_overhead(data_type.value_type)
+    direct = _pandas_object_cell_overhead(data_type)
+    if direct:
+        if pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
+            return direct + sys.getsizeof("")
+        return direct
+    if pa.types.is_boolean(data_type):
+        return sys.getsizeof(False) + _PYTHON_POINTER_BYTES
+    if pa.types.is_signed_integer(data_type) or pa.types.is_unsigned_integer(
+        data_type
+    ):
+        return sys.getsizeof(0) + _PYTHON_POINTER_BYTES
+    if pa.types.is_floating(data_type):
+        return sys.getsizeof(0.0) + _PYTHON_POINTER_BYTES
+    if pa.types.is_timestamp(data_type):
+        return sys.getsizeof(pd.Timestamp(0)) + _PYTHON_POINTER_BYTES
+    if pa.types.is_duration(data_type):
+        return sys.getsizeof(pd.Timedelta(0)) + _PYTHON_POINTER_BYTES
+    return sys.getsizeof(None) + (2 * _PYTHON_POINTER_BYTES)
 
 
 def _pandas_object_cell_overhead(data_type: pa.DataType) -> int:
@@ -1086,31 +1188,12 @@ def _pandas_object_cell_overhead(data_type: pa.DataType) -> int:
         return sys.getsizeof(date.min) + _PYTHON_POINTER_BYTES
     if pa.types.is_time(data_type):
         return sys.getsizeof(time.min) + _PYTHON_POINTER_BYTES
-    if pa.types.is_struct(data_type):
-        return (
-            sys.getsizeof({})
-            + _PYTHON_POINTER_BYTES
-            + sum(
-                sys.getsizeof(field.name)
-                + (2 * _PYTHON_POINTER_BYTES)
-                + _pandas_object_cell_overhead(field.type)
-                for field in data_type
-            )
-        )
-    if pa.types.is_fixed_size_list(data_type):
-        return (
-            sys.getsizeof([])
-            + _PYTHON_POINTER_BYTES
-            + data_type.list_size
-            * (
-                _PYTHON_POINTER_BYTES
-                + _pandas_object_cell_overhead(data_type.value_type)
-            )
-        )
     if (
         pa.types.is_list(data_type)
         or pa.types.is_large_list(data_type)
+        or pa.types.is_fixed_size_list(data_type)
         or pa.types.is_map(data_type)
+        or pa.types.is_struct(data_type)
     ):
         return sys.getsizeof([]) + _PYTHON_POINTER_BYTES
     return 0

@@ -675,6 +675,41 @@ def test_wide_struct_row_fails_before_pandas_conversion(
     assert calls["count"] == 0
 
 
+def test_large_map_row_fails_before_pandas_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = pa.record_batch(
+        [
+            pa.array(
+                [[(f"key_{index}", None) for index in range(5_000)]],
+                type=pa.map_(pa.string(), pa.null()),
+            )
+        ],
+        names=["payload"],
+    )
+    calls = {"count": 0}
+
+    def record_conversion(_arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+        calls["count"] += 1
+        raise AssertionError("conversion_must_not_run")
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_arrow_slice_to_pandas",
+        record_conversion,
+    )
+
+    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
+        tuple(
+            dataset_reading._arrow_batch_to_bounded_pandas(
+                batch,
+                target_chunk_bytes=256 * 1024,
+            )
+        )
+
+    assert calls["count"] == 0
+
+
 def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
     tmp_path: Path,
 ) -> None:
