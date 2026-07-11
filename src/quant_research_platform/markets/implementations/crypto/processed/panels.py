@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 
 import pandas as pd
 from pandas.api.types import is_bool_dtype
@@ -80,7 +80,6 @@ def calculate_market_panel_from_chunks(
         target_state_bytes=depth_state_bytes,
         target_output_bytes=depth_output_bytes,
         normalize_chunk=normalize_depth_chunk,
-        finalize_snapshot=finalize_depth_snapshot,
     )
     for chunk in depth_chunks:
         if not chunk.empty:
@@ -362,59 +361,6 @@ def normalize_depth_chunk(depth: pd.DataFrame) -> pd.DataFrame:
     )
     _validate_depth_level_values(frame)
     return frame.loc[:, list(columns)]
-
-
-def finalize_depth_snapshot(
-    asset_id: str,
-    quote_timestamp: pd.Timestamp,
-    sides: Mapping[str, Mapping[int, tuple[float, float]]],
-) -> dict[str, object]:
-    row: dict[str, object] = {
-        "asset_id": asset_id,
-        "quote_timestamp": quote_timestamp,
-        "best_bid": pd.NA,
-        "best_ask": pd.NA,
-        "bid_quantity": pd.NA,
-        "ask_quantity": pd.NA,
-        "bid_depth": pd.NA,
-        "ask_depth": pd.NA,
-    }
-    for side, levels in sides.items():
-        ordered_levels = sorted(levels)
-        if ordered_levels != list(range(1, len(ordered_levels) + 1)):
-            raise ValueError("invalid_crypto_depth_level_sequence")
-        prices = [levels[level][0] for level in ordered_levels]
-        if side == "bid" and any(
-            current >= previous
-            for previous, current in zip(prices, prices[1:], strict=False)
-        ):
-            raise ValueError("invalid_crypto_bid_price_order")
-        if side == "ask" and any(
-            current <= previous
-            for previous, current in zip(prices, prices[1:], strict=False)
-        ):
-            raise ValueError("invalid_crypto_ask_price_order")
-        best_price, best_quantity = levels[1]
-        row[f"best_{side}"] = best_price
-        row[f"{side}_quantity"] = best_quantity
-        row[f"{side}_depth"] = sum(
-            levels[level][1] for level in ordered_levels
-        )
-    required = ("best_bid", "best_ask", "bid_quantity", "ask_quantity")
-    quote_valid = all(pd.notna(row[column]) for column in required)
-    if quote_valid:
-        row["mid_price"] = (float(row["best_bid"]) + float(row["best_ask"])) / 2
-        quote_valid = bool(
-            float(row["best_bid"]) > 0
-            and float(row["best_ask"]) > 0
-            and float(row["bid_quantity"]) > 0
-            and float(row["ask_quantity"]) > 0
-            and float(row["best_bid"]) < float(row["best_ask"])
-        )
-    else:
-        row["mid_price"] = pd.NA
-    row["quote_valid"] = quote_valid
-    return row
 
 
 def _crypto_asset_id_series(series: pd.Series) -> pd.Series:

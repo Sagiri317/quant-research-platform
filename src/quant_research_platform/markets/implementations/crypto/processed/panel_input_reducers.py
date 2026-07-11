@@ -8,6 +8,11 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+_PYTHON_POINTER_BYTES = max(
+    1,
+    sys.getsizeof((None,)) - sys.getsizeof(()),
+)
+
 _QUOTE_COLUMNS = (
     "asset_id",
     "quote_timestamp",
@@ -235,14 +240,6 @@ class DepthSnapshotReducer:
         target_state_bytes: int,
         target_output_bytes: int,
         normalize_chunk: Callable[[pd.DataFrame], pd.DataFrame],
-        finalize_snapshot: Callable[
-            [
-                str,
-                pd.Timestamp,
-                Mapping[str, Mapping[int, tuple[float, float]]],
-            ],
-            dict[str, object],
-        ],
     ) -> None:
         if (
             isinstance(target_state_bytes, bool)
@@ -278,7 +275,6 @@ class DepthSnapshotReducer:
             error="invalid_crypto_depth_output_budget",
         )
         self._normalize_chunk = normalize_chunk
-        self._finalize_snapshot = finalize_snapshot
         self._last_order_key: tuple[str, pd.Timestamp, str, int] | None = None
         self._current_key: tuple[str, str, pd.Timestamp] | None = None
         self._current_levels: dict[
@@ -384,7 +380,14 @@ class DepthSnapshotReducer:
         if self._current_key is None:
             return
         _, asset_id, quote_timestamp = self._current_key
-        self._latest_snapshot = self._finalize_snapshot(
+        self._require_budget(
+            additional_bytes=_depth_snapshot_finalization_bound_bytes(
+                asset_id,
+                quote_timestamp,
+                self._current_levels,
+            )
+        )
+        self._latest_snapshot = finalize_depth_snapshot(
             asset_id,
             quote_timestamp,
             self._current_levels,
@@ -438,8 +441,8 @@ class DepthSnapshotReducer:
         self._latest_snapshot_is_candidate = True
         self._require_budget()
 
-    def _require_budget(self) -> None:
-        estimated_state_bytes = (
+    def _require_budget(self, *, additional_bytes: int = 0) -> None:
+        estimated_state_bytes = additional_bytes + (
             self._target_maps_bytes
             + self._current_levels_bytes
             + self._candidate_entries_bytes
@@ -457,6 +460,73 @@ class DepthSnapshotReducer:
         )
         if estimated_state_bytes > self._target_state_bytes:
             raise ValueError("crypto_depth_state_exceeds_resource_budget")
+
+
+def finalize_depth_snapshot(
+    asset_id: str,
+    quote_timestamp: pd.Timestamp,
+    sides: Mapping[str, Mapping[int, tuple[float, float]]],
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "asset_id": asset_id,
+        "quote_timestamp": quote_timestamp,
+        "best_bid": pd.NA,
+        "best_ask": pd.NA,
+        "bid_quantity": pd.NA,
+        "ask_quantity": pd.NA,
+        "bid_depth": pd.NA,
+        "ask_depth": pd.NA,
+    }
+    for side, levels in sides.items():
+        ordered_levels = sorted(levels)
+        if any(
+            level != position
+            for position, level in enumerate(ordered_levels, start=1)
+        ):
+            raise ValueError("invalid_crypto_depth_level_sequence")
+        previous_price: float | None = None
+        depth = 0.0
+        for level in ordered_levels:
+            price, quantity = levels[level]
+            if previous_price is not None:
+                if side == "bid" and price >= previous_price:
+                    raise ValueError("invalid_crypto_bid_price_order")
+                if side == "ask" and price <= previous_price:
+                    raise ValueError("invalid_crypto_ask_price_order")
+            previous_price = price
+            depth += quantity
+        best_price, best_quantity = levels[1]
+        row[f"best_{side}"] = best_price
+        row[f"{side}_quantity"] = best_quantity
+        row[f"{side}_depth"] = depth
+    required = ("best_bid", "best_ask", "bid_quantity", "ask_quantity")
+    quote_valid = all(pd.notna(row[column]) for column in required)
+    if quote_valid:
+        row["mid_price"] = (float(row["best_bid"]) + float(row["best_ask"])) / 2
+        quote_valid = bool(
+            float(row["best_bid"]) > 0
+            and float(row["best_ask"]) > 0
+            and float(row["bid_quantity"]) > 0
+            and float(row["ask_quantity"]) > 0
+            and float(row["best_bid"]) < float(row["best_ask"])
+        )
+    else:
+        row["mid_price"] = pd.NA
+    row["quote_valid"] = quote_valid
+    return row
+
+
+def _depth_snapshot_finalization_bound_bytes(
+    asset_id: str,
+    quote_timestamp: pd.Timestamp,
+    sides: Mapping[str, Mapping[int, tuple[float, float]]],
+) -> int:
+    maximum_level_count = max((len(levels) for levels in sides.values()), default=0)
+    ordered_levels_bytes = (
+        sys.getsizeof([]) + maximum_level_count * _PYTHON_POINTER_BYTES
+    )
+    row_payload_bound = 2 * 1024 + _deep_size((asset_id, quote_timestamp))
+    return ordered_levels_bytes + row_payload_bound
 
 
 def _validated_output_budget(value: int, *, error: str) -> int:
@@ -536,6 +606,13 @@ def _bounded_output_frame(
     target_output_bytes: int,
     error: str,
 ) -> pd.DataFrame:
+    frame_bound_bytes = (
+        256
+        + rows._payload_bytes
+        + len(rows.values) * len(columns) * 2 * _PYTHON_POINTER_BYTES
+    )
+    if rows.observed_bytes + frame_bound_bytes > target_output_bytes:
+        raise ValueError(error)
     frame = pd.DataFrame(rows.values, columns=list(columns))
     frame_bytes = int(frame.memory_usage(index=True, deep=True).sum())
     if rows.observed_bytes + frame_bytes > target_output_bytes:

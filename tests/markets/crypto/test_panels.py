@@ -485,7 +485,6 @@ def test_depth_reducer_merges_snapshot_across_chunks() -> None:
         target_state_bytes=16 * 1024,
         target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
-        finalize_snapshot=panels.finalize_depth_snapshot,
     )
 
     reducer.add_chunk(depth.iloc[:2].copy())
@@ -516,7 +515,6 @@ def test_depth_reducer_rejects_out_of_order_across_chunks() -> None:
         target_state_bytes=16 * 1024,
         target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
-        finalize_snapshot=panels.finalize_depth_snapshot,
     )
 
     reducer.add_chunk(depth.iloc[2:].copy())
@@ -567,7 +565,6 @@ def test_depth_reducer_fails_when_one_snapshot_exceeds_state_budget() -> None:
         target_state_bytes=2 * 1024,
         target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
-        finalize_snapshot=panels.finalize_depth_snapshot,
     )
 
     with pytest.raises(ValueError, match="crypto_depth_state_exceeds_resource_budget"):
@@ -620,7 +617,6 @@ def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
         target_state_bytes=64 * 1024,
         target_output_bytes=64 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
-        finalize_snapshot=panels.finalize_depth_snapshot,
     )
 
     for start in range(0, len(depth), 17):
@@ -758,11 +754,66 @@ def test_depth_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> No
         target_state_bytes=16 * 1024,
         target_output_bytes=1_024,
         normalize_chunk=panels.normalize_depth_chunk,
-        finalize_snapshot=panels.finalize_depth_snapshot,
     )
     reducer.add_chunk(_ordered_depth_levels_frame())
 
     with pytest.raises(ValueError, match="crypto_depth_output_exceeds_resource_budget"):
+        reducer.finish()
+
+
+def test_reducer_output_frame_budget_fails_before_dataframe_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _panel_input_reducers_module()
+    rows = module._BoundedOutputRows(
+        target_output_bytes=128,
+        error="bounded_output",
+    )
+    monkeypatch.setattr(
+        module.pd,
+        "DataFrame",
+        lambda *_args, **_kwargs: pytest.fail("allocated over-budget frame"),
+    )
+
+    with pytest.raises(ValueError, match="bounded_output"):
+        module._bounded_output_frame(
+            rows,
+            columns=("asset_id",),
+            target_output_bytes=128,
+            error="bounded_output",
+        )
+
+
+def test_depth_snapshot_finalization_is_preflighted_before_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _panel_input_reducers_module()
+    reducer = module.DepthSnapshotReducer(
+        bars=panels.prepare_panel_bars(_bars_frame()),
+        target_state_bytes=16 * 1024,
+        target_output_bytes=16 * 1024,
+        normalize_chunk=panels.normalize_depth_chunk,
+    )
+    reducer.add_chunk(_ordered_depth_levels_frame())
+    reducer._target_state_bytes = (
+        reducer._target_maps_bytes
+        + reducer._current_levels_bytes
+        + reducer._candidate_entries_bytes
+        + module._deep_size(
+            (
+                reducer._last_order_key,
+                reducer._current_key,
+                reducer._latest_snapshot,
+            )
+        )
+    )
+    monkeypatch.setattr(
+        module,
+        "finalize_depth_snapshot",
+        lambda *_args: pytest.fail("finalized without state preflight"),
+    )
+
+    with pytest.raises(ValueError, match="crypto_depth_state_exceeds_resource_budget"):
         reducer.finish()
 
 
@@ -779,7 +830,6 @@ def test_depth_target_position_budget_is_stable_after_positions_advance() -> Non
         target_state_bytes=64 * 1024**2,
         target_output_bytes=64 * 1024**2,
         normalize_chunk=panels.normalize_depth_chunk,
-        finalize_snapshot=panels.finalize_depth_snapshot,
     )
     reducer._target_positions = {
         asset_id: index + 10_000
@@ -812,7 +862,6 @@ def test_reducer_state_budget_counts_deep_python_key_payloads() -> None:
             target_state_bytes=512,
             target_output_bytes=16 * 1024,
             normalize_chunk=panels.normalize_depth_chunk,
-            finalize_snapshot=panels.finalize_depth_snapshot,
         )
 
 
@@ -846,7 +895,6 @@ def test_depth_budget_checks_do_not_rescan_all_targets_per_update() -> None:
         target_state_bytes=1024**3,
         target_output_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
-        finalize_snapshot=panels.finalize_depth_snapshot,
     )
     work = {"units": 0}
 
