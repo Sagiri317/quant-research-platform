@@ -17,6 +17,15 @@ from tests.helpers.synthetic_a_share import (
 )
 
 
+def tiny_processed_chunk_bytes(data_id: str) -> int:
+    return {
+        "market_panel_1d": 10 * 1024,
+        "execution": 12 * 1024,
+        "price_volume": 512 * 1024,
+        "forward_returns": 512 * 1024,
+    }[data_id]
+
+
 def assert_forced_tiny_processed_chunks_match_default(
     tmp_path,
     *,
@@ -25,10 +34,7 @@ def assert_forced_tiny_processed_chunks_match_default(
     end_date: str,
     time_window: TimeWindow,
 ) -> None:
-    tiny_chunk_bytes = {
-        "execution": 8 * 1024,
-        "forward_returns": 16 * 1024,
-    }.get(data_id, 4 * 1024)
+    tiny_chunk_bytes = tiny_processed_chunk_bytes(data_id)
     default_layout = StorageLayout(project_root=tmp_path / "default")
     tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
     source_id = SourceId("csmar")

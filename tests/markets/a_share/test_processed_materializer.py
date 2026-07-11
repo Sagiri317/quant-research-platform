@@ -46,6 +46,7 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.processed_chunk_parity import tiny_processed_chunk_bytes
 from tests.helpers.synthetic_a_share import (
     processed_a_share_root,
     write_synthetic_interim_inputs,
@@ -842,10 +843,7 @@ def _assert_forced_tiny_chunks_match_default(
     end_date: str,
     time_window: TimeWindow,
 ) -> None:
-    tiny_chunk_bytes = {
-        MARKET_PANEL_DATA_ID: 10 * 1024,
-        "forward_returns": 16 * 1024,
-    }.get(data_id, 12 * 1024)
+    tiny_chunk_bytes = tiny_processed_chunk_bytes(data_id)
     default_layout = StorageLayout(project_root=tmp_path / "default")
     tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
     write_synthetic_interim_inputs(
