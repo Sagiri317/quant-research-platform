@@ -172,7 +172,7 @@ def _write_portfolio_row_artifact_chunks(
                     compression="zstd",
                     index=False,
                 )
-    except Exception:
+    except BaseException:
         for writer in writers.values():
             writer.close()
         raise

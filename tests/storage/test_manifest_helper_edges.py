@@ -54,6 +54,25 @@ def test_manifest_replace_does_not_overwrite_unclaimed_temp_collision(
     assert manifests.read_manifest(final_path)["schema_id"] == "old"
 
 
+def test_manifest_replace_cleans_claimed_temp_after_control_flow_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_path = tmp_path / "manifest.json"
+    final_path.write_text('{"schema_id": "old"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        Path,
+        "replace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        manifests.replace_qrp_json(final_path, {"schema_id": "new"})
+
+    assert not tuple(tmp_path.glob(".tmp-*"))
+    assert manifests.read_manifest(final_path)["schema_id"] == "old"
+
+
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [

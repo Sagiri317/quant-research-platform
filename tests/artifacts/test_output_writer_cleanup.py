@@ -67,6 +67,26 @@ def test_report_parquet_writer_cleans_temp_on_failure(
     assert not list(tmp_path.glob("*.tmp-*"))
 
 
+def test_report_parquet_writer_cleans_temp_on_control_flow_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def cancel_to_parquet(self, path, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        Path(path).write_text("temporary", encoding="utf-8")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", cancel_to_parquet)
+
+    with pytest.raises(KeyboardInterrupt):
+        parquet_writers.write_parquet(
+            pd.DataFrame({"value": [1]}),
+            tmp_path / "report.parquet",
+        )
+
+    assert not list(tmp_path.glob("*.tmp-*"))
+
+
 def test_report_parquet_writer_does_not_overwrite_unclaimed_temp_collision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

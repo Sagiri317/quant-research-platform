@@ -81,7 +81,7 @@ def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         temp_path.replace(final_path)
-    except Exception:
+    except BaseException:
         if claimed_temp and temp_path.exists():
             temp_path.unlink()
         raise

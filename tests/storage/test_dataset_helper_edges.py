@@ -10,6 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import quant_research_platform.storage._dataset_key_tracking as key_tracking
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage import datasets
@@ -38,6 +39,26 @@ from tests.storage.low_level_fixtures import (
     make_helper_edges_dataset_frame,
     make_processed_dataset_spec,
 )
+
+
+def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        key_tracking.sqlite3,
+        "connect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        ExactPrimaryKeyIndex(
+            primary_key=("asset_id",),
+            timestamp_columns=(),
+            scratch_parent=tmp_path,
+        ).__enter__()
+
+    assert tuple(tmp_path.iterdir()) == ()
 
 
 def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:

@@ -74,7 +74,7 @@ def write_parquet_chunks(
         writer = None
         reject_if_exists(final_path)
         publish_no_replace(temp_path, final_path)
-    except Exception:
+    except BaseException:
         if writer is not None:
             writer.close()
         if claimed_temp and temp_path.exists():
@@ -127,7 +127,7 @@ def write_parquet(
         frame.to_parquet(temp_path, **kwargs)
         reject_if_exists(final_path)
         publish_no_replace(temp_path, final_path)
-    except Exception:
+    except BaseException:
         if claimed_temp and temp_path.exists():
             temp_path.unlink()
         raise

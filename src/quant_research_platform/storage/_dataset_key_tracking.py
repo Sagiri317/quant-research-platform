@@ -80,7 +80,7 @@ class ExactPrimaryKeyIndex:
                 ") WITHOUT ROWID"
             )
             connection.commit()
-        except Exception:
+        except BaseException:
             if connection is not None:
                 connection.close()
             self._temporary_directory.cleanup()
