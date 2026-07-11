@@ -199,9 +199,9 @@ def test_panel_materializer_does_not_preload_full_market_bars(
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
         data_ids=(MARKET_PANEL_DATA_ID,),
         resource_policy=RuntimeResourcePolicy(
-            available_memory_bytes=4 * 1024,
+            available_memory_bytes=32 * 1024,
             memory_budget_fraction=1.0,
-            chunk_target_bytes=4 * 1024,
+            chunk_target_bytes=32 * 1024,
             memory_safety_factor=1.0,
         ),
     )
@@ -843,9 +843,9 @@ def _assert_forced_tiny_chunks_match_default(
     time_window: TimeWindow,
 ) -> None:
     tiny_chunk_bytes = {
-        "execution": 8 * 1024,
+        MARKET_PANEL_DATA_ID: 10 * 1024,
         "forward_returns": 16 * 1024,
-    }.get(data_id, 4 * 1024)
+    }.get(data_id, 12 * 1024)
     default_layout = StorageLayout(project_root=tmp_path / "default")
     tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
     write_synthetic_interim_inputs(

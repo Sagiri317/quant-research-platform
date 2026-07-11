@@ -201,7 +201,7 @@ def _join_processed_inputs(
         base_data_id=base_data_id,
     )
     assembled: pd.DataFrame | None = None
-    base_frame: pd.DataFrame | None = None
+    base_keys: pd.DataFrame | None = None
     for input_data_id in ordered_input_ids:
         processed_spec = processed_catalog.get(input_data_id)
         input_frame = _read_processed_input(
@@ -216,21 +216,35 @@ def _join_processed_inputs(
             _require_research_join_working_set(
                 retained_bytes=0,
                 input_bytes=_frame_bytes(input_frame),
+                base_key_bytes=_frame_bytes(
+                    input_frame.loc[:, list(dataset_spec.primary_key)]
+                ),
                 resource_policy=resource_policy,
             )
             assembled = input_frame
-            base_frame = input_frame
+            base_keys = input_frame.loc[:, list(dataset_spec.primary_key)].copy()
             continue
-        assert base_frame is not None
+        assert base_keys is not None
+        retained_bytes = _frame_bytes(assembled)
+        input_bytes = _frame_bytes(input_frame)
+        base_key_bytes = _frame_bytes(base_keys)
+        _require_research_join_working_set(
+            retained_bytes=retained_bytes,
+            input_bytes=input_bytes,
+            base_key_bytes=base_key_bytes,
+            include_coverage_working_set=True,
+            resource_policy=resource_policy,
+        )
         _validate_input_key_coverage(
-            base_frame,
+            base_keys,
             input_frame,
             dataset_spec=dataset_spec,
             input_data_id=input_data_id,
         )
         _require_research_join_working_set(
-            retained_bytes=_frame_bytes(assembled),
-            input_bytes=_frame_bytes(input_frame),
+            retained_bytes=retained_bytes,
+            input_bytes=input_bytes,
+            base_key_bytes=base_key_bytes,
             resource_policy=resource_policy,
         )
         assembled = assembled.merge(
@@ -241,6 +255,7 @@ def _join_processed_inputs(
         )
     if assembled is None:
         raise ValueError("empty_research_dataset_inputs")
+    del base_keys
     if 2 * _frame_bytes(assembled) > resource_policy.effective_chunk_bytes:
         raise ValueError("research_join_working_set_exceeds_memory_budget")
     assembled = _apply_feature_transforms(assembled, dataset_spec)
@@ -253,9 +268,25 @@ def _require_research_join_working_set(
     *,
     retained_bytes: int,
     input_bytes: int,
+    base_key_bytes: int,
+    include_coverage_working_set: bool = False,
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
-    if 2 * (retained_bytes + input_bytes) > resource_policy.effective_chunk_bytes:
+    join_peak_bytes = (
+        2 * (retained_bytes + input_bytes)
+        + base_key_bytes
+    )
+    coverage_peak_bytes = (
+        retained_bytes
+        + 3 * input_bytes
+        + 2 * base_key_bytes
+    )
+    required_bytes = (
+        max(join_peak_bytes, coverage_peak_bytes)
+        if include_coverage_working_set
+        else join_peak_bytes
+    )
+    if required_bytes > resource_policy.effective_chunk_bytes:
         raise ValueError("research_join_working_set_exceeds_memory_budget")
 
 
@@ -337,15 +368,14 @@ def _ordered_input_data_ids(
 
 
 def _validate_input_key_coverage(
-    base_frame: pd.DataFrame,
+    base_keys: pd.DataFrame,
     input_frame: pd.DataFrame,
     *,
     dataset_spec: ResearchDatasetSpec,
     input_data_id: str,
 ) -> None:
     key_columns = list(dataset_spec.primary_key)
-    base_keys = base_frame.loc[:, key_columns].drop_duplicates()
-    input_keys = input_frame.loc[:, key_columns].drop_duplicates()
+    input_keys = input_frame.loc[:, key_columns].copy()
     extra = input_keys.merge(
         base_keys,
         on=key_columns,
@@ -647,26 +677,34 @@ def _estimate_research_join_bytes_per_session(
     base_data_id: str,
     resource_policy: RuntimeResourcePolicy,
 ) -> int:
-    sample_time_key_count = min(len(time_keys), SIZING_SAMPLE_SESSION_CAP)
-    sample_window = _research_chunk_windows(
+    sample_windows = _research_chunk_windows(
         time_keys,
         time_window=time_window,
-        target_core_count=sample_time_key_count,
+        target_core_count=1,
         reason="research_sizing",
-    )[0]
-    frame = _join_processed_inputs(
-        layout=layout,
-        dataset_spec=dataset_spec,
-        processed_catalog=processed_catalog,
-        time_window=sample_window,
-        base_data_id=base_data_id,
-        resource_policy=resource_policy,
-    )
-    return _measured_bytes_per_session(
-        frame,
-        sample_sessions=time_keys[:sample_time_key_count],
-        target_session_count=len(time_keys),
-    )
+    )[:SIZING_SAMPLE_SESSION_CAP]
+    estimates = []
+    for sample_window, sample_time_key in zip(
+        sample_windows,
+        time_keys[: len(sample_windows)],
+        strict=True,
+    ):
+        frame = _join_processed_inputs(
+            layout=layout,
+            dataset_spec=dataset_spec,
+            processed_catalog=processed_catalog,
+            time_window=sample_window,
+            base_data_id=base_data_id,
+            resource_policy=resource_policy,
+        )
+        estimates.append(
+            _measured_bytes_per_session(
+                frame,
+                sample_sessions=(sample_time_key,),
+                target_session_count=len(time_keys),
+            )
+        )
+    return max(estimates, default=1)
 
 
 def _measured_bytes_per_session(

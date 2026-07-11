@@ -346,8 +346,30 @@ def test_research_join_rejects_merge_before_combined_peak_exceeds_budget() -> No
         assembler_module._require_research_join_working_set(
             retained_bytes=300,
             input_bytes=300,
+            base_key_bytes=0,
             resource_policy=policy,
         )
+
+
+def test_research_join_budget_includes_retained_base_keys_and_coverage_merge() -> None:
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        chunk_target_bytes=1_000,
+        memory_safety_factor=1.0,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="research_join_working_set_exceeds_memory_budget",
+    ):
+        assembler_module._require_research_join_working_set(
+            retained_bytes=200,
+            input_bytes=300,
+            base_key_bytes=250,
+            include_coverage_working_set=True,
+            resource_policy=policy,
+        )
+
 
 def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
@@ -625,6 +647,32 @@ def test_research_dataset_sizing_accounts_for_assembly_peak_memory() -> None:
         == raw_per_session
         * assembler_module.RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER
     )
+
+
+def test_research_sizing_probe_materializes_one_session_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = tuple(pd.date_range("2026-01-01", periods=20, freq="D"))
+    observed_windows: list[TimeWindow] = []
+
+    def join(**kwargs):
+        observed_windows.append(kwargs["time_window"])
+        return pd.DataFrame({"timestamp": [kwargs["time_window"].start]})
+
+    monkeypatch.setattr(assembler_module, "_join_processed_inputs", join)
+
+    assembler_module._estimate_research_join_bytes_per_session(
+        layout=SimpleNamespace(),
+        dataset_spec=SimpleNamespace(),
+        processed_catalog=SimpleNamespace(),
+        time_keys=sessions,
+        time_window=TimeWindow("2026-01-01", "2026-01-20"),
+        base_data_id="base",
+        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+    )
+
+    assert len(observed_windows) == 20
+    assert all(window.start == window.end for window in observed_windows)
 
 
 def test_sparse_research_dataset_left_joins_missing_non_base_input_key(

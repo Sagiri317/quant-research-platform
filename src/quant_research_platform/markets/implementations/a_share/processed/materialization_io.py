@@ -150,6 +150,7 @@ def read_materialized_dataset(
     resource_policy: RuntimeResourcePolicy,
     time_window: TimeWindow | None = None,
     columns: Sequence[str] | None = None,
+    materialized_budget_bytes: int | None = None,
 ) -> pd.DataFrame:
     context = build_dataset_read_context(
         root,
@@ -159,6 +160,7 @@ def read_materialized_dataset(
     return materialize_dataset_context(
         context,
         target_chunk_bytes=resource_policy.effective_chunk_bytes,
+        materialized_budget_bytes=materialized_budget_bytes,
     )
 
 

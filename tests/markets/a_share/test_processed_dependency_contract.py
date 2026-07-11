@@ -142,7 +142,13 @@ def test_source_input_physical_reads_use_owner_resource_policy(
         raising=False,
     )
 
-    def fake_materialize_dataset_context(context, *, target_chunk_bytes):  # noqa: ANN001
+    def fake_materialize_dataset_context(  # noqa: ANN001
+        context,
+        *,
+        target_chunk_bytes,
+        materialized_budget_bytes,
+    ):
+        assert materialized_budget_bytes is None
         observed_targets.append(target_chunk_bytes)
         return _key_frame()
 
@@ -163,6 +169,21 @@ def test_source_input_physical_reads_use_owner_resource_policy(
 
     assert set(inputs) == {"trading_calendar"}
     assert observed_targets == [policy.effective_chunk_bytes]
+
+
+def test_a_share_sizing_probe_materializes_one_core_session_at_a_time() -> None:
+    sessions = tuple(pd.date_range("2026-01-01", periods=30, freq="D"))
+
+    windows = materialization_planning._sample_windows(
+        sessions,
+        time_window=TimeWindow("2026-01-01", "2026-01-30"),
+        warmup_sessions=2,
+        lookahead_sessions=1,
+        reason="sizing_test",
+    )
+
+    assert len(windows) == materialization_planning.SIZING_SAMPLE_SESSION_CAP
+    assert all(len(window.core_sessions) == 1 for window in windows)
 
 
 def test_panel_materializer_rejects_unapproved_market_bars_source_variant() -> None:

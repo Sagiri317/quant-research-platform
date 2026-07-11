@@ -47,6 +47,7 @@ from quant_research_platform.storage.layout import StorageLayout
 
 SIZING_SAMPLE_SESSION_CAP = 20
 
+
 def filter_output_sessions(
     frame: pd.DataFrame,
     sessions: tuple[pd.Timestamp, ...],
@@ -259,32 +260,38 @@ def estimate_panel_bytes_per_session(
     required_columns: tuple[str, ...],
     resource_policy: RuntimeResourcePolicy,
 ) -> int:
-    sample = _sample_window(
+    samples = _sample_windows(
         sessions,
         time_window=time_window,
         lookahead_sessions=1,
         reason="panel_sizing",
     )
-    market_bars = materialization_io.read_materialized_dataset(
-        market_bars_root,
-        time_window=sample.read,
-        resource_policy=resource_policy,
-    )
-    panel = panels.compute_market_panel(
-        market_bars,
-        stock_master=stock_master,
-        market_cap=market_cap,
-        trading_calendar=trading_calendar,
-    )
-    output = filter_output_sessions(panel, sample.core_sessions)
-    selected = output.loc[:, list(required_columns)]
-    return _measured_peak_bytes_per_session(
-        frames=(market_bars, panel, selected),
-        row_count=len(selected),
-        sessions=sample.core_sessions,
-        inspection=inspection,
-        target_session_count=len(_target_sessions(sessions, time_window)),
-    )
+    estimates = []
+    for sample in samples:
+        market_bars = materialization_io.read_materialized_dataset(
+            market_bars_root,
+            time_window=sample.read,
+            resource_policy=resource_policy,
+            materialized_budget_bytes=resource_policy.effective_chunk_bytes,
+        )
+        panel = panels.compute_market_panel(
+            market_bars,
+            stock_master=stock_master,
+            market_cap=market_cap,
+            trading_calendar=trading_calendar,
+        )
+        output = filter_output_sessions(panel, sample.core_sessions)
+        selected = output.loc[:, list(required_columns)]
+        estimates.append(
+            _measured_peak_bytes_per_session(
+                frames=(market_bars, panel, output, selected),
+                row_count=len(selected),
+                sessions=sample.core_sessions,
+                inspection=inspection,
+                target_session_count=len(_target_sessions(sessions, time_window)),
+            )
+        )
+    return max(estimates, default=1)
 
 
 def estimate_factor_bytes_per_session(
@@ -299,31 +306,37 @@ def estimate_factor_bytes_per_session(
     definitions: Sequence[FactorDefinition],
     resource_policy: RuntimeResourcePolicy,
 ) -> int:
-    sample = _sample_window(
+    samples = _sample_windows(
         sessions,
         time_window=time_window,
         warmup_sessions=lookback_days,
         reason="factor_sizing",
     )
-    panel = materialization_io.read_materialized_dataset(
-        panel_root,
-        time_window=sample.read,
-        columns=panel_input_columns,
-        resource_policy=resource_policy,
-    )
-    factors = factor_calculations.calculate_factors_for_panel(
-        panel,
-        definitions=definitions,
-    )
-    output = filter_output_sessions(factors, sample.core_sessions)
-    selected = output.loc[:, list(required_columns)]
-    return _measured_peak_bytes_per_session(
-        frames=(panel, factors, selected),
-        row_count=len(selected),
-        sessions=sample.core_sessions,
-        inspection=inspection,
-        target_session_count=len(_target_sessions(sessions, time_window)),
-    )
+    estimates = []
+    for sample in samples:
+        panel = materialization_io.read_materialized_dataset(
+            panel_root,
+            time_window=sample.read,
+            columns=panel_input_columns,
+            resource_policy=resource_policy,
+            materialized_budget_bytes=resource_policy.effective_chunk_bytes,
+        )
+        factors = factor_calculations.calculate_factors_for_panel(
+            panel,
+            definitions=definitions,
+        )
+        output = filter_output_sessions(factors, sample.core_sessions)
+        selected = output.loc[:, list(required_columns)]
+        estimates.append(
+            _measured_peak_bytes_per_session(
+                frames=(panel, factors, output, selected),
+                row_count=len(selected),
+                sessions=sample.core_sessions,
+                inspection=inspection,
+                target_session_count=len(_target_sessions(sessions, time_window)),
+            )
+        )
+    return max(estimates, default=1)
 
 
 def estimate_label_bytes_per_session(
@@ -338,50 +351,54 @@ def estimate_label_bytes_per_session(
     definitions: Sequence[LabelDefinition],
     resource_policy: RuntimeResourcePolicy,
 ) -> int:
-    sample = _sample_window(
+    samples = _sample_windows(
         sessions,
         time_window=time_window,
         lookahead_sessions=lookahead_sessions,
         reason="label_sizing",
     )
-    panel = materialization_io.read_materialized_dataset(
-        panel_root,
-        time_window=sample.read,
-        columns=panel_input_columns,
-        resource_policy=resource_policy,
-    )
-    labels = label_calculations.calculate_labels_for_panel(
-        panel,
-        definitions=definitions,
-    )
-    output = filter_output_sessions(labels, sample.core_sessions)
-    selected = output.loc[:, list(required_columns)]
-    return _measured_peak_bytes_per_session(
-        frames=(panel, labels, selected),
-        row_count=len(selected),
-        sessions=sample.core_sessions,
-        inspection=inspection,
-        target_session_count=len(_target_sessions(sessions, time_window)),
-    )
+    estimates = []
+    for sample in samples:
+        panel = materialization_io.read_materialized_dataset(
+            panel_root,
+            time_window=sample.read,
+            columns=panel_input_columns,
+            resource_policy=resource_policy,
+            materialized_budget_bytes=resource_policy.effective_chunk_bytes,
+        )
+        labels = label_calculations.calculate_labels_for_panel(
+            panel,
+            definitions=definitions,
+        )
+        output = filter_output_sessions(labels, sample.core_sessions)
+        selected = output.loc[:, list(required_columns)]
+        estimates.append(
+            _measured_peak_bytes_per_session(
+                frames=(panel, labels, output, selected),
+                row_count=len(selected),
+                sessions=sample.core_sessions,
+                inspection=inspection,
+                target_session_count=len(_target_sessions(sessions, time_window)),
+            )
+        )
+    return max(estimates, default=1)
 
 
-def _sample_window(
+def _sample_windows(
     sessions: tuple[pd.Timestamp, ...],
     *,
     time_window: TimeWindow,
     reason: str,
     warmup_sessions: int = 0,
     lookahead_sessions: int = 0,
-) -> SessionWindow:
-    require_date_window(time_window, context="a_share_sample_window")
-    target_sessions = _target_sessions(sessions, time_window)
-    sample_session_count = min(len(target_sessions), SIZING_SAMPLE_SESSION_CAP)
+) -> tuple[SessionWindow, ...]:
+    require_date_window(time_window, context="a_share_sample_windows")
     return SessionWindowPlanner.from_sessions(
         sessions,
-        target_core_session_count=sample_session_count,
+        target_core_session_count=1,
         warmup_sessions=warmup_sessions,
         lookahead_sessions=lookahead_sessions,
-    ).windows(time_window, reason=reason)[0]
+    ).windows(time_window, reason=reason)[:SIZING_SAMPLE_SESSION_CAP]
 
 
 def _measured_peak_bytes_per_session(
