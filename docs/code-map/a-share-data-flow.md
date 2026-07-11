@@ -48,6 +48,10 @@ of `RuntimeResourcePolicy`. The same owner derives physical targets for source,
 processed, calendar, coverage, and sizing-probe reads from the active policy and
 routes them through storage's single physical iterator. A minimum session that
 exceeds the policy fails before panel/factor/label computation.
+Sizing probes materialize one core session at a time, retain only the maximum
+measurement, and pass the active policy as the total storage materialization
+bound. The owner measurement includes input, computed frame, core-session copy,
+and selected output.
 
 A-share coverage uses trading sessions. Coverage helpers must reject invalid
 asset keys and timestamps instead of silently dropping them. Crypto coverage
