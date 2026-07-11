@@ -90,7 +90,7 @@ def test_atomic_write_directory_recovers_dead_owner_when_final_exists(
     final_root = tmp_path / "bundle"
     final_root.mkdir()
     scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
-    stale = final_root.with_name(f"{scratch_prefix}deadbeef")
+    stale = final_root.with_name(f"{scratch_prefix}qzzzzzz-stale")
     stale.mkdir()
     (stale / "partial.bin").write_bytes(b"partial")
     Path(f"{stale}.target").write_text(
@@ -112,7 +112,7 @@ def test_atomic_directory_recovery_does_not_cross_exact_target_identity(
     first_prefix = atomic._atomic_directory_scratch_prefix(first)
     second_prefix = atomic._atomic_directory_scratch_prefix(second)
     assert first_prefix == second_prefix
-    second_scratch = second.with_name(f"{second_prefix}deadbeef")
+    second_scratch = second.with_name(f"{second_prefix}qzzzzzz-stale")
     second_scratch.mkdir()
     (second_scratch / "partial.bin").write_bytes(b"partial")
     Path(f"{second_scratch}.target").write_text(
@@ -215,19 +215,44 @@ def test_publish_file_no_replace_preserves_concurrent_winner(
     source = tmp_path / "candidate.tmp"
     target = tmp_path / "output.txt"
     source.write_text("candidate\n", encoding="utf-8")
-    original_link = atomic.os.link
 
-    def racing_link(source_path: Path, target_path: Path) -> None:
+    def racing_rename(source_path: Path, target_path: Path) -> None:
+        del source_path
         Path(target_path).write_text("concurrent-winner\n", encoding="utf-8")
-        original_link(source_path, target_path)
+        raise FileExistsError(target_path)
 
-    monkeypatch.setattr(atomic.os, "link", racing_link)
+    monkeypatch.setattr(atomic, "_rename_no_replace", racing_rename)
 
     with pytest.raises(FileExistsError):
         atomic.publish_no_replace(source, target)
 
     assert target.read_text(encoding="utf-8") == "concurrent-winner\n"
     assert source.read_text(encoding="utf-8") == "candidate\n"
+
+
+def test_publish_file_does_not_retry_claim_after_source_unlink_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "candidate.tmp"
+    target = tmp_path / "output.txt"
+    source.write_text("candidate\n", encoding="utf-8")
+    original_unlink = Path.unlink
+    calls = {"source_unlink": 0}
+
+    def transient_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path == source:
+            calls["source_unlink"] += 1
+            if calls["source_unlink"] == 1:
+                raise PermissionError("transient source cleanup failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", transient_unlink)
+
+    atomic.publish_no_replace(source, target)
+
+    assert target.read_text(encoding="utf-8") == "candidate\n"
+    assert not source.exists()
 
 
 def test_atomic_csv_writer_cleans_temp_file_after_mid_write_failure(

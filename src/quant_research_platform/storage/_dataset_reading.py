@@ -45,6 +45,7 @@ _PARQUET_TO_PANDAS_EXPANSION_FACTOR = 4
 _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR = 32
 _PHYSICAL_WORKING_SET_PARTS = 4
 _PANDAS_PROBE_ROWS = 64
+_PANDAS_FRAME_OVERHEAD_BYTES = 192
 
 
 @dataclass(frozen=True)
@@ -229,7 +230,11 @@ def iter_dataset_chunks(
 ) -> Iterator[pd.DataFrame]:
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     if not context.read_paths:
-        yield _empty_frame(context, context.logical_columns)
+        yield _empty_frame(
+            context,
+            context.logical_columns,
+            target_chunk_bytes=target_bytes,
+        )
         return
     yielded = False
     for _, frame in iter_dataset_file_batches(
@@ -245,7 +250,11 @@ def iter_dataset_chunks(
             yielded = True
             yield chunk
     if not yielded:
-        yield _empty_frame(context, context.logical_columns)
+        yield _empty_frame(
+            context,
+            context.logical_columns,
+            target_chunk_bytes=target_bytes,
+        )
 
 
 def iter_dataset_file_batches(
@@ -253,18 +262,30 @@ def iter_dataset_file_batches(
     *,
     columns: tuple[str, ...],
     target_chunk_bytes: int | None = None,
+    categorical_dtypes: Mapping[str, pd.CategoricalDtype] | None = None,
+    categorical_state_bytes: int | None = None,
 ) -> Iterator[tuple[Path, pd.DataFrame]]:
     """Yield deterministic file batches after Arrow-level bounded conversion."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     null_columns = _dataset_null_columns(context.all_paths, columns)
+    if categorical_dtypes is None or categorical_state_bytes is None:
+        categorical_dtypes, categorical_state_bytes = dataset_categorical_dtypes(
+            context.all_paths,
+            columns,
+            target_state_bytes=max(1, target_bytes // 8),
+        )
+    physical_target_bytes = target_bytes - categorical_state_bytes
+    if physical_target_bytes <= 0:
+        raise ValueError("dataset_categorical_state_exceeds_target_bytes")
     for path in context.read_paths:
         for frame in iter_parquet_file_batches(
             path,
             columns=columns,
             parquet_filters=context.parquet_filters,
-            target_chunk_bytes=target_bytes,
+            target_chunk_bytes=physical_target_bytes,
             null_columns=null_columns,
+            categorical_dtypes=categorical_dtypes,
         ):
             yield path, frame
 
@@ -276,6 +297,7 @@ def iter_parquet_file_batches(
     columns: tuple[str, ...] | None = None,
     parquet_filters: list[tuple[str, str, Any]] | None = None,
     null_columns: frozenset[str] | None = None,
+    categorical_dtypes: Mapping[str, pd.CategoricalDtype] | None = None,
 ) -> Iterator[pd.DataFrame]:
     """Yield bounded Pandas batches from one Parquet file."""
 
@@ -302,6 +324,7 @@ def iter_parquet_file_batches(
         dtype_overrides = _pandas_dtype_overrides(
             pa.schema(selected_fields),
             observed_null_columns,
+            categorical_dtypes=categorical_dtypes,
         )
     finally:
         parquet_file.close()
@@ -541,8 +564,10 @@ def _dataset_null_columns(
 def _pandas_dtype_overrides(
     schema: pa.Schema,
     null_columns: frozenset[str],
-) -> dict[str, str]:
-    overrides: dict[str, str] = {}
+    *,
+    categorical_dtypes: Mapping[str, pd.CategoricalDtype] | None = None,
+) -> dict[str, object]:
+    overrides: dict[str, object] = dict(categorical_dtypes or {})
     for field in schema:
         if field.name not in null_columns:
             continue
@@ -550,8 +575,122 @@ def _pandas_dtype_overrides(
             prefix = "Int" if pa.types.is_signed_integer(field.type) else "UInt"
             overrides[field.name] = f"{prefix}{field.type.bit_width}"
         elif pa.types.is_boolean(field.type):
-            overrides[field.name] = "object"
+            overrides[field.name] = "boolean"
     return overrides
+
+
+def dataset_categorical_dtypes(
+    paths: tuple[Path, ...],
+    columns: tuple[str, ...],
+    *,
+    target_state_bytes: int = _DEFAULT_TARGET_CHUNK_BYTES // 8,
+) -> tuple[dict[str, pd.CategoricalDtype], int]:
+    if target_state_bytes <= 0:
+        raise ValueError("dataset_categorical_state_exceeds_target_bytes")
+    categories: dict[str, dict[object, None]] = {}
+    ordered_domains: dict[str, tuple[object, ...]] = {}
+    ordered_columns: dict[str, bool] = {}
+    observed_state_bytes = 0
+    for path in paths:
+        parquet_file = pq.ParquetFile(path)
+        try:
+            dictionary_columns = tuple(
+                column
+                for column in columns
+                if pa.types.is_dictionary(parquet_file.schema_arrow.field(column).type)
+            )
+            for column in dictionary_columns:
+                ordered_columns[column] = bool(
+                    parquet_file.schema_arrow.field(column).type.ordered
+                )
+            if not dictionary_columns:
+                continue
+            for row_group_index in range(parquet_file.metadata.num_row_groups):
+                batch = next(
+                    parquet_file.iter_batches(
+                        batch_size=1,
+                        row_groups=[row_group_index],
+                        columns=list(dictionary_columns),
+                        use_threads=False,
+                    ),
+                    None,
+                )
+                if batch is None:
+                    continue
+                for position, column in enumerate(dictionary_columns):
+                    array = batch.column(position)
+                    if not isinstance(array, pa.DictionaryArray):
+                        raise ValueError("dataset_categorical_dtype_mismatch")
+                    if (
+                        observed_state_bytes
+                        + max(1, int(array.dictionary.nbytes))
+                        * _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR
+                        > target_state_bytes
+                    ):
+                        raise ValueError(
+                            "dataset_categorical_state_exceeds_target_bytes"
+                        )
+                    values = tuple(array.dictionary.to_pylist())
+                    if ordered_columns[column]:
+                        expected = ordered_domains.get(column)
+                        if expected is None:
+                            ordered_domains[column] = values
+                            observed_state_bytes += max(
+                                max(1, int(array.dictionary.nbytes))
+                                * _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR,
+                                sum(sys.getsizeof(value) for value in values),
+                            )
+                            if observed_state_bytes > target_state_bytes:
+                                raise ValueError(
+                                    "dataset_categorical_state_exceeds_target_bytes"
+                                )
+                            continue
+                        if values != expected:
+                            raise ValueError("dataset_categorical_dtype_mismatch")
+                        continue
+                    domain = categories.setdefault(column, {})
+                    previous_bytes = sys.getsizeof(domain)
+                    new_values = tuple(
+                        value for value in values if value not in domain
+                    )
+                    for value in values:
+                        domain[value] = None
+                    observed_state_bytes += sys.getsizeof(domain) - previous_bytes
+                    observed_state_bytes += sum(
+                        sys.getsizeof(value) for value in new_values
+                    )
+                    if observed_state_bytes > target_state_bytes:
+                        raise ValueError(
+                            "dataset_categorical_state_exceeds_target_bytes"
+                        )
+        finally:
+            parquet_file.close()
+    dtypes: dict[str, pd.CategoricalDtype] = {}
+    for column, ordered in ordered_columns.items():
+        values = (
+            ordered_domains[column]
+            if ordered
+            else tuple(
+                sorted(
+                    categories.get(column, {}),
+                    key=lambda value: (
+                        type(value).__module__,
+                        type(value).__qualname__,
+                        repr(value),
+                    ),
+                )
+            )
+        )
+        dtypes[column] = pd.CategoricalDtype(categories=values, ordered=ordered)
+    dtype_state_bytes = sum(
+        sys.getsizeof(dtype)
+        + int(pd.Series(dtype.categories).memory_usage(index=True, deep=True))
+        for dtype in dtypes.values()
+    )
+    observed_state_bytes = max(observed_state_bytes, dtype_state_bytes)
+    if observed_state_bytes > target_state_bytes:
+        raise ValueError("dataset_categorical_state_exceeds_target_bytes")
+    return dtypes, observed_state_bytes
 
 
 def _iter_filtered_arrow_batches(
@@ -876,6 +1015,8 @@ def _filter_arrow_batch(
 def _empty_frame(
     context: DatasetReadContext,
     columns: tuple[str, ...],
+    *,
+    target_chunk_bytes: int = _DEFAULT_TARGET_CHUNK_BYTES,
 ) -> pd.DataFrame:
     parquet_file = pq.ParquetFile(context.all_paths[0])
     try:
@@ -883,13 +1024,33 @@ def _empty_frame(
         selected = pa.schema([schema.field(column) for column in columns])
         frame = pa.Table.from_batches([], schema=selected).to_pandas(use_threads=False)
         null_columns = _dataset_null_columns(context.all_paths, columns)
-        return frame.astype(_pandas_dtype_overrides(selected, null_columns))
+        categorical_dtypes, _ = dataset_categorical_dtypes(
+            context.all_paths,
+            columns,
+            target_state_bytes=max(1, target_chunk_bytes // 8),
+        )
+        return frame.astype(
+            _pandas_dtype_overrides(
+                selected,
+                null_columns,
+                categorical_dtypes=categorical_dtypes,
+            )
+        )
     finally:
         parquet_file.close()
 
 
 def _is_variable_width(data_type: pa.DataType) -> bool:
     return _fixed_width_arrow_row_bytes(data_type) is None
+
+
+def _requires_conservative_pandas_probe(data_type: pa.DataType) -> bool:
+    return _is_variable_width(data_type) or (
+        pa.types.is_fixed_size_binary(data_type)
+        or pa.types.is_decimal(data_type)
+        or pa.types.is_date(data_type)
+        or pa.types.is_time(data_type)
+    )
 
 
 def _fixed_width_arrow_row_bytes(data_type: pa.DataType) -> int | None:
@@ -918,7 +1079,7 @@ def _arrow_batch_to_bounded_pandas(
     batch: pa.RecordBatch,
     *,
     target_chunk_bytes: int,
-    dtype_overrides: Mapping[str, str] | None = None,
+    dtype_overrides: Mapping[str, object] | None = None,
 ) -> Iterator[pd.DataFrame]:
     if batch.num_rows == 0:
         return
@@ -930,22 +1091,30 @@ def _arrow_batch_to_bounded_pandas(
     arrow_row_bytes = max(1, (batch.nbytes + batch.num_rows - 1) // batch.num_rows)
     expansion = (
         _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR
-        if any(_is_variable_width(field.type) for field in batch.schema)
+        if any(
+            _requires_conservative_pandas_probe(field.type)
+            for field in batch.schema
+        )
         else _PARQUET_TO_PANDAS_EXPANSION_FACTOR
+    )
+    conversion_payload_bytes = max(
+        1,
+        conversion_budget
+        - min(_PANDAS_FRAME_OVERHEAD_BYTES, max(0, conversion_budget - 1)),
     )
     rows_per_slice = max(
         1,
         min(
             batch.num_rows,
             _PANDAS_PROBE_ROWS,
-            conversion_budget // max(1, arrow_row_bytes * expansion),
+            conversion_payload_bytes // max(1, arrow_row_bytes * expansion),
         ),
     )
     start = 0
     while start < batch.num_rows:
         stop = min(batch.num_rows, start + rows_per_slice)
         arrow_slice = batch.slice(start, stop - start)
-        frame = arrow_slice.to_pandas(use_threads=False)
+        frame = _arrow_slice_to_pandas(arrow_slice)
         frame_bytes = int(frame.memory_usage(index=True, deep=True).sum())
         if frame_bytes > conversion_budget:
             if len(frame) == 1:
@@ -975,6 +1144,10 @@ def _arrow_batch_to_bounded_pandas(
                 conversion_budget // measured_row_bytes,
             ),
         )
+
+
+def _arrow_slice_to_pandas(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+    return arrow_slice.to_pandas(use_threads=False)
 
 
 def _bounded_frame_chunks(

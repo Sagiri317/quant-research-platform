@@ -475,6 +475,40 @@ def test_fixed_width_batch_estimate_uses_parquet_leaf_paths(tmp_path: Path) -> N
     assert batch.nbytes <= target_chunk_bytes // 4
 
 
+def test_fixed_size_binary_conversion_probes_before_pandas_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = pa.record_batch(
+        [pa.array([b"x"] * 64, type=pa.binary(1))],
+        names=["value"],
+    )
+    observed_conversion_bytes: list[int] = []
+    convert = dataset_reading._arrow_slice_to_pandas
+
+    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+        frame = convert(arrow_slice)
+        observed_conversion_bytes.append(
+            int(frame.memory_usage(index=True, deep=True).sum())
+        )
+        return frame
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_arrow_slice_to_pandas",
+        record_conversion,
+    )
+
+    chunks = tuple(
+        dataset_reading._arrow_batch_to_bounded_pandas(
+            batch,
+            target_chunk_bytes=1024,
+        )
+    )
+
+    assert sum(len(chunk) for chunk in chunks) == 64
+    assert max(observed_conversion_bytes) <= 1024 // 4
+
+
 def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
     tmp_path: Path,
 ) -> None:
@@ -661,6 +695,25 @@ def test_nullable_uint64_read_and_fingerprint_preserve_large_integer_identity(
     assert comparison.status == "CONTENT_MISMATCH"
 
 
+def test_nullable_boolean_preserves_extension_dtype_across_read_modes(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "nullable_boolean")
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    frame["value"] = pd.array([True, pd.NA], dtype="boolean")
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec("nullable_boolean"),
+    )
+
+    chunks = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+    materialized = read_dataset(root)
+
+    assert {str(chunk["value"].dtype) for chunk in chunks} == {"boolean"}
+    assert str(materialized["value"].dtype) == "boolean"
+
+
 @pytest.mark.parametrize(
     "mode",
     [DatasetReadMode.CHUNKED, DatasetReadMode.MATERIALIZED],
@@ -702,6 +755,35 @@ def test_materialized_read_unions_categorical_dictionaries_across_parts(
     assert set(materialized["asset_id"].cat.categories) == set(
         pd.concat((first["asset_id"].astype(str), second["asset_id"].astype(str)))
     )
+    assert all(
+        chunk["asset_id"].dtype == materialized["asset_id"].dtype
+        for chunk in chunks
+    )
+
+
+def test_fingerprint_includes_categorical_dictionary_identity(
+    tmp_path: Path,
+) -> None:
+    left_root = make_dataset_artifact_root(tmp_path / "left", "category_identity")
+    right_root = make_dataset_artifact_root(tmp_path / "right", "category_identity")
+    left = make_default_dataset_frame().iloc[:1].copy()
+    right = left.copy()
+    value = str(left["asset_id"].iloc[0])
+    left["asset_id"] = pd.Categorical(
+        left["asset_id"],
+        categories=[value, "unused_left"],
+    )
+    right["asset_id"] = pd.Categorical(
+        right["asset_id"],
+        categories=[value, "unused_right"],
+    )
+    spec = make_processed_dataset_spec("category_identity")
+    write_dataset(left_root, left, spec=spec)
+    write_dataset(right_root, right, spec=spec)
+
+    comparison = compare_datasets(left_root, right_root)
+
+    assert comparison.status == "CONTENT_MISMATCH"
 
 
 def test_writer_rejects_inconsistent_ordered_categorical_domains(
@@ -952,7 +1034,7 @@ def test_exact_key_index_recovers_dead_sibling_scratch(tmp_path: Path) -> None:
     module = importlib.import_module(
         "quant_research_platform.storage._dataset_key_tracking"
     )
-    stale = tmp_path / ".k-deadbeef"
+    stale = tmp_path / ".k-qzzzzzz-stale"
     stale.mkdir()
     for name in ("k.sqlite3", "k.sqlite3-journal", "k.sqlite3-wal", "k.sqlite3-shm"):
         (stale / name).write_bytes(b"scratch")
@@ -1029,8 +1111,8 @@ def test_dataset_write_recovers_stale_key_scratch_without_publishing_it(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "stale_key_scratch")
-    stale_stage = root.parent / ".stale_key_scratch.tmp-deadbeef"
-    stale_scratch = stale_stage / ".k-deadbeef"
+    stale_stage = root.parent / ".stale_key_scratch.tmp-qzzzzzz-stale"
+    stale_scratch = stale_stage / ".k-qzzzzzz-stale"
     stale_scratch.mkdir(parents=True)
     for name in (
         "k.sqlite3",
@@ -1137,6 +1219,41 @@ def test_dataset_staged_write_does_not_clean_unclaimed_name_collision(
     assert (live_stage / "live.txt").read_text(encoding="utf-8") == "live\n"
 
 
+def test_dataset_staged_write_preserves_unclaimed_scratch_directory(
+    tmp_path: Path,
+) -> None:
+    final_root = tmp_path / "dataset"
+    unclaimed = tmp_path / ".dataset.tmp-user-data"
+    unclaimed.mkdir()
+    sentinel = unclaimed / "sentinel.txt"
+    sentinel.write_text("unclaimed\n", encoding="utf-8")
+
+    dataset_writing._cleanup_stale_staged_scratch(final_root)
+
+    assert sentinel.read_text(encoding="utf-8") == "unclaimed\n"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows case alias contract")
+def test_dataset_staged_write_preserves_live_case_alias(
+    tmp_path: Path,
+) -> None:
+    ownership = importlib.import_module(
+        "quant_research_platform.storage._scratch_ownership"
+    )
+    final_root = tmp_path / "data"
+    live_stage = tmp_path / ownership.owned_scratch_name(
+        ".Data.tmp-",
+        "live",
+    )
+    live_stage.mkdir()
+    sentinel = live_stage / "sentinel.txt"
+    sentinel.write_text("live\n", encoding="utf-8")
+
+    dataset_writing._cleanup_stale_staged_scratch(final_root)
+
+    assert sentinel.read_text(encoding="utf-8") == "live\n"
+
+
 def test_dataset_staged_write_uses_no_replace_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1171,8 +1288,10 @@ def test_dataset_write_recovers_dead_stage_when_final_exists(
     root = make_dataset_artifact_root(tmp_path, "published_with_dead_stage")
     spec = make_processed_dataset_spec("published_with_dead_stage")
     write_dataset(root, make_default_dataset_frame(), spec=spec)
-    stale_stage = root.with_name(".published_with_dead_stage.tmp-deadbeef")
-    stale_scratch = stale_stage / ".k-deadbeef"
+    stale_stage = root.with_name(
+        ".published_with_dead_stage.tmp-qzzzzzz-stale"
+    )
+    stale_scratch = stale_stage / ".k-qzzzzzz-stale"
     stale_scratch.mkdir(parents=True)
     (stale_scratch / "k.sqlite3").write_bytes(b"scratch")
 

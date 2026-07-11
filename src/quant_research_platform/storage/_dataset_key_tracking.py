@@ -18,7 +18,7 @@ import pyarrow as pa
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_prefix,
-    scratch_owner_is_alive,
+    scratch_owner_is_stale,
 )
 
 
@@ -248,7 +248,7 @@ def _canonical_arrow_scalar_payload(value: object, data_type: pa.DataType) -> by
         decimal = Decimal(value)
         if decimal == 0:
             decimal = Decimal(0)
-        value_payload = str(decimal.normalize()).encode("ascii")
+        value_payload = format(decimal, "f").encode("ascii")
     elif pa.types.is_date(data_type):
         value_payload = pd.Timestamp(value).date().isoformat().encode("ascii")
     else:
@@ -267,6 +267,9 @@ def _framed(tag: bytes, payload: bytes) -> bytes:
 
 def _cleanup_stale_key_scratch(parent: Path) -> None:
     for scratch in parent.glob(".k-*"):
-        if not scratch.is_dir() or scratch_owner_is_alive(scratch, prefix=".k-"):
+        if not scratch.is_dir() or not scratch_owner_is_stale(
+            scratch,
+            prefix=".k-",
+        ):
             continue
         shutil.rmtree(scratch)

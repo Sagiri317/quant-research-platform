@@ -17,7 +17,7 @@ import pandas as pd
 
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
-    scratch_owner_is_alive,
+    scratch_owner_is_stale,
 )
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
@@ -124,7 +124,7 @@ def _cleanup_stale_atomic_directories(
     for temp_root in final_root.parent.glob(f"{prefix}*"):
         if not temp_root.is_dir():
             continue
-        if scratch_owner_is_alive(temp_root, prefix=prefix):
+        if not scratch_owner_is_stale(temp_root, prefix=prefix):
             continue
         target_marker = _atomic_target_marker(temp_root)
         if target_marker.is_file():
@@ -192,11 +192,7 @@ def publish_no_replace(
 ) -> None:
     for attempt in range(1, attempts + 1):
         try:
-            if source.is_dir():
-                _rename_directory_no_replace(source, target)
-            else:
-                os.link(source, target)
-                source.unlink()
+            _rename_no_replace(source, target)
             return
         except PermissionError:
             if attempt == attempts:
@@ -204,7 +200,7 @@ def publish_no_replace(
             time.sleep(delay_seconds)
 
 
-def _rename_directory_no_replace(source: Path, target: Path) -> None:
+def _rename_no_replace(source: Path, target: Path) -> None:
     if os.name == "nt":
         source.rename(target)
         return

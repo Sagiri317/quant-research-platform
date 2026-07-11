@@ -40,7 +40,7 @@ from quant_research_platform.storage._dataset_schema import (
 )
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
-    scratch_owner_is_alive,
+    scratch_owner_is_stale,
 )
 from quant_research_platform.storage.atomic import publish_no_replace
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
@@ -307,7 +307,7 @@ def _cleanup_stale_staged_scratch(final_root: Path) -> None:
     for staged_root in final_root.parent.glob(f"{scratch_prefix}*"):
         if not staged_root.is_dir():
             continue
-        if scratch_owner_is_alive(staged_root, prefix=scratch_prefix):
+        if not scratch_owner_is_stale(staged_root, prefix=scratch_prefix):
             continue
         _remove_tree(staged_root)
 

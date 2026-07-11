@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -72,6 +73,41 @@ def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
                 data_root=Path("data"),
                 key_tracker=tracker,
             ).payload()
+
+
+def test_exact_index_preserves_decimal_values_beyond_context_precision(
+    tmp_path: Path,
+) -> None:
+    schema = pa.schema([pa.field("key", pa.decimal128(38, 0))])
+    first = Decimal("12345678901234567890123456789012345678")
+    second = Decimal("12345678901234567890123456789012345679")
+
+    with ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+        key_schema=schema,
+    ) as index:
+        assert index.add_table(pa.table({"key": [first]})) == 0
+        assert index.add_table(pa.table({"key": [second]})) == 0
+
+
+def test_exact_index_preserves_unclaimed_key_scratch_directory(
+    tmp_path: Path,
+) -> None:
+    unclaimed = tmp_path / ".k-user-cache"
+    unclaimed.mkdir()
+    sentinel = unclaimed / "sentinel.txt"
+    sentinel.write_text("unclaimed\n", encoding="utf-8")
+
+    with ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ):
+        pass
+
+    assert sentinel.read_text(encoding="utf-8") == "unclaimed\n"
 
 
 def test_write_stats_tracks_null_and_non_finite_failures(tmp_path: Path) -> None:

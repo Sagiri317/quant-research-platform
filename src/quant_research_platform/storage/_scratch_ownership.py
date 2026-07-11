@@ -21,34 +21,36 @@ def owned_scratch_prefix(prefix: str) -> str:
 
     if not prefix:
         raise ValueError("invalid_storage_scratch_name")
-    return f"{prefix}{_base36(os.getpid())}-"
+    return f"{prefix}q{_base36(os.getpid())}-"
 
 
-def scratch_owner_is_alive(path: Path, *, prefix: str) -> bool:
-    """Return whether a scratch name still belongs to the live process incarnation."""
+def scratch_owner_is_stale(path: Path, *, prefix: str) -> bool:
+    """Return whether a recognized scratch owner is no longer this incarnation."""
 
     name = Path(path).name
-    if not name.startswith(prefix):
+    normalized_name = os.path.normcase(name)
+    normalized_prefix = os.path.normcase(prefix)
+    if not normalized_name.startswith(normalized_prefix):
         return False
-    owner_parts = name[len(prefix) :].split("-", 1)
-    if len(owner_parts) != 2:
+    owner_parts = normalized_name[len(normalized_prefix) :].split("-", 1)
+    if len(owner_parts) != 2 or not owner_parts[0].startswith("q"):
         return False
     try:
-        pid = int(owner_parts[0], 36)
+        pid = int(owner_parts[0][1:], 36)
     except ValueError:
         return False
     if pid <= 0 or not owner_parts[1]:
         return False
     try:
         process = psutil.Process(pid)
-        return (
+        return not (
             process.is_running()
             and Path(path).stat().st_ctime >= float(process.create_time())
         )
     except (FileNotFoundError, psutil.NoSuchProcess, psutil.ZombieProcess):
-        return False
-    except psutil.AccessDenied:
         return True
+    except psutil.AccessDenied:
+        return False
 
 
 def _base36(value: int) -> str:
