@@ -66,8 +66,9 @@ review-safe aggregate calculation.
 
 A-share coverage uses trading sessions. Coverage helpers must reject invalid
 asset keys and timestamps instead of silently dropping them. Their cached
-asset/session namespace is deep-sized incrementally and must fit its owner-local
-state allocation instead of growing as an unbudgeted Python mapping. Crypto
+asset/session namespace is deep-sized incrementally; set-to-tuple coverage and
+session-result finalization are preflighted while retained state is still live,
+and the combined state must fit its owner-local allocation. Crypto
 coverage uses its own minute-grid semantics and must not reuse A-share calendar
 rules.
 

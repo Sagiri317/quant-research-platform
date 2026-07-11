@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable, Iterator
 from math import ceil
 from pathlib import Path
@@ -16,13 +17,16 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow, is_intraday_time_window
 from quant_research_platform.markets.session_windows import (
     SessionWindowPlanner,
-    normalize_session_dates,
 )
 from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
 )
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
+)
+from quant_research_platform.runtime._resource_accounting import (
+    python_list_container_bytes,
+    python_tuple_container_bytes,
 )
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
@@ -47,7 +51,6 @@ SIZING_SAMPLE_SESSION_CAP = 20
 # Research assembly temporarily holds merge/sort/write copies of the joined frame,
 # so session sizing must reserve peak headroom beyond the steady-state frame size.
 RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER = 4
-RESEARCH_TIME_KEY_STATE_BYTES = 160
 
 
 def assemble_research_dataset(
@@ -326,20 +329,32 @@ def _time_keys_from_base_input(
         time_window=time_window,
     )
     timestamps: set[pd.Timestamp] = set()
+    state_bytes = sys.getsizeof(timestamps)
+    intraday = is_intraday_time_window(time_window)
     physical_target_bytes = max(1, resource_policy.effective_chunk_bytes // 2)
     target_state_bytes = resource_policy.effective_chunk_bytes - physical_target_bytes
     for chunk in iter_dataset_chunks(
         context,
         target_chunk_bytes=physical_target_bytes,
     ):
-        timestamps.update(
-            pd.Timestamp(value) for value in chunk["timestamp"].dropna().unique()
-        )
-        if len(timestamps) * RESEARCH_TIME_KEY_STATE_BYTES > target_state_bytes:
+        for value in chunk["timestamp"].dropna().unique():
+            timestamp = pd.Timestamp(value)
+            if not intraday:
+                timestamp = timestamp.normalize()
+            if timestamp in timestamps:
+                continue
+            previous_container_bytes = sys.getsizeof(timestamps)
+            timestamps.add(timestamp)
+            state_bytes += (
+                sys.getsizeof(timestamps)
+                - previous_container_bytes
+                + sys.getsizeof(timestamp)
+            )
+        finalization_bytes = python_list_container_bytes(len(timestamps))
+        finalization_bytes += python_tuple_container_bytes(len(timestamps))
+        if state_bytes + finalization_bytes > target_state_bytes:
             raise ValueError("research_time_key_state_exceeds_chunk_budget")
-    if is_intraday_time_window(time_window):
-        return tuple(sorted(timestamps))
-    return normalize_session_dates(timestamps)
+    return tuple(sorted(timestamps))
 
 
 def _research_chunk_windows(

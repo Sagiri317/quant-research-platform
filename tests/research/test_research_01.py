@@ -288,6 +288,42 @@ def test_research_time_key_scan_uses_policy_target_and_bounds_state(
     assert observed_targets == [policy.effective_chunk_bytes // 2]
 
 
+def test_research_time_key_scan_preflights_sorted_tuple_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=1024**3,
+        chunk_target_bytes=320,
+        memory_safety_factor=1.0,
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "build_dataset_read_context",
+        lambda root, **_kwargs: root,
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter(
+            (pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")]}),)
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="research_time_key_state_exceeds_chunk_budget",
+    ):
+        assembler_module._time_keys_from_base_input(
+            Path("base"),
+            primary_key=platform_entity_time_key(),
+            time_window=TimeWindow(
+                "2026-01-01T00:00:00",
+                "2026-01-01T00:00:00",
+            ),
+            resource_policy=policy,
+        )
+
+
 def test_research_processed_input_reserves_materialized_join_working_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

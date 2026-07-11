@@ -277,6 +277,77 @@ def test_a_share_panel_key_coverage_state_is_bounded(
         )
 
 
+def test_a_share_panel_key_coverage_preflights_finalization_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk = pd.DataFrame(
+        {
+            "asset_id": ["asset_a"],
+            "timestamp": [pd.Timestamp("2026-01-01")],
+        }
+    )
+    monkeypatch.setattr(
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
+        lambda *_args, **_kwargs: iter((chunk,)),
+    )
+    monkeypatch.setattr(
+        materialization_planning,
+        "inspect_dataset",
+        lambda _root: SimpleNamespace(columns=("asset_id", "timestamp")),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="a_share_panel_key_coverage_exceeds_resource_budget",
+    ):
+        materialization_planning.processed_panel_key_coverage(
+            Path("panel"),
+            resource_policy=materialization_io.RuntimeResourcePolicy(
+                available_memory_bytes=1024**3,
+                chunk_target_bytes=2_800,
+                memory_safety_factor=1.0,
+            ),
+        )
+
+
+def test_a_share_trading_sessions_preflight_result_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calendar = pd.DataFrame(
+        {
+            "source_market_type": [1],
+            "is_trading_day": [True],
+            "timestamp": [pd.Timestamp("2026-01-01")],
+        }
+    )
+    monkeypatch.setattr(
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
+        lambda *_args, **_kwargs: iter((calendar,)),
+    )
+    monkeypatch.setattr(
+        materialization_planning,
+        "python_tuple_container_bytes",
+        lambda _item_count: 10**9,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="a_share_trading_session_state_exceeds_resource_budget",
+    ):
+        materialization_planning.available_trading_sessions(
+            SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
+            SourceId("csmar"),
+            time_window=TimeWindow("2026-01-01", "2026-01-01"),
+            lookback_sessions=0,
+            lookahead_sessions=0,
+            resource_policy=materialization_io.RuntimeResourcePolicy(
+                available_memory_bytes=1024**3,
+            ),
+        )
+
+
 def test_dataset_session_coverage_state_is_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

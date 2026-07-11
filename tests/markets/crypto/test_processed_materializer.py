@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import sys
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -800,6 +801,26 @@ def test_crypto_source_asset_index_counts_unicode_object_storage() -> None:
         materialize_panel._canonical_source_assets(
             ((source_asset_id,),),
             target_state_bytes=50_000,
+        )
+
+
+def test_crypto_source_asset_index_preflights_finalization_state() -> None:
+    source_by_canonical = {
+        "btc_usdt": "BTCUSDT",
+        "eth_usdt": "ETHUSDT",
+    }
+    retained_bytes = sys.getsizeof(source_by_canonical) + sum(
+        sys.getsizeof(key) + sys.getsizeof(value)
+        for key, value in source_by_canonical.items()
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="crypto_panel_asset_index_exceeds_resource_budget",
+    ):
+        materialize_panel._canonical_source_assets(
+            (("BTCUSDT",), ("ETHUSDT",)),
+            target_state_bytes=retained_bytes,
         )
 
 

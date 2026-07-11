@@ -35,6 +35,11 @@ from quant_research_platform.markets.session_windows import (
     SessionWindow,
     SessionWindowPlanner,
 )
+from quant_research_platform.runtime._resource_accounting import (
+    python_list_container_bytes,
+    python_mapping_container_upper_bound_bytes,
+    python_tuple_container_bytes,
+)
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
     ResourceChunkPlanner,
@@ -187,11 +192,25 @@ def processed_panel_key_coverage(
                 raise ValueError(
                     "a_share_panel_key_coverage_exceeds_resource_budget"
                 )
+    finalization_bytes = python_mapping_container_upper_bound_bytes(len(coverage))
+    finalization_bytes += sum(
+        python_tuple_container_bytes(len(asset_dates))
+        for asset_dates in coverage.values()
+    )
+    finalization_bytes += max(
+        (
+            python_list_container_bytes(len(asset_dates))
+            for asset_dates in coverage.values()
+        ),
+        default=0,
+    )
+    if state_bytes + finalization_bytes > state_budget:
+        raise ValueError("a_share_panel_key_coverage_exceeds_resource_budget")
     result = {
         asset_id: tuple(sorted(asset_dates))
         for asset_id, asset_dates in coverage.items()
     }
-    if materialization_state_bytes(result) > state_budget:
+    if materialization_state_bytes((coverage, result)) > state_budget:
         raise ValueError("a_share_panel_key_coverage_exceeds_resource_budget")
     if cache is not None:
         cache[cache_key] = result
@@ -251,10 +270,13 @@ def available_trading_sessions(
         return session.date() > time_window.end and len(after) >= lookahead_sessions
 
     def result() -> tuple[pd.Timestamp, ...]:
-        sessions = (*before, *core, *after)
-        if state_bytes + sys.getsizeof(sessions) > state_budget:
+        session_count = len(before) + len(core) + len(after)
+        if (
+            state_bytes + python_tuple_container_bytes(session_count)
+            > state_budget
+        ):
             raise ValueError("a_share_trading_session_state_exceeds_resource_budget")
-        return sessions
+        return (*before, *core, *after)
 
     for calendar in chunks:
         source_market_type = strict_values.strict_market_type_series(

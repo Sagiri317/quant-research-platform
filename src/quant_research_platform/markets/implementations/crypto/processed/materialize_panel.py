@@ -21,6 +21,10 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     panels,
     source_ids,
 )
+from quant_research_platform.runtime._resource_accounting import (
+    python_list_container_bytes,
+    python_tuple_container_bytes,
+)
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
 )
@@ -225,6 +229,10 @@ def _canonical_source_assets(
         )
         if state_bytes > target_state_bytes:
             raise ValueError("crypto_panel_asset_index_exceeds_resource_budget")
+    finalization_bytes = python_list_container_bytes(len(source_by_canonical))
+    finalization_bytes += python_tuple_container_bytes(len(source_by_canonical))
+    if state_bytes + finalization_bytes > target_state_bytes:
+        raise ValueError("crypto_panel_asset_index_exceeds_resource_budget")
     return tuple(
         source_by_canonical[canonical]
         for canonical in sorted(source_by_canonical)
