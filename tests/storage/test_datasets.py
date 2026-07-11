@@ -462,7 +462,7 @@ def test_fixed_width_batch_estimate_uses_parquet_leaf_paths(tmp_path: Path) -> N
     )
     pq.write_table(table, path, compression="zstd")
     parquet_file = pq.ParquetFile(path)
-    target_chunk_bytes = 64 * 1024
+    target_chunk_bytes = 512 * 1024
 
     batch_rows = dataset_reading._target_batch_rows(
         parquet_file,
@@ -879,6 +879,7 @@ def test_plain_variable_width_probe_does_not_decode_one_row_per_batch(
             columns=("value",),
             parquet_filters=None,
             component_budget=512 * 1024,
+            page_budget=2 * 1024**2,
         )
     )
 
@@ -907,6 +908,31 @@ def test_parquet_page_is_rejected_before_oversized_decompression(
                 path,
                 columns=("value",),
                 target_chunk_bytes=4 * 1024**2,
+            )
+        )
+
+
+def test_parquet_page_respects_physical_arrow_component_budget(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "component-oversized-data-page.parquet"
+    pq.write_table(
+        pa.table({"value": ["x" * 1_024] * 10_000}),
+        path,
+        compression="zstd",
+        use_dictionary=False,
+        data_page_size=32 * 1024**2,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_parquet_page_exceeds_target_chunk_bytes",
+    ):
+        next(
+            dataset_reading.iter_parquet_arrow_batches(
+                path,
+                columns=("value",),
+                target_chunk_bytes=16 * 1024**2,
             )
         )
 
@@ -1834,16 +1860,19 @@ def test_internal_physical_reader_uses_bounded_record_batches(
         "bounded_reader",
         market_id="dummy",
     )
+    row_count = 4_096
     frame = pd.DataFrame(
         {
-            "market_id": ["dummy"] * 64,
-            "asset_id": [f"asset_{index:04d}" for index in range(64)],
-            "timestamp": pd.date_range("2026-01-01", periods=64, freq="min"),
-            "value": [float(index) for index in range(64)],
+            "market_id": ["dummy"] * row_count,
+            "asset_id": [f"asset_{index:04d}" for index in range(row_count)],
+            "timestamp": pd.date_range(
+                "2026-01-01", periods=row_count, freq="min"
+            ),
+            "value": [float(index) for index in range(row_count)],
         }
     )
     ordered_input = pd.concat(
-        (frame.iloc[32:].copy(), frame.iloc[:32].copy()),
+        (frame.iloc[row_count // 2 :].copy(), frame.iloc[: row_count // 2].copy()),
         ignore_index=True,
     )
     ordered_input["timestamp"] = ordered_input["timestamp"].astype(
@@ -1851,7 +1880,10 @@ def test_internal_physical_reader_uses_bounded_record_batches(
     )
     write_dataset(
         root,
-        (frame.iloc[32:].copy(), frame.iloc[:32].copy()),
+        (
+            frame.iloc[row_count // 2 :].copy(),
+            frame.iloc[: row_count // 2].copy(),
+        ),
         spec=make_processed_dataset_spec("bounded_reader", market_id="dummy"),
     )
     assert hasattr(dataset_reading, "iter_dataset_chunks")
@@ -1860,7 +1892,7 @@ def test_internal_physical_reader_uses_bounded_record_batches(
         columns=None,
         time_window=None,
     )
-    target_chunk_bytes = 2_048
+    target_chunk_bytes = 512 * 1024
 
     chunks = list(
         dataset_reading.iter_dataset_chunks(

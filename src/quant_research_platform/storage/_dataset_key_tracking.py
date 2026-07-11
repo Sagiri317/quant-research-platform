@@ -43,10 +43,10 @@ class ExactPrimaryKeyIndex:
         if (
             isinstance(sqlite_cache_bytes, bool)
             or not isinstance(sqlite_cache_bytes, int)
-            or sqlite_cache_bytes <= 0
+            or sqlite_cache_bytes < 1024
         ):
             raise ValueError("invalid_exact_key_sqlite_cache_budget")
-        self._sqlite_cache_kib = max(1, sqlite_cache_bytes // 1024)
+        self._sqlite_cache_kib = sqlite_cache_bytes // 1024
         self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
         self._connection: sqlite3.Connection | None = None
 

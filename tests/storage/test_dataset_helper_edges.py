@@ -49,6 +49,16 @@ def test_exact_key_index_does_not_bypass_bounded_pandas_conversion() -> None:
     assert ".to_pandas(" not in source
 
 
+def test_exact_key_index_rejects_sub_page_cache_budget(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="invalid_exact_key_sqlite_cache_budget"):
+        ExactPrimaryKeyIndex(
+            primary_key=("asset_id",),
+            timestamp_columns=(),
+            scratch_parent=tmp_path,
+            sqlite_cache_bytes=512,
+        )
+
+
 def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

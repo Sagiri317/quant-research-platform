@@ -385,7 +385,7 @@ def iter_parquet_arrow_batches(
             parquet_filters=None,
             batch_size=batch_size,
             row_groups=row_groups,
-            max_page_uncompressed_bytes=target_bytes,
+            max_page_uncompressed_bytes=arrow_budget,
         ):
             _require_arrow_batch_budget(batch, arrow_budget=arrow_budget)
             yield batch
@@ -804,7 +804,7 @@ def _iter_filtered_arrow_batches(
         columns=columns,
         parquet_filters=parquet_filters,
         batch_size=batch_size,
-        max_page_uncompressed_bytes=target_chunk_bytes,
+        max_page_uncompressed_bytes=source_budget,
     ):
         _require_arrow_batch_budget(source_batch, arrow_budget=source_budget)
         filtered = _filter_arrow_batch(source_batch, parquet_filters)
@@ -830,7 +830,7 @@ def _iter_variable_width_arrow_batches(
         columns=columns,
         parquet_filters=parquet_filters,
         component_budget=component_budget,
-        page_budget=arrow_budget * _PHYSICAL_WORKING_SET_PARTS,
+        page_budget=component_budget,
     ):
         _require_arrow_batch_budget(source_batch, arrow_budget=component_budget)
         filtered = _filter_arrow_batch(source_batch, parquet_filters)
@@ -874,9 +874,7 @@ def _adaptive_variable_width_source_batches(
     component_budget: int,
     page_budget: int | None = None,
 ) -> Iterator[pa.RecordBatch]:
-    physical_page_budget = page_budget or (
-        component_budget * 2 * _PHYSICAL_WORKING_SET_PARTS
-    )
+    physical_page_budget = page_budget or component_budget
     probe_batches = _raw_arrow_batches(
         path,
         columns=columns,
