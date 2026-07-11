@@ -1767,6 +1767,92 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
     )
 
 
+def test_panel_chunks_reject_same_asset_cross_chunk_time_reversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = processed_catalog().get("market_panel_1m")
+    chunks = tuple(
+        pd.DataFrame(
+            {
+                "source_asset_id": ["BTCUSDT"],
+                "timestamp": [timestamp],
+            }
+        )
+        for timestamp in pd.to_datetime(
+            ["2026-07-06 00:01", "2026-07-06 00:00"]
+        )
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_read_context",
+        lambda *_args, **kwargs: kwargs,
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "build_dataset_equality_group_plan",
+        lambda *_args, **_kwargs: SimpleNamespace(keys=(("BTCUSDT",),)),
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "dataset_context_for_equality_group",
+        lambda context, _plan, _key: context,
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter(chunk.copy() for chunk in chunks),
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "_validate_matching_bar_keys",
+        lambda _x: None,
+    )
+
+    def prepare(bars: pd.DataFrame) -> pd.DataFrame:
+        output = pd.DataFrame(
+            {
+                "market_id": ["crypto"],
+                "asset_id": ["btc_usdt"],
+                "timestamp": bars["timestamp"].reset_index(drop=True),
+            }
+        )
+        for column in spec.required_columns:
+            if column not in output:
+                output[column] = 1.0
+        return output
+
+    monkeypatch.setattr(materialize_panel.panels, "prepare_panel_bars", prepare)
+    monkeypatch.setattr(
+        materialize_panel,
+        "_iter_matching_trade_chunks",
+        lambda *_args, **_kwargs: iter(()),
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "_iter_matching_depth_chunks",
+        lambda *_args, **_kwargs: iter(()),
+    )
+    monkeypatch.setattr(
+        materialize_panel.panels,
+        "calculate_market_panel_from_chunks",
+        lambda panel, **_kwargs: panel,
+    )
+
+    with pytest.raises(ValueError, match="out_of_order_crypto_panel_dependency"):
+        list(
+            materialize_panel._iter_panel_chunks(
+                spec,
+                layout=StorageLayout(project_root=tmp_path),
+                source_id=SourceId("binance"),
+                time_window=TimeWindow("2026-07-06", "2026-07-06"),
+                resource_policy=RuntimeResourcePolicy(
+                    available_memory_bytes=1024**3
+                ),
+            )
+        )
+
+
 def test_crypto_research_dataset_includes_full_market_context_columns(
     tmp_path: Path,
 ) -> None:

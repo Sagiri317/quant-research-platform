@@ -129,12 +129,18 @@ def iter_interim_frames(
         raise ValueError("invalid_binance_raw_input_files")
     yielded = False
     empty_schema_frame: pd.DataFrame | None = None
+    last_key: tuple[object, ...] | None = None
     for input_file in sorted(input_files):
         for batch in _iter_batches(
             iter_raw_envelopes(input_file),
             batch_size=row_batch_size,
         ):
             normalized = normalize_raw_envelopes(batch, data_id=data_id)
+            last_key = _validate_normalized_order(
+                normalized,
+                data_id=data_id,
+                previous_key=last_key,
+            )
             empty_schema_frame = normalized.iloc[:0].copy()
             filtered = _filter_time_window(
                 normalized,
@@ -159,12 +165,15 @@ def normalize_raw_envelopes(
 ) -> pd.DataFrame:
     _validate_raw_kind_matches_data_id(envelopes, data_id=data_id)
     if data_id == ids.market_bars_data_id():
-        return _normalize_klines(envelopes)
-    if data_id == ids.aggregate_trades_data_id():
-        return _normalize_aggregate_trades(envelopes)
-    if data_id == ids.depth_levels_data_id():
-        return _normalize_depth(envelopes)
-    raise ValueError(f"unsupported_binance_data_id: {data_id}")
+        frame = _normalize_klines(envelopes)
+    elif data_id == ids.aggregate_trades_data_id():
+        frame = _normalize_aggregate_trades(envelopes)
+    elif data_id == ids.depth_levels_data_id():
+        frame = _normalize_depth(envelopes)
+    else:
+        raise ValueError(f"unsupported_binance_data_id: {data_id}")
+    _validate_normalized_order(frame, data_id=data_id, previous_key=None)
+    return frame
 
 
 def materialize_interim_data(
@@ -251,10 +260,9 @@ def _normalize_klines(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
         }
         for envelope in rows
     ]
-    return _ordered_frame(
+    return _interim_frame(
         normalized,
         MARKET_BARS_COLUMNS,
-        ["source_asset_id", "timestamp"],
     )
 
 
@@ -365,10 +373,9 @@ def _normalize_aggregate_trades(rows: tuple[dict[str, Any], ...]) -> pd.DataFram
                 "source_market_type": strict_market_type(envelope["market_type"]),
             }
         )
-    return _ordered_frame(
+    return _interim_frame(
         normalized,
         AGGREGATE_TRADES_COLUMNS,
-        ["source_asset_id", "timestamp", "aggregate_trade_id"],
     )
 
 
@@ -379,8 +386,8 @@ def _normalize_depth(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
         timestamp = _timestamp_iso(envelope["captured_at"])
         symbol = strict_symbol(envelope["symbol"])
         for side, raw_levels in (
-            ("bid", payload.get("bids", ())),
             ("ask", payload.get("asks", ())),
+            ("bid", payload.get("bids", ())),
         ):
             for level, (price, quantity) in enumerate(
                 depth_side_levels(
@@ -403,10 +410,9 @@ def _normalize_depth(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
                         ),
                     }
                 )
-    return _ordered_frame(
+    return _interim_frame(
         normalized,
         DEPTH_LEVELS_COLUMNS,
-        ["source_asset_id", "timestamp", "side", "level"],
     )
 
 
@@ -442,15 +448,37 @@ def _column_roles(
     return {column: field_role(column, primary_key=primary_key) for column in columns}
 
 
-def _ordered_frame(
+def _interim_frame(
     rows: list[dict[str, Any]],
     columns: tuple[str, ...],
-    sort_columns: list[str],
 ) -> pd.DataFrame:
-    frame = pd.DataFrame(rows, columns=columns)
-    if frame.empty:
-        return frame
-    return frame.sort_values(sort_columns).reset_index(drop=True)
+    return pd.DataFrame(rows, columns=columns).reset_index(drop=True)
+
+
+def _validate_normalized_order(
+    frame: pd.DataFrame,
+    *,
+    data_id: str,
+    previous_key: tuple[object, ...] | None,
+) -> tuple[object, ...] | None:
+    primary_key = _interim_primary_key(data_id)
+    last_key = previous_key
+    for row in frame.loc[:, list(primary_key)].itertuples(index=False, name=None):
+        key = tuple(row)
+        if last_key is not None and key <= last_key:
+            raise ValueError("out_of_order_binance_interim_dependency")
+        last_key = key
+    return last_key
+
+
+def _interim_primary_key(data_id: str) -> tuple[str, ...]:
+    if data_id == ids.aggregate_trades_data_id():
+        return ("source_asset_id", "timestamp", "aggregate_trade_id")
+    if data_id == ids.depth_levels_data_id():
+        return ("source_asset_id", "timestamp", "side", "level")
+    if data_id == ids.market_bars_data_id():
+        return ("source_asset_id", "timestamp")
+    raise ValueError(f"unsupported_binance_data_id: {data_id}")
 
 
 def _timestamp_ms(value: object) -> pd.Timestamp:

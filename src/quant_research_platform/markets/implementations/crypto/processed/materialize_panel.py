@@ -127,6 +127,7 @@ def _iter_panel_chunks(
         group_plan.keys,
         target_state_bytes=budget.dependency_key_index_bytes - asset_index_budget,
     )
+    order_state = materialization_validation.OrderedDependencyState()
     for source_asset_id in source_assets:
         group_context = dataset_context_for_equality_group(
             bar_context,
@@ -141,6 +142,13 @@ def _iter_panel_chunks(
                 continue
             _validate_matching_bar_keys(bars)
             prepared_bars = panels.prepare_panel_bars(bars)
+            prepared_bars = (
+                materialization_validation.validated_ordered_dependency_chunk(
+                    prepared_bars,
+                    state=order_state,
+                    error="out_of_order_crypto_panel_dependency",
+                )
+            )
             materialization_resources.require_frame_within_budget(
                 prepared_bars,
                 target_bytes=budget.allocations["core_window"],

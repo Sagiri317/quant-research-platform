@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.sources.binance import interim
 from quant_research_platform.sources.binance.interim import materialize_interim_data
@@ -100,6 +101,46 @@ def test_binance_interim_materializer_writes_multiple_batches(
 
     assert chunk_lengths == [2, 2, 1]
     assert len(market_bars) == 5
+
+
+@pytest.mark.parametrize(
+    ("data_id", "path_parts", "envelope_kind"),
+    [
+        (
+            "aggregate_trades_tick",
+            ("spot", "agg_trades", "BTCUSDT", "2026-07-06.jsonl"),
+            "trade",
+        ),
+        (
+            "depth_levels_tick",
+            ("spot", "depth", "BTCUSDT", "2026-07-06.jsonl"),
+            "depth",
+        ),
+    ],
+)
+@pytest.mark.parametrize("row_batch_size", [1, 2])
+def test_binance_interim_rejects_global_order_reversal_independent_of_batch_size(
+    tmp_path: Path,
+    data_id: str,
+    path_parts: tuple[str, ...],
+    envelope_kind: str,
+    row_batch_size: int,
+) -> None:
+    path = tmp_path.joinpath(*path_parts)
+    envelope_factory = (
+        _trade_envelope if envelope_kind == "trade" else _depth_envelope
+    )
+    _append_jsonl(path, envelope_factory(1))
+    _append_jsonl(path, envelope_factory(0))
+
+    with pytest.raises(ValueError, match="out_of_order_binance_interim_dependency"):
+        tuple(
+            interim.iter_interim_frames(
+                data_id=data_id,
+                input_files=(path,),
+                row_batch_size=row_batch_size,
+            )
+        )
 
 
 def test_binance_date_only_interim_end_includes_full_day(tmp_path: Path) -> None:
