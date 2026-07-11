@@ -911,6 +911,19 @@ def test_parquet_page_is_rejected_before_oversized_decompression(
         )
 
 
+def test_empty_parquet_row_group_skips_page_preflight(tmp_path: Path) -> None:
+    path = tmp_path / "empty.parquet"
+    pq.write_table(pa.table({"value": pa.array([], type=pa.string())}), path)
+
+    assert list(
+        dataset_reading.iter_parquet_arrow_batches(
+            path,
+            columns=("value",),
+            target_chunk_bytes=1024,
+        )
+    ) == []
+
+
 def test_variable_width_batch_adapts_before_arrow_allocation_when_probe_underestimates(
     tmp_path: Path,
     monkeypatch,

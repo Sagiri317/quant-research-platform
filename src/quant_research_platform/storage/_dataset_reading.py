@@ -1054,6 +1054,8 @@ def _require_selected_parquet_page_budget(
     with Path(path).open("rb") as stream:
         for row_group_index in row_groups:
             row_group = parquet_file.metadata.row_group(row_group_index)
+            if int(row_group.num_rows) == 0:
+                continue
             for position in positions:
                 column = row_group.column(position)
                 offsets = tuple(
