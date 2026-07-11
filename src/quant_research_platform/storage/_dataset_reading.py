@@ -1053,6 +1053,21 @@ def _requires_conservative_pandas_probe(data_type: pa.DataType) -> bool:
     )
 
 
+def _single_row_pandas_expansion_factor(data_type: pa.DataType) -> int:
+    if pa.types.is_fixed_size_binary(data_type):
+        return 64
+    if (
+        pa.types.is_string(data_type)
+        or pa.types.is_large_string(data_type)
+        or pa.types.is_binary(data_type)
+        or pa.types.is_large_binary(data_type)
+    ):
+        return 4
+    if _requires_conservative_pandas_probe(data_type):
+        return _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR
+    return _PARQUET_TO_PANDAS_EXPANSION_FACTOR
+
+
 def _fixed_width_arrow_row_bytes(data_type: pa.DataType) -> int | None:
     if pa.types.is_null(data_type):
         return 1
@@ -1102,6 +1117,13 @@ def _arrow_batch_to_bounded_pandas(
         conversion_budget
         - min(_PANDAS_FRAME_OVERHEAD_BYTES, max(0, conversion_budget - 1)),
     )
+    single_row_estimate = _PANDAS_FRAME_OVERHEAD_BYTES + sum(
+        max(1, (batch.column(position).nbytes + batch.num_rows - 1) // batch.num_rows)
+        * _single_row_pandas_expansion_factor(field.type)
+        for position, field in enumerate(batch.schema)
+    )
+    if single_row_estimate > conversion_budget:
+        raise ValueError("dataset_row_exceeds_target_chunk_bytes")
     rows_per_slice = max(
         1,
         min(

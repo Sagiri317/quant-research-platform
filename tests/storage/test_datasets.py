@@ -509,6 +509,36 @@ def test_fixed_size_binary_conversion_probes_before_pandas_expansion(
     assert max(observed_conversion_bytes) <= 1024 // 4
 
 
+def test_single_row_over_conversion_estimate_fails_before_pandas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = pa.record_batch(
+        [pa.array([b"x"], type=pa.binary(1))],
+        names=["value"],
+    )
+    calls = {"count": 0}
+
+    def record_conversion(_arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+        calls["count"] += 1
+        raise AssertionError("conversion_must_not_run")
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_arrow_slice_to_pandas",
+        record_conversion,
+    )
+
+    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
+        tuple(
+            dataset_reading._arrow_batch_to_bounded_pandas(
+                batch,
+                target_chunk_bytes=512,
+            )
+        )
+
+    assert calls["count"] == 0
+
+
 def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
     tmp_path: Path,
 ) -> None:
@@ -1460,7 +1490,7 @@ def test_internal_physical_reader_uses_bounded_record_batches(
         columns=None,
         time_window=None,
     )
-    target_chunk_bytes = 1_024
+    target_chunk_bytes = 2_048
 
     chunks = list(
         dataset_reading.iter_dataset_chunks(
