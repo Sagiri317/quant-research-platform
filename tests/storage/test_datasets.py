@@ -7,7 +7,7 @@ import math
 import sys
 from datetime import date, datetime
 from decimal import Decimal
-from inspect import signature
+from inspect import getsource, signature
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +17,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import quant_research_platform.storage._dataset_fingerprinting as dataset_fingerprinting
 import quant_research_platform.storage._dataset_reading as dataset_reading
 import quant_research_platform.storage._dataset_writing as dataset_writing
 import quant_research_platform.storage.atomic as storage_atomic
@@ -759,6 +760,32 @@ def test_wide_empty_schema_fails_before_pandas_materialization(
         )
 
 
+def test_materialized_context_fails_before_collecting_all_physical_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    yielded = 0
+
+    def frames(*_args, **_kwargs):
+        nonlocal yielded
+        for index in range(4):
+            yielded += 1
+            yield pd.DataFrame({"value": ["x" * 1_024], "part": [index]})
+
+    monkeypatch.setattr(dataset_reading, "iter_dataset_chunks", frames)
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_materialized_result_exceeds_target_bytes",
+    ):
+        dataset_reading.materialize_dataset_context(
+            SimpleNamespace(),
+            target_chunk_bytes=64 * 1024,
+            materialized_budget_bytes=2_048,
+        )
+
+    assert yielded < 4
+
+
 def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
     tmp_path: Path,
 ) -> None:
@@ -818,6 +845,45 @@ def test_variable_width_probe_adapts_above_probe_size_for_small_values(
     assert maximum_rows > dataset_reading._PANDAS_PROBE_ROWS
     assert requested_batch_sizes[0] == 1
     assert max(requested_batch_sizes[1:]) > 1
+
+
+def test_plain_variable_width_probe_does_not_decode_one_row_per_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "plain-unique-strings.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "value": [
+                    f"value-{index:08d}-" + "x" * 20
+                    for index in range(20_000)
+                ]
+            }
+        ),
+        path,
+        compression="zstd",
+        use_dictionary=False,
+    )
+    requested_batch_sizes: list[int] = []
+    raw_batches = dataset_reading._raw_arrow_batches
+
+    def record_raw_batch_size(path, **kwargs):  # noqa: ANN001
+        requested_batch_sizes.append(kwargs["batch_size"])
+        yield from raw_batches(path, **kwargs)
+
+    monkeypatch.setattr(dataset_reading, "_raw_arrow_batches", record_raw_batch_size)
+    tuple(
+        dataset_reading._adaptive_variable_width_source_batches(
+            path,
+            columns=("value",),
+            parquet_filters=None,
+            component_budget=512 * 1024,
+        )
+    )
+
+    assert requested_batch_sizes[0] == 1
+    assert max(requested_batch_sizes[1:]) > 1_000
 
 
 def test_variable_width_batch_adapts_before_arrow_allocation_when_probe_underestimates(
@@ -1009,6 +1075,48 @@ def test_materialized_read_unions_categorical_dictionaries_across_parts(
         chunk["asset_id"].dtype == materialized["asset_id"].dtype
         for chunk in chunks
     )
+
+
+def test_categorical_domain_budget_rejects_before_dictionary_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "oversized-dictionary.parquet"
+    dictionary = pa.array(
+        [f"category-{index:04d}-" + "x" * 1_024 for index in range(1_000)]
+    )
+    table = pa.table(
+        {
+            "value": pa.DictionaryArray.from_arrays(
+                pa.array([0], type=pa.int32()),
+                dictionary,
+            )
+        }
+    )
+    pq.write_table(table, path, use_dictionary=True)
+
+    def unexpected_decode(*_args, **_kwargs):
+        raise AssertionError("dictionary_decode_started_before_budget_check")
+        yield
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "iter_parquet_arrow_batches",
+        unexpected_decode,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_categorical_state_exceeds_target_bytes",
+    ):
+        dataset_reading.dataset_categorical_dtypes(
+            (path,),
+            ("value",),
+            target_state_bytes=64 * 1024,
+        )
+    source = getsource(dataset_reading.dataset_categorical_dtypes)
+    assert ".iter_batches(" not in source
+    assert "iter_parquet_arrow_batches(" in source
 
 
 def test_fingerprint_preserves_content_identity_across_unused_categories(
@@ -2156,6 +2264,30 @@ def test_fingerprint_supports_writer_accepted_nested_columns(tmp_path: Path) -> 
     comparison = compare_datasets(root, root)
     assert comparison.status == "MATCH"
     assert comparison.matches
+
+
+def test_nested_fingerprint_rejects_escaping_expansion_before_canonical_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame({"nested": [["\x00" * (32 * 1024)]]})
+
+    def unexpected_canonicalization(_value: object) -> str:
+        raise AssertionError("canonical_string_allocated_before_budget_check")
+
+    monkeypatch.setattr(
+        dataset_fingerprinting,
+        "_canonical_nested_value",
+        unexpected_canonicalization,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_fingerprint_value_exceeds_target_bytes",
+    ):
+        dataset_fingerprinting._hashable_fingerprint_frame(
+            frame,
+            target_bytes=64 * 1024,
+        )
 
 
 def test_fingerprint_supports_nested_non_finite_float_values(tmp_path: Path) -> None:

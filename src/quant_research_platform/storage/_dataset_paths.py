@@ -291,7 +291,12 @@ def _require_only_expected_parquet_paths(
     observed = {path.absolute() for path in observed_paths}
     allowed = {path.absolute() for path in expected}
     resolved_allowed = {path.resolve() for path in expected}
-    if observed != allowed or len(resolved_allowed) != len(expected):
+    physical_allowed = {_physical_file_identity(path) for path in expected}
+    if (
+        observed != allowed
+        or len(resolved_allowed) != len(expected)
+        or len(physical_allowed) != len(expected)
+    ):
         raise ValueError("invalid_dataset_part_files")
 
 
@@ -309,6 +314,16 @@ def _path_or_relative_component_is_alias(root: Path, path: Path) -> bool:
         if _path_is_filesystem_alias(current):
             return True
     return False
+
+
+def _physical_file_identity(path: Path) -> tuple[int, int]:
+    try:
+        stat = Path(path).stat()
+    except OSError as exc:
+        raise ValueError("invalid_dataset_part_files") from exc
+    if int(stat.st_ino) <= 0:
+        raise ValueError("invalid_dataset_part_files")
+    return int(stat.st_dev), int(stat.st_ino)
 
 
 def _path_is_filesystem_alias(path: Path) -> bool:

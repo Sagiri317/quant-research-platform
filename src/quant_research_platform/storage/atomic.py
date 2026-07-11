@@ -42,7 +42,7 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Path
             os.fsync(handle.fileno())
         reject_if_exists(final_path)
         publish_no_replace(temp_path, final_path)
-    except Exception:
+    except BaseException:
         if claimed_temp:
             _remove_path(temp_path)
         raise
@@ -70,7 +70,7 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
         frame.to_csv(temp_path, **kwargs)
         reject_if_exists(final_path)
         publish_no_replace(temp_path, final_path)
-    except Exception:
+    except BaseException:
         if claimed_temp:
             _remove_path(temp_path)
         raise
@@ -104,9 +104,14 @@ def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
             os.fsync(handle.fileno())
         result = writer(temp_root)
         reject_if_exists(final_root)
-        publish_no_replace(temp_root, final_root)
+        try:
+            publish_no_replace(temp_root, final_root)
+        except FileExistsError as exc:
+            if final_root.exists():
+                raise OutputAlreadyExistsError() from exc
+            raise
         _remove_atomic_target_marker(target_marker)
-    except Exception:
+    except BaseException:
         if claimed_temp:
             _remove_path(temp_root)
         if claimed_marker:
@@ -194,6 +199,10 @@ def publish_no_replace(
         try:
             _rename_no_replace(source, target)
             return
+        except FileExistsError as exc:
+            if Path(target).exists():
+                raise OutputAlreadyExistsError() from exc
+            raise
         except PermissionError:
             if attempt == attempts:
                 raise

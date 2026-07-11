@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from decimal import Decimal
 from pathlib import Path
@@ -444,6 +445,21 @@ def test_candidate_data_files_rejects_junction_data_root(tmp_path: Path) -> None
         pytest.skip("junction_not_available")
 
     assert data_root.is_junction()
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        candidate_data_files(data_root, spec={"partition_columns": []})
+
+
+def test_candidate_data_files_rejects_hardlinked_part_alias(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    first = data_root / "part-000.parquet"
+    alias = data_root / "part-001.parquet"
+    pq.write_table(pa.table({"value": [1]}), first)
+    try:
+        os.link(first, alias)
+    except OSError:
+        pytest.skip("hardlink_not_available")
+
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
         candidate_data_files(data_root, spec={"partition_columns": []})
 

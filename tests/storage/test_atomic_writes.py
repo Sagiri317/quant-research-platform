@@ -14,6 +14,7 @@ from quant_research_platform.storage.atomic import (
     atomic_write_json,
     atomic_write_text,
 )
+from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
 
 class _FixedUuid:
@@ -33,6 +34,46 @@ def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -
     assert not final_root.exists()
     scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
     assert list(final_root.parent.glob(f"{scratch_prefix}*")) == []
+
+
+@pytest.mark.parametrize("cancellation", [KeyboardInterrupt, SystemExit])
+def test_atomic_write_directory_cleans_claimed_paths_after_control_flow_cancellation(
+    tmp_path: Path,
+    cancellation: type[BaseException],
+) -> None:
+    final_root = tmp_path / "bundle"
+
+    def cancelling_writer(temp_root: Path) -> None:
+        (temp_root / "partial.txt").write_text("partial\n", encoding="utf-8")
+        raise cancellation
+
+    with pytest.raises(cancellation):
+        atomic_write_directory(final_root, cancelling_writer)
+
+    scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
+    assert list(tmp_path.glob(f"{scratch_prefix}*")) == []
+
+
+@pytest.mark.parametrize("writer_kind", ["text", "csv"])
+def test_atomic_file_writers_clean_claimed_temp_after_control_flow_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer_kind: str,
+) -> None:
+    final_path = tmp_path / f"output.{writer_kind}"
+    monkeypatch.setattr(
+        atomic,
+        "publish_no_replace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        if writer_kind == "text":
+            atomic_write_text(final_path, "payload\n")
+        else:
+            atomic_write_csv(pd.DataFrame({"value": [1]}), final_path, index=False)
+
+    assert tuple(tmp_path.iterdir()) == ()
 
 
 def test_atomic_directory_supports_long_final_component(tmp_path: Path) -> None:
@@ -192,7 +233,7 @@ def test_atomic_directory_preserves_concurrent_winner(
 
     monkeypatch.setattr(atomic, "publish_no_replace", racing_publish)
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(OutputAlreadyExistsError):
         atomic_write_directory(
             final_root,
             lambda stage: (stage / "candidate.txt").write_text(
@@ -345,7 +386,7 @@ def test_publish_file_no_replace_preserves_concurrent_winner(
 
     monkeypatch.setattr(atomic, "_rename_no_replace", racing_rename)
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(OutputAlreadyExistsError):
         atomic.publish_no_replace(source, target)
 
     assert target.read_text(encoding="utf-8") == "concurrent-winner\n"

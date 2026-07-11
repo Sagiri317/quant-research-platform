@@ -42,7 +42,7 @@ from quant_research_platform.storage._dataset_types import (
 )
 from quant_research_platform.storage.manifests import read_qrp_json
 
-_DEFAULT_TARGET_CHUNK_BYTES = 64 * 1024 * 1024
+DEFAULT_DATASET_PHYSICAL_TARGET_BYTES = 64 * 1024 * 1024
 _PARQUET_TO_PANDAS_EXPANSION_FACTOR = 4
 _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR = 32
 _PHYSICAL_WORKING_SET_PARTS = 4
@@ -102,15 +102,25 @@ def materialize_dataset_context(
     context: DatasetReadContext,
     *,
     target_chunk_bytes: int | None = None,
+    materialized_budget_bytes: int | None = None,
 ) -> pd.DataFrame:
     """Materialize one validated context through the unique physical iterator."""
 
-    frames = list(
-        iter_dataset_chunks(
-            context,
-            target_chunk_bytes=target_chunk_bytes,
-        )
+    frames: list[pd.DataFrame] = []
+    observed_frame_bytes = 0
+    input_frame_budget = (
+        None
+        if materialized_budget_bytes is None
+        else _validated_target_chunk_bytes(materialized_budget_bytes) // 3
     )
+    for frame in iter_dataset_chunks(
+        context,
+        target_chunk_bytes=target_chunk_bytes,
+    ):
+        observed_frame_bytes += _pandas_frame_bytes(frame)
+        if input_frame_budget is not None and observed_frame_bytes > input_frame_budget:
+            raise ValueError("dataset_materialized_result_exceeds_target_bytes")
+        frames.append(frame)
     categorical_columns = tuple(
         column
         for column in frames[0].columns
@@ -345,6 +355,8 @@ def iter_parquet_arrow_batches(
     target_chunk_bytes: int,
     columns: tuple[str, ...] | None = None,
     parquet_filters: list[tuple[str, str, Any]] | None = None,
+    row_groups: tuple[int, ...] | None = None,
+    source_batch_rows: int | None = None,
 ) -> Iterator[pa.RecordBatch]:
     """Yield bounded Arrow batches through the single physical decoder."""
 
@@ -358,13 +370,25 @@ def iter_parquet_arrow_batches(
         variable_width = any(
             _is_variable_width(field.type) for field in selected_fields
         )
-        batch_size = _target_batch_rows(
+        batch_size = source_batch_rows or _target_batch_rows(
             parquet_file,
             columns=selected_columns,
             target_chunk_bytes=target_bytes,
         )
     finally:
         parquet_file.close()
+    if row_groups is not None:
+        arrow_budget = max(1, target_bytes // _PHYSICAL_WORKING_SET_PARTS)
+        for batch in _raw_arrow_batches(
+            path,
+            columns=selected_columns,
+            parquet_filters=None,
+            batch_size=batch_size,
+            row_groups=row_groups,
+        ):
+            _require_arrow_batch_budget(batch, arrow_budget=arrow_budget)
+            yield batch
+        return
     yield from _iter_filtered_arrow_batches(
         path,
         columns=selected_columns,
@@ -494,7 +518,7 @@ def _equality_group_plan_bytes(
 
 def _validated_target_chunk_bytes(value: int | None) -> int:
     if value is None:
-        return _DEFAULT_TARGET_CHUNK_BYTES
+        return DEFAULT_DATASET_PHYSICAL_TARGET_BYTES
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError("invalid_target_chunk_bytes")
     return value
@@ -615,7 +639,7 @@ def dataset_categorical_dtypes(
     paths: tuple[Path, ...],
     columns: tuple[str, ...],
     *,
-    target_state_bytes: int = _DEFAULT_TARGET_CHUNK_BYTES // 8,
+    target_state_bytes: int = DEFAULT_DATASET_PHYSICAL_TARGET_BYTES // 8,
 ) -> tuple[dict[str, pd.CategoricalDtype], int]:
     if target_state_bytes <= 0:
         raise ValueError("dataset_categorical_state_exceeds_target_bytes")
@@ -638,15 +662,24 @@ def dataset_categorical_dtypes(
             if not dictionary_columns:
                 continue
             for row_group_index in range(parquet_file.metadata.num_row_groups):
-                batch = next(
-                    parquet_file.iter_batches(
-                        batch_size=1,
-                        row_groups=[row_group_index],
-                        columns=list(dictionary_columns),
-                        use_threads=False,
-                    ),
-                    None,
+                _require_categorical_row_group_budget(
+                    parquet_file,
+                    row_group_index=row_group_index,
+                    columns=dictionary_columns,
+                    target_state_bytes=target_state_bytes,
                 )
+                batches = iter_parquet_arrow_batches(
+                    path,
+                    columns=dictionary_columns,
+                    target_chunk_bytes=target_state_bytes
+                    * _PHYSICAL_WORKING_SET_PARTS,
+                    row_groups=(row_group_index,),
+                    source_batch_rows=1,
+                )
+                try:
+                    batch = next(batches, None)
+                finally:
+                    batches.close()
                 if batch is None:
                     continue
                 for position, column in enumerate(dictionary_columns):
@@ -723,6 +756,23 @@ def dataset_categorical_dtypes(
     if observed_state_bytes > target_state_bytes:
         raise ValueError("dataset_categorical_state_exceeds_target_bytes")
     return dtypes, observed_state_bytes
+
+
+def _require_categorical_row_group_budget(
+    parquet_file: pq.ParquetFile,
+    *,
+    row_group_index: int,
+    columns: tuple[str, ...],
+    target_state_bytes: int,
+) -> None:
+    positions = _projected_parquet_leaf_positions(parquet_file, columns)
+    row_group = parquet_file.metadata.row_group(row_group_index)
+    encoded_bytes = sum(
+        max(0, int(row_group.column(position).total_uncompressed_size))
+        for position in positions
+    )
+    if encoded_bytes > target_state_bytes:
+        raise ValueError("dataset_categorical_state_exceeds_target_bytes")
 
 
 def _iter_filtered_arrow_batches(
@@ -882,15 +932,30 @@ def _variable_width_source_batch_rows(
             _fixed_width_arrow_row_bytes(field.type) or 0
             for field in probe.schema
         )
-        maximum_variable_chunk_bytes = 0
+        maximum_variable_row_bytes = 0
         for row_group_index in range(parquet_file.metadata.num_row_groups):
             row_group = parquet_file.metadata.row_group(row_group_index)
-            maximum_variable_chunk_bytes = max(
-                maximum_variable_chunk_bytes,
-                sum(
-                    max(0, int(row_group.column(index).total_uncompressed_size))
-                    for index in variable_positions
-                ),
+            row_count = max(1, int(row_group.num_rows))
+            variable_chunk_bytes = 0
+            dictionary_encoded = False
+            for index in variable_positions:
+                column_chunk = row_group.column(index)
+                variable_chunk_bytes += max(
+                    0,
+                    int(column_chunk.total_uncompressed_size),
+                )
+                dictionary_encoded = dictionary_encoded or any(
+                    "DICTIONARY" in str(encoding)
+                    for encoding in column_chunk.encodings
+                )
+            variable_row_bytes = (
+                variable_chunk_bytes
+                if dictionary_encoded
+                else (variable_chunk_bytes + row_count - 1) // row_count
+            )
+            maximum_variable_row_bytes = max(
+                maximum_variable_row_bytes,
+                variable_row_bytes,
             )
     finally:
         parquet_file.close()
@@ -900,7 +965,7 @@ def _variable_width_source_batch_rows(
     )
     conservative_row_bytes = max(
         probe_row_bytes,
-        fixed_row_bytes + maximum_variable_chunk_bytes,
+        fixed_row_bytes + maximum_variable_row_bytes,
     )
     return max(1, component_budget // conservative_row_bytes)
 
@@ -941,13 +1006,18 @@ def _raw_arrow_batches(
     columns: tuple[str, ...],
     parquet_filters: list[tuple[str, str, Any]] | None,
     batch_size: int,
+    row_groups: tuple[int, ...] | None = None,
 ) -> Iterator[pa.RecordBatch]:
     parquet_file = pq.ParquetFile(path)
     try:
-        row_groups = _matching_row_groups(parquet_file, parquet_filters)
+        selected_row_groups = (
+            _matching_row_groups(parquet_file, parquet_filters)
+            if row_groups is None
+            else row_groups
+        )
         yield from parquet_file.iter_batches(
             batch_size=batch_size,
-            row_groups=row_groups,
+            row_groups=selected_row_groups,
             columns=list(columns),
             use_threads=False,
         )
@@ -1048,7 +1118,7 @@ def _empty_frame(
     context: DatasetReadContext,
     columns: tuple[str, ...],
     *,
-    target_chunk_bytes: int = _DEFAULT_TARGET_CHUNK_BYTES,
+    target_chunk_bytes: int = DEFAULT_DATASET_PHYSICAL_TARGET_BYTES,
 ) -> pd.DataFrame:
     parquet_file = pq.ParquetFile(context.all_paths[0])
     try:
