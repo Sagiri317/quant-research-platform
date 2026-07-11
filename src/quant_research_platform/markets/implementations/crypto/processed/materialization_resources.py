@@ -14,18 +14,16 @@ from quant_research_platform.runtime.resources import (
 )
 
 _ALLOCATION_WEIGHTS = {
-    "arrow_batch": 1,
-    "pandas_frame": 1,
-    "normalization_copy": 1,
+    "physical_read": 3,
     "core_window": 1,
     "carry_or_label_buffer": 1,
-    "dependency_key_index": 1,
-    "reducer_state": 1,
-    "trade_output": 2,
+    "dependency_key_index": 4,
+    "reducer_state": 2,
+    "trade_output": 1,
     "depth_output": 2,
     "materialized_output": 2,
     "sqlite_cache": 1,
-    "allocator_headroom": 3,
+    "allocator_headroom": 1,
 }
 _MIN_ALLOCATION_UNIT_BYTES = 1024
 
@@ -57,8 +55,8 @@ class MaterializationBudget:
         return cls(allocations=allocations)
 
     @property
-    def physical_batch_bytes(self) -> int:
-        return self.allocations["arrow_batch"]
+    def physical_read_bytes(self) -> int:
+        return self.allocations["physical_read"]
 
     @property
     def reducer_state_bytes(self) -> int:
@@ -81,8 +79,44 @@ class MaterializationBudget:
         return self.allocations["carry_or_label_buffer"]
 
     @property
-    def dependency_key_index_bytes(self) -> int:
-        return self.allocations["dependency_key_index"]
+    def panel_key_index_bytes(self) -> int:
+        return sum(
+            self.allocations[name]
+            for name in (
+                "carry_or_label_buffer",
+                "dependency_key_index",
+                "sqlite_cache",
+            )
+        )
+
+    @property
+    def dependent_key_index_bytes(self) -> int:
+        return sum(
+            self.allocations[name]
+            for name in (
+                "core_window",
+                "dependency_key_index",
+                "reducer_state",
+                "trade_output",
+                "depth_output",
+                "sqlite_cache",
+            )
+        )
+
+    @property
+    def validation_key_index_bytes(self) -> int:
+        return sum(
+            self.allocations[name]
+            for name in (
+                "core_window",
+                "carry_or_label_buffer",
+                "dependency_key_index",
+                "reducer_state",
+                "trade_output",
+                "depth_output",
+                "materialized_output",
+            )
+        )
 
     @property
     def sqlite_cache_bytes(self) -> int:

@@ -162,7 +162,7 @@ def validate_panel_materialization(
     chunk_target_bytes = (
         materialization_resources.MaterializationBudget.from_policy(
             resource_policy
-        ).physical_batch_bytes
+        ).physical_read_bytes
     )
     bar_context = build_dataset_read_context(
         bar_root,
@@ -181,7 +181,7 @@ def validate_panel_materialization(
         target_state_bytes=(
             materialization_resources.MaterializationBudget.from_policy(
                 resource_policy
-            ).dependency_key_index_bytes
+            ).validation_key_index_bytes
         ),
     )
     validate_single_asset_part_grouping(
@@ -233,7 +233,7 @@ def validate_panel_dependent_materialization(
     chunk_target_bytes = (
         materialization_resources.MaterializationBudget.from_policy(
             resource_policy
-        ).physical_batch_bytes
+        ).physical_read_bytes
     )
     expected_context = build_dataset_read_context(
         panel_root,
@@ -279,7 +279,7 @@ def validate_exact_dependency_key_coverage(
     budget = materialization_resources.MaterializationBudget.from_policy(
         resource_policy
     )
-    chunk_target_bytes = budget.physical_batch_bytes
+    chunk_target_bytes = budget.physical_read_bytes
     timestamp_columns = tuple(
         column for column in primary_key if column == "timestamp"
     )

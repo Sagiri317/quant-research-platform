@@ -103,7 +103,7 @@ def _iter_factor_chunks(
     budget = materialization_resources.MaterializationBudget.from_policy(
         resource_policy
     )
-    chunk_target_bytes = budget.physical_batch_bytes
+    chunk_target_bytes = budget.physical_read_bytes
     active_key: tuple[str, str] | None = None
     active_carry: pd.DataFrame | None = None
     order_state = materialization_validation.OrderedDependencyState()
@@ -117,7 +117,7 @@ def _iter_factor_chunks(
         context,
         columns=("market_id", "asset_id"),
         target_chunk_bytes=chunk_target_bytes,
-        target_state_bytes=budget.dependency_key_index_bytes,
+        target_state_bytes=budget.dependent_key_index_bytes,
     )
     materialization_validation.validate_single_asset_part_grouping(
         group_plan,

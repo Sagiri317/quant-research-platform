@@ -650,12 +650,40 @@ def test_materialization_budget_allocations_close_under_effective_budget() -> No
 
     assert sum(budget.allocations.values()) <= RESOURCE_POLICY.effective_chunk_bytes
     assert not hasattr(budget, "effective_bytes")
-    assert budget.physical_batch_bytes > 0
+    assert budget.physical_read_bytes > 0
     assert budget.reducer_state_bytes > 0
     assert budget.trade_output_bytes > 0
     assert budget.depth_output_bytes > 0
     assert budget.materialized_output_bytes > 0
-    assert budget.dependency_key_index_bytes > 0
+    assert budget.panel_key_index_bytes > 0
+    assert budget.dependent_key_index_bytes > 0
+    assert budget.validation_key_index_bytes > 0
+    assert (
+        budget.physical_read_bytes
+        + budget.panel_key_index_bytes
+        + budget.allocations["core_window"]
+        + budget.reducer_state_bytes
+        + budget.trade_output_bytes
+        + budget.depth_output_bytes
+        + budget.materialized_output_bytes
+        + budget.allocations["allocator_headroom"]
+        <= RESOURCE_POLICY.effective_chunk_bytes
+    )
+    assert (
+        budget.physical_read_bytes
+        + budget.dependent_key_index_bytes
+        + budget.carry_bytes
+        + budget.materialized_output_bytes
+        + budget.allocations["allocator_headroom"]
+        <= RESOURCE_POLICY.effective_chunk_bytes
+    )
+    assert (
+        budget.physical_read_bytes
+        + budget.validation_key_index_bytes
+        + budget.sqlite_cache_bytes
+        + budget.allocations["allocator_headroom"]
+        <= RESOURCE_POLICY.effective_chunk_bytes
+    )
     assert {
         "trade_output",
         "depth_output",
@@ -933,6 +961,7 @@ def _patch_mock_group_plan(
             key: (Path(f"part-{index:03d}.parquet"),)
             for index, key in enumerate(keys)
         },
+        retained_bytes=0,
     )
     monkeypatch.setattr(
         module,

@@ -105,7 +105,7 @@ def _iter_panel_chunks(
     budget = materialization_resources.MaterializationBudget.from_policy(
         resource_policy
     )
-    chunk_target_bytes = budget.physical_batch_bytes
+    chunk_target_bytes = budget.physical_read_bytes
     bar_root = layout.interim_data_root(
         source_id,
         source_ids.market_bars_source_data_id(spec),
@@ -123,12 +123,11 @@ def _iter_panel_chunks(
         columns=None,
         time_window=time_window,
     )
-    asset_index_budget = budget.dependency_key_index_bytes // 2
     group_plan = build_dataset_equality_group_plan(
         bar_context,
         columns=("source_asset_id",),
         target_chunk_bytes=chunk_target_bytes,
-        target_state_bytes=asset_index_budget,
+        target_state_bytes=budget.panel_key_index_bytes,
     )
     materialization_validation.validate_single_asset_part_grouping(
         group_plan,
@@ -136,7 +135,9 @@ def _iter_panel_chunks(
     )
     source_assets = _canonical_source_assets(
         group_plan.keys,
-        target_state_bytes=budget.dependency_key_index_bytes - asset_index_budget,
+        target_state_bytes=(
+            budget.panel_key_index_bytes - group_plan.retained_bytes
+        ),
     )
     order_state = materialization_validation.OrderedDependencyState()
     for source_asset_id in source_assets:

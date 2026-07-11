@@ -71,11 +71,12 @@ class DatasetReadContext:
     parquet_filters: list[tuple[str, str, Any]] | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DatasetEqualityGroupPlan:
     columns: tuple[str, ...]
     keys: tuple[tuple[Any, ...], ...]
     paths_by_key: dict[tuple[Any, ...], tuple[Path, ...]]
+    retained_bytes: int
 
 
 def read_dataset(
@@ -487,10 +488,17 @@ def build_dataset_equality_group_plan(
         key: tuple(paths_by_key[key])
         for key in ordered_keys
     }
+    retained_bytes = _equality_group_plan_retained_bytes(
+        ordered_keys,
+        ordered_paths,
+    )
+    if retained_bytes > target_state_bytes:
+        raise ValueError("dataset_equality_group_index_exceeds_target_bytes")
     return DatasetEqualityGroupPlan(
         columns=columns,
         keys=ordered_keys,
         paths_by_key=ordered_paths,
+        retained_bytes=retained_bytes,
     )
 
 
@@ -563,8 +571,29 @@ def _equality_group_plan_finalization_bytes(
         + sorted_list_bound
         + keys_tuple_bound
         + path_tuple_bound
-        + sys.getsizeof(DatasetEqualityGroupPlan)
+        + sys.getsizeof(object.__new__(DatasetEqualityGroupPlan))
     )
+
+
+def _equality_group_plan_retained_bytes(
+    keys: tuple[tuple[Any, ...], ...],
+    paths_by_key: Mapping[tuple[Any, ...], tuple[Path, ...]],
+) -> int:
+    retained_bytes = (
+        sys.getsizeof(object.__new__(DatasetEqualityGroupPlan))
+        + sys.getsizeof(keys)
+        + sys.getsizeof(paths_by_key)
+    )
+    for key in keys:
+        retained_bytes += sys.getsizeof(key)
+        retained_bytes += sum(sys.getsizeof(value) for value in key)
+        paths = paths_by_key[key]
+        retained_bytes += sys.getsizeof(paths)
+        for path in paths:
+            retained_bytes += sys.getsizeof(path)
+            retained_bytes += sys.getsizeof(path.parts)
+            retained_bytes += sum(sys.getsizeof(part) for part in path.parts)
+    return retained_bytes
 
 
 def _validated_target_chunk_bytes(value: int | None) -> int:

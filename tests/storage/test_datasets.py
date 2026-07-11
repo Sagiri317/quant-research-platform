@@ -2527,6 +2527,7 @@ def test_equality_group_plan_indexes_only_candidate_part_paths(tmp_path: Path) -
         ("a_share", "asset_001"),
         ("a_share", "asset_002"),
     )
+    assert 0 < plan.retained_bytes <= 1024**2
     assert len(group_context.read_paths) == 1
     assert observed["asset_id"].tolist() == ["asset_002"]
 

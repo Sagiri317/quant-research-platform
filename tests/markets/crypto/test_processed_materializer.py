@@ -192,7 +192,7 @@ def test_crypto_processed_materializer_uses_policy_bounded_physical_reads(
     assert {target for _, _, target in calls} == {
         materialization_resources.MaterializationBudget.from_policy(
             policy
-        ).physical_batch_bytes
+        ).physical_read_bytes
     }
 
 
@@ -748,6 +748,7 @@ def test_crypto_panel_source_parts_require_one_asset_per_physical_part(
             ("BTCUSDT",): (shared_path,),
             ("ETHUSDT",): (shared_path,),
         },
+        retained_bytes=0,
     )
     monkeypatch.setattr(
         materialize_panel,
@@ -785,6 +786,7 @@ def _physical_group_plan(keys: tuple[tuple[object, ...], ...]) -> SimpleNamespac
     return SimpleNamespace(
         keys=keys,
         paths_by_key=SimpleNamespace(items=lambda: items),
+        retained_bytes=0,
     )
 
 
@@ -828,6 +830,7 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
                 paths_by_key={
                     ("crypto", "btc_usdt"): (Path("part-000.parquet"),)
                 },
+                retained_bytes=0,
             ),
         )
         monkeypatch.setattr(
