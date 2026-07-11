@@ -1053,19 +1053,13 @@ def _requires_conservative_pandas_probe(data_type: pa.DataType) -> bool:
     )
 
 
-def _single_row_pandas_expansion_factor(data_type: pa.DataType) -> int:
-    if pa.types.is_fixed_size_binary(data_type):
-        return 64
-    if (
-        pa.types.is_string(data_type)
-        or pa.types.is_large_string(data_type)
-        or pa.types.is_binary(data_type)
-        or pa.types.is_large_binary(data_type)
-    ):
-        return 4
-    if _requires_conservative_pandas_probe(data_type):
-        return _VARIABLE_WIDTH_TO_PANDAS_EXPANSION_FACTOR
-    return _PARQUET_TO_PANDAS_EXPANSION_FACTOR
+def _single_row_minimum_pandas_bytes(batch: pa.RecordBatch) -> int:
+    if batch.num_rows != 1:
+        raise ValueError("single_row_batch_required")
+    return int(pd.RangeIndex(1).memory_usage(deep=True)) + sum(
+        max(1, int(batch.column(position).nbytes))
+        for position in range(batch.num_columns)
+    )
 
 
 def _fixed_width_arrow_row_bytes(data_type: pa.DataType) -> int | None:
@@ -1117,13 +1111,6 @@ def _arrow_batch_to_bounded_pandas(
         conversion_budget
         - min(_PANDAS_FRAME_OVERHEAD_BYTES, max(0, conversion_budget - 1)),
     )
-    single_row_estimate = _PANDAS_FRAME_OVERHEAD_BYTES + sum(
-        max(1, (batch.column(position).nbytes + batch.num_rows - 1) // batch.num_rows)
-        * _single_row_pandas_expansion_factor(field.type)
-        for position, field in enumerate(batch.schema)
-    )
-    if single_row_estimate > conversion_budget:
-        raise ValueError("dataset_row_exceeds_target_chunk_bytes")
     rows_per_slice = max(
         1,
         min(
@@ -1136,6 +1123,15 @@ def _arrow_batch_to_bounded_pandas(
     while start < batch.num_rows:
         stop = min(batch.num_rows, start + rows_per_slice)
         arrow_slice = batch.slice(start, stop - start)
+        if len(arrow_slice) == 1:
+            if _single_row_minimum_pandas_bytes(arrow_slice) > conversion_budget:
+                raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+        elif (
+            _PANDAS_FRAME_OVERHEAD_BYTES + arrow_slice.nbytes * expansion
+            > conversion_budget
+        ):
+            rows_per_slice = max(1, rows_per_slice // 2)
+            continue
         frame = _arrow_slice_to_pandas(arrow_slice)
         frame_bytes = int(frame.memory_usage(index=True, deep=True).sum())
         if frame_bytes > conversion_budget:

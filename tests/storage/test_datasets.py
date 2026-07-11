@@ -539,6 +539,27 @@ def test_single_row_over_conversion_estimate_fails_before_pandas(
     assert calls["count"] == 0
 
 
+def test_single_short_string_key_row_uses_measured_conversion_size() -> None:
+    batch = pa.record_batch(
+        [
+            pa.array(["a_share"], type=pa.large_string()),
+            pa.array(["000001"], type=pa.large_string()),
+            pa.array([pd.Timestamp("2014-01-02")], type=pa.timestamp("ns")),
+        ],
+        names=["market_id", "asset_id", "timestamp"],
+    )
+
+    chunks = tuple(
+        dataset_reading._arrow_batch_to_bounded_pandas(
+            batch,
+            target_chunk_bytes=1_152,
+        )
+    )
+
+    assert len(chunks) == 1
+    pd.testing.assert_frame_equal(chunks[0], batch.to_pandas(use_threads=False))
+
+
 def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
     tmp_path: Path,
 ) -> None:
