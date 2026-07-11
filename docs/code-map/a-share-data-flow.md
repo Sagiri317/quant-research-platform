@@ -50,12 +50,20 @@ routes them through storage's single physical iterator. A minimum session that
 exceeds the policy fails before panel/factor/label computation.
 Sizing probes materialize one core session at a time, retain only the maximum
 measurement, and pass the active policy as the total storage materialization
-bound. The owner measurement includes input, computed frame, core-session copy,
-and selected output.
+bound. The owner measurement and production write path both count retained
+source inputs, the current physical/Pandas input, computed and filtered frames,
+owner state, and four simultaneously possible selected-output copies. Their sum
+must fit one `effective_chunk_bytes` budget. Trading-session discovery retains
+only the requested lookback, core window, and lookahead while scanning bounded
+calendar chunks; panel calculation preserves complete historical calendar
+semantics while projecting only the fields required by the A-share owner.
 
 A-share coverage uses trading sessions. Coverage helpers must reject invalid
-asset keys and timestamps instead of silently dropping them. Crypto coverage
-uses its own minute-grid semantics and must not reuse A-share calendar rules.
+asset keys and timestamps instead of silently dropping them. Their cached
+asset/session namespace is deep-sized incrementally and must fit its owner-local
+state allocation instead of growing as an unbudgeted Python mapping. Crypto
+coverage uses its own minute-grid semantics and must not reuse A-share calendar
+rules.
 
 ## storage 层
 
