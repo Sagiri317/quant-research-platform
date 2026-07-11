@@ -886,6 +886,31 @@ def test_plain_variable_width_probe_does_not_decode_one_row_per_batch(
     assert max(requested_batch_sizes[1:]) > 1_000
 
 
+def test_parquet_page_is_rejected_before_oversized_decompression(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "oversized-data-page.parquet"
+    pq.write_table(
+        pa.table({"value": ["x" * 1_024] * 10_000}),
+        path,
+        compression="zstd",
+        use_dictionary=False,
+        data_page_size=32 * 1024**2,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_parquet_page_exceeds_target_chunk_bytes",
+    ):
+        next(
+            dataset_reading.iter_parquet_arrow_batches(
+                path,
+                columns=("value",),
+                target_chunk_bytes=4 * 1024**2,
+            )
+        )
+
+
 def test_variable_width_batch_adapts_before_arrow_allocation_when_probe_underestimates(
     tmp_path: Path,
     monkeypatch,
@@ -2501,7 +2526,7 @@ def test_equality_group_plan_state_accounting_work_is_linear(
     plan = dataset_reading.build_dataset_equality_group_plan(
         context,
         columns=("market_id", "asset_id"),
-        target_chunk_bytes=2048,
+        target_chunk_bytes=64 * 1024,
         target_state_bytes=1024**2,
     )
 

@@ -82,8 +82,14 @@ class ExactPrimaryKeyIndex:
             connection.commit()
         except BaseException:
             if connection is not None:
-                connection.close()
-            self._temporary_directory.cleanup()
+                try:
+                    connection.close()
+                except BaseException:
+                    pass
+            try:
+                self._temporary_directory.cleanup()
+            except BaseException:
+                pass
             self._temporary_directory = None
             raise
         assert connection is not None

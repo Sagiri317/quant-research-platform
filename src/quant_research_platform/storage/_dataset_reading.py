@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import date, time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import pandas as pd
 import pyarrow as pa
@@ -385,6 +385,7 @@ def iter_parquet_arrow_batches(
             parquet_filters=None,
             batch_size=batch_size,
             row_groups=row_groups,
+            max_page_uncompressed_bytes=target_bytes,
         ):
             _require_arrow_batch_budget(batch, arrow_budget=arrow_budget)
             yield batch
@@ -803,6 +804,7 @@ def _iter_filtered_arrow_batches(
         columns=columns,
         parquet_filters=parquet_filters,
         batch_size=batch_size,
+        max_page_uncompressed_bytes=target_chunk_bytes,
     ):
         _require_arrow_batch_budget(source_batch, arrow_budget=source_budget)
         filtered = _filter_arrow_batch(source_batch, parquet_filters)
@@ -828,6 +830,7 @@ def _iter_variable_width_arrow_batches(
         columns=columns,
         parquet_filters=parquet_filters,
         component_budget=component_budget,
+        page_budget=arrow_budget * _PHYSICAL_WORKING_SET_PARTS,
     ):
         _require_arrow_batch_budget(source_batch, arrow_budget=component_budget)
         filtered = _filter_arrow_batch(source_batch, parquet_filters)
@@ -869,12 +872,17 @@ def _adaptive_variable_width_source_batches(
     columns: tuple[str, ...],
     parquet_filters: list[tuple[str, str, Any]] | None,
     component_budget: int,
+    page_budget: int | None = None,
 ) -> Iterator[pa.RecordBatch]:
+    physical_page_budget = page_budget or (
+        component_budget * 2 * _PHYSICAL_WORKING_SET_PARTS
+    )
     probe_batches = _raw_arrow_batches(
         path,
         columns=columns,
         parquet_filters=parquet_filters,
         batch_size=1,
+        max_page_uncompressed_bytes=physical_page_budget,
     )
     try:
         probe = next(probe_batches, None)
@@ -899,6 +907,7 @@ def _adaptive_variable_width_source_batches(
         columns=columns,
         parquet_filters=parquet_filters,
         batch_size=batch_size,
+        max_page_uncompressed_bytes=physical_page_budget,
     ):
         if skipped_rows:
             if batch.num_rows <= skipped_rows:
@@ -1007,6 +1016,7 @@ def _raw_arrow_batches(
     parquet_filters: list[tuple[str, str, Any]] | None,
     batch_size: int,
     row_groups: tuple[int, ...] | None = None,
+    max_page_uncompressed_bytes: int,
 ) -> Iterator[pa.RecordBatch]:
     parquet_file = pq.ParquetFile(path)
     try:
@@ -1014,6 +1024,13 @@ def _raw_arrow_batches(
             _matching_row_groups(parquet_file, parquet_filters)
             if row_groups is None
             else row_groups
+        )
+        _require_selected_parquet_page_budget(
+            path,
+            parquet_file=parquet_file,
+            columns=columns,
+            row_groups=tuple(selected_row_groups),
+            max_page_uncompressed_bytes=max_page_uncompressed_bytes,
         )
         yield from parquet_file.iter_batches(
             batch_size=batch_size,
@@ -1023,6 +1040,169 @@ def _raw_arrow_batches(
         )
     finally:
         parquet_file.close()
+
+
+def _require_selected_parquet_page_budget(
+    path: Path,
+    *,
+    parquet_file: pq.ParquetFile,
+    columns: tuple[str, ...],
+    row_groups: tuple[int, ...],
+    max_page_uncompressed_bytes: int,
+) -> None:
+    positions = _projected_parquet_leaf_positions(parquet_file, columns)
+    with Path(path).open("rb") as stream:
+        for row_group_index in row_groups:
+            row_group = parquet_file.metadata.row_group(row_group_index)
+            for position in positions:
+                column = row_group.column(position)
+                offsets = tuple(
+                    offset
+                    for offset in (
+                        int(column.dictionary_page_offset or 0),
+                        int(column.data_page_offset or 0),
+                    )
+                    if offset > 0
+                )
+                if not offsets:
+                    raise ValueError("invalid_dataset_parquet_page_metadata")
+                start = min(offsets)
+                end = start + int(column.total_compressed_size)
+                stream.seek(start)
+                while stream.tell() < end:
+                    uncompressed_size, compressed_size = _read_parquet_page_header(
+                        stream
+                    )
+                    if uncompressed_size > max_page_uncompressed_bytes:
+                        if int(row_group.num_rows) == 1:
+                            raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+                        raise ValueError(
+                            "dataset_parquet_page_exceeds_target_chunk_bytes"
+                        )
+                    payload_end = stream.tell() + compressed_size
+                    if compressed_size < 0 or payload_end > end:
+                        raise ValueError("invalid_dataset_parquet_page_metadata")
+                    stream.seek(payload_end)
+                if stream.tell() != end:
+                    raise ValueError("invalid_dataset_parquet_page_metadata")
+
+
+def _read_parquet_page_header(stream: BinaryIO) -> tuple[int, int]:
+    previous_field_id = 0
+    sizes: dict[int, int] = {}
+    while True:
+        field_header = _read_compact_byte(stream)
+        field_type = field_header & 0x0F
+        if field_type == 0:
+            break
+        field_delta = field_header >> 4
+        field_id = (
+            previous_field_id + field_delta
+            if field_delta
+            else _read_compact_integer(stream)
+        )
+        previous_field_id = field_id
+        if field_id in (2, 3) and field_type in (4, 5, 6):
+            sizes[field_id] = _read_compact_integer(stream)
+        else:
+            _skip_compact_value(stream, field_type)
+    uncompressed_size = sizes.get(2)
+    compressed_size = sizes.get(3)
+    if (
+        uncompressed_size is None
+        or compressed_size is None
+        or uncompressed_size < 0
+        or compressed_size < 0
+    ):
+        raise ValueError("invalid_dataset_parquet_page_metadata")
+    return uncompressed_size, compressed_size
+
+
+def _read_compact_byte(stream: BinaryIO) -> int:
+    value = stream.read(1)
+    if len(value) != 1:
+        raise ValueError("invalid_dataset_parquet_page_metadata")
+    return value[0]
+
+
+def _read_compact_unsigned(stream: BinaryIO) -> int:
+    value = 0
+    for shift in range(0, 70, 7):
+        byte = _read_compact_byte(stream)
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value
+    raise ValueError("invalid_dataset_parquet_page_metadata")
+
+
+def _read_compact_integer(stream: BinaryIO) -> int:
+    value = _read_compact_unsigned(stream)
+    return (value >> 1) ^ -(value & 1)
+
+
+def _skip_compact_value(
+    stream: BinaryIO,
+    field_type: int,
+    *,
+    collection_value: bool = False,
+) -> None:
+    if field_type == 0:
+        raise ValueError("invalid_dataset_parquet_page_metadata")
+    if field_type in (1, 2):
+        if collection_value:
+            _read_compact_byte(stream)
+        return
+    if field_type == 3:
+        _read_compact_byte(stream)
+        return
+    if field_type in (4, 5, 6):
+        _read_compact_unsigned(stream)
+        return
+    if field_type == 7:
+        stream.seek(8, 1)
+        return
+    if field_type == 8:
+        size = _read_compact_unsigned(stream)
+        stream.seek(size, 1)
+        return
+    if field_type in (9, 10):
+        header = _read_compact_byte(stream)
+        size = header >> 4
+        element_type = header & 0x0F
+        if size == 15:
+            size = _read_compact_unsigned(stream)
+        for _ in range(size):
+            _skip_compact_value(
+                stream,
+                element_type,
+                collection_value=True,
+            )
+        return
+    if field_type == 11:
+        size = _read_compact_unsigned(stream)
+        if size:
+            types = _read_compact_byte(stream)
+            key_type = types >> 4
+            value_type = types & 0x0F
+            for _ in range(size):
+                _skip_compact_value(stream, key_type, collection_value=True)
+                _skip_compact_value(stream, value_type, collection_value=True)
+        return
+    if field_type == 12:
+        previous_field_id = 0
+        while True:
+            header = _read_compact_byte(stream)
+            nested_type = header & 0x0F
+            if nested_type == 0:
+                return
+            field_delta = header >> 4
+            previous_field_id = (
+                previous_field_id + field_delta
+                if field_delta
+                else _read_compact_integer(stream)
+            )
+            _skip_compact_value(stream, nested_type)
+    raise ValueError("invalid_dataset_parquet_page_metadata")
 
 
 def _matching_row_groups(

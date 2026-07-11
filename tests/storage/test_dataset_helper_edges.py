@@ -62,6 +62,33 @@ def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
     assert tuple(tmp_path.iterdir()) == ()
 
 
+def test_exact_key_index_preserves_open_failure_when_close_also_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingConnection:
+        def execute(self, _statement: str) -> None:
+            raise RuntimeError("index_initialization_failed")
+
+        def close(self) -> None:
+            raise RuntimeError("index_close_failed")
+
+    def connect(path: Path) -> FailingConnection:
+        Path(path).touch()
+        return FailingConnection()
+
+    monkeypatch.setattr(key_tracking.sqlite3, "connect", connect)
+
+    with pytest.raises(RuntimeError, match="index_initialization_failed"):
+        ExactPrimaryKeyIndex(
+            primary_key=("asset_id",),
+            timestamp_columns=(),
+            scratch_parent=tmp_path,
+        ).__enter__()
+
+    assert tuple(tmp_path.iterdir()) == ()
+
+
 def test_dataset_comparison_failure_summary_does_not_expose_local_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -499,6 +526,21 @@ def test_candidate_data_files_rejects_hardlinked_part_alias(tmp_path: Path) -> N
     pq.write_table(pa.table({"value": [1]}), first)
     try:
         os.link(first, alias)
+    except OSError:
+        pytest.skip("hardlink_not_available")
+
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        candidate_data_files(data_root, spec={"partition_columns": []})
+
+
+def test_candidate_data_files_rejects_single_external_hardlink(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    external = tmp_path / "external.parquet"
+    part = data_root / "part-000.parquet"
+    pq.write_table(pa.table({"value": [1]}), external)
+    try:
+        os.link(external, part)
     except OSError:
         pytest.skip("hardlink_not_available")
 

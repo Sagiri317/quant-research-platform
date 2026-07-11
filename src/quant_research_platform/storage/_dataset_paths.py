@@ -321,7 +321,7 @@ def _physical_file_identity(path: Path) -> tuple[int, int]:
         stat = Path(path).stat()
     except OSError as exc:
         raise ValueError("invalid_dataset_part_files") from exc
-    if int(stat.st_ino) <= 0:
+    if int(stat.st_ino) <= 0 or int(stat.st_nlink) != 1:
         raise ValueError("invalid_dataset_part_files")
     return int(stat.st_dev), int(stat.st_ino)
 
