@@ -47,18 +47,6 @@ def fingerprint_dataset(
         context.all_paths,
         hash_physical_columns,
     )
-    categorical_identity_hash = sha256_json(
-        {
-            column: {
-                "ordered": bool(dtype.ordered),
-                "categories": [
-                    _canonical_nested_value(value)
-                    for value in dtype.categories
-                ],
-            }
-            for column, dtype in sorted(categorical_dtypes.items())
-        }
-    )
     row_count = 0
     row_hash_sum = 0
     row_hash_xor = 0
@@ -100,7 +88,6 @@ def fingerprint_dataset(
             "row_count": row_count,
             "columns": list(output_columns),
             "hash_columns": list(hash_columns),
-            "categorical_identity_hash": categorical_identity_hash,
         }
     )
     partition_fingerprints = tuple(
@@ -113,7 +100,6 @@ def fingerprint_dataset(
                     "row_hash_xor": int(partition_hash_xor[partition]),
                     "row_count": int(partition_rows[partition]),
                     "hash_columns": list(hash_columns),
-                    "categorical_identity_hash": categorical_identity_hash,
                 }
             ),
         }

@@ -112,6 +112,7 @@ def validate_panel_materialization(
     time_window: TimeWindow,
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
+    scratch_parent: Path | None = None,
 ) -> None:
     validate_materialization_input_identities(
         inspection,
@@ -152,7 +153,9 @@ def validate_panel_materialization(
         primary_key=spec.primary_key,
         error="invalid_crypto_panel_key_coverage",
         resource_policy=resource_policy,
-        scratch_parent=inspection.root.parent,
+        scratch_parent=(
+            inspection.root.parent if scratch_parent is None else scratch_parent
+        ),
         key_schema=dataset_primary_key_schema(actual_context, spec.primary_key),
     )
 
@@ -165,6 +168,7 @@ def validate_panel_dependent_materialization(
     time_window: TimeWindow,
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
+    scratch_parent: Path | None = None,
 ) -> None:
     validate_materialization_input_identities(
         inspection,
@@ -203,7 +207,9 @@ def validate_panel_dependent_materialization(
         primary_key=spec.primary_key,
         error="invalid_crypto_processed_key_coverage",
         resource_policy=resource_policy,
-        scratch_parent=inspection.root.parent,
+        scratch_parent=(
+            inspection.root.parent if scratch_parent is None else scratch_parent
+        ),
         key_schema=dataset_primary_key_schema(actual_context, spec.primary_key),
     )
 

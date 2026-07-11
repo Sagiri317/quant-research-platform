@@ -417,16 +417,14 @@ def _normalize_depth(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
 
 
 def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
+    primary_key = _interim_primary_key(data_id)
     if data_id == ids.aggregate_trades_data_id():
-        primary_key = ("source_asset_id", "timestamp", "aggregate_trade_id")
         frequency = DataFrequency.TICK
         grain = DataGrain.TRADE_EVENT
     elif data_id == ids.depth_levels_data_id():
-        primary_key = ("source_asset_id", "timestamp", "side", "level")
         frequency = DataFrequency.TICK
         grain = DataGrain.ORDER_BOOK_LEVEL
     else:
-        primary_key = ("source_asset_id", "timestamp")
         frequency = DataFrequency.MINUTE
         grain = DataGrain.ASSET_TIMESTAMP
     return InterimDataSpec(

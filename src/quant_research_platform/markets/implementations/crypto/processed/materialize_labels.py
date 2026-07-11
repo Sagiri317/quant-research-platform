@@ -35,10 +35,10 @@ from quant_research_platform.storage._dataset_reading import (
     filter_frame_by_time_window,
     iter_dataset_chunks,
 )
+from quant_research_platform.storage._dataset_writing import write_dataset
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     inspect_dataset,
-    write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -77,21 +77,26 @@ def write_labels(
         policy=resource_policy,
         scratch_parent=root.parent,
     )
+    def validate_staged_dataset(staged_root) -> None:
+        staged_inspection = inspect_dataset(staged_root, time_window=time_window)
+        materialization_validation.validate_panel_dependent_materialization(
+            staged_inspection,
+            layout=layout,
+            spec=spec,
+            time_window=time_window,
+            expected_input_identities=input_identities,
+            resource_policy=resource_policy,
+            scratch_parent=staged_root,
+        )
+
     write_dataset(
         root,
         chunks,
         spec=spec,
         instance_metadata={"input_dataset_identities": input_identities},
+        staged_validator=validate_staged_dataset,
     )
     inspection = inspect_dataset(root, time_window=time_window)
-    materialization_validation.validate_panel_dependent_materialization(
-        inspection,
-        layout=layout,
-        spec=spec,
-        time_window=time_window,
-        expected_input_identities=input_identities,
-        resource_policy=resource_policy,
-    )
     return inspection
 
 
@@ -159,8 +164,8 @@ def _iter_label_chunks(
                         yield finalized
                     buffer = pd.DataFrame()
                     active_market_asset = market_asset
-                buffer = _ordered_panel(
-                    asset_rows.copy()
+                buffer = (
+                    asset_rows.copy().reset_index(drop=True)
                     if buffer.empty
                     else pd.concat((buffer, asset_rows), ignore_index=True)
                 )
@@ -220,13 +225,6 @@ def _label_emit_mask(panel: pd.DataFrame) -> pd.Series:
     positions = panel.groupby("asset_id", sort=False).cumcount()
     group_sizes = panel.groupby("asset_id", sort=False)["asset_id"].transform("size")
     return positions.lt(group_sizes - LABEL_LOOKAHEAD_BARS)
-
-
-def _ordered_panel(panel: pd.DataFrame) -> pd.DataFrame:
-    return panel.sort_values(
-        ["market_id", "asset_id", "timestamp"],
-        kind="mergesort",
-    ).reset_index(drop=True)
 
 
 def _core_mask(frame: pd.DataFrame, time_window: TimeWindow) -> pd.Series:

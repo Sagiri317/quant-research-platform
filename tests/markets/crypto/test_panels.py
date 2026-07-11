@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 import math
 import warnings
+import weakref
 
 import numpy as np
 import pandas as pd
@@ -45,6 +46,62 @@ def compute_market_panel(
         depth_output_bytes=test_budget,
         max_quote_age=max_quote_age,
     )
+
+
+def test_panel_releases_trade_reducer_state_before_depth_reduction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trade_reference: weakref.ReferenceType[object] | None = None
+
+    class TradeReducer:
+        def __init__(self, **_kwargs: object) -> None:
+            nonlocal trade_reference
+            trade_reference = weakref.ref(self)
+
+        def add_chunk(self, _chunk: pd.DataFrame) -> None:
+            pass
+
+        def finish(self) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    class DepthReducer:
+        def __init__(self, **_kwargs: object) -> None:
+            assert trade_reference is not None
+            assert trade_reference() is None
+
+        def add_chunk(self, _chunk: pd.DataFrame) -> None:
+            pass
+
+        def finish(self) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    monkeypatch.setattr(
+        panels.panel_input_reducers,
+        "AggregateTradeReducer",
+        TradeReducer,
+    )
+    monkeypatch.setattr(
+        panels.panel_input_reducers,
+        "DepthSnapshotReducer",
+        DepthReducer,
+    )
+    monkeypatch.setattr(
+        panels,
+        "_calculate_market_panel",
+        lambda panel, **_kwargs: panel,
+    )
+
+    output = panels.calculate_market_panel_from_chunks(
+        pd.DataFrame({"market_id": ["crypto"]}),
+        trade_chunks=(),
+        depth_chunks=(),
+        trade_state_bytes=1,
+        trade_output_bytes=1,
+        depth_state_bytes=1,
+        depth_output_bytes=1,
+    )
+
+    assert output["market_id"].tolist() == ["crypto"]
 
 
 class _StringLikeCryptoSymbol:

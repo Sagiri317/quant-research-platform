@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -239,6 +239,7 @@ def write_dataset(
     *,
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
+    staged_validator: Callable[[Path], None] | None = None,
 ) -> None:
     final_root = Path(dataset_root)
     validate_dataset_spec(spec)
@@ -265,6 +266,8 @@ def write_dataset(
             ),
         )
         validate_written_artifact(temp_root, accumulator)
+        if staged_validator is not None:
+            staged_validator(temp_root)
 
     _staged_write_directory(final_root, _writer)
 

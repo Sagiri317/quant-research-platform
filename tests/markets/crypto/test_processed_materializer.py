@@ -902,13 +902,62 @@ def test_crypto_panel_matching_accepts_valid_source_asset_id(
         resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
     )
 
-    panel = read_dataset(
-        layout.processed_data_root("crypto", ProcessedDataKind.PANEL, "market_panel_1m")
+    final_root = layout.processed_data_root(
+        "crypto",
+        ProcessedDataKind.PANEL,
+        "market_panel_1m",
     )
+    panel = read_dataset(final_root)
     assert panel["asset_id"].tolist() == ["btc_usdt"]
     assert panel["trade_flow_observed"].tolist() == [True]
     assert panel["quote_observed"].tolist() == [True]
     assert "source_asset_id" not in panel.columns
+    assert not list(final_root.parent.rglob(".k-*"))
+
+
+def test_crypto_panel_validation_failure_never_publishes_final_dataset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _patch_matching_panel_reads(monkeypatch, _matching_panel_frames())
+    observed_roots: list[Path] = []
+
+    def reject_staged_dataset(inspection, **_kwargs) -> None:
+        observed_roots.append(Path(inspection.root))
+        raise ValueError("synthetic_staged_crypto_validation_failure")
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "validate_panel_materialization",
+        reject_staged_dataset,
+    )
+    final_root = layout.processed_data_root(
+        "crypto",
+        ProcessedDataKind.PANEL,
+        "market_panel_1m",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="synthetic_staged_crypto_validation_failure",
+    ):
+        materialize_panel.write_panel(
+            processed_catalog().get("market_panel_1m"),
+            layout=layout,
+            source_id=SourceId("synthetic_crypto"),
+            time_window=TimeWindow(
+                "2026-07-06T00:00:00",
+                "2026-07-06T00:00:00",
+            ),
+            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        )
+
+    assert len(observed_roots) == 1
+    assert observed_roots[0] != final_root
+    assert observed_roots[0].parent == final_root.parent
+    assert not final_root.exists()
+    assert not list(final_root.parent.glob(".market_panel_1m.tmp-*"))
 
 
 def test_synthetic_crypto_normalized_interim_can_generate_non_binance_panel(

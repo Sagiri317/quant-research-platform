@@ -73,6 +73,7 @@ def calculate_market_panel_from_chunks(
         if not chunk.empty:
             trade_reducer.add_chunk(chunk)
     trade_aggregates = trade_reducer.finish()
+    del trade_reducer
     depth_reducer = panel_input_reducers.DepthSnapshotReducer(
         bars=prepared_bars,
         target_state_bytes=depth_state_bytes,
@@ -84,6 +85,7 @@ def calculate_market_panel_from_chunks(
         if not chunk.empty:
             depth_reducer.add_chunk(chunk)
     quote_snapshots = depth_reducer.finish()
+    del depth_reducer
     return _calculate_market_panel(
         prepared_bars,
         trade_aggregates=trade_aggregates,

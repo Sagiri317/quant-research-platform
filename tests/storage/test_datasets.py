@@ -29,6 +29,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.storage._dataset_schema import sha256_json
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
@@ -812,7 +813,7 @@ def test_materialized_read_unions_categorical_dictionaries_across_parts(
     )
 
 
-def test_fingerprint_includes_categorical_dictionary_identity(
+def test_fingerprint_preserves_content_identity_across_unused_categories(
     tmp_path: Path,
 ) -> None:
     left_root = make_dataset_artifact_root(tmp_path / "left", "category_identity")
@@ -834,7 +835,41 @@ def test_fingerprint_includes_categorical_dictionary_identity(
 
     comparison = compare_datasets(left_root, right_root)
 
-    assert comparison.status == "CONTENT_MISMATCH"
+    assert comparison.matches
+
+
+def test_fingerprint_content_hash_preserves_registered_formula(tmp_path: Path) -> None:
+    root = make_dataset_artifact_root(tmp_path, "fingerprint_formula")
+    frame = make_default_dataset_frame()
+    spec = make_processed_dataset_spec("fingerprint_formula")
+    write_dataset(root, frame, spec=spec)
+
+    fingerprint = fingerprint_dataset(root)
+    hash_columns = tuple(dict.fromkeys((*spec.primary_key, *spec.required_columns)))
+    legacy_readback = pd.concat(
+        tuple(
+            pd.read_parquet(path)
+            for path in sorted((root / "data").rglob("part-*.parquet"))
+        ),
+        ignore_index=True,
+    )
+    hashes = pd.util.hash_pandas_object(
+        legacy_readback.loc[:, list(hash_columns)],
+        index=False,
+    ).to_numpy("uint64")
+    expected = sha256_json(
+        {
+            "row_hash_sum": int(hashes.sum(dtype=np.uint64)),
+            "row_hash_xor": int(
+                np.bitwise_xor.reduce(hashes, initial=np.uint64(0))
+            ),
+            "row_count": len(frame),
+            "columns": list(spec.required_columns),
+            "hash_columns": list(hash_columns),
+        }
+    )
+
+    assert fingerprint.content_hash == expected
 
 
 def test_writer_rejects_inconsistent_ordered_categorical_domains(

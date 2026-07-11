@@ -28,10 +28,10 @@ from quant_research_platform.storage._dataset_reading import (
     filter_frame_by_time_window,
     iter_dataset_chunks,
 )
+from quant_research_platform.storage._dataset_writing import write_dataset
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     inspect_dataset,
-    write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -71,21 +71,26 @@ def write_factors(
         policy=resource_policy,
         scratch_parent=root.parent,
     )
+    def validate_staged_dataset(staged_root) -> None:
+        staged_inspection = inspect_dataset(staged_root, time_window=time_window)
+        materialization_validation.validate_panel_dependent_materialization(
+            staged_inspection,
+            layout=layout,
+            spec=spec,
+            time_window=time_window,
+            expected_input_identities=input_identities,
+            resource_policy=resource_policy,
+            scratch_parent=staged_root,
+        )
+
     write_dataset(
         root,
         chunks,
         spec=spec,
         instance_metadata={"input_dataset_identities": input_identities},
+        staged_validator=validate_staged_dataset,
     )
     inspection = inspect_dataset(root, time_window=time_window)
-    materialization_validation.validate_panel_dependent_materialization(
-        inspection,
-        layout=layout,
-        spec=spec,
-        time_window=time_window,
-        expected_input_identities=input_identities,
-        resource_policy=resource_policy,
-    )
     return inspection
 
 

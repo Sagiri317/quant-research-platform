@@ -434,15 +434,21 @@ def test_exact_dependency_validator_has_no_full_key_collectors() -> None:
     assert "pd.concat" not in source
 
 
-def test_published_dataset_validation_places_key_scratch_outside_artifact() -> None:
-    source = inspect.getsource(
+def test_coverage_scratch_follows_validation_lifecycle_owner() -> None:
+    validation_source = inspect.getsource(
         materialization_validation.validate_panel_materialization
     ) + inspect.getsource(
         materialization_validation.validate_panel_dependent_materialization
     )
+    writer_source = "".join(
+        inspect.getsource(module)
+        for module in (materialize_panel, materialize_factors, materialize_labels)
+    )
 
-    assert source.count("scratch_parent=inspection.root.parent") == 2
-    assert "scratch_parent=inspection.root," not in source
+    assert validation_source.count(
+        "inspection.root.parent if scratch_parent is None else scratch_parent"
+    ) == 2
+    assert writer_source.count("scratch_parent=staged_root") == 3
 
 
 def test_dependency_chunk_order_rejects_unsorted_and_overlap() -> None:
