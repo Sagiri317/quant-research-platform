@@ -77,7 +77,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         "compute_ic_and_grouped_label_values",
         wrapped_compute,
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.003")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.004")
 
     result = evaluate_signal_frame(frame, spec, n_groups=2)
 
@@ -343,7 +343,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.003")
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0035")
 
     result = fit_model_result(frame, spec)
 

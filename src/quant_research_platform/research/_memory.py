@@ -31,30 +31,35 @@ def iter_time_sized_frames(
         yield frame
         return
 
+    policy = resource_policy or active_runtime_resource_policy()
+
     timestamps = strict_timestamp_series(
         frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
     )
 
     sessions = pd.Index(timestamps.dropna().unique()).sort_values()
     if len(sessions) <= 1:
+        _require_time_chunk_budget(frame, policy=policy)
         yield frame
         return
 
     estimated_bytes = _estimated_bytes_per_session(frame, session_count=len(sessions))
-    policy = resource_policy or active_runtime_resource_policy()
     plan = ResourceChunkPlanner(policy).plan_sessions(
         axis=axis,
         session_count=len(sessions),
         estimated_bytes_per_session=estimated_bytes,
     )
     if plan.chunk_count <= 1:
+        _require_time_chunk_budget(frame, policy=policy)
         yield frame
         return
 
     target = plan.target_core_session_count
     for start in range(0, len(sessions), target):
         window_sessions = sessions[start : start + target]
-        yield frame.loc[timestamps.isin(window_sessions)]
+        output = frame.loc[timestamps.isin(window_sessions)]
+        _require_time_chunk_budget(output, policy=policy)
+        yield output
 
 
 def iter_complete_time_sized_frames(
@@ -151,9 +156,24 @@ def _concat_time_boundary_frames(
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> pd.DataFrame:
-    result = pd.concat([left, right], ignore_index=True)
     policy = resource_policy or active_runtime_resource_policy()
-    estimated_bytes = int(result.memory_usage(index=True, deep=True).sum())
-    if estimated_bytes > policy.effective_chunk_bytes:
+    retained_bytes = _frame_bytes(left) + _frame_bytes(right)
+    if 2 * retained_bytes > policy.effective_chunk_bytes:
+        raise ValueError("time_chunk_boundary_overlap_exceeds_memory_budget")
+    result = pd.concat([left, right], ignore_index=True)
+    if retained_bytes + _frame_bytes(result) > policy.effective_chunk_bytes:
         raise ValueError("time_chunk_boundary_overlap_exceeds_memory_budget")
     return result
+
+
+def _frame_bytes(frame: pd.DataFrame) -> int:
+    return int(frame.memory_usage(index=True, deep=True).sum())
+
+
+def _require_time_chunk_budget(
+    frame: pd.DataFrame,
+    *,
+    policy: RuntimeResourcePolicy,
+) -> None:
+    if _frame_bytes(frame) > policy.effective_chunk_bytes:
+        raise ValueError("time_chunk_exceeds_memory_budget")

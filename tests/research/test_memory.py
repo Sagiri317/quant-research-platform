@@ -5,11 +5,14 @@ from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.research._memory import (
+    _concat_time_boundary_frames,
     iter_complete_time_sized_frames,
     iter_time_sized_frames,
 )
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 
 
 def test_complete_time_sized_frames_preserves_all_empty_chunk_schema() -> None:
@@ -59,3 +62,59 @@ def test_time_sized_frames_accept_equivalent_timezone_representations() -> None:
         chunks = list(iter_time_sized_frames(frame, timestamp_column="timestamp"))
 
     assert sum(len(chunk) for chunk in chunks) == 2
+
+
+def test_time_sized_frames_rejects_single_timestamp_over_budget() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2026-01-01")] * 400,
+            "value": ["x" * 20] * 400,
+        }
+    )
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=10_000,
+        memory_budget_fraction=1.0,
+        chunk_target_bytes=10_000,
+        memory_safety_factor=1.0,
+    )
+
+    with pytest.raises(ValueError, match="time_chunk_exceeds_memory_budget"):
+        list(
+            iter_time_sized_frames(
+                frame,
+                timestamp_column="timestamp",
+                resource_policy=policy,
+            )
+        )
+
+
+def test_time_boundary_concat_rejects_peak_before_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2026-01-01")] * 200,
+            "value": ["x" * 20] * 200,
+        }
+    )
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=10_000,
+        memory_budget_fraction=1.0,
+        chunk_target_bytes=10_000,
+        memory_safety_factor=1.0,
+    )
+
+    def reject_concat(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("concat allocated before peak budget preflight")
+
+    monkeypatch.setattr(pd, "concat", reject_concat)
+
+    with pytest.raises(
+        ValueError,
+        match="time_chunk_boundary_overlap_exceeds_memory_budget",
+    ):
+        _concat_time_boundary_frames(
+            frame.iloc[:100].copy(),
+            frame.iloc[100:].copy(),
+            resource_policy=policy,
+        )
