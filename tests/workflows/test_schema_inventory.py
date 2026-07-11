@@ -69,4 +69,3 @@ def test_schema_inventory_uses_storage_exact_duplicate_fact(
     payload = schema_inventory.build_schema_inventory_payload(tmp_path)
 
     assert payload["datasets"][0]["duplicate_primary_key_count"] == 0
-
