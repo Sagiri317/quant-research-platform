@@ -92,9 +92,11 @@ sequential `all` profile（串行全量运行配置）是正式 correctness trut
 
 ## 运行结果与 JSON
 
-`<run_root>/run.json` 是运行级机器事实源，`<run_root>/summary.md` 是运行级人读摘要，实例结果位于 `<run_root>/outputs/<output_id>/`。QRP-owned JSON 必须是顶层 object，必须有 `schema_id`，版本不编码进 `schema_id`。
+`<run_root>/run.json` 是运行级机器事实源，`<run_root>/summary.md` 是运行级人读摘要，实例结果位于 `<run_root>/outputs/<output_id>/`。QRP-owned JSON 由 Contracts 层唯一的内部 strict codec 读写；该 owner 不从 package root 导出。读取必须是 strict UTF-8 顶层 object，并在构造 mapping 前拒绝 duplicate keys，同时拒绝 `NaN`、`Infinity`、`-Infinity`、非字符串 object key、非 JSON-native value、`schema_version` 和 `contract_version`。写入必须 deterministic、`allow_nan=False`，不得使用 `default=str` 或 key coercion。artifact owner 在 strict decode 后校验精确 `schema_id`、exact field set 和业务不变量；版本不编码进 `schema_id`。
 
-compare 按 `output_id` 配对，并使用 `output_definition_id` 与 metadata 做类型和语义校验。状态聚合只由 `policy/check_status.py` 定义。
+Dataset `spec.json` 和 `_manifest/manifest.json` 使用 exact current variant grammar，拒绝 unknown fields。write-side `DataSpec` 在任何 path 或 Parquet IO 前校验 exact runtime enum、identifier、tuple 和 mapping kinds；manifest 复制的 spec fields 使用同一个 typed canonical identity 做精确绑定，不采用 Python 宽松数值相等。计数只接受 `type(value) is int` 的非负值；columns、partitions 和 hash 采用精确类型、唯一性及交叉一致性校验；status 只接受 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`，不得规范化 lowercase 或 `ok`。Physical Arrow schema identity 递归记录 field name、type、nullability、nested child nullability 以及 dictionary index/value/ordered 参数，并拒绝超出 persisted Parquet physical type domain 的 descriptor 或 nullable map key，再以 typed canonical identity hash 绑定 manifest。normal read 和 fingerprint 对 manifest 已声明的 failed status、duplicate PK、PK null 或 nonfinite fail closed；diagnostic inspection 仍可读取同一结构合法 artifact。Canonical identity 使用显式 type tag 和 length framing；非字符串 mapping key 拒绝，字符串不做 Unicode normalization，Timestamp 与字符串保持不同身份。
+
+compare 按 `output_id` 配对，并使用 `output_definition_id` 与 metadata 做 typed-exact 语义校验。它要求 declared `summary.md` 存在，把 run output index 与 persisted output manifest 精确绑定，并验证 dataset/layer date、duplicate/status、validation/data/checks 和 overall/matrix 的交叉不变量。local verification 先发布人读 summary，最后才替换 completed `run.json`；output index 只接纳 bundle containment 内实际存在的 declared files。状态 token 与聚合只由 `policy/check_status.py` 定义，handoff contract 不保留 copied-tool fallback 或平行聚合算法。
 
 REVIEW_SAFE evidence tests 分为纯 synthetic fast gate 和 data/parquet contract gate：
 

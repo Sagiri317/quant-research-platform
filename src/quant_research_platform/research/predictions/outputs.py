@@ -120,7 +120,6 @@ class _PredictionBuildState:
         if self.prediction_rows == 0 or self.effective_test_end is None:
             raise ValueError("empty_prediction_window")
         return {
-            "contract_version": spec.contract_version,
             "prediction_mode": spec.prediction_mode,
             "sample_filter_mode": spec.sample_filter_mode,
             "filter_columns_used": list(self.filter_columns_used),
@@ -244,13 +243,20 @@ def _iter_prediction_work_frames(
 
 
 def validate_prediction_outputs(frame: pd.DataFrame, spec: PredictionSpec) -> None:
-    expected = tuple(dict.fromkeys((*spec.primary_key, spec.prediction_column)))
-    missing = [column for column in expected if column not in frame.columns]
+    expected = (*spec.primary_key, spec.prediction_column)
+    observed = tuple(frame.columns)
+    if any(type(column) is not str or not column for column in observed):
+        raise ValueError("invalid_prediction_output_columns")
+    if len(observed) != len(set(observed)):
+        raise ValueError("duplicate_prediction_output_columns")
+    missing = [column for column in expected if column not in observed]
     if missing:
         raise ValueError("missing_prediction_output_columns: " + ", ".join(missing))
-    extra = sorted(set(frame.columns).difference(expected))
+    extra = sorted(set(observed).difference(expected))
     if extra:
         raise ValueError("unregistered_prediction_output_columns: " + ", ".join(extra))
+    if observed != expected:
+        raise ValueError("misordered_prediction_output_columns")
     if frame.empty:
         raise ValueError("empty_prediction_window")
     timestamps = strict_timestamp_series(

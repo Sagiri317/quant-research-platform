@@ -26,14 +26,6 @@ def aggregates():
     return aggregates
 
 
-@pytest.fixture
-def dataset_read_mode():
-    pytest.importorskip("pyarrow")
-    from quant_research_platform.storage.datasets import DatasetReadMode
-
-    return DatasetReadMode
-
-
 def test_current_review_safe_aggregate_payload_includes_key_value_paired_hash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -167,13 +159,13 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
 
     class Inspection:
         columns = ("asset_id", "timestamp")
-        manifest = {"file_size_bytes": 1000}
+        manifest = {"file_size_bytes": 100_000}
 
     sessions = pd.date_range("2014-01-02", periods=6, freq="B")
     policy = aggregates.RuntimeResourcePolicy(
-        available_memory_bytes=2000,
+        available_memory_bytes=256 * 1024,
         memory_budget_fraction=1.0,
-        chunk_target_bytes=2000,
+        chunk_target_bytes=256 * 1024,
         memory_safety_factor=1.0,
     )
 
@@ -240,7 +232,11 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
         "inspect_dataset",
         lambda _root: Inspection(),
     )
-    monkeypatch.setattr(aggregates, "read_dataset", read_private_summary_dataset)
+    monkeypatch.setattr(
+        aggregates.materialization_io,
+        "read_materialized_dataset",
+        read_private_summary_dataset,
+    )
     monkeypatch.setattr(panels, "compute_market_panel", fake_compute_market_panel)
     monkeypatch.setattr(
         aggregates.RuntimeResourcePolicy,
@@ -338,17 +334,30 @@ def test_dataset_root_summary_uses_dataframe_chunks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     aggregates,
-    dataset_read_mode,
 ) -> None:
     root = tmp_path / "data" / "processed" / "a_share" / "factor" / "fixture"
     calls: list[dict[str, object]] = []
+    policy = aggregates.RuntimeResourcePolicy(
+        available_memory_bytes=64 * 1024,
+        memory_budget_fraction=1.0,
+        chunk_target_bytes=64 * 1024,
+        memory_safety_factor=1.0,
+    )
+    physical_target_bytes, _ = aggregates._verification_resource_allocations(policy)
 
-    def capture_dataset_chunk_read(dataset_root, *, time_window, mode):
+    def capture_dataset_chunk_read(
+        dataset_root,
+        *,
+        time_window,
+        resource_policy,
+        target_chunk_bytes,
+    ):
         calls.append(
             {
                 "root": dataset_root,
                 "time_window": time_window,
-                "mode": mode,
+                "resource_policy": resource_policy,
+                "target_chunk_bytes": target_chunk_bytes,
             }
         )
         return iter(
@@ -372,9 +381,17 @@ def test_dataset_root_summary_uses_dataframe_chunks(
             ]
         )
 
-    monkeypatch.setattr(aggregates, "read_dataset", capture_dataset_chunk_read)
+    monkeypatch.setattr(
+        aggregates.materialization_io,
+        "iter_dataset_chunks_with_policy",
+        capture_dataset_chunk_read,
+    )
 
-    summary = aggregates._summarize_dataset_root(root, years=(2025,))
+    summary = aggregates._summarize_dataset_root(
+        root,
+        years=(2025,),
+        resource_policy=policy,
+    )
 
     assert calls == [
         {
@@ -383,7 +400,8 @@ def test_dataset_root_summary_uses_dataframe_chunks(
                 "2025-01-01",
                 "2025-12-31",
             ),
-            "mode": dataset_read_mode.CHUNKED,
+            "resource_policy": policy,
+            "target_chunk_bytes": physical_target_bytes,
         }
     ]
     assert summary.row_count == 2

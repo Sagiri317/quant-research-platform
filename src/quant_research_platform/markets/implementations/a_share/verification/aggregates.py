@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import ceil
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.artifacts._output_bundle_validation import (
+    validate_output_bundle,
+)
+from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
@@ -49,10 +51,8 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_paths import path_is_filesystem_alias
 from quant_research_platform.storage._dataset_reading import iter_parquet_file_batches
 from quant_research_platform.storage.datasets import inspect_dataset
-from quant_research_platform.storage.manifests import read_qrp_json
 
 PROJECT_VERSION = "0.1.0"
 OUTPUT_SCOPE = "REVIEW_SAFE"
@@ -122,23 +122,23 @@ class AggregateSummary:
 
     @property
     def column_set_hash(self) -> str:
-        return sha256_json(list(self.columns))
+        return canonical_json_hash(list(self.columns))
 
     @property
     def dtype_summary_hash(self) -> str:
-        return sha256_json(self.dtype_summary)
+        return canonical_json_hash(self.dtype_summary)
 
     @property
     def null_summary_hash(self) -> str:
-        return sha256_json(self.null_summary)
+        return canonical_json_hash(self.null_summary)
 
     @property
     def key_value_paired_summary_hash(self) -> str:
-        return sha256_json(self.key_value_paired_summary)
+        return canonical_json_hash(self.key_value_paired_summary)
 
     @property
     def aggregate_checksum(self) -> str:
-        return sha256_json(
+        return canonical_json_hash(
             {
                 "row_count": self.row_count,
                 "key_count": self.key_count,
@@ -367,6 +367,12 @@ def _output_bundles(
 ) -> tuple[Path, ...]:
     preferred = outputs_root / preferred_id
     if preferred.exists():
+        payload, _ = validate_output_bundle(
+            preferred,
+            expected_output_id=preferred.name,
+        )
+        if payload["output_definition_id"] != output_definition_id:
+            raise ValueError("invalid_aggregate_output_manifest")
         return (preferred,)
     discovered = tuple(
         sorted(
@@ -385,15 +391,14 @@ def _output_bundles(
 
 def _output_manifest_definition_id(output_bundle: Path) -> str | None:
     try:
-        payload = read_qrp_json(
-            output_bundle / "manifest.json",
-            expected_schema_id="qrp-output-manifest",
-            error="output_manifest_schema_id_invalid",
+        payload, _ = validate_output_bundle(
+            output_bundle,
+            expected_output_id=output_bundle.name,
         )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except ValueError:
         return None
-    value = payload.get("output_definition_id")
-    return value if isinstance(value, str) else None
+    definition_id = payload["output_definition_id"]
+    return definition_id if type(definition_id) is str else None
 
 
 def _prediction_oos_expected_period() -> str:
@@ -797,71 +802,18 @@ def _iter_output_frames(
 
 def _validated_output_parquet_paths(root: Path) -> tuple[Path, ...]:
     bundle_root = Path(root)
-    try:
-        resolved_root = bundle_root.resolve(strict=True)
-    except OSError as exc:
-        raise FileNotFoundError("aggregates_input_missing") from exc
-    if path_is_filesystem_alias(bundle_root):
-        raise ValueError("invalid_aggregate_output_files")
-    manifest = read_qrp_json(
-        bundle_root / "manifest.json",
-        expected_schema_id="qrp-output-manifest",
-        error="output_manifest_schema_id_invalid",
+    _, declared = validate_output_bundle(
+        bundle_root,
+        expected_output_id=bundle_root.name,
     )
-    files = manifest.get("files")
-    if (
-        not isinstance(files, list)
-        or not files
-        or any(not isinstance(name, str) or not name for name in files)
-        or len(set(files)) != len(files)
-    ):
+    parquet_paths = tuple(
+        path for path in declared if path.suffix.casefold() == ".parquet"
+    )
+    if not parquet_paths:
         raise ValueError("invalid_aggregate_output_files")
-    declared: list[Path] = []
-    logical_names: set[str] = set()
-    resolved_paths: set[Path] = set()
-    physical_files: set[tuple[int, int]] = set()
-    for name in files:
-        relative = PurePosixPath(name)
-        normalized_name = relative.as_posix()
-        logical_name = normalized_name.casefold()
-        if (
-            relative.is_absolute()
-            or len(relative.parts) != 1
-            or name != normalized_name
-            or logical_name in logical_names
-        ):
-            raise ValueError("invalid_aggregate_output_files")
-        logical_names.add(logical_name)
-        path = bundle_root / relative.as_posix()
-        if path.suffix.casefold() != ".parquet":
-            continue
-        try:
-            stat = path.stat()
-            resolved_path = path.resolve(strict=True)
-            physical_file = (int(stat.st_dev), int(stat.st_ino))
-            if (
-                not path.is_file()
-                or path_is_filesystem_alias(path)
-                or not resolved_path.is_relative_to(resolved_root)
-                or int(stat.st_ino) <= 0
-                or int(stat.st_nlink) != 1
-                or resolved_path in resolved_paths
-                or physical_file in physical_files
-            ):
-                raise ValueError("invalid_aggregate_output_files")
-        except OSError as exc:
-            raise ValueError("invalid_aggregate_output_files") from exc
-        resolved_paths.add(resolved_path)
-        physical_files.add(physical_file)
-        declared.append(path)
-    observed = {
-        path.absolute()
-        for path in bundle_root.rglob("*")
-        if path.is_file() and path.suffix.casefold() == ".parquet"
-    }
-    if not declared or observed != {path.absolute() for path in declared}:
-        raise ValueError("invalid_aggregate_output_files")
-    return tuple(declared)
+    return parquet_paths
+
+
 def _summarize_dataset_root(
     root: Path,
     *,
@@ -1342,16 +1294,6 @@ def _parse_period(period: str) -> tuple[pd.Timestamp | None, pd.Timestamp | None
         return None, None
     start, end = period.split(" through ", 1)
     return pd.Timestamp(start), pd.Timestamp(end)
-
-
-def sha256_json(payload: Any) -> str:
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 __all__ = [

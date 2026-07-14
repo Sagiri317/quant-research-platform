@@ -156,7 +156,7 @@ def test_schema_inventory_default_has_no_a_share_important_columns(
     assert research["selected_important_column_null_counts"] == {}
 
 
-def test_schema_inventory_infers_time_aware_reference_primary_key(tmp_path) -> None:
+def test_schema_inventory_reads_time_aware_reference_primary_key(tmp_path) -> None:
     index_info_root = tmp_path / "data" / "interim" / "csmar" / "index_info"
     write_low_level_parquet_artifact(
         index_info_root,
@@ -167,7 +167,7 @@ def test_schema_inventory_infers_time_aware_reference_primary_key(tmp_path) -> N
                 "index_name": ["Synthetic Index"],
             }
         ),
-        primary_key=[],
+        primary_key=["source_asset_id", "timestamp"],
         partition_columns=["year"],
     )
 
@@ -178,7 +178,7 @@ def test_schema_inventory_infers_time_aware_reference_primary_key(tmp_path) -> N
         "source_asset_id",
         "timestamp",
     ]
-    assert "primary_key_inferred" in item["warnings"]
+    assert "primary_key_inferred" not in item["warnings"]
 
 
 def test_qrp_private_schema_inventory_requires_output_and_refuses_overwrite(
@@ -523,13 +523,13 @@ def _write_inventory_fixture(project_root: Path) -> None:
     write_low_level_parquet_artifact(
         raw_root,
         pd.DataFrame({"raw_value": ["raw_ignored_value"]}),
-        primary_key=[],
+        primary_key=["raw_value"],
         partition_columns=[],
     )
     write_low_level_parquet_artifact(
         report_root,
         pd.DataFrame({"asset_id": ["asset_a"], "metric": [1.0]}),
-        primary_key=[],
+        primary_key=["asset_id"],
         partition_columns=[],
     )
 

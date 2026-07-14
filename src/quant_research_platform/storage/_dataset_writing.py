@@ -12,6 +12,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
@@ -32,11 +33,11 @@ from quant_research_platform.storage._dataset_reading import (
     iter_parquet_arrow_batches,
 )
 from quant_research_platform.storage._dataset_schema import (
-    canonical_schema_from_file,
     data_spec_payload,
     date_string,
     merge_dataset_instance_metadata,
-    sha256_json,
+    physical_schema_columns,
+    physical_schema_from_file,
     validate_dataset_spec,
 )
 from quant_research_platform.storage.atomic import atomic_write_directory
@@ -65,7 +66,7 @@ class _WriteStats:
     partition_row_counts: dict[str, int] = field(default_factory=dict)
     columns: tuple[str, ...] | None = None
     schema_hash: str | None = None
-    _schema: tuple[tuple[str, str], ...] | None = None
+    _schema: list[dict[str, Any]] | None = None
     _arrow_schema: pa.Schema | None = None
     _ordered_categorical_domains: dict[str, pd.Index] = field(default_factory=dict)
 
@@ -123,13 +124,13 @@ class _WriteStats:
             actual_row_count = int(parquet_file.metadata.num_rows)
             if actual_row_count != int(row_count):
                 raise ValueError("dataset_row_count_mismatch")
-            schema = canonical_schema_from_file(parquet_file)
+            schema = physical_schema_from_file(parquet_file)
         finally:
             parquet_file.close()
         if self._schema is None:
             self._schema = schema
-            self.columns = tuple(name for name, _ in schema)
-            self.schema_hash = sha256_json(schema)
+            self.columns = physical_schema_columns(schema)
+            self.schema_hash = canonical_json_hash(schema)
         elif schema != self._schema:
             raise ValueError("dataset_schema_mismatch")
         partition = relative_partition_label(self.data_root, path)
@@ -149,13 +150,8 @@ class _WriteStats:
             )
 
     def payload(self) -> dict[str, Any]:
-        if self.columns is None or self.schema_hash is None:
+        if self.columns is None or self._schema is None or self.schema_hash is None:
             raise ValueError("dataset_schema_missing")
-        validation_failed = (
-            self.duplicate_primary_key_count > 0
-            or any(value > 0 for value in self.null_count_summary.values())
-            or any(value > 0 for value in self.non_finite_count_summary.values())
-        )
         payload = data_spec_payload(self.spec)
         payload.update(
             {
@@ -163,6 +159,7 @@ class _WriteStats:
                 "file_count": int(self.file_count),
                 "file_size_bytes": int(self.file_size_bytes),
                 "columns": list(self.columns),
+                "physical_schema": self._schema,
                 "schema_hash": self.schema_hash,
                 "partition_row_counts": {
                     key: int(value)
@@ -179,7 +176,7 @@ class _WriteStats:
                 "duplicate_primary_key_count": int(self.duplicate_primary_key_count),
                 "factor_nan_profile": dict(sorted(self.factor_nan_profile.items())),
                 "label_nan_profile": dict(sorted(self.label_nan_profile.items())),
-                "validation_status": "fail" if validation_failed else "pass",
+                "validation_status": "PASS",
             }
         )
         return payload

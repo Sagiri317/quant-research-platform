@@ -1,0 +1,274 @@
+from __future__ import annotations
+
+import importlib
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from enum import IntEnum
+from types import MappingProxyType
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+import pytest
+
+import quant_research_platform.contracts as contracts
+from quant_research_platform.contracts._json import (
+    canonical_identity_bytes,
+    canonical_json_hash,
+    parse_qrp_json_object,
+    render_qrp_json_object,
+)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b'{"schema_id":"x","value":1,"value":1}',
+        b'{"schema_id":"x","value":1,"value":2}',
+        b'{"schema_id":"x","nested":{"key":1,"key":2}}',
+    ),
+)
+def test_strict_parser_rejects_duplicate_keys_before_dict_construction(
+    raw: bytes,
+) -> None:
+    with pytest.raises(ValueError, match="qrp_json_duplicate_key"):
+        parse_qrp_json_object(raw)
+
+
+@pytest.mark.parametrize("constant", (b"NaN", b"Infinity", b"-Infinity"))
+def test_strict_parser_rejects_nonfinite_constants(constant: bytes) -> None:
+    with pytest.raises(ValueError, match="qrp_json_nonfinite_number"):
+        parse_qrp_json_object(b'{"schema_id":"x","value":' + constant + b"}")
+
+
+def test_strict_parser_rejects_invalid_utf8_and_non_object_top_level() -> None:
+    with pytest.raises(ValueError, match="qrp_json_invalid_utf8"):
+        parse_qrp_json_object(b'{"schema_id":"x","value":"\xff"}')
+    with pytest.raises(ValueError, match="qrp_json_top_level_object_required"):
+        parse_qrp_json_object(b"[]")
+    with pytest.raises(ValueError, match="qrp_json_invalid"):
+        parse_qrp_json_object(b'{"schema_id":')
+    with pytest.raises(ValueError, match="qrp_json_retired_identity_key"):
+        parse_qrp_json_object(b'{"schema_id":"x","nested":{"schema_version":"0.1"}}')
+
+
+def test_strict_writer_is_deterministic_and_rejects_non_json_values() -> None:
+    expected = '{\n  "a": 1,\n  "schema_id": "x",\n  "text": "\u91cf\u5316"\n}'
+    assert (
+        render_qrp_json_object({"text": "量化", "schema_id": "x", "a": 1}) == expected
+    )
+    with pytest.raises(ValueError, match="qrp_json_nonfinite_number"):
+        render_qrp_json_object({"schema_id": "x", "value": float("nan")})
+    with pytest.raises(ValueError, match="qrp_json_non_string_key"):
+        render_qrp_json_object({"schema_id": "x", 1: "value"})
+    with pytest.raises(ValueError, match="qrp_json_unsupported_value"):
+        render_qrp_json_object({"schema_id": "x", "value": (1, 2)})
+    with pytest.raises(ValueError, match="qrp_json_retired_identity_key"):
+        render_qrp_json_object({"schema_id": "x", "contract_version": "0.1"})
+
+
+def test_typed_canonical_identity_keeps_types_distinct() -> None:
+    timestamp = pd.Timestamp("2026-01-01", tz="UTC")
+    values = (
+        None,
+        False,
+        0,
+        0.0,
+        "0",
+        b"0",
+        Decimal("0"),
+        date(2026, 1, 1),
+        datetime(2026, 1, 1, tzinfo=UTC),
+        timestamp,
+        ["x"],
+        ("x",),
+        {"x": 1},
+    )
+    assert len({canonical_identity_bytes(value) for value in values}) == len(values)
+    assert canonical_json_hash(timestamp) != canonical_json_hash(str(timestamp))
+    assert canonical_json_hash({"b": 2, "a": 1}) == canonical_json_hash(
+        {"a": 1, "b": 2}
+    )
+
+
+def test_typed_canonical_identity_cannot_be_mimicked_by_tag_shaped_content() -> None:
+    encoded_integer = canonical_identity_bytes(17)
+    tag_shaped_string = encoded_integer.decode("utf-8")
+
+    assert canonical_identity_bytes(encoded_integer) != encoded_integer
+    assert canonical_identity_bytes(tag_shaped_string) != encoded_integer
+    assert canonical_json_hash(encoded_integer) != canonical_json_hash(17)
+    assert canonical_json_hash(tag_shaped_string) != canonical_json_hash(17)
+
+
+def test_typed_canonical_identity_normalizes_only_approved_zero_forms() -> None:
+    assert canonical_json_hash(-0.0) == canonical_json_hash(0.0)
+    assert canonical_json_hash(Decimal("-0.00")) == canonical_json_hash(Decimal("0.00"))
+    assert canonical_json_hash(1) != canonical_json_hash(1.0)
+    assert canonical_json_hash(True) != canonical_json_hash(1)
+
+
+def test_typed_canonical_decimal_identity_preserves_exponent_and_zero_scale() -> None:
+    assert canonical_json_hash(Decimal("1.0")) != canonical_json_hash(Decimal("1.00"))
+    assert canonical_json_hash(Decimal("-0.00")) == canonical_json_hash(Decimal("0.00"))
+    assert canonical_json_hash(Decimal("-0.00")) != canonical_json_hash(Decimal("0.0"))
+
+
+def test_typed_canonical_identity_rejects_ambiguous_or_nonfinite_values() -> None:
+    with pytest.raises(ValueError, match="canonical_json_non_string_key"):
+        canonical_json_hash({1: "value"})
+    with pytest.raises(ValueError, match="canonical_json_nonfinite_number"):
+        canonical_json_hash(float("inf"))
+    with pytest.raises(ValueError, match="canonical_json_nonfinite_number"):
+        canonical_json_hash(Decimal("NaN"))
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+        Decimal("NaN"),
+        Decimal("sNaN"),
+    ),
+)
+def test_typed_canonical_decimal_identity_rejects_every_nonfinite_form(
+    value: Decimal,
+) -> None:
+    with pytest.raises(ValueError, match="canonical_json_nonfinite_number"):
+        canonical_identity_bytes(value)
+
+
+def test_typed_canonical_timestamp_identity_preserves_unit_and_timezone() -> None:
+    nanoseconds = pd.Timestamp("2026-01-01T00:00:00", tz=ZoneInfo("UTC")).as_unit(
+        "ns"
+    )
+    milliseconds = nanoseconds.as_unit("ms")
+    fixed_offset = pd.Timestamp(
+        "2026-01-01T00:00:00",
+        tz=UTC,
+    ).as_unit("ns")
+
+    assert canonical_json_hash(nanoseconds) != canonical_json_hash(milliseconds)
+    assert canonical_json_hash(nanoseconds) != canonical_json_hash(fixed_offset)
+
+
+def test_typed_canonical_timestamp_datetime_and_string_are_distinct() -> None:
+    timestamp = pd.Timestamp("2026-01-01T00:00:00Z")
+    python_datetime = timestamp.to_pydatetime()
+    text = timestamp.isoformat()
+
+    identities = {
+        canonical_identity_bytes(timestamp),
+        canonical_identity_bytes(python_datetime),
+        canonical_identity_bytes(text),
+    }
+
+    assert len(identities) == 3
+
+
+@pytest.mark.parametrize(
+    "value",
+    (pd.NaT, pd.Timestamp("NaT")),
+    ids=("pandas-nat", "timestamp-nat"),
+)
+def test_typed_canonical_identity_rejects_nat_sentinel(value: object) -> None:
+    assert value is pd.NaT
+    with pytest.raises(ValueError, match="canonical_json_invalid_timestamp"):
+        canonical_identity_bytes(value)
+
+
+def test_typed_canonical_identity_does_not_normalize_unicode() -> None:
+    assert canonical_json_hash("\u00e9") != canonical_json_hash("e\u0301")
+
+
+def test_internal_codec_has_no_package_root_export_and_no_import_cycle() -> None:
+    assert not hasattr(contracts, "canonical_json_hash")
+    assert not hasattr(contracts, "parse_qrp_json_object")
+    assert importlib.import_module("quant_research_platform.policy.identifiers")
+    assert importlib.import_module("quant_research_platform.contracts._json")
+
+
+def test_strict_json_rejects_huge_integers_with_stable_errors() -> None:
+    raw = b'{"schema_id":"x","value":' + (b"1" * 4097) + b"}"
+    huge = 1 << 14_000
+    boundary = (10**4096) - 1
+    decimal_overflow = 10**4096
+
+    assert parse_qrp_json_object(
+        b'{"schema_id":"x","value":' + str(boundary).encode("ascii") + b"}"
+    )["value"] == boundary
+    render_qrp_json_object({"schema_id": "x", "value": boundary})
+    canonical_identity_bytes(boundary)
+
+    with pytest.raises(ValueError, match="qrp_json_integer_too_large"):
+        parse_qrp_json_object(raw)
+    with pytest.raises(ValueError, match="qrp_json_integer_too_large"):
+        render_qrp_json_object({"schema_id": "x", "value": decimal_overflow})
+    with pytest.raises(ValueError, match="canonical_json_integer_too_large"):
+        canonical_identity_bytes(decimal_overflow)
+    with pytest.raises(ValueError, match="qrp_json_integer_too_large"):
+        render_qrp_json_object({"schema_id": "x", "value": huge})
+    with pytest.raises(ValueError, match="canonical_json_integer_too_large"):
+        canonical_identity_bytes(huge)
+
+
+def test_strict_json_rejects_cycles_and_excessive_recursion() -> None:
+    cyclic: dict[str, object] = {"schema_id": "x"}
+    cyclic["self"] = cyclic
+    with pytest.raises(ValueError, match="qrp_json_cycle"):
+        render_qrp_json_object(cyclic)
+    with pytest.raises(ValueError, match="canonical_json_cycle"):
+        canonical_identity_bytes(cyclic)
+
+    nested: object = None
+    for _ in range(300):
+        nested = [nested]
+    with pytest.raises(ValueError, match="qrp_json_recursion_limit"):
+        render_qrp_json_object({"schema_id": "x", "nested": nested})
+    with pytest.raises(ValueError, match="canonical_json_recursion_limit"):
+        canonical_identity_bytes(nested)
+
+
+def test_strict_json_requires_exact_native_scalar_and_container_types() -> None:
+    class IntegerKind(IntEnum):
+        ONE = 1
+
+    class ListKind(list[object]):
+        pass
+
+    class TupleKind(tuple[object, ...]):
+        pass
+
+    class DictKind(dict[str, object]):
+        pass
+
+    class DecimalKind(Decimal):
+        pass
+
+    class DateKind(date):
+        pass
+
+    class DatetimeKind(datetime):
+        pass
+
+    for value in (IntegerKind.ONE, np.int64(1), np.bool_(True), np.float64(1.0)):
+        with pytest.raises(ValueError, match="qrp_json_unsupported_value"):
+            render_qrp_json_object({"schema_id": "x", "value": value})
+        with pytest.raises(ValueError, match="canonical_json_unsupported_value"):
+            canonical_identity_bytes(value)
+    with pytest.raises(ValueError, match="qrp_json_unsupported_value"):
+        render_qrp_json_object({"schema_id": "x", "value": ListKind()})
+
+    noncanonical_identity_values = (
+        ListKind((1,)),
+        TupleKind((1,)),
+        DictKind({"key": 1}),
+        MappingProxyType({"key": 1}),
+        DecimalKind("1.0"),
+        DateKind(2026, 1, 1),
+        DatetimeKind(2026, 1, 1),
+    )
+    for value in noncanonical_identity_values:
+        with pytest.raises(ValueError, match="canonical_json_unsupported_value"):
+            canonical_identity_bytes(value)

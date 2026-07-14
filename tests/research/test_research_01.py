@@ -807,8 +807,8 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
     ("field_name", "bad_column", "expected_error"),
     [
         ("label_columns", "mom_20d", "research_input_column_overlap"),
-        ("filter_columns", "market_type", "invalid_research_filter_columns"),
-        ("context_columns", "eligible", "invalid_research_context_columns"),
+        ("filter_columns", "market_type", "research_semantic_column_role_invalid"),
+        ("context_columns", "eligible", "research_semantic_column_role_invalid"),
     ],
 )
 def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context(

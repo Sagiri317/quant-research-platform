@@ -99,7 +99,6 @@ def model_metadata(
     feature_importance_status: str | None = None,
 ) -> dict[str, object]:
     metadata: dict[str, object] = {
-        "contract_version": spec.contract_version,
         "model_algorithm": spec.model_algorithm,
         "sample_filter_mode": spec.sample_filter_mode,
         "filter_columns_used": list(filter_metadata["filter_columns_used"]),

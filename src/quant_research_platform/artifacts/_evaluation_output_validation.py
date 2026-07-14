@@ -10,6 +10,11 @@ from quant_research_platform.artifacts._membership_validation import (
     validate_string_membership_column,
 )
 from quant_research_platform.artifacts._output_common_validation import (
+    require_metadata_string,
+    require_metadata_string_list,
+    require_non_negative_metadata_int,
+    require_optional_metadata_string,
+    require_signal_metadata_list,
     validate_filter_metadata,
 )
 from quant_research_platform.contracts.evaluations import (
@@ -23,6 +28,7 @@ from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
 )
+from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.validation import strict_timestamp_series
 
 EVALUATION_METRICS_COLUMNS = ("timestamp", "signal", "label", "ic", "rankic", "n_obs")
@@ -64,6 +70,153 @@ EVALUATION_ARTIFACTS = [
     "group_spread_summary.parquet",
     "summary.md",
 ]
+_EVALUATION_OUTPUT_METADATA_KEYS = frozenset(
+    {
+        "run_id",
+        "run_type",
+        "market_id",
+        "research_dataset_id",
+        "signals",
+        "label_columns",
+        "filter_mode",
+        "evaluation_diagnostics",
+    }
+)
+_EVALUATION_DIAGNOSTIC_KEYS = frozenset(
+    {
+        "filter_mode",
+        "filter_columns_used",
+        "filter_definition",
+        "rows_input",
+        "rows_after_filter_mode",
+        "rows_after_signal_label_dropna",
+        "metric_rows",
+        "grouped_label_value_rows",
+        "ic_summary_rows",
+        "group_spread_summary_rows",
+        "timestamp_count",
+        "min_timestamp",
+        "max_timestamp",
+        "n_groups",
+        "skipped_timestamp_count",
+    }
+)
+
+
+def validate_evaluation_output_metadata_shape(
+    metadata: object,
+) -> dict[str, object]:
+    if type(metadata) is not dict or set(metadata) != _EVALUATION_OUTPUT_METADATA_KEYS:
+        raise ValueError("output_manifest_metadata_invalid")
+    for key in (
+        "run_id",
+        "run_type",
+        "market_id",
+        "research_dataset_id",
+        "filter_mode",
+    ):
+        require_metadata_string(metadata, key, "output_manifest_metadata_invalid")
+    label_columns = require_metadata_string_list(
+        metadata, "label_columns", "output_manifest_metadata_invalid"
+    )
+    signals = require_signal_metadata_list(
+        metadata, "signals", "output_manifest_metadata_invalid"
+    )
+    if not label_columns:
+        raise ValueError("output_manifest_metadata_invalid")
+
+    diagnostics = metadata["evaluation_diagnostics"]
+    if type(diagnostics) is not dict or set(diagnostics) != _EVALUATION_DIAGNOSTIC_KEYS:
+        raise ValueError("output_manifest_metadata_invalid")
+    require_metadata_string(
+        diagnostics, "filter_mode", "output_manifest_metadata_invalid"
+    )
+    require_metadata_string(
+        diagnostics, "filter_definition", "output_manifest_metadata_invalid"
+    )
+    require_metadata_string_list(
+        diagnostics,
+        "filter_columns_used",
+        "output_manifest_metadata_invalid",
+        allow_empty=True,
+    )
+    for key in (
+        "rows_input",
+        "rows_after_filter_mode",
+        "rows_after_signal_label_dropna",
+        "metric_rows",
+        "grouped_label_value_rows",
+        "ic_summary_rows",
+        "group_spread_summary_rows",
+        "timestamp_count",
+        "n_groups",
+        "skipped_timestamp_count",
+    ):
+        require_non_negative_metadata_int(
+            diagnostics, key, "output_manifest_metadata_invalid"
+        )
+    min_timestamp = require_optional_metadata_string(
+        diagnostics, "min_timestamp", "output_manifest_metadata_invalid"
+    )
+    max_timestamp = require_optional_metadata_string(
+        diagnostics, "max_timestamp", "output_manifest_metadata_invalid"
+    )
+    if (diagnostics["min_timestamp"] is None) != (
+        diagnostics["max_timestamp"] is None
+    ):
+        raise ValueError("output_manifest_metadata_invalid")
+    if not (
+        diagnostics["rows_after_filter_mode"] <= diagnostics["rows_input"]
+        and diagnostics["rows_after_signal_label_dropna"]
+        <= diagnostics["rows_after_filter_mode"]
+        * len(metadata["signals"])
+        * len(label_columns)
+    ):
+        raise ValueError("output_manifest_metadata_invalid")
+    if (
+        metadata["filter_mode"] != diagnostics["filter_mode"]
+        or diagnostics["metric_rows"] < diagnostics["timestamp_count"]
+    ):
+        raise ValueError("output_manifest_metadata_invalid")
+    try:
+        evaluation_diagnostics = EvaluationDiagnostics(
+            filter_mode=diagnostics["filter_mode"],
+            filter_columns_used=tuple(diagnostics["filter_columns_used"]),
+            filter_definition=diagnostics["filter_definition"],
+            rows_input=diagnostics["rows_input"],
+            rows_after_filter_mode=diagnostics["rows_after_filter_mode"],
+            rows_after_signal_label_dropna=diagnostics[
+                "rows_after_signal_label_dropna"
+            ],
+            metric_rows=diagnostics["metric_rows"],
+            grouped_label_value_rows=diagnostics["grouped_label_value_rows"],
+            ic_summary_rows=diagnostics["ic_summary_rows"],
+            group_spread_summary_rows=diagnostics["group_spread_summary_rows"],
+            timestamp_count=diagnostics["timestamp_count"],
+            min_timestamp=min_timestamp,
+            max_timestamp=max_timestamp,
+            n_groups=diagnostics["n_groups"],
+            skipped_timestamp_count=diagnostics["skipped_timestamp_count"],
+        )
+        validate_filter_metadata(
+            mode=evaluation_diagnostics.filter_mode,
+            columns=list(evaluation_diagnostics.filter_columns_used),
+            definition=evaluation_diagnostics.filter_definition,
+            error_name="output_manifest_metadata_invalid",
+        )
+        EvaluationSpec(
+            run_id=metadata["run_id"],
+            market_id=MarketId(metadata["market_id"]),
+            research_dataset_id=metadata["research_dataset_id"],
+            signals=signals,
+            label_columns=tuple(label_columns),
+            filter_mode=metadata["filter_mode"],
+            n_groups=evaluation_diagnostics.n_groups,
+            run_type=metadata["run_type"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("output_manifest_metadata_invalid") from exc
+    return metadata
 
 
 def validate_evaluation_diagnostics_consistency(

@@ -5,7 +5,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
+from quant_research_platform.contracts._json import render_qrp_json_object
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
@@ -129,9 +131,97 @@ def test_local_verification_workflow_fails_when_dataset_manifest_is_missing(
     assert result.status == "FAIL"
     assert "dataset_manifest_missing" in validation["failure_codes"]
     assert validation["dataset_manifest_completeness"]["missing"] == [
-        f"data/interim/csmar/{frequency_ids.MARKET_BARS_DATA_ID}"
+        "data/interim/csmar/"
+        f"{frequency_ids.MARKET_BARS_DATA_ID}/_manifest/manifest.json"
     ]
     assert run_payload["status"]["overall"] == validation["status"] == "FAIL"
+    summary_md = (run_root / "summary.md").read_text(encoding="utf-8")
+    assert "- overall: `FAIL`" in summary_md
+    assert "- validation: `FAIL`" in summary_md
+
+
+@pytest.mark.parametrize(
+    "null_count_summary",
+    ({}, {"source_asset_id": 0}),
+    ids=("empty", "composite-key-member-omitted"),
+)
+def test_local_verification_workflow_fails_when_primary_key_null_facts_are_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    null_count_summary: dict[str, int],
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "assemble_research_dataset",
+        persist_fake_research_root,
+    )
+    stub_output_writers(monkeypatch)
+    monkeypatch.setattr(
+        module,
+        "build_evaluation_result_from_research_dataset",
+        lambda **kwargs: fake_evaluation_result(kwargs),
+    )
+    monkeypatch.setattr(
+        module,
+        "build_prediction_result_from_research_dataset",
+        lambda **kwargs: fake_prediction_result(kwargs),
+    )
+    monkeypatch.setattr(
+        module,
+        "build_portfolio_result_from_research_dataset",
+        lambda **kwargs: fake_portfolio_result(kwargs),
+    )
+
+    def remove_primary_key_null_facts(
+        root: Path,
+        manifest: dict[str, object],
+    ) -> None:
+        manifest["null_count_summary"] = null_count_summary
+        (root / "_manifest" / "manifest.json").write_text(
+            render_qrp_json_object(manifest) + "\n",
+            encoding="utf-8",
+        )
+
+    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "pk-null-facts")
+    result = run_local_verification(
+        make_local_verification_config(
+            run_root=run_root,
+            start_date="2014-01-01",
+            end_date="2016-12-31",
+            profile=profile_with_materializers(
+                stub_interim_importer(on_artifact=remove_primary_key_null_facts),
+                empty_processed_inputs,
+            ),
+        )
+    )
+    run_payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+    validation = run_payload["checks"]["validation"]
+
+    assert result.status == "FAIL"
+    assert validation["status"] == "FAIL"
+    assert validation["failure_codes"] == [
+        "dataset_validation_failed",
+        "primary_key_nulls",
+        "layer_validation_failed",
+    ]
+    assert validation["primary_key_null_failures"] == [
+        frequency_ids.MARKET_BARS_DATA_ID
+    ]
+    assert validation["dataset_manifest_completeness"]["missing"] == []
+    assert run_payload["status"]["validation"] == "FAIL"
+    assert run_payload["status"]["smoke"] == "FAIL"
+    assert run_payload["status"]["overall"] == "FAIL"
+    assert run_payload["data"]["run_validation_status"] == "FAIL"
+    assert run_payload["data"]["failed_layers"] == ["interim"]
+    interim_layer = next(
+        layer
+        for layer in run_payload["data"]["layers"]
+        if layer["logical_layer"] == "interim"
+    )
+    assert interim_layer["missing_dataset_manifests"] == []
+    assert interim_layer["failed_dataset_validations"] == [
+        frequency_ids.MARKET_BARS_DATA_ID
+    ]
     summary_md = (run_root / "summary.md").read_text(encoding="utf-8")
     assert "- overall: `FAIL`" in summary_md
     assert "- validation: `FAIL`" in summary_md
@@ -198,9 +288,32 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
     assert run_payload["status"]["compare"] == "NOT_RUN"
     assert run_payload["status"]["full_horizon"] == "NOT_RUN"
     assert run_payload["status"]["validation_matrix"] == "NOT_RUN"
-    assert run_payload["checks"]["validation"]["share_safety_scan"][
-        "checked_count"
-    ] == 1
+    share_safety_scan = run_payload["checks"]["validation"]["share_safety_scan"]
+    expected_evidence_count = sum(
+        1
+        + sum(
+            not file_name.casefold().endswith(".parquet")
+            for file_name in output["files"]
+        )
+        for output in run_payload["outputs"]
+    )
+    expected_evidence_paths = [
+        path
+        for output in run_payload["outputs"]
+        for path in (
+            output["manifest_path"],
+            *(
+                f"outputs/{output['output_id']}/{file_name}"
+                for file_name in output["files"]
+                if not file_name.casefold().endswith(".parquet")
+            ),
+        )
+    ]
+    assert share_safety_scan["requested_count"] == expected_evidence_count
+    assert share_safety_scan["checked_count"] == expected_evidence_count
+    assert share_safety_scan["existing_scanned_count"] == expected_evidence_count
+    assert share_safety_scan["missing_count"] == 0
+    assert share_safety_scan["requested_paths"] == expected_evidence_paths
     assert len(run_payload["outputs"]) == len(prediction_ids) + 2
     assert set(metrics["signal"]) == {"mom_20d", "rev_1d", "mom_20d_zscore"}
     assert "mom_20d_zscore" in research.columns

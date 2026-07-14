@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from collections import UserDict
+from dataclasses import replace
+from types import MappingProxyType
+
 import pytest
 from pydantic import ValidationError
 
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.data import DataFrequency, DataGrain
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    DataGrain,
+    normalize_data_frequency,
+)
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
@@ -14,6 +22,29 @@ from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec, WeightConfig
 from quant_research_platform.contracts.signals import SignalSpec
 from tests.helpers import frequency_ids
+
+
+class _DictSubclass(dict[str, str]):
+    pass
+
+
+class _ColumnRoleDictSubclass(dict[str, ColumnRole]):
+    pass
+
+
+class _StringSubclass(str):
+    pass
+
+
+def test_data_frequency_vocabulary_is_current_and_exact() -> None:
+    assert tuple(frequency.value for frequency in DataFrequency) == (
+        frequency_ids.DAILY_FREQUENCY_SLUG,
+        "1m",
+        "tick",
+    )
+    for retired_value in ("daily", "minute", "1min"):
+        with pytest.raises(ValueError, match="^invalid_data_frequency:"):
+            normalize_data_frequency(retired_value)
 
 
 def test_research_dataset_splits_factor_and_feature_columns_without_alias() -> None:
@@ -96,6 +127,209 @@ def test_research_dataset_splits_factor_and_feature_columns_without_alias() -> N
             feature_columns=("mom_20d",),
             label_columns=("forward_return_20d",),
         )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "missing_column"),
+    [
+        ("factor_columns", "missing_factor"),
+        ("feature_columns", "missing_feature"),
+        ("label_columns", "missing_label"),
+        ("filter_columns", "missing_filter"),
+        ("context_columns", "missing_context"),
+    ],
+)
+def test_research_dataset_spec_requires_semantic_columns_in_required_columns(
+    field_name: str,
+    missing_column: str,
+) -> None:
+    spec = _complete_research_dataset_spec()
+    changes: dict[str, object] = {field_name: (missing_column,)}
+    if field_name == "feature_columns":
+        changes["feature_transforms"] = (
+            FeatureTransformSpec(
+                transform_id="missing_feature_from_factor_1",
+                source_columns=("factor_1",),
+                output_columns=(missing_column,),
+                transform="cross_sectional_zscore",
+            ),
+        )
+
+    with pytest.raises(
+        ValueError,
+        match=f"research_semantic_column_not_required: {field_name}",
+    ):
+        replace(spec, **changes)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "column", "invalid_role"),
+    [
+        ("factor_columns", "factor_1", ColumnRole.MASK),
+        ("feature_columns", "feature_1", ColumnRole.CONTEXT),
+        ("label_columns", "label_1", ColumnRole.CONTEXT),
+        ("filter_columns", "eligible", ColumnRole.CONTEXT),
+        ("context_columns", "context_1", ColumnRole.MASK),
+    ],
+)
+def test_research_dataset_spec_requires_semantic_column_roles(
+    field_name: str,
+    column: str,
+    invalid_role: ColumnRole,
+) -> None:
+    spec = _complete_research_dataset_spec()
+
+    with pytest.raises(
+        ValueError,
+        match=f"research_semantic_column_role_invalid: {field_name}",
+    ):
+        replace(
+            spec,
+            column_roles={**spec.column_roles, column: invalid_role},
+        )
+
+
+def test_research_dataset_spec_allows_mask_or_universe_filter_roles() -> None:
+    spec = _complete_research_dataset_spec()
+
+    universe_filter = replace(
+        spec,
+        column_roles={**spec.column_roles, "eligible": ColumnRole.UNIVERSE},
+    )
+
+    assert universe_filter.column_roles["eligible"] is ColumnRole.UNIVERSE
+
+
+def test_research_dataset_spec_freezes_semantic_mapping_snapshots() -> None:
+    original = _complete_research_dataset_spec()
+    source_roles = dict(original.column_roles)
+    source_key_coverage = {"factors": "sparse"}
+
+    spec = replace(
+        original,
+        column_roles=source_roles,
+        key_coverage=source_key_coverage,
+    )
+    source_roles["factor_1"] = ColumnRole.MASK
+    source_key_coverage["factors"] = "strict"
+    source_key_coverage["annotations"] = "sparse"
+
+    assert type(spec.column_roles) is MappingProxyType
+    assert type(spec.key_coverage) is MappingProxyType
+    assert spec.column_roles["factor_1"] is ColumnRole.FACTOR
+    assert spec.key_coverage == {
+        "factors": "sparse",
+        "labels": "strict",
+        "annotations": "strict",
+    }
+    with pytest.raises(TypeError):
+        spec.column_roles["factor_1"] = ColumnRole.MASK  # type: ignore[index]
+    with pytest.raises(TypeError):
+        spec.key_coverage["annotations"] = "sparse"  # type: ignore[index]
+
+    replacement = replace(spec)
+
+    assert replacement == spec
+    assert replacement is not spec
+    assert replacement.column_roles is not spec.column_roles
+    assert replacement.key_coverage is not spec.key_coverage
+    assert replacement.key_coverage["annotations"] == "strict"
+
+
+@pytest.mark.parametrize(
+    "wrong_container",
+    (
+        [("market_id", ColumnRole.KEY)],
+        (("market_id", ColumnRole.KEY),),
+        "market_id",
+        None,
+        _ColumnRoleDictSubclass({"market_id": ColumnRole.KEY}),
+        UserDict({"market_id": ColumnRole.KEY}),
+    ),
+    ids=("list_pairs", "tuple_pairs", "string", "none", "dict_subclass", "mapping"),
+)
+def test_research_dataset_spec_requires_exact_column_roles_container(
+    wrong_container: object,
+) -> None:
+    spec = _complete_research_dataset_spec()
+
+    with pytest.raises(ValueError, match="^invalid_research_column_roles$"):
+        replace(spec, column_roles=wrong_container)
+
+
+@pytest.mark.parametrize(
+    "wrong_key",
+    (1, "", _StringSubclass("factor_1_alias")),
+    ids=("integer", "empty", "str_subclass"),
+)
+def test_research_dataset_spec_requires_exact_nonempty_column_role_keys(
+    wrong_key: object,
+) -> None:
+    spec = _complete_research_dataset_spec()
+
+    with pytest.raises(ValueError, match="^invalid_research_column_roles$"):
+        replace(
+            spec,
+            column_roles={**spec.column_roles, wrong_key: ColumnRole.FACTOR},
+        )
+
+
+@pytest.mark.parametrize(
+    "wrong_role",
+    ("factor", _StringSubclass("factor"), 1),
+    ids=("string", "str_subclass", "integer"),
+)
+def test_research_dataset_spec_requires_exact_column_role_values(
+    wrong_role: object,
+) -> None:
+    spec = _complete_research_dataset_spec()
+
+    with pytest.raises(ValueError, match="^invalid_research_column_roles$"):
+        replace(
+            spec,
+            column_roles={**spec.column_roles, "factor_1": wrong_role},
+        )
+
+
+@pytest.mark.parametrize(
+    "wrong_kind",
+    ([], {}, _StringSubclass("strict")),
+    ids=("list", "dict", "str_subclass"),
+)
+def test_research_dataset_spec_rejects_invalid_key_coverage_policy_with_owner_error(
+    wrong_kind: object,
+) -> None:
+    spec = _complete_research_dataset_spec()
+
+    with pytest.raises(ValueError, match="^invalid_research_key_coverage"):
+        replace(
+            spec,
+            key_coverage={**spec.key_coverage, "factors": wrong_kind},
+        )
+
+
+@pytest.mark.parametrize(
+    "wrong_container",
+    ([], (), None, _DictSubclass()),
+    ids=("list", "tuple", "none", "dict_subclass"),
+)
+def test_research_dataset_spec_requires_exact_key_coverage_dict(
+    wrong_container: object,
+) -> None:
+    spec = _complete_research_dataset_spec()
+
+    with pytest.raises(ValueError, match="^invalid_research_key_coverage$"):
+        replace(spec, key_coverage=wrong_container)
+
+
+@pytest.mark.parametrize("wrong_key", (1, _StringSubclass("factors")))
+def test_research_dataset_spec_requires_exact_string_key_coverage_keys(
+    wrong_key: object,
+) -> None:
+    spec = _complete_research_dataset_spec()
+
+    with pytest.raises(ValueError, match="^invalid_research_key_coverage$"):
+        replace(spec, key_coverage={wrong_key: "strict"})
 
 
 def test_feature_transform_spec_rejects_raw_factor_pass_through() -> None:
@@ -351,3 +585,39 @@ def test_weight_config_is_portfolio_contract_without_direction() -> None:
 
     assert config.method == "rank_weighted_quantile"
     assert not hasattr(config, "direction")
+
+
+def _complete_research_dataset_spec() -> ResearchDatasetSpec:
+    return ResearchDatasetSpec(
+        data_id="complete_research",
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.RESEARCH_ROW,
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "factor_1": ColumnRole.FACTOR,
+            "feature_1": ColumnRole.FEATURE,
+            "label_1": ColumnRole.LABEL,
+            "eligible": ColumnRole.MASK,
+            "context_1": ColumnRole.CONTEXT,
+        },
+        primary_key=("market_id", "asset_id", "timestamp"),
+        partition_columns=("year",),
+        market_id=MarketId("a_share"),
+        input_data_ids=("factors", "labels", "annotations"),
+        base_input_data_id="annotations",
+        factor_columns=("factor_1",),
+        feature_columns=("feature_1",),
+        feature_transforms=(
+            FeatureTransformSpec(
+                transform_id="feature_1_from_factor_1",
+                source_columns=("factor_1",),
+                output_columns=("feature_1",),
+                transform="cross_sectional_zscore",
+            ),
+        ),
+        label_columns=("label_1",),
+        filter_columns=("eligible",),
+        context_columns=("context_1",),
+    )

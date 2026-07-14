@@ -16,6 +16,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from pandas.api.types import union_categoricals
 
+from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_date_bounds,
@@ -33,9 +34,11 @@ from quant_research_platform.storage._dataset_paths import (
     timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage._dataset_schema import (
-    sha256_json,
-    validate_dataset_manifest_instance_metadata,
-    validated_schema,
+    physical_schema_columns,
+    validate_dataset_manifest_consumable,
+    validate_dataset_manifest_payload,
+    validate_dataset_spec_payload,
+    validated_physical_schema,
 )
 from quant_research_platform.storage._dataset_types import (
     DatasetReadMode,
@@ -66,7 +69,7 @@ class DatasetReadContext:
     physical_columns: tuple[str, ...]
     timestamp_column: str | None
     time_window: TimeWindow | None
-    schema: tuple[tuple[str, str], ...]
+    schema: list[dict[str, Any]]
     schema_hash: str
     parquet_filters: list[tuple[str, str, Any]] | None
 
@@ -150,6 +153,7 @@ def build_dataset_read_context(
     columns: tuple[str, ...] | list[str] | None,
     time_window: TimeWindow | None,
     row_filters: tuple[tuple[str, str, Any], ...] = (),
+    require_consumable: bool = True,
 ) -> DatasetReadContext:
     root = require_artifact_root(Path(dataset_root))
     spec_path = root / "spec.json"
@@ -164,6 +168,7 @@ def build_dataset_read_context(
         expected_schema_id="qrp-dataset-spec",
         error="dataset_spec_schema_id_invalid",
     )
+    validate_dataset_spec_payload(spec_payload)
     if not manifest_path.is_file():
         raise ValueError("dataset_manifest_missing")
     manifest = read_qrp_json(
@@ -171,15 +176,17 @@ def build_dataset_read_context(
         expected_schema_id="qrp-dataset-manifest",
         error="dataset_manifest_schema_id_invalid",
     )
-    validate_dataset_manifest_instance_metadata(manifest)
+    validate_dataset_manifest_payload(manifest, spec=spec_payload)
+    if require_consumable:
+        validate_dataset_manifest_consumable(manifest)
     if not manifest_has_runtime_metadata(manifest):
         raise ValueError("manifest_runtime_metadata_missing")
     all_paths = tuple(candidate_data_files(data_root, spec=spec_payload))
     if not all_paths:
         raise ValueError("dataset_data_dir_missing")
-    schema = validated_schema(list(all_paths))
-    schema_columns = tuple(name for name, _ in schema)
-    schema_hash = sha256_json(schema)
+    schema = validated_physical_schema(list(all_paths))
+    schema_columns = physical_schema_columns(schema)
+    schema_hash = canonical_json_hash(schema)
     validate_manifest_runtime_metadata(
         manifest,
         data_root=data_root,
@@ -188,6 +195,8 @@ def build_dataset_read_context(
     )
     if tuple(str(column) for column in manifest["columns"]) != schema_columns:
         raise ValueError("manifest_columns_mismatch")
+    if manifest["physical_schema"] != schema:
+        raise ValueError("manifest_physical_schema_mismatch")
     if str(manifest["schema_hash"]) != schema_hash:
         raise ValueError("manifest_schema_hash_mismatch")
     logical_columns = resolve_columns_from_schema(
@@ -424,7 +433,7 @@ def build_dataset_equality_group_plan(
     target_chunk_bytes: int,
     target_state_bytes: int,
 ) -> DatasetEqualityGroupPlan:
-    schema_columns = {name for name, _ in context.schema}
+    schema_columns = set(physical_schema_columns(context.schema))
     if not columns or any(column not in schema_columns for column in columns):
         raise ValueError("invalid_dataset_equality_group_columns")
     if (

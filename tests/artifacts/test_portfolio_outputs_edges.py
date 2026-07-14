@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 import quant_research_platform.artifacts._portfolio_output_validation as validation
 import quant_research_platform.artifacts._portfolio_outputs as portfolio_outputs
+from quant_research_platform.artifacts._output_manifest import (
+    portfolio_output_metadata_from_row_counts,
+)
 from quant_research_platform.artifacts._portfolio_output_validation import (
     validate_portfolio_artifact_membership_columns,
 )
@@ -16,6 +20,7 @@ from tests.artifacts.output_edge_fixtures import (
     make_output_edge_portfolio_artifacts,
     make_output_edge_portfolio_spec,
     make_output_edge_report_spec,
+    output_edge_portfolio_row_artifact_names,
     write_output_edge_portfolio_chunks,
 )
 
@@ -295,3 +300,155 @@ def test_portfolio_validation_rejects_invalid_membership_values() -> None:
 
 def test_portfolio_validation_has_no_test_only_bulk_parallel_path() -> None:
     assert not hasattr(validation, "validate_portfolio_artifact_semantics")
+
+
+@pytest.mark.parametrize(
+    ("mapping_name", "mutation"),
+    (
+        ("rows", "missing"),
+        ("rows", "extra"),
+        ("rows", "value"),
+        ("summary", "missing"),
+        ("summary", "extra"),
+        ("summary", "value"),
+    ),
+)
+def test_portfolio_outputs_reject_exact_mapping_mutations_and_clean_scratch(
+    tmp_path: Path,
+    mapping_name: str,
+    mutation: str,
+) -> None:
+    spec = make_output_edge_portfolio_spec()
+    artifacts = make_output_edge_portfolio_artifacts()
+    row_names = output_edge_portfolio_row_artifact_names()
+    row_mapping = {name: artifacts[name] for name in row_names}
+    summary_mapping = {
+        name: artifacts[name] for name in artifacts if name not in row_names
+    }
+    target = row_mapping if mapping_name == "rows" else summary_mapping
+    if mutation == "missing":
+        target.pop(next(iter(target)))
+    elif mutation == "extra":
+        target["unexpected_artifact"] = pd.DataFrame()
+    else:
+        target[next(iter(target))] = object()
+
+    final_path = tmp_path / "outputs" / "portfolio_demo_report"
+    error = "portfolio_row" if mapping_name == "rows" else "portfolio_summary"
+    with pytest.raises(ValueError, match=error):
+        portfolio_outputs._write_portfolio_output_chunks(
+            (row_mapping,),
+            summary_factory=lambda: summary_mapping,
+            spec=spec,
+            output_spec=make_output_edge_report_spec(
+                "portfolio_outputs", spec.portfolio_id, "portfolio"
+            ),
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+    assert not final_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value"),
+    (
+        ("missing", None),
+        ("extra", None),
+        ("bool", True),
+        ("string", "1"),
+        ("float", 1.0),
+        ("numpy", np.int64(1)),
+        ("negative", -1),
+    ),
+)
+def test_portfolio_row_counts_exact_mutation_matrix(
+    mutation: str,
+    value: object,
+) -> None:
+    row_counts = {name: 0 for name in validation.PORTFOLIO_ARTIFACTS}
+    if mutation == "missing":
+        row_counts.pop("positions")
+    elif mutation == "extra":
+        row_counts["unexpected"] = 0
+    else:
+        row_counts["positions"] = value
+
+    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+        validation.validate_portfolio_row_counts(row_counts)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "weight_method",
+        "weight_mode",
+        "weight_quantile_sum",
+        "weight_inverse_risk",
+        "tradability_entry_policy",
+        "tradability_exit_policy",
+        "cost_negative",
+        "cost_nonfinite",
+        "diagnostics_capacity_dependency",
+        "diagnostics_exposure_overlap",
+        "rebalance_frequency",
+        "signal_source_kind",
+        "signal_direction",
+        "signal_transform",
+        "signal_filter_column",
+        "signal_return_overlap",
+    ),
+)
+def test_portfolio_metadata_reuses_complete_business_owner_graph(
+    mutation: str,
+) -> None:
+    spec = make_output_edge_portfolio_spec()
+    metadata = portfolio_output_metadata_from_row_counts(
+        spec=spec,
+        row_counts={name: 0 for name in validation.PORTFOLIO_ARTIFACTS},
+    )
+    assert validation.validate_portfolio_output_metadata_shape(metadata) is metadata
+
+    if mutation == "weight_method":
+        metadata["weight_config"]["method"] = "unknown"
+    elif mutation == "weight_mode":
+        metadata["weight_config"]["portfolio_mode"] = "unknown"
+    elif mutation == "weight_quantile_sum":
+        metadata["weight_config"].update(
+            {"top_quantile": 0.8, "bottom_quantile": 0.8}
+        )
+    elif mutation == "weight_inverse_risk":
+        metadata["weight_config"].update(
+            {"method": "inverse_vol_scaled_quantile", "risk_column": None}
+        )
+    elif mutation == "tradability_entry_policy":
+        metadata["tradability_config"]["blocked_entry_policy"] = "unknown"
+    elif mutation == "tradability_exit_policy":
+        metadata["tradability_config"]["blocked_exit_policy"] = "unknown"
+    elif mutation == "cost_negative":
+        metadata["cost_config"]["buy_cost_bps"] = -1.0
+    elif mutation == "cost_nonfinite":
+        metadata["cost_config"]["spread_bps"] = float("inf")
+    elif mutation == "diagnostics_capacity_dependency":
+        metadata["diagnostics_config"]["capacity_float_market_cap_column"] = (
+            "float_market_cap"
+        )
+    elif mutation == "diagnostics_exposure_overlap":
+        metadata["diagnostics_config"]["numeric_exposure_columns"] = ["sector"]
+        metadata["diagnostics_config"]["categorical_exposure_columns"] = ["sector"]
+    elif mutation == "rebalance_frequency":
+        metadata["rebalance_frequency"] = "weekly"
+    elif mutation == "signal_source_kind":
+        metadata["signals"][0]["source_kind"] = "unknown"
+    elif mutation == "signal_direction":
+        metadata["signals"][0]["direction"] = "unknown"
+    elif mutation == "signal_transform":
+        metadata["signals"][0]["transform"] = "unknown"
+    elif mutation == "signal_filter_column":
+        metadata["signals"][0]["source_column"] = "eligible"
+    else:
+        metadata["signals"][0]["source_column"] = metadata[
+            "return_source_column"
+        ]
+
+    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+        validation.validate_portfolio_output_metadata_shape(metadata)

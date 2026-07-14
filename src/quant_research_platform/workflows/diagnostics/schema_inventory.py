@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Collection, Iterable
 from contextlib import ExitStack
-from pathlib import Path
+from datetime import date
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pandas as pd
 
+from quant_research_platform.contracts._json import canonical_json_hash
+from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAYERS
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
@@ -23,6 +24,31 @@ from quant_research_platform.storage._dataset_reading import (
 )
 from quant_research_platform.storage.datasets import inspect_dataset
 
+_INVENTORY_KEYS = frozenset({"schema_id", "datasets"})
+_INVENTORY_ITEM_KEYS = frozenset(
+    {
+        "artifact_id",
+        "layer",
+        "kind",
+        "logical_relative_root",
+        "columns",
+        "dtypes",
+        "primary_key",
+        "partition_columns",
+        "file_count",
+        "row_count",
+        "row_count_by_year",
+        "min_timestamp",
+        "max_timestamp",
+        "duplicate_primary_key_count",
+        "null_key_counts",
+        "selected_important_column_null_counts",
+        "schema_hash",
+        "warnings",
+    }
+)
+_LOWER_HEX = frozenset("0123456789abcdef")
+
 
 def build_schema_inventory_payload(
     project_root: Path,
@@ -32,9 +58,17 @@ def build_schema_inventory_payload(
     """Build sanitized aggregate schema metadata for private dataset artifacts."""
 
     root = Path(project_root)
-    important_columns = frozenset(str(column) for column in (
-        important_null_count_columns or ()
-    ))
+    declared_important_columns = (
+        ()
+        if important_null_count_columns is None
+        else important_null_count_columns
+    )
+    if any(
+        type(column) is not str or not column
+        for column in declared_important_columns
+    ):
+        raise ValueError("schema_inventory_important_columns_invalid")
+    important_columns = frozenset(declared_important_columns)
     items = [
         _inventory_item(
             root,
@@ -51,11 +85,240 @@ def build_schema_inventory_payload(
     }
 
 
+def summarize_schema_inventory_payload(
+    value: object,
+) -> dict[str, object]:
+    """Validate and summarize one complete schema inventory without coercion."""
+
+    payload = validate_schema_inventory_payload(value)
+    datasets = payload["datasets"]
+    return {
+        "schema_id": "qrp-schema-inventory-summary",
+        "dataset_count": len(datasets),
+        "total_row_count": sum(item["row_count"] for item in datasets),
+        "schema_hash": canonical_json_hash(
+            [
+                {
+                    "artifact_id": item["artifact_id"],
+                    "layer": item["layer"],
+                    "kind": item["kind"],
+                    "logical_relative_root": item["logical_relative_root"],
+                    "schema_hash": item["schema_hash"],
+                    "row_count": item["row_count"],
+                }
+                for item in datasets
+            ]
+        ),
+    }
+
+
+def validate_schema_inventory_payload(
+    value: object,
+) -> dict[str, list[dict[str, Any]] | str]:
+    """Validate the exact Workflow-owned schema-inventory grammar."""
+
+    if type(value) is not dict or set(value) != _INVENTORY_KEYS:
+        raise ValueError("schema_inventory_fields_invalid")
+    if value["schema_id"] != "qrp-schema-inventory":
+        raise ValueError("schema_inventory_schema_id_invalid")
+    datasets = value["datasets"]
+    if type(datasets) is not list or not datasets:
+        raise ValueError("schema_inventory_datasets_required")
+    validated: list[dict[str, Any]] = []
+    logical_roots: list[str] = []
+    identities: set[tuple[str, str, str, str]] = set()
+    for item in datasets:
+        validated_item = _validate_schema_inventory_item(item)
+        logical_root = validated_item["logical_relative_root"]
+        identity = _logical_identifiers(logical_root)
+        if logical_root in logical_roots or identity in identities:
+            raise ValueError("schema_inventory_dataset_duplicate")
+        logical_roots.append(logical_root)
+        identities.add(identity)
+        validated.append(validated_item)
+    if logical_roots != sorted(logical_roots):
+        raise ValueError("schema_inventory_dataset_order_invalid")
+    return {"schema_id": "qrp-schema-inventory", "datasets": validated}
+
+
+def _validate_schema_inventory_item(value: object) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != _INVENTORY_ITEM_KEYS:
+        raise ValueError("schema_inventory_dataset_invalid")
+    for key in ("artifact_id", "layer", "kind", "logical_relative_root"):
+        if type(value[key]) is not str or not value[key]:
+            raise ValueError("schema_inventory_dataset_invalid")
+    if value["layer"] not in RUN_RESULT_DATASET_LAYERS:
+        raise ValueError("schema_inventory_dataset_invalid")
+    logical_root = value["logical_relative_root"]
+    logical_path = PurePosixPath(logical_root)
+    if (
+        logical_path.is_absolute()
+        or logical_path.as_posix() != logical_root
+        or not logical_path.parts
+        or any(part in {"", ".", ".."} for part in logical_path.parts)
+    ):
+        raise ValueError("schema_inventory_dataset_invalid")
+    try:
+        path_layer, _, path_kind, path_artifact_id = _logical_identifiers(logical_root)
+    except ValueError:
+        raise ValueError("schema_inventory_dataset_invalid") from None
+    if (
+        value["layer"],
+        value["kind"],
+        value["artifact_id"],
+    ) != (path_layer, path_kind, path_artifact_id):
+        raise ValueError("schema_inventory_dataset_invalid")
+
+    columns = _exact_string_list(value["columns"], allow_empty=False)
+    primary_key = _exact_string_list(value["primary_key"], allow_empty=True)
+    partition_columns = _exact_string_list(
+        value["partition_columns"], allow_empty=True
+    )
+    warnings = _exact_string_list(value["warnings"], allow_empty=True)
+    if warnings != sorted(warnings):
+        raise ValueError("schema_inventory_dataset_invalid")
+    dtypes = _exact_string_mapping(value["dtypes"], expected_keys=set(columns))
+    row_count_by_year = _exact_count_mapping(value["row_count_by_year"])
+    null_key_counts = _exact_count_mapping(
+        value["null_key_counts"], expected_keys=set(primary_key)
+    )
+    important_null_counts = _exact_count_mapping(
+        value["selected_important_column_null_counts"]
+    )
+    if not set(important_null_counts).issubset(columns):
+        raise ValueError("schema_inventory_dataset_invalid")
+    file_count = _exact_nonnegative_int(value["file_count"])
+    row_count = _exact_nonnegative_int(value["row_count"])
+    duplicate_count = _exact_nonnegative_int(value["duplicate_primary_key_count"])
+    if not set(primary_key).issubset(columns):
+        raise ValueError("schema_inventory_dataset_invalid")
+    if any(count > row_count for count in null_key_counts.values()) or any(
+        count > row_count for count in important_null_counts.values()
+    ):
+        raise ValueError("schema_inventory_dataset_invalid")
+    if duplicate_count > row_count or (row_count > 0 and file_count == 0):
+        raise ValueError("schema_inventory_dataset_invalid")
+    date_min, date_max = _exact_date_range(
+        value["min_timestamp"], value["max_timestamp"]
+    )
+    schema_hash = value["schema_hash"]
+    if (
+        type(schema_hash) is not str
+        or len(schema_hash) != 64
+        or any(character not in _LOWER_HEX for character in schema_hash)
+        or schema_hash
+        != _schema_hash(
+            columns=tuple(columns),
+            dtypes=dtypes,
+            primary_key=tuple(primary_key),
+            partition_columns=tuple(partition_columns),
+        )
+    ):
+        raise ValueError("schema_inventory_dataset_invalid")
+    years = list(row_count_by_year)
+    if (
+        years != sorted(years)
+        or any(
+            len(year) != 4
+            or not year.isdecimal()
+            or row_count_by_year[year] == 0
+            for year in years
+        )
+        or sum(row_count_by_year.values()) > row_count
+        or (
+            "timestamp" in primary_key
+            and null_key_counts["timestamp"] == 0
+            and sum(row_count_by_year.values()) != row_count
+        )
+        or bool(years) != (date_min is not None)
+        or (
+            years
+            and (years[0] != date_min[:4] or years[-1] != date_max[:4])
+        )
+    ):
+        raise ValueError("schema_inventory_dataset_invalid")
+    return value
+
+
+def _exact_date_range(
+    minimum: object,
+    maximum: object,
+) -> tuple[str | None, str | None]:
+    if minimum is None and maximum is None:
+        return None, None
+    if type(minimum) is not str or type(maximum) is not str:
+        raise ValueError("schema_inventory_dataset_invalid")
+    try:
+        parsed_minimum = date.fromisoformat(minimum)
+        parsed_maximum = date.fromisoformat(maximum)
+    except ValueError:
+        raise ValueError("schema_inventory_dataset_invalid") from None
+    if (
+        parsed_minimum.isoformat() != minimum
+        or parsed_maximum.isoformat() != maximum
+        or parsed_minimum > parsed_maximum
+    ):
+        raise ValueError("schema_inventory_dataset_invalid")
+    return minimum, maximum
+
+
+def _exact_string_list(value: object, *, allow_empty: bool) -> list[str]:
+    if (
+        type(value) is not list
+        or (not allow_empty and not value)
+        or any(type(item) is not str or not item for item in value)
+        or len(value) != len(set(value))
+    ):
+        raise ValueError("schema_inventory_dataset_invalid")
+    return value
+
+
+def _exact_string_mapping(
+    value: object,
+    *,
+    expected_keys: set[str],
+) -> dict[str, str]:
+    if (
+        type(value) is not dict
+        or set(value) != expected_keys
+        or any(
+            type(key) is not str
+            or not key
+            or type(item) is not str
+            or not item
+            for key, item in value.items()
+        )
+    ):
+        raise ValueError("schema_inventory_dataset_invalid")
+    return value
+
+
+def _exact_count_mapping(
+    value: object,
+    *,
+    expected_keys: set[str] | None = None,
+) -> dict[str, int]:
+    if type(value) is not dict or (
+        expected_keys is not None and set(value) != expected_keys
+    ):
+        raise ValueError("schema_inventory_dataset_invalid")
+    for key, item in value.items():
+        if type(key) is not str or not key:
+            raise ValueError("schema_inventory_dataset_invalid")
+        _exact_nonnegative_int(item)
+    return value
+
+
+def _exact_nonnegative_int(value: object) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError("schema_inventory_dataset_invalid")
+    return value
+
+
 def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
-    allowed_roots = (
-        project_root / "data" / "interim",
-        project_root / "data" / "processed",
-        project_root / "data" / "research",
+    allowed_roots = tuple(
+        project_root / "data" / layer
+        for layer in sorted(RUN_RESULT_DATASET_LAYERS)
     )
     for layer_root in allowed_roots:
         if not layer_root.exists():
@@ -75,10 +338,8 @@ def _inventory_item(
     spec_payload = inspection.spec
     warnings: list[str] = []
     columns = inspection.columns
-    primary_key = tuple(str(value) for value in spec_payload.get("primary_key", ()))
-    partition_columns = tuple(
-        str(value) for value in spec_payload.get("partition_columns", ())
-    )
+    primary_key = tuple(spec_payload.get("primary_key", ()))
+    partition_columns = tuple(spec_payload.get("partition_columns", ()))
     if not primary_key:
         primary_key = _infer_primary_key(columns)
         warnings.append(
@@ -95,7 +356,7 @@ def _inventory_item(
             else None
         ),
     )
-    layer, kind, artifact_id = _logical_identifiers(logical_root)
+    layer, _, kind, artifact_id = _logical_identifiers(logical_root)
     return {
         "artifact_id": artifact_id,
         "layer": layer,
@@ -158,6 +419,7 @@ def _aggregate_dataset_stats(
         artifact_root,
         columns=None,
         time_window=None,
+        require_consumable=False,
     )
     chunks = iter_dataset_chunks(
         context,
@@ -246,20 +508,18 @@ def _exact_key_cache_bytes(policy: RuntimeResourcePolicy) -> int:
     return cache_bytes
 
 
-def _logical_identifiers(logical_root: str) -> tuple[str, str, str]:
+def _logical_identifiers(logical_root: str) -> tuple[str, str, str, str]:
     parts = logical_root.split("/")
-    if len(parts) < 4 or parts[0] != "data":
+    if len(parts) < 2 or parts[0] != "data" or any(not part for part in parts):
         raise ValueError("invalid_inventory_root")
     layer = parts[1]
-    if layer == "interim":
-        return layer, "interim", parts[-1]
-    if layer == "processed":
-        kind_parts = parts[3:-1]
-        kind = "/".join(kind_parts) if kind_parts else parts[2]
-        return layer, kind, parts[-1]
-    if layer == "research":
-        return layer, "research_dataset", parts[-1]
-    return layer, "", parts[-1]
+    if layer == "interim" and len(parts) == 4:
+        return layer, parts[2], "interim", parts[3]
+    if layer == "processed" and len(parts) == 5:
+        return layer, parts[2], parts[3], parts[4]
+    if layer == "research" and len(parts) == 4:
+        return layer, parts[2], "research_dataset", parts[3]
+    raise ValueError("invalid_inventory_root")
 
 
 def _infer_primary_key(columns: tuple[str, ...]) -> tuple[str, ...]:
@@ -291,18 +551,18 @@ def _schema_hash(
     primary_key: tuple[str, ...],
     partition_columns: tuple[str, ...],
 ) -> str:
-    encoded = json.dumps(
+    return canonical_json_hash(
         {
             "columns": list(columns),
             "dtypes": dtypes,
             "primary_key": list(primary_key),
             "partition_columns": list(partition_columns),
         },
-        sort_keys=True,
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    )
 
 
-__all__ = ["build_schema_inventory_payload"]
+__all__ = [
+    "build_schema_inventory_payload",
+    "summarize_schema_inventory_payload",
+    "validate_schema_inventory_payload",
+]

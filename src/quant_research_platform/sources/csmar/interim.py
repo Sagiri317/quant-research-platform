@@ -310,7 +310,11 @@ def normalize_raw_frame(
         result["adj_open"] = result["open"] * result["adj_close"] / result["close"]
         result["float_market_cap"] = result["float_market_cap_thousand"] * 1000.0
         result["total_market_cap"] = result["total_market_cap_thousand"] * 1000.0
-        result["turnover"] = pd.NA
+        result["turnover"] = pd.Series(
+            float("nan"),
+            index=result.index,
+            dtype="float64",
+        )
         return result.sort_values(["source_asset_id", "timestamp"]).reset_index(
             drop=True
         )

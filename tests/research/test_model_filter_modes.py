@@ -90,7 +90,6 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
     assert {
         key: eligible.metadata[key]
         for key in (
-            "contract_version",
             "model_algorithm",
             "sample_filter_mode",
             "filter_columns_used",
@@ -108,7 +107,6 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
             "coefficient_count",
         )
     } == {
-        "contract_version": "0.1",
         "model_algorithm": "linear_regression",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],

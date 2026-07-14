@@ -8,9 +8,16 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
+from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.storage._dataset_paths import (
     candidate_data_files,
     relative_partition_label,
+)
+from quant_research_platform.storage._dataset_schema import (
+    physical_schema_columns,
+    validate_dataset_manifest_payload,
+    validate_dataset_spec_payload,
+    validate_physical_schema_payload,
 )
 from quant_research_platform.storage.manifests import read_qrp_json
 
@@ -35,6 +42,8 @@ def validate_written_artifact(root: Path, accumulator: Any) -> None:
         expected_schema_id="qrp-dataset-manifest",
         error="dataset_manifest_schema_id_invalid",
     )
+    validate_dataset_spec_payload(spec_payload)
+    validate_dataset_manifest_payload(manifest, spec=spec_payload)
     if not manifest_has_runtime_metadata(manifest):
         raise ValueError("manifest_runtime_metadata_missing")
     paths = candidate_data_files(data_root, spec=spec_payload)
@@ -52,13 +61,17 @@ def validate_manifest_matches_accumulator(
     manifest: Mapping[str, Any],
     accumulator: Any,
 ) -> None:
-    if int(manifest["row_count"]) != int(accumulator.row_count):
+    if manifest["row_count"] != accumulator.row_count:
         raise ValueError("manifest_row_count_mismatch")
-    if int(manifest["file_count"]) != int(accumulator.file_count):
+    if manifest["file_count"] != accumulator.file_count:
         raise ValueError("manifest_file_count_mismatch")
-    if tuple(str(column) for column in manifest["columns"]) != accumulator.columns:
+    if manifest["file_size_bytes"] != accumulator.file_size_bytes:
+        raise ValueError("manifest_file_size_bytes_mismatch")
+    if tuple(manifest["columns"]) != accumulator.columns:
         raise ValueError("manifest_columns_mismatch")
-    if str(manifest["schema_hash"]) != accumulator.schema_hash:
+    if manifest["physical_schema"] != accumulator._schema:
+        raise ValueError("manifest_physical_schema_mismatch")
+    if manifest["schema_hash"] != accumulator.schema_hash:
         raise ValueError("manifest_schema_hash_mismatch")
     if manifest_partition_row_counts(manifest) != accumulator.partition_row_counts:
         raise ValueError("manifest_partition_row_counts_mismatch")
@@ -71,6 +84,7 @@ def manifest_has_runtime_metadata(manifest: Mapping[str, Any]) -> bool:
         key in manifest
         for key in (
             "columns",
+            "physical_schema",
             "schema_hash",
             "partition_row_counts",
             "file_count",
@@ -107,17 +121,27 @@ def validate_manifest_runtime_metadata_shape(
     if (
         not isinstance(columns, list)
         or not columns
-        or any(not isinstance(column, str) for column in columns)
+        or any(not isinstance(column, str) or not column for column in columns)
+        or len(columns) != len(set(columns))
     ):
         raise ValueError("manifest_columns_invalid")
+    physical_schema = manifest.get("physical_schema")
+    validate_physical_schema_payload(physical_schema)
+    if tuple(columns) != physical_schema_columns(physical_schema):
+        raise ValueError("manifest_columns_mismatch")
     schema_hash = manifest.get("schema_hash")
-    if not isinstance(schema_hash, str) or not schema_hash:
+    if (
+        not isinstance(schema_hash, str)
+        or len(schema_hash) != 64
+        or any(character not in "0123456789abcdef" for character in schema_hash)
+    ):
         raise ValueError("manifest_schema_hash_invalid")
-    try:
-        manifest_file_count = int(manifest["file_count"])
-        manifest_row_count = int(manifest["row_count"])
-    except (TypeError, ValueError) as exc:
-        raise ValueError("manifest_counts_invalid") from exc
+    if canonical_json_hash(physical_schema) != schema_hash:
+        raise ValueError("manifest_schema_hash_mismatch")
+    manifest_file_count = manifest.get("file_count")
+    manifest_row_count = manifest.get("row_count")
+    if type(manifest_file_count) is not int or type(manifest_row_count) is not int:
+        raise ValueError("manifest_counts_invalid")
     if manifest_file_count < 0 or manifest_row_count < 0:
         raise ValueError("manifest_counts_invalid")
     partition_row_counts = manifest_partition_row_counts(manifest)
@@ -134,13 +158,9 @@ def manifest_partition_row_counts(manifest: Mapping[str, Any]) -> dict[str, int]
     for key, item in value.items():
         if not isinstance(key, str) or not key:
             raise ValueError("manifest_partition_row_counts_invalid")
-        try:
-            count = int(item)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("manifest_partition_row_counts_invalid") from exc
-        if count < 0:
+        if type(item) is not int or item < 0:
             raise ValueError("manifest_partition_row_counts_invalid")
-        counts[key] = count
+        counts[key] = item
     return dict(sorted(counts.items()))
 
 

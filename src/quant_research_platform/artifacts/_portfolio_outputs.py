@@ -21,6 +21,7 @@ from quant_research_platform.artifacts._parquet_writers import write_parquet
 from quant_research_platform.artifacts._portfolio_output_validation import (
     PORTFOLIO_ARTIFACTS,
     portfolio_required_columns,
+    validate_portfolio_artifact_mapping_keys,
     validate_portfolio_artifact_membership_columns,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
@@ -88,6 +89,11 @@ def _write_portfolio_output_chunks(
             spec=spec,
         )
         summary_outputs = summary_factory()
+        summary_outputs = validate_portfolio_artifact_mapping_keys(
+            summary_outputs,
+            expected_names=summary_names,
+            error="portfolio_summary_artifacts_invalid",
+        )
         for artifact_name in summary_names:
             validate_output_frame(
                 summary_outputs[artifact_name],
@@ -106,7 +112,7 @@ def _write_portfolio_output_chunks(
                 compression="zstd",
                 index=False,
             )
-            row_counts[artifact_name] = int(len(summary_outputs[artifact_name]))
+            row_counts[artifact_name] = len(summary_outputs[artifact_name])
         write_manifest(
             temp_root / "manifest.json",
             output_manifest_payload(
@@ -139,6 +145,11 @@ def _write_portfolio_row_artifact_chunks(
     row_counts = {artifact_name: 0 for artifact_name in PORTFOLIO_ARTIFACTS}
     try:
         for artifact_chunk in artifact_chunks:
+            artifact_chunk = validate_portfolio_artifact_mapping_keys(
+                artifact_chunk,
+                expected_names=row_artifacts,
+                error="portfolio_row_artifacts_invalid",
+            )
             for artifact_name in row_artifacts:
                 frame = artifact_chunk[artifact_name]
                 selected = _portfolio_output_chunk_frame(
@@ -159,7 +170,7 @@ def _write_portfolio_row_artifact_chunks(
                     )
                     writers[artifact_name] = writer
                 writer.write_table(table)
-                row_counts[artifact_name] += int(len(selected))
+                row_counts[artifact_name] += len(selected)
         for writer in writers.values():
             writer.close()
         writers.clear()

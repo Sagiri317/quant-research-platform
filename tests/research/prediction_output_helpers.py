@@ -134,7 +134,6 @@ def synthetic_prediction_model_metadata(
     input_columns: tuple[str, ...],
 ) -> dict[str, object]:
     return {
-        "contract_version": "0.1",
         "model_algorithm": "linear_regression",
         "sample_filter_mode": spec.sample_filter_mode,
         "filter_columns_used": list(required_filter_columns(spec.sample_filter_mode)),

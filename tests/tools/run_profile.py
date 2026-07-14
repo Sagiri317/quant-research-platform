@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import subprocess
 import sys
@@ -11,6 +10,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from time import perf_counter
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_SRC = REPO_ROOT / "src"
+if str(REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(REPO_SRC))
+
+from quant_research_platform.contracts._json import (  # noqa: E402
+    render_qrp_json_object,
+)
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
@@ -229,11 +237,9 @@ def run_profile(
         "pytest_basetemp": _repo_relative(repo_root, pytest_basetemp),
         "reserved_profile": profile.reserved,
     }
-    summary_path.write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    rendered_summary = render_qrp_json_object(summary)
+    summary_path.write_text(rendered_summary + "\n", encoding="utf-8")
+    print(rendered_summary)
     return result.returncode
 
 

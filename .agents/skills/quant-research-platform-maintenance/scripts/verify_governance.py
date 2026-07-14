@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import subprocess
 import sys
@@ -12,8 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+SCRIPT_REPO_ROOT = SCRIPT_DIR.parents[3]
+SCRIPT_REPO_SRC = SCRIPT_REPO_ROOT / "src"
+for candidate in (SCRIPT_DIR, SCRIPT_REPO_SRC):
+    if str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
 
 from governance_contract import (  # noqa: E402
     ACTIVE_GOVERNANCE_DOC_ROOTS,
@@ -38,6 +40,10 @@ from governance_contract import (  # noqa: E402
     source_tree_forbidden_patterns,
     source_tree_governance_rule_definition_lines,
     source_tree_python_owner_ranges,
+)
+
+from quant_research_platform.contracts._json import (  # noqa: E402
+    render_qrp_json_object,
 )
 
 BASE_GOVERNANCE_PREFIXES = (
@@ -727,7 +733,7 @@ def main(argv: list[str] | None = None) -> int:
         "warnings": result.warnings,
     }
     if args.json:
-        print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+        print(render_qrp_json_object(summary))
     elif args.summary:
         print(
             f"governance_check_status={summary['status']} "

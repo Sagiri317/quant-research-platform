@@ -5,6 +5,7 @@ This module is an internal tooling fact source. It is not a public API.
 
 from __future__ import annotations
 
+import math
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
@@ -182,7 +183,7 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
         _append_step_status(
             build.get("status"), step_statuses, failures, "package_smoke_build"
         )
-        artifact_kinds = list(build.get("artifact_kinds") or [])
+        artifact_kinds = build.get("artifact_kinds")
         if build.get("status") == "PASS":
             expected_artifact_kinds = list(PACKAGE_ARTIFACT_KINDS)
         else:
@@ -238,11 +239,11 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
             scan_status, step_statuses, failures, "package_smoke_content_scan"
         )
         count = scan.get("forbidden_member_count")
-        if not isinstance(count, int) or count < 0:
+        if type(count) is not int or count < 0:
             failures.append("package_smoke_forbidden_member_count_invalid")
         elif count > 0 and scan_status == "PASS":
             failures.append("package_smoke_content_scan_forbidden_members_mismatch")
-        scanned_artifact_kinds = list(scan.get("scanned_artifact_kinds") or [])
+        scanned_artifact_kinds = scan.get("scanned_artifact_kinds")
         build_status = build.get("status") if isinstance(build, Mapping) else None
         extract_status = (
             wheel_extract.get("status") if isinstance(wheel_extract, Mapping) else None
@@ -285,7 +286,7 @@ def validate_hard_scan_receipt(payload: Mapping[str, object]) -> list[str]:
         failures.append("hard_scan_scanner_source_sha256_invalid")
     runs = payload.get("scan_runs")
     statuses: list[str] = []
-    if not isinstance(runs, list) or not runs:
+    if type(runs) is not list or not runs:
         failures.append("hard_scan_runs_invalid")
     else:
         for index, row in enumerate(runs):
@@ -299,7 +300,7 @@ def validate_hard_scan_receipt(payload: Mapping[str, object]) -> list[str]:
                 if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
                     failures.append(f"hard_scan_run_missing: {index}:{key}")
             for key in ("match_count", "actual_violation_count"):
-                if not isinstance(row.get(key), int) or int(row.get(key)) < 0:
+                if type(row.get(key)) is not int or row.get(key, -1) < 0:
                     failures.append(f"hard_scan_run_count_invalid: {index}:{key}")
             if not sha(row.get("result_sha256")):
                 failures.append(f"hard_scan_result_sha256_invalid: {index}")
@@ -321,7 +322,7 @@ def validate_check_receipts(payload: Mapping[str, object]) -> list[str]:
     if payload.get("status") not in VALID_STATUS_TOKENS:
         failures.append("check_receipts_status_invalid")
     checks = payload.get("checks")
-    if not isinstance(checks, list):
+    if type(checks) is not list:
         failures.append("check_receipts_checks_invalid")
         return failures
     rows_by_id: dict[str, Mapping[str, object]] = {}
@@ -373,7 +374,7 @@ def validate_check_receipt_row(
             failures.append(f"check_receipt_string_invalid: {index}:{key}")
     command_argv = row.get("command_argv")
     if (
-        not isinstance(command_argv, list)
+        type(command_argv) is not list
         or not command_argv
         or not all(isinstance(item, str) and item for item in command_argv)
     ):
@@ -393,14 +394,14 @@ def validate_check_receipt_row(
     exit_code = row.get("exit_code")
     duration = row.get("duration_seconds")
     if (
-        not isinstance(duration, int | float)
-        or isinstance(duration, bool)
+        type(duration) not in (int, float)
         or duration < 0
+        or (type(duration) is float and not math.isfinite(duration))
     ):
         failures.append(f"check_receipt_duration_seconds_invalid: {index}")
-    if status == "PASS" and exit_code != 0:
+    if status == "PASS" and (type(exit_code) is not int or exit_code != 0):
         failures.append(f"check_receipt_pass_exit_code_invalid: {index}")
-    if status == "FAIL" and (not isinstance(exit_code, int) or exit_code == 0):
+    if status == "FAIL" and (type(exit_code) is not int or exit_code == 0):
         failures.append(f"check_receipt_fail_exit_code_invalid: {index}")
     if status in {"BLOCKED", "NOT_RUN"} and exit_code is not None:
         failures.append(f"check_receipt_non_executed_exit_code_invalid: {index}")
@@ -430,9 +431,12 @@ def validate_check_receipt_row(
     timeout_seconds = row.get("timeout_seconds")
     if status == "BLOCKED" and row.get("blocked_reason") == "timeout":
         if (
-            not isinstance(timeout_seconds, int | float)
-            or isinstance(timeout_seconds, bool)
+            type(timeout_seconds) not in (int, float)
             or timeout_seconds <= 0
+            or (
+                type(timeout_seconds) is float
+                and not math.isfinite(timeout_seconds)
+            )
         ):
             failures.append(f"check_receipt_timeout_seconds_invalid: {index}")
     elif timeout_seconds is not None:
@@ -456,7 +460,7 @@ def validate_pytest_counts(
     failures: list[str] = []
     if not isinstance(counts, Mapping) or set(counts) != COUNT_FIELDS:
         return [f"check_receipt_counts_invalid: {index}"]
-    if any(not isinstance(value, int) or value < 0 for value in counts.values()):
+    if any(type(value) is not int or value < 0 for value in counts.values()):
         return [f"check_receipt_counts_invalid: {index}"]
     expected_collected = sum(
         int(counts[key])
@@ -472,15 +476,22 @@ def validate_pytest_counts(
     )
     if counts["collected"] != expected_collected:
         failures.append(f"check_receipt_counts_collected_mismatch: {index}")
-    if status == "PASS" and (counts["failed"] != 0 or counts["errors"] != 0):
-        failures.append(f"check_receipt_pass_counts_invalid: {index}")
+    if status == "PASS":
+        if (
+            counts["collected"] == 0
+            or counts["passed"] == 0
+            or counts["deselected"] != 0
+            or counts["failed"] != 0
+            or counts["errors"] != 0
+        ):
+            failures.append(f"check_receipt_pass_counts_invalid: {index}")
     return failures
 
 
 def normalize_check_receipts(payload: Mapping[str, object]) -> dict[str, object]:
     _raise_if_invalid(validate_check_receipts(payload))
     checks = payload["checks"]
-    assert isinstance(checks, list)
+    assert type(checks) is list
     return {
         "schema_id": "qrp-check-receipts",
         "status": str(payload["status"]),
@@ -507,7 +518,7 @@ def normalize_hard_scan_receipt(payload: Mapping[str, object]) -> dict[str, obje
     _raise_if_invalid(validate_hard_scan_receipt(payload))
     scan_runs = payload.get("scan_runs")
     normalized_runs: list[dict[str, object]] = []
-    if isinstance(scan_runs, list):
+    if type(scan_runs) is list:
         for row in scan_runs:
             if not isinstance(row, Mapping):
                 continue
@@ -580,7 +591,7 @@ def forbidden_receipt_field_failures(
             if key_text in FORBIDDEN_RECEIPT_FIELDS:
                 failures.append(f"receipt_forbidden_raw_field: {name}:{dotted}")
             failures.extend(forbidden_receipt_field_failures(name, value, dotted))
-    elif isinstance(payload, list):
+    elif type(payload) is list:
         for index, value in enumerate(payload):
             failures.extend(
                 forbidden_receipt_field_failures(name, value, f"{prefix}.{index}")
@@ -653,7 +664,7 @@ def _compare_receipts(
 def _normalized_check_row(row: Mapping[str, object]) -> dict[str, object]:
     normalized = dict(row)
     duration = normalized.get("duration_seconds")
-    if isinstance(duration, int | float) and not isinstance(duration, bool):
+    if type(duration) in (int, float):
         normalized["duration_seconds"] = 0.0
     return normalized
 

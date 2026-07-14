@@ -8,6 +8,9 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.artifacts._output_bundle_validation import (
+    validate_output_bundle,
+)
 from quant_research_platform.artifacts.evidence import (
     write_json_evidence,
     write_run_summary_markdown,
@@ -23,6 +26,7 @@ from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.check_status import (
     overall_verification_status,
+    require_status,
     validate_verification_statuses,
 )
 from quant_research_platform.policy.share_safety import local_run_root_reason
@@ -44,7 +48,10 @@ from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
 )
 from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
-from quant_research_platform.runtime.logical_paths import logical_path
+from quant_research_platform.runtime.logical_paths import (
+    RUN_RESULT_DATASET_LAYERS,
+    dataset_layer_from_path,
+)
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     require_free_disk_headroom,
@@ -59,6 +66,7 @@ from quant_research_platform.storage.manifests import (
 )
 from quant_research_platform.workflows.diagnostics.schema_inventory import (
     build_schema_inventory_payload,
+    summarize_schema_inventory_payload,
 )
 from quant_research_platform.workflows.diagnostics.validation_summary import (
     build_validation_summary,
@@ -95,6 +103,12 @@ class LocalVerificationRunResult:
 
 _RUN_SCHEMA_ID = "qrp-run"
 _WORKFLOW_ID = "local_verification"
+_SEED_RUN_KEYS = frozenset(
+    {"schema_id", "workflow_id", "run_id", "created_at", "root_ownership"}
+)
+_ROOT_OWNERSHIP_KEYS = frozenset(
+    {"owner", "workflow_id", "created_by", "created_at", "replace_safe"}
+)
 _PROFILE_PREDICTION_PREVIEW_TRAIN_END = "2000-01-01"
 _PROFILE_PREDICTION_PREVIEW_TEST_START = "2000-01-02"
 
@@ -283,6 +297,10 @@ def _run_local_verification_with_policy(
         *(Path(prediction_root) for prediction_root in prediction_roots),
         *(Path(portfolio_root) for portfolio_root in portfolio_roots),
     )
+    output_indexes = tuple(
+        _output_index(root, run_root, expected_run_id=run_id)
+        for root in output_bundles
+    )
     layer_summaries = _build_layer_summaries(
         layout=layout,
         dataset_roots=dataset_roots,
@@ -294,15 +312,23 @@ def _run_local_verification_with_policy(
                 config.profile.schema_inventory_important_columns()
             ),
         )
-        schema_inventory_summary = _schema_inventory_run_summary(schema_inventory)
+        schema_inventory_summary = summarize_schema_inventory_payload(schema_inventory)
         validation_summary = build_validation_summary(
             run_id=run_id,
             dataset_roots=dataset_roots,
             layer_summaries=layer_summaries,
-            generated_text_paths=_generated_text_paths(output_bundles),
+            generated_text_paths=_generated_text_paths(
+                output_bundles,
+                output_indexes=output_indexes,
+            ),
         )
+    validation_status = require_status(validation_summary.get("status"))
+    share_safety_scan = validation_summary.get("share_safety_scan")
+    if type(share_safety_scan) is not dict:
+        raise ValueError("validation_summary_share_safety_invalid")
+    share_safety_status = require_status(share_safety_scan.get("status"))
     statuses = validate_verification_statuses(
-        smoke_status=str(validation_summary.get("status", "FAIL")),
+        smoke_status=validation_status,
         compare_status="NOT_RUN",
         full_horizon_status="NOT_RUN",
         compare_evidence=None,
@@ -310,15 +336,13 @@ def _run_local_verification_with_policy(
     )
     status_payload = {
         "overall": overall_verification_status(
-            validation_summary.get("status", "FAIL"),
+            validation_status,
             statuses,
         ),
-        "validation": str(validation_summary.get("status", "FAIL")),
+        "validation": validation_status,
         "smoke": statuses["smoke_status"],
         "compare": statuses["compare_status"],
-        "share_safety": str(
-            validation_summary.get("share_safety_scan", {}).get("status", "FAIL")
-        ),
+        "share_safety": share_safety_status,
         "full_horizon": statuses["full_horizon_status"],
         "validation_matrix": statuses["validation_matrix_status"],
     }
@@ -349,7 +373,7 @@ def _run_local_verification_with_policy(
             }
         },
         "data": build_run_data_summary(layer_summaries=layer_summaries),
-        "outputs": [_output_index(root, run_root) for root in output_bundles],
+        "outputs": list(output_indexes),
         "checks": {
             "schema_inventory": schema_inventory_summary,
             "validation": validation_summary,
@@ -360,53 +384,14 @@ def _run_local_verification_with_policy(
     }
     summary_markdown = render_run_summary_markdown(run_payload)
     _require_output_disk_headroom(resource_policy, run_root)
-    replace_qrp_json(layout.run_json_path, run_payload)
     write_run_summary_markdown(layout.summary_md_path, summary_markdown)
+    replace_qrp_json(layout.run_json_path, run_payload)
     return LocalVerificationRunResult(
         status=status_payload["overall"],
         run_id=run_id,
         run_root=_logical_run_root(run_root),
         summary=run_payload,
     )
-
-
-def _schema_inventory_run_summary(
-    schema_inventory: dict[str, object],
-) -> dict[str, object]:
-    datasets = schema_inventory.get("datasets", ())
-    if not isinstance(datasets, list):
-        raise ValueError("schema_inventory_datasets_required")
-    schema_hash = _hash_inventory_schemas(datasets)
-    return {
-        "schema_id": "qrp-schema-inventory-summary",
-        "dataset_count": len(datasets),
-        "total_row_count": sum(int(item.get("row_count", 0)) for item in datasets),
-        "schema_hash": schema_hash,
-    }
-
-
-def _hash_inventory_schemas(datasets: list[object]) -> str:
-    import hashlib
-    import json
-
-    payload = [
-        {
-            "artifact_id": item.get("artifact_id"),
-            "layer": item.get("layer"),
-            "kind": item.get("kind"),
-            "schema_hash": item.get("schema_hash"),
-            "row_count": item.get("row_count"),
-        }
-        for item in datasets
-        if isinstance(item, dict)
-    ]
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _write_prediction_result(
@@ -650,22 +635,33 @@ def _read_run_json(run_root: Path) -> dict[str, Any]:
             expected_schema_id=_RUN_SCHEMA_ID,
             error="run_root_not_owned_by_local_verification_workflow",
         )
-    except ValueError:
+        ownership = payload.get("root_ownership")
+        run_id = payload.get("run_id")
+        created_at = payload.get("created_at")
+        if (
+            set(payload) != _SEED_RUN_KEYS
+            or payload.get("workflow_id") != _WORKFLOW_ID
+            or not isinstance(run_id, str)
+            or not run_id
+            or not isinstance(created_at, str)
+            or not created_at
+            or not isinstance(ownership, dict)
+            or set(ownership) != _ROOT_OWNERSHIP_KEYS
+            or ownership.get("owner") != _WORKFLOW_ID
+            or ownership.get("workflow_id") != _WORKFLOW_ID
+            or ownership.get("created_by") != "quant_research_platform"
+            or ownership.get("created_at") != created_at
+            or ownership.get("replace_safe") is not True
+        ):
+            raise ValueError("run_root_not_owned_by_local_verification_workflow")
+        validate_run_id(run_id)
+    except (TypeError, ValueError):
         raise ValueError("run_root_not_owned_by_local_verification_workflow") from None
     return payload
 
 
 def _assert_owned_local_verification_run_root(run_root: Path) -> None:
-    payload = _read_run_json(run_root)
-    ownership = payload.get("root_ownership")
-    if (
-        payload.get("schema_id") != _RUN_SCHEMA_ID
-        or not isinstance(ownership, dict)
-        or ownership.get("owner") != _WORKFLOW_ID
-        or ownership.get("workflow_id") != _WORKFLOW_ID
-        or ownership.get("replace_safe") is not True
-    ):
-        raise ValueError("run_root_not_owned_by_local_verification_workflow")
+    _read_run_json(run_root)
 
 
 def _create_layout_directories(layout: LocalVerificationLayout) -> None:
@@ -696,16 +692,19 @@ def _dataset_roots(
 
 
 def _logical_layer(dataset_root: Path, run_root: Path) -> str:
-    relative = logical_path(dataset_root, run_root=run_root)
-    if relative.startswith("data/interim/"):
-        return "interim"
-    if relative.startswith("data/research/"):
-        return "research"
-    return "processed"
-
-
-def _layer_for_root(dataset_root: Path, layout: LocalVerificationLayout) -> str:
-    return _logical_layer(dataset_root, layout.run_root)
+    try:
+        relative_root = Path(dataset_root).resolve(strict=False).relative_to(
+            Path(run_root).resolve(strict=False)
+        )
+    except ValueError:
+        raise ValueError("local_verification_dataset_layer_invalid") from None
+    logical_layer = dataset_layer_from_path(relative_root)
+    if (
+        logical_layer not in RUN_RESULT_DATASET_LAYERS
+        or relative_root.parts[:2] != ("data", logical_layer)
+    ):
+        raise ValueError("local_verification_dataset_layer_invalid")
+    return logical_layer
 
 
 def _build_layer_summaries(
@@ -715,7 +714,8 @@ def _build_layer_summaries(
 ) -> tuple[dict[str, Any], ...]:
     grouped: dict[str, list[Path]] = {}
     for root in dataset_roots:
-        grouped.setdefault(_layer_for_root(root, layout), []).append(root)
+        logical_layer = _logical_layer(root, layout.run_root)
+        grouped.setdefault(logical_layer, []).append(root)
     return tuple(
         build_layer_summary(
             layer_root=layout.data_root / logical_layer,
@@ -726,25 +726,61 @@ def _build_layer_summaries(
     )
 
 
-def _output_index(output_bundle: Path, run_root: Path) -> dict[str, Any]:
-    manifest_path = Path(output_bundle) / "manifest.json"
-    payload = read_qrp_json(
-        manifest_path,
-        expected_schema_id="qrp-output-manifest",
-        error="output_manifest_schema_id_invalid",
-    )
+def _output_index(
+    output_bundle: Path,
+    run_root: Path,
+    *,
+    expected_run_id: str,
+) -> dict[str, Any]:
+    try:
+        resolved_run_root = Path(run_root).resolve(strict=False)
+        resolved_output_bundle = Path(output_bundle).resolve(strict=True)
+        if not resolved_output_bundle.is_relative_to(resolved_run_root):
+            raise ValueError("output_manifest_schema_id_invalid")
+        payload, _declared_paths = validate_output_bundle(
+            resolved_output_bundle,
+            expected_run_id=expected_run_id,
+            expected_output_id=resolved_output_bundle.name,
+        )
+    except (KeyError, OSError, TypeError, ValueError):
+        raise ValueError("output_manifest_schema_id_invalid") from None
+    manifest_path = resolved_output_bundle / "manifest.json"
+    output_id = payload["output_id"]
+    try:
+        manifest_relative_path = manifest_path.relative_to(
+            resolved_run_root
+        ).as_posix()
+    except ValueError:
+        raise ValueError("output_manifest_schema_id_invalid") from None
+    if manifest_relative_path != f"outputs/{output_id}/manifest.json":
+        raise ValueError("output_manifest_schema_id_invalid")
     return {
         **payload,
-        "manifest_path": manifest_path.relative_to(run_root).as_posix(),
+        "manifest_path": manifest_relative_path,
     }
 
 
-def _generated_text_paths(output_bundles: tuple[Path, ...]) -> tuple[Path, ...]:
-    return tuple(
-        summary_path
-        for summary_path in (Path(root) / "summary.md" for root in output_bundles)
-        if summary_path.is_file()
-    )
+def _generated_text_paths(
+    output_bundles: tuple[Path, ...],
+    *,
+    output_indexes: tuple[dict[str, Any], ...],
+) -> tuple[Path, ...]:
+    if len(output_bundles) != len(output_indexes):
+        raise ValueError("output_evidence_declaration_mismatch")
+    paths: list[Path] = []
+    for root, index in zip(output_bundles, output_indexes, strict=True):
+        files = index["files"]
+        if type(files) is not list:
+            raise ValueError("output_evidence_declaration_mismatch")
+        paths.append(Path(root) / "manifest.json")
+        paths.extend(
+            Path(root) / name
+            for name in files
+            if Path(name).suffix.casefold() != ".parquet"
+        )
+    if not paths:
+        raise ValueError("output_evidence_declaration_empty")
+    return tuple(paths)
 
 
 def _utc_now() -> str:

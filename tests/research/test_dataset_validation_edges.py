@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.research.datasets.validation import (
     validate_evaluation_input,
     validate_prediction_input,
@@ -14,7 +11,7 @@ from quant_research_platform.research.datasets.validation import (
 from tests.helpers.research_specs import make_dummy_research_dataset_spec
 
 
-def test_research_dataset_validation_rejects_key_and_role_errors() -> None:
+def test_research_dataset_validation_rejects_frame_key_errors() -> None:
     spec = make_dummy_research_dataset_spec()
     frame = _research_frame()
 
@@ -25,12 +22,20 @@ def test_research_dataset_validation_rejects_key_and_role_errors() -> None:
     with pytest.raises(ValueError, match="duplicate_research_dataset_keys"):
         validate_research_dataset(pd.concat([frame, frame.iloc[[0]]]), spec)
 
-    bad_factor = replace(
-        spec,
-        column_roles={**spec.column_roles, "factor_1": ColumnRole.MASK},
-    )
-    with pytest.raises(ValueError, match="invalid_research_dataset_factors"):
-        validate_research_dataset(frame, bad_factor)
+
+@pytest.mark.parametrize("duplicate_column", ("asset_id", "factor_1"))
+def test_research_dataset_validation_rejects_duplicate_dataframe_columns(
+    duplicate_column: str,
+) -> None:
+    spec = make_dummy_research_dataset_spec()
+    frame = _research_frame()
+    duplicate = pd.concat([frame, frame[[duplicate_column]]], axis="columns")
+
+    with pytest.raises(
+        ValueError,
+        match=f"^duplicate_research_dataset_columns: {duplicate_column}$",
+    ):
+        validate_research_dataset(duplicate, spec)
 
 
 def test_evaluation_and_prediction_inputs_require_declared_columns() -> None:

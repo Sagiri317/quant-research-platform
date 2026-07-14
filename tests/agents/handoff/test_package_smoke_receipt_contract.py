@@ -105,6 +105,24 @@ def test_package_smoke_rejects_fixed_value_drift() -> None:
     assert "package_smoke_wheel_extract_method_invalid" in failures
     assert "package_smoke_import_module_invalid" in failures
 
+
+def test_package_smoke_requires_exact_lists_and_integer_count() -> None:
+    contract = load_handoff_script_module("receipt_contract")
+    payload = make_package_smoke_receipt_payload()
+    payload["build"]["artifact_kinds"] = ("wheel", "sdist")
+    payload["content_scan"]["scanned_artifact_kinds"] = (
+        "wheel",
+        "sdist",
+        "wheel_extract",
+    )
+    payload["content_scan"]["forbidden_member_count"] = False
+
+    failures = contract.validate_package_smoke_receipt(payload)
+
+    assert "package_smoke_artifact_kinds_invalid" in failures
+    assert "package_smoke_scanned_artifact_kinds_invalid" in failures
+    assert "package_smoke_forbidden_member_count_invalid" in failures
+
 @pytest.mark.parametrize(
     ("artifacts", "expected_status"),
     (

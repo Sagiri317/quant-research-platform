@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -14,8 +14,13 @@ from quant_research_platform.contracts.filtering import (
     required_filter_columns,
 )
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.policy.share_safety import sanitize_shared_object
 from quant_research_platform.storage.layout import StorageLayout
+
+_SIGNAL_METADATA_KEYS = frozenset(
+    {"signal_id", "source_kind", "source_column", "direction", "transform"}
+)
 
 
 def required_frame_metadata(
@@ -34,10 +39,10 @@ def sanitize_required_metadata(
     *,
     error_name: str,
 ) -> dict[str, object]:
-    if not isinstance(value, Mapping) or not value:
+    if type(value) is not dict or not value:
         raise ValueError(error_name)
-    sanitized = sanitize_shared_object(dict(value))
-    if not isinstance(sanitized, dict) or not sanitized:
+    sanitized = sanitize_shared_object(value)
+    if type(sanitized) is not dict or not sanitized:
         raise ValueError(error_name)
     return sanitized
 
@@ -62,7 +67,7 @@ def validate_filter_metadata(
     definition: str,
     error_name: str,
 ) -> None:
-    if list(columns) != list(required_filter_columns(mode)):
+    if type(columns) is not list or columns != list(required_filter_columns(mode)):
         raise ValueError(error_name)
     if definition != filter_definition(mode):
         raise ValueError(error_name)
@@ -74,7 +79,7 @@ def require_metadata_string(
     error_name: str,
 ) -> str:
     value = metadata[key]
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise ValueError(error_name)
     return value
 
@@ -87,7 +92,7 @@ def require_optional_metadata_string(
     value = metadata[key]
     if value is None:
         return None
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise ValueError(error_name)
     return value
 
@@ -100,11 +105,13 @@ def require_metadata_string_list(
     allow_empty: bool = False,
 ) -> list[str]:
     value = metadata[key]
-    if not isinstance(value, list):
+    if type(value) is not list:
         raise ValueError(error_name)
     if (not allow_empty and not value) or any(
-        not isinstance(item, str) or not item for item in value
+        type(item) is not str or not item for item in value
     ):
+        raise ValueError(error_name)
+    if len(value) != len(set(value)):
         raise ValueError(error_name)
     return value
 
@@ -115,9 +122,49 @@ def require_non_negative_metadata_int(
     error_name: str,
 ) -> int:
     value = metadata[key]
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+    if type(value) is not int or value < 0:
         raise ValueError(error_name)
     return value
+
+
+def require_finite_metadata_number(
+    metadata: dict[str, object],
+    key: str,
+    error_name: str,
+) -> int | float:
+    value = metadata[key]
+    if type(value) not in {int, float} or not math.isfinite(value):
+        raise ValueError(error_name)
+    return value
+
+
+def require_signal_metadata_list(
+    metadata: dict[str, object],
+    key: str,
+    error_name: str,
+) -> tuple[SignalSpec, ...]:
+    value = metadata[key]
+    if type(value) is not list or not value:
+        raise ValueError(error_name)
+    signals: list[SignalSpec] = []
+    for signal in value:
+        if type(signal) is not dict or set(signal) != _SIGNAL_METADATA_KEYS:
+            raise ValueError(error_name)
+        for field in _SIGNAL_METADATA_KEYS:
+            require_metadata_string(signal, field, error_name)
+        try:
+            signals.append(
+                SignalSpec(
+                    signal_id=signal["signal_id"],
+                    source_kind=signal["source_kind"],
+                    source_column=signal["source_column"],
+                    direction=signal["direction"],
+                    transform=signal["transform"],
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(error_name) from exc
+    return tuple(signals)
 
 
 def validate_output_frame(
@@ -126,12 +173,19 @@ def validate_output_frame(
     required: tuple[str, ...],
     error_name: str,
 ) -> None:
+    observed = tuple(frame.columns)
+    if any(type(column) is not str or not column for column in observed):
+        raise ValueError(f"invalid_{error_name}_columns")
+    if len(observed) != len(set(observed)):
+        raise ValueError(f"duplicate_{error_name}_columns")
     missing = sorted(set(required).difference(frame.columns))
     if missing:
         raise ValueError(f"missing_{error_name}_columns: {', '.join(missing)}")
     extra = sorted(set(frame.columns).difference(required))
     if extra:
         raise ValueError(f"unregistered_{error_name}_columns: {', '.join(extra)}")
+    if observed != required:
+        raise ValueError(f"misordered_{error_name}_columns")
 
 
 def derive_output_bundle_root(

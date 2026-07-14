@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from enum import StrEnum
+from pathlib import PurePosixPath
 
 
 class CheckStatus(StrEnum):
@@ -19,13 +21,13 @@ COMPARE_STATUSES = frozenset(VALID_STATUS_TOKENS)
 FULL_HORIZON_STATUSES = frozenset(VALID_STATUS_TOKENS)
 COMPARE_EVIDENCE_FIELDS = frozenset({"comparison_path", "verification_scope"})
 FULL_HORIZON_EVIDENCE_FIELDS = frozenset({"evidence_path", "verification_scope"})
+_VERIFICATION_SCOPE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def require_status(value: object) -> str:
-    status = str(value).strip().upper()
-    if status not in VALID_STATUS_TOKENS:
+    if not isinstance(value, str) or value not in VALID_STATUS_TOKENS:
         raise ValueError(f"invalid_check_status: {value}")
-    return status
+    return str(value)
 
 
 def aggregate_check_status(statuses: Iterable[object]) -> str:
@@ -72,32 +74,35 @@ def validate_verification_statuses(
     compare_evidence: dict[str, object] | None,
     full_horizon_evidence: dict[str, object] | None,
 ) -> dict[str, object]:
-    smoke = smoke_status.upper()
-    compare = compare_status.upper()
-    full_horizon = full_horizon_status.upper()
-    if smoke not in SMOKE_STATUSES:
+    if not isinstance(smoke_status, str) or smoke_status not in SMOKE_STATUSES:
         raise ValueError("invalid_smoke_status")
-    if compare not in COMPARE_STATUSES:
+    if not isinstance(compare_status, str) or compare_status not in COMPARE_STATUSES:
         raise ValueError("invalid_compare_status")
-    if full_horizon not in FULL_HORIZON_STATUSES:
+    if (
+        not isinstance(full_horizon_status, str)
+        or full_horizon_status not in FULL_HORIZON_STATUSES
+    ):
         raise ValueError("invalid_full_horizon_status")
+    smoke = str(smoke_status)
+    compare = str(compare_status)
+    full_horizon = str(full_horizon_status)
     if smoke == "NOT_RUN" and compare != "NOT_RUN":
         raise ValueError("compare_status_requires_smoke")
     if smoke == "FAIL" and compare == "PASS":
         raise ValueError("compare_pass_requires_smoke_pass")
-    if compare in {"PASS", "FAIL"} and not compare_evidence:
+    if compare in {"PASS", "FAIL"} and compare_evidence is None:
         raise ValueError("compare_evidence_required")
-    if compare == "NOT_RUN" and compare_evidence:
+    if compare == "NOT_RUN" and compare_evidence is not None:
         raise ValueError("compare_evidence_not_applicable")
-    if compare in {"PASS", "FAIL"}:
+    if compare_evidence is not None:
         _require_evidence_fields(
             compare_evidence,
             required_fields=COMPARE_EVIDENCE_FIELDS,
             error_name="compare_evidence_missing_fields",
         )
-    if full_horizon == "NOT_RUN" and full_horizon_evidence:
+    if full_horizon == "NOT_RUN" and full_horizon_evidence is not None:
         raise ValueError("full_horizon_evidence_not_applicable")
-    if full_horizon != "NOT_RUN" and not full_horizon_evidence:
+    if full_horizon != "NOT_RUN" and full_horizon_evidence is None:
         raise ValueError("full_horizon_evidence_required")
     if full_horizon != "NOT_RUN":
         _require_evidence_fields(
@@ -113,8 +118,10 @@ def validate_verification_statuses(
         "compare_status": compare,
         "full_horizon_status": full_horizon,
         "validation_matrix_status": validation_matrix_status,
-        "compare_evidence": dict(compare_evidence or {}),
-        "full_horizon_evidence": dict(full_horizon_evidence or {}),
+        "compare_evidence": {} if compare_evidence is None else dict(compare_evidence),
+        "full_horizon_evidence": (
+            {} if full_horizon_evidence is None else dict(full_horizon_evidence)
+        ),
     }
 
 
@@ -136,14 +143,25 @@ def _require_evidence_fields(
     required_fields: frozenset[str],
     error_name: str,
 ) -> None:
-    payload = evidence or {}
-    missing = [
-        field
-        for field in sorted(required_fields)
-        if not str(payload.get(field, "")).strip()
-    ]
-    if missing:
+    if type(evidence) is not dict or set(evidence) != required_fields:
         raise ValueError(error_name)
+    for field in sorted(required_fields):
+        value = evidence[field]
+        if type(value) is not str or not value or value != value.strip():
+            raise ValueError(error_name)
+        if field == "verification_scope":
+            if _VERIFICATION_SCOPE_RE.fullmatch(value) is None:
+                raise ValueError(error_name)
+        else:
+            path = PurePosixPath(value)
+            if (
+                "\\" in value
+                or path.is_absolute()
+                or path.as_posix() != value
+                or not path.parts
+                or any(part in {"", ".", ".."} for part in path.parts)
+            ):
+                raise ValueError(error_name)
 
 
 __all__ = [

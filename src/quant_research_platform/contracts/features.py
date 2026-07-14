@@ -35,9 +35,15 @@ class FeatureTransformSpec:
         _validate_column_tuple(self.output_columns, "output_columns")
         if len(self.source_columns) != len(self.output_columns):
             raise ValueError("feature_transform_source_output_count_mismatch")
-        if self.transform not in FEATURE_TRANSFORMS:
+        if (
+            not isinstance(self.transform, str)
+            or self.transform not in FEATURE_TRANSFORMS
+        ):
             raise ValueError("unsupported_feature_transform")
-        if self.fillna_policy not in FILLNA_POLICIES:
+        if (
+            not isinstance(self.fillna_policy, str)
+            or self.fillna_policy not in FILLNA_POLICIES
+        ):
             raise ValueError("unsupported_feature_transform_fillna_policy")
         overlap = sorted(
             set(self.source_columns).intersection(self.output_columns)
@@ -47,7 +53,7 @@ class FeatureTransformSpec:
                 "feature_transform_raw_factor_passthrough: " + ", ".join(overlap)
             )
         if self.winsorize_quantiles is not None:
-            _validate_winsorize_quantiles(self.winsorize_quantiles)
+            validated_winsorize_quantiles(self.winsorize_quantiles)
         elif self.transform in {
             "winsorize",
             "winsorized_zscore",
@@ -65,9 +71,9 @@ def _validate_column_tuple(columns: tuple[str, ...], field_name: str) -> None:
         raise ValueError(f"{field_name}_must_not_contain_duplicates")
 
 
-def _validate_winsorize_quantiles(value: tuple[float, float]) -> None:
+def validated_winsorize_quantiles(value: object) -> tuple[float, float]:
     if (
-        not isinstance(value, tuple)
+        type(value) is not tuple
         or len(value) != 2
         or any(
             isinstance(item, bool) or not isinstance(item, int | float)
@@ -75,10 +81,14 @@ def _validate_winsorize_quantiles(value: tuple[float, float]) -> None:
         )
     ):
         raise TypeError("winsorize_quantiles_must_be_numeric_pair")
-    lower = float(value[0])
-    upper = float(value[1])
+    try:
+        lower = float(value[0])
+        upper = float(value[1])
+    except OverflowError as exc:
+        raise ValueError("invalid_winsorize_quantiles") from exc
     if not 0.0 <= lower < upper <= 1.0:
         raise ValueError("invalid_winsorize_quantiles")
+    return lower, upper
 
 
 __all__ = ["FEATURE_TRANSFORMS", "FILLNA_POLICIES", "FeatureTransformSpec"]

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
@@ -114,8 +113,11 @@ SOURCE_LOCAL_KEYS = frozenset({"source_asset_id", "source_market_id"})
 JSON_LOGICAL_PATH_VALUE_KEYS = frozenset(
     {
         "manifest_path",
+        "invalid",
+        "invalid_dataset_manifests",
         "missing",
         "missing_dataset_manifests",
+        "requested_paths",
         "run_root",
         "run_manifest_path",
         "validation_summary_path",
@@ -254,14 +256,6 @@ def evidence_text_unsafe_reason(
     return None
 
 
-def evidence_json_unsafe_reason(text: str) -> str | None:
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return "invalid_json"
-    return evidence_json_value_unsafe_reason(payload)
-
-
 def evidence_json_value_unsafe_reason(
     value: object,
     *,
@@ -293,40 +287,6 @@ def evidence_json_value_unsafe_reason(
             value,
             allow_logical_local_only_path=key in JSON_LOGICAL_PATH_VALUE_KEYS,
         )
-    return None
-
-
-def qrp_json_identity_reason(value: object) -> str | None:
-    """Return why a QRP-owned JSON value violates the identity contract."""
-
-    if not isinstance(value, Mapping):
-        return "top_level_object_required"
-    schema_id = value.get("schema_id")
-    if not isinstance(schema_id, str) or not schema_id:
-        return "schema_id_required"
-    if "/" in schema_id:
-        return "schema_id_versioned"
-    return _nested_qrp_json_identity_reason(value)
-
-
-def _nested_qrp_json_identity_reason(value: object) -> str | None:
-    if isinstance(value, Mapping):
-        for item_key, item in value.items():
-            key = str(item_key)
-            if key in {"schema_version", "contract_version"}:
-                return f"retired_identity_key:{key}"
-            if key == "schema_id" and (
-                not isinstance(item, str) or not item or "/" in item
-            ):
-                return "schema_id_invalid"
-            reason = _nested_qrp_json_identity_reason(item)
-            if reason is not None:
-                return reason
-    elif isinstance(value, list | tuple):
-        for item in value:
-            reason = _nested_qrp_json_identity_reason(item)
-            if reason is not None:
-                return reason
     return None
 
 
@@ -394,29 +354,156 @@ def sanitize_shared_text(text: object) -> str:
     return result
 
 
-def sanitize_shared_object(value: Any) -> Any:
-    """Recursively sanitize mapping/list scalar values for shared metadata."""
+_MAX_SANITIZE_DEPTH = 64
 
-    if isinstance(value, Mapping):
-        sanitized: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            safe_key = sanitize_shared_text(key_text)
-            sanitized[safe_key] = (
-                "[row-sample]"
-                if key_text.lower() in _ROW_SAMPLE_KEYS and item
-                else sanitize_shared_object(item)
-            )
-        return sanitized
-    if isinstance(value, list):
-        return [sanitize_shared_object(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(sanitize_shared_object(item) for item in value)
-    if isinstance(value, set):
-        return sorted(sanitize_shared_object(item) for item in value)
+
+def sanitize_shared_object(value: Any) -> Any:
+    """Sanitize one object graph while rejecting ambiguous shared identity."""
+
+    try:
+        sanitized, _source_token, _safe_token = _sanitize_shared_node(
+            value,
+            active=set(),
+            depth=0,
+        )
+    except RecursionError as exc:
+        raise ValueError("sanitize_recursion_limit") from exc
+    return sanitized
+
+
+def _sanitize_shared_node(
+    value: Any,
+    *,
+    active: set[int],
+    depth: int,
+) -> tuple[Any, tuple[Any, ...], tuple[Any, ...]]:
+    if depth > _MAX_SANITIZE_DEPTH:
+        raise ValueError("sanitize_recursion_limit")
     if isinstance(value, str):
-        return sanitize_shared_text(value)
-    return value
+        sanitized = sanitize_shared_text(value)
+        return sanitized, ("str", value), ("str", sanitized)
+    if not isinstance(value, (Mapping, list, tuple, set, frozenset)):
+        token = _sanitize_scalar_token(value)
+        if unsafe_for_share_reason(value) is not None:
+            sanitized = sanitize_shared_text(value)
+            return sanitized, token, ("str", sanitized)
+        return value, token, token
+
+    object_id = id(value)
+    if object_id in active:
+        raise ValueError("sanitize_cycle")
+    active.add(object_id)
+    try:
+        if isinstance(value, Mapping):
+            return _sanitize_shared_mapping(value, active=active, depth=depth)
+        return _sanitize_shared_sequence(value, active=active, depth=depth)
+    finally:
+        active.remove(object_id)
+
+
+def _sanitize_shared_mapping(
+    value: Mapping[Any, Any],
+    *,
+    active: set[int],
+    depth: int,
+) -> tuple[dict[str, Any], tuple[Any, ...], tuple[Any, ...]]:
+    sanitized: dict[str, Any] = {}
+    source_items: list[tuple[Any, ...]] = []
+    safe_items: list[tuple[Any, ...]] = []
+    observed_safe_values: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise ValueError("sanitize_mapping_key_must_be_string")
+        safe_key = sanitize_shared_text(key)
+        if safe_key in sanitized:
+            raise ValueError("sanitize_key_collision")
+        safe_item, source_token, safe_token = _sanitize_shared_node(
+            item,
+            active=active,
+            depth=depth + 1,
+        )
+        if key.lower() in _ROW_SAMPLE_KEYS and item:
+            safe_item = "[row-sample]"
+            safe_token = ("str", safe_item)
+        _reject_sanitized_value_collision(
+            observed_safe_values,
+            source_token=source_token,
+            safe_token=safe_token,
+        )
+        sanitized[safe_key] = safe_item
+        source_items.append(("item", ("str", key), source_token))
+        safe_items.append(("item", ("str", safe_key), safe_token))
+    source_items.sort(key=lambda entry: entry[1])
+    safe_items.sort(key=lambda entry: entry[1])
+    return (
+        sanitized,
+        ("mapping", *source_items),
+        ("mapping", *safe_items),
+    )
+
+
+def _sanitize_shared_sequence(
+    value: list[Any] | tuple[Any, ...] | set[Any] | frozenset[Any],
+    *,
+    active: set[int],
+    depth: int,
+) -> tuple[Any, tuple[Any, ...], tuple[Any, ...]]:
+    entries: list[tuple[Any, tuple[Any, ...], tuple[Any, ...]]] = []
+    observed_safe_values: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+    for item in value:
+        safe_item, source_token, safe_token = _sanitize_shared_node(
+            item,
+            active=active,
+            depth=depth + 1,
+        )
+        _reject_sanitized_value_collision(
+            observed_safe_values,
+            source_token=source_token,
+            safe_token=safe_token,
+        )
+        entries.append((safe_item, source_token, safe_token))
+
+    if isinstance(value, (set, frozenset)):
+        entries.sort(key=lambda entry: entry[2])
+        sanitized: Any = [entry[0] for entry in entries]
+        container_kind = "set" if isinstance(value, set) else "frozenset"
+    elif isinstance(value, tuple):
+        sanitized = tuple(entry[0] for entry in entries)
+        container_kind = "tuple"
+    else:
+        sanitized = [entry[0] for entry in entries]
+        container_kind = "list"
+    return (
+        sanitized,
+        (container_kind, *(entry[1] for entry in entries)),
+        (container_kind, *(entry[2] for entry in entries)),
+    )
+
+
+def _reject_sanitized_value_collision(
+    observed: dict[tuple[Any, ...], tuple[Any, ...]],
+    *,
+    source_token: tuple[Any, ...],
+    safe_token: tuple[Any, ...],
+) -> None:
+    previous = observed.get(safe_token)
+    if previous is not None and previous != source_token:
+        raise ValueError("sanitize_value_collision")
+    observed[safe_token] = source_token
+
+
+def _sanitize_scalar_token(value: Any) -> tuple[Any, ...]:
+    value_type = type(value)
+    try:
+        representation = repr(value)
+    except RecursionError as exc:
+        raise ValueError("sanitize_recursion_limit") from exc
+    return (
+        "scalar",
+        value_type.__module__,
+        value_type.__qualname__,
+        representation,
+    )
 
 
 def assert_internal_artifact_metadata_safe(value: Any) -> None:
@@ -456,6 +543,7 @@ def internal_artifact_metadata_unsafe_reason(
         return None
     logical_path_key = key in {
         "manifest_path",
+        "invalid_dataset_manifests",
         "missing_dataset_manifests",
         "run_root",
     }
@@ -483,14 +571,12 @@ __all__ = [
     "LOCAL_ONLY_ROOTS",
     "PACKAGE_FORBIDDEN_SUFFIXES",
     "contains_source_local_key",
-    "evidence_json_unsafe_reason",
     "evidence_json_value_unsafe_reason",
     "evidence_text_unsafe_reason",
     "assert_internal_artifact_metadata_safe",
     "internal_artifact_metadata_unsafe_reason",
     "is_local_only_path",
     "local_run_root_reason",
-    "qrp_json_identity_reason",
     "sanitize_shared_object",
     "sanitize_shared_text",
     "unsafe_for_share_reason",

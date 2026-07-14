@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.markets.implementations.a_share import calendar
@@ -407,7 +411,7 @@ def test_compute_market_panel_fails_closed_on_missing_reference_dates() -> None:
         )
 
 
-def test_compute_market_panel_uses_missing_reference_defaults() -> None:
+def test_compute_market_panel_uses_missing_reference_defaults(tmp_path: Path) -> None:
     panel = compute_market_panel(
         make_synthetic_market_bars_daily(["2020-01-02"]),
         stock_master=make_synthetic_a_share_stock_master(),
@@ -421,6 +425,19 @@ def test_compute_market_panel_uses_missing_reference_defaults() -> None:
     assert pd.isna(panel.loc[0, "total_shares"])
     assert pd.isna(panel.loc[0, "a_float_shares"])
     assert pd.isna(panel.loc[0, "turnover"])
+    assert panel["share_change_date"].dtype == "datetime64[ns]"
+    assert panel["total_shares"].dtype == "float64"
+    assert panel["a_float_shares"].dtype == "float64"
+
+    schema, read_back = _parquet_round_trip(
+        tmp_path / "zero-market-cap.parquet",
+        panel,
+    )
+    assert pa.types.is_timestamp(schema.field("share_change_date").type)
+    assert pa.types.is_float64(schema.field("total_shares").type)
+    assert pa.types.is_float64(schema.field("a_float_shares").type)
+    missing_columns = ["share_change_date", "total_shares", "a_float_shares"]
+    assert read_back[missing_columns].isna().all().all()
 
 
 def test_compute_market_panel_fails_closed_on_missing_join_key_columns() -> None:
@@ -460,24 +477,72 @@ def test_compute_market_panel_fails_closed_on_missing_canonical_after_mapping(
         )
 
 
-def test_panel_asof_stock_master_fills_missing_stock_columns() -> None:
+def test_panel_asof_stock_master_fills_registered_missing_stock_columns(
+    tmp_path: Path,
+) -> None:
     daily = pd.DataFrame(
         {
             "market_id": ["a_share"],
-            "asset_id": ["asset_without_master"],
+            "asset_id": ["000001"],
             "timestamp": pd.to_datetime(["2020-01-02"]),
         }
     )
     stocks = pd.DataFrame(
         {
-            "asset_id": pd.Series([], dtype="object"),
-            "listing_date": pd.Series([], dtype="datetime64[ns]"),
-            "status_change_date": pd.Series([], dtype="datetime64[ns]"),
-            "stock_name": pd.Series([], dtype="object"),
+            "asset_id": ["000002"],
+            "listing_date": pd.to_datetime(["2010-01-01"]),
+            "delisting_date": pd.to_datetime([None]),
+            "status_change_date": pd.to_datetime(["2010-01-01"]),
+            "stock_name": ["other"],
+            "company_status": ["normal"],
+            "csrc_2012_industry_code": ["I1"],
+            "csrc_2012_industry_name": ["Industry"],
         }
     )
 
-    joined = _asof_join_stock_master(daily, stocks)
+    string_columns = (
+        "stock_name",
+        "company_status",
+        "csrc_2012_industry_code",
+        "csrc_2012_industry_name",
+    )
+    date_columns = ("listing_date", "delisting_date", "status_change_date")
+    for case_name, stock_frame in (
+        ("empty", stocks.iloc[0:0].copy()),
+        ("unmatched", stocks),
+    ):
+        joined = _asof_join_stock_master(daily, stock_frame)
 
-    assert pd.isna(joined.loc[0, "stock_name"])
+        for column in string_columns:
+            assert isinstance(joined[column].dtype, pd.StringDtype)
+            assert joined[column].isna().all()
+        for column in date_columns:
+            assert joined[column].dtype == "datetime64[ns]"
+            assert joined[column].isna().all()
+
+        schema, read_back = _parquet_round_trip(
+            tmp_path / f"{case_name}-stock-master.parquet",
+            joined,
+        )
+        for column in string_columns:
+            physical_type = schema.field(column).type
+            assert pa.types.is_string(physical_type) or pa.types.is_large_string(
+                physical_type
+            )
+            assert read_back[column].isna().all()
+        for column in date_columns:
+            assert pa.types.is_timestamp(schema.field(column).type)
+            assert read_back[column].isna().all()
     assert _first_static_stock_value(stocks, "missing_column") == {}
+
+
+def _parquet_round_trip(
+    path: Path,
+    frame: pd.DataFrame,
+) -> tuple[pa.Schema, pd.DataFrame]:
+    pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), path)
+    parquet_file = pq.ParquetFile(path)
+    try:
+        return parquet_file.schema_arrow, parquet_file.read().to_pandas()
+    finally:
+        parquet_file.close()

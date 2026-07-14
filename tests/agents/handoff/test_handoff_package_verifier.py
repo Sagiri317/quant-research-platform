@@ -467,32 +467,208 @@ def test_handoff_package_verifier_rejects_local_run_members(
 def test_handoff_package_verifier_rejects_private_provider_markers(
     tmp_path: Path,
     text: str,
+    full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     module = _load_verifier_for_scanner_tests()
-    package = tmp_path / "handoff.zip"
-    with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("handoff_evidence/leak.md", text)
+    package, _sidecar = copy_valid_handoff_package(
+        full_valid_handoff_package,
+        tmp_path,
+    )
+    rewrite_handoff_package_member(package, "task_metadata.json", text.encode())
 
     inspection = module.load_handoff_package_payload(package, None)
 
     assert (
-        "vendor_marker_text: handoff_evidence/leak.md"
+        "vendor_marker_text: task_metadata.json"
         in inspection.share_safety_failures
     )
 
 
 def test_handoff_package_verifier_large_text_skip_is_fail_closed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     module = _load_verifier_for_scanner_tests()
-    package = tmp_path / "handoff.zip"
+    package, _sidecar = copy_valid_handoff_package(
+        full_valid_handoff_package,
+        tmp_path,
+    )
     large_text = ("x" * (module.BUNDLE_TEXT_SIZE_CAP_BYTES + 1)) + "\nsource_id=raw\n"
-    with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("handoff_evidence/large.md", large_text)
+    rewrite_handoff_package_member(
+        package,
+        "task_metadata.json",
+        large_text.encode(),
+    )
+    monkeypatch.setattr(module, "ZIP_COMPRESSION_RATIO_CAP", float("inf"))
 
     inspection = module.load_handoff_package_payload(package, None)
 
     assert (
-        "text scan exceeded maximum size: handoff_evidence/large.md"
+        "text scan exceeded maximum size: task_metadata.json"
         in inspection.share_safety_failures
+    )
+
+
+def test_handoff_package_verifier_enforces_member_and_total_size_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("final-branch.bundle", b"1234")
+
+    monkeypatch.setattr(module, "ZIP_MEMBER_SIZE_CAP_BYTES", 3)
+    inspection = module.load_handoff_package_payload(package, None)
+    assert (
+        "zip_member_size_limit_exceeded: final-branch.bundle"
+        in inspection.load_failures
+    )
+
+    monkeypatch.setattr(module, "ZIP_MEMBER_SIZE_CAP_BYTES", 8)
+    monkeypatch.setattr(module, "ZIP_TOTAL_SIZE_CAP_BYTES", 3)
+    inspection = module.load_handoff_package_payload(package, None)
+    assert "zip_total_size_limit_exceeded" in inspection.load_failures
+
+
+def test_handoff_package_verifier_rejects_extreme_compression_ratio(
+    tmp_path: Path,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(
+        package,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as archive:
+        archive.writestr("final-branch.bundle", b"0" * (1024 * 1024))
+
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert (
+        "zip_member_compression_ratio_exceeded: final-branch.bundle"
+        in inspection.load_failures
+    )
+
+
+def test_handoff_package_verifier_streams_members_without_zipfile_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("final-branch.bundle", b"bundle")
+        for name in module.REQUIRED_HANDOFF_ENTRIES - {"final-branch.bundle"}:
+            archive.writestr(name, b"{}")
+
+    def reject_whole_member_read(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("whole_zip_member_read")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", reject_whole_member_read)
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert inspection.raw_bundle == b"bundle"
+
+
+@pytest.mark.parametrize("member_delta", (-1, 1))
+def test_handoff_package_verifier_bounds_member_count_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    member_delta: int,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        for index in range(len(module.REQUIRED_HANDOFF_ENTRIES) + member_delta):
+            archive.writestr(f"extra-{index}.txt", b"payload")
+
+    def reject_member_open(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("zip_member_opened_before_exact_count_preflight")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", reject_member_open)
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert any(
+        failure.startswith("zip_member_count_invalid:")
+        for failure in inspection.load_failures
+    )
+
+
+def test_handoff_package_verifier_blocks_exact_count_invalid_layout_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    required = sorted(module.REQUIRED_HANDOFF_ENTRIES)
+    missing = required[-1]
+    duplicate = required[0]
+    package = tmp_path / "handoff.zip"
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(package, "w") as archive:
+            for name in (*required[:-1], duplicate):
+                archive.writestr(name, b"payload")
+
+    def reject_member_open(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("invalid_layout_member_opened")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", reject_member_open)
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert len(inspection.member_names) == len(module.REQUIRED_HANDOFF_ENTRIES)
+    assert f"duplicate_zip_member: {duplicate}" in inspection.load_failures
+    assert f"missing_required_entry: {missing}" in inspection.load_failures
+
+
+def test_handoff_package_verifier_normalizes_unsupported_member_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("final-branch.bundle", b"bundle")
+        for name in module.REQUIRED_HANDOFF_ENTRIES - {"final-branch.bundle"}:
+            archive.writestr(name, b"{}")
+
+    def reject_member_open(*_args: object, **_kwargs: object) -> object:
+        raise NotImplementedError("unsupported compression")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", reject_member_open)
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert (
+        "zip_member_read_failed: final-branch.bundle: NotImplementedError"
+        in inspection.load_failures
+    )
+
+
+def test_handoff_package_verifier_rejects_unsupported_compression_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_verifier_for_scanner_tests()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("final-branch.bundle", b"bundle")
+        for name in module.REQUIRED_HANDOFF_ENTRIES - {"final-branch.bundle"}:
+            archive.writestr(name, b"{}")
+    original_infolist = zipfile.ZipFile.infolist
+
+    def unsupported_infolist(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+        members = original_infolist(archive)
+        members[0].compress_type = 999
+        return members
+
+    def reject_member_open(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("unsupported_zip_member_opened")
+
+    monkeypatch.setattr(zipfile.ZipFile, "infolist", unsupported_infolist)
+    monkeypatch.setattr(zipfile.ZipFile, "open", reject_member_open)
+    inspection = module.load_handoff_package_payload(package, None)
+
+    assert (
+        "zip_member_compression_unsupported: final-branch.bundle"
+        in inspection.load_failures
     )

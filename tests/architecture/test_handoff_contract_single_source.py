@@ -6,6 +6,8 @@ import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
+
 from tests.helpers.import_graph import imported_modules_from_path
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
@@ -362,6 +364,15 @@ def test_handoff_contract_has_no_retired_verified_path_surfaces() -> None:
     assert "aggregate_validation_summary_status" not in defs
     assert "private_validation" not in source
     assert "baseline_compare" not in source
+    assert "except ModuleNotFoundError" not in source
+    assert "def _aggregate_validation_matrix_status" not in source
+
+
+def test_handoff_status_aggregation_uses_policy_owner_fail_closed() -> None:
+    handoff_contract = load_handoff_script_module("handoff_contract")
+
+    with pytest.raises(ValueError, match="invalid_check_status"):
+        handoff_contract.aggregate_handoff_status(["UNKNOWN"])
 
 
 def test_advisory_machine_contract_is_absent() -> None:

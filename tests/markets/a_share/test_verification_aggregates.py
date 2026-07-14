@@ -7,6 +7,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts._output_manifest import (
+    stage_profile_output_manifest_payload,
+)
+from quant_research_platform.contracts._json import canonical_json_hash
+from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.markets.implementations.a_share.processed import (
     materialization_planning,
 )
@@ -67,7 +73,7 @@ def test_aggregates_summarizes_frames_without_row_level_output(tmp_path: Path) -
     assert summary.duplicate_key_count == 1
     assert summary.period == "2024-01-02 through 2024-01-03"
     assert summary.column_count == 5
-    assert summary.dtype_summary_hash == aggregates.sha256_json(summary.dtype_summary)
+    assert summary.dtype_summary_hash == canonical_json_hash(summary.dtype_summary)
     assert len(summary.aggregate_checksum) == 64
     assert "value" in summary.content_summary
     assert summary.content_summary["flag"]["numeric_max"] == 1.0
@@ -290,39 +296,39 @@ def test_aggregates_output_discovery_rejects_manifest_identity_violations(
     outputs_root = tmp_path / "outputs"
     invalid = outputs_root / "invalid_eval"
     valid = outputs_root / "valid_eval"
-    invalid.mkdir(parents=True)
-    valid.mkdir(parents=True)
+
+    def persist_valid_stage_profile(root: Path) -> dict[str, object]:
+        root.mkdir(parents=True)
+        payload = stage_profile_output_manifest_payload(
+            spec=OutputSpec(
+                output_id=root.name,
+                output_definition_id="stage_profile_diagnostic",
+                run_id="run",
+                market_id=MarketId("a_share"),
+                run_type="diagnostics",
+                scope=OutputScope.LOCAL_ONLY,
+            )
+        )
+        for name in payload["files"]:
+            (root / name).write_text("fixture", encoding="utf-8")
+        (root / "manifest.json").write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+        return payload
+
+    invalid_payload = persist_valid_stage_profile(invalid)
+    persist_valid_stage_profile(valid)
+    invalid_payload["metadata"] = {"schema_id": "nested/version"}
     (invalid / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_id": "qrp-output-manifest",
-                "output_id": "invalid_eval",
-                "output_definition_id": "evaluation_outputs",
-                "run_id": "run",
-                "metadata": {"schema_id": "nested/version"},
-                "files": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (valid / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_id": "qrp-output-manifest",
-                "output_id": "valid_eval",
-                "output_definition_id": "evaluation_outputs",
-                "run_id": "run",
-                "metadata": {},
-                "files": [],
-            }
-        ),
+        json.dumps(invalid_payload),
         encoding="utf-8",
     )
 
     bundles = aggregates._output_bundles(
         outputs_root,
         preferred_id="missing_preferred",
-        output_definition_id="evaluation_outputs",
+        output_definition_id="stage_profile_diagnostic",
     )
 
     assert bundles == (valid,)

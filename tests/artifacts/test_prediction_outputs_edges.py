@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import inspect
 import warnings
+from copy import deepcopy
 from datetime import timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts import _parquet_writers as parquet_writers
+from quant_research_platform.artifacts import (
+    _parquet_writers as parquet_writers,
+)
+from quant_research_platform.artifacts import (
+    _prediction_output_validation as validation,
+)
 from quant_research_platform.artifacts import outputs
+from quant_research_platform.artifacts._output_manifest import (
+    prediction_output_metadata,
+)
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.storage.layout import StorageLayout
 from tests.artifacts.output_edge_fixtures import (
@@ -20,6 +30,186 @@ from tests.artifacts.output_edge_fixtures import (
 from tests.helpers.report_output_frames import (
     make_artifact_prediction_output_frame,
 )
+
+
+def _valid_prediction_output_metadata_with_selection() -> dict[str, object]:
+    spec = PredictionSpec(
+        prediction_id="prediction_demo",
+        model_id="model_demo",
+        research_dataset_id="research_demo",
+        train_end="2024-01-01",
+        test_start="2024-01-03",
+        candidate_model_ids=("candidate_model",),
+        model_selection_validation_start="2024-01-02",
+        model_selection_validation_end="2024-01-02",
+    )
+    frame = make_artifact_prediction_output_frame()
+    model_metadata = deepcopy(frame.attrs["model_metadata"])
+    model_metadata.update(
+        {
+            "test_start": spec.test_start,
+            "oos_start": spec.test_start,
+            "oos_end": spec.test_start,
+        }
+    )
+    model_selection = _valid_model_selection_metadata()
+    model_selection["selected_model_input_columns"] = model_metadata["input_columns"]
+    model_metadata["model_selection"] = model_selection
+    prediction_metadata = deepcopy(frame.attrs["prediction_metadata"])
+    prediction_metadata.update(
+        {
+            "test_start": spec.test_start,
+            "effective_test_end": spec.test_start,
+        }
+    )
+    return prediction_output_metadata(
+        spec=spec,
+        model_metadata=model_metadata,
+        prediction_metadata=prediction_metadata,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "prediction_mode",
+        "is_oos",
+        "primary_key",
+        "sample_filter_mode",
+        "model_filter_columns",
+        "model_filter_definition",
+        "prediction_filter_columns",
+        "prediction_filter_definition",
+        "noncanonical_final_window",
+        "selection_configured_model",
+        "selection_candidate_identity",
+        "model_algorithm",
+        "model_label_input_overlap",
+        "model_factor_filter_column",
+        "model_feature_filter_column",
+        "model_factor_duplicate",
+        "model_feature_duplicate",
+        "model_factor_feature_overlap",
+        "model_inputs_empty",
+        "model_random_seed_bool",
+        "model_random_seed_float",
+        "model_purge_gap_negative",
+        "model_purge_gap_bool",
+        "model_max_train_rows_zero",
+        "model_max_train_rows_bool",
+    ),
+)
+def test_prediction_metadata_reuses_complete_business_owner_graph(
+    mutation: str,
+) -> None:
+    metadata = _valid_prediction_output_metadata_with_selection()
+    assert validation.validate_prediction_output_metadata_shape(metadata) is metadata
+    metadata = deepcopy(metadata)
+    model_metadata = metadata["model_metadata"]
+    prediction_metadata = metadata["prediction_metadata"]
+    selection = model_metadata["model_selection"]
+    if mutation == "prediction_mode":
+        metadata["prediction_mode"] = "unknown"
+        prediction_metadata["prediction_mode"] = "unknown"
+    elif mutation == "is_oos":
+        metadata["is_oos"] = False
+        prediction_metadata["is_oos"] = False
+    elif mutation == "primary_key":
+        metadata["primary_key"] = ["asset_id", "timestamp"]
+    elif mutation == "sample_filter_mode":
+        metadata["sample_filter_mode"] = "tradable"
+        for item in (model_metadata, prediction_metadata):
+            item["sample_filter_mode"] = "tradable"
+            item["filter_columns_used"] = ["eligible", "can_enter", "can_exit"]
+            item["filter_definition"] = (
+                "eligible == True and can_enter == True and can_exit == True"
+            )
+    elif mutation == "model_filter_columns":
+        model_metadata["filter_columns_used"] = []
+    elif mutation == "model_filter_definition":
+        model_metadata["filter_definition"] = "wrong"
+    elif mutation == "prediction_filter_columns":
+        prediction_metadata["filter_columns_used"] = []
+    elif mutation == "prediction_filter_definition":
+        prediction_metadata["filter_definition"] = "wrong"
+    elif mutation == "noncanonical_final_window":
+        metadata["test_end"] = metadata["test_start"]
+        prediction_metadata["requested_test_end"] = metadata["test_start"]
+        model_metadata["test_end"] = metadata["test_start"]
+    elif mutation == "selection_configured_model":
+        selection["configured_model_id"] = "other_model"
+    elif mutation == "selection_candidate_identity":
+        selection["candidate_model_ids"][0] = "other_model"
+        selection["trial_metrics"][0]["model_id"] = "other_model"
+    elif mutation == "model_algorithm":
+        model_metadata["model_algorithm"] = ""
+    elif mutation == "model_label_input_overlap":
+        model_metadata["label_column"] = model_metadata["input_columns"][0]
+    elif mutation == "model_factor_filter_column":
+        model_metadata["input_factor_columns"] = ["eligible"]
+        model_metadata["input_columns"] = [
+            "eligible",
+            *model_metadata["input_feature_columns"],
+        ]
+    elif mutation == "model_feature_filter_column":
+        model_metadata["input_feature_columns"] = ["can_enter"]
+        model_metadata["input_columns"] = [
+            *model_metadata["input_factor_columns"],
+            "can_enter",
+        ]
+    elif mutation == "model_factor_duplicate":
+        model_metadata["input_factor_columns"] = ["factor", "factor"]
+        model_metadata["input_columns"] = [
+            "factor",
+            "factor",
+            *model_metadata["input_feature_columns"],
+        ]
+    elif mutation == "model_feature_duplicate":
+        model_metadata["input_feature_columns"] = ["feature", "feature"]
+        model_metadata["input_columns"] = [
+            *model_metadata["input_factor_columns"],
+            "feature",
+            "feature",
+        ]
+    elif mutation == "model_factor_feature_overlap":
+        model_metadata["input_feature_columns"] = ["factor"]
+        model_metadata["input_columns"] = [
+            *model_metadata["input_factor_columns"],
+            "factor",
+        ]
+    elif mutation == "model_inputs_empty":
+        model_metadata["input_factor_columns"] = []
+        model_metadata["input_feature_columns"] = []
+        model_metadata["input_columns"] = []
+    elif mutation == "model_random_seed_bool":
+        model_metadata["random_seed"] = True
+    elif mutation == "model_random_seed_float":
+        model_metadata["random_seed"] = 1.0
+    elif mutation == "model_purge_gap_negative":
+        model_metadata["purge_gap_steps"] = -1
+    elif mutation == "model_purge_gap_bool":
+        model_metadata["purge_gap_steps"] = True
+    elif mutation == "model_max_train_rows_zero":
+        model_metadata["max_train_rows"] = 0
+    else:
+        model_metadata["max_train_rows"] = True
+
+    if mutation.startswith("model_") and mutation in {
+        "model_factor_filter_column",
+        "model_feature_filter_column",
+        "model_factor_duplicate",
+        "model_feature_duplicate",
+        "model_factor_feature_overlap",
+        "model_inputs_empty",
+    }:
+        model_metadata["input_count"] = len(model_metadata["input_columns"])
+        model_metadata["feature_importance"] = {
+            column: 1.0 for column in model_metadata["input_columns"]
+        }
+        selection["selected_model_input_columns"] = model_metadata["input_columns"]
+
+    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+        validation.validate_prediction_output_metadata_shape(metadata)
 
 
 def test_prediction_output_validation_rejects_bad_frames(
@@ -55,6 +245,73 @@ def test_prediction_output_validation_rejects_bad_frames(
             output_spec=report_spec,
             layout=layout,
         )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("equal_ids", "output_manifest_output_id_invalid"),
+        ("unknown_definition", "output_spec_mismatch"),
+    ),
+)
+def test_prediction_output_identity_failure_never_publishes_bundle(
+    tmp_path: Path,
+    mutation: str,
+    error: str,
+) -> None:
+    spec = make_output_edge_prediction_spec()
+    output_spec = make_output_edge_report_spec(
+        "prediction_outputs",
+        spec.prediction_id,
+        "prediction",
+    )
+    if mutation == "equal_ids":
+        object.__setattr__(
+            output_spec,
+            "output_id",
+            output_spec.output_definition_id,
+        )
+    else:
+        object.__setattr__(
+            output_spec,
+            "output_definition_id",
+            "unknown_outputs",
+        )
+    layout = StorageLayout(project_root=tmp_path)
+
+    with pytest.raises(ValueError, match=error):
+        outputs.write_prediction_outputs(
+            make_artifact_prediction_output_frame(),
+            spec=spec,
+            output_spec=output_spec,
+            layout=layout,
+        )
+
+    assert not (tmp_path / "outputs" / output_spec.output_id).exists()
+
+
+def test_prediction_output_nested_schema_identity_never_publishes_bundle(
+    tmp_path: Path,
+) -> None:
+    spec = make_output_edge_prediction_spec()
+    output_spec = make_output_edge_report_spec(
+        "prediction_outputs",
+        spec.prediction_id,
+        "prediction",
+    )
+    frame = make_artifact_prediction_output_frame()
+    frame.attrs["model_metadata"]["hyperparameters"]["schema_id"] = "forbidden"
+    layout = StorageLayout(project_root=tmp_path)
+
+    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+        outputs.write_prediction_outputs(
+            frame,
+            spec=spec,
+            output_spec=output_spec,
+            layout=layout,
+        )
+
+    assert not (tmp_path / "outputs" / output_spec.output_id).exists()
 
 
 def test_prediction_chunk_writer_has_no_row_proportional_python_key_set() -> None:
@@ -308,6 +565,58 @@ def test_prediction_outputs_reject_tampered_selected_model_input_columns(
         )
 
 
+@pytest.mark.parametrize(
+    "feature_importance",
+    (
+        {"factor": 0.1},
+        {"factor": 0.1, "feature": 0.2, "extra": 0.3},
+        {"unrelated": 1.0},
+    ),
+    ids=("missing", "extra", "unrelated"),
+)
+@pytest.mark.parametrize("chunked", (False, True), ids=("direct", "chunked"))
+def test_prediction_outputs_bind_feature_importance_to_exact_model_inputs(
+    tmp_path: Path,
+    feature_importance: dict[str, float],
+    chunked: bool,
+) -> None:
+    spec = make_output_edge_prediction_spec()
+    output_spec = make_output_edge_report_spec(
+        "prediction_outputs",
+        spec.prediction_id,
+        "prediction",
+    )
+    frame = make_artifact_prediction_output_frame()
+    model_metadata = {
+        **frame.attrs["model_metadata"],
+        "feature_importance": feature_importance,
+    }
+    layout = StorageLayout(project_root=tmp_path)
+
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
+        if chunked:
+            outputs.write_prediction_outputs(
+                spec=spec,
+                output_spec=output_spec,
+                layout=layout,
+                output_chunks=(frame,),
+                model_metadata=model_metadata,
+                prediction_metadata_factory=lambda: frame.attrs[
+                    "prediction_metadata"
+                ],
+            )
+        else:
+            frame.attrs["model_metadata"] = model_metadata
+            outputs.write_prediction_outputs(
+                frame,
+                spec=spec,
+                output_spec=output_spec,
+                layout=layout,
+            )
+
+    assert not (tmp_path / "outputs" / output_spec.output_id).exists()
+
+
 def test_prediction_outputs_reject_tampered_model_selection_direction(
     tmp_path: Path,
 ) -> None:
@@ -378,6 +687,114 @@ def test_prediction_outputs_reject_tampered_model_selection_direction(
             output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
         )
+    assert not (tmp_path / "outputs" / report_spec.output_id).exists()
+
+
+def _valid_model_selection_metadata() -> dict[str, object]:
+    return {
+        "status": "selected",
+        "configured_model_id": "model_demo",
+        "selected_model_id": "candidate_model",
+        "selected_model_input_columns": ["factor"],
+        "candidate_model_ids": ["model_demo", "candidate_model"],
+        "selection_metric": "validation_rankic",
+        "selection_direction": "maximize",
+        "validation_start": "2024-01-02",
+        "validation_end": "2024-01-02",
+        "candidate_count": 2,
+        "trial_metrics": [
+            {
+                "model_id": "model_demo",
+                "validation_rows": 1,
+                "validation_ic": 0.0,
+                "validation_rankic": 0.0,
+                "validation_mse": 1.0,
+            },
+            {
+                "model_id": "candidate_model",
+                "validation_rows": 1,
+                "validation_ic": 0.0,
+                "validation_rankic": 0.0,
+                "validation_mse": 0.0,
+            },
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "candidate_missing",
+        "candidate_extra",
+        "candidate_duplicate",
+        "trial_missing",
+        "trial_extra",
+        "trial_duplicate",
+        "trial_out_of_order",
+        "trial_field_missing",
+        "trial_field_extra",
+        "trial_validation_rows_bool",
+        "trial_validation_rows_string",
+        "trial_validation_rows_numpy",
+        "trial_validation_rows_negative",
+        "candidate_count_bool",
+        "candidate_count_string",
+        "candidate_count_numpy",
+        "candidate_count_mismatch",
+        "trial_metric_bool",
+        "trial_metric_nan",
+        "trial_metric_infinity",
+    ),
+)
+def test_model_selection_candidate_trial_exact_mutation_matrix(
+    mutation: str,
+) -> None:
+    metadata = deepcopy(_valid_model_selection_metadata())
+    candidates = metadata["candidate_model_ids"]
+    trials = metadata["trial_metrics"]
+    if mutation == "candidate_missing":
+        candidates.pop()
+    elif mutation == "candidate_extra":
+        candidates.append("extra_model")
+    elif mutation == "candidate_duplicate":
+        candidates[1] = candidates[0]
+    elif mutation == "trial_missing":
+        trials.pop()
+    elif mutation == "trial_extra":
+        trials.append(deepcopy(trials[0]))
+    elif mutation == "trial_duplicate":
+        trials[1]["model_id"] = trials[0]["model_id"]
+    elif mutation == "trial_out_of_order":
+        trials.reverse()
+    elif mutation == "trial_field_missing":
+        trials[0].pop("validation_mse")
+    elif mutation == "trial_field_extra":
+        trials[0]["unexpected"] = 0
+    elif mutation == "trial_validation_rows_bool":
+        trials[0]["validation_rows"] = True
+    elif mutation == "trial_validation_rows_string":
+        trials[0]["validation_rows"] = "1"
+    elif mutation == "trial_validation_rows_numpy":
+        trials[0]["validation_rows"] = np.int64(1)
+    elif mutation == "trial_validation_rows_negative":
+        trials[0]["validation_rows"] = -1
+    elif mutation == "candidate_count_bool":
+        metadata["candidate_count"] = True
+    elif mutation == "candidate_count_string":
+        metadata["candidate_count"] = "2"
+    elif mutation == "candidate_count_numpy":
+        metadata["candidate_count"] = np.int64(2)
+    elif mutation == "candidate_count_mismatch":
+        metadata["candidate_count"] = 1
+    elif mutation == "trial_metric_bool":
+        trials[0]["validation_mse"] = True
+    elif mutation == "trial_metric_nan":
+        trials[0]["validation_mse"] = float("nan")
+    else:
+        trials[0]["validation_mse"] = float("inf")
+
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
+        validation.validate_model_selection_metadata_shape(metadata)
 
 
 def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(

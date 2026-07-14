@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Annotated
 
@@ -10,7 +9,7 @@ import typer
 
 from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.storage.atomic import atomic_write_text
+from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.workflows.diagnostics.schema_inventory import (
     build_schema_inventory_payload,
 )
@@ -67,11 +66,7 @@ def schema_inventory(
     except Exception as exc:
         typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
-    atomic_write_text(
-        output,
-        json.dumps(inventory, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(output, inventory)
 
 
 @local_verification_app.command("run")

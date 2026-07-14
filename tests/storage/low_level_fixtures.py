@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -8,18 +7,23 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from quant_research_platform.catalog.fields import platform_entity_time_key
+from quant_research_platform.contracts._json import (
+    canonical_json_hash,
+    render_qrp_json_object,
+)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
     ProcessedDataKind,
     ProcessedDataSpec,
+    data_frequency_slug,
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_schema import (
-    canonical_schema_from_file,
-    sha256_json,
+    physical_schema_columns,
+    physical_schema_from_file,
 )
 
 
@@ -170,18 +174,32 @@ def write_low_level_parquet_artifact(
 ) -> None:
     """Construct low-level parquet fixtures for storage-adjacent tests."""
 
+    effective_primary_key = tuple(primary_key)
+    if (
+        not effective_primary_key
+        or any(
+            type(column) is not str or not column for column in effective_primary_key
+        )
+    ):
+        raise ValueError("low_level_fixture_primary_key_required")
     spec = {
         "schema_id": "qrp-dataset-spec",
         "data_id": Path(artifact_root).name,
-        "primary_key": list(primary_key),
+        "frequency": data_frequency_slug(DataFrequency.DAILY),
+        "grain": (
+            "asset_timestamp"
+            if "timestamp" in effective_primary_key
+            else "asset_reference"
+        ),
+        "primary_key": list(effective_primary_key),
         "partition_columns": list(partition_columns),
         "required_columns": [str(column) for column in frame.columns],
-        "column_roles": _column_roles(frame.columns, primary_key),
+        "column_roles": _column_roles(frame.columns, effective_primary_key),
     }
     root = Path(artifact_root)
     root.mkdir(parents=True, exist_ok=True)
     (root / "spec.json").write_text(
-        json.dumps(spec, ensure_ascii=False, indent=2) + "\n",
+        render_qrp_json_object(spec) + "\n",
         encoding="utf-8",
     )
     data_root = root / "data"
@@ -200,16 +218,23 @@ def write_low_level_parquet_artifact(
         path = data_root / "part-000.parquet"
         frame.to_parquet(path, index=False)
         paths.append(path)
-    _write_runtime_manifest(root, data_root, paths)
+    _write_runtime_manifest(root, data_root, paths, frame=frame, spec=spec)
 
 
-def _write_runtime_manifest(root: Path, data_root: Path, paths: list[Path]) -> None:
-    schemas: list[tuple[tuple[str, str], ...]] = []
+def _write_runtime_manifest(
+    root: Path,
+    data_root: Path,
+    paths: list[Path],
+    *,
+    frame: pd.DataFrame,
+    spec: dict[str, object],
+) -> None:
+    schemas: list[list[dict[str, object]]] = []
     row_count = 0
     partition_row_counts: dict[str, int] = {}
     for path in sorted(paths):
         parquet_file = pq.ParquetFile(path)
-        schemas.append(canonical_schema_from_file(parquet_file))
+        schemas.append(physical_schema_from_file(parquet_file))
         partition = relative_partition_label(data_root, path)
         rows = int(parquet_file.metadata.num_rows)
         row_count += rows
@@ -217,18 +242,47 @@ def _write_runtime_manifest(root: Path, data_root: Path, paths: list[Path]) -> N
     first_schema = schemas[0]
     if any(schema != first_schema for schema in schemas[1:]):
         raise ValueError("dataset_schema_mismatch")
+    timestamp_values = (
+        pd.to_datetime(frame["timestamp"], errors="raise").dropna()
+        if "timestamp" in frame
+        else pd.Series(dtype="datetime64[ns]")
+    )
+    primary_key = list(spec["primary_key"])
     manifest = {
+        **{key: value for key, value in spec.items() if key != "schema_id"},
         "schema_id": "qrp-dataset-manifest",
-        "columns": [name for name, _ in first_schema],
-        "schema_hash": sha256_json(first_schema),
+        "columns": list(physical_schema_columns(first_schema)),
+        "physical_schema": first_schema,
+        "schema_hash": canonical_json_hash(first_schema),
         "partition_row_counts": dict(sorted(partition_row_counts.items())),
+        "partition_count": len(partition_row_counts),
+        "partitions": sorted(partition_row_counts),
         "file_count": len(paths),
+        "file_size_bytes": sum(path.stat().st_size for path in paths),
         "row_count": row_count,
+        "date_min": (
+            None
+            if timestamp_values.empty
+            else timestamp_values.min().date().isoformat()
+        ),
+        "date_max": (
+            None
+            if timestamp_values.empty
+            else timestamp_values.max().date().isoformat()
+        ),
+        "null_count_summary": {
+            column: int(frame[column].isna().sum()) for column in primary_key
+        },
+        "non_finite_count_summary": {},
+        "duplicate_primary_key_count": int(frame.duplicated(primary_key).sum()),
+        "factor_nan_profile": {},
+        "label_nan_profile": {},
+        "validation_status": "PASS",
     }
     manifest_path = root / "_manifest" / "manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        render_qrp_json_object(manifest) + "\n",
         encoding="utf-8",
     )
 

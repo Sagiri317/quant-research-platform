@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_reading import (
@@ -21,7 +22,6 @@ from quant_research_platform.storage._dataset_reading import (
     iter_dataset_file_batches,
     read_columns_for_time_window,
 )
-from quant_research_platform.storage._dataset_schema import sha256_json
 from quant_research_platform.storage._dataset_types import DatasetFingerprint
 
 _FINGERPRINT_PHYSICAL_TARGET_BYTES = DEFAULT_DATASET_PHYSICAL_TARGET_BYTES // 2
@@ -91,7 +91,7 @@ def fingerprint_dataset(
         ) % 2**64
         partition_hash_xor[partition] = partition_hash_xor.get(partition, 0) ^ chunk_xor
 
-    content_hash = sha256_json(
+    content_hash = canonical_json_hash(
         {
             "row_hash_sum": row_hash_sum,
             "row_hash_xor": row_hash_xor,
@@ -104,7 +104,7 @@ def fingerprint_dataset(
         {
             "partition": partition,
             "row_count": int(partition_rows[partition]),
-            "content_hash": sha256_json(
+            "content_hash": canonical_json_hash(
                 {
                     "row_hash_sum": int(partition_hash_sum[partition]),
                     "row_hash_xor": int(partition_hash_xor[partition]),

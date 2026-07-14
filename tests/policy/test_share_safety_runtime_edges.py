@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from quant_research_platform.agents.safety import (
@@ -123,6 +125,92 @@ def test_sanitizer_recurses_public_objects() -> None:
     assert "D:" not in str(sanitized)
     assert "000001" not in str(sanitized)
     assert "abcdef123456" not in str(sanitized)
+
+
+@pytest.mark.parametrize("container_kind", ["list", "tuple", "mapping"])
+def test_sanitizer_rejects_distinct_values_that_collapse_to_one_safe_value(
+    container_kind: str,
+) -> None:
+    values = [r"C:\private\one.csv", r"D:\private\two.csv"]
+    if container_kind == "list":
+        payload: object = values
+    elif container_kind == "tuple":
+        payload = tuple(values)
+    else:
+        payload = {"first": values[0], "second": values[1]}
+
+    with pytest.raises(ValueError, match="sanitize_value_collision"):
+        sanitize_shared_object(payload)
+
+
+def test_sanitizer_allows_repeated_identical_values() -> None:
+    value = r"C:\private\one.csv"
+
+    assert sanitize_shared_object([value, value]) == ["[local-path]", "[local-path]"]
+
+
+def test_sanitizer_mapping_graph_identity_is_key_order_independent() -> None:
+    first = {"path": r"C:\private\one.csv", "label": "same"}
+    second = {"label": "same", "path": r"D:\private\two.csv"}
+
+    with pytest.raises(ValueError, match="sanitize_value_collision"):
+        sanitize_shared_object([first, second])
+
+
+def test_sanitizer_preserves_mapping_order_for_identical_reordered_graphs() -> None:
+    first = {"path": r"C:\private\one.csv", "label": "same"}
+    second = {"label": "same", "path": r"C:\private\one.csv"}
+
+    assert sanitize_shared_object([first, second]) == [
+        {"path": "[local-path]", "label": "same"},
+        {"label": "same", "path": "[local-path]"},
+    ]
+
+
+def test_sanitizer_rejects_mapping_key_collision_after_redaction() -> None:
+    with pytest.raises(ValueError, match="sanitize_key_collision"):
+        sanitize_shared_object(
+            {
+                r"C:\private\one.csv": "first",
+                r"D:\private\two.csv": "second",
+            }
+        )
+
+
+def test_sanitizer_rejects_direct_and_mutual_cycles() -> None:
+    direct: list[object] = []
+    direct.append(direct)
+    left: list[object] = []
+    right: list[object] = [left]
+    left.append(right)
+
+    with pytest.raises(ValueError, match="sanitize_cycle"):
+        sanitize_shared_object(direct)
+    with pytest.raises(ValueError, match="sanitize_cycle"):
+        sanitize_shared_object(left)
+
+
+def test_sanitizer_rejects_excessive_container_depth() -> None:
+    payload: object = "leaf"
+    for _ in range(66):
+        payload = [payload]
+
+    with pytest.raises(ValueError, match="sanitize_recursion_limit"):
+        sanitize_shared_object(payload)
+
+
+def test_sanitizer_orders_heterogeneous_sets_by_safe_identity() -> None:
+    assert sanitize_shared_object({2, "1", None}) == [None, 2, "1"]
+
+
+def test_sanitizer_makes_scanner_rejected_path_scalars_share_safe() -> None:
+    first = Path(r"C:\private\one.csv")
+    second = Path(r"D:\private\two.csv")
+
+    assert sanitize_shared_object(first) == "[local-path]"
+    assert sanitize_shared_object(1) == 1
+    with pytest.raises(ValueError, match="sanitize_value_collision"):
+        sanitize_shared_object([first, second])
 
 
 def test_provider_source_marker_input_is_rejected_before_row_level_read() -> None:
@@ -256,3 +344,18 @@ def test_internal_artifact_metadata_safety_is_owned_by_runtime(
         match=f"unsafe_internal_artifact_metadata: {reason}",
     ):
         assert_internal_artifact_metadata_safe(payload)
+
+
+def test_sanitizer_rejects_distinct_keys_that_collapse() -> None:
+    with pytest.raises(ValueError, match="sanitize_key_collision"):
+        sanitize_shared_object(
+            {
+                "token=abcdefgh": "first",
+                "token=ijklmnop": "second",
+            }
+        )
+
+
+def test_sanitizer_rejects_non_string_mapping_keys_before_json_write() -> None:
+    with pytest.raises(ValueError, match="sanitize_mapping_key_must_be_string"):
+        sanitize_shared_object({1: "value"})

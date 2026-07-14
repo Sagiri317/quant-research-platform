@@ -4,6 +4,8 @@ import re
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
@@ -483,7 +485,27 @@ def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
         "available_at",
         "source_exchange",
     }.intersection(pruned.columns)
+    assert pruned.columns.tolist() == list(interim.MARKET_BARS_INTERIM_COLUMNS)
+    assert pruned["turnover"].dtype == "float64"
+    assert pruned["turnover"].isna().all()
     assert report["data_id"] == frequency_ids.MARKET_BARS_DATA_ID
+
+
+def test_csmar_empty_daily_interim_preserves_turnover_float64_dtype() -> None:
+    raw = _market_bars_daily_raw_frame().iloc[0:0]
+
+    normalized = interim.normalize_raw_frame(
+        raw,
+        frequency_ids.MARKET_BARS_DATA_ID,
+    )
+    pruned, _ = interim.apply_output_column_rules(
+        normalized,
+        frequency_ids.MARKET_BARS_DATA_ID,
+    )
+
+    assert pruned.empty
+    assert pruned.columns.tolist() == list(interim.MARKET_BARS_INTERIM_COLUMNS)
+    assert pruned["turnover"].dtype == "float64"
 
 
 @pytest.mark.parametrize("index_code", [None, pd.NA, "", [], {}, set(), 123])
@@ -876,8 +898,19 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     assert inspection.file_count >= 1
     assert inspection.row_count == 2
     assert len(read_back) == 2
+    assert read_back.columns.tolist() == list(interim.MARKET_BARS_INTERIM_COLUMNS)
+    assert read_back["turnover"].dtype == "float64"
+    assert read_back["turnover"].isna().all()
     assert "asset_id" not in read_back.columns
     assert "market_id" not in read_back.columns
+    parts = sorted(artifact_root.rglob("*.parquet"))
+    assert parts
+    assert all(
+        pa.types.is_float64(
+            pq.ParquetFile(part).schema_arrow.field("turnover").type
+        )
+        for part in parts
+    )
 
 
 def _market_bars_daily_raw_frame() -> pd.DataFrame:

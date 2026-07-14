@@ -9,7 +9,6 @@ from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import (
     build_layer_summary,
     build_run_data_summary,
-    write_internal_artifact_manifest,
     write_manifest,
 )
 from tests.storage.low_level_fixtures import (
@@ -130,14 +129,10 @@ def test_build_layer_summary_detects_missing_dataset_manifests(tmp_path: Path) -
     layer_root = tmp_path / "data" / "processed"
     present = layer_root / "a_share" / "factor" / "present"
     missing = layer_root / "a_share" / "label" / "missing"
-    write_internal_artifact_manifest(
-        present / "_manifest" / "manifest.json",
-        _artifact_manifest_payload(
-            data_id="present",
-            row_count=3,
-            date_min="2014-01-02",
-            date_max="2014-01-03",
-        ),
+    write_dataset(
+        present,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("present"),
     )
 
     payload = build_layer_summary(
@@ -151,7 +146,7 @@ def test_build_layer_summary_detects_missing_dataset_manifests(tmp_path: Path) -
     assert payload["missing_dataset_manifests"] == [
         "data/processed/a_share/label/missing/_manifest/manifest.json"
     ]
-    assert payload["layer_validation_status"] == "fail"
+    assert payload["layer_validation_status"] == "FAIL"
 
 
 def test_build_run_data_summary_aggregates_dynamic_layers(tmp_path: Path) -> None:
@@ -171,26 +166,8 @@ def test_build_run_data_summary_aggregates_dynamic_layers(tmp_path: Path) -> Non
     )
 
     assert payload["layer_count"] == 2
-    assert payload["run_validation_status"] == "pass"
+    assert payload["run_validation_status"] == "PASS"
     assert [layer["logical_layer"] for layer in payload["layers"]] == [
         "processed",
         "research",
     ]
-
-
-def _artifact_manifest_payload(
-    *,
-    data_id: str,
-    row_count: int,
-    date_min: str,
-    date_max: str,
-) -> dict[str, object]:
-    return {
-        "schema_id": "qrp-dataset-manifest",
-        "data_id": data_id,
-        "row_count": row_count,
-        "date_min": date_min,
-        "date_max": date_max,
-        "duplicate_primary_key_count": 0,
-        "validation_status": "pass",
-    }

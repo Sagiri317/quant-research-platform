@@ -201,8 +201,8 @@ def test_duplicate_output_column_fails_closed() -> None:
     [
         ("factor_columns", "eligible", "research_input_column_overlap"),
         ("label_columns", "factor_1", "research_input_column_overlap"),
-        ("filter_columns", "context_1", "invalid_research_filter_columns"),
-        ("context_columns", "label_1", "invalid_research_context_columns"),
+        ("filter_columns", "context_1", "research_semantic_column_role_invalid"),
+        ("context_columns", "label_1", "research_semantic_column_role_invalid"),
     ],
 )
 def test_research_dataset_role_separation_is_enforced(
@@ -321,7 +321,7 @@ def test_sparse_research_input_missing_base_key_passes_with_nan(
     assert pd.isna(result.loc[result["asset_id"].eq("asset_b"), "factor_1"]).all()
 
 
-def test_research_dataset_key_coverage_is_persisted_for_all_inputs(
+def test_research_dataset_semantic_snapshots_are_persisted_for_all_inputs(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
@@ -355,6 +355,12 @@ def test_research_dataset_key_coverage_is_persisted_for_all_inputs(
     }
     assert spec_payload["key_coverage"] == expected
     assert manifest_payload["key_coverage"] == expected
+    expected_roles = {
+        column: role.value
+        for column, role in dataset_catalog.get("dummy_dataset").column_roles.items()
+    }
+    assert spec_payload["column_roles"] == expected_roles
+    assert manifest_payload["column_roles"] == expected_roles
 
 
 def test_strict_research_input_value_nan_does_not_count_as_missing_key(

@@ -18,6 +18,9 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
     compute_listing_age_trading_days,
 )
+from quant_research_platform.markets.implementations.a_share.fields import (
+    field_catalog,
+)
 from quant_research_platform.markets.implementations.a_share.ids import (
     MARKET_ID,
     require_supported_panel_frequency,
@@ -121,9 +124,15 @@ def compute_market_panel(
         cap_frame = cap[cap["asset_id"] == asset_id]
         if cap_frame.empty:
             stock_result = stock_frame.copy()
-            stock_result["share_change_date"] = pd.NaT
-            stock_result["total_shares"] = pd.NA
-            stock_result["a_float_shares"] = pd.NA
+            for column in (
+                "share_change_date",
+                "total_shares",
+                "a_float_shares",
+            ):
+                stock_result[column] = _missing_registered_column(
+                    column,
+                    index=stock_result.index,
+                )
         else:
             stock_result = pd.merge_asof(
                 stock_frame.sort_values("timestamp"),
@@ -285,7 +294,10 @@ def _asof_join_stock_master(
             stock_result = market_bar_frame.copy()
             for column in stock_output_columns:
                 if column not in stock_result.columns:
-                    stock_result[column] = pd.NA
+                    stock_result[column] = _missing_registered_column(
+                        column,
+                        index=stock_result.index,
+                    )
         else:
             stock_result = pd.merge_asof(
                 market_bar_frame.sort_values("timestamp"),
@@ -313,15 +325,25 @@ def _asof_join_stock_master(
         stock_result = market_frame.copy()
         for column in stock_output_columns:
             if column not in stock_result.columns:
-                stock_result[column] = _empty_stock_master_column(column)
+                stock_result[column] = _missing_registered_column(
+                    column,
+                    index=stock_result.index,
+                )
         return stock_result
     return pd.concat(merged_groups, ignore_index=True)
 
 
-def _empty_stock_master_column(column: str) -> pd.Series:
-    if column in {"listing_date", "delisting_date", "status_change_date"}:
-        return pd.Series(dtype="datetime64[ns]")
-    return pd.Series(dtype="object")
+def _missing_registered_column(
+    column: str,
+    *,
+    index: pd.Index,
+) -> pd.Series:
+    spec = field_catalog().get(column)
+    if spec.dtype == "date" or spec.dtype.startswith("timestamp["):
+        return pd.Series(pd.NaT, index=index, dtype="datetime64[ns]")
+    if spec.dtype.startswith("float"):
+        return pd.Series(float("nan"), index=index, dtype=spec.dtype)
+    return pd.Series(pd.NA, index=index, dtype=spec.dtype)
 
 
 def _stock_master_effective_date(stocks: pd.DataFrame) -> pd.Series:

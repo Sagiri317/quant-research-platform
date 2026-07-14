@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from quant_research_platform.contracts.features import FeatureTransformSpec
@@ -75,6 +77,43 @@ def test_feature_transform_spec_uses_source_and_output_columns_only() -> None:
             transform="cross_sectional_rank",
             output_columns=("mom_20d",),
         )
+
+
+def test_feature_transform_quantiles_reject_unrepresentable_numeric_bounds() -> None:
+    with pytest.raises(ValueError, match="invalid_winsorize_quantiles"):
+        FeatureTransformSpec(
+            transform_id="bad_huge_quantile",
+            source_columns=("mom_20d",),
+            transform="winsorize",
+            output_columns=("mom_20d_winsorized",),
+            winsorize_quantiles=(0, 10**400),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_kind", "error"),
+    (
+        ("transform", [], "unsupported_feature_transform"),
+        ("transform", {}, "unsupported_feature_transform"),
+        ("fillna_policy", [], "unsupported_feature_transform_fillna_policy"),
+        ("fillna_policy", {}, "unsupported_feature_transform_fillna_policy"),
+    ),
+    ids=("transform-list", "transform-dict", "fillna-list", "fillna-dict"),
+)
+def test_feature_transform_rejects_unhashable_enum_values_with_owner_error(
+    field: str,
+    wrong_kind: object,
+    error: str,
+) -> None:
+    spec = FeatureTransformSpec(
+        transform_id="mom_20d_rank",
+        source_columns=("mom_20d",),
+        transform="cross_sectional_rank",
+        output_columns=("mom_20d_rank",),
+    )
+
+    with pytest.raises(ValueError, match=error):
+        replace(spec, **{field: wrong_kind})
 
 
 def test_portfolio_contract_uses_return_source_and_cost_config() -> None:

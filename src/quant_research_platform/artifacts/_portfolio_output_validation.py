@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pandas as pd
 
 from quant_research_platform.artifacts._membership_validation import (
     validate_string_membership_column,
 )
+from quant_research_platform.artifacts._output_common_validation import (
+    require_finite_metadata_number,
+    require_metadata_string,
+    require_metadata_string_list,
+    require_non_negative_metadata_int,
+    require_optional_metadata_string,
+    require_signal_metadata_list,
+)
+from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS,
     PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS,
     PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS,
+    CostConfig,
+    PortfolioDiagnosticsConfig,
     PortfolioSpec,
+    TradabilityConfig,
+    WeightConfig,
 )
 
 PORTFOLIO_ARTIFACTS = {
@@ -29,6 +44,46 @@ PORTFOLIO_ARTIFACTS = {
     "numeric_exposure_diagnostics": "numeric_exposure_diagnostics.parquet",
     "categorical_exposure_diagnostics": "categorical_exposure_diagnostics.parquet",
 }
+_PORTFOLIO_OUTPUT_METADATA_KEYS = frozenset(
+    {
+        "portfolio_id",
+        "market_id",
+        "research_dataset_id",
+        "run_type",
+        "signals",
+        "return_source_column",
+        "rebalance_frequency",
+        "execution_lag_steps",
+        "weight_config",
+        "tradability_config",
+        "cost_config",
+        "diagnostics_config",
+        "row_counts",
+    }
+)
+_WEIGHT_CONFIG_KEYS = frozenset(
+    {"method", "portfolio_mode", "top_quantile", "bottom_quantile", "risk_column"}
+)
+_TRADABILITY_CONFIG_KEYS = frozenset(
+    {
+        "eligibility_column",
+        "can_enter_column",
+        "can_exit_column",
+        "blocked_entry_policy",
+        "blocked_exit_policy",
+    }
+)
+_COST_CONFIG_KEYS = frozenset(
+    {"buy_cost_bps", "sell_cost_bps", "slippage_bps", "spread_bps", "impact_model"}
+)
+_DIAGNOSTICS_CONFIG_KEYS = frozenset(
+    {
+        "capacity_amount_column",
+        "capacity_float_market_cap_column",
+        "numeric_exposure_columns",
+        "categorical_exposure_columns",
+    }
+)
 _PORTFOLIO_POSITION_COLUMNS = ("timestamp", "asset", "signal", "position")
 _PORTFOLIO_TURNOVER_COLUMNS = ("timestamp", "signal", "turnover")
 _PORTFOLIO_COST_BREAKDOWN_COLUMNS = (
@@ -175,6 +230,197 @@ def portfolio_required_columns() -> dict[str, tuple[str, ...]]:
             PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS
         ),
     }
+
+
+def validate_portfolio_artifact_mapping_keys(
+    value: object,
+    *,
+    expected_names: tuple[str, ...],
+    error: str,
+) -> Mapping[str, pd.DataFrame]:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != set(expected_names)
+        or any(not isinstance(value[name], pd.DataFrame) for name in expected_names)
+    ):
+        raise ValueError(error)
+    return value
+
+
+def validate_portfolio_row_counts(value: object) -> dict[str, int]:
+    if type(value) is not dict or set(value) != set(PORTFOLIO_ARTIFACTS):
+        raise ValueError("output_manifest_metadata_invalid")
+    for artifact_name in PORTFOLIO_ARTIFACTS:
+        require_non_negative_metadata_int(
+            value,
+            artifact_name,
+            "output_manifest_metadata_invalid",
+        )
+    return value
+
+
+def validate_portfolio_output_metadata_shape(
+    metadata: object,
+) -> dict[str, object]:
+    if type(metadata) is not dict or set(metadata) != _PORTFOLIO_OUTPUT_METADATA_KEYS:
+        raise ValueError("output_manifest_metadata_invalid")
+    for key in (
+        "portfolio_id",
+        "market_id",
+        "research_dataset_id",
+        "run_type",
+        "return_source_column",
+        "rebalance_frequency",
+    ):
+        require_metadata_string(metadata, key, "output_manifest_metadata_invalid")
+    signals = require_signal_metadata_list(
+        metadata, "signals", "output_manifest_metadata_invalid"
+    )
+    require_non_negative_metadata_int(
+        metadata, "execution_lag_steps", "output_manifest_metadata_invalid"
+    )
+
+    weight = metadata["weight_config"]
+    if type(weight) is not dict or set(weight) != _WEIGHT_CONFIG_KEYS:
+        raise ValueError("output_manifest_metadata_invalid")
+    method = require_metadata_string(
+        weight, "method", "output_manifest_metadata_invalid"
+    )
+    portfolio_mode = require_metadata_string(
+        weight, "portfolio_mode", "output_manifest_metadata_invalid"
+    )
+    risk_column = require_optional_metadata_string(
+        weight, "risk_column", "output_manifest_metadata_invalid"
+    )
+    top_quantile = require_finite_metadata_number(
+        weight, "top_quantile", "output_manifest_metadata_invalid"
+    )
+    bottom_quantile = require_finite_metadata_number(
+        weight, "bottom_quantile", "output_manifest_metadata_invalid"
+    )
+    try:
+        weight_config = WeightConfig(
+            method=method,
+            portfolio_mode=portfolio_mode,
+            top_quantile=top_quantile,
+            bottom_quantile=bottom_quantile,
+            risk_column=risk_column,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("output_manifest_metadata_invalid") from exc
+
+    tradability = metadata["tradability_config"]
+    if type(tradability) is not dict or set(tradability) != _TRADABILITY_CONFIG_KEYS:
+        raise ValueError("output_manifest_metadata_invalid")
+    eligibility_column = require_optional_metadata_string(
+        tradability, "eligibility_column", "output_manifest_metadata_invalid"
+    )
+    can_enter_column = require_optional_metadata_string(
+        tradability, "can_enter_column", "output_manifest_metadata_invalid"
+    )
+    can_exit_column = require_optional_metadata_string(
+        tradability, "can_exit_column", "output_manifest_metadata_invalid"
+    )
+    blocked_entry_policy = require_metadata_string(
+        tradability, "blocked_entry_policy", "output_manifest_metadata_invalid"
+    )
+    blocked_exit_policy = require_metadata_string(
+        tradability, "blocked_exit_policy", "output_manifest_metadata_invalid"
+    )
+    try:
+        tradability_config = TradabilityConfig(
+            eligibility_column=eligibility_column,
+            can_enter_column=can_enter_column,
+            can_exit_column=can_exit_column,
+            blocked_entry_policy=blocked_entry_policy,
+            blocked_exit_policy=blocked_exit_policy,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("output_manifest_metadata_invalid") from exc
+
+    cost = metadata["cost_config"]
+    if type(cost) is not dict or set(cost) != _COST_CONFIG_KEYS:
+        raise ValueError("output_manifest_metadata_invalid")
+    buy_cost_bps = require_finite_metadata_number(
+        cost, "buy_cost_bps", "output_manifest_metadata_invalid"
+    )
+    sell_cost_bps = require_finite_metadata_number(
+        cost, "sell_cost_bps", "output_manifest_metadata_invalid"
+    )
+    slippage_bps = require_finite_metadata_number(
+        cost, "slippage_bps", "output_manifest_metadata_invalid"
+    )
+    spread_bps = (
+        None
+        if cost["spread_bps"] is None
+        else require_finite_metadata_number(
+            cost, "spread_bps", "output_manifest_metadata_invalid"
+        )
+    )
+    impact_model = require_optional_metadata_string(
+        cost, "impact_model", "output_manifest_metadata_invalid"
+    )
+    try:
+        cost_config = CostConfig(
+            buy_cost_bps=buy_cost_bps,
+            sell_cost_bps=sell_cost_bps,
+            slippage_bps=slippage_bps,
+            spread_bps=spread_bps,
+            impact_model=impact_model,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("output_manifest_metadata_invalid") from exc
+
+    diagnostics = metadata["diagnostics_config"]
+    if type(diagnostics) is not dict or set(diagnostics) != _DIAGNOSTICS_CONFIG_KEYS:
+        raise ValueError("output_manifest_metadata_invalid")
+    capacity_amount_column = require_optional_metadata_string(
+        diagnostics, "capacity_amount_column", "output_manifest_metadata_invalid"
+    )
+    capacity_float_market_cap_column = require_optional_metadata_string(
+        diagnostics,
+        "capacity_float_market_cap_column",
+        "output_manifest_metadata_invalid",
+    )
+    numeric_columns = require_metadata_string_list(
+        diagnostics,
+        "numeric_exposure_columns",
+        "output_manifest_metadata_invalid",
+        allow_empty=True,
+    )
+    categorical_columns = require_metadata_string_list(
+        diagnostics,
+        "categorical_exposure_columns",
+        "output_manifest_metadata_invalid",
+        allow_empty=True,
+    )
+    try:
+        diagnostics_config = PortfolioDiagnosticsConfig(
+            capacity_amount_column=capacity_amount_column,
+            capacity_float_market_cap_column=capacity_float_market_cap_column,
+            numeric_exposure_columns=tuple(numeric_columns),
+            categorical_exposure_columns=tuple(categorical_columns),
+        )
+        portfolio_spec = PortfolioSpec(
+            portfolio_id=metadata["portfolio_id"],
+            market_id=MarketId(metadata["market_id"]),
+            research_dataset_id=metadata["research_dataset_id"],
+            signals=signals,
+            return_source_column=metadata["return_source_column"],
+            rebalance_frequency=metadata["rebalance_frequency"],
+            execution_lag_steps=metadata["execution_lag_steps"],
+            weight_config=weight_config,
+            tradability_config=tradability_config,
+            cost_config=cost_config,
+            diagnostics_config=diagnostics_config,
+            run_type=metadata["run_type"],
+        )
+        if portfolio_spec.rebalance_frequency != metadata["rebalance_frequency"]:
+            raise ValueError("portfolio_rebalance_frequency_not_canonical")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("output_manifest_metadata_invalid") from exc
+    validate_portfolio_row_counts(metadata["row_counts"])
+    return metadata
 
 
 def validate_portfolio_artifact_membership_columns(

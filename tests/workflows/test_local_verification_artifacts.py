@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from quant_research_platform.workflows import local_verification as module
 from quant_research_platform.workflows.local_verification import run_local_verification
 from quant_research_platform.workflows.local_verification_layout import (
@@ -24,15 +26,34 @@ from tests.workflows.local_verification_fixtures import (
 )
 
 
-def test_local_verification_workflow_runs_injected_generation_and_writes_artifacts(
+@pytest.mark.parametrize("summary_failure", (False, True))
+def test_local_verification_publishes_completed_run_only_after_summary(
     tmp_path,
     monkeypatch,
+    summary_failure,
 ):
     calls: list[str] = []
+    publish_order: list[str] = []
     run_years: list[tuple[int, ...]] = []
     evaluation_run_ids: list[str] = []
     prediction_ids: list[str] = []
     portfolio_ids: list[str] = []
+    original_write_summary = module.write_run_summary_markdown
+    original_replace_json = module.replace_qrp_json
+
+    def track_summary_publish(path, text):
+        publish_order.append("summary")
+        if summary_failure:
+            raise OSError("summary_publish_failed")
+        return original_write_summary(path, text)
+
+    def track_run_publish(path, payload):
+        if "completed_at" in payload:
+            publish_order.append("completed_run")
+        return original_replace_json(path, payload)
+
+    monkeypatch.setattr(module, "write_run_summary_markdown", track_summary_publish)
+    monkeypatch.setattr(module, "replace_qrp_json", track_run_publish)
 
     def assemble_dataset(**kwargs):
         calls.append("research")
@@ -92,14 +113,22 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
     ]
     expected_prediction_count = len(expected_prediction_ids)
     run_root = repo_run_root(tmp_path, monkeypatch, ".run", "s1")
-    result = run_local_verification(
-        make_local_verification_config(
-            run_root=run_root,
-            start_date="2014-01-01",
-            end_date="2016-12-31",
-            profile=profile,
-        )
+    config = make_local_verification_config(
+        run_root=run_root,
+        start_date="2014-01-01",
+        end_date="2016-12-31",
+        profile=profile,
     )
+    if summary_failure:
+        with pytest.raises(OSError, match="summary_publish_failed"):
+            run_local_verification(config)
+        seed_payload = json.loads(
+            (run_root / "run.json").read_text(encoding="utf-8")
+        )
+        assert "completed_at" not in seed_payload
+        assert publish_order == ["summary"]
+        return
+    result = run_local_verification(config)
 
     assert calls == [
         "interim",
@@ -114,6 +143,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
     assert prediction_ids == expected_prediction_ids
     assert portfolio_ids == ["signal_forward_return_20d_portfolio"]
     assert result.status == "NOT_RUN"
+    assert publish_order == ["summary", "completed_run"]
     assert result.run_id == "s1"
     assert result.run_root == "s1"
     layout = LocalVerificationLayout.from_run_root(run_root)

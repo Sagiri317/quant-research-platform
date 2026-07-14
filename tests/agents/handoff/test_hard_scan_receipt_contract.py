@@ -79,3 +79,15 @@ def test_hard_scan_rejects_actual_violation_with_top_pass() -> None:
     failures = contract.validate_hard_scan_receipt(payload)
 
     assert "hard_scan_status_mismatch" in failures
+
+
+def test_hard_scan_requires_exact_list_and_integer_counts() -> None:
+    contract = load_handoff_script_module("receipt_contract")
+    payload = make_hard_scan_receipt_payload()
+    payload["scan_runs"][0]["match_count"] = False
+
+    failures = contract.validate_hard_scan_receipt(payload)
+
+    assert "hard_scan_run_count_invalid: 0:match_count" in failures
+    payload["scan_runs"] = tuple(payload["scan_runs"])
+    assert "hard_scan_runs_invalid" in contract.validate_hard_scan_receipt(payload)

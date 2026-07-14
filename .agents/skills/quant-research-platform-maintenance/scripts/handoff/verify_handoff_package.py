@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from zipfile import BadZipFile, ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile, ZipInfo
+from zlib import error as ZlibError
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPT_PARENT = SCRIPT_DIR.parent
@@ -37,6 +38,7 @@ from handoff_contract import (  # noqa: E402
     FINAL_BRANCH_BUNDLE_ENTRY,
     HARD_SCAN_RECEIPT_ENTRY,
     PACKAGE_SMOKE_RECEIPT_ENTRY,
+    REQUIRED_HANDOFF_ENTRIES,
     TASK_METADATA_ENTRY,
     VALIDATION_SUMMARY_ENTRY,
     build_validation_summary_from_receipts,
@@ -60,8 +62,11 @@ from replay_evidence import (  # noqa: E402
     build_machine_receipts,
 )
 
+from quant_research_platform.contracts._json import (  # noqa: E402
+    parse_qrp_json_object,
+)
 from quant_research_platform.policy.share_safety import (  # noqa: E402
-    evidence_json_unsafe_reason,
+    evidence_json_value_unsafe_reason,
     unsafe_for_share_reason,
 )
 
@@ -77,6 +82,9 @@ TEXT_LIKE_SUFFIXES = {
     ".yml",
 }
 BUNDLE_TEXT_SIZE_CAP_BYTES = 2 * 1024 * 1024
+ZIP_MEMBER_SIZE_CAP_BYTES = 256 * 1024 * 1024
+ZIP_TOTAL_SIZE_CAP_BYTES = 512 * 1024 * 1024
+ZIP_COMPRESSION_RATIO_CAP = 200.0
 
 
 @dataclass(frozen=True)
@@ -252,10 +260,18 @@ def load_handoff_package_payload(
         )
     try:
         with ZipFile(zip_path) as archive:
-            names = tuple(archive.namelist())
+            members = archive.infolist()
+            required_member_count = len(REQUIRED_HANDOFF_ENTRIES)
+            if len(members) != required_member_count:
+                failures.append(
+                    "zip_member_count_invalid: "
+                    f"expected {required_member_count}, observed {len(members)}"
+                )
+            bounded_members = members[: required_member_count + 1]
+            names = tuple(member.filename for member in bounded_members)
             name_set = set(names)
             duplicates = tuple(
-                sorted(name for name in name_set if names.count(name) > 1)
+                sorted(name for name, count in Counter(names).items() if count > 1)
             )
             failures.extend(f"duplicate_zip_member: {name}" for name in duplicates)
             for name in names:
@@ -263,22 +279,43 @@ def load_handoff_package_payload(
                 share_safety_failures.extend(
                     f"{failure}: {name}" for failure in member_name_failures(name)
                 )
-            if json_path is not None and json_path.name in name_set:
-                failures.append("external_sidecar_in_zip")
-            failures.extend(validate_handoff_package_layout(names))
-            for member in archive.infolist():
-                raw = archive.read(member)
-                name = member.filename
-                member_bytes[name] = raw
                 suffix = Path(name).suffix.lower()
                 if suffix in {".bundle", ".zip"} and name != FINAL_BRANCH_BUNDLE_ENTRY:
                     share_safety_failures.append(
                         f"nested package/bundle not allowed by default: {name}"
                     )
-                if name == FINAL_BRANCH_BUNDLE_ENTRY:
-                    raw_bundle = raw
-                if suffix in TEXT_LIKE_SUFFIXES:
-                    share_safety_failures.extend(text_blob_failures(raw, name=name))
+            if json_path is not None and json_path.name in name_set:
+                failures.append("external_sidecar_in_zip")
+            failures.extend(validate_handoff_package_layout(names))
+            declared_total_size = sum(member.file_size for member in bounded_members)
+            total_size_exceeded = declared_total_size > ZIP_TOTAL_SIZE_CAP_BYTES
+            if total_size_exceeded:
+                failures.append("zip_total_size_limit_exceeded")
+            for member in bounded_members:
+                name = member.filename
+                if member.compress_type not in {ZIP_STORED, ZIP_DEFLATED}:
+                    failures.append(f"zip_member_compression_unsupported: {name}")
+                if member.file_size > ZIP_MEMBER_SIZE_CAP_BYTES:
+                    failures.append(f"zip_member_size_limit_exceeded: {name}")
+                compression_ratio = member.file_size / max(member.compress_size, 1)
+                if compression_ratio > ZIP_COMPRESSION_RATIO_CAP:
+                    failures.append(
+                        f"zip_member_compression_ratio_exceeded: {name}"
+                    )
+            metadata_preflight_passed = not failures and not share_safety_failures
+            if metadata_preflight_passed:
+                for member in bounded_members:
+                    name = member.filename
+                    raw, read_failure = _read_zip_member_streaming(archive, member)
+                    if read_failure is not None:
+                        failures.append(read_failure)
+                        continue
+                    member_bytes[name] = raw
+                    suffix = Path(name).suffix.lower()
+                    if name == FINAL_BRANCH_BUNDLE_ENTRY:
+                        raw_bundle = raw
+                    if suffix in TEXT_LIKE_SUFFIXES:
+                        share_safety_failures.extend(text_blob_failures(raw, name=name))
     except (BadZipFile, OSError) as exc:
         failures.append(f"zip_read_failed: {exc}")
     if member_bytes:
@@ -288,15 +325,12 @@ def load_handoff_package_payload(
             (VALIDATION_SUMMARY_ENTRY, "validation_summary"),
         ):
             try:
-                payload = json.loads(member_bytes[entry].decode("utf-8"))
+                payload = parse_qrp_json_object(member_bytes[entry])
             except KeyError:
                 failures.append(f"json_member_missing: {entry}")
                 continue
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            except ValueError:
                 failures.append(f"json_member_invalid: {entry}")
-                continue
-            if not isinstance(payload, dict):
-                failures.append(f"json_member_must_be_object: {entry}")
                 continue
             if target == "task_metadata":
                 task_metadata = payload
@@ -308,15 +342,12 @@ def load_handoff_package_payload(
             CHECK_RECEIPTS_ENTRY,
         ):
             try:
-                payload = json.loads(member_bytes[entry].decode("utf-8"))
+                payload = parse_qrp_json_object(member_bytes[entry])
             except KeyError:
                 failures.append(f"json_member_missing: {entry}")
                 continue
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            except ValueError:
                 failures.append(f"json_member_invalid: {entry}")
-                continue
-            if not isinstance(payload, dict):
-                failures.append(f"json_member_must_be_object: {entry}")
                 continue
             receipts[entry] = payload
     if json_path is not None:
@@ -326,14 +357,11 @@ def load_handoff_package_payload(
                 f"sidecar_{failure}"
                 for failure in text_blob_failures(raw_sidecar, name="sidecar.json")
             )
-            sidecar = json.loads(raw_sidecar.decode("utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            sidecar = parse_qrp_json_object(raw_sidecar)
+        except (OSError, ValueError) as exc:
             failures.append(f"sidecar_json_invalid: {exc}")
         else:
-            if isinstance(sidecar, dict):
-                sidecar_payload = sidecar
-            else:
-                failures.append("sidecar_must_be_object")
+            sidecar_payload = sidecar
     return HandoffPackagePayload(
         zip_path=zip_path,
         json_path=json_path,
@@ -357,11 +385,9 @@ def verify_manifest_hashes_from_bytes(
     failures: list[str] = []
     try:
         raw = member_bytes[ARTIFACT_MANIFEST_ENTRY]
-        payload = json.loads(raw.decode("utf-8"))
-    except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+        payload = parse_qrp_json_object(raw)
+    except (KeyError, ValueError):
         return ["artifact_manifest_invalid"]
-    if not isinstance(payload, dict):
-        return ["artifact_manifest_must_be_object"]
     failures.extend(validate_artifact_manifest_contract(payload))
     entries = payload.get("entries")
     if not isinstance(entries, list):
@@ -556,6 +582,34 @@ def text_blob_failures(raw: bytes, *, name: str) -> list[str]:
     return [f"{reason}_text: {name}"] if reason is not None else []
 
 
+def _read_zip_member_streaming(
+    archive: ZipFile,
+    member: ZipInfo,
+) -> tuple[bytes, str | None]:
+    raw = bytearray()
+    try:
+        with archive.open(member, "r") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                raw.extend(chunk)
+                if len(raw) > ZIP_MEMBER_SIZE_CAP_BYTES:
+                    return b"", f"zip_member_size_limit_exceeded: {member.filename}"
+    except (
+        BadZipFile,
+        EOFError,
+        NotImplementedError,
+        OSError,
+        RuntimeError,
+        ZlibError,
+    ) as exc:
+        return (
+            b"",
+            f"zip_member_read_failed: {member.filename}: {type(exc).__name__}",
+        )
+    if len(raw) != member.file_size:
+        return b"", f"zip_member_size_mismatch: {member.filename}"
+    return bytes(raw), None
+
+
 def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
     scan_text = "\n".join(
         line
@@ -584,7 +638,12 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
     if shared_reason == "local_run_path":
         return "local_run_path"
     if name.lower().endswith(".json"):
-        json_reason = evidence_json_unsafe_reason(scan_text)
+        try:
+            payload = parse_qrp_json_object(scan_text.encode("utf-8", errors="strict"))
+        except (UnicodeEncodeError, ValueError):
+            json_reason = "invalid_json"
+        else:
+            json_reason = evidence_json_value_unsafe_reason(payload)
         if json_reason is not None:
             return (
                 "local_absolute_path" if json_reason == "absolute_path" else json_reason

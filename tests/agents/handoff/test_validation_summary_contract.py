@@ -8,6 +8,24 @@ from tests.agents.handoff.receipt_contract_fixtures import (
 from tests.helpers.maintenance_script_loader import load_handoff_script_module
 
 
+def test_artifact_manifest_requires_exact_list_and_integer_size() -> None:
+    handoff_contract = load_handoff_script_module("handoff_contract")
+    payload = {
+        "schema_id": "qrp-handoff-artifact-manifest",
+        "entries": [
+            {"path": "final-branch.bundle", "size": True, "sha256": "0" * 64}
+        ],
+    }
+
+    failures = handoff_contract.validate_artifact_manifest_contract(payload)
+
+    assert "artifact_manifest_size_invalid: 0" in failures
+    payload["entries"] = tuple(payload["entries"])
+    assert "artifact_manifest_entries_invalid" in (
+        handoff_contract.validate_artifact_manifest_contract(payload)
+    )
+
+
 @pytest.mark.parametrize("row_name", ("private_validation", "baseline_compare"))
 def test_validation_summary_rejects_deleted_rows(row_name: str) -> None:
     handoff_contract = load_handoff_script_module("handoff_contract")

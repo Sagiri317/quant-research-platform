@@ -18,7 +18,10 @@ from quant_research_platform.storage._dataset_reading import (
     build_dataset_read_context,
     iter_dataset_file_batches,
 )
-from quant_research_platform.storage._dataset_schema import date_string
+from quant_research_platform.storage._dataset_schema import (
+    date_string,
+    physical_schema_columns,
+)
 from quant_research_platform.storage._dataset_types import DatasetInspection
 
 
@@ -31,6 +34,7 @@ def inspect_dataset(
         dataset_root,
         columns=None,
         time_window=time_window,
+        require_consumable=False,
     )
     runtime = _inspection_runtime_metadata(
         context,
@@ -39,7 +43,7 @@ def inspect_dataset(
         root=context.root,
         data_root=context.data_root,
         spec=context.spec,
-        columns=tuple(name for name, _ in context.schema),
+        columns=physical_schema_columns(context.schema),
         schema_hash=context.schema_hash,
         file_count=int(runtime["file_count"]),
         row_count=int(runtime["row_count"]),

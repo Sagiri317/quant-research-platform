@@ -208,7 +208,7 @@ class ExactPrimaryKeyIndex:
         for row_index in range(keys.num_rows):
             payload = b"".join(
                 _canonical_arrow_scalar_payload(
-                    column[row_index].as_py(),
+                    column[row_index],
                     field.type,
                 )
                 for column, field in zip(columns, fields, strict=True)
@@ -216,25 +216,32 @@ class ExactPrimaryKeyIndex:
             yield namespace, payload
 
 
-def _canonical_arrow_scalar_payload(value: object, data_type: pa.DataType) -> bytes:
+def _canonical_arrow_scalar_payload(
+    value: pa.Scalar,
+    data_type: pa.DataType,
+) -> bytes:
     type_payload = str(data_type).encode("ascii")
+    if not value.is_valid:
+        raise ValueError("dataset_primary_key_null")
     if pa.types.is_dictionary(data_type):
         value_payload = _canonical_arrow_scalar_payload(
-            value,
+            value.value,
             data_type.value_type,
         )
     elif pa.types.is_timestamp(data_type):
-        value_payload = struct.pack(">q", int(pd.Timestamp(value).value))
+        value_payload = struct.pack(">q", int(value.value))
     elif pa.types.is_boolean(data_type):
-        value_payload = b"1" if bool(value) else b"0"
+        value_payload = b"1" if bool(value.as_py()) else b"0"
     elif pa.types.is_signed_integer(data_type) or pa.types.is_unsigned_integer(
         data_type
     ):
-        value_payload = str(int(value)).encode("ascii")
+        value_payload = str(int(value.as_py())).encode("ascii")
     elif pa.types.is_floating(data_type):
-        number = float(value)
+        number = float(value.as_py())
         if math.isnan(number):
             raise ValueError("dataset_primary_key_null")
+        if not math.isfinite(number):
+            raise ValueError("invalid_dataset_primary_key_value")
         if number == 0.0:
             number = 0.0
         value_payload = (
@@ -243,16 +250,18 @@ def _canonical_arrow_scalar_payload(value: object, data_type: pa.DataType) -> by
             else struct.pack(">d", number)
         )
     elif pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
-        value_payload = str(value).encode("utf-8")
+        value_payload = str(value.as_py()).encode("utf-8")
     elif pa.types.is_binary(data_type) or pa.types.is_large_binary(data_type):
-        value_payload = bytes(value)
+        value_payload = bytes(value.as_py())
     elif pa.types.is_decimal(data_type):
-        decimal = Decimal(value)
+        decimal = Decimal(value.as_py())
+        if not decimal.is_finite():
+            raise ValueError("invalid_dataset_primary_key_value")
         if decimal == 0:
             decimal = Decimal(0)
         value_payload = format(decimal, "f").encode("ascii")
     elif pa.types.is_date(data_type):
-        value_payload = pd.Timestamp(value).date().isoformat().encode("ascii")
+        value_payload = pd.Timestamp(value.as_py()).date().isoformat().encode("ascii")
     else:
         raise ValueError("invalid_dataset_primary_key_value")
     return _framed(type_payload, value_payload)

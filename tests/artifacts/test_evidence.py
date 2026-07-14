@@ -21,7 +21,7 @@ def test_evidence_writers_only_persist_given_payload_or_text(tmp_path: Path) -> 
 
 
 def test_json_evidence_requires_schema_id(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="schema_id_required"):
+    with pytest.raises(ValueError, match="evidence_json_identity_invalid"):
         write_json_evidence(tmp_path / "evidence.json", {"status": "PASS"})
 
 
@@ -30,21 +30,21 @@ def test_json_evidence_requires_schema_id(tmp_path: Path) -> None:
     [
         (
             {"schema_id": "qrp-test/0.1", "status": "PASS"},
-            "schema_id_versioned",
+            "evidence_json_identity_invalid",
         ),
         (
             {
                 "schema_id": "qrp-test",
                 "details": {"schema_version": "0.1"},
             },
-            "retired_identity_key:schema_version",
+            "qrp_json_retired_identity_key",
         ),
         (
             {
                 "schema_id": "qrp-test",
                 "details": {"contract_version": "0.1"},
             },
-            "retired_identity_key:contract_version",
+            "qrp_json_retired_identity_key",
         ),
     ],
 )

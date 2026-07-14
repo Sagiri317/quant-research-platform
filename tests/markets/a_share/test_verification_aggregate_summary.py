@@ -9,6 +9,25 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from quant_research_platform.artifacts._evaluation_output_validation import (
+    EVALUATION_ARTIFACTS,
+)
+from quant_research_platform.artifacts._output_manifest import (
+    evaluation_output_metadata,
+    output_manifest_payload,
+    validate_output_manifest_business_envelope,
+)
+from quant_research_platform.contracts.evaluations import (
+    EvaluationDiagnostics,
+    EvaluationSpec,
+)
+from quant_research_platform.contracts.filtering import (
+    filter_definition,
+    required_filter_columns,
+)
+from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.markets.implementations.a_share.verification import (
     aggregates,
 )
@@ -42,6 +61,68 @@ class CountingDatasetReader:
         return iter((self._frame.copy(),))
 
 
+def _write_valid_output_bundle(root) -> dict[str, object]:
+    root.mkdir(parents=True, exist_ok=True)
+    filter_mode = "unfiltered"
+    spec = EvaluationSpec(
+        run_id="synthetic",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_dataset",
+        signals=(
+            SignalSpec(
+                signal_id="signal",
+                source_kind="factor",
+                source_column="value",
+                direction="higher_is_better",
+                transform="identity",
+            ),
+        ),
+        label_columns=("label",),
+        filter_mode=filter_mode,
+        n_groups=5,
+    )
+    diagnostics = EvaluationDiagnostics(
+        filter_mode=filter_mode,
+        filter_columns_used=required_filter_columns(filter_mode),
+        filter_definition=filter_definition(filter_mode),
+        rows_input=0,
+        rows_after_filter_mode=0,
+        rows_after_signal_label_dropna=0,
+        metric_rows=0,
+        grouped_label_value_rows=0,
+        ic_summary_rows=0,
+        group_spread_summary_rows=0,
+        timestamp_count=0,
+        min_timestamp=None,
+        max_timestamp=None,
+        n_groups=5,
+        skipped_timestamp_count=0,
+    )
+    payload = output_manifest_payload(
+        output_spec=OutputSpec(
+            output_id=root.name,
+            output_definition_id="evaluation_outputs",
+            run_id=spec.run_id,
+            market_id=spec.market_id,
+            run_type=spec.run_type,
+            scope=OutputScope.LOCAL_ONLY,
+        ),
+        metadata=evaluation_output_metadata(
+            spec=spec,
+            evaluation_diagnostics=diagnostics,
+        ),
+        files=EVALUATION_ARTIFACTS,
+    )
+    for name in EVALUATION_ARTIFACTS:
+        path = root / name
+        if path.suffix == ".parquet":
+            pq.write_table(pa.table({"value": [1.0]}), path)
+        else:
+            path.write_text("summary", encoding="utf-8")
+    (root / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
 def test_aggregates_summary_is_row_order_and_file_split_insensitive(tmp_path) -> None:
     frame = _base_frame()
     split_summary = aggregates._summarize_frames(
@@ -64,22 +145,7 @@ def test_aggregates_output_frames_are_lazy(
     tmp_path,
 ) -> None:
     report_root = tmp_path / "report"
-    report_root.mkdir()
-    (report_root / "first.parquet").write_bytes(b"")
-    (report_root / "second.parquet").write_bytes(b"")
-    (report_root / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_id": "qrp-output-manifest",
-                "output_id": "synthetic",
-                "output_definition_id": "evaluation_outputs",
-                "run_id": "synthetic",
-                "metadata": {},
-                "files": ["second.parquet", "first.parquet"],
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_valid_output_bundle(report_root)
     read_order: list[str] = []
 
     observed_targets: list[int] = []
@@ -116,33 +182,28 @@ def test_aggregates_output_frames_are_lazy(
 
         assert read_order == []
         next(frames)
-        assert read_order == ["second.parquet"]
+        assert read_order == ["metrics.parquet"]
         next(frames)
-        assert read_order == ["second.parquet", "first.parquet"]
+        assert read_order == ["metrics.parquet", "grouped_label_values.parquet"]
     assert observed_targets == [policy.effective_chunk_bytes] * 2
+
+
+def test_aggregates_validate_all_members_before_selecting_parquet(tmp_path) -> None:
+    root = tmp_path / "output"
+    _write_valid_output_bundle(root)
+
+    assert aggregates._validated_output_parquet_paths(root) == tuple(
+        root / name for name in EVALUATION_ARTIFACTS if name.endswith(".parquet")
+    )
 
 
 def test_aggregates_output_frames_reject_manifest_stray_parquet(tmp_path) -> None:
     root = tmp_path / "output"
-    root.mkdir()
+    _write_valid_output_bundle(root)
     table = pa.table({"value": [1.0]})
-    pq.write_table(table, root / "listed.parquet")
     pq.write_table(table, root / "stray.parquet")
-    (root / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_id": "qrp-output-manifest",
-                "output_id": "synthetic",
-                "output_definition_id": "evaluation_outputs",
-                "run_id": "synthetic",
-                "metadata": {},
-                "files": ["listed.parquet"],
-            }
-        ),
-        encoding="utf-8",
-    )
 
-    with pytest.raises(ValueError, match="invalid_aggregate_output_files"):
+    with pytest.raises(ValueError, match="output_member_set_mismatch"):
         list(
             aggregates._iter_output_frames(
                 (root,),
@@ -154,24 +215,65 @@ def test_aggregates_output_frames_reject_manifest_stray_parquet(tmp_path) -> Non
 def test_aggregates_output_frames_reject_external_hardlink(tmp_path) -> None:
     external = tmp_path / "external.parquet"
     root = tmp_path / "output"
-    root.mkdir()
+    _write_valid_output_bundle(root)
     pq.write_table(pa.table({"value": [1.0]}), external)
-    os.link(external, root / "listed.parquet")
-    (root / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_id": "qrp-output-manifest",
-                "output_id": "synthetic",
-                "output_definition_id": "evaluation_outputs",
-                "run_id": "synthetic",
-                "metadata": {},
-                "files": ["listed.parquet"],
-            }
-        ),
-        encoding="utf-8",
-    )
+    (root / "metrics.parquet").unlink()
+    os.link(external, root / "metrics.parquet")
 
-    with pytest.raises(ValueError, match="invalid_aggregate_output_files"):
+    with pytest.raises(
+        ValueError,
+        match="output_member_physical_identity_invalid",
+    ):
+        list(
+            aggregates._iter_output_frames(
+                (root,),
+                target_chunk_bytes=1024**2,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("member_state", "expected_error"),
+    (
+        ("missing", "output_member_set_mismatch"),
+        ("directory", "output_member_physical_identity_invalid"),
+    ),
+)
+def test_aggregates_output_frames_validate_declared_non_parquet_members(
+    tmp_path,
+    member_state: str,
+    expected_error: str,
+) -> None:
+    root = tmp_path / "output"
+    _write_valid_output_bundle(root)
+    (root / "summary.md").unlink()
+    if member_state == "directory":
+        (root / "summary.md").mkdir()
+
+    with pytest.raises(
+        ValueError,
+        match=expected_error,
+    ):
+        list(
+            aggregates._iter_output_frames(
+                (root,),
+                target_chunk_bytes=1024**2,
+            )
+        )
+
+
+def test_aggregates_output_frames_reject_declared_member_physical_duplicate(
+    tmp_path,
+) -> None:
+    root = tmp_path / "output"
+    _write_valid_output_bundle(root)
+    (root / "grouped_label_values.parquet").unlink()
+    os.link(root / "metrics.parquet", root / "grouped_label_values.parquet")
+
+    with pytest.raises(
+        ValueError,
+        match="output_member_physical_identity_invalid",
+    ):
         list(
             aggregates._iter_output_frames(
                 (root,),
@@ -182,23 +284,135 @@ def test_aggregates_output_frames_reject_external_hardlink(tmp_path) -> None:
 
 def test_aggregates_output_frames_reject_normalized_manifest_alias(tmp_path) -> None:
     root = tmp_path / "output"
-    root.mkdir()
-    pq.write_table(pa.table({"value": [1.0]}), root / "listed.parquet")
-    (root / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_id": "qrp-output-manifest",
-                "output_id": "synthetic",
-                "output_definition_id": "evaluation_outputs",
-                "run_id": "synthetic",
-                "metadata": {},
-                "files": ["listed.parquet", "./listed.parquet"],
-            }
-        ),
+    payload = _write_valid_output_bundle(root)
+    payload["files"] = ["metrics.parquet", "./metrics.parquet"]
+    (root / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="output_file_path_invalid"):
+        list(
+            aggregates._iter_output_frames(
+                (root,),
+                target_chunk_bytes=1024**2,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    (
+        ("unknown_field", "output_manifest_fields_invalid"),
+        ("wrong_kind_output_id", "output_manifest_output_id_invalid"),
+        ("wrong_kind_run_id", "output_manifest_run_id_invalid"),
+        ("equal_ids", "output_manifest_output_id_invalid"),
+        ("unknown_definition", "output_manifest_definition_id_invalid"),
+        ("deep_nested_schema_id", "output_manifest_metadata_invalid"),
+        ("backslash_file", "output_file_path_invalid"),
+        ("casefold_duplicate_file", "output_files_invalid"),
+    ),
+)
+def test_aggregates_explicit_output_rejects_noncurrent_manifest_envelope(
+    tmp_path,
+    mutation: str,
+    expected_error: str,
+) -> None:
+    root = tmp_path / "output"
+    payload = _write_valid_output_bundle(root)
+    if mutation == "unknown_field":
+        payload["unknown"] = True
+    elif mutation == "wrong_kind_output_id":
+        payload["output_id"] = 7
+    elif mutation == "wrong_kind_run_id":
+        payload["run_id"] = 7
+    elif mutation == "equal_ids":
+        payload["output_id"] = "evaluation_outputs"
+    elif mutation == "unknown_definition":
+        payload["output_definition_id"] = "unknown_outputs"
+    elif mutation == "deep_nested_schema_id":
+        payload["metadata"] = {"nested": [{"schema_id": "forbidden"}]}
+    elif mutation == "backslash_file":
+        payload["files"] = ["nested\\metrics.parquet"]
+    elif mutation == "casefold_duplicate_file":
+        payload["files"] = ["metrics.parquet", "METRICS.PARQUET"]
+
+    with pytest.raises(ValueError, match=expected_error):
+        validate_output_manifest_business_envelope(payload)
+    (root / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=expected_error):
+        list(
+            aggregates._iter_output_frames(
+                (root,),
+                target_chunk_bytes=1024**2,
+            )
+        )
+
+
+@pytest.mark.parametrize("extra_kind", ("file", "nested"))
+def test_aggregates_output_frames_reject_undeclared_non_parquet_members(
+    tmp_path,
+    extra_kind: str,
+) -> None:
+    root = tmp_path / "output"
+    _write_valid_output_bundle(root)
+    if extra_kind == "file":
+        (root / "extra.md").write_text("summary", encoding="utf-8")
+    else:
+        nested = root / "nested"
+        nested.mkdir()
+        (nested / "summary.md").write_text("summary", encoding="utf-8")
+    with pytest.raises(ValueError, match="output_member_set_mismatch"):
+        list(
+            aggregates._iter_output_frames(
+                (root,),
+                target_chunk_bytes=1024**2,
+            )
+        )
+
+
+def test_aggregates_output_frames_reject_manifest_symlink(tmp_path) -> None:
+    root = tmp_path / "output"
+    payload = _write_valid_output_bundle(root)
+    (root / "manifest.json").unlink()
+    external_manifest = tmp_path / "external-manifest.json"
+    external_manifest.write_text(
+        json.dumps(payload),
         encoding="utf-8",
     )
+    try:
+        (root / "manifest.json").symlink_to(external_manifest)
+    except OSError as exc:
+        pytest.skip(f"symlink_not_available: {exc}")
 
-    with pytest.raises(ValueError, match="invalid_aggregate_output_files"):
+    with pytest.raises(
+        ValueError,
+        match="output_manifest_physical_identity_invalid",
+    ):
+        list(
+            aggregates._iter_output_frames(
+                (root,),
+                target_chunk_bytes=1024**2,
+            )
+        )
+
+
+def test_aggregates_output_frames_reject_manifest_external_hardlink(tmp_path) -> None:
+    root = tmp_path / "output"
+    payload = _write_valid_output_bundle(root)
+    (root / "manifest.json").unlink()
+    external_manifest = tmp_path / "external-manifest.json"
+    external_manifest.write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    try:
+        os.link(external_manifest, root / "manifest.json")
+    except OSError as exc:
+        pytest.skip(f"hardlink_not_available: {exc}")
+
+    with pytest.raises(
+        ValueError,
+        match="output_manifest_physical_identity_invalid",
+    ):
         list(
             aggregates._iter_output_frames(
                 (root,),

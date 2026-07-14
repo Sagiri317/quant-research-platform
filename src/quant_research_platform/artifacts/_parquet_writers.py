@@ -11,6 +11,9 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from quant_research_platform.artifacts._output_common_validation import (
+    validate_output_frame,
+)
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage.atomic import publish_no_replace, reject_if_exists
@@ -105,12 +108,11 @@ def _prediction_output_chunk_frame(
     required: tuple[str, ...],
     key_columns: tuple[str, ...],
 ) -> pd.DataFrame:
-    missing = sorted(set(required).difference(frame.columns))
-    if missing:
-        raise ValueError(f"missing_prediction_output_columns: {', '.join(missing)}")
-    extra = sorted(set(frame.columns).difference(required))
-    if extra:
-        raise ValueError(f"unregistered_prediction_output_columns: {', '.join(extra)}")
+    validate_output_frame(
+        frame,
+        required=required,
+        error_name="prediction_output",
+    )
     selected = frame.loc[:, list(required)]
     if bool(selected.duplicated(list(key_columns)).any()):
         raise ValueError("duplicate_prediction_keys")

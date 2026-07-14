@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import warnings
+from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,9 @@ from quant_research_platform.artifacts import (
 )
 from quant_research_platform.artifacts import (
     outputs,
+)
+from quant_research_platform.artifacts._output_manifest import (
+    evaluation_output_metadata,
 )
 from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
@@ -32,6 +36,68 @@ from tests.helpers.report_output_frames import (
     make_artifact_evaluation_metrics_frame,
     make_artifact_signal_spec,
 )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "diagnostics_n_groups",
+        "filter_mode",
+        "filter_columns",
+        "filter_definition",
+        "signal_source_kind",
+        "signal_direction",
+        "signal_transform",
+        "signal_filter_column",
+        "signal_label_overlap",
+    ),
+)
+def test_evaluation_metadata_reuses_complete_business_owner_graph(
+    mutation: str,
+) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    metadata = evaluation_output_metadata(
+        spec=spec,
+        evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
+    )
+    assert (
+        evaluation_output_validation.validate_evaluation_output_metadata_shape(
+            metadata
+        )
+        is metadata
+    )
+    metadata = deepcopy(metadata)
+    diagnostics = metadata["evaluation_diagnostics"]
+    if mutation == "diagnostics_n_groups":
+        diagnostics["n_groups"] = 1
+    elif mutation == "filter_mode":
+        metadata["filter_mode"] = "unknown"
+        diagnostics["filter_mode"] = "unknown"
+    elif mutation == "filter_columns":
+        diagnostics["filter_columns_used"] = []
+    elif mutation == "filter_definition":
+        diagnostics["filter_definition"] = "wrong"
+    elif mutation == "signal_source_kind":
+        metadata["signals"][0]["source_kind"] = "unknown"
+    elif mutation == "signal_direction":
+        metadata["signals"][0]["direction"] = "unknown"
+    elif mutation == "signal_transform":
+        metadata["signals"][0]["transform"] = "unknown"
+    elif mutation == "signal_filter_column":
+        metadata["signals"][0]["source_column"] = "eligible"
+    else:
+        metadata["signals"][0]["source_column"] = metadata["label_columns"][0]
+
+    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+        evaluation_output_validation.validate_evaluation_output_metadata_shape(
+            metadata
+        )
 
 
 def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> None:

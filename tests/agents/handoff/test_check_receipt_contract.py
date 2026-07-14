@@ -48,6 +48,38 @@ def test_check_receipt_rejects_pass_with_failed_or_error_count(
         make_valid_check_row(counts=make_valid_check_counts(**count_overrides))
     )
 
+
+@pytest.mark.parametrize(
+    "counts",
+    (
+        {
+            "passed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "deselected": 0,
+            "errors": 0,
+            "xfailed": 0,
+            "xpassed": 0,
+            "collected": 0,
+        },
+        make_valid_check_counts(passed=0, skipped=1),
+        make_valid_check_counts(passed=0, deselected=1),
+        make_valid_check_counts(passed=1, deselected=1, collected=2),
+    ),
+    ids=(
+        "zero-collected",
+        "no-passed-body",
+        "fully-deselected",
+        "partially-deselected",
+    ),
+)
+def test_profile_smoke_pass_requires_executed_body_and_zero_deselection(
+    counts: dict[str, int],
+) -> None:
+    assert "check_receipt_pass_counts_invalid: 0" in receipt_row_failures(
+        make_valid_check_row(counts=counts)
+    )
+
 @pytest.mark.parametrize(
     "row_overrides",
     (
@@ -93,6 +125,46 @@ def test_check_receipt_requires_duration_seconds() -> None:
     row = make_valid_check_row()
     row.pop("duration_seconds")
     assert "check_receipt_missing: 0:duration_seconds" in receipt_row_failures(row)
+
+
+@pytest.mark.parametrize("duration", (float("nan"), float("inf"), float("-inf")))
+def test_check_receipt_rejects_nonfinite_duration(duration: float) -> None:
+    assert "check_receipt_duration_seconds_invalid: 0" in receipt_row_failures(
+        make_valid_check_row(duration_seconds=duration)
+    )
+
+
+def test_check_receipt_rejects_bool_for_integer_fields() -> None:
+    assert "check_receipt_pass_exit_code_invalid: 0" in receipt_row_failures(
+        make_valid_check_row(exit_code=False)
+    )
+    counts = make_valid_check_counts()
+    counts["passed"] = True
+    assert "check_receipt_counts_invalid: 0" in receipt_row_failures(
+        make_valid_check_row(counts=counts)
+    )
+
+
+def test_check_receipt_rejects_nonfinite_timeout() -> None:
+    failures = receipt_row_failures(
+        make_valid_check_row(
+            status="BLOCKED",
+            exit_code=None,
+            counts=None,
+            failure_class="command_timeout",
+            blocked_reason="timeout",
+            timeout_seconds=float("inf"),
+        )
+    )
+
+    assert "check_receipt_timeout_seconds_invalid: 0" in failures
+
+
+def test_check_receipt_requires_exact_command_argv_list() -> None:
+    row = make_valid_check_row()
+    row["command_argv"] = tuple(row["command_argv"])
+
+    assert "check_receipt_command_argv_invalid: 0" in receipt_row_failures(row)
 
 def test_check_receipt_rejects_old_trace_fields() -> None:
     failures = receipt_row_failures(

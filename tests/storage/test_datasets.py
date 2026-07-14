@@ -22,6 +22,7 @@ import quant_research_platform.storage._dataset_reading as dataset_reading
 import quant_research_platform.storage._dataset_writing as dataset_writing
 import quant_research_platform.storage.atomic as storage_atomic
 import quant_research_platform.storage.datasets as datasets
+from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -31,7 +32,6 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.storage._dataset_schema import sha256_json
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
@@ -76,6 +76,72 @@ def count_candidate_data_file_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str
         count_candidate_data_files,
     )
     return calls
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("validation_status", "FAIL"),
+        ("duplicate_primary_key_count", 1),
+        ("null_count_summary", {"market_id": 1}),
+        ("non_finite_count_summary", {"value": 1}),
+    ),
+)
+def test_normal_consumers_reject_non_consumable_manifest_but_inspection_reports_it(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec(),
+    )
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[field] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
+        read_dataset(root)
+    with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
+        fingerprint_dataset(root)
+
+    inspection = inspect_dataset(root)
+    assert inspection.manifest[field] == value
+
+
+@pytest.mark.parametrize(
+    "null_count_summary",
+    (
+        {},
+        {"market_id": 0, "asset_id": 0},
+    ),
+    ids=("empty", "composite-key-member-omitted"),
+)
+def test_normal_consumers_reject_missing_primary_key_null_facts_but_inspection_reports(
+    tmp_path: Path,
+    null_count_summary: dict[str, int],
+) -> None:
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec(),
+    )
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["null_count_summary"] = null_count_summary
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
+        read_dataset(root)
+    with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
+        fingerprint_dataset(root)
+
+    inspection = inspect_dataset(root)
+    assert inspection.manifest["null_count_summary"] == null_count_summary
 
 
 def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
@@ -219,7 +285,7 @@ def test_inspect_dataset_rejects_parallel_input_fingerprint_lineage(
 
     with pytest.raises(
         ValueError,
-        match="unsupported_dataset_instance_metadata_key: input_fingerprints",
+        match="dataset_manifest_fields_invalid",
     ):
         inspect_dataset(root)
 
@@ -1227,7 +1293,7 @@ def test_fingerprint_content_hash_preserves_registered_formula(tmp_path: Path) -
         legacy_readback.loc[:, list(hash_columns)],
         index=False,
     ).to_numpy("uint64")
-    expected = sha256_json(
+    expected = canonical_json_hash(
         {
             "row_hash_sum": int(hashes.sum(dtype=np.uint64)),
             "row_hash_xor": int(
@@ -1437,8 +1503,12 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
         assert numeric.add_frame(pd.DataFrame({"key": [1.0]})) == 1
         assert numeric.add_frame(pd.DataFrame({"key": [-0.0]})) == 0
         assert numeric.add_frame(pd.DataFrame({"key": [0.0]})) == 1
-        assert numeric.add_frame(pd.DataFrame({"key": [math.inf]})) == 0
-        assert numeric.add_frame(pd.DataFrame({"key": [math.inf]})) == 1
+        for infinite_value in (math.inf, -math.inf):
+            with pytest.raises(
+                ValueError,
+                match="invalid_dataset_primary_key_value",
+            ):
+                numeric.add_frame(pd.DataFrame({"key": [infinite_value]}))
         for null_value in (None, math.nan):
             with pytest.raises(ValueError, match="dataset_primary_key_null"):
                 numeric.add_frame(pd.DataFrame({"key": [null_value]}))
@@ -1466,6 +1536,62 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
         assert not hasattr(strings, "key_schema")
         assert strings.add_frame(pd.DataFrame({"key": ["é"]})) == 0
         assert strings.add_frame(pd.DataFrame({"key": ["e\u0301"]})) == 0
+
+
+@pytest.mark.parametrize(
+    "decimal_value",
+    (Decimal("Infinity"), Decimal("-Infinity")),
+)
+def test_exact_primary_key_scalar_rejects_decimal_infinity(
+    decimal_value: Decimal,
+) -> None:
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+    scalar = SimpleNamespace(is_valid=True, as_py=lambda: decimal_value)
+
+    with pytest.raises(ValueError, match="invalid_dataset_primary_key_value"):
+        module._canonical_arrow_scalar_payload(
+            scalar,
+            pa.decimal128(38, 0),
+        )
+
+
+def test_exact_primary_key_timestamp_identity_preserves_arrow_type_and_range(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module(
+        "quant_research_platform.storage._dataset_key_tracking"
+    )
+    unit_types = tuple(pa.timestamp(unit) for unit in ("s", "ms", "us", "ns"))
+    unit_payloads = {
+        module._canonical_arrow_scalar_payload(pa.scalar(1, type=data_type), data_type)
+        for data_type in unit_types
+    }
+    timezone_types = (
+        pa.timestamp("s"),
+        pa.timestamp("s", tz="UTC"),
+        pa.timestamp("s", tz="Asia/Shanghai"),
+    )
+    timezone_payloads = {
+        module._canonical_arrow_scalar_payload(pa.scalar(1, type=data_type), data_type)
+        for data_type in timezone_types
+    }
+
+    assert len(unit_payloads) == len(unit_types)
+    assert len(timezone_payloads) == len(timezone_types)
+
+    out_of_nanosecond_range = 32_503_680_000
+    timestamp_type = pa.timestamp("s", tz="UTC")
+    table = pa.table({"key": pa.array([out_of_nanosecond_range], type=timestamp_type)})
+    with module.ExactPrimaryKeyIndex(
+        primary_key=("key",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+        key_schema=pa.schema([pa.field("key", timestamp_type)]),
+    ) as timestamps:
+        assert timestamps.add_table(table) == 0
+        assert timestamps.add_table(table) == 1
 
 
 def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
@@ -2075,7 +2201,7 @@ def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
                 "schema_id": "qrp-dataset-spec",
                 "metadata": {"schema_id": "nested/version"},
             },
-            "dataset_spec_schema_id_invalid",
+            "dataset_spec_fields_invalid",
         ),
         ("_manifest/manifest.json", {}, "dataset_manifest_schema_id_invalid"),
         (
@@ -2094,7 +2220,7 @@ def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
                 "schema_id": "qrp-dataset-manifest",
                 "metadata": {"schema_id": "nested/version"},
             },
-            "dataset_manifest_schema_id_invalid",
+            "dataset_manifest_fields_invalid",
         ),
     ),
 )
@@ -2147,6 +2273,73 @@ def test_read_dataset_manifest_row_count_mismatch_fails_closed(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="manifest_row_count_mismatch"):
+        read_dataset(root)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    (
+        ("row_count", True, "manifest_row_count_invalid"),
+        ("row_count", "3", "manifest_row_count_invalid"),
+        ("row_count", 3.0, "manifest_row_count_invalid"),
+        ("file_count", True, "manifest_file_count_invalid"),
+        (
+            "columns",
+            ["market_id", "asset_id", "timestamp", "value", "value"],
+            "manifest_columns_invalid",
+        ),
+        ("schema_hash", "A" * 64, "manifest_schema_hash_invalid"),
+        ("partition_count", True, "manifest_partition_count_invalid"),
+        (
+            "partition_row_counts",
+            {"year=2014": True, "year=2015": 2},
+            "manifest_partition_row_counts_invalid",
+        ),
+        (
+            "partitions",
+            ["year=2014", "year=2015", "year=2015"],
+            "manifest_partitions_invalid",
+        ),
+        ("date_min", "2016-01-01", "manifest_date_range_invalid"),
+        ("validation_status", "pass", "manifest_validation_status_invalid"),
+        ("unknown", "value", "dataset_manifest_fields_invalid"),
+    ),
+)
+def test_read_dataset_rejects_strict_manifest_type_and_shape_mutations(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[field] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=error):
+        read_dataset(root)
+
+
+def test_read_dataset_rejects_forged_recursive_physical_schema_identity(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+    )
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["physical_schema"][0]["nullable"] = not manifest["physical_schema"][0][
+        "nullable"
+    ]
+    manifest["schema_hash"] = canonical_json_hash(manifest["physical_schema"])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest_physical_schema_mismatch"):
         read_dataset(root)
 
 

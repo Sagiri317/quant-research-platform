@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata as importlib_metadata
-import json
 import os
 import re
 import shutil
@@ -45,6 +44,11 @@ from receipt_contract import (  # noqa: E402
     normalize_hard_scan_receipt,
     normalize_package_smoke_receipt,
     validate_check_receipts,
+)
+
+from quant_research_platform.contracts._json import (  # noqa: E402
+    parse_qrp_json_object,
+    render_qrp_json_object,
 )
 
 FORBIDDEN_PACKAGE_SUFFIXES = {
@@ -427,8 +431,8 @@ def _replay_status(
         )
         if summary_path.exists():
             try:
-                payload = json.loads(summary_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
+                payload = parse_qrp_json_object(summary_path.read_bytes())
+            except ValueError:
                 return "FAIL"
             status = payload.get("status")
             if status in {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}:
@@ -647,7 +651,7 @@ def _git_text(repo: Path, *args: str) -> str:
 
 
 def _stable_json(payload: object) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return render_qrp_json_object(payload) + "\n"
 
 
 def _sha256_text(text: str) -> str:

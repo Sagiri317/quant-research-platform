@@ -202,8 +202,8 @@ def _reports_prediction_frame(*, row_count: int) -> pd.DataFrame:
     scores = [0.25, 0.35][:row_count]
     return pd.DataFrame(
         {
-            "asset_id": assets,
             "timestamp": pd.to_datetime(["2014-01-03"] * row_count),
+            "asset_id": assets,
             "prediction_score": scores,
         }
     )
@@ -212,8 +212,8 @@ def _reports_prediction_frame(*, row_count: int) -> pd.DataFrame:
 def _artifacts_prediction_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "asset_id": ["asset_a"],
             "timestamp": pd.to_datetime(["2024-01-02"]),
+            "asset_id": ["asset_a"],
             "prediction_score": [0.1],
         }
     )
@@ -221,7 +221,6 @@ def _artifacts_prediction_frame() -> pd.DataFrame:
 
 def _reports_model_metadata() -> dict[str, object]:
     return {
-        "contract_version": "0.1",
         "model_algorithm": "linear_regression",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
@@ -252,7 +251,6 @@ def _reports_model_metadata() -> dict[str, object]:
 
 def _reports_prediction_metadata() -> dict[str, object]:
     return {
-        "contract_version": "0.1",
         "prediction_mode": "minimal_oos",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
@@ -275,7 +273,6 @@ def _reports_prediction_metadata() -> dict[str, object]:
 
 def _artifacts_model_metadata() -> dict[str, object]:
     return {
-        "contract_version": "0.1",
         "model_algorithm": "linear_regression",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
@@ -306,7 +303,6 @@ def _artifacts_model_metadata() -> dict[str, object]:
 
 def _artifacts_prediction_metadata() -> dict[str, object]:
     return {
-        "contract_version": "0.1",
         "prediction_mode": "minimal_oos",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],

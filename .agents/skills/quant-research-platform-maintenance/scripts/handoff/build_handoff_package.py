@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import re
 import shutil
 import subprocess
@@ -41,6 +40,10 @@ from replay_evidence import (  # noqa: E402
 from verify_handoff_package import (  # noqa: E402
     load_handoff_package_payload,
     validate_handoff_package_payload,
+)
+
+from quant_research_platform.contracts._json import (  # noqa: E402
+    render_qrp_json_object,
 )
 
 PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
@@ -293,7 +296,7 @@ def write_text(path: Path, text: str) -> None:
 
 
 def stable_json(payload: object) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return render_qrp_json_object(payload) + "\n"
 
 
 def sha256_file(path: Path) -> str:

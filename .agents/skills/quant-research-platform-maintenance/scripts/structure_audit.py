@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import ast
 import importlib.util
-import json
 import re
 import sys
 import tomllib
@@ -15,13 +14,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-SCRIPT_REPO_ROOT = SCRIPT_DIR.parents[4]
+SCRIPT_REPO_ROOT = SCRIPT_DIR.parents[3]
 SCRIPT_REPO_SRC = SCRIPT_REPO_ROOT / "src"
 for candidate in (SCRIPT_DIR, SCRIPT_REPO_SRC):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
 import governance_contract  # noqa: E402
+
+from quant_research_platform.contracts._json import (  # noqa: E402
+    render_qrp_json_object,
+)
 
 HANDOFF_ROOT = (
     Path(".agents")
@@ -86,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         ],
     }
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        print(render_qrp_json_object(payload))
     else:
         for check in checks:
             print(f"{check.status} {check.name}")

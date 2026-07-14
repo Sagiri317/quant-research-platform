@@ -11,24 +11,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
 
-try:
-    from quant_research_platform.policy.check_status import (
-        VALID_STATUS_TOKENS,
-    )
-    from quant_research_platform.policy.check_status import (
-        aggregate_validation_matrix_status as _aggregate_validation_matrix_status,
-    )
-except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit src.
-    VALID_STATUS_TOKENS = frozenset({"PASS", "FAIL", "NOT_RUN", "BLOCKED"})
-
-    def _aggregate_validation_matrix_status(statuses: list[str]) -> str:
-        if "FAIL" in statuses:
-            return "FAIL"
-        if "BLOCKED" in statuses:
-            return "BLOCKED"
-        if "NOT_RUN" in statuses:
-            return "NOT_RUN"
-        return "PASS"
+from quant_research_platform.policy.check_status import (
+    VALID_STATUS_TOKENS,
+    aggregate_validation_matrix_status,
+)
 
 
 class ProofClass(StrEnum):
@@ -300,7 +286,7 @@ def allowed_keys(specs: Mapping[str, FieldSpec]) -> frozenset[str]:
 
 
 def aggregate_handoff_status(statuses: Iterable[str]) -> str:
-    return _aggregate_validation_matrix_status(list(statuses))
+    return aggregate_validation_matrix_status(statuses)
 
 
 def validate_handoff_package_layout(names: Iterable[str]) -> list[str]:
@@ -341,7 +327,7 @@ def validate_artifact_manifest_contract(payload: Mapping[str, object]) -> list[s
     if payload.get("schema_id") != "qrp-handoff-artifact-manifest":
         failures.append("artifact_manifest_schema_id_invalid")
     entries = payload.get("entries")
-    if not isinstance(entries, list):
+    if type(entries) is not list:
         failures.append("artifact_manifest_entries_invalid")
         return failures
     for index, entry in enumerate(entries):
@@ -357,7 +343,7 @@ def validate_artifact_manifest_contract(payload: Mapping[str, object]) -> list[s
         )
         if not isinstance(entry.get("path"), str) or not str(entry.get("path")).strip():
             failures.append(f"artifact_manifest_path_invalid: {index}")
-        if not isinstance(entry.get("size"), int) or int(entry.get("size")) < 0:
+        if type(entry.get("size")) is not int or entry.get("size", -1) < 0:
             failures.append(f"artifact_manifest_size_invalid: {index}")
         if not sha(entry.get("sha256")):
             failures.append(f"artifact_manifest_sha256_invalid: {index}")
@@ -373,7 +359,7 @@ def validate_validation_summary_contract(
     if payload.get("schema_id") != "qrp-handoff-validation-summary":
         failures.append("validation_summary_schema_id_invalid")
     rows = payload.get("rows")
-    if not isinstance(rows, list):
+    if type(rows) is not list:
         failures.append("validation_summary_rows_must_be_list")
         return failures
     seen: set[str] = set()
@@ -466,7 +452,7 @@ def mandatory_validation_failures(
 ) -> list[str]:
     failures: list[str] = []
     rows = validation_summary.get("rows")
-    if not isinstance(rows, list):
+    if type(rows) is not list:
         return ["validation_summary_rows_must_be_list"]
     by_name: dict[str, list[object]] = {name: [] for name in MANDATORY_VALIDATION_ROWS}
     observed_statuses: list[str] = []
@@ -510,7 +496,7 @@ def validate_validation_summary_against_receipts(
 ) -> list[str]:
     failures = validate_validation_summary_contract(validation_summary)
     rows = validation_summary.get("rows")
-    if not isinstance(rows, list):
+    if type(rows) is not list:
         return failures
     expected_statuses = expected_validation_status_map_from_receipts(receipts)
     for row in rows:
@@ -531,7 +517,7 @@ def check_rows_by_command_id(
     check_receipts: Mapping[str, object],
 ) -> dict[str, Mapping[str, object]]:
     rows = check_receipts.get("checks")
-    if not isinstance(rows, list):
+    if type(rows) is not list:
         return {}
     result: dict[str, Mapping[str, object]] = {}
     for row in rows:

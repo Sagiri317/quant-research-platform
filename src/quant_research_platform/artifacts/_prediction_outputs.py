@@ -11,8 +11,10 @@ from quant_research_platform.artifacts._output_common_validation import (
     derive_output_bundle_root,
     required_frame_metadata,
     sanitize_required_metadata,
+    validate_output_frame,
 )
 from quant_research_platform.artifacts._output_manifest import (
+    PREDICTION_ARTIFACTS,
     output_manifest_payload,
     prediction_output_metadata,
 )
@@ -68,12 +70,11 @@ def write_prediction_outputs(
         expected_definition_id="prediction_outputs",
     )
     required = (*spec.primary_key, spec.prediction_column)
-    missing = sorted(set(required).difference(frame.columns))
-    if missing:
-        raise ValueError(f"missing_prediction_output_columns: {', '.join(missing)}")
-    extra = sorted(set(frame.columns).difference(required))
-    if extra:
-        raise ValueError(f"unregistered_prediction_output_columns: {', '.join(extra)}")
+    validate_output_frame(
+        frame,
+        required=required,
+        error_name="prediction_output",
+    )
     if bool(frame.duplicated(list(spec.primary_key)).any()):
         raise ValueError("duplicate_prediction_keys")
     model_metadata = validate_model_metadata_shape(
@@ -123,7 +124,7 @@ def write_prediction_outputs(
                     model_metadata=model_metadata,
                     prediction_metadata=prediction_metadata,
                 ),
-                files=("prediction.parquet",),
+                files=PREDICTION_ARTIFACTS,
             ),
         )
 
@@ -192,7 +193,7 @@ def _write_prediction_output_chunks(
                     model_metadata=effective_model_metadata,
                     prediction_metadata=prediction_metadata,
                 ),
-                files=("prediction.parquet",),
+                files=PREDICTION_ARTIFACTS,
             ),
         )
 

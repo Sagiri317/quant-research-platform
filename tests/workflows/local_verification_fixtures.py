@@ -8,6 +8,14 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts._output_manifest import (
+    _OUTPUT_DEFINITION_FILES,
+    portfolio_output_metadata_from_row_counts,
+    prediction_output_metadata,
+)
+from quant_research_platform.artifacts._portfolio_output_validation import (
+    PORTFOLIO_ARTIFACTS,
+)
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.columns import ColumnRole
@@ -19,6 +27,10 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.filtering import (
+    filter_definition,
+    required_filter_columns,
+)
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.markets.implementations.a_share import (
     research_scenarios as a_share_research_scenarios,
@@ -30,6 +42,7 @@ from quant_research_platform.workflows.local_verification import (
     LocalVerificationRunConfig,
 )
 from tests.helpers import frequency_ids
+from tests.helpers.report_output_frames import make_artifact_prediction_output_frame
 
 LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
 MIB = 1024 * 1024
@@ -210,6 +223,9 @@ def stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
         output_spec = kwargs["output_spec"]
         root = kwargs["layout"].project_root / "outputs" / output_spec.output_id
         root.mkdir(parents=True)
+        files = list(_OUTPUT_DEFINITION_FILES[output_spec.output_definition_id])
+        for name in files:
+            (root / name).write_bytes(b"{}\n")
         (root / "manifest.json").write_text(
             json.dumps(
                 {
@@ -217,8 +233,11 @@ def stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
                     "output_id": output_spec.output_id,
                     "output_definition_id": output_spec.output_definition_id,
                     "run_id": output_spec.run_id,
-                    "metadata": {},
-                    "files": [],
+                    "metadata": _stub_output_metadata(
+                        output_spec.output_definition_id,
+                        kwargs,
+                    ),
+                    "files": files,
                 }
             ),
             encoding="utf-8",
@@ -240,6 +259,86 @@ def stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
         "write_portfolio_outputs",
         write_stub,
     )
+
+
+def _stub_output_metadata(
+    output_definition_id: str,
+    kwargs: dict[str, object],
+) -> dict[str, object]:
+    spec = kwargs["spec"]
+    if output_definition_id == "evaluation_outputs":
+        return {
+            "run_id": spec.run_id,
+            "run_type": spec.run_type,
+            "market_id": str(spec.market_id),
+            "research_dataset_id": spec.research_dataset_id,
+            "signals": [
+                {
+                    "signal_id": signal.signal_id,
+                    "source_kind": signal.source_kind,
+                    "source_column": signal.source_column,
+                    "direction": signal.direction,
+                    "transform": signal.transform,
+                }
+                for signal in spec.signals
+            ],
+            "label_columns": list(spec.label_columns),
+            "filter_mode": spec.filter_mode,
+            "evaluation_diagnostics": {
+                "filter_mode": spec.filter_mode,
+                "filter_columns_used": list(
+                    required_filter_columns(spec.filter_mode)
+                ),
+                "filter_definition": filter_definition(spec.filter_mode),
+                "rows_input": 0,
+                "rows_after_filter_mode": 0,
+                "rows_after_signal_label_dropna": 0,
+                "metric_rows": 0,
+                "grouped_label_value_rows": 0,
+                "ic_summary_rows": 0,
+                "group_spread_summary_rows": 0,
+                "timestamp_count": 0,
+                "min_timestamp": None,
+                "max_timestamp": None,
+                "n_groups": spec.n_groups,
+                "skipped_timestamp_count": 0,
+            },
+        }
+    if output_definition_id == "prediction_outputs":
+        frame = make_artifact_prediction_output_frame()
+        effective_end = spec.test_end or spec.test_start
+        model_metadata = {
+            **frame.attrs["model_metadata"],
+            "train_start": spec.train_end,
+            "train_end": spec.train_end,
+            "test_start": spec.test_start,
+            "test_end": spec.test_end,
+            "oos_start": spec.test_start,
+            "oos_end": effective_end,
+        }
+        prediction_metadata = {
+            **frame.attrs["prediction_metadata"],
+            "prediction_mode": spec.prediction_mode,
+            "sample_filter_mode": spec.sample_filter_mode,
+            "train_end": spec.train_end,
+            "test_start": spec.test_start,
+            "requested_test_end": spec.test_end,
+            "effective_test_end": effective_end,
+            "is_oos": spec.is_oos,
+            "is_final_oos_window": spec.is_final_oos_window,
+            "prediction_column": spec.prediction_column,
+        }
+        return prediction_output_metadata(
+            spec=spec,
+            model_metadata=model_metadata,
+            prediction_metadata=prediction_metadata,
+        )
+    if output_definition_id == "portfolio_outputs":
+        return portfolio_output_metadata_from_row_counts(
+            spec=spec,
+            row_counts={name: 0 for name in PORTFOLIO_ARTIFACTS},
+        )
+    raise AssertionError(f"unexpected_output_definition:{output_definition_id}")
 
 
 def persist_tiny_a_share_processed_inputs(

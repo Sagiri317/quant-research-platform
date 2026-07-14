@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import json
 import os
 import shutil
 import sys
@@ -15,6 +14,7 @@ from uuid import uuid4
 
 import pandas as pd
 
+from quant_research_platform.contracts._json import render_qrp_json_object
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
     scratch_owner_is_stale,
@@ -52,7 +52,7 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Path
 def atomic_write_json(path: Path, payload: object) -> Path:
     return atomic_write_text(
         path,
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        render_qrp_json_object(payload) + "\n",
         encoding="utf-8",
     )
 

@@ -211,7 +211,6 @@ def test_prediction_build_rejects_invalid_filter_metadata_counts(
 
 def _prediction_model_metadata() -> dict[str, object]:
     return {
-        "contract_version": "0.1",
         "model_algorithm": "linear_regression",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
@@ -521,7 +520,6 @@ def test_prediction_outputs_accept_equivalent_timezone_representations() -> None
     )
     frame = pd.DataFrame(
         {
-            "asset_id": ["asset_a", "asset_b"],
             "timestamp": [
                 pd.Timestamp(
                     "2024-01-02T12:00:00",
@@ -532,6 +530,7 @@ def test_prediction_outputs_accept_equivalent_timezone_representations() -> None
                     tz=ZoneInfo("Europe/Paris"),
                 ),
             ],
+            "asset_id": ["asset_a", "asset_b"],
             PREDICTION_SCORE_COLUMN: [0.1, 0.2],
         }
     )
@@ -572,6 +571,78 @@ def test_prediction_outputs_accept_equivalent_timezone_representations() -> None
             coefficients=np.asarray([0.0, 0.01]),
             input_columns=("factor",),
         )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("non_string", "invalid_prediction_output_columns"),
+        ("duplicate_key", "duplicate_prediction_output_columns"),
+        ("duplicate_payload", "duplicate_prediction_output_columns"),
+        ("missing", "missing_prediction_output_columns: prediction_score"),
+        ("extra", "unregistered_prediction_output_columns: extra"),
+        ("misordered", "misordered_prediction_output_columns"),
+    ),
+)
+def test_prediction_outputs_require_exact_ordered_unique_columns(
+    mutation: str,
+    error: str,
+) -> None:
+    spec = PredictionSpec(
+        prediction_id="pred_exact_output_columns",
+        model_id="linear_eligible",
+        research_dataset_id="demo_filter",
+        train_end="2024-01-01",
+        test_start="2024-01-02",
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-02")],
+            "asset_id": ["asset_a"],
+            PREDICTION_SCORE_COLUMN: [0.1],
+        }
+    )
+    if mutation == "non_string":
+        frame = frame.rename(columns={"timestamp": 1})
+    elif mutation == "duplicate_key":
+        frame = pd.concat((frame, frame.loc[:, ["timestamp"]]), axis=1)
+    elif mutation == "duplicate_payload":
+        frame = pd.concat(
+            (frame, frame.loc[:, [PREDICTION_SCORE_COLUMN]]),
+            axis=1,
+        )
+    elif mutation == "missing":
+        frame = frame.drop(columns=[PREDICTION_SCORE_COLUMN])
+    elif mutation == "extra":
+        frame = frame.assign(extra=1)
+    elif mutation == "misordered":
+        frame = frame.loc[:, ["asset_id", "timestamp", PREDICTION_SCORE_COLUMN]]
+
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        validate_prediction_outputs(frame, spec)
+
+
+def test_prediction_builder_outputs_canonical_columns_for_validation() -> None:
+    spec = PredictionSpec(
+        prediction_id="pred_canonical_builder_output",
+        model_id="linear_eligible",
+        research_dataset_id="demo_filter",
+        train_end="2024-01-02",
+        test_start="2024-01-03",
+        test_end="2024-01-03",
+    )
+    frame = make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-03"))
+    result = build_prediction_result_from_frames(
+        (frame.drop(columns=["label"]),),
+        spec,
+        coefficients=np.asarray([0.0, 0.01]),
+        input_columns=("factor",),
+        model_metadata=_prediction_model_metadata(),
+    )
+    output = pd.concat(tuple(result.output_chunks), ignore_index=True)
+
+    assert tuple(output.columns) == (*spec.primary_key, spec.prediction_column)
+    validate_prediction_outputs(output, spec)
 
 
 def test_prediction_handoff_empty_training_window_fails_closed(

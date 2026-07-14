@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
+from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
@@ -11,6 +14,7 @@ from quant_research_platform.contracts.ids import MarketId
 
 @dataclass(frozen=True, kw_only=True)
 class ResearchDatasetSpec(DataSpec):
+    column_roles: Mapping[str, ColumnRole]
     market_id: MarketId
     input_data_ids: tuple[str, ...]
     base_input_data_id: str
@@ -20,10 +24,26 @@ class ResearchDatasetSpec(DataSpec):
     label_columns: tuple[str, ...]
     filter_columns: tuple[str, ...] = ()
     context_columns: tuple[str, ...] = ()
-    key_coverage: dict[str, str] = field(default_factory=dict)
+    key_coverage: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if type(self.column_roles) not in (dict, MappingProxyType) or any(
+            type(column) is not str
+            or not column
+            or type(role) is not ColumnRole
+            for column, role in self.column_roles.items()
+        ):
+            raise ValueError("invalid_research_column_roles")
+        object.__setattr__(
+            self,
+            "column_roles",
+            MappingProxyType(dict(self.column_roles)),
+        )
         super().__post_init__()
+        if type(self.key_coverage) not in (dict, MappingProxyType) or any(
+            type(data_id) is not str for data_id in self.key_coverage
+        ):
+            raise ValueError("invalid_research_key_coverage")
         if self.base_input_data_id not in self.input_data_ids:
             raise ValueError(
                 f"base_input_data_id_not_in_inputs: {self.base_input_data_id}"
@@ -36,7 +56,7 @@ class ResearchDatasetSpec(DataSpec):
         invalid_policies = sorted(
             f"{data_id}={policy}"
             for data_id, policy in self.key_coverage.items()
-            if policy not in {"strict", "sparse"}
+            if type(policy) is not str or policy not in {"strict", "sparse"}
         )
         if invalid_policies:
             raise ValueError(
@@ -59,6 +79,18 @@ class ResearchDatasetSpec(DataSpec):
                 "research_factor_feature_overlap: "
                 + ", ".join(factor_feature_overlap)
             )
+        for field_name, columns in (
+            ("factor_columns", self.factor_columns),
+            ("feature_columns", self.feature_columns),
+            ("label_columns", self.label_columns),
+            ("filter_columns", self.filter_columns),
+            ("context_columns", self.context_columns),
+        ):
+            _validate_semantic_column_membership(
+                columns,
+                field_name=field_name,
+                required_columns=self.required_columns,
+            )
         _validate_feature_transforms(
             self.feature_transforms,
             factor_columns=self.factor_columns,
@@ -76,11 +108,45 @@ class ResearchDatasetSpec(DataSpec):
             raise ValueError(
                 "research_input_column_overlap: " + ", ".join(invalid_research_inputs)
             )
-        normalized = {
+        _validate_semantic_column_roles(
+            self.factor_columns,
+            field_name="factor_columns",
+            column_roles=self.column_roles,
+            allowed_roles=(ColumnRole.FACTOR,),
+        )
+        _validate_semantic_column_roles(
+            self.feature_columns,
+            field_name="feature_columns",
+            column_roles=self.column_roles,
+            allowed_roles=(ColumnRole.FEATURE,),
+        )
+        _validate_semantic_column_roles(
+            self.label_columns,
+            field_name="label_columns",
+            column_roles=self.column_roles,
+            allowed_roles=(ColumnRole.LABEL,),
+        )
+        _validate_semantic_column_roles(
+            self.filter_columns,
+            field_name="filter_columns",
+            column_roles=self.column_roles,
+            allowed_roles=(ColumnRole.MASK, ColumnRole.UNIVERSE),
+        )
+        _validate_semantic_column_roles(
+            self.context_columns,
+            field_name="context_columns",
+            column_roles=self.column_roles,
+            allowed_roles=(ColumnRole.CONTEXT,),
+        )
+        normalized_key_coverage = {
             data_id: self.key_coverage.get(data_id, "strict")
             for data_id in self.input_data_ids
         }
-        object.__setattr__(self, "key_coverage", normalized)
+        object.__setattr__(
+            self,
+            "key_coverage",
+            MappingProxyType(normalized_key_coverage),
+        )
 
 
 def _validate_column_tuple(
@@ -95,6 +161,38 @@ def _validate_column_tuple(
         raise ValueError(f"{field_name}_must_be_non_empty_strings")
     if len(set(columns)) != len(columns):
         raise ValueError(f"{field_name}_must_not_contain_duplicates")
+
+
+def _validate_semantic_column_membership(
+    columns: tuple[str, ...],
+    *,
+    field_name: str,
+    required_columns: tuple[str, ...],
+) -> None:
+    required = set(required_columns)
+    missing = [column for column in columns if column not in required]
+    if missing:
+        raise ValueError(
+            f"research_semantic_column_not_required: {field_name}: "
+            + ", ".join(missing)
+        )
+
+
+def _validate_semantic_column_roles(
+    columns: tuple[str, ...],
+    *,
+    field_name: str,
+    column_roles: Mapping[str, ColumnRole],
+    allowed_roles: tuple[ColumnRole, ...],
+) -> None:
+    invalid = [
+        column for column in columns if column_roles.get(column) not in allowed_roles
+    ]
+    if invalid:
+        raise ValueError(
+            f"research_semantic_column_role_invalid: {field_name}: "
+            + ", ".join(invalid)
+        )
 
 
 def _validate_feature_transforms(

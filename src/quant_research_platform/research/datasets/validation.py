@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.datasets._contracts import (
@@ -20,6 +19,16 @@ def validate_research_dataset(
 ) -> None:
     if spec.primary_key != RESEARCH_DATASET_PRIMARY_KEY_COLUMNS:
         raise ValueError("invalid_research_dataset_primary_key")
+    duplicate_columns = tuple(
+        dict.fromkeys(
+            str(column)
+            for column in frame.columns[frame.columns.duplicated(keep=False)]
+        )
+    )
+    if duplicate_columns:
+        raise ValueError(
+            "duplicate_research_dataset_columns: " + ", ".join(duplicate_columns)
+        )
     required = set(spec.required_columns if require_all_columns else spec.primary_key)
     missing = sorted(required.difference(frame.columns))
     if missing:
@@ -35,59 +44,6 @@ def validate_research_dataset(
     duplicates = frame.duplicated(list(spec.primary_key))
     if bool(duplicates.any()):
         raise ValueError("duplicate_research_dataset_keys")
-
-    invalid_factors = [
-        column
-        for column in spec.factor_columns
-        if spec.column_roles.get(column) is not ColumnRole.FACTOR
-    ]
-    if invalid_factors:
-        joined = ", ".join(invalid_factors)
-        raise ValueError(f"invalid_research_dataset_factors: {joined}")
-
-    invalid_features = [
-        column
-        for column in spec.feature_columns
-        if spec.column_roles.get(column) is not ColumnRole.FEATURE
-    ]
-    if invalid_features:
-        joined = ", ".join(invalid_features)
-        raise ValueError(f"invalid_research_dataset_features: {joined}")
-
-    invalid_labels = [
-        column
-        for column in spec.label_columns
-        if spec.column_roles.get(column) is not ColumnRole.LABEL
-    ]
-    if invalid_labels:
-        joined = ", ".join(invalid_labels)
-        raise ValueError(f"invalid_research_dataset_labels: {joined}")
-
-    mask_inputs = [
-        column
-        for column in (*spec.factor_columns, *spec.feature_columns)
-        if spec.column_roles.get(column) is ColumnRole.MASK
-    ]
-    if mask_inputs:
-        raise ValueError(f"mask_column_in_research_inputs: {', '.join(mask_inputs)}")
-
-    invalid_filters = [
-        column
-        for column in spec.filter_columns
-        if spec.column_roles.get(column) not in {ColumnRole.MASK, ColumnRole.UNIVERSE}
-    ]
-    if invalid_filters:
-        joined = ", ".join(invalid_filters)
-        raise ValueError(f"invalid_research_dataset_filters: {joined}")
-
-    invalid_context = [
-        column
-        for column in spec.context_columns
-        if spec.column_roles.get(column) is not ColumnRole.CONTEXT
-    ]
-    if invalid_context:
-        joined = ", ".join(invalid_context)
-        raise ValueError(f"invalid_research_dataset_context: {joined}")
 
 
 def validate_evaluation_input(

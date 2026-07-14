@@ -89,6 +89,13 @@ def init_handoff_test_repo(repo: Path) -> tuple[str, str]:
     package_root = repo / "src" / "quant_research_platform"
     package_root.mkdir(parents=True)
     (package_root / "__init__.py").write_text("", encoding="utf-8")
+    contracts_root = package_root / "contracts"
+    contracts_root.mkdir()
+    (contracts_root / "__init__.py").write_text("", encoding="utf-8")
+    shutil.copyfile(
+        Path("src") / "quant_research_platform" / "contracts" / "_json.py",
+        contracts_root / "_json.py",
+    )
     policy_root = package_root / "policy"
     policy_root.mkdir()
     (policy_root / "__init__.py").write_text("", encoding="utf-8")
@@ -170,8 +177,17 @@ def _write_minimal_project_files(repo: Path) -> None:
                 "from __future__ import annotations",
                 "",
                 "import argparse",
-                "import json",
+                "import sys",
                 "from pathlib import Path",
+                "",
+                "REPO_ROOT = Path(__file__).resolve().parents[2]",
+                "REPO_SRC = REPO_ROOT / 'src'",
+                "if str(REPO_SRC) not in sys.path:",
+                "    sys.path.insert(0, str(REPO_SRC))",
+                "",
+                "from quant_research_platform.contracts._json import (  # noqa: E402",
+                "    render_qrp_json_object,",
+                ")",
                 "",
                 "",
                 "def main() -> int:",
@@ -195,11 +211,12 @@ def _write_minimal_project_files(repo: Path) -> None:
                 "        'run_dir': args.run_dir,",
                 "    }",
                 "    summary_name = Path('summary').with_suffix('.json')",
+                "    rendered_summary = render_qrp_json_object(summary)",
                 "    (run_dir / summary_name).write_text(",
-                "        json.dumps(summary, indent=2, sort_keys=True) + '\\n',",
+                "        rendered_summary + '\\n',",
                 "        encoding='utf-8',",
                 "    )",
-                "    print(json.dumps(summary, sort_keys=True))",
+                "    print(rendered_summary)",
                 "    return 0",
                 "",
                 "",

@@ -17,6 +17,7 @@ RUN_RESULT_LOGICAL_PATH_MARKERS: tuple[str, ...] = (
     "logs",
     "handoff_evidence",
 )
+RUN_RESULT_DATASET_LAYERS = frozenset({"interim", "processed", "research"})
 
 
 def logical_path(
@@ -71,6 +72,7 @@ def _posix_parts(path: Path) -> tuple[str, ...]:
 
 __all__ = [
     "DEFAULT_GENERATED_MARKERS",
+    "RUN_RESULT_DATASET_LAYERS",
     "RUN_RESULT_LOGICAL_PATH_MARKERS",
     "dataset_layer_from_path",
     "logical_path",
