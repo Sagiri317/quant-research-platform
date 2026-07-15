@@ -57,6 +57,7 @@ from quant_research_platform.research.predictions import (
     build_prediction_result_from_research_dataset,
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.storage import atomic as storage_atomic
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
@@ -250,11 +251,11 @@ def test_research_time_key_scan_uses_payload_target(
         available_memory_bytes=1024,
         environ={},
     )
+    session = SimpleNamespace()
     monkeypatch.setattr(
         assembler_module,
-        "build_dataset_read_context",
-        lambda root, **_kwargs: root,
-        raising=False,
+        "_research_session_view",
+        lambda current, **_kwargs: current,
     )
 
     def fake_iter_dataset_chunks(context, *, target_chunk_bytes):  # noqa: ANN001
@@ -269,7 +270,7 @@ def test_research_time_key_scan_uses_payload_target(
     )
 
     result = assembler_module._time_keys_from_base_input(
-        Path("base"),
+        session,
         primary_key=platform_entity_time_key(),
         time_window=TimeWindow(
             "2026-01-01T00:00:00",
@@ -289,10 +290,11 @@ def test_research_time_key_scan_preserves_single_timestamp(
         available_memory_bytes=320,
         environ={},
     )
+    session = SimpleNamespace()
     monkeypatch.setattr(
         assembler_module,
-        "build_dataset_read_context",
-        lambda root, **_kwargs: root,
+        "_research_session_view",
+        lambda current, **_kwargs: current,
     )
     monkeypatch.setattr(
         assembler_module,
@@ -303,7 +305,7 @@ def test_research_time_key_scan_preserves_single_timestamp(
     )
 
     assert assembler_module._time_keys_from_base_input(
-        Path("base"),
+        session,
         primary_key=platform_entity_time_key(),
         time_window=TimeWindow(
             "2026-01-01T00:00:00",
@@ -324,10 +326,16 @@ def test_research_processed_input_uses_task_budget_for_materialization(
         environ={},
     )
     observed: dict[str, object] = {}
+    columns = assembler_module._processed_input_columns(
+        dataset_spec,
+        processed_spec,
+        existing_columns=(),
+    )
+    context = SimpleNamespace(logical_columns=columns)
     monkeypatch.setattr(
         assembler_module,
-        "build_dataset_read_context",
-        lambda *_args, **_kwargs: "context",
+        "_research_session_view",
+        lambda current, **_kwargs: current,
     )
 
     def materialize(context, **kwargs):  # noqa: ANN001
@@ -335,19 +343,19 @@ def test_research_processed_input_uses_task_budget_for_materialization(
         observed.update(kwargs)
         return pd.DataFrame()
 
-    monkeypatch.setattr(assembler_module, "materialize_dataset_context", materialize)
+    monkeypatch.setattr(assembler_module, "materialize_dataset_session", materialize)
 
     assembler_module._read_processed_input(
-        layout=SimpleNamespace(processed_data_root=lambda *_args: Path("processed")),
         dataset_spec=dataset_spec,
         processed_spec=processed_spec,
+        session=context,
         existing_columns=(),
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
         resource_policy=policy,
     )
 
     assert observed == {
-        "context": "context",
+        "context": context,
         "target_chunk_bytes": policy.payload_target_bytes,
         "materialized_budget_bytes": policy.task_memory_budget_bytes,
     }
@@ -698,9 +706,9 @@ def test_research_sizing_probe_materializes_one_session_at_a_time(
     monkeypatch.setattr(assembler_module, "_join_processed_inputs", join)
 
     assembler_module._estimate_research_join_bytes_per_session(
-        layout=SimpleNamespace(),
         dataset_spec=SimpleNamespace(),
         processed_catalog=SimpleNamespace(),
+        sessions={},
         time_keys=sessions,
         time_window=TimeWindow("2026-01-01", "2026-01-20"),
         base_data_id="base",
@@ -712,6 +720,233 @@ def test_research_sizing_probe_materializes_one_session_at_a_time(
 
     assert len(observed_windows) == 20
     assert all(window.start == window.end for window in observed_windows)
+
+
+def test_research_assembly_rejects_dependency_replacement_after_identity_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path / "current")
+    replacement_layout = StorageLayout(project_root=tmp_path / "replacement")
+    processed_catalog = make_demo_processed_catalog()
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    write_demo_processed_inputs(layout, processed_catalog)
+    write_demo_processed_inputs(
+        replacement_layout,
+        processed_catalog,
+        frame=_research_rows_for_dates(
+            ["2014-01-02", "2014-01-03", "2014-01-04"]
+        ),
+    )
+    factor_spec = processed_catalog.get("demo_factors")
+    current_root = layout.processed_data_root(
+        factor_spec.market_id,
+        factor_spec.kind,
+        factor_spec.data_id,
+    )
+    replacement_root = replacement_layout.processed_data_root(
+        factor_spec.market_id,
+        factor_spec.kind,
+        factor_spec.data_id,
+    )
+    backup_root = current_root.with_name(current_root.name + "-before-replacement")
+    real_identity = assembler_module.dataset_identity_payload
+    real_open = assembler_module.open_dataset_session
+    opened_roots: list[Path] = []
+    replaced = False
+
+    def record_open(root: Path, **kwargs):
+        opened_roots.append(Path(root))
+        return real_open(root, **kwargs)
+
+    def replace_after_identity(spec, manifest):  # noqa: ANN001
+        nonlocal replaced
+        identity = real_identity(spec, manifest)
+        if spec["data_id"] == factor_spec.data_id and not replaced:
+            current_root.rename(backup_root)
+            replacement_root.rename(current_root)
+            replaced = True
+        return identity
+
+    monkeypatch.setattr(assembler_module, "open_dataset_session", record_open)
+    monkeypatch.setattr(
+        assembler_module,
+        "dataset_identity_payload",
+        replace_after_identity,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_manifest_identity_changed",
+    ):
+        assemble_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            processed_catalog=processed_catalog,
+            dataset_id="demo",
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        )
+
+    assert replaced
+    assert len(opened_roots) == len(processed_catalog.list())
+    assert len(opened_roots) == len(set(opened_roots))
+
+
+def test_research_assembly_verifies_every_input_inside_staged_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = make_demo_processed_catalog()
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    write_demo_processed_inputs(layout, processed_catalog)
+    real_open = assembler_module.open_dataset_session
+    real_write = assembler_module.write_dataset
+    real_verify = assembler_module.DatasetSession.verify
+    opened_roots: list[Path] = []
+    staged_verified_roots: list[Path] = []
+    post_publish_verified_roots: list[Path] = []
+    inside_staged_validator = False
+    writer_returned = False
+
+    def record_open(root: Path, **kwargs):
+        opened_roots.append(Path(root))
+        return real_open(root, **kwargs)
+
+    def record_verify(session) -> None:  # noqa: ANN001
+        if inside_staged_validator:
+            staged_verified_roots.append(session.root)
+        elif writer_returned and session.root in opened_roots:
+            post_publish_verified_roots.append(session.root)
+        real_verify(session)
+
+    def record_write(root, data, *, staged_validator, **kwargs):  # noqa: ANN001
+        nonlocal inside_staged_validator, writer_returned
+        assert staged_validator is not None
+
+        def record_staged(receipt) -> None:  # noqa: ANN001
+            nonlocal inside_staged_validator
+            inside_staged_validator = True
+            try:
+                staged_validator(receipt)
+            finally:
+                inside_staged_validator = False
+
+        result = real_write(
+            root,
+            data,
+            staged_validator=record_staged,
+            **kwargs,
+        )
+        writer_returned = True
+        return result
+
+    monkeypatch.setattr(assembler_module, "open_dataset_session", record_open)
+    monkeypatch.setattr(assembler_module.DatasetSession, "verify", record_verify)
+    monkeypatch.setattr(assembler_module, "write_dataset", record_write)
+
+    artifact_root = assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+    )
+
+    assert artifact_root.is_dir()
+    assert len(opened_roots) == len(processed_catalog.list())
+    assert len(opened_roots) == len(set(opened_roots))
+    assert staged_verified_roots == opened_roots
+    assert post_publish_verified_roots == []
+
+
+def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path / "current")
+    replacement_layout = StorageLayout(project_root=tmp_path / "replacement")
+    processed_catalog = make_demo_processed_catalog()
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    write_demo_processed_inputs(layout, processed_catalog)
+    write_demo_processed_inputs(
+        replacement_layout,
+        processed_catalog,
+        frame=_research_rows_for_dates(
+            ["2014-01-02", "2014-01-03", "2014-01-04"]
+        ),
+    )
+    factor_spec = processed_catalog.get("demo_factors")
+    current_root = layout.processed_data_root(
+        factor_spec.market_id,
+        factor_spec.kind,
+        factor_spec.data_id,
+    )
+    replacement_root = replacement_layout.processed_data_root(
+        factor_spec.market_id,
+        factor_spec.kind,
+        factor_spec.data_id,
+    )
+    backup_root = current_root.with_name(current_root.name + "-before-replacement")
+    artifact_root = layout.research_dataset_root(MarketId("a_share"), "demo")
+    real_open = assembler_module.open_dataset_session
+    real_guarded_chunks = assembler_module._iter_disk_guarded_output_chunks
+    real_write = assembler_module.write_dataset
+    opened_roots: list[Path] = []
+    replaced = False
+    staged_validator_supplied = False
+
+    def record_open(root: Path, **kwargs):
+        opened_roots.append(Path(root))
+        return real_open(root, **kwargs)
+
+    def replace_after_last_input(chunks, *, scratch_parent):  # noqa: ANN001
+        nonlocal replaced
+        yield from real_guarded_chunks(chunks, scratch_parent=scratch_parent)
+        current_root.rename(backup_root)
+        replacement_root.rename(current_root)
+        replaced = True
+
+    def record_write(root, data, *, staged_validator, **kwargs):  # noqa: ANN001
+        nonlocal staged_validator_supplied
+        staged_validator_supplied = staged_validator is not None
+        return real_write(
+            root,
+            data,
+            staged_validator=staged_validator,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(assembler_module, "open_dataset_session", record_open)
+    monkeypatch.setattr(
+        assembler_module,
+        "_iter_disk_guarded_output_chunks",
+        replace_after_last_input,
+    )
+    monkeypatch.setattr(assembler_module, "write_dataset", record_write)
+
+    with pytest.raises(ValueError, match="dataset_manifest_identity_changed"):
+        assemble_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            processed_catalog=processed_catalog,
+            dataset_id="demo",
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        )
+
+    assert replaced
+    assert staged_validator_supplied
+    assert len(opened_roots) == len(processed_catalog.list())
+    assert len(opened_roots) == len(set(opened_roots))
+    assert not artifact_root.exists()
+    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(artifact_root)
+    assert list(artifact_root.parent.glob(f"{scratch_prefix}*")) == []
 
 
 def test_sparse_research_dataset_left_joins_missing_non_base_input_key(

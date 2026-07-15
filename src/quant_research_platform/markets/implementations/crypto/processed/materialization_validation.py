@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from itertools import zip_longest
 from pathlib import Path
 
 import pandas as pd
-import pyarrow as pa
 
-from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
-from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import (
     strict_hashable_key_series,
@@ -18,28 +17,22 @@ from quant_research_platform.contracts.validation import (
 )
 from quant_research_platform.markets.implementations.crypto.ids import (
     MARKET_ID,
-    MARKET_PANEL_DATA_ID,
     canonical_crypto_asset_id,
 )
-from quant_research_platform.markets.implementations.crypto.processed import source_ids
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
-    require_free_disk_headroom,
 )
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage._dataset_reading import (
-    DatasetEqualityGroupPlan,
-    build_dataset_equality_group_plan,
-    build_dataset_read_context,
-    dataset_primary_key_schema,
+    DatasetSession,
     filter_frame_by_time_window,
     iter_dataset_chunks,
+    iter_dataset_file_batches,
 )
 from quant_research_platform.storage._dataset_schema import dataset_identity_payload
-from quant_research_platform.storage._dataset_types import DatasetInspection
-from quant_research_platform.storage.datasets import inspect_dataset
-from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.storage._dataset_writing import DatasetWriteReceipt
+
+_EXPECTED_KEY_NAMESPACE = "crypto_expected"
 
 
 @dataclass
@@ -49,17 +42,64 @@ class OrderedDependencyState:
     last_key: tuple[str, str, pd.Timestamp] | None = None
 
 
-def validate_single_asset_part_grouping(
-    plan: DatasetEqualityGroupPlan,
+def crypto_asset_session_views(
+    session: DatasetSession,
     *,
+    columns: tuple[str, ...],
+    target_chunk_bytes: int,
     error: str,
-) -> None:
-    key_by_path: dict[Path, tuple[object, ...]] = {}
-    for key, paths in plan.paths_by_key.items():
-        for path in paths:
+    key_error: str | None = None,
+) -> tuple[tuple[tuple[str, ...], DatasetSession], ...]:
+    if not columns:
+        raise ValueError(error)
+    key_by_path: dict[Path, tuple[str, ...]] = {}
+    paths_by_key: dict[tuple[str, ...], list[Path]] = {}
+    discovery_columns = tuple(
+        dict.fromkeys(
+            (
+                *columns,
+                *(
+                    column
+                    for column, _operator, _value in session.parquet_filters or ()
+                ),
+            )
+        )
+    )
+    for path, frame in iter_dataset_file_batches(
+        session,
+        columns=discovery_columns,
+        target_chunk_bytes=target_chunk_bytes,
+    ):
+        for row in frame.loc[:, list(columns)].itertuples(index=False, name=None):
+            if any(not isinstance(value, str) or not value for value in row):
+                raise ValueError(error if key_error is None else key_error)
+            key = tuple(row)
             existing = key_by_path.setdefault(path, key)
             if existing != key:
                 raise ValueError(error)
+            paths = paths_by_key.setdefault(key, [])
+            if path not in paths:
+                paths.append(path)
+    if not paths_by_key:
+        raise ValueError(error if key_error is None else key_error)
+    views: list[tuple[tuple[str, ...], DatasetSession]] = []
+    for key in sorted(paths_by_key):
+        views.append(
+            (
+                key,
+                replace(
+                    session,
+                    read_paths=tuple(paths_by_key[key]),
+                    parquet_filters=tuple(session.parquet_filters or ())
+                    + tuple(
+                        (column, "==", value)
+                        for column, value in zip(columns, key, strict=True)
+                    ),
+                ),
+            )
+        )
+    session.verify()
+    return tuple(views)
 
 
 def core_time_window_mask(
@@ -82,219 +122,210 @@ def core_time_window_mask(
     return pd.Series(positions.to_numpy(dtype=bool), index=frame.index)
 
 
-def panel_input_inspections(
-    *,
-    layout: StorageLayout,
-    source_id: SourceId,
-    spec: ProcessedDataSpec,
-) -> dict[str, DatasetInspection]:
-    data_ids = (
-        source_ids.market_bars_source_data_id(spec),
-        source_ids.aggregate_trades_source_data_id(spec),
-        source_ids.depth_levels_source_data_id(spec),
-    )
-    return {
-        data_id: inspect_dataset(layout.interim_data_root(source_id, data_id))
-        for data_id in data_ids
-    }
-
-
-def panel_dependency_inspections(
-    *,
-    layout: StorageLayout,
-) -> dict[str, DatasetInspection]:
-    panel_root = layout.processed_data_root(
-        MARKET_ID,
-        ProcessedDataKind.PANEL,
-        MARKET_PANEL_DATA_ID,
-    )
-    return {MARKET_PANEL_DATA_ID: inspect_dataset(panel_root)}
-
-
 def input_dataset_identities(
-    inspections: Mapping[str, DatasetInspection],
+    sessions: Mapping[str, DatasetSession],
 ) -> dict[str, dict[str, str]]:
-    if not inspections:
+    if not sessions:
         raise ValueError("missing_crypto_materialization_inputs")
     identities: dict[str, dict[str, str]] = {}
-    for data_id, inspection in inspections.items():
-        if not isinstance(data_id, str) or inspection.spec.get("data_id") != data_id:
+    for data_id, session in sessions.items():
+        if not isinstance(data_id, str) or session.spec.get("data_id") != data_id:
             raise ValueError("invalid_crypto_materialization_input_identity")
         identities[data_id] = dataset_identity_payload(
-            inspection.spec,
-            inspection.manifest,
+            session.spec,
+            session.manifest,
         )
     return dict(sorted(identities.items()))
 
 
 def validate_materialization_input_identities(
-    inspection: DatasetInspection,
+    manifest: Mapping[str, object],
     *,
     expected: Mapping[str, Mapping[str, str]],
     error: str,
 ) -> None:
-    if inspection.manifest.get("input_dataset_identities") != dict(expected):
+    if manifest.get("input_dataset_identities") != dict(expected):
         raise ValueError(error)
 
 
 def validate_panel_materialization(
-    inspection: DatasetInspection,
+    receipt: DatasetWriteReceipt,
     *,
-    layout: StorageLayout,
-    source_id: SourceId,
+    bar_session: DatasetSession,
+    spec: ProcessedDataSpec,
+    expected_input_identities: Mapping[str, Mapping[str, str]],
+    resource_policy: RuntimeResourcePolicy,
+) -> None:
+    validate_materialization_input_identities(
+        receipt.session.manifest,
+        expected=expected_input_identities,
+        error="crypto_panel_input_dataset_identity_mismatch",
+    )
+    chunk_target_bytes = resource_policy.payload_target_bytes
+    _validate_receipt_key_coverage(
+        _iter_panel_primary_key_chunks(
+            iter_dataset_chunks(
+                bar_session,
+                target_chunk_bytes=chunk_target_bytes,
+            ),
+            primary_key=spec.primary_key,
+        ),
+        receipt,
+        primary_key=spec.primary_key,
+        error="invalid_crypto_panel_key_coverage",
+        resource_policy=resource_policy,
+    )
+
+
+def validate_panel_dependent_materialization(
+    receipt: DatasetWriteReceipt,
+    *,
+    panel_session: DatasetSession,
     spec: ProcessedDataSpec,
     time_window: TimeWindow,
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
-    scratch_parent: Path | None = None,
 ) -> None:
     validate_materialization_input_identities(
-        inspection,
+        receipt.session.manifest,
+        expected=expected_input_identities,
+        error="crypto_processed_input_dataset_identity_mismatch",
+    )
+    chunk_target_bytes = resource_policy.payload_target_bytes
+    _validate_receipt_key_coverage(
+        _iter_core_window_chunks(
+            panel_session,
+            time_window=time_window,
+            target_chunk_bytes=chunk_target_bytes,
+        ),
+        receipt,
+        primary_key=spec.primary_key,
+        error="invalid_crypto_processed_key_coverage",
+        resource_policy=resource_policy,
+    )
+
+
+def _validate_receipt_key_coverage(
+    expected: Iterable[pd.DataFrame],
+    receipt: DatasetWriteReceipt,
+    *,
+    primary_key: tuple[str, ...],
+    error: str,
+    resource_policy: RuntimeResourcePolicy,
+) -> None:
+    if not primary_key:
+        raise ValueError(error)
+    chunk_target_bytes = resource_policy.payload_target_bytes
+    receipt.session.verify()
+    index = receipt.exact_primary_key_index
+    for frame in expected:
+        if not isinstance(frame, pd.DataFrame):
+            raise ValueError(error)
+        keys = _normalized_primary_keys(frame, primary_key, error=error)
+        if pandas_frame_payload_bytes(keys) > chunk_target_bytes:
+            raise ValueError(error)
+        try:
+            duplicates = index.add_frame(keys, namespace=_EXPECTED_KEY_NAMESPACE)
+        except ValueError as exc:
+            raise ValueError(error) from exc
+        if duplicates:
+            raise ValueError(error)
+    missing_count, extra_count = index.difference_counts(
+        expected_namespace=_EXPECTED_KEY_NAMESPACE,
+        actual_namespace="dataset",
+    )
+    if missing_count or extra_count:
+        raise ValueError(error)
+
+
+def validate_existing_panel_materialization(
+    panel_session: DatasetSession,
+    *,
+    bar_session: DatasetSession,
+    spec: ProcessedDataSpec,
+    expected_input_identities: Mapping[str, Mapping[str, str]],
+    resource_policy: RuntimeResourcePolicy,
+) -> None:
+    validate_materialization_input_identities(
+        panel_session.manifest,
         expected=expected_input_identities,
         error="crypto_panel_input_dataset_identity_mismatch",
     )
-    bar_root = layout.interim_data_root(
-        source_id,
-        source_ids.market_bars_source_data_id(spec),
-    )
     chunk_target_bytes = resource_policy.payload_target_bytes
-    bar_context = build_dataset_read_context(
-        bar_root,
-        columns=("source_asset_id", "timestamp"),
-        time_window=time_window,
-    )
-    actual_context = build_dataset_read_context(
-        inspection.root,
-        columns=spec.primary_key,
-        time_window=time_window,
-    )
-    actual_group_plan = build_dataset_equality_group_plan(
-        actual_context,
-        columns=("market_id", "asset_id"),
-        target_chunk_bytes=chunk_target_bytes,
-    )
-    validate_single_asset_part_grouping(
-        actual_group_plan,
-        error="invalid_crypto_panel_physical_asset_grouping",
-    )
-    validate_exact_dependency_key_coverage(
+    _validate_ordered_key_stream_coverage(
         _iter_panel_primary_key_chunks(
             iter_dataset_chunks(
-                bar_context,
+                bar_session,
                 target_chunk_bytes=chunk_target_bytes,
             ),
             primary_key=spec.primary_key,
         ),
         iter_dataset_chunks(
-            actual_context,
+            panel_session,
             target_chunk_bytes=chunk_target_bytes,
         ),
         primary_key=spec.primary_key,
         error="invalid_crypto_panel_key_coverage",
-        resource_policy=resource_policy,
-        scratch_parent=(
-            inspection.root.parent if scratch_parent is None else scratch_parent
-        ),
-        key_schema=dataset_primary_key_schema(actual_context, spec.primary_key),
     )
 
 
-def validate_panel_dependent_materialization(
-    inspection: DatasetInspection,
+def _iter_core_window_chunks(
+    session: DatasetSession,
     *,
-    layout: StorageLayout,
-    spec: ProcessedDataSpec,
     time_window: TimeWindow,
-    expected_input_identities: Mapping[str, Mapping[str, str]],
-    resource_policy: RuntimeResourcePolicy,
-    scratch_parent: Path | None = None,
-) -> None:
-    validate_materialization_input_identities(
-        inspection,
-        expected=expected_input_identities,
-        error="crypto_processed_input_dataset_identity_mismatch",
-    )
-    panel_root = layout.processed_data_root(
-        MARKET_ID,
-        ProcessedDataKind.PANEL,
-        MARKET_PANEL_DATA_ID,
-    )
-    chunk_target_bytes = resource_policy.payload_target_bytes
-    expected_context = build_dataset_read_context(
-        panel_root,
-        columns=spec.primary_key,
-        time_window=time_window,
-    )
-    actual_context = build_dataset_read_context(
-        inspection.root,
-        columns=spec.primary_key,
-        time_window=time_window,
-    )
-    validate_exact_dependency_key_coverage(
-        iter_dataset_chunks(
-            expected_context,
-            target_chunk_bytes=chunk_target_bytes,
-        ),
-        iter_dataset_chunks(
-            actual_context,
-            target_chunk_bytes=chunk_target_bytes,
-        ),
-        primary_key=spec.primary_key,
-        error="invalid_crypto_processed_key_coverage",
-        resource_policy=resource_policy,
-        scratch_parent=(
-            inspection.root.parent if scratch_parent is None else scratch_parent
-        ),
-        key_schema=dataset_primary_key_schema(actual_context, spec.primary_key),
-    )
+    target_chunk_bytes: int,
+) -> Iterator[pd.DataFrame]:
+    for frame in iter_dataset_chunks(
+        session,
+        target_chunk_bytes=target_chunk_bytes,
+    ):
+        if frame.empty:
+            continue
+        yield frame.loc[core_time_window_mask(frame, time_window)].copy()
 
 
-def validate_exact_dependency_key_coverage(
+def _validate_ordered_key_stream_coverage(
     expected: Iterable[pd.DataFrame],
     actual: Iterable[pd.DataFrame],
     *,
     primary_key: tuple[str, ...],
     error: str,
-    resource_policy: RuntimeResourcePolicy,
-    scratch_parent: Path,
-    key_schema: pa.Schema | None = None,
 ) -> None:
-    if not primary_key:
-        raise ValueError(error)
-    chunk_target_bytes = resource_policy.payload_target_bytes
-    timestamp_columns = tuple(
-        column for column in primary_key if column == "timestamp"
-    )
-    with ExactPrimaryKeyIndex(
+    sentinel = object()
+    expected_rows = _iter_normalized_primary_key_rows(
+        expected,
         primary_key=primary_key,
-        timestamp_columns=timestamp_columns,
-        scratch_parent=scratch_parent,
-        key_schema=key_schema,
-    ) as index:
-        for namespace, frames in (("expected", expected), ("actual", actual)):
-            for frame in frames:
-                if not isinstance(frame, pd.DataFrame):
-                    raise ValueError(error)
-                keys = _normalized_primary_keys(frame, primary_key, error=error)
-                key_bytes = pandas_frame_payload_bytes(keys)
-                if key_bytes > chunk_target_bytes:
-                    raise ValueError(error)
-                require_free_disk_headroom(
-                    scratch_parent,
-                    reserve_bytes=key_bytes,
-                )
-                try:
-                    duplicates = index.add_frame(keys, namespace=namespace)
-                except ValueError as exc:
-                    raise ValueError(error) from exc
-                if duplicates:
-                    raise ValueError(error)
-        missing_count, extra_count = index.difference_counts(
-            expected_namespace="expected",
-            actual_namespace="actual",
-        )
-        if missing_count or extra_count:
+        error=error,
+    )
+    actual_rows = _iter_normalized_primary_key_rows(
+        actual,
+        primary_key=primary_key,
+        error=error,
+    )
+    for expected_row, actual_row in zip_longest(
+        expected_rows,
+        actual_rows,
+        fillvalue=sentinel,
+    ):
+        if expected_row != actual_row:
             raise ValueError(error)
+
+
+def _iter_normalized_primary_key_rows(
+    frames: Iterable[pd.DataFrame],
+    *,
+    primary_key: tuple[str, ...],
+    error: str,
+) -> Iterator[tuple[object, ...]]:
+    previous: tuple[object, ...] | None = None
+    for frame in frames:
+        keys = _normalized_primary_keys(frame, primary_key, error=error)
+        for row in keys.itertuples(index=False, name=None):
+            normalized = tuple(row)
+            if previous is not None and normalized <= previous:
+                raise ValueError(error)
+            previous = normalized
+            yield normalized
 
 
 def validated_ordered_dependency_chunk(
@@ -382,12 +413,10 @@ def _iter_panel_primary_key_chunks(
 __all__ = [
     "input_dataset_identities",
     "core_time_window_mask",
-    "panel_dependency_inspections",
-    "panel_input_inspections",
-    "validate_exact_dependency_key_coverage",
+    "crypto_asset_session_views",
     "validate_materialization_input_identities",
+    "validate_existing_panel_materialization",
     "validate_panel_dependent_materialization",
     "validate_panel_materialization",
     "validated_ordered_dependency_chunk",
-    "validate_single_asset_part_grouping",
 ]

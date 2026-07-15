@@ -18,7 +18,6 @@ import pytest
 
 import quant_research_platform.storage._dataset_comparison as dataset_comparison
 import quant_research_platform.storage._dataset_key_tracking as key_tracking
-import quant_research_platform.storage._dataset_schema as dataset_schema
 from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -48,12 +47,12 @@ from quant_research_platform.storage._dataset_reading import (
 )
 from quant_research_platform.storage._dataset_schema import (
     data_spec_payload,
+    logical_dtype_payload_from_frame,
     physical_schema_from_schema,
     validate_dataset_manifest_payload,
     validate_dataset_spec,
     validate_dataset_spec_payload,
     validate_physical_schema_payload,
-    validated_physical_schema,
 )
 from quant_research_platform.storage._dataset_writing import _WriteStats
 from tests.helpers.research_specs import make_demo_research_dataset_spec
@@ -246,6 +245,14 @@ def test_manifest_spec_binding_is_typed_exact_recursively(
         "columns": list(spec["required_columns"]),
         "physical_schema": physical_schema,
         "schema_hash": canonical_json_hash(physical_schema),
+        "logical_dtypes": logical_dtype_payload_from_frame(
+            pd.DataFrame(
+                {
+                    column: pd.Series(dtype="object")
+                    for column in spec["required_columns"]
+                }
+            )
+        ),
         "partition_row_counts": {"year=2024": 0},
         "partition_count": 1,
         "partitions": ["year=2024"],
@@ -258,6 +265,9 @@ def test_manifest_spec_binding_is_typed_exact_recursively(
         "label_nan_profile": {},
         "validation_status": "PASS",
     }
+    manifest["logical_dtype_hash"] = canonical_json_hash(
+        manifest["logical_dtypes"]
+    )
     manifest["feature_transforms"][0]["winsorize_quantiles"] = replacement
 
     with pytest.raises(ValueError, match="dataset_manifest_spec_mismatch"):
@@ -563,6 +573,52 @@ def test_exact_key_index_sqlite_page_fits_declared_cache_budget(
     assert page_size <= cache_bytes
 
 
+@pytest.mark.parametrize(
+    "cache_bytes",
+    (True, 1024.0, 8 * 1024 * 1024 + 1),
+)
+def test_exact_key_index_rejects_nonexact_or_oversized_cache_budget(
+    tmp_path: Path,
+    cache_bytes: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_exact_key_sqlite_cache_budget"):
+        ExactPrimaryKeyIndex(
+            primary_key=("asset_id",),
+            timestamp_columns=(),
+            scratch_parent=tmp_path,
+            sqlite_cache_bytes=cache_bytes,  # type: ignore[arg-type]
+        )
+
+
+def test_exact_key_index_stores_primary_keys_once_and_category_values_only(
+    tmp_path: Path,
+) -> None:
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+        sqlite_cache_bytes=8 * 1024 * 1024,
+    ) as index:
+        index.add_table(pa.table({"asset_id": ["a", "b"]}))
+        assert index._connection is not None
+        dataset_rows = index._connection.execute(
+            "SELECT payload, value FROM exact_keys "
+            "WHERE namespace = 'dataset' ORDER BY payload"
+        ).fetchall()
+        assert len(dataset_rows) == 2
+        assert all(payload and value is None for payload, value in dataset_rows)
+
+        index.add_identity_payloads(
+            namespace="logical-category:asset_id",
+            payloads=((b"b", b"value-b"), (b"a", b"value-a")),
+        )
+        assert list(
+            index.identity_payload_values(
+                namespace="logical-category:asset_id"
+            )
+        ) == [b"value-a", b"value-b"]
+
+
 def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -644,27 +700,25 @@ def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
         )
 
         with pytest.raises(ValueError, match="unregistered_output_columns"):
-            stats.update_frame(
+            stats.declared_frame(
                 make_helper_edges_dataset_frame(market_id="dummy").assign(
                     extra=1
-                )
+                ),
+                target_chunk_bytes=1024**2,
             )
         with pytest.raises(ValueError, match="missing_required_columns"):
-            stats.update_frame(
+            stats.declared_frame(
                 make_helper_edges_dataset_frame(market_id="dummy").drop(
                     columns=["value"]
-                )
+                ),
+                target_chunk_bytes=1024**2,
             )
-        with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
-            frame = make_helper_edges_dataset_frame(market_id="dummy")
-            stats.update_frame(pd.concat([frame, frame.iloc[[0]]]))
-
         with pytest.raises(ValueError, match="dataset_schema_missing"):
             _WriteStats(
                 spec=spec,
                 data_root=Path("data"),
                 key_tracker=tracker,
-            ).payload()
+            ).payload(target_chunk_bytes=1024**2)
 
 
 def test_exact_index_preserves_decimal_values_beyond_context_precision(
@@ -702,40 +756,6 @@ def test_exact_index_preserves_unclaimed_key_scratch_directory(
     assert sentinel.read_text(encoding="utf-8") == "unclaimed\n"
 
 
-def test_write_stats_tracks_null_and_non_finite_failures(tmp_path: Path) -> None:
-    spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    with ExactPrimaryKeyIndex(
-        primary_key=spec.primary_key,
-        timestamp_columns=("timestamp",),
-        scratch_parent=tmp_path,
-    ) as null_tracker:
-        with pytest.raises(ValueError, match="dataset_primary_key_null"):
-            _WriteStats(
-                spec=spec,
-                data_root=Path("data"),
-                key_tracker=null_tracker,
-            ).update_frame(
-                make_helper_edges_dataset_frame(market_id="dummy").assign(
-                    asset_id=["asset_a", pd.NA]
-                )
-            )
-    with ExactPrimaryKeyIndex(
-        primary_key=spec.primary_key,
-        timestamp_columns=("timestamp",),
-        scratch_parent=tmp_path,
-    ) as numeric_tracker:
-        with pytest.raises(ValueError, match="dataset_infinite_value"):
-            _WriteStats(
-                spec=spec,
-                data_root=Path("data"),
-                key_tracker=numeric_tracker,
-            ).update_frame(
-                make_helper_edges_dataset_frame(market_id="dummy").assign(
-                    value=[1.0, float("inf")]
-                )
-            )
-
-
 def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
     with ExactPrimaryKeyIndex(
@@ -748,7 +768,7 @@ def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
                 spec=spec,
                 data_root=Path("data"),
                 key_tracker=tracker,
-            ).update_frame(
+            ).prepare_frame(
                 make_helper_edges_dataset_frame(market_id="dummy").assign(
                     timestamp=["2024-01-02", "bad-date"]
                 )
@@ -1004,6 +1024,20 @@ def test_physical_schema_identity_rejects_unsupported_or_mutated_grammar() -> No
         validate_physical_schema_payload(identity)
 
 
+@pytest.mark.parametrize(
+    "data_type",
+    (pa.date64(), pa.list_(pa.date64())),
+    ids=("top-level", "nested"),
+)
+def test_physical_schema_encoder_rejects_unsupported_date64(
+    data_type: pa.DataType,
+) -> None:
+    with pytest.raises(ValueError, match="unsupported_dataset_arrow_type"):
+        physical_schema_from_schema(
+            pa.schema([pa.field("unsupported_date64", data_type)])
+        )
+
+
 @pytest.mark.parametrize("wrong_kind", ([], {}), ids=("list", "dict"))
 @pytest.mark.parametrize(
     ("type_payload", "nested"),
@@ -1171,66 +1205,6 @@ def test_dataset_timestamp_and_candidate_file_helpers(tmp_path: Path) -> None:
             data_root,
             spec={**spec, "partition_columns": ["month"]},
         )
-    with pytest.raises(ValueError, match="dataset_data_dir_missing"):
-        validated_physical_schema([])
-
-
-def test_validated_physical_schema_compares_each_part_before_opening_next(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    events: list[str] = []
-    descriptors: list[TrackingSchema] = []
-
-    class FakeParquetFile:
-        def __init__(self, name: str) -> None:
-            self.name = name
-
-        def close(self) -> None:
-            events.append(f"close:{self.name}")
-
-    class TrackingSchema(list[dict[str, object]]):
-        def __init__(self, name: str) -> None:
-            super().__init__([{"name": "value"}])
-            self.name = name
-
-        def __ne__(self, other: object) -> bool:
-            assert isinstance(other, TrackingSchema)
-            events.append(f"compare:{self.name}:{other.name}")
-            return False
-
-    def open_parquet(path: Path) -> FakeParquetFile:
-        events.append(f"open:{path.name}")
-        return FakeParquetFile(path.name)
-
-    def describe(parquet_file: FakeParquetFile) -> TrackingSchema:
-        events.append(f"describe:{parquet_file.name}")
-        descriptor = TrackingSchema(parquet_file.name)
-        descriptors.append(descriptor)
-        return descriptor
-
-    monkeypatch.setattr(dataset_schema.pq, "ParquetFile", open_parquet)
-    monkeypatch.setattr(dataset_schema, "physical_schema_from_file", describe)
-
-    result = validated_physical_schema(
-        [Path("part-0.parquet"), Path("part-1.parquet"), Path("part-2.parquet")]
-    )
-
-    assert result is descriptors[0]
-    assert events == [
-        "open:part-0.parquet",
-        "describe:part-0.parquet",
-        "close:part-0.parquet",
-        "open:part-1.parquet",
-        "describe:part-1.parquet",
-        "compare:part-1.parquet:part-0.parquet",
-        "close:part-1.parquet",
-        "open:part-2.parquet",
-        "describe:part-2.parquet",
-        "compare:part-2.parquet:part-0.parquet",
-        "close:part-2.parquet",
-    ]
-
-
 def test_candidate_data_files_orders_numeric_part_indices(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()

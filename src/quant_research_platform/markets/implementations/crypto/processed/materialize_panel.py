@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Iterator
+from collections.abc import Hashable, Iterator, Mapping
+from dataclasses import replace
 
 import pandas as pd
 
@@ -25,15 +26,18 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_reading import (
-    build_dataset_equality_group_plan,
-    build_dataset_read_context,
-    dataset_context_for_equality_group,
+    DatasetSession,
     iter_dataset_chunks,
+    open_dataset_session,
+    parquet_filters_for_time_window,
+    prune_paths_for_time_window,
 )
-from quant_research_platform.storage._dataset_writing import write_dataset
+from quant_research_platform.storage._dataset_writing import (
+    DatasetWriteReceipt,
+    write_dataset,
+)
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
-    inspect_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -48,38 +52,50 @@ def write_panel(
 ) -> DatasetInspection:
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with runtime_resource_policy_scope(resource_policy):
+        bar_data_id = source_ids.market_bars_source_data_id(spec)
+        trade_data_id = source_ids.aggregate_trades_source_data_id(spec)
+        depth_data_id = source_ids.depth_levels_source_data_id(spec)
+        input_sessions = {
+            bar_data_id: open_dataset_session(
+                layout.interim_data_root(source_id, bar_data_id),
+                columns=None,
+                time_window=time_window,
+            ),
+            trade_data_id: open_dataset_session(
+                layout.interim_data_root(source_id, trade_data_id),
+                columns=None,
+                time_window=None,
+            ),
+            depth_data_id: open_dataset_session(
+                layout.interim_data_root(source_id, depth_data_id),
+                columns=None,
+                time_window=None,
+            ),
+        }
         input_identities = materialization_validation.input_dataset_identities(
-            materialization_validation.panel_input_inspections(
-                layout=layout,
-                source_id=source_id,
-                spec=spec,
-            )
+            input_sessions
         )
         chunks = materialization_resources.iter_disk_guarded_chunks(
             _iter_panel_chunks(
                 spec,
-                layout=layout,
-                source_id=source_id,
+                input_sessions=input_sessions,
                 time_window=time_window,
                 resource_policy=resource_policy,
             ),
             scratch_parent=root.parent,
         )
 
-        def validate_staged_dataset(staged_root) -> None:
-            staged_inspection = inspect_dataset(staged_root, time_window=time_window)
+        def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:
             materialization_validation.validate_panel_materialization(
-                staged_inspection,
-                layout=layout,
-                source_id=source_id,
+                receipt,
+                bar_session=input_sessions[bar_data_id],
                 spec=spec,
-                time_window=time_window,
                 expected_input_identities=input_identities,
                 resource_policy=resource_policy,
-                scratch_parent=staged_root,
             )
-
-        write_dataset(
+            for session in input_sessions.values():
+                session.verify()
+        return write_dataset(
             root,
             chunks,
             spec=spec,
@@ -87,57 +103,40 @@ def write_panel(
             staged_validator=validate_staged_dataset,
             resource_policy=resource_policy,
         )
-        return inspect_dataset(root, time_window=time_window)
 
 
 def _iter_panel_chunks(
     spec: ProcessedDataSpec,
     *,
-    layout: StorageLayout,
-    source_id: SourceId,
+    input_sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
     chunk_target_bytes = resource_policy.payload_target_bytes
-    bar_root = layout.interim_data_root(
-        source_id,
-        source_ids.market_bars_source_data_id(spec),
-    )
-    trade_root = layout.interim_data_root(
-        source_id,
-        source_ids.aggregate_trades_source_data_id(spec),
-    )
-    depth_root = layout.interim_data_root(
-        source_id,
-        source_ids.depth_levels_source_data_id(spec),
-    )
-    bar_context = build_dataset_read_context(
-        bar_root,
-        columns=None,
-        time_window=time_window,
-    )
-    group_plan = build_dataset_equality_group_plan(
-        bar_context,
+    bar_session = input_sessions[source_ids.market_bars_source_data_id(spec)]
+    trade_session = input_sessions[source_ids.aggregate_trades_source_data_id(spec)]
+    depth_session = input_sessions[source_ids.depth_levels_source_data_id(spec)]
+    source_asset_views = materialization_validation.crypto_asset_session_views(
+        bar_session,
         columns=("source_asset_id",),
         target_chunk_bytes=chunk_target_bytes,
-    )
-    materialization_validation.validate_single_asset_part_grouping(
-        group_plan,
         error="invalid_crypto_panel_source_physical_asset_grouping",
+        key_error="invalid_crypto_matching_bar_source_asset_id",
     )
-    source_assets = _canonical_source_assets(group_plan.keys)
+    source_assets = _canonical_source_assets(
+        tuple(key for key, _view in source_asset_views)
+    )
+    view_by_source_asset = {
+        key[0]: view for key, view in source_asset_views
+    }
     order_state = materialization_validation.OrderedDependencyState()
     for source_asset_id in source_assets:
         trade_continuity_state = (
             panel_input_reducers.AggregateTradeContinuityState()
         )
-        group_context = dataset_context_for_equality_group(
-            bar_context,
-            group_plan,
-            (source_asset_id,),
-        )
+        asset_session = view_by_source_asset[source_asset_id]
         for bars in iter_dataset_chunks(
-            group_context,
+            asset_session,
             target_chunk_bytes=chunk_target_bytes,
         ):
             if bars.empty:
@@ -157,12 +156,12 @@ def _iter_panel_chunks(
                 error="crypto_indivisible_reducer_unit_exceeds_payload_target",
             )
             trade_chunks = _iter_matching_trade_chunks(
-                trade_root,
+                trade_session,
                 prepared_bars,
                 target_chunk_bytes=chunk_target_bytes,
             )
             depth_chunks = _iter_matching_depth_chunks(
-                depth_root,
+                depth_session,
                 prepared_bars,
                 target_chunk_bytes=chunk_target_bytes,
             )
@@ -180,6 +179,8 @@ def _iter_panel_chunks(
                 error="crypto_indivisible_reducer_unit_exceeds_payload_target",
             )
             yield output
+    for session in input_sessions.values():
+        session.verify()
 
 
 def _canonical_source_assets(
@@ -204,7 +205,7 @@ def _canonical_source_assets(
 
 
 def _iter_matching_trade_chunks(
-    dataset_root,
+    session: DatasetSession,
     bars: pd.DataFrame,
     *,
     target_chunk_bytes: int,
@@ -214,7 +215,7 @@ def _iter_matching_trade_chunks(
         max_quote_age=pd.Timedelta(0),
     )
     yield from _iter_matching_chunks(
-        dataset_root,
+        session,
         asset_ids=asset_ids,
         start=start,
         end=end,
@@ -227,7 +228,7 @@ def _iter_matching_trade_chunks(
 
 
 def _iter_matching_depth_chunks(
-    dataset_root,
+    session: DatasetSession,
     bars: pd.DataFrame,
     *,
     target_chunk_bytes: int,
@@ -238,7 +239,7 @@ def _iter_matching_depth_chunks(
         max_quote_age=max_quote_age,
     )
     yield from _iter_matching_chunks(
-        dataset_root,
+        session,
         asset_ids=asset_ids,
         start=start,
         end=end,
@@ -296,7 +297,7 @@ def _validate_matching_bar_keys(bars: pd.DataFrame) -> None:
 
 
 def _iter_matching_chunks(
-    dataset_root,
+    session: DatasetSession,
     *,
     asset_ids: set[str],
     start: pd.Timestamp,
@@ -307,18 +308,13 @@ def _iter_matching_chunks(
     timestamp_error: str,
     target_chunk_bytes: int,
 ) -> Iterator[pd.DataFrame]:
-    context = build_dataset_read_context(
-        dataset_root,
-        columns=None,
+    view = _matching_session_view(
+        session,
         time_window=time_window,
-        row_filters=(
-            (("source_asset_id", "==", next(iter(asset_ids))),)
-            if len(asset_ids) == 1
-            else ()
-        ),
+        asset_ids=asset_ids,
     )
     for chunk in iter_dataset_chunks(
-        context,
+        view,
         target_chunk_bytes=target_chunk_bytes,
     ):
         if chunk.empty:
@@ -336,6 +332,38 @@ def _iter_matching_chunks(
         ].copy()
         if not matching.empty:
             yield matching
+
+
+def _matching_session_view(
+    session: DatasetSession,
+    *,
+    time_window: TimeWindow,
+    asset_ids: set[str],
+) -> DatasetSession:
+    filters = tuple(
+        parquet_filters_for_time_window(
+            timestamp_column=session.timestamp_column,
+            time_window=time_window,
+        )
+        or ()
+    )
+    if len(asset_ids) == 1:
+        filters += (("source_asset_id", "==", next(iter(asset_ids))),)
+    view = replace(
+        session,
+        read_paths=tuple(
+            prune_paths_for_time_window(
+                session.data_root,
+                session.all_paths,
+                spec=session.spec,
+                time_window=time_window,
+            )
+        ),
+        time_window=time_window,
+        parquet_filters=filters or None,
+    )
+    view.verify()
+    return view
 
 
 def _matching_window_mask(

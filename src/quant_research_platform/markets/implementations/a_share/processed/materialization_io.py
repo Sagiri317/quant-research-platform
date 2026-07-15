@@ -18,9 +18,9 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_reading import (
-    build_dataset_read_context,
     iter_dataset_chunks,
-    materialize_dataset_context,
+    materialize_dataset_session,
+    open_dataset_session,
 )
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
@@ -157,13 +157,13 @@ def read_materialized_dataset(
     )
     if available_bytes <= 0:
         raise ValueError("a_share_known_payloads_exceed_task_memory_budget")
-    context = build_dataset_read_context(
+    session = open_dataset_session(
         root,
         columns=None if columns is None else tuple(columns),
         time_window=time_window,
     )
-    return materialize_dataset_context(
-        context,
+    return materialize_dataset_session(
+        session,
         target_chunk_bytes=resource_policy.payload_target_bytes,
         materialized_budget_bytes=available_bytes,
     )
@@ -177,7 +177,7 @@ def iter_dataset_chunks_with_policy(
     columns: Sequence[str] | None = None,
     target_chunk_bytes: int | None = None,
 ) -> Iterator[pd.DataFrame]:
-    context = build_dataset_read_context(
+    session = open_dataset_session(
         root,
         columns=None if columns is None else tuple(columns),
         time_window=time_window,
@@ -190,7 +190,7 @@ def iter_dataset_chunks_with_policy(
     if target_bytes > resource_policy.payload_target_bytes:
         raise ValueError("a_share_indivisible_market_unit_exceeds_payload_target")
     yield from iter_dataset_chunks(
-        context,
+        session,
         target_chunk_bytes=target_bytes,
     )
 

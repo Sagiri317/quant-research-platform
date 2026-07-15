@@ -41,13 +41,14 @@ def write_dataset(
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
 ) -> None:
-    return _write_dataset(
+    _write_dataset(
         dataset_root,
         data,
         spec=spec,
         instance_metadata=instance_metadata,
         resource_policy=active_runtime_resource_policy(),
     )
+    return None
 
 
 def read_dataset(

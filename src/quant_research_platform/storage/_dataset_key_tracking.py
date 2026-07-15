@@ -7,7 +7,7 @@ import shutil
 import sqlite3
 import struct
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from decimal import Decimal
 from pathlib import Path
 from types import TracebackType
@@ -21,6 +21,8 @@ from quant_research_platform.storage._scratch_ownership import (
     scratch_owner_is_stale,
 )
 
+_MAX_SQLITE_CACHE_BYTES = 8 * 1024 * 1024
+
 
 class ExactPrimaryKeyIndex:
     """Index Arrow-canonical keys in isolated SQLite namespaces."""
@@ -32,7 +34,7 @@ class ExactPrimaryKeyIndex:
         timestamp_columns: Sequence[str],
         scratch_parent: Path,
         key_schema: pa.Schema | None = None,
-        sqlite_cache_bytes: int = 8 * 1024,
+        sqlite_cache_bytes: int = 1024 * 1024,
     ) -> None:
         self._primary_key = tuple(str(column) for column in primary_key)
         self._timestamp_columns = frozenset(
@@ -44,6 +46,7 @@ class ExactPrimaryKeyIndex:
             isinstance(sqlite_cache_bytes, bool)
             or not isinstance(sqlite_cache_bytes, int)
             or sqlite_cache_bytes < 1024
+            or sqlite_cache_bytes > _MAX_SQLITE_CACHE_BYTES
         ):
             raise ValueError("invalid_exact_key_sqlite_cache_budget")
         self._sqlite_cache_kib = sqlite_cache_bytes // 1024
@@ -77,6 +80,7 @@ class ExactPrimaryKeyIndex:
                 "CREATE TABLE exact_keys ("
                 "namespace TEXT NOT NULL, "
                 "payload BLOB NOT NULL, "
+                "value BLOB, "
                 "PRIMARY KEY(namespace, payload)"
                 ") WITHOUT ROWID"
             )
@@ -160,7 +164,8 @@ class ExactPrimaryKeyIndex:
         before = connection.total_changes
         with connection:
             connection.executemany(
-                "INSERT OR IGNORE INTO exact_keys(namespace, payload) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
+                "VALUES (?, ?, ?)",
                 self._payload_rows(
                     keys,
                     namespace=namespace,
@@ -168,6 +173,45 @@ class ExactPrimaryKeyIndex:
             )
         inserted = connection.total_changes - before
         return int(keys.num_rows - inserted)
+
+    def add_identity_payloads(
+        self,
+        *,
+        namespace: str,
+        payloads: Iterable[tuple[bytes, bytes]],
+    ) -> None:
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("exact_primary_key_index_not_open")
+        if not isinstance(namespace, str) or not namespace:
+            raise ValueError("invalid_exact_key_namespace")
+        with connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
+                "VALUES (?, ?, ?)",
+                (
+                    (namespace, bytes(identity), bytes(value))
+                    for identity, value in payloads
+                ),
+            )
+
+    def identity_payload_values(self, *, namespace: str) -> Iterator[bytes]:
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("exact_primary_key_index_not_open")
+        if not isinstance(namespace, str) or not namespace:
+            raise ValueError("invalid_exact_key_namespace")
+        rows = connection.execute(
+            "SELECT value FROM exact_keys WHERE namespace = ? ORDER BY payload",
+            (namespace,),
+        )
+        try:
+            for row in rows:
+                if row[0] is None:
+                    raise ValueError("exact_key_identity_payload_missing")
+                yield bytes(row[0])
+        finally:
+            rows.close()
 
     def difference_counts(
         self,
@@ -202,7 +246,7 @@ class ExactPrimaryKeyIndex:
         keys: pa.Table,
         *,
         namespace: str,
-    ) -> Iterator[tuple[str, bytes]]:
+    ) -> Iterator[tuple[str, bytes, None]]:
         fields = tuple(keys.schema.field(column) for column in self._primary_key)
         columns = tuple(keys.column(column) for column in self._primary_key)
         for row_index in range(keys.num_rows):
@@ -213,7 +257,7 @@ class ExactPrimaryKeyIndex:
                 )
                 for column, field in zip(columns, fields, strict=True)
             )
-            yield namespace, payload
+            yield namespace, payload, None
 
 
 def _canonical_arrow_scalar_payload(
@@ -229,6 +273,8 @@ def _canonical_arrow_scalar_payload(
             data_type.value_type,
         )
     elif pa.types.is_timestamp(data_type):
+        value_payload = struct.pack(">q", int(value.value))
+    elif pa.types.is_time(data_type) or pa.types.is_duration(data_type):
         value_payload = struct.pack(">q", int(value.value))
     elif pa.types.is_boolean(data_type):
         value_payload = b"1" if bool(value.as_py()) else b"0"
@@ -251,7 +297,11 @@ def _canonical_arrow_scalar_payload(
         )
     elif pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
         value_payload = str(value.as_py()).encode("utf-8")
-    elif pa.types.is_binary(data_type) or pa.types.is_large_binary(data_type):
+    elif (
+        pa.types.is_binary(data_type)
+        or pa.types.is_large_binary(data_type)
+        or pa.types.is_fixed_size_binary(data_type)
+    ):
         value_payload = bytes(value.as_py())
     elif pa.types.is_decimal(data_type):
         decimal = Decimal(value.as_py())
@@ -262,6 +312,36 @@ def _canonical_arrow_scalar_payload(
         value_payload = format(decimal, "f").encode("ascii")
     elif pa.types.is_date(data_type):
         value_payload = pd.Timestamp(value.as_py()).date().isoformat().encode("ascii")
+    elif pa.types.is_list(data_type) or pa.types.is_large_list(data_type):
+        value_payload = b"".join(
+            _canonical_arrow_scalar_payload(item, data_type.value_type)
+            for item in value.values
+        )
+    elif pa.types.is_fixed_size_list(data_type):
+        value_payload = b"".join(
+            _canonical_arrow_scalar_payload(item, data_type.value_type)
+            for item in value.values
+        )
+    elif pa.types.is_struct(data_type):
+        value_payload = b"".join(
+            _framed(
+                field.name.encode("utf-8"),
+                _canonical_arrow_scalar_payload(value[field.name], field.type),
+            )
+            for field in data_type
+        )
+    elif pa.types.is_map(data_type):
+        entries = value.values
+        value_payload = b"".join(
+            _framed(
+                b"entry",
+                _canonical_arrow_scalar_payload(entry["key"], data_type.key_type)
+                + _canonical_arrow_scalar_payload(
+                    entry["value"], data_type.item_type
+                ),
+            )
+            for entry in entries
+        )
     else:
         raise ValueError("invalid_dataset_primary_key_value")
     return _framed(type_payload, value_payload)

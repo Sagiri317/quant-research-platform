@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quant_research_platform.catalog.fields import platform_entity_time_key
@@ -22,8 +23,10 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_schema import (
+    logical_dtype_metadata_bytes,
+    logical_dtype_payload_from_frame,
     physical_schema_columns,
-    physical_schema_from_file,
+    physical_schema_from_schema,
 )
 
 
@@ -211,12 +214,15 @@ def write_low_level_parquet_artifact(
             year_root = data_root / f"year={int(year)}"
             year_root.mkdir(parents=True, exist_ok=True)
             path = year_root / "part-000.parquet"
-            year_frame.drop(columns=["_fixture_year"]).to_parquet(path, index=False)
+            _write_fixture_parquet(
+                year_frame.drop(columns=["_fixture_year"]),
+                path,
+            )
             paths.append(path)
     else:
         data_root.mkdir(parents=True, exist_ok=True)
         path = data_root / "part-000.parquet"
-        frame.to_parquet(path, index=False)
+        _write_fixture_parquet(frame, path)
         paths.append(path)
     _write_runtime_manifest(root, data_root, paths, frame=frame, spec=spec)
 
@@ -234,7 +240,9 @@ def _write_runtime_manifest(
     partition_row_counts: dict[str, int] = {}
     for path in sorted(paths):
         parquet_file = pq.ParquetFile(path)
-        schemas.append(physical_schema_from_file(parquet_file))
+        schemas.append(
+            physical_schema_from_schema(parquet_file.schema_arrow.remove_metadata())
+        )
         partition = relative_partition_label(data_root, path)
         rows = int(parquet_file.metadata.num_rows)
         row_count += rows
@@ -248,12 +256,17 @@ def _write_runtime_manifest(
         else pd.Series(dtype="datetime64[ns]")
     )
     primary_key = list(spec["primary_key"])
+    logical_dtypes = logical_dtype_payload_from_frame(
+        frame.loc[:, list(spec["required_columns"])]
+    )
     manifest = {
         **{key: value for key, value in spec.items() if key != "schema_id"},
         "schema_id": "qrp-dataset-manifest",
         "columns": list(physical_schema_columns(first_schema)),
         "physical_schema": first_schema,
         "schema_hash": canonical_json_hash(first_schema),
+        "logical_dtypes": logical_dtypes,
+        "logical_dtype_hash": canonical_json_hash(logical_dtypes),
         "partition_row_counts": dict(sorted(partition_row_counts.items())),
         "partition_count": len(partition_row_counts),
         "partitions": sorted(partition_row_counts),
@@ -285,6 +298,14 @@ def _write_runtime_manifest(
         render_qrp_json_object(manifest) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_fixture_parquet(frame: pd.DataFrame, path: Path) -> None:
+    logical_dtypes = logical_dtype_payload_from_frame(frame)
+    table = pa.Table.from_pandas(frame, preserve_index=False).replace_schema_metadata(
+        {b"qrp.logical-dtypes": logical_dtype_metadata_bytes(logical_dtypes)}
+    )
+    pq.write_table(table, path)
 
 
 def _column_roles(

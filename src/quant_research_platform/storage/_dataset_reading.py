@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.compute as pc
-import pyarrow.parquet as pq
-from pandas.api.types import union_categoricals
 
-from quant_research_platform.contracts._json import canonical_json_hash
+from quant_research_platform.contracts._json import (
+    canonical_json_hash,
+    parse_qrp_json_object,
+)
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_date_bounds,
@@ -34,43 +37,82 @@ from quant_research_platform.storage._dataset_paths import (
     require_artifact_root,
     timestamp_column_from_spec_payload,
 )
+from quant_research_platform.storage._dataset_physical import (
+    DatasetFileIdentity,
+    DatasetPartMetadata,
+    dataset_file_identity,
+    inspect_dataset_part,
+    iter_dataset_part_batches,
+)
 from quant_research_platform.storage._dataset_schema import (
+    logical_dtype_metadata_bytes,
+    merge_logical_dtype_payloads,
+    pandas_dtype_overrides_from_logical_payload,
+    parse_logical_dtype_metadata,
     physical_schema_columns,
+    physical_schema_from_schema,
     validate_dataset_manifest_consumable,
     validate_dataset_manifest_payload,
     validate_dataset_spec_payload,
-    validated_physical_schema,
 )
 from quant_research_platform.storage._dataset_types import (
     DatasetReadMode,
 )
-from quant_research_platform.storage.manifests import read_qrp_json
-
-_PHYSICAL_WORKING_SET_PARTS = 4
 
 
-@dataclass(frozen=True)
-class DatasetReadContext:
+@dataclass(frozen=True, slots=True)
+class DatasetSession:
     root: Path
     data_root: Path
-    spec: dict[str, Any]
-    manifest: dict[str, Any]
+    spec_bytes: bytes
+    manifest_bytes: bytes
     all_paths: tuple[Path, ...]
     read_paths: tuple[Path, ...]
     logical_columns: tuple[str, ...]
     physical_columns: tuple[str, ...]
     timestamp_column: str | None
     time_window: TimeWindow | None
-    schema: list[dict[str, Any]]
     schema_hash: str
-    parquet_filters: list[tuple[str, str, Any]] | None
+    arrow_schema: pa.Schema
+    logical_dtype_bytes: bytes
+    part_metadata: tuple[tuple[Path, DatasetPartMetadata], ...]
+    parquet_filters: tuple[tuple[str, str, Any], ...] | None
 
+    @property
+    def spec(self) -> dict[str, Any]:
+        return parse_qrp_json_object(self.spec_bytes)
 
-@dataclass(frozen=True, slots=True)
-class DatasetEqualityGroupPlan:
-    columns: tuple[str, ...]
-    keys: tuple[tuple[Any, ...], ...]
-    paths_by_key: dict[tuple[Any, ...], tuple[Path, ...]]
+    @property
+    def manifest(self) -> dict[str, Any]:
+        return parse_qrp_json_object(self.manifest_bytes)
+
+    @property
+    def schema(self) -> list[dict[str, Any]]:
+        return list(self.manifest["physical_schema"])
+
+    @property
+    def logical_dtypes(self) -> dict[str, Any]:
+        return parse_logical_dtype_metadata(self.logical_dtype_bytes)
+
+    def metadata_for(self, path: Path) -> DatasetPartMetadata:
+        for candidate, metadata in self.part_metadata:
+            if candidate == path:
+                return metadata
+        raise ValueError("dataset_part_not_in_session")
+
+    def verify(self) -> None:
+        if (self.root / "spec.json").read_bytes() != self.spec_bytes:
+            raise ValueError("dataset_spec_identity_changed")
+        if (
+            self.root / "_manifest" / "manifest.json"
+        ).read_bytes() != self.manifest_bytes:
+            raise ValueError("dataset_manifest_identity_changed")
+        current_paths = tuple(candidate_data_files(self.data_root, spec=self.spec))
+        if current_paths != self.all_paths:
+            raise ValueError("dataset_inventory_changed")
+        for path, metadata in self.part_metadata:
+            if dataset_file_identity(path) != metadata.identity:
+                raise ValueError("dataset_file_identity_changed")
 
 
 def read_dataset(
@@ -81,7 +123,7 @@ def read_dataset(
     mode: DatasetReadMode = DatasetReadMode.MATERIALIZED,
     resource_policy: RuntimeResourcePolicy,
 ) -> pd.DataFrame | Iterator[pd.DataFrame]:
-    context = build_dataset_read_context(
+    context = open_dataset_session(
         dataset_root,
         columns=columns,
         time_window=time_window,
@@ -95,15 +137,15 @@ def read_dataset(
         )
     if mode is not DatasetReadMode.MATERIALIZED:
         raise ValueError("unsupported_dataset_read_mode")
-    return materialize_dataset_context(
+    return materialize_dataset_session(
         context,
         target_chunk_bytes=target_chunk_bytes,
         materialized_budget_bytes=resource_policy.task_memory_budget_bytes,
     )
 
 
-def materialize_dataset_context(
-    context: DatasetReadContext,
+def materialize_dataset_session(
+    context: DatasetSession,
     *,
     target_chunk_bytes: int,
     materialized_budget_bytes: int | None = None,
@@ -128,41 +170,26 @@ def materialize_dataset_context(
         ):
             raise ValueError("dataset_materialized_result_exceeds_target_bytes")
         frames.append(frame)
-    categorical_columns = tuple(
-        column
-        for column in frames[0].columns
-        if all(
-            isinstance(frame[column].dtype, pd.CategoricalDtype)
-            for frame in frames
-        )
-    )
-    categorical_values: dict[str, pd.Categorical] = {}
-    for column in categorical_columns:
-        try:
-            categorical_values[column] = union_categoricals(
-                [frame[column].array for frame in frames]
-            )
-        except TypeError as exc:
-            raise ValueError("dataset_categorical_dtype_mismatch") from exc
+    context.verify()
     output = pd.concat(frames, ignore_index=True)
-    for column, values in categorical_values.items():
-        output[column] = pd.Series(values)
+    output_bytes = pandas_frame_payload_bytes(output)
     if (
         materialized_budget is not None
-        and pandas_frame_payload_bytes(output) > materialized_budget
+        and observed_frame_bytes + output_bytes > materialized_budget
     ):
         raise ValueError("dataset_materialized_result_exceeds_target_bytes")
+    del frames
     return output
 
 
-def build_dataset_read_context(
+def open_dataset_session(
     dataset_root: Path,
     *,
     columns: tuple[str, ...] | list[str] | None,
     time_window: TimeWindow | None,
     row_filters: tuple[tuple[str, str, Any], ...] = (),
     require_consumable: bool = True,
-) -> DatasetReadContext:
+) -> DatasetSession:
     root = require_artifact_root(Path(dataset_root))
     spec_path = root / "spec.json"
     data_root = root / "data"
@@ -171,19 +198,17 @@ def build_dataset_read_context(
         raise ValueError("dataset_spec_missing")
     if not data_root.is_dir():
         raise ValueError("dataset_data_dir_missing")
-    spec_payload = read_qrp_json(
-        spec_path,
-        expected_schema_id="qrp-dataset-spec",
-        error="dataset_spec_schema_id_invalid",
-    )
+    spec_bytes = spec_path.read_bytes()
+    spec_payload = parse_qrp_json_object(spec_bytes)
+    if spec_payload.get("schema_id") != "qrp-dataset-spec":
+        raise ValueError("dataset_spec_schema_id_invalid")
     validate_dataset_spec_payload(spec_payload)
     if not manifest_path.is_file():
         raise ValueError("dataset_manifest_missing")
-    manifest = read_qrp_json(
-        manifest_path,
-        expected_schema_id="qrp-dataset-manifest",
-        error="dataset_manifest_schema_id_invalid",
-    )
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = parse_qrp_json_object(manifest_bytes)
+    if manifest.get("schema_id") != "qrp-dataset-manifest":
+        raise ValueError("dataset_manifest_schema_id_invalid")
     validate_dataset_manifest_payload(manifest, spec=spec_payload)
     if require_consumable:
         validate_dataset_manifest_consumable(manifest)
@@ -192,15 +217,129 @@ def build_dataset_read_context(
     all_paths = tuple(candidate_data_files(data_root, spec=spec_payload))
     if not all_paths:
         raise ValueError("dataset_data_dir_missing")
-    schema = validated_physical_schema(list(all_paths))
+    metadata_items = tuple(
+        (path, inspect_dataset_part(path)) for path in all_paths
+    )
+    return _build_dataset_session(
+        root=root,
+        data_root=data_root,
+        spec_bytes=spec_bytes,
+        manifest_bytes=manifest_bytes,
+        all_paths=all_paths,
+        metadata_items=metadata_items,
+        columns=columns,
+        time_window=time_window,
+        row_filters=row_filters,
+        require_consumable=require_consumable,
+    )
+
+
+def _dataset_session_from_observed_parts(
+    dataset_root: Path,
+    *,
+    metadata_items: tuple[tuple[Path, DatasetPartMetadata], ...],
+    columns: tuple[str, ...] | list[str] | None,
+    time_window: TimeWindow | None,
+) -> DatasetSession:
+    """Freeze a writer receipt without reopening already observed Parquet parts."""
+
+    root = require_artifact_root(Path(dataset_root))
+    data_root = root / "data"
+    spec_bytes = (root / "spec.json").read_bytes()
+    manifest_bytes = (root / "_manifest" / "manifest.json").read_bytes()
+    spec_payload = parse_qrp_json_object(spec_bytes)
+    all_paths = tuple(candidate_data_files(data_root, spec=spec_payload))
+    observed_by_path = dict(metadata_items)
+    if len(observed_by_path) != len(metadata_items) or set(observed_by_path) != set(
+        all_paths
+    ):
+        raise ValueError("dataset_inventory_changed")
+    ordered_metadata = tuple((path, observed_by_path[path]) for path in all_paths)
+    return _build_dataset_session(
+        root=root,
+        data_root=data_root,
+        spec_bytes=spec_bytes,
+        manifest_bytes=manifest_bytes,
+        all_paths=all_paths,
+        metadata_items=ordered_metadata,
+        columns=columns,
+        time_window=time_window,
+        row_filters=(),
+        require_consumable=True,
+    )
+
+
+def _build_dataset_session(
+    *,
+    root: Path,
+    data_root: Path,
+    spec_bytes: bytes,
+    manifest_bytes: bytes,
+    all_paths: tuple[Path, ...],
+    metadata_items: tuple[tuple[Path, DatasetPartMetadata], ...],
+    columns: tuple[str, ...] | list[str] | None,
+    time_window: TimeWindow | None,
+    row_filters: tuple[tuple[str, str, Any], ...],
+    require_consumable: bool,
+) -> DatasetSession:
+    spec_payload = parse_qrp_json_object(spec_bytes)
+    if spec_payload.get("schema_id") != "qrp-dataset-spec":
+        raise ValueError("dataset_spec_schema_id_invalid")
+    validate_dataset_spec_payload(spec_payload)
+    manifest = parse_qrp_json_object(manifest_bytes)
+    if manifest.get("schema_id") != "qrp-dataset-manifest":
+        raise ValueError("dataset_manifest_schema_id_invalid")
+    validate_dataset_manifest_payload(manifest, spec=spec_payload)
+    if require_consumable:
+        validate_dataset_manifest_consumable(manifest)
+    if not manifest_has_runtime_metadata(manifest):
+        raise ValueError("manifest_runtime_metadata_missing")
+    if not all_paths or not metadata_items:
+        raise ValueError("dataset_data_dir_missing")
+    first_metadata = metadata_items[0][1]
+    schema = physical_schema_from_schema(first_metadata.schema)
+    for _, metadata in metadata_items[1:]:
+        if physical_schema_from_schema(metadata.schema) != schema:
+            raise ValueError("dataset_schema_mismatch")
+    logical_dtypes = merge_logical_dtype_payloads(
+        [
+            parse_logical_dtype_metadata(metadata.logical_dtype_payload)
+            for _, metadata in metadata_items
+        ]
+    )
     schema_columns = physical_schema_columns(schema)
     schema_hash = canonical_json_hash(schema)
     validate_manifest_runtime_metadata(
         manifest,
         data_root=data_root,
         paths=list(all_paths),
-        validate_row_counts=True,
     )
+    observed_rows = sum(metadata.row_count for _, metadata in metadata_items)
+    if int(manifest["row_count"]) != observed_rows:
+        raise ValueError("manifest_row_count_mismatch")
+    observed_partition_rows: dict[str, int] = {}
+    for path, metadata in metadata_items:
+        partition = relative_partition_label(data_root, path)
+        observed_partition_rows[partition] = (
+            observed_partition_rows.get(partition, 0) + metadata.row_count
+        )
+    if dict(sorted(observed_partition_rows.items())) != dict(
+        sorted(manifest["partition_row_counts"].items())
+    ):
+        raise ValueError("manifest_partition_row_counts_mismatch")
+    if int(manifest["file_size_bytes"]) != sum(
+        metadata.file_size_bytes for _, metadata in metadata_items
+    ):
+        raise ValueError("manifest_file_size_bytes_mismatch")
+    if manifest["logical_dtypes"] != logical_dtypes:
+        raise ValueError("manifest_logical_dtypes_mismatch")
+    if tuple(str(column) for column in spec_payload["partition_columns"]) == (
+        "year",
+    ) and any(
+        path.parent == data_root and metadata.row_count != 0
+        for path, metadata in metadata_items
+    ):
+        raise ValueError("invalid_dataset_part_files")
     if tuple(str(column) for column in manifest["columns"]) != schema_columns:
         raise ValueError("manifest_columns_mismatch")
     if manifest["physical_schema"] != schema:
@@ -233,11 +372,11 @@ def build_dataset_read_context(
             (*physical_columns, *(column for column, _, _ in physical_filters))
         )
     )
-    return DatasetReadContext(
+    session = DatasetSession(
         root=root,
         data_root=data_root,
-        spec=spec_payload,
-        manifest=manifest,
+        spec_bytes=spec_bytes,
+        manifest_bytes=manifest_bytes,
         all_paths=all_paths,
         read_paths=tuple(
             prune_paths_for_time_window(
@@ -251,256 +390,129 @@ def build_dataset_read_context(
         physical_columns=physical_columns,
         timestamp_column=timestamp_column,
         time_window=time_window,
-        schema=schema,
         schema_hash=schema_hash,
-        parquet_filters=physical_filters or None,
+        arrow_schema=first_metadata.schema,
+        logical_dtype_bytes=logical_dtype_metadata_bytes(logical_dtypes),
+        part_metadata=metadata_items,
+        parquet_filters=tuple(
+            (column, operator, _freeze_filter_value(value))
+            for column, operator, value in physical_filters
+        )
+        or None,
     )
+    session.verify()
+    return session
 
 
 def iter_dataset_chunks(
-    context: DatasetReadContext,
+    context: DatasetSession,
     *,
     target_chunk_bytes: int,
 ) -> Iterator[pd.DataFrame]:
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    if not context.read_paths:
-        yield _empty_frame(
+    try:
+        if not context.read_paths:
+            yield _empty_frame(
+                context,
+                context.logical_columns,
+                target_chunk_bytes=target_bytes,
+            )
+            return
+        yielded = False
+        for _, frame in iter_dataset_file_batches(
             context,
-            context.logical_columns,
-            target_chunk_bytes=target_bytes,
-        )
-        return
-    yielded = False
-    for _, frame in iter_dataset_file_batches(
-        context,
-        columns=context.physical_columns,
-        target_chunk_bytes=target_bytes,
-    ):
-        filtered = frame.loc[:, list(context.logical_columns)]
-        for chunk in _bounded_frame_chunks(
-            filtered,
+            columns=context.physical_columns,
             target_chunk_bytes=target_bytes,
         ):
-            yielded = True
-            yield chunk
-    if not yielded:
-        yield _empty_frame(
-            context,
-            context.logical_columns,
-            target_chunk_bytes=target_bytes,
-        )
+            filtered = frame.loc[:, list(context.logical_columns)]
+            for chunk in _bounded_frame_chunks(
+                filtered,
+                target_chunk_bytes=target_bytes,
+            ):
+                yielded = True
+                yield chunk
+        if not yielded:
+            yield _empty_frame(
+                context,
+                context.logical_columns,
+                target_chunk_bytes=target_bytes,
+            )
+    finally:
+        context.verify()
 
 
-def iter_dataset_file_batches(
-    context: DatasetReadContext,
-    *,
-    columns: tuple[str, ...],
-    target_chunk_bytes: int,
-    categorical_dtypes: Mapping[str, pd.CategoricalDtype] | None = None,
-    categorical_payload_bytes: int | None = None,
-) -> Iterator[tuple[Path, pd.DataFrame]]:
-    """Yield deterministic file batches after Arrow-level bounded conversion."""
-
-    target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    null_columns = _dataset_null_columns(context.all_paths, columns)
-    if categorical_dtypes is None or categorical_payload_bytes is None:
-        categorical_dtypes, categorical_payload_bytes = dataset_categorical_dtypes(
-            context.all_paths,
-            columns,
-            payload_target_bytes=target_bytes,
-        )
-    physical_target_bytes = target_bytes - categorical_payload_bytes
-    if physical_target_bytes <= 0:
-        raise ValueError("dataset_categorical_payload_exceeds_target_bytes")
-    for path in context.read_paths:
-        for frame in iter_parquet_file_batches(
-            path,
-            columns=columns,
-            parquet_filters=context.parquet_filters,
-            target_chunk_bytes=physical_target_bytes,
-            null_columns=null_columns,
-            categorical_dtypes=categorical_dtypes,
-        ):
-            yield path, frame
-
-
-def iter_parquet_file_batches(
+def iter_declared_parquet_member_batches(
     path: Path,
     *,
     target_chunk_bytes: int,
+    expected_identity: DatasetFileIdentity,
     columns: tuple[str, ...] | None = None,
     parquet_filters: list[tuple[str, str, Any]] | None = None,
-    null_columns: frozenset[str] | None = None,
-    categorical_dtypes: Mapping[str, pd.CategoricalDtype] | None = None,
+    dtype_overrides: Mapping[str, object] | None = None,
+    metadata_observer: Callable[[DatasetPartMetadata], None] | None = None,
+    persisted_frame_observer: Callable[[pd.DataFrame], None] | None = None,
+    batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
 ) -> Iterator[pd.DataFrame]:
-    """Yield bounded Pandas batches from one Parquet file."""
+    """Traverse one frozen Parquet member through the sole Pandas converter."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    parquet_file = pq.ParquetFile(path)
-    try:
-        selected_columns = columns or tuple(parquet_file.schema_arrow.names)
-        selected_fields = tuple(
-            parquet_file.schema_arrow.field(name) for name in selected_columns
-        )
-        observed_null_columns = (
-            _parquet_null_columns(parquet_file, selected_columns)
-            if null_columns is None
-            else null_columns
-        )
-        dtype_overrides = _pandas_dtype_overrides(
-            pa.schema(selected_fields),
-            observed_null_columns,
-            categorical_dtypes=categorical_dtypes,
-        )
-    finally:
-        parquet_file.close()
-    for batch in iter_parquet_arrow_batches(
-        path,
-        columns=selected_columns,
-        parquet_filters=parquet_filters,
+    for batch in iter_dataset_part_batches(
+        Path(path),
+        expected_identity=expected_identity,
         target_chunk_bytes=target_bytes,
+        columns=columns,
+        parquet_filters=parquet_filters,
+        metadata_observer=metadata_observer,
     ):
         yield from _arrow_batch_to_bounded_pandas(
             batch,
             target_chunk_bytes=target_bytes,
             dtype_overrides=dtype_overrides,
+            persisted_frame_observer=persisted_frame_observer,
+            batch_observer=batch_observer,
         )
 
 
-def iter_parquet_arrow_batches(
-    path: Path,
-    *,
-    target_chunk_bytes: int,
-    columns: tuple[str, ...] | None = None,
-    parquet_filters: list[tuple[str, str, Any]] | None = None,
-    row_groups: tuple[int, ...] | None = None,
-    source_batch_rows: int | None = None,
-) -> Iterator[pa.RecordBatch]:
-    """Yield bounded Arrow batches through the single physical decoder."""
-
-    target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    parquet_file = pq.ParquetFile(path)
-    try:
-        selected_columns = columns or tuple(parquet_file.schema_arrow.names)
-        selected_fields = tuple(
-            parquet_file.schema_arrow.field(name) for name in selected_columns
-        )
-        variable_width = any(
-            _is_variable_width(field.type) for field in selected_fields
-        )
-        batch_size = source_batch_rows or _target_batch_rows(
-            parquet_file,
-            columns=selected_columns,
-            target_chunk_bytes=target_bytes,
-        )
-    finally:
-        parquet_file.close()
-    if row_groups is not None:
-        arrow_budget = target_bytes
-        for batch in _raw_arrow_batches(
-            path,
-            columns=selected_columns,
-            parquet_filters=None,
-            batch_size=batch_size,
-            row_groups=row_groups,
-            max_page_uncompressed_bytes=arrow_budget,
-        ):
-            _require_arrow_batch_budget(batch, arrow_budget=arrow_budget)
-            yield batch
-        return
-    yield from _iter_filtered_arrow_batches(
-        path,
-        columns=selected_columns,
-        parquet_filters=parquet_filters,
-        batch_size=batch_size,
-        target_chunk_bytes=target_bytes,
-        probe_variable_width=variable_width,
-    )
-
-
-def dataset_primary_key_schema(
-    context: DatasetReadContext,
-    primary_key: tuple[str, ...],
-) -> pa.Schema:
-    parquet_file = pq.ParquetFile(context.all_paths[0])
-    try:
-        parquet_schema = parquet_file.schema_arrow
-        return pa.schema(
-            [parquet_schema.field(column) for column in primary_key]
-        )
-    except KeyError as exc:
-        raise ValueError("missing_dataset_primary_key_column") from exc
-    finally:
-        parquet_file.close()
-
-
-def build_dataset_equality_group_plan(
-    context: DatasetReadContext,
+def iter_dataset_file_batches(
+    context: DatasetSession,
     *,
     columns: tuple[str, ...],
     target_chunk_bytes: int,
-) -> DatasetEqualityGroupPlan:
-    schema_columns = set(physical_schema_columns(context.schema))
-    if not columns or any(column not in schema_columns for column in columns):
-        raise ValueError("invalid_dataset_equality_group_columns")
-    filter_columns = tuple(
-        column for column, _, _ in context.parquet_filters or ()
-    )
-    discovery_columns = tuple(dict.fromkeys((*columns, *filter_columns)))
-    paths_by_key: dict[tuple[Any, ...], dict[Path, None]] = {}
-    for path, frame in iter_dataset_file_batches(
-        context,
-        columns=discovery_columns,
-        target_chunk_bytes=target_chunk_bytes,
-    ):
-        for row in frame.loc[:, list(columns)].itertuples(index=False, name=None):
-            key = tuple(row)
-            if any(
-                not pd.api.types.is_scalar(value) or bool(pd.isna(value))
-                for value in key
-            ):
-                raise ValueError("invalid_dataset_equality_group_key")
-            try:
-                hash(key)
-            except TypeError as exc:
-                raise ValueError("invalid_dataset_equality_group_key") from exc
-            candidate_paths = paths_by_key.get(key)
-            if candidate_paths is None:
-                candidate_paths = {}
-                paths_by_key[key] = candidate_paths
-            if path not in candidate_paths:
-                candidate_paths[path] = None
-    ordered_keys = tuple(sorted(paths_by_key))
-    ordered_paths = {
-        key: tuple(paths_by_key[key])
-        for key in ordered_keys
-    }
-    return DatasetEqualityGroupPlan(
+) -> Iterator[tuple[Path, pd.DataFrame]]:
+    """Yield deterministic file batches after Arrow-level bounded conversion."""
+
+    target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
+    dtype_overrides = pandas_dtype_overrides_from_logical_payload(
+        context.logical_dtypes,
         columns=columns,
-        keys=ordered_keys,
-        paths_by_key=ordered_paths,
     )
+    context.verify()
+    try:
+        for path in context.read_paths:
+            metadata = context.metadata_for(path)
+            for frame in iter_declared_parquet_member_batches(
+                path,
+                expected_identity=metadata.identity,
+                columns=columns,
+                parquet_filters=context.parquet_filters,
+                target_chunk_bytes=target_bytes,
+                dtype_overrides=dtype_overrides,
+            ):
+                yield path, frame
+    finally:
+        context.verify()
 
 
-def dataset_context_for_equality_group(
-    context: DatasetReadContext,
-    plan: DatasetEqualityGroupPlan,
-    key: tuple[Any, ...],
-) -> DatasetReadContext:
-    if key not in plan.paths_by_key or len(key) != len(plan.columns):
-        raise ValueError("unknown_dataset_equality_group_key")
-    filters = [*(context.parquet_filters or ())]
-    filters.extend(
-        (column, "==", value)
-        for column, value in zip(plan.columns, key, strict=True)
-    )
-    physical_columns = tuple(dict.fromkeys((*context.physical_columns, *plan.columns)))
-    return replace(
-        context,
-        read_paths=plan.paths_by_key[key],
-        physical_columns=physical_columns,
-        parquet_filters=filters,
-    )
+def dataset_primary_key_schema(
+    context: DatasetSession,
+    primary_key: tuple[str, ...],
+) -> pa.Schema:
+    try:
+        return pa.schema(
+            [context.arrow_schema.field(column) for column in primary_key]
+        )
+    except KeyError as exc:
+        raise ValueError("missing_dataset_primary_key_column") from exc
 
 
 def _validated_target_chunk_bytes(value: int) -> int:
@@ -509,815 +521,55 @@ def _validated_target_chunk_bytes(value: int) -> int:
     return value
 
 
-def _target_batch_rows(
-    parquet_file: pq.ParquetFile,
-    *,
-    columns: tuple[str, ...],
-    target_chunk_bytes: int,
-) -> int:
-    selected_fields = tuple(parquet_file.schema_arrow.field(name) for name in columns)
-    fixed_row_bytes = tuple(
-        _fixed_width_arrow_row_bytes(field.type) for field in selected_fields
-    )
-    if any(value is None for value in fixed_row_bytes):
-        return 1
-    selected_positions = _projected_parquet_leaf_positions(
-        parquet_file,
-        columns,
-    )
-    maximum_row_bytes = max(1, sum(value or 0 for value in fixed_row_bytes))
-    metadata = parquet_file.metadata
-    for row_group_index in range(metadata.num_row_groups):
-        row_group = metadata.row_group(row_group_index)
-        if row_group.num_rows <= 0:
-            continue
-        projected_bytes = sum(
-            max(0, int(row_group.column(index).total_uncompressed_size))
-            for index in selected_positions
-        )
-        row_bytes = max(
-            1,
-            (projected_bytes + row_group.num_rows - 1) // row_group.num_rows,
-        )
-        maximum_row_bytes = max(maximum_row_bytes, row_bytes)
-    arrow_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
-    return max(1, arrow_budget // maximum_row_bytes)
-
-
-def _projected_parquet_leaf_positions(
-    parquet_file: pq.ParquetFile,
-    columns: tuple[str, ...],
-) -> tuple[int, ...]:
-    positions: list[int] = []
-    for column in columns:
-        matches = [
-            index
-            for index in range(parquet_file.metadata.num_columns)
-            if (
-                parquet_file.schema.column(index).path == column
-                or parquet_file.schema.column(index).path.startswith(f"{column}.")
-            )
-        ]
-        if not matches:
-            raise ValueError("dataset_column_not_found")
-        positions.extend(matches)
-    return tuple(positions)
-
-
-def _parquet_null_columns(
-    parquet_file: pq.ParquetFile,
-    columns: tuple[str, ...],
-) -> frozenset[str]:
-    null_columns: set[str] = set()
-    for column in columns:
-        positions = _projected_parquet_leaf_positions(parquet_file, (column,))
-        for row_group_index in range(parquet_file.metadata.num_row_groups):
-            row_group = parquet_file.metadata.row_group(row_group_index)
-            statistics = tuple(
-                row_group.column(position).statistics for position in positions
-            )
-            if any(
-                item is None or item.null_count is None or int(item.null_count) > 0
-                for item in statistics
-            ):
-                null_columns.add(column)
-                break
-    return frozenset(null_columns)
-
-
-def _dataset_null_columns(
-    paths: tuple[Path, ...],
-    columns: tuple[str, ...],
-) -> frozenset[str]:
-    null_columns: set[str] = set()
-    for path in paths:
-        parquet_file = pq.ParquetFile(path)
-        try:
-            null_columns.update(
-                _parquet_null_columns(parquet_file, columns)
-            )
-        finally:
-            parquet_file.close()
-    return frozenset(null_columns)
-
-
-def _pandas_dtype_overrides(
-    schema: pa.Schema,
-    null_columns: frozenset[str],
-    *,
-    categorical_dtypes: Mapping[str, pd.CategoricalDtype] | None = None,
-) -> dict[str, object]:
-    overrides: dict[str, object] = dict(categorical_dtypes or {})
-    for field in schema:
-        if field.name not in null_columns:
-            continue
-        if pa.types.is_integer(field.type):
-            prefix = "Int" if pa.types.is_signed_integer(field.type) else "UInt"
-            overrides[field.name] = f"{prefix}{field.type.bit_width}"
-        elif pa.types.is_boolean(field.type):
-            overrides[field.name] = "boolean"
-    return overrides
-
-
-def dataset_categorical_dtypes(
-    paths: tuple[Path, ...],
-    columns: tuple[str, ...],
-    *,
-    payload_target_bytes: int,
-) -> tuple[dict[str, pd.CategoricalDtype], int]:
-    if payload_target_bytes <= 0:
-        raise ValueError("dataset_categorical_payload_exceeds_target_bytes")
-    categories: dict[str, dict[object, None]] = {}
-    ordered_domains: dict[str, tuple[object, ...]] = {}
-    ordered_columns: dict[str, bool] = {}
-    for path in paths:
-        parquet_file = pq.ParquetFile(path)
-        try:
-            dictionary_columns = tuple(
-                column
-                for column in columns
-                if pa.types.is_dictionary(parquet_file.schema_arrow.field(column).type)
-            )
-            for column in dictionary_columns:
-                ordered_columns[column] = bool(
-                    parquet_file.schema_arrow.field(column).type.ordered
-                )
-            if not dictionary_columns:
-                continue
-            for row_group_index in range(parquet_file.metadata.num_row_groups):
-                batches = iter_parquet_arrow_batches(
-                    path,
-                    columns=dictionary_columns,
-                    target_chunk_bytes=payload_target_bytes,
-                    row_groups=(row_group_index,),
-                    source_batch_rows=1,
-                )
-                try:
-                    batch = next(batches, None)
-                finally:
-                    batches.close()
-                if batch is None:
-                    continue
-                for position, column in enumerate(dictionary_columns):
-                    array = batch.column(position)
-                    if not isinstance(array, pa.DictionaryArray):
-                        raise ValueError("dataset_categorical_dtype_mismatch")
-                    if (
-                        max(1, int(array.dictionary.nbytes))
-                        > payload_target_bytes
-                    ):
-                        raise ValueError(
-                            "dataset_categorical_payload_exceeds_target_bytes"
-                        )
-                    values = tuple(array.dictionary.to_pylist())
-                    if ordered_columns[column]:
-                        expected = ordered_domains.get(column)
-                        if expected is None:
-                            ordered_domains[column] = values
-                        elif values != expected:
-                            raise ValueError("dataset_categorical_dtype_mismatch")
-                    else:
-                        domain = categories.setdefault(column, {})
-                        for value in values:
-                            domain[value] = None
-                    if (
-                        _categorical_dtype_payload_bytes(
-                            categories,
-                            ordered_domains,
-                            ordered_columns,
-                        )
-                        > payload_target_bytes
-                    ):
-                        raise ValueError(
-                            "dataset_categorical_payload_exceeds_target_bytes"
-                        )
-        finally:
-            parquet_file.close()
-    dtypes = _categorical_dtypes_from_domains(
-        categories,
-        ordered_domains,
-        ordered_columns,
-    )
-    payload_bytes = _categorical_dtype_payload_bytes(
-        categories,
-        ordered_domains,
-        ordered_columns,
-    )
-    if payload_bytes > payload_target_bytes:
-        raise ValueError("dataset_categorical_payload_exceeds_target_bytes")
-    return dtypes, payload_bytes
-
-
-def _categorical_dtypes_from_domains(
-    categories: Mapping[str, Mapping[object, None]],
-    ordered_domains: Mapping[str, tuple[object, ...]],
-    ordered_columns: Mapping[str, bool],
-) -> dict[str, pd.CategoricalDtype]:
-    dtypes: dict[str, pd.CategoricalDtype] = {}
-    for column, ordered in ordered_columns.items():
-        values = (
-            ordered_domains[column]
-            if ordered
-            else tuple(
-                sorted(
-                    categories.get(column, {}),
-                    key=lambda value: (
-                        type(value).__module__,
-                        type(value).__qualname__,
-                        repr(value),
-                    ),
-                )
-            )
-        )
-        dtypes[column] = pd.CategoricalDtype(categories=values, ordered=ordered)
-    return dtypes
-
-
-def _categorical_dtype_payload_bytes(
-    categories: Mapping[str, Mapping[object, None]],
-    ordered_domains: Mapping[str, tuple[object, ...]],
-    ordered_columns: Mapping[str, bool],
-) -> int:
-    dtypes = _categorical_dtypes_from_domains(
-        categories,
-        ordered_domains,
-        ordered_columns,
-    )
-    if not dtypes:
-        return 0
-    frame = pd.DataFrame(
-        {
-            column: pd.Series(pd.Categorical([], dtype=dtype))
-            for column, dtype in dtypes.items()
-        }
-    )
-    return pandas_frame_payload_bytes(frame)
-
-
-def _iter_filtered_arrow_batches(
-    path: Path,
-    *,
-    columns: tuple[str, ...],
-    parquet_filters: list[tuple[str, str, Any]] | None,
-    batch_size: int,
-    target_chunk_bytes: int,
-    probe_variable_width: bool,
-) -> Iterator[pa.RecordBatch]:
-    arrow_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
-    if probe_variable_width:
-        yield from _iter_variable_width_arrow_batches(
-            path,
-            columns=columns,
-            parquet_filters=parquet_filters,
-            arrow_budget=arrow_budget,
-        )
-        return
-    source_budget = (
-        arrow_budget
-        if not parquet_filters
-        else max(1, arrow_budget // 2)
-    )
-    for source_batch in _raw_arrow_batches(
-        path,
-        columns=columns,
-        parquet_filters=parquet_filters,
-        batch_size=batch_size,
-        max_page_uncompressed_bytes=source_budget,
+def _freeze_filter_value(value: Any) -> Any:
+    if isinstance(value, pa.Scalar):
+        value = value.as_py()
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(
+        value,
+        (
+            str,
+            bytes,
+            bool,
+            int,
+            float,
+            Decimal,
+            date,
+            datetime,
+            time,
+            timedelta,
+            pd.Timestamp,
+            pd.Timedelta,
+        ),
     ):
-        _require_arrow_batch_budget(source_batch, arrow_budget=source_budget)
-        filtered = _filter_arrow_batch(source_batch, parquet_filters)
-        if filtered is not source_batch:
-            _require_arrow_batch_budget(filtered, arrow_budget=source_budget)
-        if filtered.num_rows:
-            yield filtered
-
-
-def _iter_variable_width_arrow_batches(
-    path: Path,
-    *,
-    columns: tuple[str, ...],
-    parquet_filters: list[tuple[str, str, Any]] | None,
-    arrow_budget: int,
-) -> Iterator[pa.RecordBatch]:
-    component_budget = max(1, arrow_budget // 2)
-    buffered: list[pa.RecordBatch] = []
-    buffered_arrow_bytes = 0
-    for source_batch in _adaptive_variable_width_source_batches(
-        path,
-        columns=columns,
-        parquet_filters=parquet_filters,
-        component_budget=component_budget,
-        page_budget=component_budget,
-    ):
-        _require_arrow_batch_budget(source_batch, arrow_budget=component_budget)
-        filtered = _filter_arrow_batch(source_batch, parquet_filters)
-        del source_batch
-        if filtered.num_rows == 0:
-            continue
-        batch_arrow_bytes = filtered.nbytes
-        if batch_arrow_bytes > component_budget:
-            raise ValueError("dataset_row_exceeds_target_chunk_bytes")
-        buffered.append(filtered)
-        candidate_arrow_bytes = buffered_arrow_bytes + batch_arrow_bytes
-        if len(buffered) > 1 and candidate_arrow_bytes > component_budget:
-            buffered.pop()
-            yield _coalesced_record_batch(buffered, arrow_budget=arrow_budget)
-            buffered = [filtered]
-            buffered_arrow_bytes = batch_arrow_bytes
-            continue
-        buffered_arrow_bytes = candidate_arrow_bytes
-    if buffered:
-        yield _coalesced_record_batch(buffered, arrow_budget=arrow_budget)
-
-
-def _adaptive_variable_width_source_batches(
-    path: Path,
-    *,
-    columns: tuple[str, ...],
-    parquet_filters: list[tuple[str, str, Any]] | None,
-    component_budget: int,
-    page_budget: int | None = None,
-) -> Iterator[pa.RecordBatch]:
-    physical_page_budget = page_budget or component_budget
-    probe_batches = _raw_arrow_batches(
-        path,
-        columns=columns,
-        parquet_filters=parquet_filters,
-        batch_size=1,
-        max_page_uncompressed_bytes=physical_page_budget,
-    )
-    try:
-        probe = next(probe_batches, None)
-        if probe is None:
-            return
-        yield probe
-        batch_size = _variable_width_source_batch_rows(
-            path,
-            columns=columns,
-            component_budget=component_budget,
-            probe=probe,
-        )
-        if batch_size == 1:
-            yield from probe_batches
-            return
-    finally:
-        probe_batches.close()
-
-    skipped_rows = probe.num_rows
-    for batch in _raw_arrow_batches(
-        path,
-        columns=columns,
-        parquet_filters=parquet_filters,
-        batch_size=batch_size,
-        max_page_uncompressed_bytes=physical_page_budget,
-    ):
-        if skipped_rows:
-            if batch.num_rows <= skipped_rows:
-                skipped_rows -= batch.num_rows
-                continue
-            batch = batch.slice(skipped_rows)
-            skipped_rows = 0
-        if batch.num_rows:
-            yield batch
-
-
-def _variable_width_source_batch_rows(
-    path: Path,
-    *,
-    columns: tuple[str, ...],
-    component_budget: int,
-    probe: pa.RecordBatch,
-) -> int:
-    parquet_file = pq.ParquetFile(path)
-    try:
-        variable_columns = tuple(
-            field.name
-            for field in probe.schema
-            if _is_variable_width(field.type)
-        )
-        variable_positions = _projected_parquet_leaf_positions(
-            parquet_file,
-            variable_columns,
-        )
-        fixed_row_bytes = sum(
-            _fixed_width_arrow_row_bytes(field.type) or 0
-            for field in probe.schema
-        )
-        maximum_variable_row_bytes = 0
-        for row_group_index in range(parquet_file.metadata.num_row_groups):
-            row_group = parquet_file.metadata.row_group(row_group_index)
-            row_count = max(1, int(row_group.num_rows))
-            variable_chunk_bytes = 0
-            dictionary_encoded = False
-            for index in variable_positions:
-                column_chunk = row_group.column(index)
-                variable_chunk_bytes += max(
-                    0,
-                    int(column_chunk.total_uncompressed_size),
-                )
-                dictionary_encoded = dictionary_encoded or any(
-                    "DICTIONARY" in str(encoding)
-                    for encoding in column_chunk.encodings
-                )
-            variable_row_bytes = (
-                variable_chunk_bytes
-                if dictionary_encoded
-                else (variable_chunk_bytes + row_count - 1) // row_count
-            )
-            maximum_variable_row_bytes = max(
-                maximum_variable_row_bytes,
-                variable_row_bytes,
-            )
-    finally:
-        parquet_file.close()
-    probe_row_bytes = max(
-        1,
-        (probe.nbytes + probe.num_rows - 1) // probe.num_rows,
-    )
-    conservative_row_bytes = max(
-        probe_row_bytes,
-        fixed_row_bytes + maximum_variable_row_bytes,
-    )
-    return max(1, component_budget // conservative_row_bytes)
-
-
-def _coalesced_record_batch(
-    batches: list[pa.RecordBatch],
-    *,
-    arrow_budget: int,
-) -> pa.RecordBatch:
-    if len(batches) == 1:
-        output = batches[0]
-    else:
-        table = pa.Table.from_batches(batches).combine_chunks()
-        output_batches = table.to_batches(max_chunksize=table.num_rows)
-        if len(output_batches) != 1:
-            raise ValueError("invalid_dataset_arrow_batch")
-        output = output_batches[0]
-        del table, output_batches
-    _require_arrow_batch_budget(output, arrow_budget=arrow_budget)
-    return output
-
-
-def _require_arrow_batch_budget(
-    batch: pa.RecordBatch,
-    *,
-    arrow_budget: int,
-) -> None:
-    if batch.nbytes <= arrow_budget:
-        return
-    if batch.num_rows == 1:
-        raise ValueError("dataset_row_exceeds_target_chunk_bytes")
-    raise ValueError("dataset_arrow_batch_exceeds_target_chunk_bytes")
-
-
-def _raw_arrow_batches(
-    path: Path,
-    *,
-    columns: tuple[str, ...],
-    parquet_filters: list[tuple[str, str, Any]] | None,
-    batch_size: int,
-    row_groups: tuple[int, ...] | None = None,
-    max_page_uncompressed_bytes: int,
-) -> Iterator[pa.RecordBatch]:
-    parquet_file = pq.ParquetFile(path)
-    try:
-        selected_row_groups = (
-            _matching_row_groups(parquet_file, parquet_filters)
-            if row_groups is None
-            else row_groups
-        )
-        _require_selected_parquet_page_budget(
-            path,
-            parquet_file=parquet_file,
-            columns=columns,
-            row_groups=tuple(selected_row_groups),
-            max_page_uncompressed_bytes=max_page_uncompressed_bytes,
-        )
-        yield from parquet_file.iter_batches(
-            batch_size=batch_size,
-            row_groups=selected_row_groups,
-            columns=list(columns),
-            use_threads=False,
-        )
-    finally:
-        parquet_file.close()
-
-
-def _require_selected_parquet_page_budget(
-    path: Path,
-    *,
-    parquet_file: pq.ParquetFile,
-    columns: tuple[str, ...],
-    row_groups: tuple[int, ...],
-    max_page_uncompressed_bytes: int,
-) -> None:
-    positions = _projected_parquet_leaf_positions(parquet_file, columns)
-    with Path(path).open("rb") as stream:
-        for row_group_index in row_groups:
-            row_group = parquet_file.metadata.row_group(row_group_index)
-            if int(row_group.num_rows) == 0:
-                continue
-            for position in positions:
-                column = row_group.column(position)
-                offsets = tuple(
-                    offset
-                    for offset in (
-                        int(column.dictionary_page_offset or 0),
-                        int(column.data_page_offset or 0),
-                    )
-                    if offset > 0
-                )
-                if not offsets:
-                    raise ValueError("invalid_dataset_parquet_page_metadata")
-                start = min(offsets)
-                end = start + int(column.total_compressed_size)
-                stream.seek(start)
-                while stream.tell() < end:
-                    uncompressed_size, compressed_size = _read_parquet_page_header(
-                        stream
-                    )
-                    if uncompressed_size > max_page_uncompressed_bytes:
-                        if int(row_group.num_rows) == 1:
-                            raise ValueError("dataset_row_exceeds_target_chunk_bytes")
-                        raise ValueError(
-                            "dataset_parquet_page_exceeds_target_chunk_bytes"
-                        )
-                    payload_end = stream.tell() + compressed_size
-                    if compressed_size < 0 or payload_end > end:
-                        raise ValueError("invalid_dataset_parquet_page_metadata")
-                    stream.seek(payload_end)
-                if stream.tell() != end:
-                    raise ValueError("invalid_dataset_parquet_page_metadata")
-
-
-def _read_parquet_page_header(stream: BinaryIO) -> tuple[int, int]:
-    previous_field_id = 0
-    sizes: dict[int, int] = {}
-    while True:
-        field_header = _read_compact_byte(stream)
-        field_type = field_header & 0x0F
-        if field_type == 0:
-            break
-        field_delta = field_header >> 4
-        field_id = (
-            previous_field_id + field_delta
-            if field_delta
-            else _read_compact_integer(stream)
-        )
-        previous_field_id = field_id
-        if field_id in (2, 3) and field_type in (4, 5, 6):
-            sizes[field_id] = _read_compact_integer(stream)
-        else:
-            _skip_compact_value(stream, field_type)
-    uncompressed_size = sizes.get(2)
-    compressed_size = sizes.get(3)
-    if (
-        uncompressed_size is None
-        or compressed_size is None
-        or uncompressed_size < 0
-        or compressed_size < 0
-    ):
-        raise ValueError("invalid_dataset_parquet_page_metadata")
-    return uncompressed_size, compressed_size
-
-
-def _read_compact_byte(stream: BinaryIO) -> int:
-    value = stream.read(1)
-    if len(value) != 1:
-        raise ValueError("invalid_dataset_parquet_page_metadata")
-    return value[0]
-
-
-def _read_compact_unsigned(stream: BinaryIO) -> int:
-    value = 0
-    for shift in range(0, 70, 7):
-        byte = _read_compact_byte(stream)
-        value |= (byte & 0x7F) << shift
-        if not byte & 0x80:
-            return value
-    raise ValueError("invalid_dataset_parquet_page_metadata")
-
-
-def _read_compact_integer(stream: BinaryIO) -> int:
-    value = _read_compact_unsigned(stream)
-    return (value >> 1) ^ -(value & 1)
-
-
-def _skip_compact_value(
-    stream: BinaryIO,
-    field_type: int,
-    *,
-    collection_value: bool = False,
-) -> None:
-    if field_type == 0:
-        raise ValueError("invalid_dataset_parquet_page_metadata")
-    if field_type in (1, 2):
-        if collection_value:
-            _read_compact_byte(stream)
-        return
-    if field_type == 3:
-        _read_compact_byte(stream)
-        return
-    if field_type in (4, 5, 6):
-        _read_compact_unsigned(stream)
-        return
-    if field_type == 7:
-        stream.seek(8, 1)
-        return
-    if field_type == 8:
-        size = _read_compact_unsigned(stream)
-        stream.seek(size, 1)
-        return
-    if field_type in (9, 10):
-        header = _read_compact_byte(stream)
-        size = header >> 4
-        element_type = header & 0x0F
-        if size == 15:
-            size = _read_compact_unsigned(stream)
-        for _ in range(size):
-            _skip_compact_value(
-                stream,
-                element_type,
-                collection_value=True,
-            )
-        return
-    if field_type == 11:
-        size = _read_compact_unsigned(stream)
-        if size:
-            types = _read_compact_byte(stream)
-            key_type = types >> 4
-            value_type = types & 0x0F
-            for _ in range(size):
-                _skip_compact_value(stream, key_type, collection_value=True)
-                _skip_compact_value(stream, value_type, collection_value=True)
-        return
-    if field_type == 12:
-        previous_field_id = 0
-        while True:
-            header = _read_compact_byte(stream)
-            nested_type = header & 0x0F
-            if nested_type == 0:
-                return
-            field_delta = header >> 4
-            previous_field_id = (
-                previous_field_id + field_delta
-                if field_delta
-                else _read_compact_integer(stream)
-            )
-            _skip_compact_value(stream, nested_type)
-    raise ValueError("invalid_dataset_parquet_page_metadata")
-
-
-def _matching_row_groups(
-    parquet_file: pq.ParquetFile,
-    filters: list[tuple[str, str, Any]] | None,
-) -> list[int]:
-    indexes = list(range(parquet_file.metadata.num_row_groups))
-    if not filters:
-        return indexes
-    positions = _top_level_parquet_leaf_positions(parquet_file, filters)
-    matching: list[int] = []
-    for row_group_index in indexes:
-        row_group = parquet_file.metadata.row_group(row_group_index)
-        if all(
-            _row_group_may_match(
-                (
-                    None
-                    if positions[column] is None
-                    else row_group.column(positions[column]).statistics
-                ),
-                operator=operator,
-                value=value,
-            )
-            for column, operator, value in filters
-        ):
-            matching.append(row_group_index)
-    return matching
-
-
-def _top_level_parquet_leaf_positions(
-    parquet_file: pq.ParquetFile,
-    filters: list[tuple[str, str, Any]],
-) -> dict[str, int | None]:
-    positions: dict[str, int | None] = {}
-    for column, _, _ in filters:
-        matches = [
-            index
-            for index in range(parquet_file.metadata.num_columns)
-            if parquet_file.schema.column(index).path == column
-        ]
-        positions[column] = matches[0] if len(matches) == 1 else None
-    return positions
-
-
-def _row_group_may_match(
-    statistics: Any,
-    *,
-    operator: str,
-    value: Any,
-) -> bool:
-    if statistics is None or not statistics.has_min_max:
-        return True
-    minimum = statistics.min
-    maximum = statistics.max
-    try:
-        if operator == ">=":
-            return maximum >= value
-        if operator == ">":
-            return maximum > value
-        if operator == "<=":
-            return minimum <= value
-        if operator == "<":
-            return minimum < value
-        if operator == "==":
-            return minimum <= value <= maximum
-    except (TypeError, ValueError):
-        return True
-    raise ValueError("unsupported_dataset_physical_filter")
-
-
-def _filter_arrow_batch(
-    batch: pa.RecordBatch,
-    filters: list[tuple[str, str, Any]] | None,
-) -> pa.RecordBatch:
-    mask: pa.Array | None = None
-    operations = {
-        ">=": pc.greater_equal,
-        ">": pc.greater,
-        "<=": pc.less_equal,
-        "<": pc.less,
-        "==": pc.equal,
-    }
-    for column, operator, value in filters or ():
-        operation = operations.get(operator)
-        if operation is None:
-            raise ValueError("unsupported_dataset_physical_filter")
-        condition = operation(batch.column(batch.schema.get_field_index(column)), value)
-        mask = condition if mask is None else pc.and_kleene(mask, condition)
-    return batch if mask is None else batch.filter(mask)
+        return value
+    raise ValueError("invalid_dataset_physical_filter_value")
 
 
 def _empty_frame(
-    context: DatasetReadContext,
+    context: DatasetSession,
     columns: tuple[str, ...],
     *,
     target_chunk_bytes: int,
 ) -> pd.DataFrame:
-    parquet_file = pq.ParquetFile(context.all_paths[0])
-    try:
-        schema = parquet_file.schema_arrow
-        selected = pa.schema([schema.field(column) for column in columns])
-        null_columns = _dataset_null_columns(context.all_paths, columns)
-        categorical_dtypes, _ = dataset_categorical_dtypes(
-            context.all_paths,
-            columns,
-            payload_target_bytes=target_chunk_bytes,
+    selected = pa.schema([context.arrow_schema.field(column) for column in columns])
+    overrides = pandas_dtype_overrides_from_logical_payload(
+        context.logical_dtypes,
+        columns=columns,
+    )
+    frame = _arrow_slice_to_pandas(
+        pa.RecordBatch.from_arrays(
+            [pa.array([], type=field.type) for field in selected],
+            schema=selected,
         )
-        overrides = _pandas_dtype_overrides(
-            selected,
-            null_columns,
-            categorical_dtypes=categorical_dtypes,
-        )
-        pandas_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
-        conversion_budget = max(1, pandas_budget // 2) if overrides else pandas_budget
-        frame = pa.Table.from_batches([], schema=selected).to_pandas(use_threads=False)
-        output = frame.astype(overrides) if overrides else frame
-        frame_bytes = pandas_frame_payload_bytes(frame)
-        output_bytes = pandas_frame_payload_bytes(output)
-        if frame_bytes > conversion_budget or (
-            output is not frame and frame_bytes + output_bytes > pandas_budget
-        ):
-            raise ValueError("dataset_row_exceeds_target_chunk_bytes")
-        return output
-    finally:
-        parquet_file.close()
-
-
-def _is_variable_width(data_type: pa.DataType) -> bool:
-    return _fixed_width_arrow_row_bytes(data_type) is None
-
-
-def _fixed_width_arrow_row_bytes(data_type: pa.DataType) -> int | None:
-    if pa.types.is_null(data_type):
-        return 1
-    if pa.types.is_boolean(data_type):
-        return 1
-    if pa.types.is_fixed_size_binary(data_type):
-        return int(data_type.byte_width)
-    if pa.types.is_decimal(data_type):
-        return max(1, int(data_type.bit_width) // 8)
-    if (
-        pa.types.is_signed_integer(data_type)
-        or pa.types.is_unsigned_integer(data_type)
-        or pa.types.is_floating(data_type)
-        or pa.types.is_date(data_type)
-        or pa.types.is_time(data_type)
-        or pa.types.is_timestamp(data_type)
-        or pa.types.is_duration(data_type)
-    ):
-        return max(1, int(data_type.bit_width) // 8)
-    return None
+    )
+    output = frame.astype(overrides) if overrides else frame
+    if pandas_frame_payload_bytes(frame) + (
+        pandas_frame_payload_bytes(output) if output is not frame else 0
+    ) > target_chunk_bytes:
+        raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+    return output
 
 
 def _arrow_batch_to_bounded_pandas(
@@ -1325,14 +577,14 @@ def _arrow_batch_to_bounded_pandas(
     *,
     target_chunk_bytes: int,
     dtype_overrides: Mapping[str, object] | None = None,
+    persisted_frame_observer: Callable[[pd.DataFrame], None] | None = None,
+    batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
 ) -> Iterator[pd.DataFrame]:
     if batch.num_rows == 0:
         return
-    pandas_budget = max(1, target_chunk_bytes // _PHYSICAL_WORKING_SET_PARTS)
+    pandas_budget = target_chunk_bytes
     overrides = dict(dtype_overrides or {})
-    conversion_budget = (
-        max(1, pandas_budget // 2) if overrides else pandas_budget
-    )
+    conversion_budget = pandas_budget
     # Arrow payload size does not predict the Pandas representation.  Probe the
     # indivisible row first, then grow only from the observed Pandas payload.
     rows_per_slice = 1
@@ -1348,6 +600,8 @@ def _arrow_batch_to_bounded_pandas(
                 raise ValueError("dataset_row_exceeds_target_chunk_bytes")
             rows_per_slice = max(1, rows_per_slice // 2)
             continue
+        if persisted_frame_observer is not None:
+            persisted_frame_observer(frame)
         output = frame.astype(overrides) if overrides else frame
         output_bytes = pandas_frame_payload_bytes(output)
         if frame_bytes + output_bytes > pandas_budget and output is not frame:
@@ -1373,6 +627,8 @@ def _arrow_batch_to_bounded_pandas(
                 del output, frame
                 rows_per_slice = calibrated_rows
                 continue
+        if batch_observer is not None:
+            batch_observer(arrow_slice, output)
         yield output
         start = stop
         if start >= batch.num_rows:

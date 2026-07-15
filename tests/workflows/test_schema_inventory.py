@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -82,8 +83,9 @@ def test_schema_inventory_uses_policy_bound_physical_batches() -> None:
 
     assert "DatasetReadMode.CHUNKED" not in source
     assert "target_chunk_bytes=resource_policy.payload_target_bytes" in source
-    assert "payload_target_bytes - sqlite_cache_bytes" not in source
-    assert "sqlite_cache_bytes=" in source
+    assert "ExactPrimaryKeyIndex" not in source
+    assert "sqlite_cache_bytes" not in source
+    assert "duplicate_primary_key_count = exact_duplicate_count" in source
 
 
 def test_schema_inventory_captures_one_policy_for_all_datasets(
@@ -135,16 +137,168 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
     ]
 
 
-def test_schema_inventory_sqlite_cache_is_fixed_and_bounded() -> None:
-    cache_bytes = 1024 * 1024
+def test_schema_inventory_reuses_session_duplicate_count() -> None:
+    source = inspect.getsource(schema_inventory._inventory_item)
 
-    assert schema_inventory._exact_key_cache_bytes(cache_bytes + 1) == cache_bytes
-    assert schema_inventory._exact_key_cache_bytes(64 * cache_bytes) == cache_bytes
+    assert "inspect_dataset_session(" in source
+    assert 'inspection.manifest["duplicate_primary_key_count"]' in source
+    assert "ExactPrimaryKeyIndex" not in source
+
+
+def test_schema_inventory_rejects_replacement_between_open_and_stats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = ProcessedDataSpec(
+        data_id="inventory_replacement",
+        market_id=MarketId("a_share"),
+        kind=ProcessedDataKind.FACTOR,
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "value": ColumnRole.FACTOR,
+        },
+        primary_key=("market_id", "asset_id", "timestamp"),
+        partition_columns=("year",),
+    )
+    current_root = (
+        tmp_path
+        / "data"
+        / "processed"
+        / "a_share"
+        / "factor"
+        / spec.data_id
+    )
+    replacement_root = (
+        tmp_path
+        / "replacement"
+        / "data"
+        / "processed"
+        / "a_share"
+        / "factor"
+        / spec.data_id
+    )
+    backup_root = current_root.with_name(current_root.name + "-before-replacement")
+
+    def frame(rows: int) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "market_id": ["a_share"] * rows,
+                "asset_id": [f"asset_{index}" for index in range(rows)],
+                "timestamp": pd.date_range("2026-01-01", periods=rows, freq="D"),
+                "value": [float(index) for index in range(rows)],
+            }
+        )
+
+    write_dataset(current_root, frame(2), spec=spec)
+    write_dataset(replacement_root, frame(3), spec=spec)
+    real_open = schema_inventory.open_dataset_session
+    real_aggregate = schema_inventory._aggregate_dataset_stats
+    open_count = 0
+
+    def record_open(root: Path, **kwargs):
+        nonlocal open_count
+        open_count += 1
+        return real_open(root, **kwargs)
+
+    def replace_before_stats(session, *args, **kwargs):  # noqa: ANN001
+        current_root.rename(backup_root)
+        replacement_root.rename(current_root)
+        return real_aggregate(session, *args, **kwargs)
+
+    monkeypatch.setattr(schema_inventory, "open_dataset_session", record_open)
+    monkeypatch.setattr(
+        schema_inventory,
+        "_aggregate_dataset_stats",
+        replace_before_stats,
+    )
+
     with pytest.raises(
         ValueError,
-        match="schema_inventory_resource_budget_too_small",
+        match="dataset_manifest_identity_changed",
     ):
-        schema_inventory._exact_key_cache_bytes(cache_bytes)
+        schema_inventory.build_schema_inventory_payload(tmp_path)
+
+    assert open_count == 1
+
+
+@pytest.mark.parametrize(
+    ("forged_summary", "error"),
+    (
+        (
+            {"row_count": 3, "partition_row_counts": {"year=2026": 3}},
+            "manifest_row_count_mismatch",
+        ),
+        (
+            {
+                "partitions": ["year=2099"],
+                "partition_row_counts": {"year=2099": 2},
+            },
+            "manifest_partition_row_counts_mismatch",
+        ),
+        (
+            {
+                "null_count_summary": {
+                    "market_id": 1,
+                    "asset_id": 0,
+                    "timestamp": 0,
+                }
+            },
+            "dataset_manifest_summary_mismatch",
+        ),
+    ),
+    ids=("row-count", "partition-summary", "observer-summary"),
+)
+def test_schema_inventory_rejects_forged_storage_summary(
+    tmp_path: Path,
+    forged_summary: dict[str, object],
+    error: str,
+) -> None:
+    spec = ProcessedDataSpec(
+        data_id="inventory_forged_summary",
+        market_id=MarketId("a_share"),
+        kind=ProcessedDataKind.FACTOR,
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "value": ColumnRole.FACTOR,
+        },
+        primary_key=("market_id", "asset_id", "timestamp"),
+        partition_columns=("year",),
+    )
+    root = (
+        tmp_path
+        / "data"
+        / "processed"
+        / "a_share"
+        / "factor"
+        / spec.data_id
+    )
+    write_dataset(
+        root,
+        pd.DataFrame(
+            {
+                "market_id": ["a_share", "a_share"],
+                "asset_id": ["asset_a", "asset_b"],
+                "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+                "value": [1.0, 2.0],
+            }
+        ),
+        spec=spec,
+    )
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(forged_summary)
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=error):
+        schema_inventory.build_schema_inventory_payload(tmp_path)
 
 
 @pytest.mark.parametrize("value", (True, 1, ""))

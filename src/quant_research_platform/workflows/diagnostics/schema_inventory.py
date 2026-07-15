@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable
-from contextlib import ExitStack
 from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -15,16 +14,16 @@ from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAY
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_reading import (
-    build_dataset_read_context,
-    iter_dataset_chunks,
+from quant_research_platform.storage._dataset_inspection import (
+    inspect_dataset_session,
 )
-from quant_research_platform.storage.datasets import inspect_dataset
+from quant_research_platform.storage._dataset_reading import (
+    DatasetSession,
+    iter_dataset_chunks,
+    open_dataset_session,
+)
 
 _INVENTORY_KEYS = frozenset({"schema_id", "datasets"})
 _INVENTORY_ITEM_KEYS = frozenset(
@@ -49,7 +48,6 @@ _INVENTORY_ITEM_KEYS = frozenset(
         "warnings",
     }
 )
-_SQLITE_CACHE_BYTES = 1024 * 1024
 _LOWER_HEX = frozenset("0123456789abcdef")
 
 
@@ -340,7 +338,16 @@ def _inventory_item(
     important_null_count_columns: frozenset[str],
     resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
-    inspection = inspect_dataset(artifact_root)
+    session = open_dataset_session(
+        artifact_root,
+        columns=None,
+        time_window=None,
+        require_consumable=False,
+    )
+    inspection = inspect_dataset_session(
+        session,
+        resource_policy=resource_policy,
+    )
     logical_root = artifact_root.relative_to(project_root).as_posix()
     spec_payload = inspection.spec
     warnings: list[str] = []
@@ -353,17 +360,16 @@ def _inventory_item(
             "primary_key_inferred" if primary_key else "primary_key_missing"
         )
     stats = _aggregate_dataset_stats(
-        artifact_root,
+        session,
         columns,
         primary_key,
         important_null_count_columns=important_null_count_columns,
         resource_policy=resource_policy,
-        exact_duplicate_count=(
-            int(inspection.manifest["duplicate_primary_key_count"])
-            if "duplicate_primary_key_count" in inspection.manifest
-            else None
+        exact_duplicate_count=int(
+            inspection.manifest["duplicate_primary_key_count"]
         ),
     )
+    session.verify()
     layer, _, kind, artifact_id = _logical_identifiers(logical_root)
     return {
         "artifact_id": artifact_id,
@@ -375,10 +381,10 @@ def _inventory_item(
         "primary_key": list(primary_key),
         "partition_columns": list(partition_columns),
         "file_count": inspection.file_count,
-        "row_count": stats["row_count"],
+        "row_count": inspection.row_count,
         "row_count_by_year": stats["row_count_by_year"],
-        "min_timestamp": stats["min_timestamp"],
-        "max_timestamp": stats["max_timestamp"],
+        "min_timestamp": inspection.date_min,
+        "max_timestamp": inspection.date_max,
         "duplicate_primary_key_count": stats["duplicate_primary_key_count"],
         "null_key_counts": stats["null_key_counts"],
         "selected_important_column_null_counts": (
@@ -395,12 +401,12 @@ def _inventory_item(
 
 
 def _aggregate_dataset_stats(
-    artifact_root: Path,
+    session: DatasetSession,
     columns: tuple[str, ...],
     primary_key: tuple[str, ...],
     *,
     important_null_count_columns: frozenset[str],
-    exact_duplicate_count: int | None,
+    exact_duplicate_count: int,
     resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
     dtypes: dict[str, str] = {}
@@ -413,86 +419,41 @@ def _aggregate_dataset_stats(
     important_null_counts = {column: 0 for column in important_columns}
     min_timestamp: pd.Timestamp | None = None
     max_timestamp: pd.Timestamp | None = None
-    duplicate_primary_key_count = (
-        0 if exact_duplicate_count is None else exact_duplicate_count
-    )
-
-    sqlite_cache_bytes = (
-        _exact_key_cache_bytes(resource_policy.task_memory_budget_bytes)
-        if exact_duplicate_count is None and primary_key
-        else 0
-    )
-    context = build_dataset_read_context(
-        artifact_root,
-        columns=None,
-        time_window=None,
-        require_consumable=False,
-    )
+    duplicate_primary_key_count = exact_duplicate_count
     chunks = iter_dataset_chunks(
-        context,
+        session,
         target_chunk_bytes=resource_policy.payload_target_bytes,
     )
-    with ExitStack() as stack:
-        key_index: ExactPrimaryKeyIndex | None = None
-        if exact_duplicate_count is None and primary_key:
-            require_free_disk_headroom(
-                artifact_root.parent,
-                reserve_bytes=resource_policy.payload_target_bytes * 2,
-            )
-            key_index = stack.enter_context(
-                ExactPrimaryKeyIndex(
-                    primary_key=primary_key,
-                    timestamp_columns=tuple(
-                        column for column in primary_key if column == "timestamp"
-                    ),
-                    scratch_parent=artifact_root.parent,
-                    sqlite_cache_bytes=sqlite_cache_bytes,
-                )
-            )
-        for frame in chunks:
-            if (
-                key_index is not None
-                and pandas_frame_payload_bytes(frame) + sqlite_cache_bytes
-                > resource_policy.task_memory_budget_bytes
-            ):
-                raise ValueError("schema_inventory_resource_budget_too_small")
-            row_count += int(len(frame))
-            for column in frame.columns:
-                dtypes.setdefault(str(column), str(frame[column].dtype))
-            if "timestamp" in frame.columns:
-                timestamps = pd.to_datetime(
-                    frame["timestamp"], errors="coerce"
-                ).dropna()
-                if not timestamps.empty:
-                    year_counts = timestamps.dt.year.astype(str).value_counts()
-                    for year, count in year_counts.items():
-                        row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
-                            count
-                        )
-                    chunk_min = timestamps.min()
-                    chunk_max = timestamps.max()
-                    min_timestamp = (
-                        chunk_min
-                        if min_timestamp is None
-                        else min(min_timestamp, chunk_min)
+    for frame in chunks:
+        row_count += int(len(frame))
+        for column in frame.columns:
+            dtypes.setdefault(str(column), str(frame[column].dtype))
+        if "timestamp" in frame.columns:
+            timestamps = pd.to_datetime(
+                frame["timestamp"], errors="coerce"
+            ).dropna()
+            if not timestamps.empty:
+                year_counts = timestamps.dt.year.astype(str).value_counts()
+                for year, count in year_counts.items():
+                    row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
+                        count
                     )
-                    max_timestamp = (
-                        chunk_max
-                        if max_timestamp is None
-                        else max(max_timestamp, chunk_max)
-                    )
-            for column in primary_key:
-                null_key_counts[column] += int(frame[column].isna().sum())
-            for column in important_columns:
-                important_null_counts[column] += int(frame[column].isna().sum())
-            if key_index is not None:
-                key_frame = frame.loc[:, list(primary_key)]
-                key_bytes = pandas_frame_payload_bytes(key_frame)
-                require_free_disk_headroom(
-                    artifact_root.parent,
-                    reserve_bytes=resource_policy.payload_target_bytes + 4 * key_bytes,
+                chunk_min = timestamps.min()
+                chunk_max = timestamps.max()
+                min_timestamp = (
+                    chunk_min
+                    if min_timestamp is None
+                    else min(min_timestamp, chunk_min)
                 )
-                duplicate_primary_key_count += key_index.add_frame(key_frame)
+                max_timestamp = (
+                    chunk_max
+                    if max_timestamp is None
+                    else max(max_timestamp, chunk_max)
+                )
+        for column in primary_key:
+            null_key_counts[column] += int(frame[column].isna().sum())
+        for column in important_columns:
+            important_null_counts[column] += int(frame[column].isna().sum())
 
     return {
         "dtypes": {column: dtypes.get(column, "") for column in columns},
@@ -506,12 +467,6 @@ def _aggregate_dataset_stats(
             sorted(important_null_counts.items())
         ),
     }
-
-
-def _exact_key_cache_bytes(task_memory_budget_bytes: int) -> int:
-    if task_memory_budget_bytes <= _SQLITE_CACHE_BYTES:
-        raise ValueError("schema_inventory_resource_budget_too_small")
-    return _SQLITE_CACHE_BYTES
 
 
 def _logical_identifiers(logical_root: str) -> tuple[str, str, str, str]:

@@ -21,16 +21,19 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     materialize_factors,
     materialize_labels,
     materialize_panel,
+    source_ids,
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage.datasets import (
-    DatasetInspection,
-    inspect_dataset,
+from quant_research_platform.storage._dataset_inspection import inspect_dataset_session
+from quant_research_platform.storage._dataset_reading import (
+    DatasetSession,
+    open_dataset_session,
 )
+from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
 processed_catalog = processed_catalog_module.processed_catalog
@@ -87,6 +90,14 @@ def _materialize_processed_data_with_policy(
     requested_by_id = {spec.data_id: spec for spec in requested}
     specs = _include_dependencies(requested_by_id)
     written: dict[str, DatasetInspection] = {}
+    panel_session: DatasetSession | None = None
+    needs_panel_session = any(
+        data_id in specs
+        for data_id in (
+            MICROSTRUCTURE_PROCESSED_DATA_ID,
+            FORWARD_RETURNS_PROCESSED_DATA_ID,
+        )
+    )
     for data_id in (
         MARKET_PANEL_DATA_ID,
         MICROSTRUCTURE_PROCESSED_DATA_ID,
@@ -105,13 +116,14 @@ def _materialize_processed_data_with_policy(
             spec.data_id not in requested_by_id
             and _processed_root(layout, spec).exists()
         ):
-            written[data_id] = _inspect_existing_dependency(
+            inspection, panel_session = _inspect_existing_dependency(
                 layout,
                 spec,
                 source_id=source_id,
                 time_window=target_time_window,
                 resource_policy=policy,
             )
+            written[data_id] = inspection
             continue
         written[data_id] = _materialize_one(
             spec,
@@ -119,7 +131,14 @@ def _materialize_processed_data_with_policy(
             source_id=source_id,
             time_window=target_time_window,
             resource_policy=policy,
+            panel_session=panel_session,
         )
+        if spec.kind is ProcessedDataKind.PANEL and needs_panel_session:
+            panel_session = open_dataset_session(
+                _processed_root(layout, spec),
+                columns=None,
+                time_window=target_time_window,
+            )
     return written
 
 
@@ -134,28 +153,41 @@ def _inspect_existing_dependency(
     source_id: SourceId,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-) -> DatasetInspection:
-    input_inspections = materialization_validation.panel_input_inspections(
-        layout=layout,
-        source_id=source_id,
-        spec=spec,
-    )
+) -> tuple[DatasetInspection, DatasetSession]:
+    bar_data_id = source_ids.market_bars_source_data_id(spec)
+    trade_data_id = source_ids.aggregate_trades_source_data_id(spec)
+    depth_data_id = source_ids.depth_levels_source_data_id(spec)
+    input_sessions = {
+        data_id: open_dataset_session(
+            layout.interim_data_root(source_id, data_id),
+            columns=None,
+            time_window=time_window,
+        )
+        for data_id in (bar_data_id, trade_data_id, depth_data_id)
+    }
     expected_input_identities = materialization_validation.input_dataset_identities(
-        input_inspections
+        input_sessions
     )
-    inspection = inspect_dataset(
-        _processed_root(layout, spec), time_window=time_window
-    )
-    materialization_validation.validate_panel_materialization(
-        inspection,
-        layout=layout,
-        source_id=source_id,
-        spec=spec,
+    panel_session = open_dataset_session(
+        _processed_root(layout, spec),
+        columns=None,
         time_window=time_window,
+    )
+    inspection = inspect_dataset_session(
+        panel_session,
+        resource_policy=resource_policy,
+    )
+    materialization_validation.validate_existing_panel_materialization(
+        panel_session,
+        bar_session=input_sessions[bar_data_id],
+        spec=spec,
         expected_input_identities=expected_input_identities,
         resource_policy=resource_policy,
     )
-    return inspection
+    panel_session.verify()
+    for session in input_sessions.values():
+        session.verify()
+    return inspection, panel_session
 
 
 def _include_dependencies(
@@ -181,6 +213,7 @@ def _materialize_one(
     source_id: SourceId,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
+    panel_session: DatasetSession | None,
 ) -> DatasetInspection:
     if spec.kind is ProcessedDataKind.PANEL:
         return materialize_panel.write_panel(
@@ -191,16 +224,22 @@ def _materialize_one(
             resource_policy=resource_policy,
         )
     if spec.kind is ProcessedDataKind.FACTOR:
+        if panel_session is None:
+            raise ValueError("missing_crypto_panel_session")
         return materialize_factors.write_factors(
             spec,
             layout=layout,
+            panel_session=panel_session,
             time_window=time_window,
             resource_policy=resource_policy,
         )
     if spec.kind is ProcessedDataKind.LABEL:
+        if panel_session is None:
+            raise ValueError("missing_crypto_panel_session")
         return materialize_labels.write_labels(
             spec,
             layout=layout,
+            panel_session=panel_session,
             time_window=time_window,
             resource_policy=resource_policy,
         )

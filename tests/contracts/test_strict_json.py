@@ -13,11 +13,76 @@ import pytest
 
 import quant_research_platform.contracts as contracts
 from quant_research_platform.contracts._json import (
+    _bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
     parse_qrp_json_object,
     render_qrp_json_object,
 )
+
+
+def test_bounded_strict_renderer_matches_existing_renderer_for_lazy_arrays() -> None:
+    categories = [
+        {"type": "str", "value": "量化"},
+        {"type": "int", "value": 1},
+        {"type": "bytes", "value": "ff"},
+    ]
+    skeleton = {
+        "schema_id": "qrp-dataset-part-logical-dtypes",
+        "columns": [
+            {
+                "name": "asset_id",
+                "kind": "categorical",
+                "ordered": False,
+                "categories": [],
+            },
+            {"name": "value", "kind": "numpy_float", "dtype": "float64"},
+        ],
+    }
+    full = {
+        **skeleton,
+        "columns": [
+            {**skeleton["columns"][0], "categories": categories},
+            skeleton["columns"][1],
+        ],
+    }
+    expected_size = len(render_qrp_json_object(full).encode("utf-8"))
+
+    assert (
+        _bounded_rendered_qrp_json_object_size(
+            skeleton,
+            lazy_arrays={("columns", 0, "categories"): iter(categories)},
+            max_bytes=expected_size,
+        )
+        == expected_size
+    )
+
+
+def test_bounded_strict_renderer_stops_before_lazy_array_tail() -> None:
+    skeleton = {"schema_id": "x", "values": []}
+    seen = 0
+
+    def values():
+        nonlocal seen
+        for index in range(10):
+            seen += 1
+            if index == 3:
+                raise AssertionError("lazy_array_tail_materialized")
+            yield {"index": index, "value": "x" * 128}
+
+    one_item_size = len(
+        render_qrp_json_object(
+            {"schema_id": "x", "values": [{"index": 0, "value": "x" * 128}]}
+        ).encode("utf-8")
+    )
+    with pytest.raises(ValueError, match="qrp_json_render_exceeds_max_bytes"):
+        _bounded_rendered_qrp_json_object_size(
+            skeleton,
+            lazy_arrays={("values",): values()},
+            max_bytes=one_item_size,
+        )
+
+    assert seen == 2
 
 
 @pytest.mark.parametrize(

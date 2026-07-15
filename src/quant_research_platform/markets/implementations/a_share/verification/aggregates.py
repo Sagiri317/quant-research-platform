@@ -50,7 +50,13 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_reading import iter_parquet_file_batches
+from quant_research_platform.storage._dataset_physical import (
+    DatasetFileIdentity,
+    dataset_file_identity,
+)
+from quant_research_platform.storage._dataset_reading import (
+    iter_declared_parquet_member_batches,
+)
 from quant_research_platform.storage.datasets import inspect_dataset
 
 PROJECT_VERSION = "0.1.0"
@@ -102,6 +108,22 @@ class AggregateInput:
     explanation_name: str
     summary_kind: str = "dataset_roots"
     years: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenOutputBundle:
+    root: Path
+    manifest_bytes: bytes
+    declared_paths: tuple[Path, ...]
+    member_identities: tuple[tuple[Path, DatasetFileIdentity], ...]
+
+    @property
+    def parquet_members(self) -> tuple[tuple[Path, DatasetFileIdentity], ...]:
+        return tuple(
+            (path, identity)
+            for path, identity in self.member_identities
+            if path.suffix.casefold() == ".parquet"
+        )
 
 
 @dataclass
@@ -826,25 +848,53 @@ def _iter_output_frames(
     target_chunk_bytes: int,
 ) -> Iterator[pd.DataFrame]:
     for root in roots:
-        for file in _validated_output_parquet_paths(root):
-            yield from iter_parquet_file_batches(
-                file,
-                target_chunk_bytes=target_chunk_bytes,
-            )
+        frozen = _freeze_output_bundle(root)
+        try:
+            for file, identity in frozen.parquet_members:
+                yield from iter_declared_parquet_member_batches(
+                    file,
+                    target_chunk_bytes=target_chunk_bytes,
+                    expected_identity=identity,
+                )
+        finally:
+            _verify_frozen_output_bundle(frozen)
 
 
-def _validated_output_parquet_paths(root: Path) -> tuple[Path, ...]:
+def _freeze_output_bundle(root: Path) -> _FrozenOutputBundle:
     bundle_root = Path(root)
     _, declared = validate_output_bundle(
         bundle_root,
         expected_output_id=bundle_root.name,
     )
-    parquet_paths = tuple(
-        path for path in declared if path.suffix.casefold() == ".parquet"
+    members = (bundle_root / "manifest.json", *declared)
+    frozen = _FrozenOutputBundle(
+        root=bundle_root,
+        manifest_bytes=(bundle_root / "manifest.json").read_bytes(),
+        declared_paths=declared,
+        member_identities=tuple(
+            (path, dataset_file_identity(path)) for path in members
+        ),
     )
-    if not parquet_paths:
+    if not frozen.parquet_members:
         raise ValueError("invalid_aggregate_output_files")
-    return parquet_paths
+    return frozen
+
+
+def _verify_frozen_output_bundle(frozen: _FrozenOutputBundle) -> None:
+    try:
+        _, declared = validate_output_bundle(
+            frozen.root,
+            expected_output_id=frozen.root.name,
+        )
+        if declared != frozen.declared_paths:
+            raise ValueError("aggregate_output_bundle_changed")
+        if (frozen.root / "manifest.json").read_bytes() != frozen.manifest_bytes:
+            raise ValueError("aggregate_output_bundle_changed")
+        for path, identity in frozen.member_identities:
+            if dataset_file_identity(path) != identity:
+                raise ValueError("aggregate_output_bundle_changed")
+    except OSError as exc:
+        raise ValueError("aggregate_output_bundle_changed") from exc
 
 
 def _summarize_dataset_root(

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import replace
 from math import ceil
 from pathlib import Path
 
@@ -31,13 +32,16 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_reading import (
-    build_dataset_read_context,
+    DatasetSession,
     iter_dataset_chunks,
-    materialize_dataset_context,
+    materialize_dataset_session,
+    open_dataset_session,
+    parquet_filters_for_time_window,
+    prune_paths_for_time_window,
 )
 from quant_research_platform.storage._dataset_schema import dataset_identity_payload
-from quant_research_platform.storage.datasets import (
-    inspect_dataset,
+from quant_research_platform.storage._dataset_writing import (
+    DatasetWriteReceipt,
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -83,27 +87,39 @@ def _assemble_research_dataset_with_policy(
     spec = dataset_catalog.get(dataset_id)
     policy = resource_policy
     _validate_research_input_specs(spec, processed_catalog)
-    input_identities = _input_dataset_identities(
+    input_sessions = _open_input_dataset_sessions(
         layout=layout,
         dataset_spec=spec,
         processed_catalog=processed_catalog,
+        time_window=time_window,
+    )
+    input_identities = _input_dataset_identities(
+        dataset_spec=spec,
+        sessions=input_sessions,
     )
     artifact_root = layout.research_dataset_root(spec.market_id, spec.data_id)
     chunks = _iter_disk_guarded_output_chunks(
         _iter_joined_processed_chunks(
-            layout=layout,
             dataset_spec=spec,
             processed_catalog=processed_catalog,
+            sessions=input_sessions,
             time_window=time_window,
             resource_policy=policy,
         ),
         scratch_parent=artifact_root.parent,
     )
+
+    def verify_input_sessions(_receipt: DatasetWriteReceipt) -> None:
+        for session in input_sessions.values():
+            session.verify()
+
     write_dataset(
         artifact_root,
         chunks,
         spec=spec,
         instance_metadata={"input_dataset_identities": input_identities},
+        staged_validator=verify_input_sessions,
+        resource_policy=policy,
     )
     return artifact_root
 
@@ -124,22 +140,16 @@ def _iter_disk_guarded_output_chunks(
 
 def _iter_joined_processed_chunks(
     *,
-    layout: StorageLayout,
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
+    sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
     policy = resource_policy
     base_data_id = _base_input_data_id(dataset_spec)
-    base_spec = processed_catalog.get(base_data_id)
-    base_root = layout.processed_data_root(
-        base_spec.market_id,
-        base_spec.kind,
-        base_spec.data_id,
-    )
     time_keys = _time_keys_from_base_input(
-        base_root,
+        sessions[base_data_id],
         primary_key=dataset_spec.primary_key,
         time_window=time_window,
         resource_policy=policy,
@@ -147,9 +157,9 @@ def _iter_joined_processed_chunks(
     if not time_keys:
         raise ValueError("no_research_dataset_sessions")
     estimated = _estimate_research_join_bytes_per_session(
-        layout=layout,
         dataset_spec=dataset_spec,
         processed_catalog=processed_catalog,
+        sessions=sessions,
         time_keys=time_keys,
         time_window=time_window,
         base_data_id=base_data_id,
@@ -171,9 +181,9 @@ def _iter_joined_processed_chunks(
 
     for chunk_window in chunk_windows:
         chunk = _join_processed_inputs(
-            layout=layout,
             dataset_spec=dataset_spec,
             processed_catalog=processed_catalog,
+            sessions=sessions,
             time_window=chunk_window,
             base_data_id=base_data_id,
             resource_policy=policy,
@@ -193,9 +203,9 @@ def _iter_joined_processed_chunks(
 
 def _join_processed_inputs(
     *,
-    layout: StorageLayout,
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
+    sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     base_data_id: str | None = None,
     resource_policy: RuntimeResourcePolicy,
@@ -209,9 +219,9 @@ def _join_processed_inputs(
     for input_data_id in ordered_input_ids:
         processed_spec = processed_catalog.get(input_data_id)
         input_frame = _read_processed_input(
-            layout=layout,
             dataset_spec=dataset_spec,
             processed_spec=processed_spec,
+            session=sessions[input_data_id],
             existing_columns=tuple(assembled.columns) if assembled is not None else (),
             time_window=time_window,
             resource_policy=resource_policy,
@@ -287,21 +297,17 @@ def _require_research_final_write_payload(
 
 
 def _time_keys_from_base_input(
-    base_root: Path,
+    base_session: DatasetSession,
     *,
     primary_key: tuple[str, ...],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> tuple[pd.Timestamp, ...]:
-    context = build_dataset_read_context(
-        base_root,
-        columns=primary_key,
-        time_window=time_window,
-    )
+    session = _research_session_view(base_session, time_window=time_window)
     timestamps: set[pd.Timestamp] = set()
     intraday = is_intraday_time_window(time_window)
     for chunk in iter_dataset_chunks(
-        context,
+        session,
         target_chunk_bytes=resource_policy.payload_target_bytes,
     ):
         for value in chunk["timestamp"].dropna().unique():
@@ -398,9 +404,9 @@ def _validate_input_key_coverage(
 
 def _read_processed_input(
     *,
-    layout: StorageLayout,
     dataset_spec: ResearchDatasetSpec,
     processed_spec: ProcessedDataSpec,
+    session: DatasetSession,
     existing_columns: tuple[str, ...],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
@@ -410,35 +416,14 @@ def _read_processed_input(
         processed_spec,
         existing_columns=existing_columns,
     )
-    data_root = layout.processed_data_root(
-        processed_spec.market_id,
-        processed_spec.kind,
-        processed_spec.data_id,
+    if tuple(columns) != session.logical_columns:
+        raise ValueError("research_input_session_columns_mismatch")
+    view = _research_session_view(session, time_window=time_window)
+    return materialize_dataset_session(
+        view,
+        target_chunk_bytes=resource_policy.payload_target_bytes,
+        materialized_budget_bytes=resource_policy.task_memory_budget_bytes,
     )
-    try:
-        context = build_dataset_read_context(
-            data_root,
-            time_window=time_window,
-            columns=tuple(columns),
-        )
-        return materialize_dataset_context(
-            context,
-            target_chunk_bytes=resource_policy.payload_target_bytes,
-            materialized_budget_bytes=resource_policy.task_memory_budget_bytes,
-        )
-    except ValueError as exc:
-        if str(exc) == "dataset_column_not_found":
-            missing_keys = [
-                column
-                for column in dataset_spec.primary_key
-                if column not in processed_spec.required_columns
-            ]
-            if missing_keys:
-                raise ValueError(
-                    f"missing_research_join_key: {processed_spec.data_id}: "
-                    + ", ".join(missing_keys)
-                ) from exc
-        raise
 
 
 def _processed_input_columns(
@@ -635,31 +620,97 @@ def _apply_feature_transforms(
 
 def _input_dataset_identities(
     *,
-    layout: StorageLayout,
     dataset_spec: ResearchDatasetSpec,
-    processed_catalog: ProcessedDataCatalog,
+    sessions: Mapping[str, DatasetSession],
 ) -> dict[str, dict[str, str]]:
     identities: dict[str, dict[str, str]] = {}
     for data_id in dataset_spec.input_data_ids:
+        session = sessions[data_id]
+        if session.spec.get("data_id") != data_id:
+            raise ValueError("invalid_research_input_dataset_identity")
+        identities[data_id] = dataset_identity_payload(
+            session.spec,
+            session.manifest,
+        )
+    return dict(sorted(identities.items()))
+
+
+def _open_input_dataset_sessions(
+    *,
+    layout: StorageLayout,
+    dataset_spec: ResearchDatasetSpec,
+    processed_catalog: ProcessedDataCatalog,
+    time_window: TimeWindow,
+) -> dict[str, DatasetSession]:
+    sessions: dict[str, DatasetSession] = {}
+    existing_columns: tuple[str, ...] = ()
+    for data_id in _ordered_input_data_ids(dataset_spec, base_data_id=None):
         processed_spec = processed_catalog.get(data_id)
+        columns = _processed_input_columns(
+            dataset_spec,
+            processed_spec,
+            existing_columns=existing_columns,
+        )
         root = layout.processed_data_root(
             processed_spec.market_id,
             processed_spec.kind,
             processed_spec.data_id,
         )
-        inspection = inspect_dataset(root)
-        identities[data_id] = dataset_identity_payload(
-            inspection.spec,
-            inspection.manifest,
-        )
-    return dict(sorted(identities.items()))
+        try:
+            session = open_dataset_session(
+                root,
+                columns=columns,
+                time_window=time_window,
+            )
+        except ValueError as exc:
+            if str(exc) == "dataset_column_not_found":
+                missing_keys = [
+                    column
+                    for column in dataset_spec.primary_key
+                    if column not in processed_spec.required_columns
+                ]
+                if missing_keys:
+                    raise ValueError(
+                        f"missing_research_join_key: {processed_spec.data_id}: "
+                        + ", ".join(missing_keys)
+                    ) from exc
+            raise
+        sessions[data_id] = session
+        existing_columns = tuple(dict.fromkeys((*existing_columns, *columns)))
+    return sessions
+
+
+def _research_session_view(
+    session: DatasetSession,
+    *,
+    time_window: TimeWindow,
+) -> DatasetSession:
+    filters = parquet_filters_for_time_window(
+        timestamp_column=session.timestamp_column,
+        time_window=time_window,
+    )
+    view = replace(
+        session,
+        read_paths=tuple(
+            prune_paths_for_time_window(
+                session.data_root,
+                session.all_paths,
+                spec=session.spec,
+                time_window=time_window,
+            )
+        ),
+        time_window=time_window,
+        parquet_filters=tuple(filters) if filters else None,
+    )
+    view.verify()
+    return view
 
 
 def _estimate_research_join_bytes_per_session(
     *,
-    layout: StorageLayout,
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
+    sessions: Mapping[str, DatasetSession],
     time_keys: tuple[pd.Timestamp, ...],
     time_window: TimeWindow,
     base_data_id: str,
@@ -678,9 +729,9 @@ def _estimate_research_join_bytes_per_session(
         strict=True,
     ):
         frame = _join_processed_inputs(
-            layout=layout,
             dataset_spec=dataset_spec,
             processed_catalog=processed_catalog,
+            sessions=sessions,
             time_window=sample_window,
             base_data_id=base_data_id,
             resource_policy=resource_policy,

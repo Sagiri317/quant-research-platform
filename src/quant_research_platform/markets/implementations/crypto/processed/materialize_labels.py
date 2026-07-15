@@ -8,19 +8,16 @@ import pandas as pd
 
 from quant_research_platform.contracts.data import (
     DataFrequency,
-    ProcessedDataKind,
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.ids import (
-    MARKET_ID,
     MARKET_PANEL_DATA_ID,
 )
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_HORIZONS,
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
-    materialization_dependencies,
     materialization_resources,
     materialization_validation,
 )
@@ -33,15 +30,15 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_reading import (
-    build_dataset_equality_group_plan,
-    build_dataset_read_context,
-    dataset_context_for_equality_group,
+    DatasetSession,
     iter_dataset_chunks,
 )
-from quant_research_platform.storage._dataset_writing import write_dataset
+from quant_research_platform.storage._dataset_writing import (
+    DatasetWriteReceipt,
+    write_dataset,
+)
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
-    inspect_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -53,42 +50,36 @@ def write_labels(
     spec: ProcessedDataSpec,
     *,
     layout: StorageLayout,
+    panel_session: DatasetSession,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
-    panel_root = layout.processed_data_root(
-        MARKET_ID,
-        ProcessedDataKind.PANEL,
-        MARKET_PANEL_DATA_ID,
-    )
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with runtime_resource_policy_scope(resource_policy):
         input_identities = materialization_validation.input_dataset_identities(
-            materialization_validation.panel_dependency_inspections(layout=layout)
+            {MARKET_PANEL_DATA_ID: panel_session}
         )
         chunks = materialization_resources.iter_disk_guarded_chunks(
             _iter_label_chunks(
                 spec,
-                panel_root=panel_root,
+                panel_session=panel_session,
                 time_window=time_window,
                 resource_policy=resource_policy,
             ),
             scratch_parent=root.parent,
         )
 
-        def validate_staged_dataset(staged_root) -> None:
-            staged_inspection = inspect_dataset(staged_root, time_window=time_window)
+        def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:
             materialization_validation.validate_panel_dependent_materialization(
-                staged_inspection,
-                layout=layout,
+                receipt,
+                panel_session=panel_session,
                 spec=spec,
                 time_window=time_window,
                 expected_input_identities=input_identities,
                 resource_policy=resource_policy,
-                scratch_parent=staged_root,
             )
-
-        write_dataset(
+            panel_session.verify()
+        return write_dataset(
             root,
             chunks,
             spec=spec,
@@ -96,13 +87,12 @@ def write_labels(
             staged_validator=validate_staged_dataset,
             resource_policy=resource_policy,
         )
-        return inspect_dataset(root, time_window=time_window)
 
 
 def _iter_label_chunks(
     spec: ProcessedDataSpec,
     *,
-    panel_root,
+    panel_session: DatasetSession,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
@@ -110,29 +100,15 @@ def _iter_label_chunks(
     buffer = pd.DataFrame()
     active_market_asset: tuple[str, str] | None = None
     order_state = materialization_validation.OrderedDependencyState()
-    read_window = materialization_dependencies.label_read_window(time_window)
-    context = build_dataset_read_context(
-        panel_root,
-        columns=None,
-        time_window=read_window,
-    )
-    group_plan = build_dataset_equality_group_plan(
-        context,
+    asset_views = materialization_validation.crypto_asset_session_views(
+        panel_session,
         columns=("market_id", "asset_id"),
         target_chunk_bytes=chunk_target_bytes,
-    )
-    materialization_validation.validate_single_asset_part_grouping(
-        group_plan,
         error="invalid_crypto_panel_physical_asset_grouping",
     )
-    for key in group_plan.keys:
-        group_context = dataset_context_for_equality_group(
-            context,
-            group_plan,
-            key,
-        )
+    for (_market_id, _asset_id), asset_session in asset_views:
         for panel in iter_dataset_chunks(
-            group_context,
+            asset_session,
             target_chunk_bytes=chunk_target_bytes,
         ):
             if panel.empty:
@@ -204,6 +180,7 @@ def _iter_label_chunks(
                 error="crypto_indivisible_reducer_unit_exceeds_payload_target",
             )
             yield finalized
+    panel_session.verify()
 
 
 def _final_label_output(

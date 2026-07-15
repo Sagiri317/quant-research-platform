@@ -157,12 +157,16 @@ def test_aggregates_output_frames_are_lazy(
 
     observed_targets: list[int] = []
 
-    def fake_iter_parquet_file_batches(  # noqa: ANN001
+    observed_identities: list[object] = []
+
+    def fake_iter_declared_parquet_member_batches(  # noqa: ANN001
         path,
         *,
         target_chunk_bytes,
+        expected_identity,
     ):
         observed_targets.append(target_chunk_bytes)
+        observed_identities.append(expected_identity)
         read_order.append(path.name)
         yield _base_frame().iloc[:1].copy()
 
@@ -171,8 +175,8 @@ def test_aggregates_output_frames_are_lazy(
 
     monkeypatch.setattr(
         aggregates,
-        "iter_parquet_file_batches",
-        fake_iter_parquet_file_batches,
+        "iter_declared_parquet_member_batches",
+        fake_iter_declared_parquet_member_batches,
         raising=False,
     )
     monkeypatch.setattr(aggregates.pd, "read_parquet", reject_full_file_read)
@@ -192,14 +196,21 @@ def test_aggregates_output_frames_are_lazy(
         next(frames)
         assert read_order == ["metrics.parquet", "grouped_label_values.parquet"]
     assert observed_targets == [policy.payload_target_bytes] * 2
+    assert all(identity is not None for identity in observed_identities)
 
 
 def test_aggregates_validate_all_members_before_selecting_parquet(tmp_path) -> None:
     root = tmp_path / "output"
     _write_valid_output_bundle(root)
+    frozen = aggregates._freeze_output_bundle(root)
 
-    assert aggregates._validated_output_parquet_paths(root) == tuple(
-        root / name for name in EVALUATION_ARTIFACTS if name.endswith(".parquet")
+    assert frozen.parquet_members == tuple(
+        (
+            root / name,
+            aggregates.dataset_file_identity(root / name),
+        )
+        for name in EVALUATION_ARTIFACTS
+        if name.endswith(".parquet")
     )
 
 

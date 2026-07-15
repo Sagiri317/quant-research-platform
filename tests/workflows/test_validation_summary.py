@@ -234,7 +234,7 @@ def test_build_validation_summary_does_not_misclassify_physical_inspection_failu
     ({}, {"market_id": 0, "asset_id": 0}),
     ids=("empty", "composite-key-member-omitted"),
 )
-def test_build_validation_summary_fails_when_primary_key_null_facts_are_missing(
+def test_build_validation_summary_rejects_forged_primary_key_null_facts(
     tmp_path: Path,
     null_count_summary: dict[str, int],
 ) -> None:
@@ -257,37 +257,29 @@ def test_build_validation_summary_fails_when_primary_key_null_facts_are_missing(
     manifests.replace_qrp_json(manifest_path, manifest)
 
     layer_summary = _layer_summary(dataset_root)
-    summary = build_validation_summary(
-        run_id="demo_run",
-        dataset_roots=(dataset_root,),
-        layer_summaries=(layer_summary,),
-        generated_text_paths=(_safe_evidence(tmp_path),),
-    )
-
-    assert summary["status"] == "FAIL"
-    assert summary["failure_codes"] == [
-        "dataset_validation_failed",
-        "primary_key_nulls",
-        "layer_validation_failed",
-    ]
-    assert summary["primary_key_null_failures"] == [
-        "workflow_pk_null_fact_demo"
-    ]
-    assert summary["dataset_manifest_completeness"]["missing"] == []
+    with pytest.raises(
+        ValueError,
+        match="validation_summary_dataset_inspection_failed",
+    ):
+        build_validation_summary(
+            run_id="demo_run",
+            dataset_roots=(dataset_root,),
+            layer_summaries=(layer_summary,),
+            generated_text_paths=(_safe_evidence(tmp_path),),
+        )
 
 
 @pytest.mark.parametrize(
-    ("field", "value", "failure_code"),
+    ("field", "value"),
     (
-        ("duplicate_primary_key_count", 1, "duplicate_primary_key"),
-        ("non_finite_count_summary", {"value": 1}, "non_finite_values"),
+        ("duplicate_primary_key_count", 1),
+        ("non_finite_count_summary", {"value": 1}),
     ),
 )
-def test_validation_summary_uses_storage_consumability_for_layer_truth(
+def test_validation_summary_rejects_forged_storage_summary(
     tmp_path: Path,
     field: str,
     value: object,
-    failure_code: str,
 ) -> None:
     dataset_root = (
         tmp_path
@@ -312,25 +304,22 @@ def test_validation_summary_uses_storage_consumability_for_layer_truth(
         dataset_roots=(dataset_root,),
     )
 
-    summary = build_validation_summary(
-        run_id="demo_run",
-        dataset_roots=(dataset_root,),
-        layer_summaries=(layer_summary,),
-        generated_text_paths=(_safe_evidence(tmp_path),),
-    )
-
     assert layer_summary["failed_dataset_validations"] == [
         "workflow_consumability_demo"
     ]
     assert layer_summary["datasets"][0]["manifest_summary"][
         "validation_status"
     ] == "FAIL"
-    assert summary["status"] == "FAIL"
-    assert summary["failure_codes"] == [
-        "dataset_validation_failed",
-        failure_code,
-        "layer_validation_failed",
-    ]
+    with pytest.raises(
+        ValueError,
+        match="validation_summary_dataset_inspection_failed",
+    ):
+        build_validation_summary(
+            run_id="demo_run",
+            dataset_roots=(dataset_root,),
+            layer_summaries=(layer_summary,),
+            generated_text_paths=(_safe_evidence(tmp_path),),
+        )
 
 
 @pytest.mark.parametrize(

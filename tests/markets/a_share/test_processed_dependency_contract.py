@@ -138,12 +138,12 @@ def test_source_input_physical_reads_use_owner_resource_policy(
 
     monkeypatch.setattr(
         materialization_io,
-        "build_dataset_read_context",
+        "open_dataset_session",
         lambda root, **_kwargs: root,
         raising=False,
     )
 
-    def fake_materialize_dataset_context(  # noqa: ANN001
+    def fake_materialize_dataset_session(  # noqa: ANN001
         context,
         *,
         target_chunk_bytes,
@@ -155,8 +155,8 @@ def test_source_input_physical_reads_use_owner_resource_policy(
 
     monkeypatch.setattr(
         materialization_io,
-        "materialize_dataset_context",
-        fake_materialize_dataset_context,
+        "materialize_dataset_session",
+        fake_materialize_dataset_session,
         raising=False,
     )
 
@@ -182,11 +182,11 @@ def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
     observed: list[tuple[int, int]] = []
     monkeypatch.setattr(
         materialization_io,
-        "build_dataset_read_context",
+        "open_dataset_session",
         lambda root, **_kwargs: root,
     )
 
-    def fake_materialize_dataset_context(  # noqa: ANN001
+    def fake_materialize_dataset_session(  # noqa: ANN001
         _context,
         *,
         target_chunk_bytes,
@@ -197,8 +197,8 @@ def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
 
     monkeypatch.setattr(
         materialization_io,
-        "materialize_dataset_context",
-        fake_materialize_dataset_context,
+        "materialize_dataset_session",
+        fake_materialize_dataset_session,
     )
 
     retained_payload_bytes = 2 * 1024**2

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import quant_research_platform.storage._dataset_fingerprinting as dataset_fingerprinting
-import quant_research_platform.storage._dataset_inspection as dataset_inspection
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -16,12 +16,8 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.storage._dataset_inspection import (
-    _inspection_runtime_metadata,
-)
 from quant_research_platform.storage._dataset_reading import (
-    DatasetReadContext,
-    build_dataset_read_context,
+    open_dataset_session,
 )
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
@@ -86,7 +82,7 @@ def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_column
     )
     full = read_dataset(root)
     window = TimeWindow("2015-01-01", "2015-01-05")
-    context = build_dataset_read_context(
+    context = open_dataset_session(
         root,
         columns=["asset_id", "value"],
         time_window=window,
@@ -243,49 +239,34 @@ def test_inspect_dataset_time_window_reports_window_scoped_counts(
     assert inspection.partition_row_counts == {"year=2015": 1}
 
 
-def test_inspection_runtime_metadata_rejects_invalid_timestamp_values(
+def test_selected_operations_ignore_unrelated_forged_full_history_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    data_root = tmp_path / "data"
-    path = data_root / "part-000.parquet"
-    context = DatasetReadContext(
-        root=tmp_path,
-        data_root=data_root,
-        spec={
-            "schema_id": "qrp-dataset-spec",
-            "primary_key": ["market_id", "asset_id", "timestamp"],
-            "column_roles": {
-                "market_id": "key",
-                "asset_id": "key",
-                "timestamp": "timestamp",
-                "value": "feature",
-            },
-        },
-        manifest={},
-        all_paths=(path,),
-        read_paths=(path,),
-        logical_columns=("market_id", "asset_id", "timestamp", "value"),
-        physical_columns=("timestamp",),
-        timestamp_column="timestamp",
-        time_window=TimeWindow("2024-01-01", "2024-01-31"),
-        schema=(("timestamp", "string"),),
-        schema_hash="hash",
-        parquet_filters=None,
+    root = make_dataset_artifact_root(tmp_path, "selected_forged_summary")
+    write_dataset(
+        root,
+        make_time_window_dataset_frame(),
+        spec=make_processed_dataset_spec("selected_forged_summary"),
     )
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["date_min"] = "1900-01-01"
+    manifest["date_max"] = "2099-12-31"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    read_paths = capture_file_batch_paths(monkeypatch)
+    window = TimeWindow("2015-01-01", "2015-12-31")
 
-    monkeypatch.setattr(
-        dataset_inspection,
-        "iter_dataset_file_batches",
-        lambda *_args, **_kwargs: iter(
-            ((path, pd.DataFrame({"timestamp": ["2024-01-02", "bad-date"]})),)
-        ),
-    )
-    with pytest.raises(ValueError, match="invalid_time_window_timestamp_value"):
-        _inspection_runtime_metadata(
-            context,
-            target_chunk_bytes=1024**2,
-        )
+    inspection = inspect_dataset(root, time_window=window)
+    fingerprint = fingerprint_dataset(root, time_window=window)
+
+    assert inspection.row_count == fingerprint.row_count == 1
+    assert inspection.date_min == inspection.date_max == "2015-01-05"
+    assert {path.parent.name for path in read_paths} == {"year=2015"}
+    session = open_dataset_session(root, columns=None, time_window=window)
+    manifest_path.write_bytes(session.manifest_bytes + b" ")
+    with pytest.raises(ValueError, match="dataset_manifest_identity_changed"):
+        session.verify()
 
 
 def test_fingerprint_dataset_time_window_hashes_window_only(tmp_path: Path) -> None:

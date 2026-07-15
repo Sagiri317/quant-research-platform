@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 import struct
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, NoReturn
@@ -56,6 +56,108 @@ def render_qrp_json_object(value: Mapping[str, Any]) -> str:
         sort_keys=True,
         allow_nan=False,
     )
+
+
+def _bounded_rendered_qrp_json_object_size(
+    value: Mapping[str, Any],
+    *,
+    lazy_arrays: Mapping[tuple[str | int, ...], Iterable[object]],
+    max_bytes: int,
+) -> int:
+    """Count exact rendered UTF-8 bytes without materializing declared arrays."""
+
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("qrp_json_max_bytes_invalid")
+    payload = _json_native_object(value)
+    arrays = dict(lazy_arrays)
+    for path in arrays:
+        if type(path) is not tuple or not path:
+            raise ValueError("qrp_json_lazy_array_path_invalid")
+        current: object = payload
+        for component in path:
+            if type(current) is dict and type(component) is str:
+                if component not in current:
+                    raise ValueError("qrp_json_lazy_array_path_invalid")
+                current = current[component]
+            elif type(current) is list and type(component) is int:
+                if component < 0 or component >= len(current):
+                    raise ValueError("qrp_json_lazy_array_path_invalid")
+                current = current[component]
+            else:
+                raise ValueError("qrp_json_lazy_array_path_invalid")
+        if type(current) is not list:
+            raise ValueError("qrp_json_lazy_array_path_invalid")
+
+    lazy_values: list[_LazyJsonArray] = []
+    for path, source in arrays.items():
+        parent: object = payload
+        for component in path[:-1]:
+            parent = parent[component]  # type: ignore[index]
+        lazy_value = _LazyJsonArray(
+            source,
+            depth=len(path) + 1,
+        )
+        lazy_values.append(lazy_value)
+        parent[path[-1]] = lazy_value  # type: ignore[index]
+
+    encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    )
+    total = 0
+    try:
+        for chunk in encoder.iterencode(payload):
+            total += len(chunk.encode("utf-8"))
+            if total > max_bytes:
+                raise ValueError("qrp_json_render_exceeds_max_bytes")
+        return total
+    finally:
+        for lazy_value in lazy_values:
+            lazy_value.close()
+
+
+class _LazyJsonArray(list[Any]):
+    """One-pass list protocol for the stdlib encoder's existing array codec."""
+
+    def __init__(self, source: Iterable[object], *, depth: int) -> None:
+        super().__init__()
+        self._source = iter(source)
+        self._depth = depth
+        self._first: object | None = None
+        self._has_first: bool | None = None
+        self._iterated = False
+
+    def __len__(self) -> int:
+        self._prime()
+        return 1 if self._has_first else 0
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        if self._iterated:
+            raise RuntimeError("qrp_json_lazy_array_reused")
+        self._iterated = True
+        self._prime()
+        if not self._has_first:
+            return
+        yield _json_native_value(self._first, active=set(), depth=self._depth)
+        for item in self._source:
+            yield _json_native_value(item, active=set(), depth=self._depth)
+
+    def _prime(self) -> None:
+        if self._has_first is not None:
+            return
+        try:
+            self._first = next(self._source)
+        except StopIteration:
+            self._has_first = False
+        else:
+            self._has_first = True
+
+    def close(self) -> None:
+        close = getattr(self._source, "close", None)
+        if close is not None:
+            close()
 
 
 def canonical_json_hash(value: object) -> str:

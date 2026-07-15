@@ -20,9 +20,8 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_reading import (
-    build_dataset_read_context,
-    dataset_categorical_dtypes,
     iter_dataset_file_batches,
+    open_dataset_session,
     read_columns_for_time_window,
 )
 from quant_research_platform.storage._dataset_types import DatasetFingerprint
@@ -35,7 +34,7 @@ def fingerprint_dataset(
     time_window: TimeWindow | None = None,
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetFingerprint:
-    context = build_dataset_read_context(
+    context = open_dataset_session(
         dataset_root,
         columns=columns,
         time_window=time_window,
@@ -49,11 +48,6 @@ def fingerprint_dataset(
         time_window=context.time_window,
     )
     output_columns = tuple(context.logical_columns)
-    categorical_dtypes, categorical_payload_bytes = dataset_categorical_dtypes(
-        context.all_paths,
-        hash_physical_columns,
-        payload_target_bytes=payload_target_bytes,
-    )
     row_count = 0
     row_hash_sum = 0
     row_hash_xor = 0
@@ -66,8 +60,6 @@ def fingerprint_dataset(
         context,
         columns=hash_physical_columns,
         target_chunk_bytes=payload_target_bytes,
-        categorical_dtypes=categorical_dtypes,
-        categorical_payload_bytes=categorical_payload_bytes,
     ):
         chunk = chunk.loc[:, list(hash_columns)]
         if chunk.empty:

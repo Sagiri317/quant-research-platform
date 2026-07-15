@@ -8,7 +8,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pandas as pd
-import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -207,11 +206,6 @@ def candidate_data_files(
         raise ValueError("unsupported_partitioning")
     unpartitioned = _validated_part_paths(root)
     if unpartitioned:
-        if any(
-            int(pq.ParquetFile(path).metadata.num_rows) != 0
-            for path in unpartitioned
-        ):
-            raise ValueError("invalid_dataset_part_files")
         _require_only_expected_parquet_paths(root, unpartitioned)
         return unpartitioned
     year_directories: list[tuple[int, Path]] = []

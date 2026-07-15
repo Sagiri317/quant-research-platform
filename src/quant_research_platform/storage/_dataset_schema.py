@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import date
-from pathlib import Path
+import math
+from collections.abc import Callable, Iterable, Mapping
+from datetime import date, datetime
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from quant_research_platform.contracts._json import (
+    _bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
+    parse_qrp_json_object,
     render_qrp_json_object,
 )
 from quant_research_platform.contracts.columns import ColumnRole
@@ -67,6 +70,8 @@ _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
         "columns",
         "physical_schema",
         "schema_hash",
+        "logical_dtypes",
+        "logical_dtype_hash",
         "partition_row_counts",
         "partition_count",
         "partitions",
@@ -129,6 +134,8 @@ _DATASET_MANIFEST_RUNTIME_KEYS = frozenset(
         "columns",
         "physical_schema",
         "schema_hash",
+        "logical_dtypes",
+        "logical_dtype_hash",
         "partition_row_counts",
         "partition_count",
         "partitions",
@@ -464,37 +471,440 @@ def _require_runtime_string_tuple(
     return value
 
 
-def validated_physical_schema(paths: list[Path]) -> list[dict[str, Any]]:
-    if not paths:
-        raise ValueError("dataset_data_dir_missing")
-    first: list[dict[str, Any]] | None = None
-    for path in paths:
-        parquet_file = pq.ParquetFile(path)
-        try:
-            current = physical_schema_from_file(parquet_file)
-            if first is None:
-                first = current
-            elif current != first:
-                raise ValueError("dataset_schema_mismatch")
-        finally:
-            parquet_file.close()
-    if first is None:
-        raise AssertionError("validated_physical_schema_requires_paths")
-    return first
-
-
-def physical_schema_from_file(
-    parquet_file: pq.ParquetFile,
-) -> list[dict[str, Any]]:
-    return physical_schema_from_schema(parquet_file.schema_arrow)
-
-
 def physical_schema_from_schema(schema: pa.Schema) -> list[dict[str, Any]]:
     if not isinstance(schema, pa.Schema):
         raise TypeError("dataset_arrow_schema_required")
     payload = [_physical_field_payload(field) for field in schema]
     validate_physical_schema_payload(payload)
     return payload
+
+
+def logical_dtype_payload_from_frame(
+    frame: pd.DataFrame,
+    *,
+    columns: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("dataset_frame_required")
+    selected = (
+        tuple(str(column) for column in frame.columns)
+        if columns is None
+        else columns
+    )
+    if any(column not in frame for column in selected):
+        raise ValueError("dataset_column_not_found")
+    return {
+        "schema_id": "qrp-dataset-part-logical-dtypes",
+        "columns": [
+            _logical_dtype_descriptor(str(column), frame[column])
+            for column in selected
+        ],
+    }
+
+
+def logical_dtype_metadata_bytes(payload: Mapping[str, Any]) -> bytes:
+    validated = validate_logical_dtype_payload(payload)
+    return (render_qrp_json_object(validated) + "\n").encode("utf-8")
+
+
+def require_logical_dtype_metadata_within_target(
+    payload: Mapping[str, Any],
+    *,
+    category_payloads: Callable[[Mapping[str, Any]], Iterable[Mapping[str, Any]]],
+    target_chunk_bytes: int,
+) -> int:
+    """Require exact bounded metadata bytes while category arrays remain lazy."""
+
+    if type(target_chunk_bytes) is not int or target_chunk_bytes <= 0:
+        raise ValueError("invalid_target_chunk_bytes")
+    validated = validate_logical_dtype_payload(payload)
+    skeleton = {
+        "schema_id": validated["schema_id"],
+        "columns": [
+            {
+                **descriptor,
+                **({"categories": []} if descriptor["kind"] == "categorical" else {}),
+            }
+            for descriptor in validated["columns"]
+        ],
+    }
+    lazy_arrays = {
+        ("columns", index, "categories"): _validated_category_payloads(
+            category_payloads(descriptor),
+            target_chunk_bytes=target_chunk_bytes,
+        )
+        for index, descriptor in enumerate(validated["columns"])
+        if descriptor["kind"] == "categorical"
+    }
+    try:
+        rendered_size = _bounded_rendered_qrp_json_object_size(
+            skeleton,
+            lazy_arrays=lazy_arrays,
+            max_bytes=target_chunk_bytes - 1,
+        )
+    except ValueError as exc:
+        if str(exc) == "qrp_json_render_exceeds_max_bytes":
+            raise ValueError(
+                "dataset_logical_dtype_metadata_exceeds_payload_target"
+            ) from None
+        raise
+    return rendered_size + 1
+
+
+def require_frame_logical_dtype_metadata_within_target(
+    frame: pd.DataFrame,
+    *,
+    columns: tuple[str, ...],
+    target_chunk_bytes: int,
+) -> int:
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("dataset_frame_required")
+    descriptors: list[dict[str, Any]] = []
+    for column in columns:
+        if column not in frame:
+            raise ValueError("dataset_column_not_found")
+        series = frame[column]
+        dtype = series.dtype
+        if isinstance(dtype, pd.CategoricalDtype):
+            descriptors.append(
+                {
+                    "name": column,
+                    "kind": "categorical",
+                    "ordered": bool(dtype.ordered),
+                    "categories": [],
+                }
+            )
+        else:
+            descriptors.append(_logical_dtype_descriptor(column, series))
+    payload = {
+        "schema_id": "qrp-dataset-part-logical-dtypes",
+        "columns": descriptors,
+    }
+
+    def category_values(
+        descriptor: Mapping[str, Any],
+    ) -> Iterable[Mapping[str, Any]]:
+        dtype = frame[str(descriptor["name"])].dtype
+        if not isinstance(dtype, pd.CategoricalDtype):
+            raise ValueError("dataset_logical_dtypes_invalid")
+        return (
+            _typed_category_value_payload(value) for value in dtype.categories
+        )
+
+    return require_logical_dtype_metadata_within_target(
+        payload,
+        category_payloads=category_values,
+        target_chunk_bytes=target_chunk_bytes,
+    )
+
+
+def _validated_category_payloads(
+    payloads: Iterable[Mapping[str, Any]],
+    *,
+    target_chunk_bytes: int,
+) -> Iterable[Mapping[str, Any]]:
+    for payload in payloads:
+        try:
+            canonical = _typed_category_value_payload(
+                _typed_category_value(payload)
+            )
+            matches = canonical_identity_bytes(canonical) == canonical_identity_bytes(
+                payload
+            )
+        except (TypeError, ValueError, OverflowError):
+            matches = False
+        if not matches:
+            raise ValueError("dataset_logical_dtypes_invalid")
+        _encoded_logical_category_value(
+            canonical,
+            target_chunk_bytes=target_chunk_bytes,
+        )
+        yield canonical
+
+
+def _encoded_logical_category_value(
+    value: Mapping[str, Any],
+    *,
+    target_chunk_bytes: int,
+) -> tuple[bytes, bytes]:
+    identity = canonical_identity_bytes(value)
+    rendered = (
+        render_qrp_json_object(
+            {
+                "schema_id": "qrp-category-value",
+                "value": value,
+            }
+        )
+        + "\n"
+    ).encode("utf-8")
+    if max(len(identity), len(rendered)) > target_chunk_bytes:
+        raise ValueError("dataset_categorical_value_exceeds_payload_target")
+    return identity, rendered
+
+
+def parse_logical_dtype_metadata(raw: bytes) -> dict[str, Any]:
+    try:
+        payload = parse_qrp_json_object(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("dataset_logical_dtypes_invalid") from exc
+    return validate_logical_dtype_payload(payload)
+
+
+def validate_logical_dtype_payload(value: object) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != {"schema_id", "columns"}:
+        raise ValueError("dataset_logical_dtypes_invalid")
+    if value.get("schema_id") != "qrp-dataset-part-logical-dtypes":
+        raise ValueError("dataset_logical_dtypes_invalid")
+    columns = value.get("columns")
+    if type(columns) is not list or not columns:
+        raise ValueError("dataset_logical_dtypes_invalid")
+    names: list[str] = []
+    for descriptor in columns:
+        if type(descriptor) is not dict:
+            raise ValueError("dataset_logical_dtypes_invalid")
+        name = descriptor.get("name")
+        kind = descriptor.get("kind")
+        if type(name) is not str or not name or type(kind) is not str or not kind:
+            raise ValueError("dataset_logical_dtypes_invalid")
+        names.append(name)
+        if kind == "categorical":
+            if set(descriptor) != {"name", "kind", "ordered", "categories"}:
+                raise ValueError("dataset_logical_dtypes_invalid")
+            if type(descriptor["ordered"]) is not bool:
+                raise ValueError("dataset_logical_dtypes_invalid")
+            categories = descriptor["categories"]
+            if type(categories) is not list:
+                raise ValueError("dataset_logical_dtypes_invalid")
+            identities = [_typed_category_identity(item) for item in categories]
+            if len(identities) != len(set(identities)):
+                raise ValueError("dataset_logical_dtypes_invalid")
+        elif set(descriptor) != {"name", "kind", "dtype"}:
+            raise ValueError("dataset_logical_dtypes_invalid")
+        elif type(descriptor["dtype"]) is not str or not descriptor["dtype"]:
+            raise ValueError("dataset_logical_dtypes_invalid")
+        try:
+            canonical = _canonical_logical_dtype_descriptor(descriptor)
+            is_canonical = canonical_identity_bytes(
+                canonical
+            ) == canonical_identity_bytes(descriptor)
+        except (TypeError, ValueError, OverflowError):
+            is_canonical = False
+        if not is_canonical:
+            raise ValueError("dataset_logical_dtypes_invalid")
+    if len(names) != len(set(names)):
+        raise ValueError("dataset_logical_dtypes_invalid")
+    return {
+        "schema_id": value["schema_id"],
+        "columns": [dict(item) for item in columns],
+    }
+
+
+def _canonical_logical_dtype_descriptor(
+    descriptor: Mapping[str, Any],
+) -> dict[str, Any]:
+    name = descriptor["name"]
+    if descriptor["kind"] == "categorical":
+        dtype: object = pd.CategoricalDtype(
+            categories=[
+                _typed_category_value(item) for item in descriptor["categories"]
+            ],
+            ordered=descriptor["ordered"],
+        )
+    else:
+        dtype = descriptor["dtype"]
+    return _logical_dtype_descriptor(name, pd.Series([], dtype=dtype))
+
+
+def merge_logical_dtype_payloads(
+    payloads: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if not payloads:
+        raise ValueError("dataset_logical_dtypes_missing")
+    validated = [validate_logical_dtype_payload(payload) for payload in payloads]
+    first = validated[0]
+    names = tuple(item["name"] for item in first["columns"])
+    merged = [dict(item) for item in first["columns"]]
+    for payload in validated[1:]:
+        if tuple(item["name"] for item in payload["columns"]) != names:
+            raise ValueError("dataset_logical_dtype_mismatch")
+        for index, current in enumerate(payload["columns"]):
+            expected = merged[index]
+            if current["kind"] != expected["kind"]:
+                promoted = _promote_compatible_logical_dtype(expected, current)
+                if promoted is None:
+                    raise ValueError("dataset_logical_dtype_mismatch")
+                merged[index] = promoted
+                continue
+            if current["kind"] != "categorical":
+                if current != expected:
+                    raise ValueError("dataset_logical_dtype_mismatch")
+                continue
+            if current["ordered"] != expected["ordered"]:
+                raise ValueError("dataset_logical_dtype_mismatch")
+            if current["ordered"]:
+                if current["categories"] != expected["categories"]:
+                    raise ValueError("dataset_ordered_categorical_mismatch")
+                continue
+            domains = {
+                _typed_category_identity(item): item
+                for item in [*expected["categories"], *current["categories"]]
+            }
+            expected["categories"] = [domains[key] for key in sorted(domains)]
+    return {"schema_id": first["schema_id"], "columns": merged}
+
+
+def _promote_compatible_logical_dtype(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    kinds = {left["kind"], right["kind"]}
+    if kinds == {"numpy_integer", "nullable_integer"}:
+        numpy_descriptor = left if left["kind"] == "numpy_integer" else right
+        nullable_descriptor = left if left["kind"] == "nullable_integer" else right
+        if nullable_descriptor["dtype"].lower() == numpy_descriptor["dtype"]:
+            return dict(nullable_descriptor)
+    if kinds == {"numpy_boolean", "nullable_boolean"}:
+        nullable_descriptor = left if left["kind"] == "nullable_boolean" else right
+        return dict(nullable_descriptor)
+    return None
+
+
+def pandas_dtype_overrides_from_logical_payload(
+    payload: Mapping[str, Any],
+    *,
+    columns: tuple[str, ...],
+) -> dict[str, object]:
+    validated = validate_logical_dtype_payload(payload)
+    selected = set(columns)
+    result: dict[str, object] = {}
+    for descriptor in validated["columns"]:
+        name = descriptor["name"]
+        if name not in selected:
+            continue
+        kind = descriptor["kind"]
+        if kind == "categorical":
+            result[name] = pd.CategoricalDtype(
+                categories=[
+                    _typed_category_value(item) for item in descriptor["categories"]
+                ],
+                ordered=bool(descriptor["ordered"]),
+            )
+        elif kind in {"nullable_integer", "nullable_boolean", "string"}:
+            result[name] = descriptor["dtype"]
+    return result
+
+
+def _logical_dtype_descriptor(name: str, series: pd.Series) -> dict[str, Any]:
+    dtype = series.dtype
+    if isinstance(dtype, pd.CategoricalDtype):
+        return {
+            "name": name,
+            "kind": "categorical",
+            "ordered": bool(dtype.ordered),
+            "categories": [
+                _typed_category_value_payload(item) for item in dtype.categories
+            ],
+        }
+    dtype_name = str(dtype)
+    if isinstance(dtype, pd.StringDtype):
+        kind = "string"
+    elif isinstance(dtype, pd.BooleanDtype):
+        kind = "nullable_boolean"
+    elif isinstance(dtype, pd.api.extensions.ExtensionDtype) and dtype_name.startswith(
+        ("Int", "UInt")
+    ):
+        kind = "nullable_integer"
+    elif pd.api.types.is_integer_dtype(dtype):
+        kind = "numpy_integer"
+    elif pd.api.types.is_bool_dtype(dtype):
+        kind = "numpy_boolean"
+    elif pd.api.types.is_float_dtype(dtype):
+        kind = "numpy_float"
+    elif pd.api.types.is_datetime64_any_dtype(dtype):
+        kind = "datetime"
+    elif pd.api.types.is_timedelta64_dtype(dtype):
+        kind = "timedelta"
+    elif pd.api.types.is_object_dtype(dtype):
+        kind = "object"
+    else:
+        raise ValueError("unsupported_dataset_logical_dtype")
+    return {"name": name, "kind": kind, "dtype": dtype_name}
+
+
+def _typed_category_value_payload(value: object) -> dict[str, Any]:
+    if isinstance(value, np.generic):
+        return _typed_category_value_payload(value.item())
+    if type(value) is bool:
+        return {"type": "bool", "value": value}
+    if type(value) is int:
+        return {"type": "int", "value": value}
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("dataset_categorical_value_invalid")
+        return {"type": "float", "value": value}
+    if type(value) is str:
+        return {"type": "str", "value": value}
+    if type(value) is bytes:
+        return {"type": "bytes", "value": value.hex()}
+    if type(value) is Decimal:
+        if not value.is_finite():
+            raise ValueError("dataset_categorical_value_invalid")
+        if value.is_zero():
+            value = Decimal(0)
+        return {"type": "decimal", "value": format(value, "f")}
+    if type(value) is date and type(value) is not datetime:
+        return {"type": "date", "value": value.isoformat()}
+    if isinstance(value, (pd.Timestamp, datetime)):
+        timestamp = pd.Timestamp(value)
+        if pd.isna(timestamp):
+            raise ValueError("dataset_categorical_value_invalid")
+        return {"type": "timestamp", "value": timestamp.isoformat()}
+    raise ValueError("dataset_categorical_value_invalid")
+
+
+def _typed_category_identity(value: object) -> bytes:
+    if type(value) is not dict or set(value) != {"type", "value"}:
+        raise ValueError("dataset_logical_dtypes_invalid")
+    _typed_category_value(value)
+    return canonical_identity_bytes(value)
+
+
+def _typed_category_value(value: Mapping[str, Any]) -> object:
+    kind = value.get("type")
+    payload = value.get("value")
+    if kind == "bool" and type(payload) is bool:
+        return payload
+    if kind == "int" and type(payload) is int:
+        return payload
+    if kind == "float" and type(payload) is float and pd.notna(payload):
+        return payload
+    if kind == "str" and type(payload) is str:
+        return payload
+    if kind == "bytes" and type(payload) is str:
+        try:
+            return bytes.fromhex(payload)
+        except ValueError as exc:
+            raise ValueError("dataset_logical_dtypes_invalid") from exc
+    if kind == "decimal" and type(payload) is str:
+        try:
+            result = Decimal(payload)
+        except ValueError as exc:
+            raise ValueError("dataset_logical_dtypes_invalid") from exc
+        if result.is_finite():
+            return result
+    if kind == "date" and type(payload) is str:
+        try:
+            return date.fromisoformat(payload)
+        except ValueError as exc:
+            raise ValueError("dataset_logical_dtypes_invalid") from exc
+    if kind == "timestamp" and type(payload) is str:
+        try:
+            result = pd.Timestamp(payload)
+        except ValueError as exc:
+            raise ValueError("dataset_logical_dtypes_invalid") from exc
+        if not pd.isna(result):
+            return result
+    raise ValueError("dataset_logical_dtypes_invalid")
 
 
 def physical_schema_columns(schema: object) -> tuple[str, ...]:
@@ -530,8 +940,6 @@ def _physical_type_payload(data_type: pa.DataType) -> dict[str, Any]:
         }
     if pa.types.is_date32(data_type):
         return {"kind": "date", "unit": "day"}
-    if pa.types.is_date64(data_type):
-        return {"kind": "date", "unit": "millisecond"}
     if pa.types.is_time32(data_type) or pa.types.is_time64(data_type):
         return {"kind": "time", "unit": data_type.unit}
     if pa.types.is_timestamp(data_type):
@@ -876,6 +1284,17 @@ def validate_dataset_manifest_payload(
     )
     if canonical_json_hash(physical_schema) != schema_hash:
         raise ValueError("manifest_schema_hash_mismatch")
+    logical_dtypes = validate_logical_dtype_payload(
+        manifest.get("logical_dtypes")
+    )
+    if [item["name"] for item in logical_dtypes["columns"]] != columns:
+        raise ValueError("manifest_logical_dtypes_mismatch")
+    logical_dtype_hash = _require_hash(
+        manifest.get("logical_dtype_hash"),
+        "manifest_logical_dtype_hash_invalid",
+    )
+    if canonical_json_hash(logical_dtypes) != logical_dtype_hash:
+        raise ValueError("manifest_logical_dtype_hash_mismatch")
 
     partitions = _require_string_list(
         manifest.get("partitions"), "manifest_partitions_invalid", allow_empty=False
