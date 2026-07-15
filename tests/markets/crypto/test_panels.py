@@ -40,10 +40,7 @@ def compute_market_panel(
         prepared,
         trade_chunks=(trades,),
         depth_chunks=(ordered_depth,),
-        trade_state_bytes=test_budget,
-        trade_output_bytes=test_budget,
-        depth_state_bytes=test_budget,
-        depth_output_bytes=test_budget,
+        payload_target_bytes=test_budget,
         max_quote_age=max_quote_age,
     )
 
@@ -95,10 +92,7 @@ def test_panel_releases_trade_reducer_state_before_depth_reduction(
         pd.DataFrame({"market_id": ["crypto"]}),
         trade_chunks=(),
         depth_chunks=(),
-        trade_state_bytes=1,
-        trade_output_bytes=1,
-        depth_state_bytes=1,
-        depth_output_bytes=1,
+        payload_target_bytes=1,
     )
 
     assert output["market_id"].tolist() == ["crypto"]
@@ -482,8 +476,7 @@ def test_depth_reducer_merges_snapshot_across_chunks() -> None:
     depth = _ordered_depth_levels_frame()
     reducer = module.DepthSnapshotReducer(
         bars=panels.prepare_panel_bars(_bars_frame()),
-        target_state_bytes=16 * 1024,
-        target_output_bytes=16 * 1024,
+        payload_target_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
     )
 
@@ -512,8 +505,7 @@ def test_depth_reducer_rejects_out_of_order_across_chunks() -> None:
     depth = _ordered_depth_levels_frame()
     reducer = module.DepthSnapshotReducer(
         bars=panels.prepare_panel_bars(_bars_frame()),
-        target_state_bytes=16 * 1024,
-        target_output_bytes=16 * 1024,
+        payload_target_bytes=16 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
     )
 
@@ -539,58 +531,8 @@ def test_market_panel_rejects_out_of_order_depth_independent_of_chunking(
             panels.prepare_panel_bars(_bars_frame()),
             trade_chunks=(),
             depth_chunks=depth_chunks,
-            trade_state_bytes=16 * 1024,
-            trade_output_bytes=16 * 1024,
-            depth_state_bytes=16 * 1024,
-            depth_output_bytes=16 * 1024,
+            payload_target_bytes=16 * 1024,
         )
-
-
-def test_depth_reducer_fails_when_one_snapshot_exceeds_state_budget() -> None:
-    module = _panel_input_reducers_module()
-    levels = 32
-    depth = pd.DataFrame(
-        {
-            "source_asset_id": ["BTCUSDT"] * levels,
-            "timestamp": [pd.Timestamp("2026-07-06 00:00:58")] * levels,
-            "side": ["ask"] * levels,
-            "level": range(1, levels + 1),
-            "price": [100.2 + index / 100 for index in range(levels)],
-            "quantity": [1.0] * levels,
-            "source_market_type": ["spot"] * levels,
-        }
-    )
-    reducer = module.DepthSnapshotReducer(
-        bars=panels.prepare_panel_bars(_bars_frame()),
-        target_state_bytes=2 * 1024,
-        target_output_bytes=16 * 1024,
-        normalize_chunk=panels.normalize_depth_chunk,
-    )
-
-    with pytest.raises(ValueError, match="crypto_depth_state_exceeds_resource_budget"):
-        reducer.add_chunk(depth)
-
-
-def test_depth_candidate_budget_counts_mapping_keys() -> None:
-    module = _panel_input_reducers_module()
-    key = ("btc_usdt", pd.Timestamp("2026-07-06 00:00:58"))
-    snapshot = {
-        "asset_id": "btc_usdt",
-        "quote_timestamp": pd.Timestamp("2026-07-06 00:00:58"),
-        "best_bid": 100.0,
-        "best_ask": 100.2,
-        "bid_quantity": 1.5,
-        "ask_quantity": 1.0,
-        "bid_depth": 1.5,
-        "ask_depth": 1.0,
-    }
-    observed: set[int] = set()
-    expected = module._deep_size(key, observed) + module._deep_size(
-        snapshot,
-        observed,
-    )
-
-    assert module._candidate_entry_budget_bytes(key, snapshot) == expected
 
 
 def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
@@ -614,8 +556,7 @@ def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
     )
     reducer = module.DepthSnapshotReducer(
         bars=panels.prepare_panel_bars(_bars_frame()),
-        target_state_bytes=64 * 1024,
-        target_output_bytes=64 * 1024,
+        payload_target_bytes=64 * 1024,
         normalize_chunk=panels.normalize_depth_chunk,
     )
 
@@ -662,8 +603,7 @@ def test_trade_aggregate_state_reduces_dense_chunks_incrementally() -> None:
     )
     reducer = module.AggregateTradeReducer(
         bars=panels.prepare_panel_bars(bars),
-        target_state_bytes=64 * 1024,
-        target_output_bytes=64 * 1024,
+        payload_target_bytes=64 * 1024,
         normalize_chunk=panels.normalize_trade_chunk,
     )
 
@@ -685,8 +625,7 @@ def test_trade_reducer_checks_range_continuity_across_chunks() -> None:
     trades = _aggregate_trades_frame(first_trade_ids=(10, 12), last_trade_ids=(10, 12))
     reducer = module.AggregateTradeReducer(
         bars=panels.prepare_panel_bars(bars),
-        target_state_bytes=16 * 1024,
-        target_output_bytes=16 * 1024,
+        payload_target_bytes=16 * 1024,
         normalize_chunk=panels.normalize_trade_chunk,
     )
 
@@ -710,8 +649,7 @@ def test_trade_reducer_checks_range_continuity_across_bar_reducers() -> None:
     )
     first = module.AggregateTradeReducer(
         bars=panels.prepare_panel_bars(bars.iloc[:1].copy()),
-        target_state_bytes=16 * 1024,
-        target_output_bytes=16 * 1024,
+        payload_target_bytes=16 * 1024,
         normalize_chunk=panels.normalize_trade_chunk,
         continuity_state=continuity,
     )
@@ -723,251 +661,13 @@ def test_trade_reducer_checks_range_continuity_across_bar_reducers() -> None:
     second_bars["close_time"] = pd.Timestamp("2026-07-06 00:01:59.999")
     second = module.AggregateTradeReducer(
         bars=panels.prepare_panel_bars(second_bars),
-        target_state_bytes=16 * 1024,
-        target_output_bytes=16 * 1024,
+        payload_target_bytes=16 * 1024,
         normalize_chunk=panels.normalize_trade_chunk,
         continuity_state=continuity,
     )
 
     with pytest.raises(ValueError, match="invalid_crypto_trade_flow_coverage"):
         second.add_chunk(trades.iloc[1:].copy())
-
-
-def test_trade_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> None:
-    module = _panel_input_reducers_module()
-    reducer = module.AggregateTradeReducer(
-        bars=panels.prepare_panel_bars(_bars_frame()),
-        target_state_bytes=16 * 1024,
-        target_output_bytes=512,
-        normalize_chunk=panels.normalize_trade_chunk,
-    )
-    reducer.add_chunk(_aggregate_trades_frame().iloc[:1].copy())
-
-    with pytest.raises(ValueError, match="crypto_trade_output_exceeds_resource_budget"):
-        reducer.finish()
-
-
-def test_trade_reducer_finish_preflights_sorted_key_state() -> None:
-    module = _panel_input_reducers_module()
-    reducer = module.AggregateTradeReducer(
-        bars=panels.prepare_panel_bars(_bars_frame()),
-        target_state_bytes=16 * 1024,
-        target_output_bytes=16 * 1024,
-        normalize_chunk=panels.normalize_trade_chunk,
-    )
-    reducer.add_chunk(_aggregate_trades_frame().iloc[:1].copy())
-    reducer._target_state_bytes = (
-        reducer._target_keys_bytes
-        + reducer._state_entries_bytes
-        + module._deep_size(
-            (
-                reducer._continuity_state.last_order_key,
-                reducer._continuity_state.active_source_asset_id,
-                reducer._continuity_state.last_aggregate_trade_id,
-                reducer._continuity_state.last_underlying_trade_id,
-            )
-        )
-    )
-
-    with pytest.raises(ValueError, match="crypto_trade_state_exceeds_resource_budget"):
-        reducer.finish()
-
-
-def test_depth_reducer_finish_counts_rows_and_dataframe_in_output_budget() -> None:
-    module = _panel_input_reducers_module()
-    reducer = module.DepthSnapshotReducer(
-        bars=panels.prepare_panel_bars(_bars_frame()),
-        target_state_bytes=16 * 1024,
-        target_output_bytes=1_024,
-        normalize_chunk=panels.normalize_depth_chunk,
-    )
-    reducer.add_chunk(_ordered_depth_levels_frame())
-
-    with pytest.raises(ValueError, match="crypto_depth_output_exceeds_resource_budget"):
-        reducer.finish()
-
-
-def test_reducer_output_frame_budget_fails_before_dataframe_allocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _panel_input_reducers_module()
-    rows = module._BoundedOutputRows(
-        target_output_bytes=128,
-        error="bounded_output",
-    )
-    monkeypatch.setattr(
-        module.pd,
-        "DataFrame",
-        lambda *_args, **_kwargs: pytest.fail("allocated over-budget frame"),
-    )
-
-    with pytest.raises(ValueError, match="bounded_output"):
-        module._bounded_output_frame(
-            rows,
-            columns=("asset_id",),
-            target_output_bytes=128,
-            error="bounded_output",
-        )
-
-
-def test_depth_snapshot_finalization_is_preflighted_before_callback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _panel_input_reducers_module()
-    reducer = module.DepthSnapshotReducer(
-        bars=panels.prepare_panel_bars(_bars_frame()),
-        target_state_bytes=16 * 1024,
-        target_output_bytes=16 * 1024,
-        normalize_chunk=panels.normalize_depth_chunk,
-    )
-    reducer.add_chunk(_ordered_depth_levels_frame())
-    reducer._target_state_bytes = (
-        reducer._target_maps_bytes
-        + reducer._current_levels_bytes
-        + reducer._candidate_entries_bytes
-        + module._deep_size(
-            (
-                reducer._last_order_key,
-                reducer._current_key,
-                reducer._latest_snapshot,
-            )
-        )
-    )
-    monkeypatch.setattr(
-        module,
-        "finalize_depth_snapshot",
-        lambda *_args: pytest.fail("finalized without state preflight"),
-    )
-
-    with pytest.raises(ValueError, match="crypto_depth_state_exceeds_resource_budget"):
-        reducer.finish()
-
-
-def test_depth_target_position_budget_is_stable_after_positions_advance() -> None:
-    module = _panel_input_reducers_module()
-    bars = pd.DataFrame(
-        {
-            "asset_id": [f"asset_{index:04d}" for index in range(1_000)],
-            "close_time": pd.date_range("2026-07-06", periods=1_000, freq="min"),
-        }
-    )
-    reducer = module.DepthSnapshotReducer(
-        bars=bars,
-        target_state_bytes=64 * 1024**2,
-        target_output_bytes=64 * 1024**2,
-        normalize_chunk=panels.normalize_depth_chunk,
-    )
-    reducer._target_positions = {
-        asset_id: index + 10_000
-        for index, asset_id in enumerate(reducer._target_positions)
-    }
-
-    assert reducer._target_maps_bytes >= module._deep_size(
-        (reducer._targets_by_asset, reducer._target_positions)
-    )
-
-
-def test_reducer_state_budget_counts_deep_python_key_payloads() -> None:
-    module = _panel_input_reducers_module()
-    long_asset_id = "asset_" + "x" * 4096
-    trade_bars = panels.prepare_panel_bars(_bars_frame()).assign(
-        asset_id=long_asset_id
-    )
-
-    with pytest.raises(ValueError, match="crypto_trade_state_exceeds_resource_budget"):
-        module.AggregateTradeReducer(
-            bars=trade_bars,
-            target_state_bytes=512,
-            target_output_bytes=16 * 1024,
-            normalize_chunk=panels.normalize_trade_chunk,
-        )
-
-    with pytest.raises(ValueError, match="crypto_depth_state_exceeds_resource_budget"):
-        module.DepthSnapshotReducer(
-            bars=trade_bars,
-            target_state_bytes=512,
-            target_output_bytes=16 * 1024,
-            normalize_chunk=panels.normalize_depth_chunk,
-        )
-
-
-def test_trade_state_budget_tracks_actual_large_integer_payloads() -> None:
-    module = _panel_input_reducers_module()
-    small = module._TradeBarState(
-        covered_trade_count=1,
-        first_trade_id=1,
-        last_trade_id=1,
-        first_aggregate_trade_id=1,
-        last_aggregate_trade_id=1,
-    )
-    large_value = 10**200
-    large = module._TradeBarState(
-        covered_trade_count=large_value,
-        first_trade_id=large_value,
-        last_trade_id=large_value,
-        first_aggregate_trade_id=large_value,
-        last_aggregate_trade_id=large_value,
-    )
-
-    assert module._trade_bar_state_budget_bytes(large) > (
-        module._trade_bar_state_budget_bytes(small)
-    )
-
-
-def test_depth_budget_checks_do_not_rescan_all_targets_per_update() -> None:
-    module = _panel_input_reducers_module()
-    reducer = module.DepthSnapshotReducer(
-        bars=panels.prepare_panel_bars(_bars_frame()),
-        target_state_bytes=1024**3,
-        target_output_bytes=16 * 1024,
-        normalize_chunk=panels.normalize_depth_chunk,
-    )
-    work = {"units": 0}
-
-    class CountingTargets(dict):
-        def values(self):
-            work["units"] += len(self)
-            return super().values()
-
-    reducer._targets_by_asset = CountingTargets(
-        {
-            f"asset_{index:04d}": (pd.Timestamp("2026-01-01"),)
-            for index in range(100)
-        }
-    )
-
-    for _ in range(100):
-        reducer._require_budget()
-
-    assert work["units"] <= 100
-
-
-def test_trade_output_budget_fails_before_building_full_rows_list(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _panel_input_reducers_module()
-    reducer = module.AggregateTradeReducer(
-        bars=panels.prepare_panel_bars(_bars_frame()),
-        target_state_bytes=1024**3,
-        target_output_bytes=512,
-        normalize_chunk=panels.normalize_trade_chunk,
-    )
-    reducer._states = {
-        ("asset_a", pd.Timestamp("2026-01-01") + pd.Timedelta(minutes=index)):
-        module._TradeBarState()
-        for index in range(20)
-    }
-    original_deep_size = module._deep_size
-
-    def reject_full_rows_list(value, seen=None):
-        if isinstance(value, list) and len(value) > 1:
-            raise AssertionError("full_rows_list_built_before_budget_check")
-        return original_deep_size(value, seen)
-
-    monkeypatch.setattr(module, "_deep_size", reject_full_rows_list)
-
-    with pytest.raises(ValueError, match="crypto_trade_output_exceeds_resource_budget"):
-        reducer.finish()
 
 
 def test_quote_matching_has_no_per_bar_dataframe_scan() -> None:

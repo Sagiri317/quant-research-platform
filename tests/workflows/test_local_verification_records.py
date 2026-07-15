@@ -30,11 +30,12 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
 ) -> None:
     snapshots: list[RuntimeResourcePolicy] = []
     from_environment_calls = 0
-    policy = RuntimeResourcePolicy(
+    policy = RuntimeResourcePolicy.from_environment(
         available_memory_bytes=10 * GIB,
-        memory_budget_fraction=0.5,
-        chunk_target_bytes=128 * MIB,
-        memory_safety_factor=0.5,
+        environ={
+            "QRP_TASK_MEMORY_BUDGET_MB": str(5 * GIB // MIB),
+            "QRP_PAYLOAD_TARGET_MB": "128",
+        },
     )
 
     def fake_from_environment() -> RuntimeResourcePolicy:

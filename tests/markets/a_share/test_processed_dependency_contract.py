@@ -52,6 +52,7 @@ from quant_research_platform.research.factors.price_volume import (
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -108,8 +109,9 @@ def test_panel_materializer_skips_market_bars_source_preload(
         layout=layout,
         source_id=source_id,
         market_bars_data_id=source_ids.market_bars_source_data_id(spec),
-        resource_policy=materialization_io.RuntimeResourcePolicy(
-            available_memory_bytes=1024**3
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=1024**3,
+            environ={},
         ),
     )
 
@@ -128,10 +130,9 @@ def test_source_input_physical_reads_use_owner_resource_policy(
         kind=ProcessedDataKind.PANEL,
         source_input_data_ids=(MARKET_BARS_DATA_ID, "trading_calendar"),
     )
-    policy = materialization_io.RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=32 * 1024,
-        memory_safety_factor=1.0,
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=32 * 1024,
+        environ={},
     )
     observed_targets: list[int] = []
 
@@ -148,7 +149,7 @@ def test_source_input_physical_reads_use_owner_resource_policy(
         target_chunk_bytes,
         materialized_budget_bytes,
     ):
-        assert materialized_budget_bytes == policy.effective_chunk_bytes
+        assert materialized_budget_bytes == policy.task_memory_budget_bytes
         observed_targets.append(target_chunk_bytes)
         return _key_frame()
 
@@ -168,16 +169,15 @@ def test_source_input_physical_reads_use_owner_resource_policy(
     )
 
     assert set(inputs) == {"trading_calendar"}
-    assert observed_targets == [policy.effective_chunk_bytes]
+    assert observed_targets == [policy.payload_target_bytes]
 
 
-def test_materialized_read_reserves_retained_owner_state(
+def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = materialization_io.RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=32 * 1024,
-        memory_safety_factor=1.0,
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=10 * 1024**2,
+        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
     )
     observed: list[tuple[int, int]] = []
     monkeypatch.setattr(
@@ -201,184 +201,61 @@ def test_materialized_read_reserves_retained_owner_state(
         fake_materialize_dataset_context,
     )
 
-    retained_bytes = 8 * 1024
+    retained_payload_bytes = 2 * 1024**2
     materialization_io.read_materialized_dataset(
         Path("dataset"),
         resource_policy=policy,
-        retained_bytes=retained_bytes,
+        retained_payload_bytes=retained_payload_bytes,
     )
 
-    available = policy.effective_chunk_bytes - retained_bytes
-    assert observed == [(available, available)]
+    available = policy.task_memory_budget_bytes - retained_payload_bytes
+    assert observed == [(policy.payload_target_bytes, available)]
 
 
-def test_materialized_read_rejects_negative_retained_state() -> None:
-    with pytest.raises(ValueError, match="invalid_a_share_retained_bytes"):
+def test_materialized_read_rejects_exhausted_retained_state_before_decoder() -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=10 * 1024**2,
+        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="a_share_known_payloads_exceed_task_memory_budget",
+    ):
         materialization_io.read_materialized_dataset(
             Path("dataset"),
-            resource_policy=materialization_io.RuntimeResourcePolicy(
-                available_memory_bytes=1024**3,
-            ),
-            retained_bytes=-1,
+            resource_policy=policy,
+            retained_payload_bytes=policy.task_memory_budget_bytes,
         )
 
 
-def test_a_share_working_set_counts_writer_copies_and_retained_state() -> None:
-    policy = materialization_io.RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=1_000,
-        memory_safety_factor=1.0,
+def test_materialized_read_rejects_negative_retained_state() -> None:
+    with pytest.raises(ValueError, match="invalid_a_share_retained_payload_bytes"):
+        materialization_io.read_materialized_dataset(
+            Path("dataset"),
+            resource_policy=RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=1024**3,
+                environ={},
+            ),
+            retained_payload_bytes=-1,
+        )
+
+
+def test_a_share_indivisible_output_rejects_payload_over_target() -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=100,
+        environ={},
     )
     output = pd.DataFrame({"value": ["x" * 256]})
 
     with pytest.raises(
         ValueError,
-        match="a_share_materialization_working_set_exceeds_resource_budget",
+        match="a_share_indivisible_market_unit_exceeds_payload_target",
     ):
-        materialization_planning.require_materialization_working_set(
+        materialization_planning.require_known_materialization_payload_bound(
             frames=(),
             output=output,
-            retained_state_bytes=250,
             resource_policy=policy,
-        )
-
-
-def test_a_share_panel_key_coverage_state_is_bounded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    chunk = pd.DataFrame(
-        {
-            "asset_id": [f"asset_{index}_" + "x" * 256 for index in range(20)],
-            "timestamp": pd.date_range("2026-01-01", periods=20, freq="D"),
-        }
-    )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: iter((chunk,)),
-    )
-    monkeypatch.setattr(
-        materialization_planning,
-        "inspect_dataset",
-        lambda _root: SimpleNamespace(columns=("asset_id", "timestamp")),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="a_share_panel_key_coverage_exceeds_resource_budget",
-    ):
-        materialization_planning.processed_panel_key_coverage(
-            Path("panel"),
-            resource_policy=materialization_io.RuntimeResourcePolicy(
-                available_memory_bytes=1024**3,
-                chunk_target_bytes=4 * 1024,
-                memory_safety_factor=1.0,
-            ),
-        )
-
-
-def test_a_share_panel_key_coverage_preflights_finalization_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    chunk = pd.DataFrame(
-        {
-            "asset_id": ["asset_a"],
-            "timestamp": [pd.Timestamp("2026-01-01")],
-        }
-    )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: iter((chunk,)),
-    )
-    monkeypatch.setattr(
-        materialization_planning,
-        "inspect_dataset",
-        lambda _root: SimpleNamespace(columns=("asset_id", "timestamp")),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="a_share_panel_key_coverage_exceeds_resource_budget",
-    ):
-        materialization_planning.processed_panel_key_coverage(
-            Path("panel"),
-            resource_policy=materialization_io.RuntimeResourcePolicy(
-                available_memory_bytes=1024**3,
-                chunk_target_bytes=2_800,
-                memory_safety_factor=1.0,
-            ),
-        )
-
-
-def test_a_share_trading_sessions_preflight_result_tuple(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calendar = pd.DataFrame(
-        {
-            "source_market_type": [1],
-            "is_trading_day": [True],
-            "timestamp": [pd.Timestamp("2026-01-01")],
-        }
-    )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: iter((calendar,)),
-    )
-    monkeypatch.setattr(
-        materialization_planning,
-        "python_tuple_container_bytes",
-        lambda _item_count: 10**9,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="a_share_trading_session_state_exceeds_resource_budget",
-    ):
-        materialization_planning.available_trading_sessions(
-            SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
-            SourceId("csmar"),
-            time_window=TimeWindow("2026-01-01", "2026-01-01"),
-            lookback_sessions=0,
-            lookahead_sessions=0,
-            resource_policy=materialization_io.RuntimeResourcePolicy(
-                available_memory_bytes=1024**3,
-            ),
-        )
-
-
-def test_dataset_session_coverage_state_is_bounded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    chunks = (
-        pd.DataFrame(
-            {"timestamp": pd.date_range("2026-01-01", periods=100, freq="D")}
-        ),
-    )
-    monkeypatch.setattr(
-        materialization_planning,
-        "inspect_dataset",
-        lambda _root: SimpleNamespace(columns=("timestamp",)),
-    )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: iter(chunks),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="a_share_dataset_session_state_exceeds_resource_budget",
-    ):
-        materialization_planning._dataset_session_dates(
-            Path("dataset"),
-            TimeWindow("2026-01-01", "2026-04-10"),
-            resource_policy=materialization_io.RuntimeResourcePolicy(
-                available_memory_bytes=1024**3,
-                chunk_target_bytes=4 * 1024,
-                memory_safety_factor=1.0,
-            ),
         )
 
 
@@ -432,8 +309,9 @@ def test_materializer_reads_processed_inputs_from_spec_processed_input_data_ids(
         target,
         layout=layout,
         processed_catalog=_catalog(panel_spec, target),
-        resource_policy=materialization_io.RuntimeResourcePolicy(
-            available_memory_bytes=1024**3
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=1024**3,
+            environ={},
         ),
     )
 
@@ -692,8 +570,9 @@ def test_write_paths_read_processed_inputs_via_helper(
         "estimate_label_bytes_per_session",
         lambda *args, **kwargs: 1,
     )
-    resource_policy = materialization_io.RuntimeResourcePolicy(
-        available_memory_bytes=1024**3
+    resource_policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
     )
 
     materialize_annotations.write_annotations(
@@ -768,8 +647,9 @@ def test_processed_panel_key_coverage_rejects_invalid_keys(monkeypatch) -> None:
     with pytest.raises(ValueError, match="invalid_processed_panel_asset_id"):
         materialization_planning.processed_panel_key_coverage(
             Path("panel"),
-            resource_policy=materialization_io.RuntimeResourcePolicy(
-                available_memory_bytes=1024**3
+            resource_policy=RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=1024**3,
+                environ={},
             ),
         )
 
@@ -784,8 +664,9 @@ def test_processed_panel_key_coverage_rejects_invalid_keys(monkeypatch) -> None:
     with pytest.raises(ValueError, match="invalid_processed_panel_timestamp"):
         materialization_planning.processed_panel_key_coverage(
             Path("panel"),
-            resource_policy=materialization_io.RuntimeResourcePolicy(
-                available_memory_bytes=1024**3
+            resource_policy=RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=1024**3,
+                environ={},
             ),
         )
 
@@ -816,8 +697,9 @@ def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
         target,
         layout=layout,
         processed_catalog=_catalog(panel_spec, execution_spec, target),
-        resource_policy=materialization_io.RuntimeResourcePolicy(
-            available_memory_bytes=1024**3
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=1024**3,
+            environ={},
         ),
     )
 

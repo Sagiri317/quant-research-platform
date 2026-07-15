@@ -16,6 +16,10 @@ from quant_research_platform.research.evaluations.engine import evaluate_signal_
 from quant_research_platform.research.models import (
     fit_model_result,
 )
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
 from tests.helpers.research_specs import (
     make_signal_spec,
 )
@@ -77,9 +81,12 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         "compute_ic_and_grouped_label_values",
         wrapped_compute,
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.004")
-
-    result = evaluate_signal_frame(frame, spec, n_groups=2)
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1_000,
+        environ={},
+    )
+    with runtime_resource_policy_scope(policy):
+        result = evaluate_signal_frame(frame, spec, n_groups=2)
 
     assert len(seen_columns) > 1
     pd.testing.assert_frame_equal(
@@ -272,17 +279,21 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
         signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0015")
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=500,
+        environ={},
+    )
 
     with pytest.raises(
         ValueError,
-        match="time_chunk_boundary_overlap_exceeds_memory_budget",
+        match="research_time_boundary_payloads_exceed_task_memory_budget",
     ):
-        eval_engine.evaluate_signal_frame_chunks(
-            (frame.iloc[:3], frame.iloc[3:]),
-            spec,
-            n_groups=2,
-        )
+        with runtime_resource_policy_scope(policy):
+            eval_engine.evaluate_signal_frame_chunks(
+                (frame.iloc[:3], frame.iloc[3:]),
+                spec,
+                n_groups=2,
+            )
 
 
 def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
@@ -343,9 +354,12 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0035")
-
-    result = fit_model_result(frame, spec)
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=800,
+        environ={},
+    )
+    with runtime_resource_policy_scope(policy):
+        result = fit_model_result(frame, spec)
 
     assert len(filtered_chunk_rows) > 1
     assert max(filtered_chunk_rows) < len(frame)
@@ -395,18 +409,22 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
     original_filter = artifacts_module.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.003")
     monkeypatch.setattr(
         artifacts_module,
         "apply_filter_mode",
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
-    result = prediction_frame_from_artifact(
-        frame.drop(columns=["label"]),
-        spec,
-        coefficients=np.asarray([0.0, 0.01]),
-        input_columns=("factor",),
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1_000,
+        environ={},
     )
+    with runtime_resource_policy_scope(policy):
+        result = prediction_frame_from_artifact(
+            frame.drop(columns=["label"]),
+            spec,
+            coefficients=np.asarray([0.0, 0.01]),
+            input_columns=("factor",),
+        )
 
     assert len(filtered_chunk_rows) > 1
     assert max(filtered_chunk_rows) < len(frame)

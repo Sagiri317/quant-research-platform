@@ -215,43 +215,40 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
     )
 
 
-def test_research_output_disk_guard_rechecks_before_publication(
+def test_research_output_disk_guard_checks_each_chunk(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
     observed: list[Path] = []
     monkeypatch.setattr(
         assembler_module,
         "require_free_disk_headroom",
-        lambda _policy, path, **_kwargs: observed.append(Path(path)),
+        lambda path, **_kwargs: observed.append(Path(path)),
     )
     frames = (pd.DataFrame({"value": [1]}), pd.DataFrame({"value": [2]}))
 
     result = list(
         assembler_module._iter_disk_guarded_output_chunks(
             frames,
-            policy=policy,
             scratch_parent=tmp_path,
         )
     )
 
     assert [len(frame) for frame in result] == [1, 1]
-    assert observed == [tmp_path, tmp_path, tmp_path]
+    assert observed == [tmp_path, tmp_path]
     assert "_iter_disk_guarded_output_chunks(" in inspect.getsource(
-        assembler_module.assemble_research_dataset
+        assembler_module._assemble_research_dataset_with_policy
     )
 
 
-def test_research_time_key_scan_uses_policy_target_and_bounds_state(
+def test_research_time_key_scan_uses_payload_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed_targets: list[int] = []
     timestamps = pd.date_range("2026-01-01", periods=20, freq="min")
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=1024,
-        memory_safety_factor=1.0,
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024,
+        environ={},
     )
     monkeypatch.setattr(
         assembler_module,
@@ -271,30 +268,26 @@ def test_research_time_key_scan_uses_policy_target_and_bounds_state(
         raising=False,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="research_time_key_state_exceeds_chunk_budget",
-    ):
-        assembler_module._time_keys_from_base_input(
-            Path("base"),
-            primary_key=platform_entity_time_key(),
-            time_window=TimeWindow(
-                "2026-01-01T00:00:00",
-                "2026-01-01T00:19:00",
-            ),
-            resource_policy=policy,
-        )
+    result = assembler_module._time_keys_from_base_input(
+        Path("base"),
+        primary_key=platform_entity_time_key(),
+        time_window=TimeWindow(
+            "2026-01-01T00:00:00",
+            "2026-01-01T00:19:00",
+        ),
+        resource_policy=policy,
+    )
 
-    assert observed_targets == [policy.effective_chunk_bytes // 2]
+    assert len(result) == 20
+    assert observed_targets == [policy.payload_target_bytes]
 
 
-def test_research_time_key_scan_preflights_sorted_tuple_state(
+def test_research_time_key_scan_preserves_single_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=320,
-        memory_safety_factor=1.0,
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=320,
+        environ={},
     )
     monkeypatch.setattr(
         assembler_module,
@@ -309,31 +302,26 @@ def test_research_time_key_scan_preflights_sorted_tuple_state(
         ),
     )
 
-    with pytest.raises(
-        ValueError,
-        match="research_time_key_state_exceeds_chunk_budget",
-    ):
-        assembler_module._time_keys_from_base_input(
-            Path("base"),
-            primary_key=platform_entity_time_key(),
-            time_window=TimeWindow(
-                "2026-01-01T00:00:00",
-                "2026-01-01T00:00:00",
-            ),
-            resource_policy=policy,
-        )
+    assert assembler_module._time_keys_from_base_input(
+        Path("base"),
+        primary_key=platform_entity_time_key(),
+        time_window=TimeWindow(
+            "2026-01-01T00:00:00",
+            "2026-01-01T00:00:00",
+        ),
+        resource_policy=policy,
+    ) == (pd.Timestamp("2026-01-01"),)
 
 
-def test_research_processed_input_reserves_materialized_join_working_set(
+def test_research_processed_input_uses_task_budget_for_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     processed_catalog = make_demo_processed_catalog()
     dataset_spec = make_research_dataset_catalog().get("demo")
     processed_spec = processed_catalog.get("demo_factors")
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=12 * 1024,
-        memory_safety_factor=1.0,
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=12 * 1024,
+        environ={},
     )
     observed: dict[str, object] = {}
     monkeypatch.setattr(
@@ -360,66 +348,59 @@ def test_research_processed_input_reserves_materialized_join_working_set(
 
     assert observed == {
         "context": "context",
-        "target_chunk_bytes": policy.effective_chunk_bytes,
-        "materialized_budget_bytes": (
-            policy.effective_chunk_bytes
-            // assembler_module.RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER
-        ),
+        "target_chunk_bytes": policy.payload_target_bytes,
+        "materialized_budget_bytes": policy.task_memory_budget_bytes,
     }
 
 
-def test_research_join_rejects_merge_before_combined_peak_exceeds_budget() -> None:
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=1_024,
-        memory_safety_factor=1.0,
+def test_research_join_rejects_known_payloads_over_task_budget() -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1_024,
+        environ={},
     )
 
     with pytest.raises(
         ValueError,
-        match="research_join_working_set_exceeds_memory_budget",
+        match="research_known_join_payloads_exceed_task_memory_budget",
     ):
-        assembler_module._require_research_join_working_set(
-            retained_bytes=300,
-            input_bytes=300,
+        assembler_module._require_research_known_join_payload_bound(
+            retained_payload_bytes=500,
+            input_bytes=500,
             base_key_bytes=0,
             resource_policy=policy,
         )
 
 
-def test_research_join_budget_includes_retained_base_keys_and_coverage_merge() -> None:
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=1_000,
-        memory_safety_factor=1.0,
+def test_research_join_bound_includes_retained_base_keys() -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1_000,
+        environ={},
     )
 
     with pytest.raises(
         ValueError,
-        match="research_join_working_set_exceeds_memory_budget",
+        match="research_known_join_payloads_exceed_task_memory_budget",
     ):
-        assembler_module._require_research_join_working_set(
-            retained_bytes=200,
-            input_bytes=300,
-            base_key_bytes=250,
-            include_coverage_working_set=True,
+        assembler_module._require_research_known_join_payload_bound(
+            retained_payload_bytes=300,
+            input_bytes=400,
+            base_key_bytes=300,
             resource_policy=policy,
         )
 
 
-def test_research_final_write_counts_suspended_and_writer_copies() -> None:
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=1_000,
-        memory_safety_factor=1.0,
+def test_research_final_write_rejects_output_over_payload_target() -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1_000,
+        environ={},
     )
-    output = pd.DataFrame({"value": ["x" * 256]})
+    output = pd.DataFrame({"value": ["x" * 2_000]})
 
     with pytest.raises(
         ValueError,
-        match="research_final_write_working_set_exceeds_memory_budget",
+        match="research_indivisible_join_unit_exceeds_payload_target",
     ):
-        assembler_module._require_research_final_write_working_set(
+        assembler_module._require_research_final_write_payload(
             output,
             resource_policy=policy,
         )
@@ -650,11 +631,12 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
+    monkeypatch.setenv("QRP_TASK_MEMORY_BUDGET_MB", "1")
+    monkeypatch.setenv("QRP_PAYLOAD_TARGET_MB", "1")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 30_000,
+        lambda **_kwargs: 600_000,
     )
     tiny_root = assemble_research_dataset(
         layout=tiny_layout,
@@ -722,7 +704,10 @@ def test_research_sizing_probe_materializes_one_session_at_a_time(
         time_keys=sessions,
         time_window=TimeWindow("2026-01-01", "2026-01-20"),
         base_data_id="base",
-        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=1024**3,
+            environ={},
+        ),
     )
 
     assert len(observed_windows) == 20
@@ -1048,11 +1033,12 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
+    monkeypatch.setenv("QRP_TASK_MEMORY_BUDGET_MB", "1")
+    monkeypatch.setenv("QRP_PAYLOAD_TARGET_MB", "1")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 30_000,
+        lambda **_kwargs: 600_000,
     )
     assemble_research_dataset(
         layout=layout,
@@ -1061,7 +1047,8 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
+    monkeypatch.setenv("QRP_TASK_MEMORY_BUDGET_MB", "1")
+    monkeypatch.setenv("QRP_PAYLOAD_TARGET_MB", "1")
     model_catalog = ModelCatalog()
     model_catalog.register(
         ModelSpec(
@@ -1223,11 +1210,12 @@ def test_evaluation_runner_streams_research_chunks(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
+    monkeypatch.setenv("QRP_TASK_MEMORY_BUDGET_MB", "1")
+    monkeypatch.setenv("QRP_PAYLOAD_TARGET_MB", "1")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 30_000,
+        lambda **_kwargs: 600_000,
     )
     assemble_research_dataset(
         layout=layout,

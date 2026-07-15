@@ -9,6 +9,7 @@ import pandas as pd
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage._dataset_manifest_validation import (
     manifest_partition_row_counts,
 )
@@ -29,6 +30,7 @@ def inspect_dataset(
     dataset_root: Path,
     *,
     time_window: TimeWindow | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
     context = build_dataset_read_context(
         dataset_root,
@@ -38,6 +40,7 @@ def inspect_dataset(
     )
     runtime = _inspection_runtime_metadata(
         context,
+        target_chunk_bytes=resource_policy.payload_target_bytes,
     )
     return DatasetInspection(
         root=context.root,
@@ -57,6 +60,8 @@ def inspect_dataset(
 
 def _inspection_runtime_metadata(
     context: DatasetReadContext,
+    *,
+    target_chunk_bytes: int,
 ) -> dict[str, Any]:
     if context.time_window is None:
         partition_row_counts = manifest_partition_row_counts(context.manifest)
@@ -79,6 +84,7 @@ def _inspection_runtime_metadata(
     for path, frame in iter_dataset_file_batches(
         context,
         columns=(timestamp_column,),
+        target_chunk_bytes=target_chunk_bytes,
     ):
         if frame.empty:
             continue

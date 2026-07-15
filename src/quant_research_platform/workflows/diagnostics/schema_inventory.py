@@ -15,7 +15,9 @@ from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAY
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    pandas_frame_payload_bytes,
     require_free_disk_headroom,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage._dataset_reading import (
@@ -47,6 +49,7 @@ _INVENTORY_ITEM_KEYS = frozenset(
         "warnings",
     }
 )
+_SQLITE_CACHE_BYTES = 1024 * 1024
 _LOWER_HEX = frozenset("0123456789abcdef")
 
 
@@ -69,14 +72,17 @@ def build_schema_inventory_payload(
     ):
         raise ValueError("schema_inventory_important_columns_invalid")
     important_columns = frozenset(declared_important_columns)
-    items = [
-        _inventory_item(
-            root,
-            artifact_root,
-            important_null_count_columns=important_columns,
-        )
-        for artifact_root in _iter_dataset_artifact_roots(root)
-    ]
+    resource_policy = active_runtime_resource_policy()
+    with runtime_resource_policy_scope(resource_policy):
+        items = [
+            _inventory_item(
+                root,
+                artifact_root,
+                important_null_count_columns=important_columns,
+                resource_policy=resource_policy,
+            )
+            for artifact_root in _iter_dataset_artifact_roots(root)
+        ]
     if not items:
         raise ValueError("schema_inventory_no_datasets_found")
     return {
@@ -332,6 +338,7 @@ def _inventory_item(
     artifact_root: Path,
     *,
     important_null_count_columns: frozenset[str],
+    resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
     inspection = inspect_dataset(artifact_root)
     logical_root = artifact_root.relative_to(project_root).as_posix()
@@ -350,6 +357,7 @@ def _inventory_item(
         columns,
         primary_key,
         important_null_count_columns=important_null_count_columns,
+        resource_policy=resource_policy,
         exact_duplicate_count=(
             int(inspection.manifest["duplicate_primary_key_count"])
             if "duplicate_primary_key_count" in inspection.manifest
@@ -393,6 +401,7 @@ def _aggregate_dataset_stats(
     *,
     important_null_count_columns: frozenset[str],
     exact_duplicate_count: int | None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
     dtypes: dict[str, str] = {}
     row_count = 0
@@ -408,13 +417,11 @@ def _aggregate_dataset_stats(
         0 if exact_duplicate_count is None else exact_duplicate_count
     )
 
-    policy = active_runtime_resource_policy()
     sqlite_cache_bytes = (
-        _exact_key_cache_bytes(policy)
+        _exact_key_cache_bytes(resource_policy.task_memory_budget_bytes)
         if exact_duplicate_count is None and primary_key
         else 0
     )
-    physical_target_bytes = policy.effective_chunk_bytes - sqlite_cache_bytes
     context = build_dataset_read_context(
         artifact_root,
         columns=None,
@@ -423,15 +430,14 @@ def _aggregate_dataset_stats(
     )
     chunks = iter_dataset_chunks(
         context,
-        target_chunk_bytes=physical_target_bytes,
+        target_chunk_bytes=resource_policy.payload_target_bytes,
     )
     with ExitStack() as stack:
         key_index: ExactPrimaryKeyIndex | None = None
         if exact_duplicate_count is None and primary_key:
             require_free_disk_headroom(
-                policy,
                 artifact_root.parent,
-                reserve_bytes=policy.effective_chunk_bytes * 2,
+                reserve_bytes=resource_policy.payload_target_bytes * 2,
             )
             key_index = stack.enter_context(
                 ExactPrimaryKeyIndex(
@@ -444,6 +450,12 @@ def _aggregate_dataset_stats(
                 )
             )
         for frame in chunks:
+            if (
+                key_index is not None
+                and pandas_frame_payload_bytes(frame) + sqlite_cache_bytes
+                > resource_policy.task_memory_budget_bytes
+            ):
+                raise ValueError("schema_inventory_resource_budget_too_small")
             row_count += int(len(frame))
             for column in frame.columns:
                 dtypes.setdefault(str(column), str(frame[column].dtype))
@@ -475,13 +487,10 @@ def _aggregate_dataset_stats(
                 important_null_counts[column] += int(frame[column].isna().sum())
             if key_index is not None:
                 key_frame = frame.loc[:, list(primary_key)]
-                key_bytes = int(
-                    key_frame.memory_usage(index=True, deep=True).sum()
-                )
+                key_bytes = pandas_frame_payload_bytes(key_frame)
                 require_free_disk_headroom(
-                    policy,
                     artifact_root.parent,
-                    reserve_bytes=policy.effective_chunk_bytes + 4 * key_bytes,
+                    reserve_bytes=resource_policy.payload_target_bytes + 4 * key_bytes,
                 )
                 duplicate_primary_key_count += key_index.add_frame(key_frame)
 
@@ -499,13 +508,10 @@ def _aggregate_dataset_stats(
     }
 
 
-def _exact_key_cache_bytes(policy: RuntimeResourcePolicy) -> int:
-    effective_bytes = int(policy.effective_chunk_bytes)
-    candidate = min(8 * 1024, effective_bytes // 4)
-    cache_bytes = (candidate // 1024) * 1024
-    if cache_bytes < 1024 or effective_bytes <= cache_bytes:
+def _exact_key_cache_bytes(task_memory_budget_bytes: int) -> int:
+    if task_memory_budget_bytes <= _SQLITE_CACHE_BYTES:
         raise ValueError("schema_inventory_resource_budget_too_small")
-    return cache_bytes
+    return _SQLITE_CACHE_BYTES
 
 
 def _logical_identifiers(logical_root: str) -> tuple[str, str, str, str]:

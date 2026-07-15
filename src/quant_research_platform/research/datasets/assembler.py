@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Iterable, Iterator
 from math import ceil
 from pathlib import Path
@@ -24,16 +23,12 @@ from quant_research_platform.research.datasets.validation import (
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
 )
-from quant_research_platform.runtime._resource_accounting import (
-    python_list_container_bytes,
-    python_tuple_container_bytes,
-)
 from quant_research_platform.runtime.resources import (
-    ChunkAxis,
-    ResourceChunkPlanner,
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    pandas_frame_payload_bytes,
     require_free_disk_headroom,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_reading import (
     build_dataset_read_context,
@@ -64,14 +59,29 @@ def assemble_research_dataset(
 ) -> Path:
     """Assemble one registered research dataset from processed inputs."""
 
-    spec = dataset_catalog.get(dataset_id)
     policy = resource_policy or active_runtime_resource_policy()
-    policy.require_valid_chunk_budget()
-    require_free_disk_headroom(
-        policy,
-        layout.project_root,
-        reserve_bytes=policy.effective_chunk_bytes * 2,
-    )
+    with runtime_resource_policy_scope(policy):
+        return _assemble_research_dataset_with_policy(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            processed_catalog=processed_catalog,
+            dataset_id=dataset_id,
+            time_window=time_window,
+            resource_policy=policy,
+        )
+
+
+def _assemble_research_dataset_with_policy(
+    *,
+    layout: StorageLayout,
+    dataset_catalog: ResearchDatasetCatalog,
+    processed_catalog: ProcessedDataCatalog,
+    dataset_id: str,
+    time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy,
+) -> Path:
+    spec = dataset_catalog.get(dataset_id)
+    policy = resource_policy
     _validate_research_input_specs(spec, processed_catalog)
     input_identities = _input_dataset_identities(
         layout=layout,
@@ -79,11 +89,6 @@ def assemble_research_dataset(
         processed_catalog=processed_catalog,
     )
     artifact_root = layout.research_dataset_root(spec.market_id, spec.data_id)
-    require_free_disk_headroom(
-        policy,
-        artifact_root.parent,
-        reserve_bytes=2 * policy.effective_chunk_bytes,
-    )
     chunks = _iter_disk_guarded_output_chunks(
         _iter_joined_processed_chunks(
             layout=layout,
@@ -92,7 +97,6 @@ def assemble_research_dataset(
             time_window=time_window,
             resource_policy=policy,
         ),
-        policy=policy,
         scratch_parent=artifact_root.parent,
     )
     write_dataset(
@@ -107,25 +111,15 @@ def assemble_research_dataset(
 def _iter_disk_guarded_output_chunks(
     chunks: Iterable[pd.DataFrame],
     *,
-    policy: RuntimeResourcePolicy,
     scratch_parent: Path,
 ) -> Iterator[pd.DataFrame]:
     for chunk in chunks:
-        chunk_bytes = int(chunk.memory_usage(index=True, deep=True).sum())
+        chunk_bytes = pandas_frame_payload_bytes(chunk)
         require_free_disk_headroom(
-            policy,
             scratch_parent,
-            reserve_bytes=(
-                2 * policy.effective_chunk_bytes
-                + RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER * chunk_bytes
-            ),
+            reserve_bytes=chunk_bytes,
         )
         yield chunk
-    require_free_disk_headroom(
-        policy,
-        scratch_parent,
-        reserve_bytes=2 * policy.effective_chunk_bytes,
-    )
 
 
 def _iter_joined_processed_chunks(
@@ -134,9 +128,9 @@ def _iter_joined_processed_chunks(
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow,
-    resource_policy: RuntimeResourcePolicy | None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
-    policy = resource_policy or active_runtime_resource_policy()
+    policy = resource_policy
     base_data_id = _base_input_data_id(dataset_spec)
     base_spec = processed_catalog.get(base_data_id)
     base_root = layout.processed_data_root(
@@ -161,15 +155,17 @@ def _iter_joined_processed_chunks(
         base_data_id=base_data_id,
         resource_policy=policy,
     )
-    resource_plan = ResourceChunkPlanner(policy).plan_sessions(
-        axis=ChunkAxis.TIME,
-        session_count=len(time_keys),
-        estimated_bytes_per_session=estimated,
+    target_core_session_count = max(
+        1,
+        min(
+            len(time_keys),
+            policy.payload_target_bytes // estimated,
+        ),
     )
     chunk_windows = _research_chunk_windows(
         time_keys,
         time_window=time_window,
-        target_core_count=resource_plan.target_core_session_count,
+        target_core_count=target_core_session_count,
         reason="research_assembly",
     )
 
@@ -188,7 +184,7 @@ def _iter_joined_processed_chunks(
             .sort_values(list(dataset_spec.primary_key))
             .reset_index(drop=True)
         )
-        _require_research_final_write_working_set(
+        _require_research_final_write_payload(
             output,
             resource_policy=policy,
         )
@@ -221,8 +217,8 @@ def _join_processed_inputs(
             resource_policy=resource_policy,
         )
         if assembled is None:
-            _require_research_join_working_set(
-                retained_bytes=0,
+            _require_research_known_join_payload_bound(
+                retained_payload_bytes=0,
                 input_bytes=_frame_bytes(input_frame),
                 base_key_bytes=_frame_bytes(
                     input_frame.loc[:, list(dataset_spec.primary_key)]
@@ -233,14 +229,13 @@ def _join_processed_inputs(
             base_keys = input_frame.loc[:, list(dataset_spec.primary_key)].copy()
             continue
         assert base_keys is not None
-        retained_bytes = _frame_bytes(assembled)
+        retained_payload_bytes = _frame_bytes(assembled)
         input_bytes = _frame_bytes(input_frame)
         base_key_bytes = _frame_bytes(base_keys)
-        _require_research_join_working_set(
-            retained_bytes=retained_bytes,
+        _require_research_known_join_payload_bound(
+            retained_payload_bytes=retained_payload_bytes,
             input_bytes=input_bytes,
             base_key_bytes=base_key_bytes,
-            include_coverage_working_set=True,
             resource_policy=resource_policy,
         )
         _validate_input_key_coverage(
@@ -248,12 +243,6 @@ def _join_processed_inputs(
             input_frame,
             dataset_spec=dataset_spec,
             input_data_id=input_data_id,
-        )
-        _require_research_join_working_set(
-            retained_bytes=retained_bytes,
-            input_bytes=input_bytes,
-            base_key_bytes=base_key_bytes,
-            resource_policy=resource_policy,
         )
         assembled = assembled.merge(
             input_frame,
@@ -264,56 +253,37 @@ def _join_processed_inputs(
     if assembled is None:
         raise ValueError("empty_research_dataset_inputs")
     del base_keys
-    if 2 * _frame_bytes(assembled) > resource_policy.effective_chunk_bytes:
-        raise ValueError("research_join_working_set_exceeds_memory_budget")
+    if _frame_bytes(assembled) > resource_policy.task_memory_budget_bytes:
+        raise ValueError("research_known_join_payloads_exceed_task_memory_budget")
     assembled = _apply_feature_transforms(assembled, dataset_spec)
-    if 2 * _frame_bytes(assembled) > resource_policy.effective_chunk_bytes:
-        raise ValueError("research_join_working_set_exceeds_memory_budget")
+    if _frame_bytes(assembled) > resource_policy.task_memory_budget_bytes:
+        raise ValueError("research_known_join_payloads_exceed_task_memory_budget")
     return assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
 
 
-def _require_research_join_working_set(
+def _require_research_known_join_payload_bound(
     *,
-    retained_bytes: int,
+    retained_payload_bytes: int,
     input_bytes: int,
     base_key_bytes: int,
-    include_coverage_working_set: bool = False,
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
-    join_peak_bytes = (
-        2 * (retained_bytes + input_bytes)
-        + base_key_bytes
-    )
-    coverage_peak_bytes = (
-        retained_bytes
-        + 3 * input_bytes
-        + 2 * base_key_bytes
-    )
-    required_bytes = (
-        max(join_peak_bytes, coverage_peak_bytes)
-        if include_coverage_working_set
-        else join_peak_bytes
-    )
-    if required_bytes > resource_policy.effective_chunk_bytes:
-        raise ValueError("research_join_working_set_exceeds_memory_budget")
+    known_payload_bytes = retained_payload_bytes + input_bytes + base_key_bytes
+    if known_payload_bytes > resource_policy.task_memory_budget_bytes:
+        raise ValueError("research_known_join_payloads_exceed_task_memory_budget")
 
 
 def _frame_bytes(frame: pd.DataFrame) -> int:
-    return int(frame.memory_usage(index=True, deep=True).sum())
+    return pandas_frame_payload_bytes(frame)
 
 
-def _require_research_final_write_working_set(
+def _require_research_final_write_payload(
     output: pd.DataFrame,
     *,
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
-    if (
-        RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER * _frame_bytes(output)
-        > resource_policy.effective_chunk_bytes
-    ):
-        raise ValueError(
-            "research_final_write_working_set_exceeds_memory_budget"
-        )
+    if _frame_bytes(output) > resource_policy.payload_target_bytes:
+        raise ValueError("research_indivisible_join_unit_exceeds_payload_target")
 
 
 def _time_keys_from_base_input(
@@ -329,13 +299,10 @@ def _time_keys_from_base_input(
         time_window=time_window,
     )
     timestamps: set[pd.Timestamp] = set()
-    state_bytes = sys.getsizeof(timestamps)
     intraday = is_intraday_time_window(time_window)
-    physical_target_bytes = max(1, resource_policy.effective_chunk_bytes // 2)
-    target_state_bytes = resource_policy.effective_chunk_bytes - physical_target_bytes
     for chunk in iter_dataset_chunks(
         context,
-        target_chunk_bytes=physical_target_bytes,
+        target_chunk_bytes=resource_policy.payload_target_bytes,
     ):
         for value in chunk["timestamp"].dropna().unique():
             timestamp = pd.Timestamp(value)
@@ -343,17 +310,7 @@ def _time_keys_from_base_input(
                 timestamp = timestamp.normalize()
             if timestamp in timestamps:
                 continue
-            previous_container_bytes = sys.getsizeof(timestamps)
             timestamps.add(timestamp)
-            state_bytes += (
-                sys.getsizeof(timestamps)
-                - previous_container_bytes
-                + sys.getsizeof(timestamp)
-            )
-        finalization_bytes = python_list_container_bytes(len(timestamps))
-        finalization_bytes += python_tuple_container_bytes(len(timestamps))
-        if state_bytes + finalization_bytes > target_state_bytes:
-            raise ValueError("research_time_key_state_exceeds_chunk_budget")
     return tuple(sorted(timestamps))
 
 
@@ -466,11 +423,8 @@ def _read_processed_input(
         )
         return materialize_dataset_context(
             context,
-            target_chunk_bytes=resource_policy.effective_chunk_bytes,
-            materialized_budget_bytes=(
-                resource_policy.effective_chunk_bytes
-                // RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER
-            ),
+            target_chunk_bytes=resource_policy.payload_target_bytes,
+            materialized_budget_bytes=resource_policy.task_memory_budget_bytes,
         )
     except ValueError as exc:
         if str(exc) == "dataset_column_not_found":
@@ -749,7 +703,7 @@ def _measured_bytes_per_session(
 ) -> int:
     if frame.empty:
         return 1
-    total = int(frame.memory_usage(index=True, deep=True).sum())
+    total = pandas_frame_payload_bytes(frame)
     sample_bytes_per_session = total / max(1, len(sample_sessions))
     target_bytes_per_session = total / max(1, target_session_count)
     measured = max(1, ceil(max(sample_bytes_per_session, target_bytes_per_session)))

@@ -19,7 +19,6 @@ from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.prediction import (
     prediction_model_input_frame,
 )
-from quant_research_platform.runtime.resources import ChunkAxis
 
 
 @dataclass(frozen=True)
@@ -165,7 +164,6 @@ def _iter_prediction_output_frames(
     for chunk in iter_complete_time_sized_frames(
         iter(frames),
         timestamp_column="timestamp",
-        axis=ChunkAxis.TIME,
     ):
         filtered, metadata = apply_filter_mode(
             chunk,

@@ -38,7 +38,10 @@ from quant_research_platform.research.factors.price_volume import (
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+)
 from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import (
     read_dataset,
@@ -59,48 +62,74 @@ MARKET_PANEL_DATA_ID = market_panel_data_id()
 MARKET_CONTEXT_DATA_ID = market_context_data_id()
 
 
-def test_processed_materialization_checks_disk_before_staged_write(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(RuntimeError, match="insufficient_free_disk"):
-        materializer.materialize_processed_data(
-            layout=StorageLayout(project_root=tmp_path),
-            source_id=SYNTHETIC_SOURCE_ID,
-            time_window=TimeWindow("2020-01-02", "2020-01-03"),
-            data_ids=(MARKET_PANEL_DATA_ID,),
-            resource_policy=RuntimeResourcePolicy(
-                available_memory_bytes=1024**3,
-                min_free_disk_bytes=10**30,
-            ),
-        )
-
-
-def test_a_share_output_disk_guard_rechecks_each_chunk_and_before_publication(
+def test_a_share_output_disk_guard_checks_each_chunk(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
     observed: list[Path] = []
     monkeypatch.setattr(
         materialization_io,
         "require_free_disk_headroom",
-        lambda _policy, path, **_kwargs: observed.append(Path(path)),
+        lambda path, **_kwargs: observed.append(Path(path)),
     )
     frames = (pd.DataFrame({"value": [1]}), pd.DataFrame({"value": [2]}))
 
     result = list(
         materialization_io._iter_disk_guarded_output_chunks(
             frames,
-            policy=policy,
             scratch_parent=tmp_path,
         )
     )
 
     assert [len(frame) for frame in result] == [1, 1]
-    assert observed == [tmp_path, tmp_path, tmp_path]
+    assert observed == [tmp_path, tmp_path]
     source = inspect.getsource(materialization_io.write_and_inspect)
     assert "resource_policy" in source
     assert "_iter_disk_guarded_output_chunks(" in source
+
+
+def test_write_and_inspect_activates_explicit_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={},
+    )
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+    inspection = object()
+    observed: list[RuntimeResourcePolicy] = []
+
+    def capture_write(*_args: object, **_kwargs: object) -> None:
+        observed.append(active_runtime_resource_policy())
+
+    def capture_inspection(*_args: object, **_kwargs: object) -> object:
+        observed.append(active_runtime_resource_policy())
+        return inspection
+
+    monkeypatch.setattr(materialization_io, "write_dataset", capture_write)
+    monkeypatch.setattr(materialization_io, "inspect_dataset", capture_inspection)
+    monkeypatch.setattr(
+        materialization_io,
+        "iter_sorted_output_chunks",
+        lambda *_args, **_kwargs: (),
+    )
+    written = {}
+
+    result = materialization_io.write_and_inspect(
+        spec,
+        pd.DataFrame(),
+        layout=StorageLayout(project_root=tmp_path),
+        time_window=TimeWindow("2024-01-02", "2024-01-02"),
+        written=written,
+        resource_policy=policy,
+    )
+
+    assert observed == [policy, policy]
+    assert result is inspection
+    assert written == {spec.data_id: inspection}
+
+
 FORWARD_RETURN_1D_COLUMN = forward_return_label_column(1)
 MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 
@@ -200,11 +229,9 @@ def test_panel_materializer_does_not_preload_full_market_bars(
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
         data_ids=(MARKET_PANEL_DATA_ID,),
-        resource_policy=RuntimeResourcePolicy(
+        resource_policy=RuntimeResourcePolicy.from_environment(
             available_memory_bytes=512 * 1024,
-            memory_budget_fraction=1.0,
-            chunk_target_bytes=512 * 1024,
-            memory_safety_factor=1.0,
+            environ={},
         ),
     )
 

@@ -27,7 +27,6 @@ from quant_research_platform.research.evaluations.diagnostics import (
 from quant_research_platform.research.signals.materialization import (
     materialize_signal_frame,
 )
-from quant_research_platform.runtime.resources import ChunkAxis
 
 
 @dataclass(frozen=True)
@@ -127,7 +126,6 @@ def _compute_evaluation_frames(
             source_columns_by_kind=source_columns_by_kind,
         ),
         timestamp_column="timestamp",
-        axis=ChunkAxis.TIME,
     ):
         filtered, metadata = apply_filter_mode(
             chunk,

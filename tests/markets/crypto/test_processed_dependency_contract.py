@@ -20,12 +20,18 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     processed_catalog,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+)
 from quant_research_platform.storage._dataset_types import DatasetInspection
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
-RESOURCE_POLICY = RuntimeResourcePolicy(available_memory_bytes=1024**3)
+RESOURCE_POLICY = RuntimeResourcePolicy.from_environment(
+    available_memory_bytes=1024**3,
+    environ={},
+)
 
 
 def test_input_dataset_identities_distinguish_source_and_manifest() -> None:
@@ -338,19 +344,7 @@ def test_panel_dependents_reject_mixed_asset_physical_parts_before_repeated_read
         )
 
 
-def test_crypto_materialization_rejects_budget_below_sqlite_cache_minimum() -> None:
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024,
-        memory_budget_fraction=1.0,
-        chunk_target_bytes=18,
-        memory_safety_factor=1.0,
-    )
-
-    with pytest.raises(ValueError, match="crypto_materialization_budget_too_small"):
-        materialization_resources.MaterializationBudget.from_policy(policy)
-
-
-def test_canonical_asset_budget_accounting_is_linear(
+def test_canonical_asset_normalization_is_linear(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     asset_count = 200
@@ -371,10 +365,7 @@ def test_canonical_asset_budget_accounting_is_linear(
         lambda value: CountingString(f"canonical_{value}"),
     )
 
-    observed = materialize_panel._canonical_source_assets(
-        keys,
-        target_state_bytes=1024**2,
-    )
+    observed = materialize_panel._canonical_source_assets(keys)
 
     assert len(observed) == asset_count
     assert work["len_calls"] <= asset_count * 5
@@ -556,10 +547,9 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=4096,
-        memory_safety_factor=1.0,
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=4096,
+        environ={},
     )
     inspection = _inspection("market_panel_1m")
     observed: list[RuntimeResourcePolicy] = []
@@ -595,106 +585,6 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
     assert observed == [policy]
 
 
-def test_crypto_materialization_checks_disk_before_staged_write(
-    tmp_path: Path,
-) -> None:
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        min_free_disk_bytes=10**30,
-    )
-
-    with pytest.raises(RuntimeError, match="insufficient_free_disk"):
-        materializer.materialize_processed_data(
-            layout=StorageLayout(project_root=tmp_path),
-            source_id=SourceId("synthetic_crypto"),
-            time_window=TimeWindow("2026-07-06", "2026-07-06"),
-            data_ids=("market_panel_1m",),
-            resource_policy=policy,
-        )
-
-
-def test_crypto_rechecks_disk_before_each_materialization_stage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
-    observed: list[Path] = []
-    inspection = _inspection("market_panel_1m")
-    monkeypatch.setattr(
-        materializer,
-        "require_free_disk_headroom",
-        lambda _policy, path, **_kwargs: observed.append(Path(path)),
-    )
-    monkeypatch.setattr(
-        materialize_panel,
-        "write_panel",
-        lambda *_args, **_kwargs: inspection,
-    )
-
-    result = materializer._materialize_one(
-        processed_catalog().get("market_panel_1m"),
-        layout=StorageLayout(project_root=tmp_path),
-        source_id=SourceId("synthetic_crypto"),
-        time_window=TimeWindow("2026-07-06", "2026-07-06"),
-        resource_policy=policy,
-    )
-
-    assert result is inspection
-    assert observed == [tmp_path]
-
-
-def test_materialization_budget_allocations_close_under_effective_budget() -> None:
-    budget = materialization_resources.MaterializationBudget.from_policy(
-        RESOURCE_POLICY
-    )
-
-    assert sum(budget.allocations.values()) <= RESOURCE_POLICY.effective_chunk_bytes
-    assert not hasattr(budget, "effective_bytes")
-    assert budget.physical_read_bytes > 0
-    assert budget.reducer_state_bytes > 0
-    assert budget.trade_output_bytes > 0
-    assert budget.depth_output_bytes > 0
-    assert budget.materialized_output_bytes > 0
-    assert budget.panel_key_index_bytes > 0
-    assert budget.dependent_key_index_bytes > 0
-    assert budget.validation_key_index_bytes > 0
-    assert (
-        budget.physical_read_bytes
-        + budget.panel_key_index_bytes
-        + budget.allocations["core_window"]
-        + budget.reducer_state_bytes
-        + budget.trade_output_bytes
-        + budget.depth_output_bytes
-        + budget.materialized_output_bytes
-        + budget.allocations["allocator_headroom"]
-        <= RESOURCE_POLICY.effective_chunk_bytes
-    )
-    assert (
-        budget.physical_read_bytes
-        + budget.dependent_key_index_bytes
-        + budget.carry_bytes
-        + budget.materialized_output_bytes
-        + budget.allocations["allocator_headroom"]
-        <= RESOURCE_POLICY.effective_chunk_bytes
-    )
-    assert (
-        budget.physical_read_bytes
-        + budget.validation_key_index_bytes
-        + budget.sqlite_cache_bytes
-        + budget.allocations["allocator_headroom"]
-        <= RESOURCE_POLICY.effective_chunk_bytes
-    )
-    assert {
-        "trade_output",
-        "depth_output",
-        "materialized_output",
-    }.issubset(budget.allocations)
-    panel_source = inspect.getsource(materialize_panel._iter_panel_chunks)
-    assert "budget.trade_output_bytes" in panel_source
-    assert "budget.depth_output_bytes" in panel_source
-    assert "budget.materialized_output_bytes" in panel_source
-
-
 def test_crypto_disk_guard_rechecks_between_chunks_and_before_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -703,9 +593,7 @@ def test_crypto_disk_guard_rechecks_between_chunks_and_before_publication(
     monkeypatch.setattr(
         materialization_resources,
         "require_free_disk_headroom",
-        lambda _policy, path, *, reserve_bytes: observed.append(
-            (Path(path), reserve_bytes)
-        ),
+        lambda path, *, reserve_bytes: observed.append((Path(path), reserve_bytes)),
     )
     frames = (
         pd.DataFrame({"value": [1]}),
@@ -715,17 +603,13 @@ def test_crypto_disk_guard_rechecks_between_chunks_and_before_publication(
     result = list(
         materialization_resources.iter_disk_guarded_chunks(
             frames,
-            policy=RESOURCE_POLICY,
             scratch_parent=tmp_path,
         )
     )
 
     assert [len(frame) for frame in result] == [1, 2]
-    assert [path for path, _ in observed] == [tmp_path, tmp_path, tmp_path]
-    assert all(
-        reserve > RESOURCE_POLICY.effective_chunk_bytes
-        for _, reserve in observed
-    )
+    assert [path for path, _ in observed] == [tmp_path, tmp_path]
+    assert [reserve for _, reserve in observed] == [140, 148]
 
 
 def test_crypto_direct_dataset_writers_cannot_bypass_disk_guard() -> None:
@@ -735,8 +619,113 @@ def test_crypto_direct_dataset_writers_cannot_bypass_disk_guard() -> None:
         (materialize_labels, "write_labels"),
     ):
         source = inspect.getsource(getattr(module, function_name))
-        assert "require_materialization_disk_headroom(" in source
         assert "iter_disk_guarded_chunks(" in source
+
+
+@pytest.mark.parametrize(
+    ("module", "function_name", "iterator_name", "data_id"),
+    [
+        (
+            materialize_panel,
+            "write_panel",
+            "_iter_panel_chunks",
+            "market_panel_1m",
+        ),
+        (
+            materialize_factors,
+            "write_factors",
+            "_iter_factor_chunks",
+            "microstructure",
+        ),
+        (
+            materialize_labels,
+            "write_labels",
+            "_iter_label_chunks",
+            "forward_returns",
+        ),
+    ],
+)
+def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    module,
+    function_name: str,
+    iterator_name: str,
+    data_id: str,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={},
+    )
+    inspection = _inspection(data_id)
+    observed: list[RuntimeResourcePolicy] = []
+
+    def capture_input_inspections(**_kwargs):
+        observed.append(active_runtime_resource_policy())
+        return {}
+
+    def capture_write(
+        *_args,
+        staged_validator,
+        resource_policy,
+        **_kwargs,
+    ) -> None:
+        assert resource_policy is policy
+        observed.append(active_runtime_resource_policy())
+        staged_validator(tmp_path / "staged")
+
+    def capture_inspection(*_args, **_kwargs):
+        observed.append(active_runtime_resource_policy())
+        return inspection
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "panel_input_inspections",
+        capture_input_inspections,
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "panel_dependency_inspections",
+        capture_input_inspections,
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "input_dataset_identities",
+        lambda _inspections: {},
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "validate_panel_materialization",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "validate_panel_dependent_materialization",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materialization_resources,
+        "iter_disk_guarded_chunks",
+        lambda chunks, **_kwargs: chunks,
+    )
+    monkeypatch.setattr(module, iterator_name, lambda *_args, **_kwargs: iter(()))
+    monkeypatch.setattr(module, "write_dataset", capture_write)
+    monkeypatch.setattr(module, "inspect_dataset", capture_inspection)
+    kwargs = {
+        "layout": StorageLayout(project_root=tmp_path),
+        "time_window": TimeWindow("2026-07-06", "2026-07-06"),
+        "resource_policy": policy,
+    }
+    if module is materialize_panel:
+        kwargs["source_id"] = SourceId("synthetic_crypto")
+
+    result = getattr(module, function_name)(
+        processed_catalog().get(data_id),
+        **kwargs,
+    )
+
+    assert result is inspection
+    assert observed == [policy, policy, policy, policy]
 
 
 def test_crypto_materializers_use_storage_physical_iterator_without_split_wrapper(
@@ -746,67 +735,7 @@ def test_crypto_materializers_use_storage_physical_iterator_without_split_wrappe
         assert "iter_dataset_chunks(" in source
         assert "read_dataset(" not in source
         assert "def _frame_bytes(" not in source
-        assert "materialization_resources.materialization_frame_bytes(" in source
-
-
-@pytest.mark.parametrize(
-    ("module", "iterator_name", "error"),
-    [
-        (
-            materialize_factors,
-            "_iter_factor_chunks",
-            "crypto_factor_state_exceeds_resource_budget",
-        ),
-        (
-            materialize_labels,
-            "_iter_label_chunks",
-            "crypto_label_state_exceeds_resource_budget",
-        ),
-    ],
-)
-def test_factor_and_label_state_fail_closed_when_fixed_carry_exceeds_budget(
-    monkeypatch: pytest.MonkeyPatch,
-    module,
-    iterator_name: str,
-    error: str,
-) -> None:
-    panel = _panel_frame(start=0, minutes=30)
-    monkeypatch.setattr(
-        module,
-        "build_dataset_read_context",
-        lambda *_args, **_kwargs: object(),
-    )
-    monkeypatch.setattr(
-        module,
-        "iter_dataset_chunks",
-        lambda *_args, **_kwargs: iter((panel,)),
-    )
-    monkeypatch.setattr(
-        module.materialization_resources,
-        "require_frame_within_budget",
-        lambda *_args, **_kwargs: None,
-    )
-    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
-    budget = materialization_resources.MaterializationBudget.from_policy(policy)
-    budget.allocations["carry_or_label_buffer"] = 1
-    monkeypatch.setattr(
-        module.materialization_resources.MaterializationBudget,
-        "from_policy",
-        classmethod(lambda _cls, _policy: budget),
-    )
-    _patch_mock_group_plan(monkeypatch, module, (("crypto", "btc_usdt"),))
-    spec = processed_catalog().get(
-        "microstructure" if module is materialize_factors else "forward_returns"
-    )
-    iterator = getattr(module, iterator_name)(
-        spec,
-        panel_root=Path("unused"),
-        time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:29"),
-        resource_policy=policy,
-    )
-
-    with pytest.raises(ValueError, match=error):
-        list(iterator)
+        assert "pandas_frame_payload_bytes(" in source
 
 
 @pytest.mark.parametrize(
@@ -843,7 +772,10 @@ def test_factor_and_label_materializers_reject_non_monotonic_chunks(
         lambda *_args, **_kwargs: iter((first, second)),
     )
     _patch_mock_group_plan(monkeypatch, module, (("crypto", "btc_usdt"),))
-    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
     iterator = (
         module._iter_factor_chunks(
             spec,
@@ -961,7 +893,6 @@ def _patch_mock_group_plan(
             key: (Path(f"part-{index:03d}.parquet"),)
             for index, key in enumerate(keys)
         },
-        retained_bytes=0,
     )
     monkeypatch.setattr(
         module,

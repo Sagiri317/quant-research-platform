@@ -16,6 +16,7 @@ from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage._dataset_key_tracking import (
     ExactPrimaryKeyIndex,
 )
@@ -43,8 +44,6 @@ from quant_research_platform.storage._dataset_schema import (
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
-
-_KEY_TRACKING_TARGET_BYTES = 8 * 1024 * 1024
 
 
 @dataclass
@@ -118,7 +117,13 @@ class _WriteStats:
             elif not categories.equals(expected):
                 raise ValueError("dataset_ordered_categorical_mismatch")
 
-    def record_file(self, path: Path, *, row_count: int) -> None:
+    def record_file(
+        self,
+        path: Path,
+        *,
+        row_count: int,
+        target_chunk_bytes: int,
+    ) -> None:
         parquet_file = pq.ParquetFile(path)
         try:
             actual_row_count = int(parquet_file.metadata.num_rows)
@@ -143,7 +148,7 @@ class _WriteStats:
         for batch in iter_parquet_arrow_batches(
             path,
             columns=self.spec.primary_key,
-            target_chunk_bytes=_KEY_TRACKING_TARGET_BYTES,
+            target_chunk_bytes=target_chunk_bytes,
         ):
             self.duplicate_primary_key_count += self.key_tracker.add_table(
                 pa.Table.from_batches([batch])
@@ -245,6 +250,7 @@ def write_dataset(
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
     staged_validator: Callable[[Path], None] | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> None:
     final_root = Path(dataset_root)
     validate_dataset_spec(spec)
@@ -255,6 +261,7 @@ def write_dataset(
             _iter_input_chunks(data),
             temp_root / "data",
             spec=spec,
+            target_chunk_bytes=resource_policy.payload_target_bytes,
         )
         write_internal_artifact_manifest(
             temp_root / "spec.json",
@@ -285,6 +292,7 @@ def _write_contents(
     root: Path,
     *,
     spec: DataSpec,
+    target_chunk_bytes: int,
 ) -> _WriteStats:
     timestamp_column = validate_dataset_spec(spec)
     timestamp_columns = tuple(
@@ -323,7 +331,11 @@ def _write_contents(
                     output_path,
                     schema=accumulator._arrow_schema,
                 )
-                accumulator.record_file(output_path, row_count=len(partition_frame))
+                accumulator.record_file(
+                    output_path,
+                    row_count=len(partition_frame),
+                    target_chunk_bytes=target_chunk_bytes,
+                )
                 _raise_accumulated_failures(accumulator)
         if accumulator.row_count == 0:
             if empty_schema_frame is None:
@@ -334,7 +346,11 @@ def _write_contents(
                 output_path,
                 schema=accumulator._arrow_schema,
             )
-            accumulator.record_file(output_path, row_count=0)
+            accumulator.record_file(
+                output_path,
+                row_count=0,
+                target_chunk_bytes=target_chunk_bytes,
+            )
     return accumulator
 
 

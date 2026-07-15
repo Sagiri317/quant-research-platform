@@ -24,7 +24,13 @@ from quant_research_platform.markets.implementations.a_share.research_scenarios 
 from quant_research_platform.markets.implementations.a_share.verification import (
     aggregates,
 )
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from tests.helpers import frequency_ids
+
+RESOURCE_POLICY = RuntimeResourcePolicy.from_environment(
+    available_memory_bytes=1024**3,
+    environ={},
+)
 
 
 def test_verification_aggregates_has_no_parallel_inventory_builder() -> None:
@@ -40,7 +46,10 @@ def test_generated_panel_verification_uses_bounded_owner_materialization() -> No
     )
 
     assert "materialization_io.read_materialized_dataset(" in source
-    assert "materialization_planning.require_materialization_working_set(" in source
+    assert (
+        "materialization_planning.require_known_materialization_payload_bound("
+        in source
+    )
 
 
 def test_dataset_summary_uses_bounded_owner_materialization() -> None:
@@ -66,7 +75,10 @@ def test_aggregates_summarizes_frames_without_row_level_output(tmp_path: Path) -
         }
     )
 
-    summary = aggregates._summarize_frames([frame], scratch_parent=tmp_path)
+    summary = aggregates._summarize_frames(
+        [frame],
+        scratch_parent=tmp_path,
+    )
 
     assert summary.row_count == 3
     assert summary.key_count == 2
@@ -100,7 +112,10 @@ def test_aggregate_duplicate_truth_does_not_depend_on_64_bit_hashes(
 
     monkeypatch.setattr(aggregates, "_key_hash_blocks", colliding_key_hashes)
 
-    summary = aggregates._summarize_frames((frame,), scratch_parent=tmp_path)
+    summary = aggregates._summarize_frames(
+        (frame,),
+        scratch_parent=tmp_path,
+    )
 
     assert summary.key_count == 3
     assert summary.duplicate_key_count == 0
@@ -151,7 +166,8 @@ def test_aggregates_combines_summaries_and_area_records(
             roots=(Path("unused"),),
             expected_period=first.period,
             explanation_name="factor value",
-        )
+        ),
+        resource_policy=RESOURCE_POLICY,
     )
     gap = aggregates._area_record(
         aggregates.AggregateInput(
@@ -159,7 +175,8 @@ def test_aggregates_combines_summaries_and_area_records(
             roots=(Path("unused"),),
             expected_period="2024-01-01 through 2024-01-01",
             explanation_name="factor value",
-        )
+        ),
+        resource_policy=RESOURCE_POLICY,
     )
 
     assert ok["human_approval_required"] is False
@@ -275,7 +292,10 @@ def test_aggregates_area_inputs_and_inventory_helpers(
         ),
     )
 
-    inventory = aggregates._dataset_inventory(tmp_path)
+    inventory = aggregates._dataset_inventory(
+        tmp_path,
+        resource_policy=RESOURCE_POLICY,
+    )
 
     assert inventory[0]["kind"] == "panel"
     assert inventory[0]["artifact_id"] == frequency_ids.MARKET_PANEL_DATA_ID

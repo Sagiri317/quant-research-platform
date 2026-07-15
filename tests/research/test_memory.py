@@ -71,14 +71,15 @@ def test_time_sized_frames_rejects_single_timestamp_over_budget() -> None:
             "value": ["x" * 20] * 400,
         }
     )
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=10_000,
-        memory_budget_fraction=1.0,
-        chunk_target_bytes=10_000,
-        memory_safety_factor=1.0,
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1_000,
+        environ={},
     )
 
-    with pytest.raises(ValueError, match="time_chunk_exceeds_memory_budget"):
+    with pytest.raises(
+        ValueError,
+        match="research_indivisible_time_unit_exceeds_payload_target",
+    ):
         list(
             iter_time_sized_frames(
                 frame,
@@ -97,11 +98,9 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
             "value": ["x" * 20] * 200,
         }
     )
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=10_000,
-        memory_budget_fraction=1.0,
-        chunk_target_bytes=10_000,
-        memory_safety_factor=1.0,
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1_000,
+        environ={},
     )
 
     def reject_concat(*_args, **_kwargs):  # noqa: ANN002, ANN003
@@ -111,7 +110,7 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
 
     with pytest.raises(
         ValueError,
-        match="time_chunk_boundary_overlap_exceeds_memory_budget",
+        match="research_time_boundary_payloads_exceed_task_memory_budget",
     ):
         _concat_time_boundary_frames(
             frame.iloc[:100].copy(),

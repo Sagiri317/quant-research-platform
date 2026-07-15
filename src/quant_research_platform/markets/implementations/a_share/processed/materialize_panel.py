@@ -15,7 +15,10 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     materialization_validation,
     panels,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    pandas_frame_payload_bytes,
+)
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     inspect_dataset,
@@ -49,10 +52,9 @@ def write_panel(
         resource_policy=policy,
     )
     materialization_validation.require_source_inputs_for_spec(spec, source_inputs)
-    materialization_planning.require_materialization_working_set(
+    materialization_planning.require_known_materialization_payload_bound(
         frames=tuple(source_inputs.values()),
         output=None,
-        retained_state_bytes=0,
         resource_policy=policy,
     )
     stock_master = source_inputs["stock_master"]
@@ -65,6 +67,10 @@ def write_panel(
         market_bars_inspection.columns,
         columns=("open", "high", "low", "close", "volume", "amount"),
     )
+    retained_payload_bytes = sum(
+        pandas_frame_payload_bytes(frame)
+        for frame in source_inputs.values()
+    )
     estimated = materialization_planning.estimate_panel_bytes_per_session(
         sessions,
         time_window=time_window,
@@ -75,10 +81,7 @@ def write_panel(
         trading_calendar=trading_calendar,
         required_columns=spec.required_columns,
         resource_policy=policy,
-        retained_state_bytes=sum(
-            int(frame.memory_usage(index=True, deep=True).sum())
-            for frame in source_inputs.values()
-        ),
+        retained_payload_bytes=retained_payload_bytes,
     )
     windows = materialization_planning.planned_session_windows(
         sessions,
@@ -96,10 +99,7 @@ def write_panel(
                 market_bars_root,
                 time_window=window.read,
                 resource_policy=policy,
-                retained_bytes=sum(
-                    int(frame.memory_usage(index=True, deep=True).sum())
-                    for frame in source_inputs.values()
-                ),
+                retained_payload_bytes=retained_payload_bytes,
             )
             materialization_validation.require_source_input_columns(
                 market_bars_data_id,
@@ -117,10 +117,9 @@ def write_panel(
                 window.core_sessions,
             )
             selected = output.loc[:, list(spec.required_columns)].copy()
-            materialization_planning.require_materialization_working_set(
+            materialization_planning.require_known_materialization_payload_bound(
                 frames=(*source_inputs.values(), market_bars, panel, output),
                 output=selected,
-                retained_state_bytes=0,
                 resource_policy=policy,
             )
             yield selected

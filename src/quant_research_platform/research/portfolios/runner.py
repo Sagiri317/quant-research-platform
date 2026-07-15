@@ -26,7 +26,6 @@ from quant_research_platform.research.portfolios.engine import (
     construct_portfolio_positions,
     summarize_period_breakdown,
 )
-from quant_research_platform.runtime.resources import ChunkAxis
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -117,7 +116,6 @@ def _portfolio_input_chunks(
             columns=columns,
         ),
         timestamp_column="timestamp",
-        axis=ChunkAxis.TIME,
     )
 
 

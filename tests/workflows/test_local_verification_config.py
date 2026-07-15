@@ -363,7 +363,7 @@ def test_local_verification_workflow_resolves_independent_windows(
     monkeypatch.setattr(
         module,
         "require_free_disk_headroom",
-        lambda _policy, path, **_kwargs: disk_checks.append(Path(path)),
+        lambda path, **_kwargs: disk_checks.append(Path(path)),
     )
     stub_output_writers(monkeypatch)
     monkeypatch.setattr(

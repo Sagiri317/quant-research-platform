@@ -17,7 +17,6 @@ from quant_research_platform.research.models import (
     feature_importance,
     validation_split,
 )
-from quant_research_platform.runtime.resources import ChunkAxis
 
 
 @dataclass(frozen=True)
@@ -181,7 +180,6 @@ def fit_linear_coefficients(
     for chunk in iter_complete_time_sized_frames(
         iter(frames),
         timestamp_column="timestamp",
-        axis=ChunkAxis.TIME,
     ):
         chunk_count += 1
         filtered, metadata = apply_filter_mode(
@@ -326,7 +324,6 @@ def collect_training_frame(
             work_columns=work_columns,
         ),
         timestamp_column="timestamp",
-        axis=ChunkAxis.TIME,
     ):
         filtered, metadata = apply_filter_mode(
             chunk,

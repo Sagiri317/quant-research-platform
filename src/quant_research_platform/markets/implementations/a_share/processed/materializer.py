@@ -26,7 +26,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
-    require_free_disk_headroom,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import DatasetInspection, inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -46,7 +46,27 @@ def materialize_processed_data(
     """Materialize registered A-share processed datasets."""
 
     policy = resource_policy or active_runtime_resource_policy()
-    policy.require_valid_chunk_budget()
+    with runtime_resource_policy_scope(policy):
+        return _materialize_processed_data_with_policy(
+            layout=layout,
+            source_id=source_id,
+            time_window=time_window,
+            data_ids=data_ids,
+            kinds=kinds,
+            resource_policy=policy,
+        )
+
+
+def _materialize_processed_data_with_policy(
+    *,
+    layout: StorageLayout,
+    source_id: SourceId,
+    time_window: TimeWindow,
+    data_ids: tuple[str, ...] | None,
+    kinds: frozenset[ProcessedDataKind] | None,
+    resource_policy: RuntimeResourcePolicy,
+) -> dict[str, DatasetInspection]:
+    policy = resource_policy
     if (data_ids is None) == (kinds is None):
         raise ValueError("data_ids_xor_kinds_required")
     catalog = processed_catalog()
@@ -57,11 +77,6 @@ def materialize_processed_data(
         targets = tuple(spec for spec in catalog.list() if spec.kind in kinds)
     if not targets:
         raise ValueError("no_processed_targets")
-    require_free_disk_headroom(
-        policy,
-        layout.project_root,
-        reserve_bytes=policy.effective_chunk_bytes * 2,
-    )
     materialization_validation.validate_processed_dependency_graph(catalog, targets)
     materialization_validation.validate_active_processed_profile_frequencies(
         catalog,
@@ -149,11 +164,6 @@ def _materialize_one(
         dependency_windows=dependency_windows,
         panel_key_coverages=panel_key_coverages,
         materialize_one=_materialize_one,
-    )
-    require_free_disk_headroom(
-        policy,
-        layout.project_root,
-        reserve_bytes=policy.effective_chunk_bytes * 2,
     )
     if spec.kind is ProcessedDataKind.PANEL:
         return materialize_panel.write_panel(

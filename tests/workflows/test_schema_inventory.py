@@ -15,6 +15,10 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+)
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.workflows.diagnostics import schema_inventory
 
@@ -77,8 +81,70 @@ def test_schema_inventory_uses_policy_bound_physical_batches() -> None:
     source = inspect.getsource(schema_inventory._aggregate_dataset_stats)
 
     assert "DatasetReadMode.CHUNKED" not in source
-    assert "target_chunk_bytes=" in source
+    assert "target_chunk_bytes=resource_policy.payload_target_bytes" in source
+    assert "payload_target_bytes - sqlite_cache_bytes" not in source
     assert "sqlite_cache_bytes=" in source
+
+
+def test_schema_inventory_captures_one_policy_for_all_datasets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={},
+    )
+    captures = {"count": 0}
+    observed_policies: list[RuntimeResourcePolicy] = []
+
+    def capture_policy() -> RuntimeResourcePolicy:
+        captures["count"] += 1
+        return policy
+
+    def inventory_item(
+        _project_root: Path,
+        artifact_root: Path,
+        *,
+        important_null_count_columns: frozenset[str],
+        resource_policy: RuntimeResourcePolicy,
+    ) -> dict[str, object]:
+        assert important_null_count_columns == frozenset()
+        assert active_runtime_resource_policy() is resource_policy
+        observed_policies.append(resource_policy)
+        return {"logical_relative_root": artifact_root.name}
+
+    monkeypatch.setattr(
+        schema_inventory,
+        "active_runtime_resource_policy",
+        capture_policy,
+    )
+    monkeypatch.setattr(
+        schema_inventory,
+        "_iter_dataset_artifact_roots",
+        lambda _root: (tmp_path / "dataset-a", tmp_path / "dataset-b"),
+    )
+    monkeypatch.setattr(schema_inventory, "_inventory_item", inventory_item)
+
+    payload = schema_inventory.build_schema_inventory_payload(tmp_path)
+
+    assert captures["count"] == 1
+    assert observed_policies == [policy, policy]
+    assert [item["logical_relative_root"] for item in payload["datasets"]] == [
+        "dataset-a",
+        "dataset-b",
+    ]
+
+
+def test_schema_inventory_sqlite_cache_is_fixed_and_bounded() -> None:
+    cache_bytes = 1024 * 1024
+
+    assert schema_inventory._exact_key_cache_bytes(cache_bytes + 1) == cache_bytes
+    assert schema_inventory._exact_key_cache_bytes(64 * cache_bytes) == cache_bytes
+    with pytest.raises(
+        ValueError,
+        match="schema_inventory_resource_budget_too_small",
+    ):
+        schema_inventory._exact_key_cache_bytes(cache_bytes)
 
 
 @pytest.mark.parametrize("value", (True, 1, ""))

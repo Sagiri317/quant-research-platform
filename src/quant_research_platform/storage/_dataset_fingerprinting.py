@@ -14,9 +14,12 @@ import pandas as pd
 
 from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    pandas_frame_payload_bytes,
+)
 from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_reading import (
-    DEFAULT_DATASET_PHYSICAL_TARGET_BYTES,
     build_dataset_read_context,
     dataset_categorical_dtypes,
     iter_dataset_file_batches,
@@ -24,23 +27,20 @@ from quant_research_platform.storage._dataset_reading import (
 )
 from quant_research_platform.storage._dataset_types import DatasetFingerprint
 
-_FINGERPRINT_PHYSICAL_TARGET_BYTES = DEFAULT_DATASET_PHYSICAL_TARGET_BYTES // 2
-_FINGERPRINT_HASH_TARGET_BYTES = (
-    DEFAULT_DATASET_PHYSICAL_TARGET_BYTES - _FINGERPRINT_PHYSICAL_TARGET_BYTES
-)
-
 
 def fingerprint_dataset(
     dataset_root: Path,
     *,
     columns: tuple[str, ...] | list[str] | None = None,
     time_window: TimeWindow | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> DatasetFingerprint:
     context = build_dataset_read_context(
         dataset_root,
         columns=columns,
         time_window=time_window,
     )
+    payload_target_bytes = resource_policy.payload_target_bytes
     key_columns = tuple(str(column) for column in context.spec["primary_key"])
     hash_columns = tuple(dict.fromkeys((*key_columns, *context.logical_columns)))
     hash_physical_columns = read_columns_for_time_window(
@@ -49,9 +49,10 @@ def fingerprint_dataset(
         time_window=context.time_window,
     )
     output_columns = tuple(context.logical_columns)
-    categorical_dtypes, categorical_state_bytes = dataset_categorical_dtypes(
+    categorical_dtypes, categorical_payload_bytes = dataset_categorical_dtypes(
         context.all_paths,
         hash_physical_columns,
+        payload_target_bytes=payload_target_bytes,
     )
     row_count = 0
     row_hash_sum = 0
@@ -64,9 +65,9 @@ def fingerprint_dataset(
     for path, chunk in iter_dataset_file_batches(
         context,
         columns=hash_physical_columns,
-        target_chunk_bytes=_FINGERPRINT_PHYSICAL_TARGET_BYTES,
+        target_chunk_bytes=payload_target_bytes,
         categorical_dtypes=categorical_dtypes,
-        categorical_state_bytes=categorical_state_bytes,
+        categorical_payload_bytes=categorical_payload_bytes,
     ):
         chunk = chunk.loc[:, list(hash_columns)]
         if chunk.empty:
@@ -75,7 +76,7 @@ def fingerprint_dataset(
         hashes = pd.util.hash_pandas_object(
             _hashable_fingerprint_frame(
                 chunk,
-                target_bytes=_FINGERPRINT_HASH_TARGET_BYTES,
+                target_bytes=payload_target_bytes,
             ),
             index=False,
         ).to_numpy("uint64")
@@ -129,27 +130,23 @@ def fingerprint_dataset(
 def _hashable_fingerprint_frame(
     frame: pd.DataFrame,
     *,
-    target_bytes: int = DEFAULT_DATASET_PHYSICAL_TARGET_BYTES,
+    target_bytes: int,
 ) -> pd.DataFrame:
     if target_bytes <= 0:
         raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
-    retained_bytes = int(frame.memory_usage(index=True, deep=True).sum())
-    if 2 * retained_bytes > target_bytes:
-        raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
+    input_payload_bytes = pandas_frame_payload_bytes(frame)
     output = frame.copy()
+    if input_payload_bytes + pandas_frame_payload_bytes(output) > target_bytes:
+        raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
     for column in output.columns:
         try:
             pd.util.hash_pandas_object(output[column], index=False)
         except TypeError:
-            canonical_bytes = 0
-            for value in output[column]:
-                canonical_bytes += _canonical_nested_value_bound(value)
-                if 2 * retained_bytes + 2 * canonical_bytes > target_bytes:
-                    raise ValueError(
-                        "dataset_fingerprint_value_exceeds_target_bytes"
-                    ) from None
             output[column] = output[column].map(_canonical_nested_value)
-            retained_bytes += canonical_bytes
+            if input_payload_bytes + pandas_frame_payload_bytes(output) > target_bytes:
+                raise ValueError(
+                    "dataset_fingerprint_value_exceeds_target_bytes"
+                ) from None
     return output
 
 
@@ -161,55 +158,6 @@ def _canonical_nested_value(value: Any) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
-
-
-def _canonical_nested_value_bound(value: Any) -> int:
-    return len("qrp-nested:") + _nested_json_bound(value)
-
-
-def _nested_json_bound(value: Any) -> int:
-    if isinstance(value, np.ndarray):
-        return 32 + 16 * value.ndim + sum(
-            _nested_json_bound(item) + 1 for item in value.flat
-        )
-    if isinstance(value, np.generic):
-        return _nested_json_bound(value.item())
-    if isinstance(value, (list, tuple)):
-        return 24 + sum(_nested_json_bound(item) + 1 for item in value)
-    if isinstance(value, dict):
-        return 24 + sum(
-            _json_string_bound(str(key)) + _nested_json_bound(item) + 4
-            for key, item in value.items()
-        )
-    if isinstance(value, bytes):
-        return 24 + 2 * len(value)
-    if isinstance(value, Decimal):
-        decimal_tuple = value.as_tuple()
-        return 64 + len(decimal_tuple.digits) + int(decimal_tuple.exponent).bit_length()
-    if isinstance(value, (pd.Timestamp, datetime, date, float)):
-        return 96
-    if value is None or isinstance(value, bool):
-        return 5
-    if isinstance(value, int):
-        return max(2, (value.bit_length() * 31 + 102) // 103 + 2)
-    if isinstance(value, str):
-        return _json_string_bound(value)
-    raise ValueError("unsupported_dataset_fingerprint_value")
-
-
-def _json_string_bound(value: str) -> int:
-    encoded = 2
-    for character in value:
-        codepoint = ord(character)
-        if codepoint > 0xFFFF:
-            encoded += 12
-        elif codepoint < 0x20 or codepoint > 0x7E:
-            encoded += 6
-        elif character in {'"', "\\"}:
-            encoded += 2
-        else:
-            encoded += 1
-    return encoded
 
 
 def _json_nested_value(value: Any) -> Any:

@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+
 pytestmark = pytest.mark.integration
 from tests.architecture.test_share_safe_evidence import (  # noqa: E402
     DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA,
@@ -14,6 +16,11 @@ from tests.architecture.test_share_safe_evidence import (  # noqa: E402
     synthetic_review_safe_evidence_payload,
 )
 from tests.helpers import frequency_ids  # noqa: E402
+
+RESOURCE_POLICY = RuntimeResourcePolicy.from_environment(
+    available_memory_bytes=1024**3,
+    environ={},
+)
 
 
 @pytest.fixture
@@ -71,9 +78,13 @@ def test_current_review_safe_aggregate_payload_includes_key_value_paired_hash(
             roots=(artifact_root,),
             expected_period=summary.period,
             explanation_name="factor values",
-        )
+        ),
+        resource_policy=RESOURCE_POLICY,
     )
-    inventory = aggregates._dataset_inventory(tmp_path)
+    inventory = aggregates._dataset_inventory(
+        tmp_path,
+        resource_policy=RESOURCE_POLICY,
+    )
 
     assert HASH_RE.fullmatch(area["key_value_paired_summary_hash"])
     assert HASH_RE.fullmatch(inventory[0]["key_value_paired_summary_hash"])
@@ -113,7 +124,10 @@ def test_full_historical_market_panel_daily_summary_streams_generated_chunks(
         iter_chunks,
     )
 
-    summary = aggregates._summarize_generated_full_market_panel(Path("."))
+    summary = aggregates._summarize_generated_full_market_panel(
+        Path("."),
+        resource_policy=RESOURCE_POLICY,
+    )
 
     assert summary.row_count == 2
     assert summary.key_count == 2
@@ -142,7 +156,12 @@ def test_full_historical_market_panel_daily_generation_always_uses_chunks(
         iter_session_chunks,
     )
 
-    frames = list(aggregates._iter_generated_full_market_panel_chunks(Path(".")))
+    frames = list(
+        aggregates._iter_generated_full_market_panel_chunks(
+            Path("."),
+            resource_policy=RESOURCE_POLICY,
+        )
+    )
 
     assert len(frames) == 1
     assert frames[0].equals(chunk)
@@ -162,15 +181,10 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
         manifest = {"file_size_bytes": 100_000}
 
     sessions = pd.date_range("2014-01-02", periods=6, freq="B")
-    policy = aggregates.RuntimeResourcePolicy(
+    policy = aggregates.RuntimeResourcePolicy.from_environment(
         available_memory_bytes=256 * 1024,
-        memory_budget_fraction=1.0,
-        chunk_target_bytes=256 * 1024,
-        memory_safety_factor=1.0,
+        environ={},
     )
-
-    def fake_from_environment():
-        return policy
 
     def read_private_summary_dataset(root: Path, **kwargs) -> pd.DataFrame:
         if root.name == "trading_calendar":
@@ -238,14 +252,11 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
         read_private_summary_dataset,
     )
     monkeypatch.setattr(panels, "compute_market_panel", fake_compute_market_panel)
-    monkeypatch.setattr(
-        aggregates.RuntimeResourcePolicy,
-        "from_environment",
-        staticmethod(fake_from_environment),
-    )
-
     chunks = list(
-        aggregates._iter_generated_full_market_panel_session_chunks(Path("."))
+        aggregates._iter_generated_full_market_panel_session_chunks(
+            Path("."),
+            resource_policy=policy,
+        )
     )
 
     assert len(chunks) > 1
@@ -337,13 +348,10 @@ def test_dataset_root_summary_uses_dataframe_chunks(
 ) -> None:
     root = tmp_path / "data" / "processed" / "a_share" / "factor" / "fixture"
     calls: list[dict[str, object]] = []
-    policy = aggregates.RuntimeResourcePolicy(
+    policy = aggregates.RuntimeResourcePolicy.from_environment(
         available_memory_bytes=64 * 1024,
-        memory_budget_fraction=1.0,
-        chunk_target_bytes=64 * 1024,
-        memory_safety_factor=1.0,
+        environ={},
     )
-    physical_target_bytes, _ = aggregates._verification_resource_allocations(policy)
 
     def capture_dataset_chunk_read(
         dataset_root,
@@ -401,7 +409,7 @@ def test_dataset_root_summary_uses_dataframe_chunks(
                 "2025-12-31",
             ),
             "resource_policy": policy,
-            "target_chunk_bytes": physical_target_bytes,
+            "target_chunk_bytes": policy.payload_target_bytes,
         }
     ]
     assert summary.row_count == 2
@@ -430,7 +438,11 @@ def test_low_level_parquet_fixture_summary_reads_dataset_artifact(
         partition_columns=("year",),
     )
 
-    summary = aggregates._summarize_dataset_root(root, years=(2025,))
+    summary = aggregates._summarize_dataset_root(
+        root,
+        years=(2025,),
+        resource_policy=RESOURCE_POLICY,
+    )
 
     assert summary.row_count == 2
     assert summary.key_count == 2

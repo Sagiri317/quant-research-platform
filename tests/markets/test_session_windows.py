@@ -8,11 +8,6 @@ from quant_research_platform.markets.session_windows import (
     SessionWindowPlanner,
     normalize_session_dates,
 )
-from quant_research_platform.runtime.resources import (
-    ChunkAxis,
-    ResourceChunkPlanner,
-    RuntimeResourcePolicy,
-)
 
 
 def test_normalize_session_dates_returns_sorted_unique_daily_timestamps() -> None:
@@ -87,25 +82,6 @@ def test_session_window_planner_core_window_may_cross_years() -> None:
     assert len(windows) == 1
     assert windows[0].core.start.isoformat() == "2014-12-31"
     assert windows[0].core.end.isoformat() == "2015-01-05"
-
-
-def test_resource_chunk_planner_uses_budget_only_not_trading_calendar() -> None:
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=10 * 1024 * 1024,
-        environ={"QRP_MEMORY_BUDGET_MB": "1"},
-    )
-    planner = ResourceChunkPlanner(policy)
-
-    plan = planner.plan_sessions(
-        axis=ChunkAxis.TIME,
-        session_count=20,
-        estimated_bytes_per_session=100_000,
-    )
-
-    assert policy.memory_budget_fraction == 0.80
-    assert plan.chunk_count > 1
-    assert "calendar" not in ResourceChunkPlanner.plan_sessions.__annotations__
-    assert "sessions" not in ResourceChunkPlanner.plan_sessions.__annotations__
 
 
 def test_session_windows_map_non_trading_bounds_and_cover_core_once() -> None:

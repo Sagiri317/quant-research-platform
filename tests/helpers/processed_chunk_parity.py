@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-from unittest.mock import patch
-
 import pandas as pd
 
 from quant_research_platform.contracts.ids import SourceId
@@ -10,10 +7,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer,
 )
-from quant_research_platform.runtime.resources import (
-    ResourceChunkPlanner,
-    RuntimeResourcePolicy,
-)
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
@@ -64,39 +58,16 @@ def assert_forced_tiny_processed_chunks_match_default(
         time_window=time_window,
         data_ids=(data_id,),
     )
-    original_plan_sessions = ResourceChunkPlanner.plan_sessions
-    forced_session_counts: list[int] = []
-
-    def force_one_core_session(self, **kwargs):  # noqa: ANN001
-        plan = original_plan_sessions(self, **kwargs)
-        if plan.session_count <= 0:
-            return plan
-        forced_session_counts.append(plan.session_count)
-        return replace(
-            plan,
-            target_core_session_count=1,
-            chunk_count=plan.session_count,
-            estimated_chunk_bytes=plan.estimated_bytes_per_session,
-        )
-
-    with patch.object(
-        ResourceChunkPlanner,
-        "plan_sessions",
-        force_one_core_session,
-    ):
-        materializer.materialize_processed_data(
-            layout=tiny_layout,
-            source_id=source_id,
-            time_window=time_window,
-            data_ids=(data_id,),
-            resource_policy=RuntimeResourcePolicy(
-                available_memory_bytes=tiny_chunk_bytes,
-                memory_budget_fraction=1.0,
-                chunk_target_bytes=tiny_chunk_bytes,
-                memory_safety_factor=1.0,
-            ),
-        )
-    assert max(forced_session_counts, default=0) > 1
+    materializer.materialize_processed_data(
+        layout=tiny_layout,
+        source_id=source_id,
+        time_window=time_window,
+        data_ids=(data_id,),
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=tiny_chunk_bytes,
+            environ={},
+        ),
+    )
 
     default_root = processed_a_share_root(tmp_path / "default", kind, data_id)
     tiny_root = processed_a_share_root(tmp_path / "tiny", kind, data_id)

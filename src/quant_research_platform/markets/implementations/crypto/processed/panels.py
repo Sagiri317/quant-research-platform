@@ -52,10 +52,7 @@ def calculate_market_panel_from_chunks(
     *,
     trade_chunks: Iterable[pd.DataFrame],
     depth_chunks: Iterable[pd.DataFrame],
-    trade_state_bytes: int,
-    trade_output_bytes: int,
-    depth_state_bytes: int,
-    depth_output_bytes: int,
+    payload_target_bytes: int,
     trade_continuity_state: (
         panel_input_reducers.AggregateTradeContinuityState | None
     ) = None,
@@ -65,8 +62,7 @@ def calculate_market_panel_from_chunks(
         raise ValueError("invalid_crypto_max_quote_age")
     trade_reducer = panel_input_reducers.AggregateTradeReducer(
         bars=prepared_bars,
-        target_state_bytes=trade_state_bytes,
-        target_output_bytes=trade_output_bytes,
+        payload_target_bytes=payload_target_bytes,
         normalize_chunk=normalize_trade_chunk,
         continuity_state=trade_continuity_state,
     )
@@ -77,8 +73,7 @@ def calculate_market_panel_from_chunks(
     del trade_reducer
     depth_reducer = panel_input_reducers.DepthSnapshotReducer(
         bars=prepared_bars,
-        target_state_bytes=depth_state_bytes,
-        target_output_bytes=depth_output_bytes,
+        payload_target_bytes=payload_target_bytes,
         normalize_chunk=normalize_depth_chunk,
     )
     for chunk in depth_chunks:

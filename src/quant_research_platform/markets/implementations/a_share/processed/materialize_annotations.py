@@ -70,10 +70,9 @@ def write_annotations(
                 outputs[spec.data_id],
                 window.core_sessions,
             )
-            materialization_planning.require_materialization_working_set(
+            materialization_planning.require_known_materialization_payload_bound(
                 frames=(panel, *outputs.values()),
                 output=output,
-                retained_state_bytes=0,
                 resource_policy=policy,
             )
             yield output

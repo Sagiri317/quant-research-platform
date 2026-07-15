@@ -407,17 +407,91 @@ def test_run_id_and_run_result_derived_names_are_contract_checked() -> None:
     assert hits == []
 
 
-def test_chunk_axis_contract_has_no_year_alias() -> None:
+def test_runtime_resource_contract_has_no_generic_planner_surface() -> None:
     resources = importlib.import_module("quant_research_platform.runtime.resources")
 
-    assert {item.name for item in resources.ChunkAxis} == {
-        "ASSET",
-        "TIME",
-        "PARTITION",
-        "ROW_GROUP",
+    assert not hasattr(resources, "ChunkAxis")
+    assert not hasattr(resources, "ResourceChunkPlan")
+    assert not hasattr(resources, "ResourceChunkPlanner")
+    assert not Path(
+        "src/quant_research_platform/runtime/_resource_accounting.py"
+    ).exists()
+
+
+def test_runtime_resource_contract_has_one_current_source_surface() -> None:
+    resources = importlib.import_module("quant_research_platform.runtime.resources")
+
+    assert _dataclass_field_names(resources.RuntimeResourcePolicy) == {
+        "task_memory_budget_bytes",
+        "payload_target_bytes",
     }
-    assert "YEAR" not in resources.ChunkAxis.__members__
-    assert "ENTITY" not in resources.ChunkAxis.__members__
+    assert resources.__all__ == [
+        "RuntimeResourcePolicy",
+        "active_runtime_resource_policy",
+        "pandas_frame_payload_bytes",
+        "require_free_disk_headroom",
+        "runtime_resource_policy_scope",
+    ]
+    assert resources._RETIRED_RESOURCE_SETTINGS == {
+        "QRP_MEMORY_BUDGET_FRACTION",
+        "QRP_MEMORY_BUDGET_MB",
+        "QRP_CHUNK_TARGET_MB",
+        "QRP_MEMORY_SAFETY_FACTOR",
+        "QRP_MIN_FREE_DISK_MB",
+    }
+    disk_parameters = inspect.signature(
+        resources.require_free_disk_headroom
+    ).parameters
+    assert tuple(disk_parameters) == ("path", "reserve_bytes")
+    assert disk_parameters["reserve_bytes"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    retired_symbols = (
+        "ResourceChunkPlanner",
+        "ResourceChunkPlan",
+        "ChunkAxis",
+        "effective_chunk_bytes",
+        "memory_budget_fraction",
+        "chunk_target_fraction",
+        "chunk_target_cap_bytes",
+        "memory_safety_factor",
+        "min_free_disk_bytes",
+        "_canonical_nested_value_bound",
+        "_nested_json_bound",
+        "getsizeof",
+        "categorical_state_bytes",
+        "dataset_categorical_state_exceeds_target_bytes",
+    )
+    runtime_source = SOURCE_ROOT / "runtime/resources.py"
+    hits: list[str] = []
+    for path in SOURCE_ROOT.rglob("*.py"):
+        if path == runtime_source:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for symbol in retired_symbols:
+            if re.search(rf"\b{re.escape(symbol)}\b", source):
+                hits.append(f"{path}:{symbol}")
+        if path != runtime_source and re.search(r"\.memory_usage\s*\(", source):
+            hits.append(f"{path}:direct_pandas_memory_usage")
+
+    storage_reader_source = (
+        SOURCE_ROOT / "storage/_dataset_reading.py"
+    ).read_text(encoding="utf-8")
+    if "target_state_bytes" in storage_reader_source:
+        hits.append("storage/_dataset_reading.py:target_state_bytes")
+
+    retired_setting_test_allowlist = {
+        Path("tests/architecture/test_data_layer_boundaries.py"),
+        Path("tests/runtime/test_resources.py"),
+    }
+    for path in Path("tests").rglob("*.py"):
+        if path in retired_setting_test_allowlist:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for setting in resources._RETIRED_RESOURCE_SETTINGS:
+            if setting in source:
+                hits.append(f"{path}:positive_retired_setting:{setting}")
+
+    assert hits == []
 
 
 def _dataclass_field_names(cls: type[object]) -> set[str]:

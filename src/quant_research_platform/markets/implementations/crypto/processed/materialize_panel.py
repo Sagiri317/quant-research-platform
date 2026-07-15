@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Hashable, Iterator
 
 import pandas as pd
@@ -21,12 +20,9 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     panels,
     source_ids,
 )
-from quant_research_platform.runtime._resource_accounting import (
-    python_list_container_bytes,
-    python_tuple_container_bytes,
-)
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_reading import (
     build_dataset_equality_group_plan,
@@ -51,50 +47,47 @@ def write_panel(
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-    input_identities = materialization_validation.input_dataset_identities(
-        materialization_validation.panel_input_inspections(
-            layout=layout,
-            source_id=source_id,
-            spec=spec,
+    with runtime_resource_policy_scope(resource_policy):
+        input_identities = materialization_validation.input_dataset_identities(
+            materialization_validation.panel_input_inspections(
+                layout=layout,
+                source_id=source_id,
+                spec=spec,
+            )
         )
-    )
-    materialization_resources.require_materialization_disk_headroom(
-        resource_policy,
-        root.parent,
-    )
-    chunks = materialization_resources.iter_disk_guarded_chunks(
-        _iter_panel_chunks(
-            spec,
-            layout=layout,
-            source_id=source_id,
-            time_window=time_window,
-            resource_policy=resource_policy,
-        ),
-        policy=resource_policy,
-        scratch_parent=root.parent,
-    )
-    def validate_staged_dataset(staged_root) -> None:
-        staged_inspection = inspect_dataset(staged_root, time_window=time_window)
-        materialization_validation.validate_panel_materialization(
-            staged_inspection,
-            layout=layout,
-            source_id=source_id,
-            spec=spec,
-            time_window=time_window,
-            expected_input_identities=input_identities,
-            resource_policy=resource_policy,
-            scratch_parent=staged_root,
+        chunks = materialization_resources.iter_disk_guarded_chunks(
+            _iter_panel_chunks(
+                spec,
+                layout=layout,
+                source_id=source_id,
+                time_window=time_window,
+                resource_policy=resource_policy,
+            ),
+            scratch_parent=root.parent,
         )
 
-    write_dataset(
-        root,
-        chunks,
-        spec=spec,
-        instance_metadata={"input_dataset_identities": input_identities},
-        staged_validator=validate_staged_dataset,
-    )
-    inspection = inspect_dataset(root, time_window=time_window)
-    return inspection
+        def validate_staged_dataset(staged_root) -> None:
+            staged_inspection = inspect_dataset(staged_root, time_window=time_window)
+            materialization_validation.validate_panel_materialization(
+                staged_inspection,
+                layout=layout,
+                source_id=source_id,
+                spec=spec,
+                time_window=time_window,
+                expected_input_identities=input_identities,
+                resource_policy=resource_policy,
+                scratch_parent=staged_root,
+            )
+
+        write_dataset(
+            root,
+            chunks,
+            spec=spec,
+            instance_metadata={"input_dataset_identities": input_identities},
+            staged_validator=validate_staged_dataset,
+            resource_policy=resource_policy,
+        )
+        return inspect_dataset(root, time_window=time_window)
 
 
 def _iter_panel_chunks(
@@ -105,11 +98,7 @@ def _iter_panel_chunks(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
-    resource_policy.require_valid_chunk_budget()
-    budget = materialization_resources.MaterializationBudget.from_policy(
-        resource_policy
-    )
-    chunk_target_bytes = budget.physical_read_bytes
+    chunk_target_bytes = resource_policy.payload_target_bytes
     bar_root = layout.interim_data_root(
         source_id,
         source_ids.market_bars_source_data_id(spec),
@@ -131,18 +120,12 @@ def _iter_panel_chunks(
         bar_context,
         columns=("source_asset_id",),
         target_chunk_bytes=chunk_target_bytes,
-        target_state_bytes=budget.panel_key_index_bytes,
     )
     materialization_validation.validate_single_asset_part_grouping(
         group_plan,
         error="invalid_crypto_panel_source_physical_asset_grouping",
     )
-    source_assets = _canonical_source_assets(
-        group_plan.keys,
-        target_state_bytes=(
-            budget.panel_key_index_bytes - group_plan.retained_bytes
-        ),
-    )
+    source_assets = _canonical_source_assets(group_plan.keys)
     order_state = materialization_validation.OrderedDependencyState()
     for source_asset_id in source_assets:
         trade_continuity_state = (
@@ -170,8 +153,8 @@ def _iter_panel_chunks(
             )
             materialization_resources.require_frame_within_budget(
                 prepared_bars,
-                target_bytes=budget.allocations["core_window"],
-                error="crypto_panel_core_window_exceeds_resource_budget",
+                target_bytes=resource_policy.payload_target_bytes,
+                error="crypto_indivisible_reducer_unit_exceeds_payload_target",
             )
             trade_chunks = _iter_matching_trade_chunks(
                 trade_root,
@@ -187,28 +170,22 @@ def _iter_panel_chunks(
                 prepared_bars,
                 trade_chunks=trade_chunks,
                 depth_chunks=depth_chunks,
-                trade_state_bytes=budget.reducer_state_bytes,
-                trade_output_bytes=budget.trade_output_bytes,
-                depth_state_bytes=budget.reducer_state_bytes,
-                depth_output_bytes=budget.depth_output_bytes,
+                payload_target_bytes=resource_policy.payload_target_bytes,
                 trade_continuity_state=trade_continuity_state,
                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
             ).loc[:, spec.required_columns]
             materialization_resources.require_frame_within_budget(
                 output,
-                target_bytes=budget.materialized_output_bytes,
-                error="crypto_panel_output_exceeds_resource_budget",
+                target_bytes=resource_policy.payload_target_bytes,
+                error="crypto_indivisible_reducer_unit_exceeds_payload_target",
             )
             yield output
 
 
 def _canonical_source_assets(
     keys: tuple[tuple[object, ...], ...],
-    *,
-    target_state_bytes: int,
 ) -> tuple[str, ...]:
     source_by_canonical: dict[str, str] = {}
-    state_bytes = sys.getsizeof(source_by_canonical)
     for key in keys:
         if len(key) != 1 or not isinstance(key[0], str) or not key[0]:
             raise ValueError("invalid_crypto_matching_bar_source_asset_id")
@@ -219,20 +196,7 @@ def _canonical_source_assets(
             if existing != source_value:
                 raise ValueError("duplicate_crypto_canonical_asset_id")
             continue
-        prior_mapping_bytes = sys.getsizeof(source_by_canonical)
         source_by_canonical[canonical] = source_value
-        state_bytes += (
-            sys.getsizeof(source_by_canonical)
-            - prior_mapping_bytes
-            + sys.getsizeof(canonical)
-            + sys.getsizeof(source_value)
-        )
-        if state_bytes > target_state_bytes:
-            raise ValueError("crypto_panel_asset_index_exceeds_resource_budget")
-    finalization_bytes = python_list_container_bytes(len(source_by_canonical))
-    finalization_bytes += python_tuple_container_bytes(len(source_by_canonical))
-    if state_bytes + finalization_bytes > target_state_bytes:
-        raise ValueError("crypto_panel_asset_index_exceeds_resource_budget")
     return tuple(
         source_by_canonical[canonical]
         for canonical in sorted(source_by_canonical)

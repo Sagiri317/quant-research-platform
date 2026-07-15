@@ -125,9 +125,8 @@ def run_local_verification(
     run_id = resolve_local_verification_run_id(config.run_id, run_root)
     resource_policy = RuntimeResourcePolicy.from_environment()
     require_free_disk_headroom(
-        resource_policy,
         run_root,
-        reserve_bytes=resource_policy.effective_chunk_bytes * 2,
+        reserve_bytes=resource_policy.payload_target_bytes * 2,
     )
     _prepare_run_root(
         run_root,
@@ -422,9 +421,8 @@ def _require_output_disk_headroom(
     run_root: Path,
 ) -> None:
     require_free_disk_headroom(
-        resource_policy,
         run_root,
-        reserve_bytes=resource_policy.effective_chunk_bytes * 2,
+        reserve_bytes=resource_policy.payload_target_bytes * 2,
     )
 
 

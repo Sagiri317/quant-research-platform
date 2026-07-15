@@ -20,7 +20,11 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.research.factors.microstructure import (
     calculate_microstructure_factors,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage._dataset_reading import (
     build_dataset_equality_group_plan,
     build_dataset_read_context,
@@ -46,51 +50,47 @@ def write_factors(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
-    resource_policy.require_valid_chunk_budget()
     panel_root = layout.processed_data_root(
         MARKET_ID,
         ProcessedDataKind.PANEL,
         MARKET_PANEL_DATA_ID,
     )
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-    input_identities = materialization_validation.input_dataset_identities(
-        materialization_validation.panel_dependency_inspections(layout=layout)
-    )
-    materialization_resources.require_materialization_disk_headroom(
-        resource_policy,
-        root.parent,
-    )
-    chunks = materialization_resources.iter_disk_guarded_chunks(
-        _iter_factor_chunks(
-            spec,
-            panel_root=panel_root,
-            time_window=time_window,
-            resource_policy=resource_policy,
-        ),
-        policy=resource_policy,
-        scratch_parent=root.parent,
-    )
-    def validate_staged_dataset(staged_root) -> None:
-        staged_inspection = inspect_dataset(staged_root, time_window=time_window)
-        materialization_validation.validate_panel_dependent_materialization(
-            staged_inspection,
-            layout=layout,
-            spec=spec,
-            time_window=time_window,
-            expected_input_identities=input_identities,
-            resource_policy=resource_policy,
-            scratch_parent=staged_root,
+    with runtime_resource_policy_scope(resource_policy):
+        input_identities = materialization_validation.input_dataset_identities(
+            materialization_validation.panel_dependency_inspections(layout=layout)
+        )
+        chunks = materialization_resources.iter_disk_guarded_chunks(
+            _iter_factor_chunks(
+                spec,
+                panel_root=panel_root,
+                time_window=time_window,
+                resource_policy=resource_policy,
+            ),
+            scratch_parent=root.parent,
         )
 
-    write_dataset(
-        root,
-        chunks,
-        spec=spec,
-        instance_metadata={"input_dataset_identities": input_identities},
-        staged_validator=validate_staged_dataset,
-    )
-    inspection = inspect_dataset(root, time_window=time_window)
-    return inspection
+        def validate_staged_dataset(staged_root) -> None:
+            staged_inspection = inspect_dataset(staged_root, time_window=time_window)
+            materialization_validation.validate_panel_dependent_materialization(
+                staged_inspection,
+                layout=layout,
+                spec=spec,
+                time_window=time_window,
+                expected_input_identities=input_identities,
+                resource_policy=resource_policy,
+                scratch_parent=staged_root,
+            )
+
+        write_dataset(
+            root,
+            chunks,
+            spec=spec,
+            instance_metadata={"input_dataset_identities": input_identities},
+            staged_validator=validate_staged_dataset,
+            resource_policy=resource_policy,
+        )
+        return inspect_dataset(root, time_window=time_window)
 
 
 def _iter_factor_chunks(
@@ -100,10 +100,7 @@ def _iter_factor_chunks(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
-    budget = materialization_resources.MaterializationBudget.from_policy(
-        resource_policy
-    )
-    chunk_target_bytes = budget.physical_read_bytes
+    chunk_target_bytes = resource_policy.payload_target_bytes
     active_key: tuple[str, str] | None = None
     active_carry: pd.DataFrame | None = None
     order_state = materialization_validation.OrderedDependencyState()
@@ -117,7 +114,6 @@ def _iter_factor_chunks(
         context,
         columns=("market_id", "asset_id"),
         target_chunk_bytes=chunk_target_bytes,
-        target_state_bytes=budget.dependent_key_index_bytes,
     )
     materialization_validation.validate_single_asset_part_grouping(
         group_plan,
@@ -164,18 +160,20 @@ def _iter_factor_chunks(
                 output = factors.loc[factors[_CORE_ROW]].copy()
                 active_carry = _next_factor_carry(combined)
                 if (
-                    materialization_resources.materialization_frame_bytes(
-                        active_carry
-                    )
-                    > budget.carry_bytes
+                    pandas_frame_payload_bytes(active_carry)
+                    > resource_policy.payload_target_bytes
                 ):
-                    raise ValueError("crypto_factor_state_exceeds_resource_budget")
+                    raise ValueError(
+                        "crypto_indivisible_reducer_unit_exceeds_payload_target"
+                    )
                 if not output.empty:
                     result = output.loc[:, spec.required_columns]
                     materialization_resources.require_frame_within_budget(
                         result,
-                        target_bytes=budget.materialized_output_bytes,
-                        error="crypto_factor_output_exceeds_resource_budget",
+                        target_bytes=resource_policy.payload_target_bytes,
+                        error=(
+                            "crypto_indivisible_reducer_unit_exceeds_payload_target"
+                        ),
                     )
                     yield result
 

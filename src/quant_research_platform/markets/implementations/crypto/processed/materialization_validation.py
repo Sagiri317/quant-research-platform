@@ -21,12 +21,10 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     MARKET_PANEL_DATA_ID,
     canonical_crypto_asset_id,
 )
-from quant_research_platform.markets.implementations.crypto.processed import (
-    materialization_resources,
-    source_ids,
-)
+from quant_research_platform.markets.implementations.crypto.processed import source_ids
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    pandas_frame_payload_bytes,
     require_free_disk_headroom,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
@@ -159,11 +157,7 @@ def validate_panel_materialization(
         source_id,
         source_ids.market_bars_source_data_id(spec),
     )
-    chunk_target_bytes = (
-        materialization_resources.MaterializationBudget.from_policy(
-            resource_policy
-        ).physical_read_bytes
-    )
+    chunk_target_bytes = resource_policy.payload_target_bytes
     bar_context = build_dataset_read_context(
         bar_root,
         columns=("source_asset_id", "timestamp"),
@@ -178,11 +172,6 @@ def validate_panel_materialization(
         actual_context,
         columns=("market_id", "asset_id"),
         target_chunk_bytes=chunk_target_bytes,
-        target_state_bytes=(
-            materialization_resources.MaterializationBudget.from_policy(
-                resource_policy
-            ).validation_key_index_bytes
-        ),
     )
     validate_single_asset_part_grouping(
         actual_group_plan,
@@ -230,11 +219,7 @@ def validate_panel_dependent_materialization(
         ProcessedDataKind.PANEL,
         MARKET_PANEL_DATA_ID,
     )
-    chunk_target_bytes = (
-        materialization_resources.MaterializationBudget.from_policy(
-            resource_policy
-        ).physical_read_bytes
-    )
+    chunk_target_bytes = resource_policy.payload_target_bytes
     expected_context = build_dataset_read_context(
         panel_root,
         columns=spec.primary_key,
@@ -276,37 +261,27 @@ def validate_exact_dependency_key_coverage(
 ) -> None:
     if not primary_key:
         raise ValueError(error)
-    budget = materialization_resources.MaterializationBudget.from_policy(
-        resource_policy
-    )
-    chunk_target_bytes = budget.physical_read_bytes
+    chunk_target_bytes = resource_policy.payload_target_bytes
     timestamp_columns = tuple(
         column for column in primary_key if column == "timestamp"
-    )
-    require_free_disk_headroom(
-        resource_policy,
-        scratch_parent,
-        reserve_bytes=2 * chunk_target_bytes + budget.sqlite_cache_bytes,
     )
     with ExactPrimaryKeyIndex(
         primary_key=primary_key,
         timestamp_columns=timestamp_columns,
         scratch_parent=scratch_parent,
         key_schema=key_schema,
-        sqlite_cache_bytes=budget.sqlite_cache_bytes,
     ) as index:
         for namespace, frames in (("expected", expected), ("actual", actual)):
             for frame in frames:
                 if not isinstance(frame, pd.DataFrame):
                     raise ValueError(error)
                 keys = _normalized_primary_keys(frame, primary_key, error=error)
-                key_bytes = int(keys.memory_usage(index=True, deep=True).sum())
+                key_bytes = pandas_frame_payload_bytes(keys)
                 if key_bytes > chunk_target_bytes:
                     raise ValueError(error)
                 require_free_disk_headroom(
-                    resource_policy,
                     scratch_parent,
-                    reserve_bytes=4 * key_bytes + chunk_target_bytes,
+                    reserve_bytes=key_bytes,
                 )
                 try:
                     duplicates = index.add_frame(keys, namespace=namespace)

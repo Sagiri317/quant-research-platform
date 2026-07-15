@@ -41,34 +41,32 @@ A-share active processed profile 仍为日频。minute/tick 只由通用 data fr
 
 processed owner 内部跨文件生产 helper 使用非下划线 owner-local 名称，并且不从 `processed/__init__.py` 重导出。下划线 helper 只表示同文件私有实现细节。
 
-A-share processed output IO owns the resource-policy disk gate for its staged
-dataset lifecycle. It checks same-volume free space before scratch creation,
-between produced chunks, and before staged publication; storage remains unaware
-of `RuntimeResourcePolicy`. The same owner derives physical targets for source,
-processed, calendar, coverage, and sizing-probe reads from the active policy and
-routes them through storage's single physical iterator. A minimum session that
-exceeds the policy fails before panel/factor/label computation.
-Sizing probes materialize one core session at a time, retain only the maximum
-measurement, and pass the active policy as the total storage materialization
-bound. The owner measurement and production write path both count retained
-source inputs, the current physical/Pandas input, computed and filtered frames,
-owner state, and four simultaneously possible selected-output copies. Their sum
-must fit one `effective_chunk_bytes` budget. Trading-session discovery retains
-only the requested lookback, core window, and lookahead while scanning bounded
-calendar chunks; panel calculation preserves complete historical calendar
-semantics while projecting only the fields required by the A-share owner.
-Dataset-session discovery splits the caller budget between bounded physical
-chunks and the deep-sized retained session namespace. Verification aggregates
-likewise reserve separate physical-read and exact-key SQLite-cache allocations.
+A-share processed output IO owns the payload-chunk disk guard for its staged
+dataset lifecycle. Before each chunk is handed to the writer it performs a
+same-volume free-space check using that chunk's actual Pandas payload; disk
+reserve is not a Runtime policy field, and
+storage remains unaware of `RuntimeResourcePolicy`. The owner captures one policy
+and routes `payload_target_bytes` through source, processed, calendar, coverage,
+sizing-probe, writer, and persisted-readback calls. The sizing probe is an
+A-share planning input, not a complete-working-set measurement. Owner-local
+session windows use estimated payload per session to
+select a core-session count, while actual indivisible Pandas output payload is
+checked against `payload_target_bytes` and known simultaneously retained Pandas
+payload against `task_memory_budget_bytes`. These checks do not account for RSS,
+allocator or arbitrary Python state. Trading-session discovery preserves the
+requested lookback/core/lookahead and panel calculation preserves historical
+calendar semantics. The current owner retains sizing probes and full
+materialization; active-only state, adaptive split and streaming write are not
+current guarantees.
 Standalone evaluation, prediction, and portfolio bundles are read in declared
 manifest order; undeclared Parquet and filesystem aliases fail closed before
 review-safe aggregate calculation.
 
-A-share coverage uses trading sessions. Coverage helpers must reject invalid
-asset keys and timestamps instead of silently dropping them. Their cached
-asset/session namespace is deep-sized incrementally; set-to-tuple coverage and
-session-result finalization are preflighted while retained state is still live,
-and the combined state must fit its owner-local allocation. Crypto
+A-share coverage uses trading sessions. Coverage helpers reject invalid asset
+keys and timestamps instead of silently dropping them and preserve deterministic
+asset/session ordering. They do not claim an exact retained-state allocation;
+bounded active-only coverage state and its release/spill lifecycle are not
+guarantees of the current implementation. Crypto
 coverage uses its own minute-grid semantics and must not reuse A-share calendar
 rules.
 

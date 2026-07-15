@@ -1,129 +1,77 @@
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.runtime import resources
 from quant_research_platform.runtime.resources import (
-    ChunkAxis,
-    ResourceChunkPlanner,
     RuntimeResourcePolicy,
+    pandas_frame_payload_bytes,
+    require_free_disk_headroom,
 )
 
+MIB = 1024 * 1024
 
-def test_runtime_resource_policy_reads_environment_overrides() -> None:
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024 * 1024 * 1024,
-        environ={
-            "QRP_MEMORY_BUDGET_FRACTION": "0.5",
-            "QRP_MEMORY_BUDGET_MB": "256",
-            "QRP_CHUNK_TARGET_MB": "64",
-            "QRP_MEMORY_SAFETY_FACTOR": "0.5",
-            "QRP_MIN_FREE_DISK_MB": "1",
-        },
+
+def test_internal_factory_still_enforces_discovery_inputs_and_ceiling() -> None:
+    policy = resources._runtime_resource_policy_factory(
+        available_memory_bytes=10 * 1024 * MIB,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "16384"},
     )
 
-    assert policy.memory_budget_bytes == 256 * resources.MIB
-    assert policy.effective_chunk_bytes == 32 * resources.MIB
-    assert policy.min_free_disk_bytes == resources.MIB
+    assert policy.task_memory_budget_bytes == 8 * 1024 * MIB
+    assert policy.payload_target_bytes == 8 * 1024 * MIB
 
 
-@pytest.mark.parametrize(
-    ("environ", "error"),
-    [
-        ({"QRP_MEMORY_BUDGET_FRACTION": "0"}, "invalid_runtime_resource_env"),
-        ({"QRP_MEMORY_BUDGET_MB": "-1"}, "invalid_runtime_resource_env"),
-        ({"QRP_CHUNK_TARGET_MB": "0"}, "invalid_runtime_resource_env"),
-        ({"QRP_MEMORY_SAFETY_FACTOR": "-0.1"}, "invalid_runtime_resource_env"),
-        ({"QRP_MIN_FREE_DISK_MB": "-1"}, "invalid_runtime_resource_env"),
-    ],
-)
-def test_runtime_resource_policy_rejects_invalid_environment(
-    environ: dict[str, str],
-    error: str,
+def test_available_memory_discovery_failure_is_not_replaced_by_fallback(
+    monkeypatch,
 ) -> None:
-    with pytest.raises(ValueError, match=error):
-        RuntimeResourcePolicy.from_environment(
-            available_memory_bytes=1024 * 1024,
-            environ=environ,
-        )
+    def fail_discovery() -> int:
+        raise RuntimeError("runtime_available_memory_discovery_failed")
+
+    monkeypatch.setattr(resources, "_available_memory_bytes", fail_discovery)
+
+    with pytest.raises(
+        RuntimeError,
+        match="runtime_available_memory_discovery_failed",
+    ):
+        RuntimeResourcePolicy.from_environment(environ={})
 
 
-def test_runtime_resource_policy_rejects_chunk_target_over_budget() -> None:
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024,
-        memory_budget_fraction=0.1,
-        chunk_target_bytes=1024,
-        memory_safety_factor=1.0,
-    )
-
-    with pytest.raises(ValueError, match="chunk_target_exceeds_memory_budget"):
-        policy.require_valid_chunk_budget()
-
-
-def test_resource_chunk_planner_handles_empty_and_invalid_inputs() -> None:
-    planner = ResourceChunkPlanner(
-        RuntimeResourcePolicy(
-            available_memory_bytes=1024 * 1024,
-            chunk_target_bytes=1024,
-            memory_safety_factor=1.0,
-        )
-    )
-
-    empty = planner.plan_sessions(
-        axis=ChunkAxis.TIME,
-        session_count=0,
-        estimated_bytes_per_session=10,
-    )
-    assert empty.chunk_count == 0
-    assert empty.target_core_session_count == 1
-
-    plan = planner.plan_sessions(
-        axis=ChunkAxis.ASSET,
-        session_count=25,
-        estimated_bytes_per_session=100,
-    )
-    assert plan.chunk_count == 3
-    assert plan.target_core_session_count == 10
-    with pytest.raises(ValueError, match="invalid_session_count"):
-        planner.plan_sessions(
-            axis=ChunkAxis.TIME,
-            session_count=-1,
-            estimated_bytes_per_session=1,
-        )
-    with pytest.raises(ValueError, match="invalid_estimated_bytes_per_session"):
-        planner.plan_sessions(
-            axis=ChunkAxis.TIME,
-            session_count=1,
-            estimated_bytes_per_session=0,
-        )
-    with pytest.raises(ValueError, match="session_estimate_exceeds_chunk_budget"):
-        planner.plan_sessions(
-            axis=ChunkAxis.TIME,
-            session_count=1,
-            estimated_bytes_per_session=1025,
-        )
-
-
-def test_runtime_resource_policy_checks_disk_space(monkeypatch, tmp_path: Path) -> None:
+def test_disk_headroom_is_independent_of_memory_policy(
+    monkeypatch,
+    tmp_path,
+) -> None:
     monkeypatch.setattr(
         resources.shutil,
         "disk_usage",
         lambda _path: SimpleNamespace(free=100),
     )
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024,
-        min_free_disk_bytes=101,
-    )
 
-    assert policy.has_minimum_free_disk(tmp_path / "missing" / "child") is False
+    require_free_disk_headroom(tmp_path / "missing" / "child", reserve_bytes=100)
     with pytest.raises(RuntimeError, match="insufficient_free_disk"):
-        policy.require_minimum_free_disk(tmp_path / "missing" / "child")
+        require_free_disk_headroom(tmp_path, reserve_bytes=101)
 
-    ok_policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024,
-        min_free_disk_bytes=100,
+
+@pytest.mark.parametrize("value", [True, 1.0, "1", -1])
+def test_disk_headroom_requires_exact_nonnegative_int(value: object, tmp_path) -> None:
+    with pytest.raises(ValueError, match="invalid_runtime_resource_disk_reserve"):
+        require_free_disk_headroom(
+            tmp_path,
+            reserve_bytes=value,  # type: ignore[arg-type]
+        )
+
+
+def test_pandas_frame_payload_bytes_is_the_exact_runtime_diagnostic() -> None:
+    frame = pd.DataFrame({"value": ["a", "bb"]})
+
+    assert pandas_frame_payload_bytes(frame) == int(
+        frame.memory_usage(index=True, deep=True).sum()
     )
-    assert ok_policy.has_minimum_free_disk(tmp_path) is True
+
+
+def test_pandas_payload_diagnostic_rejects_non_frame() -> None:
+    with pytest.raises(TypeError, match="invalid_pandas_frame_payload"):
+        pandas_frame_payload_bytes(pd.Series([1]))  # type: ignore[arg-type]

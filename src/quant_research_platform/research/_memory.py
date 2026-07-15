@@ -9,10 +9,10 @@ import pandas as pd
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
-    ChunkAxis,
-    ResourceChunkPlanner,
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
 )
 
 
@@ -20,10 +20,25 @@ def iter_time_sized_frames(
     frame: pd.DataFrame,
     *,
     timestamp_column: str,
-    axis: ChunkAxis = ChunkAxis.TIME,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
     """Yield timestamp-session chunks sized by the shared runtime policy."""
+
+    policy = resource_policy or active_runtime_resource_policy()
+    with runtime_resource_policy_scope(policy):
+        yield from _iter_time_sized_frames_with_policy(
+            frame,
+            timestamp_column=timestamp_column,
+            resource_policy=policy,
+        )
+
+
+def _iter_time_sized_frames_with_policy(
+    frame: pd.DataFrame,
+    *,
+    timestamp_column: str,
+    resource_policy: RuntimeResourcePolicy,
+) -> Iterator[pd.DataFrame]:
 
     if timestamp_column not in frame.columns:
         raise ValueError("missing_time_chunk_timestamp_column")
@@ -31,7 +46,7 @@ def iter_time_sized_frames(
         yield frame
         return
 
-    policy = resource_policy or active_runtime_resource_policy()
+    policy = resource_policy
 
     timestamps = strict_timestamp_series(
         frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
@@ -44,17 +59,18 @@ def iter_time_sized_frames(
         return
 
     estimated_bytes = _estimated_bytes_per_session(frame, session_count=len(sessions))
-    plan = ResourceChunkPlanner(policy).plan_sessions(
-        axis=axis,
-        session_count=len(sessions),
-        estimated_bytes_per_session=estimated_bytes,
+    target = max(
+        1,
+        min(
+            len(sessions),
+            policy.payload_target_bytes // estimated_bytes,
+        ),
     )
-    if plan.chunk_count <= 1:
+    if target >= len(sessions):
         _require_time_chunk_budget(frame, policy=policy)
         yield frame
         return
 
-    target = plan.target_core_session_count
     for start in range(0, len(sessions), target):
         window_sessions = sessions[start : start + target]
         output = frame.loc[timestamps.isin(window_sessions)]
@@ -66,10 +82,25 @@ def iter_complete_time_sized_frames(
     frames: Iterator[pd.DataFrame],
     *,
     timestamp_column: str,
-    axis: ChunkAxis = ChunkAxis.TIME,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
     """Yield chunks without splitting any timestamp session across inputs."""
+
+    policy = resource_policy or active_runtime_resource_policy()
+    with runtime_resource_policy_scope(policy):
+        yield from _iter_complete_time_sized_frames_with_policy(
+            frames,
+            timestamp_column=timestamp_column,
+            resource_policy=policy,
+        )
+
+
+def _iter_complete_time_sized_frames_with_policy(
+    frames: Iterator[pd.DataFrame],
+    *,
+    timestamp_column: str,
+    resource_policy: RuntimeResourcePolicy,
+) -> Iterator[pd.DataFrame]:
 
     pending: pd.DataFrame | None = None
     pending_min: pd.Timestamp | None = None
@@ -112,10 +143,9 @@ def iter_complete_time_sized_frames(
             pending_min = min(pending_min, current_min)
             pending_max = max(pending_max, current_max)
             continue
-        yield from iter_time_sized_frames(
+        yield from _iter_time_sized_frames_with_policy(
             pending,
             timestamp_column=timestamp_column,
-            axis=axis,
             resource_policy=resource_policy,
         )
         emitted_max = pending_max
@@ -127,16 +157,15 @@ def iter_complete_time_sized_frames(
         if saw_empty and first_empty is not None:
             yield first_empty.iloc[0:0].copy()
         return
-    yield from iter_time_sized_frames(
+    yield from _iter_time_sized_frames_with_policy(
         pending,
         timestamp_column=timestamp_column,
-        axis=axis,
         resource_policy=resource_policy,
     )
 
 
 def _estimated_bytes_per_session(frame: pd.DataFrame, *, session_count: int) -> int:
-    total = int(frame.memory_usage(index=True, deep=True).sum())
+    total = pandas_frame_payload_bytes(frame)
     return max(1, ceil(total / max(1, session_count)))
 
 
@@ -154,20 +183,23 @@ def _concat_time_boundary_frames(
     left: pd.DataFrame,
     right: pd.DataFrame,
     *,
-    resource_policy: RuntimeResourcePolicy | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> pd.DataFrame:
-    policy = resource_policy or active_runtime_resource_policy()
-    retained_bytes = _frame_bytes(left) + _frame_bytes(right)
-    if 2 * retained_bytes > policy.effective_chunk_bytes:
-        raise ValueError("time_chunk_boundary_overlap_exceeds_memory_budget")
+    policy = resource_policy
+    retained_payload_bytes = _frame_bytes(left) + _frame_bytes(right)
+    if retained_payload_bytes > policy.task_memory_budget_bytes:
+        raise ValueError("research_time_boundary_payloads_exceed_task_memory_budget")
     result = pd.concat([left, right], ignore_index=True)
-    if retained_bytes + _frame_bytes(result) > policy.effective_chunk_bytes:
-        raise ValueError("time_chunk_boundary_overlap_exceeds_memory_budget")
+    if (
+        retained_payload_bytes + _frame_bytes(result)
+        > policy.task_memory_budget_bytes
+    ):
+        raise ValueError("research_time_boundary_payloads_exceed_task_memory_budget")
     return result
 
 
 def _frame_bytes(frame: pd.DataFrame) -> int:
-    return int(frame.memory_usage(index=True, deep=True).sum())
+    return pandas_frame_payload_bytes(frame)
 
 
 def _require_time_chunk_budget(
@@ -175,5 +207,5 @@ def _require_time_chunk_budget(
     *,
     policy: RuntimeResourcePolicy,
 ) -> None:
-    if _frame_bytes(frame) > policy.effective_chunk_bytes:
-        raise ValueError("time_chunk_exceeds_memory_budget")
+    if _frame_bytes(frame) > policy.payload_target_bytes:
+        raise ValueError("research_indivisible_time_unit_exceeds_payload_target")

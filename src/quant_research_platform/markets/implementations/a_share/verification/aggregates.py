@@ -43,10 +43,9 @@ from quant_research_platform.markets.session_windows import (
     normalize_session_dates,
 )
 from quant_research_platform.runtime.resources import (
-    ChunkAxis,
-    ResourceChunkPlanner,
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    pandas_frame_payload_bytes,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
@@ -64,10 +63,8 @@ GENERATED_BY = (
 )
 HASH_MODULUS = 1 << 64
 KEY_VALUE_HASH_MIXER = np.uint64(0x9E3779B185EBCA87)
-HASH_BLOCK_MIN_ROWS = 1_024
-HASH_BLOCK_MAX_ROWS = 1_048_576
-HASH_BLOCK_BYTES_PER_VALUE = 8
-HASH_BLOCK_INTERMEDIATE_WIDTH = 8
+# Performance-only batching cap. It is not a resource measurement or gate.
+HASH_BLOCK_ROWS = 1_048_576
 FULL_HISTORY_START_YEAR = 2014
 FULL_HISTORY_END_YEAR = 2025
 FULL_HISTORY_START_DATE = "2014-01-01"
@@ -171,6 +168,7 @@ def build_review_safe_aggregate_evidence_payload(
             root,
             generated_at=generated_at,
             summary_cache=summary_cache,
+            resource_policy=policy,
         )
 
 
@@ -193,7 +191,11 @@ def build_local_verification_inventory_payload(
             resource_policy=policy,
         )
     with runtime_resource_policy_scope(policy):
-        inventory = _dataset_inventory(root, summary_cache={})
+        inventory = _dataset_inventory(
+            root,
+            summary_cache={},
+            resource_policy=policy,
+        )
     covered_roots = [
         item["logical_root"] for item in inventory if item["covered_by_evidence_area"]
     ]
@@ -234,9 +236,14 @@ def _build_review_safe_aggregate_evidence_payload_with_cache(
     *,
     generated_at: datetime,
     summary_cache: _SummaryCache,
+    resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
     areas = [
-        _area_record(area_input, summary_cache=summary_cache)
+        _area_record(
+            area_input,
+            summary_cache=summary_cache,
+            resource_policy=resource_policy,
+        )
         for area_input in _area_inputs(root)
     ]
     handoff_ready = not any(area["human_approval_required"] for area in areas)
@@ -413,13 +420,16 @@ def _dataset_inventory(
     root: Path,
     *,
     summary_cache: _SummaryCache | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> list[dict[str, Any]]:
+    policy = resource_policy
     inventory: list[dict[str, Any]] = []
     for artifact_root in _official_dataset_artifact_roots(root):
         logical_root = _logical_dataset_root(root, artifact_root)
         summary = _summarize_dataset_root(
             artifact_root,
             summary_cache=summary_cache,
+            resource_policy=policy,
         )
         kind, artifact_id = _dataset_kind_and_artifact_id(logical_root)
         inventory.append(
@@ -493,8 +503,14 @@ def _area_record(
     area_input: AggregateInput,
     *,
     summary_cache: _SummaryCache | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
-    summary = _summarize_area_input(area_input, summary_cache=summary_cache)
+    policy = resource_policy
+    summary = _summarize_area_input(
+        area_input,
+        summary_cache=summary_cache,
+        resource_policy=policy,
+    )
     period_matches = (
         area_input.expected_period is None
         or summary.period == area_input.expected_period
@@ -560,24 +576,33 @@ def _summarize_area_input(
     area_input: AggregateInput,
     *,
     summary_cache: _SummaryCache | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> AggregateSummary:
+    policy = resource_policy
     if area_input.summary_kind == "generated_market_panel_from_interim":
         if len(area_input.roots) != 1:
             raise ValueError("expected_single_project_root")
-        return _summarize_generated_full_market_panel(area_input.roots[0])
+        return _summarize_generated_full_market_panel(
+            area_input.roots[0],
+            resource_policy=policy,
+        )
     if area_input.summary_kind == "outputs":
-        return _summarize_output_bundles(area_input.roots)
+        return _summarize_output_bundles(
+            area_input.roots,
+            resource_policy=policy,
+        )
     return _summarize_roots(
         area_input.roots,
         years=area_input.years,
         summary_cache=summary_cache,
+        resource_policy=policy,
     )
 
 
 def _summarize_generated_full_market_panel(
     project_root: Path,
     *,
-    resource_policy: RuntimeResourcePolicy | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> AggregateSummary:
     return _summarize_frames(
         _iter_generated_full_market_panel_chunks(
@@ -585,14 +610,13 @@ def _summarize_generated_full_market_panel(
             resource_policy=resource_policy,
         ),
         scratch_parent=project_root,
-        resource_policy=resource_policy,
     )
 
 
 def _iter_generated_full_market_panel_chunks(
     project_root: Path,
     *,
-    resource_policy: RuntimeResourcePolicy | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
     yield from _iter_generated_full_market_panel_session_chunks(
         project_root,
@@ -603,7 +627,7 @@ def _iter_generated_full_market_panel_chunks(
 def _iter_generated_full_market_panel_session_chunks(
     project_root: Path,
     *,
-    resource_policy: RuntimeResourcePolicy | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog as processed_catalog,
@@ -611,7 +635,7 @@ def _iter_generated_full_market_panel_session_chunks(
     from quant_research_platform.markets.implementations.a_share.processed import panels
 
     interim_root = _local_interim_root(project_root)
-    policy = resource_policy or active_runtime_resource_policy()
+    policy = resource_policy
     stock_master = materialization_io.read_materialized_dataset(
         interim_root / "stock_master",
         resource_policy=policy,
@@ -619,7 +643,7 @@ def _iter_generated_full_market_panel_session_chunks(
     market_cap = materialization_io.read_materialized_dataset(
         interim_root / "market_cap",
         resource_policy=policy,
-        retained_bytes=int(stock_master.memory_usage(index=True, deep=True).sum()),
+        retained_payload_bytes=pandas_frame_payload_bytes(stock_master),
     )
     trading_calendar = materialization_io.read_materialized_dataset(
         interim_root / "trading_calendar",
@@ -630,16 +654,15 @@ def _iter_generated_full_market_panel_session_chunks(
             "is_trading_day",
             "timestamp",
         ),
-        retained_bytes=sum(
-            int(frame.memory_usage(index=True, deep=True).sum())
+        retained_payload_bytes=sum(
+            pandas_frame_payload_bytes(frame)
             for frame in (stock_master, market_cap)
         ),
     )
     retained_inputs = (stock_master, market_cap, trading_calendar)
-    materialization_planning.require_materialization_working_set(
+    materialization_planning.require_known_materialization_payload_bound(
         frames=retained_inputs,
         output=None,
-        retained_state_bytes=0,
         resource_policy=policy,
     )
     spec = processed_catalog.processed_catalog().get(market_panel_data_id())
@@ -661,14 +684,16 @@ def _iter_generated_full_market_panel_session_chunks(
         1,
         ceil(estimated_bytes / max(1, len(target_sessions))),
     )
-    resource_plan = ResourceChunkPlanner(policy).plan_sessions(
-        axis=ChunkAxis.TIME,
-        session_count=len(target_sessions),
-        estimated_bytes_per_session=estimated_bytes_per_session,
+    target_core_session_count = max(
+        1,
+        min(
+            len(target_sessions),
+            policy.payload_target_bytes // estimated_bytes_per_session,
+        ),
     )
     windows = SessionWindowPlanner.from_sessions(
         sessions,
-        target_core_session_count=resource_plan.target_core_session_count,
+        target_core_session_count=target_core_session_count,
         lookahead_sessions=1,
     ).windows(
         time_window,
@@ -681,8 +706,8 @@ def _iter_generated_full_market_panel_session_chunks(
             time_window=window.read,
             columns=market_bars_columns,
             resource_policy=policy,
-            retained_bytes=sum(
-                int(frame.memory_usage(index=True, deep=True).sum())
+            retained_payload_bytes=sum(
+                pandas_frame_payload_bytes(frame)
                 for frame in retained_inputs
             ),
         )
@@ -699,10 +724,9 @@ def _iter_generated_full_market_panel_session_chunks(
             output,
             window.core_sessions,
         ).reset_index(drop=True)
-        materialization_planning.require_materialization_working_set(
+        materialization_planning.require_known_materialization_payload_bound(
             frames=(*retained_inputs, market_bars, panel, output),
             output=selected,
-            retained_state_bytes=0,
             resource_policy=policy,
         )
         yield selected
@@ -758,15 +782,26 @@ def _summarize_roots(
     *,
     years: tuple[int, ...] | None = None,
     summary_cache: _SummaryCache | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> AggregateSummary:
+    policy = resource_policy
     summaries = [
-        _summarize_dataset_root(root, years=years, summary_cache=summary_cache)
+        _summarize_dataset_root(
+            root,
+            years=years,
+            summary_cache=summary_cache,
+            resource_policy=policy,
+        )
         for root in roots
     ]
     return _combine_summaries(summaries)
 
 
-def _summarize_output_bundles(roots: tuple[Path, ...]) -> AggregateSummary:
+def _summarize_output_bundles(
+    roots: tuple[Path, ...],
+    *,
+    resource_policy: RuntimeResourcePolicy,
+) -> AggregateSummary:
     if not roots:
         raise ValueError("aggregate_output_roots_required")
     scratch_parent = Path(roots[0]).parent
@@ -775,15 +810,13 @@ def _summarize_output_bundles(roots: tuple[Path, ...]) -> AggregateSummary:
         for root in roots
     ):
         raise ValueError("aggregate_output_roots_cross_volume")
-    policy = active_runtime_resource_policy()
-    physical_target_bytes, sqlite_cache_bytes = _verification_resource_allocations(
-        policy
-    )
+    policy = resource_policy
     return _summarize_frames(
-        _iter_output_frames(roots, target_chunk_bytes=physical_target_bytes),
+        _iter_output_frames(
+            roots,
+            target_chunk_bytes=policy.payload_target_bytes,
+        ),
         scratch_parent=scratch_parent,
-        resource_policy=policy,
-        sqlite_cache_bytes=sqlite_cache_bytes,
     )
 
 
@@ -819,28 +852,23 @@ def _summarize_dataset_root(
     *,
     years: tuple[int, ...] | None = None,
     summary_cache: _SummaryCache | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> AggregateSummary:
     if summary_cache is not None:
         key = _summary_cache_key(root, years)
         cached = summary_cache.get(key)
         if cached is not None:
             return cached
-    policy = resource_policy or active_runtime_resource_policy()
-    physical_target_bytes, sqlite_cache_bytes = _verification_resource_allocations(
-        policy
-    )
+    policy = resource_policy
     chunks = materialization_io.iter_dataset_chunks_with_policy(
         root,
         time_window=_time_window_from_years(years),
         resource_policy=policy,
-        target_chunk_bytes=physical_target_bytes,
+        target_chunk_bytes=policy.payload_target_bytes,
     )
     summary = _summarize_frames(
         chunks,
         scratch_parent=root.parent,
-        resource_policy=policy,
-        sqlite_cache_bytes=sqlite_cache_bytes,
     )
     if summary_cache is not None:
         summary_cache[key] = summary
@@ -861,7 +889,6 @@ def _summarize_frames(
     frames: Iterable[pd.DataFrame],
     *,
     scratch_parent: Path,
-    resource_policy: RuntimeResourcePolicy | None = None,
     sqlite_cache_bytes: int | None = None,
 ) -> AggregateSummary:
     row_count = 0
@@ -876,7 +903,6 @@ def _summarize_frames(
     min_date: pd.Timestamp | None = None
     max_date: pd.Timestamp | None = None
     exact_key_columns: tuple[str, ...] | None = None
-    exact_key_policy: RuntimeResourcePolicy | None = None
     with ExitStack() as stack:
         key_index: ExactPrimaryKeyIndex | None = None
         for frame in frames:
@@ -890,37 +916,26 @@ def _summarize_frames(
                 null_summary[column_name] = null_summary.get(column_name, 0) + int(
                     frame[column].isna().sum()
                 )
-                _update_content_summary(content_summary, column_name, frame[column])
+                _update_content_summary(
+                    content_summary,
+                    column_name,
+                    frame[column],
+                )
             key_columns = tuple(_available_key_columns(frame))
             if key_columns:
                 if exact_key_columns is None:
                     exact_key_columns = key_columns
-                    exact_key_policy = (
-                        resource_policy or active_runtime_resource_policy()
-                    )
-                    exact_key_cache_bytes = (
-                        sqlite_cache_bytes
-                        if sqlite_cache_bytes is not None
-                        else _verification_resource_allocations(
-                            exact_key_policy
-                        )[1]
-                    )
-                    require_free_disk_headroom(
-                        exact_key_policy,
-                        scratch_parent,
-                        reserve_bytes=exact_key_policy.effective_chunk_bytes * 2,
-                    )
+                    index_kwargs: dict[str, object] = {
+                        "primary_key": key_columns,
+                        "timestamp_columns": tuple(
+                            column for column in key_columns if column == "timestamp"
+                        ),
+                        "scratch_parent": scratch_parent,
+                    }
+                    if sqlite_cache_bytes is not None:
+                        index_kwargs["sqlite_cache_bytes"] = sqlite_cache_bytes
                     key_index = stack.enter_context(
-                        ExactPrimaryKeyIndex(
-                            primary_key=key_columns,
-                            timestamp_columns=tuple(
-                                column
-                                for column in key_columns
-                                if column == "timestamp"
-                            ),
-                            scratch_parent=scratch_parent,
-                            sqlite_cache_bytes=exact_key_cache_bytes,
-                        )
+                        ExactPrimaryKeyIndex(**index_kwargs)
                     )
                 elif key_columns != exact_key_columns:
                     raise ValueError("aggregate_key_columns_mismatch")
@@ -931,16 +946,10 @@ def _summarize_frames(
                     key_columns=list(key_columns),
                 )
                 key_frame = frame.loc[:, list(key_columns)]
-                key_bytes = int(
-                    key_frame.memory_usage(index=True, deep=True).sum()
-                )
-                assert exact_key_policy is not None
+                key_bytes = pandas_frame_payload_bytes(key_frame)
                 require_free_disk_headroom(
-                    exact_key_policy,
                     scratch_parent,
-                    reserve_bytes=(
-                        exact_key_policy.effective_chunk_bytes + 4 * key_bytes
-                    ),
+                    reserve_bytes=key_bytes,
                 )
                 duplicate_key_count += key_index.add_frame(
                     key_frame,
@@ -981,17 +990,6 @@ def _summarize_frames(
         content_summary=normalized_content,
         key_value_paired_summary=normalized_key_value_pairs,
     )
-
-
-def _verification_resource_allocations(
-    policy: RuntimeResourcePolicy,
-) -> tuple[int, int]:
-    effective_bytes = policy.effective_chunk_bytes
-    candidate = min(8 * 1024, effective_bytes // 8)
-    sqlite_cache_bytes = (candidate // 1024) * 1024
-    if sqlite_cache_bytes < 1024 or effective_bytes <= sqlite_cache_bytes:
-        raise ValueError("a_share_verification_resource_budget_too_small")
-    return effective_bytes - sqlite_cache_bytes, sqlite_cache_bytes
 
 
 def _combine_summaries(summaries: list[AggregateSummary]) -> AggregateSummary:
@@ -1125,10 +1123,11 @@ def _update_key_value_paired_summary(
             )
 
 
-def _series_hash_blocks(series: pd.Series) -> Iterator[np.ndarray]:
-    block_rows = _hash_block_rows(value_width=1)
-    for start in range(0, len(series), block_rows):
-        block = series.iloc[start : start + block_rows].reset_index(drop=True)
+def _series_hash_blocks(
+    series: pd.Series,
+) -> Iterator[np.ndarray]:
+    for start in range(0, len(series), HASH_BLOCK_ROWS):
+        block = series.iloc[start : start + HASH_BLOCK_ROWS].reset_index(drop=True)
         yield pd.util.hash_pandas_object(block, index=False).to_numpy(dtype="uint64")
 
 
@@ -1136,31 +1135,20 @@ def _key_hash_blocks(
     frame: pd.DataFrame,
     key_columns: list[str],
 ) -> Iterator[tuple[int, np.ndarray]]:
-    block_rows = _hash_block_rows(value_width=max(1, len(key_columns)))
-    for start in range(0, len(frame), block_rows):
-        block = frame.iloc[start : start + block_rows].loc[:, key_columns]
+    for start in range(0, len(frame), HASH_BLOCK_ROWS):
+        block = frame.iloc[start : start + HASH_BLOCK_ROWS].loc[:, key_columns]
         yield (
             start,
             pd.util.hash_pandas_object(block, index=False).to_numpy(dtype="uint64"),
         )
 
 
-def _hash_block_rows(*, value_width: int) -> int:
-    try:
-        effective_bytes = active_runtime_resource_policy().effective_chunk_bytes
-    except Exception:
-        effective_bytes = 16 * 1024 * 1024
-    bytes_per_row = max(1, value_width) * HASH_BLOCK_BYTES_PER_VALUE
-    bytes_per_row *= HASH_BLOCK_INTERMEDIATE_WIDTH
-    rows = max(1, effective_bytes // max(1, bytes_per_row))
-    return max(HASH_BLOCK_MIN_ROWS, min(HASH_BLOCK_MAX_ROWS, int(rows)))
-
-
-def _finite_numeric_min_max(series: pd.Series) -> tuple[float, float] | None:
+def _finite_numeric_min_max(
+    series: pd.Series,
+) -> tuple[float, float] | None:
     values: list[tuple[float, float]] = []
-    block_rows = _hash_block_rows(value_width=1)
-    for start in range(0, len(series), block_rows):
-        block = series.iloc[start : start + block_rows]
+    for start in range(0, len(series), HASH_BLOCK_ROWS):
+        block = series.iloc[start : start + HASH_BLOCK_ROWS]
         if pd.api.types.is_bool_dtype(block):
             numeric = block.to_numpy(dtype="float64", na_value=np.nan)
         elif pd.api.types.is_numeric_dtype(block):

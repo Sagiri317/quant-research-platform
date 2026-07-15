@@ -10,6 +10,7 @@ from quant_research_platform.research.datasets import (
     assemble_research_dataset,
     read_research_dataset,
 )
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
@@ -103,7 +104,6 @@ def test_research_assembly_session_chunks_equal_default_and_keep_nan_positions(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
@@ -115,6 +115,10 @@ def test_research_assembly_session_chunks_equal_default_and_keep_nan_positions(
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=100_000,
+            environ={},
+        ),
     )
 
     default = read_research_dataset(
@@ -173,7 +177,6 @@ def test_research_feature_transform_session_chunks_equal_default(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.2")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
@@ -185,6 +188,10 @@ def test_research_feature_transform_session_chunks_equal_default(
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=100_000,
+            environ={},
+        ),
     )
 
     default = read_research_dataset(

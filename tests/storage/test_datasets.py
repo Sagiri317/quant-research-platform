@@ -4,7 +4,6 @@ import importlib
 import importlib.util
 import json
 import math
-import sys
 from datetime import date, datetime
 from decimal import Decimal
 from inspect import getsource, signature
@@ -17,7 +16,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import quant_research_platform.storage._dataset_comparison as dataset_comparison
 import quant_research_platform.storage._dataset_fingerprinting as dataset_fingerprinting
+import quant_research_platform.storage._dataset_inspection as dataset_inspection
 import quant_research_platform.storage._dataset_reading as dataset_reading
 import quant_research_platform.storage._dataset_writing as dataset_writing
 import quant_research_platform.storage.atomic as storage_atomic
@@ -32,6 +33,11 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
@@ -501,9 +507,7 @@ def test_physical_batch_size_accounts_for_arrow_to_pandas_expansion(
             use_threads=False,
         )
     )
-    pandas_bytes = int(
-        batch.to_pandas(use_threads=False).memory_usage(index=True, deep=True).sum()
-    )
+    pandas_bytes = pandas_frame_payload_bytes(batch.to_pandas(use_threads=False))
 
     assert pandas_bytes <= target_chunk_bytes
 
@@ -546,20 +550,22 @@ def test_fixed_width_batch_estimate_uses_parquet_leaf_paths(tmp_path: Path) -> N
     assert batch.nbytes <= target_chunk_bytes // 4
 
 
-def test_fixed_size_binary_conversion_probes_before_pandas_expansion(
+def test_fixed_size_binary_conversion_probes_one_row_then_grows_from_actual_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     batch = pa.record_batch(
         [pa.array([b"x"] * 64, type=pa.binary(1))],
         names=["value"],
     )
+    observed_conversion_rows: list[int] = []
     observed_conversion_bytes: list[int] = []
     convert = dataset_reading._arrow_slice_to_pandas
 
     def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
         frame = convert(arrow_slice)
+        observed_conversion_rows.append(arrow_slice.num_rows)
         observed_conversion_bytes.append(
-            dataset_reading._pandas_frame_bytes(frame)
+            pandas_frame_payload_bytes(frame)
         )
         return frame
 
@@ -577,10 +583,14 @@ def test_fixed_size_binary_conversion_probes_before_pandas_expansion(
     )
 
     assert sum(len(chunk) for chunk in chunks) == 64
+    assert max(
+        pandas_frame_payload_bytes(chunk) for chunk in chunks
+    ) <= 2_048 // 4
+    assert observed_conversion_rows[0] == 1
     assert max(observed_conversion_bytes) <= 2_048 // 4
 
 
-def test_single_row_over_conversion_estimate_fails_before_pandas(
+def test_single_row_over_actual_pandas_payload_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     batch = pa.record_batch(
@@ -588,10 +598,11 @@ def test_single_row_over_conversion_estimate_fails_before_pandas(
         names=["value"],
     )
     calls = {"count": 0}
+    convert = dataset_reading._arrow_slice_to_pandas
 
-    def record_conversion(_arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
         calls["count"] += 1
-        raise AssertionError("conversion_must_not_run")
+        return convert(arrow_slice)
 
     monkeypatch.setattr(
         dataset_reading,
@@ -607,7 +618,7 @@ def test_single_row_over_conversion_estimate_fails_before_pandas(
             )
         )
 
-    assert calls["count"] == 0
+    assert calls["count"] == 1
 
 
 def test_single_short_string_key_row_uses_measured_conversion_size() -> None:
@@ -644,7 +655,7 @@ def test_single_short_string_key_row_uses_measured_conversion_size() -> None:
     ],
     ids=["null", "fixed-binary", "decimal", "date"],
 )
-def test_wide_single_row_fails_before_pandas_conversion(
+def test_wide_single_row_fails_after_actual_pandas_payload_check(
     arrays: list[pa.Array],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -653,10 +664,11 @@ def test_wide_single_row_fails_before_pandas_conversion(
         names=[f"column_{index}" for index in range(len(arrays))],
     )
     calls = {"count": 0}
+    convert = dataset_reading._arrow_slice_to_pandas
 
-    def record_conversion(_arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
         calls["count"] += 1
-        raise AssertionError("conversion_must_not_run")
+        return convert(arrow_slice)
 
     monkeypatch.setattr(
         dataset_reading,
@@ -672,10 +684,10 @@ def test_wide_single_row_fails_before_pandas_conversion(
             )
         )
 
-    assert calls["count"] == 0
+    assert calls["count"] == 1
 
 
-def test_wide_multi_row_bounds_each_pandas_conversion(
+def test_wide_multi_row_bounds_each_yielded_pandas_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     batch = pa.record_batch(
@@ -688,7 +700,7 @@ def test_wide_multi_row_bounds_each_pandas_conversion(
     def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
         frame = convert(arrow_slice)
         observed_conversion_bytes.append(
-            dataset_reading._pandas_frame_bytes(frame)
+            pandas_frame_payload_bytes(frame)
         )
         return frame
 
@@ -706,10 +718,13 @@ def test_wide_multi_row_bounds_each_pandas_conversion(
     )
 
     assert sum(len(chunk) for chunk in chunks) == 64
-    assert max(observed_conversion_bytes) <= (256 * 1024) // 4
+    assert max(pandas_frame_payload_bytes(chunk) for chunk in chunks) <= (
+        256 * 1024
+    ) // 4
+    assert observed_conversion_bytes
 
 
-def test_wide_struct_row_fails_before_pandas_conversion(
+def test_wide_struct_row_fails_after_actual_pandas_payload_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     struct_type = pa.struct(
@@ -720,10 +735,11 @@ def test_wide_struct_row_fails_before_pandas_conversion(
         names=["payload"],
     )
     calls = {"count": 0}
+    convert = dataset_reading._arrow_slice_to_pandas
 
-    def record_conversion(_arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
         calls["count"] += 1
-        raise AssertionError("conversion_must_not_run")
+        return convert(arrow_slice)
 
     monkeypatch.setattr(
         dataset_reading,
@@ -739,10 +755,10 @@ def test_wide_struct_row_fails_before_pandas_conversion(
             )
         )
 
-    assert calls["count"] == 0
+    assert calls["count"] == 1
 
 
-def test_large_map_row_fails_before_pandas_conversion(
+def test_large_map_row_uses_only_approved_pandas_payload_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     batch = pa.record_batch(
@@ -755,10 +771,11 @@ def test_large_map_row_fails_before_pandas_conversion(
         names=["payload"],
     )
     calls = {"count": 0}
+    convert = dataset_reading._arrow_slice_to_pandas
 
-    def record_conversion(_arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
         calls["count"] += 1
-        raise AssertionError("conversion_must_not_run")
+        return convert(arrow_slice)
 
     monkeypatch.setattr(
         dataset_reading,
@@ -766,18 +783,20 @@ def test_large_map_row_fails_before_pandas_conversion(
         record_conversion,
     )
 
-    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
-        tuple(
-            dataset_reading._arrow_batch_to_bounded_pandas(
-                batch,
-                target_chunk_bytes=256 * 1024,
-            )
+    chunks = tuple(
+        dataset_reading._arrow_batch_to_bounded_pandas(
+            batch,
+            target_chunk_bytes=256 * 1024,
         )
+    )
 
-    assert calls["count"] == 0
+    assert calls["count"] == 1
+    assert max(pandas_frame_payload_bytes(chunk) for chunk in chunks) <= (
+        256 * 1024
+    ) // 4
 
 
-def test_wide_numeric_row_counts_column_axis_before_pandas_conversion(
+def test_wide_numeric_row_uses_only_approved_pandas_payload_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     batch = pa.record_batch(
@@ -785,10 +804,11 @@ def test_wide_numeric_row_counts_column_axis_before_pandas_conversion(
         names=[f"column_{index}" for index in range(1_500)],
     )
     calls = {"count": 0}
+    convert = dataset_reading._arrow_slice_to_pandas
 
-    def record_conversion(_arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
         calls["count"] += 1
-        raise AssertionError("conversion_must_not_run")
+        return convert(arrow_slice)
 
     monkeypatch.setattr(
         dataset_reading,
@@ -796,18 +816,20 @@ def test_wide_numeric_row_counts_column_axis_before_pandas_conversion(
         record_conversion,
     )
 
-    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
-        tuple(
-            dataset_reading._arrow_batch_to_bounded_pandas(
-                batch,
-                target_chunk_bytes=64 * 1024,
-            )
+    chunks = tuple(
+        dataset_reading._arrow_batch_to_bounded_pandas(
+            batch,
+            target_chunk_bytes=64 * 1024,
         )
+    )
 
-    assert calls["count"] == 0
+    assert calls["count"] == 1
+    assert max(pandas_frame_payload_bytes(chunk) for chunk in chunks) <= (
+        64 * 1024
+    ) // 4
 
 
-def test_wide_empty_schema_fails_before_pandas_materialization(
+def test_wide_empty_schema_uses_actual_empty_pandas_payload(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "wide-empty.parquet"
@@ -818,12 +840,14 @@ def test_wide_empty_schema_fails_before_pandas_materialization(
     )
     context = SimpleNamespace(all_paths=(path,))
 
-    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
-        dataset_reading._empty_frame(
-            context,
-            columns,
-            target_chunk_bytes=16 * 1024,
-        )
+    frame = dataset_reading._empty_frame(
+        context,
+        columns,
+        target_chunk_bytes=16 * 1024,
+    )
+
+    assert tuple(frame.columns) == columns
+    assert pandas_frame_payload_bytes(frame) <= 16 * 1024 // 4
 
 
 def test_materialized_context_fails_before_collecting_all_physical_chunks(
@@ -850,6 +874,27 @@ def test_materialized_context_fails_before_collecting_all_physical_chunks(
         )
 
     assert yielded < 4
+
+
+def test_materialized_context_uses_the_full_task_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = pd.DataFrame({"value": ["payload"]})
+    budget = pandas_frame_payload_bytes(expected)
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter((expected,)),
+    )
+
+    observed = dataset_reading.materialize_dataset_context(
+        SimpleNamespace(),
+        target_chunk_bytes=budget,
+        materialized_budget_bytes=budget,
+    )
+
+    pd.testing.assert_frame_equal(observed, expected)
 
 
 def test_variable_width_batch_probe_precedes_arrow_decode_expansion(
@@ -908,7 +953,7 @@ def test_variable_width_probe_adapts_above_probe_size_for_small_values(
         )
     )
 
-    assert maximum_rows > dataset_reading._PANDAS_PROBE_ROWS
+    assert maximum_rows > 64
     assert requested_batch_sizes[0] == 1
     assert max(requested_batch_sizes[1:]) > 1
 
@@ -1055,7 +1100,7 @@ def test_variable_width_batch_adapts_before_arrow_allocation_when_probe_underest
     assert max(observed_batch_bytes) <= 64 * 1024 // 4
 
 
-def test_variable_width_batch_accounts_for_python_batch_state(
+def test_variable_width_batch_accounts_for_arrow_payload(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1066,11 +1111,11 @@ def test_variable_width_batch_accounts_for_python_batch_state(
         compression="zstd",
         use_dictionary=True,
     )
-    observed_state_bytes: list[int] = []
+    observed_payload_bytes: list[int] = []
     coalesce = dataset_reading._coalesced_record_batch
 
     def record_state(batches, *, arrow_budget):  # noqa: ANN001
-        observed_state_bytes.append(sum(sys.getsizeof(batch) for batch in batches))
+        observed_payload_bytes.append(sum(batch.nbytes for batch in batches))
         return coalesce(batches, arrow_budget=arrow_budget)
 
     monkeypatch.setattr(
@@ -1090,7 +1135,7 @@ def test_variable_width_batch_accounts_for_python_batch_state(
         )
     )
 
-    assert max(observed_state_bytes) <= 64 * 1024 // 4
+    assert max(observed_payload_bytes) <= 64 * 1024 // 4
 
 
 def test_chunked_and_materialized_reads_share_nullable_numeric_dtype(
@@ -1207,43 +1252,53 @@ def test_materialized_read_unions_categorical_dictionaries_across_parts(
     )
 
 
-def test_categorical_domain_budget_rejects_before_dictionary_decode(
+def test_categorical_domain_rejects_actual_dataset_payload_over_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path = tmp_path / "oversized-dictionary.parquet"
-    dictionary = pa.array(
-        [f"category-{index:04d}-" + "x" * 1_024 for index in range(1_000)]
-    )
-    table = pa.table(
-        {
-            "value": pa.DictionaryArray.from_arrays(
-                pa.array([0], type=pa.int32()),
-                dictionary,
-            )
-        }
-    )
-    pq.write_table(table, path, use_dictionary=True)
+    paths: list[Path] = []
+    for shard in range(2):
+        path = tmp_path / f"dictionary-{shard}.parquet"
+        dictionary = pa.array(
+            [
+                f"category-{shard}-{index:04d}-" + "x" * 1_024
+                for index in range(40)
+            ]
+        )
+        table = pa.table(
+            {
+                "value": pa.DictionaryArray.from_arrays(
+                    pa.array([0], type=pa.int32()),
+                    dictionary,
+                )
+            }
+        )
+        pq.write_table(table, path, use_dictionary=True)
+        paths.append(path)
 
-    def unexpected_decode(*_args, **_kwargs):
-        raise AssertionError("dictionary_decode_started_before_budget_check")
-        yield
+    calls = {"count": 0}
+    decode = dataset_reading.iter_parquet_arrow_batches
+
+    def record_decode(*args, **kwargs):
+        calls["count"] += 1
+        yield from decode(*args, **kwargs)
 
     monkeypatch.setattr(
         dataset_reading,
         "iter_parquet_arrow_batches",
-        unexpected_decode,
+        record_decode,
     )
 
     with pytest.raises(
         ValueError,
-        match="dataset_categorical_state_exceeds_target_bytes",
+        match="dataset_categorical_payload_exceeds_target_bytes",
     ):
         dataset_reading.dataset_categorical_dtypes(
-            (path,),
+            tuple(paths),
             ("value",),
-            target_state_bytes=64 * 1024,
+            payload_target_bytes=64 * 1024,
         )
+    assert calls["count"] == 2
     source = getsource(dataset_reading.dataset_categorical_dtypes)
     assert ".iter_batches(" not in source
     assert "iter_parquet_arrow_batches(" in source
@@ -2029,7 +2084,7 @@ def test_internal_physical_reader_uses_bounded_record_batches(
 
     assert len(chunks) > 1
     assert all(
-        int(chunk.memory_usage(index=True, deep=True).sum()) <= target_chunk_bytes
+        pandas_frame_payload_bytes(chunk) <= target_chunk_bytes
         for chunk in chunks
     )
     pd.testing.assert_frame_equal(
@@ -2529,18 +2584,21 @@ def test_fingerprint_supports_writer_accepted_nested_columns(tmp_path: Path) -> 
     assert comparison.matches
 
 
-def test_nested_fingerprint_rejects_escaping_expansion_before_canonical_string(
+def test_nested_fingerprint_rejects_actual_canonical_payload_over_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = pd.DataFrame({"nested": [["\x00" * (32 * 1024)]]})
+    calls = {"count": 0}
+    canonicalize = dataset_fingerprinting._canonical_nested_value
 
-    def unexpected_canonicalization(_value: object) -> str:
-        raise AssertionError("canonical_string_allocated_before_budget_check")
+    def record_canonicalization(value: object) -> str:
+        calls["count"] += 1
+        return canonicalize(value)
 
     monkeypatch.setattr(
         dataset_fingerprinting,
         "_canonical_nested_value",
-        unexpected_canonicalization,
+        record_canonicalization,
     )
 
     with pytest.raises(
@@ -2551,6 +2609,7 @@ def test_nested_fingerprint_rejects_escaping_expansion_before_canonical_string(
             frame,
             target_bytes=64 * 1024,
         )
+    assert calls["count"] == 1
 
 
 def test_fingerprint_supports_nested_non_finite_float_values(tmp_path: Path) -> None:
@@ -2571,20 +2630,48 @@ def test_fingerprint_supports_nested_non_finite_float_values(tmp_path: Path) -> 
 
 def test_empty_materialized_and_chunked_reads_preserve_stored_dtypes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "empty_dtypes")
     expected = make_default_dataset_frame().iloc[:0].copy()
     expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
+    expected["asset_id"] = pd.Categorical(
+        expected["asset_id"],
+        categories=["asset_001", "asset_002"],
+    )
     write_dataset(
         root,
         expected,
         spec=make_processed_dataset_spec("empty_dtypes"),
     )
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024**2,
+        environ={
+            "QRP_TASK_MEMORY_BUDGET_MB": "8",
+            "QRP_PAYLOAD_TARGET_MB": "4",
+        },
+    )
+    categorical_targets: list[int] = []
+    categorical_dtypes = dataset_reading.dataset_categorical_dtypes
 
-    materialized = read_dataset(root)
-    chunked = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+    def record_categorical_target(*args, **kwargs):
+        categorical_targets.append(kwargs["payload_target_bytes"])
+        return categorical_dtypes(*args, **kwargs)
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "dataset_categorical_dtypes",
+        record_categorical_target,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        materialized = read_dataset(root)
+        chunked = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
 
     assert len(chunked) == 1
+    assert categorical_targets and set(categorical_targets) == {
+        policy.payload_target_bytes
+    }
     assert materialized.dtypes.astype(str).to_dict() == expected.dtypes.astype(
         str
     ).to_dict()
@@ -2701,7 +2788,6 @@ def test_equality_group_plan_indexes_only_candidate_part_paths(tmp_path: Path) -
         context,
         columns=("market_id", "asset_id"),
         target_chunk_bytes=1024**2,
-        target_state_bytes=1024**2,
     )
     group_context = dataset_reading.dataset_context_for_equality_group(
         context,
@@ -2720,97 +2806,18 @@ def test_equality_group_plan_indexes_only_candidate_part_paths(tmp_path: Path) -
         ("a_share", "asset_001"),
         ("a_share", "asset_002"),
     )
-    assert 0 < plan.retained_bytes <= 1024**2
     assert len(group_context.read_paths) == 1
     assert observed["asset_id"].tolist() == ["asset_002"]
 
 
-def test_equality_group_plan_state_accounting_work_is_linear(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    row_count = 200
-    root = make_dataset_artifact_root(tmp_path, "linear_equality_groups")
-    write_dataset(
-        root,
-        pd.DataFrame(
-            {
-                "market_id": ["a_share"] * row_count,
-                "asset_id": [f"asset_{index:04d}" for index in range(row_count)],
-                "timestamp": pd.date_range("2026-01-01", periods=row_count, freq="min"),
-                "value": np.arange(row_count, dtype="float64"),
-            }
-        ),
-        spec=make_processed_dataset_spec("linear_equality_groups"),
-    )
-    context = dataset_reading.build_dataset_read_context(
-        root,
-        columns=None,
-        time_window=None,
-    )
-    original = dataset_reading._equality_group_plan_bytes
-    observed_work = {"units": 0}
-
-    def record_accounting_work(*args, **kwargs):
-        current = args[0]
-        observed_work["units"] += len(current) if isinstance(current, dict) else 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(
-        dataset_reading,
-        "_equality_group_plan_bytes",
-        record_accounting_work,
-    )
-
-    plan = dataset_reading.build_dataset_equality_group_plan(
-        context,
-        columns=("market_id", "asset_id"),
-        target_chunk_bytes=64 * 1024,
-        target_state_bytes=1024**2,
-    )
-
-    assert len(plan.keys) == row_count
-    assert observed_work["units"] <= row_count * 2
-
-
-def test_equality_group_plan_counts_non_bmp_key_storage(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "non_bmp_equality_group")
-    frame = make_default_dataset_frame().iloc[[0]].copy()
-    frame["asset_id"] = chr(0x10400) * 10_000
-    write_dataset(
-        root,
-        frame,
-        spec=make_processed_dataset_spec("non_bmp_equality_group"),
-    )
-    context = dataset_reading.build_dataset_read_context(
-        root,
-        columns=None,
-        time_window=None,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="dataset_equality_group_index_exceeds_target_bytes",
-    ):
-        dataset_reading.build_dataset_equality_group_plan(
-            context,
-            columns=("asset_id",),
-            target_chunk_bytes=1024**2,
-            target_state_bytes=30_000,
-        )
-
-
-def test_fingerprint_nested_normalization_counts_input_and_copy() -> None:
+def test_fingerprint_nested_normalization_checks_actual_payloads() -> None:
     frame = pd.DataFrame({"nested": [["x" * 50] * 4]})
-    retained_bytes = int(frame.memory_usage(index=True, deep=True).sum())
-    canonical_bytes = dataset_fingerprinting._canonical_nested_value_bound(
-        frame.iloc[0, 0]
+    canonical = frame.copy()
+    canonical["nested"] = canonical["nested"].map(
+        dataset_fingerprinting._canonical_nested_value
     )
-    target_bytes = max(
-        4 * retained_bytes,
-        retained_bytes + 2 * canonical_bytes,
-    )
-    assert 2 * retained_bytes + 2 * canonical_bytes > target_bytes
+    input_payload_bytes = pandas_frame_payload_bytes(frame)
+    actual_payload_bytes = input_payload_bytes + pandas_frame_payload_bytes(canonical)
 
     with pytest.raises(
         ValueError,
@@ -2818,8 +2825,197 @@ def test_fingerprint_nested_normalization_counts_input_and_copy() -> None:
     ):
         dataset_fingerprinting._hashable_fingerprint_frame(
             frame,
-            target_bytes=target_bytes,
+            target_bytes=input_payload_bytes,
         )
+
+    observed = dataset_fingerprinting._hashable_fingerprint_frame(
+        frame,
+        target_bytes=actual_payload_bytes,
+    )
+    pd.testing.assert_frame_equal(observed, canonical)
+
+
+def test_public_storage_operations_capture_one_active_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024**2,
+        environ={
+            "QRP_TASK_MEMORY_BUDGET_MB": "8",
+            "QRP_PAYLOAD_TARGET_MB": "4",
+        },
+    )
+    active_calls = 0
+    delegated_policies: list[RuntimeResourcePolicy] = []
+    sentinel = object()
+
+    def active_policy() -> RuntimeResourcePolicy:
+        nonlocal active_calls
+        active_calls += 1
+        return policy
+
+    def delegate(*_args, **kwargs):
+        delegated_policies.append(kwargs["resource_policy"])
+        return sentinel
+
+    monkeypatch.setattr(datasets, "active_runtime_resource_policy", active_policy)
+    for name in (
+        "_write_dataset",
+        "_read_dataset",
+        "_inspect_dataset",
+        "_fingerprint_dataset",
+        "_compare_datasets",
+    ):
+        monkeypatch.setattr(datasets, name, delegate)
+
+    spec = make_processed_dataset_spec("captured_policy")
+    calls = (
+        lambda: datasets.write_dataset(Path("ignored"), pd.DataFrame(), spec=spec),
+        lambda: datasets.read_dataset(Path("ignored")),
+        lambda: datasets.read_dataset(
+            Path("ignored"),
+            mode=DatasetReadMode.CHUNKED,
+        ),
+        lambda: datasets.inspect_dataset(Path("ignored")),
+        lambda: datasets.fingerprint_dataset(Path("ignored")),
+        lambda: datasets.compare_datasets(Path("left"), Path("right")),
+    )
+
+    assert all(call() is sentinel for call in calls)
+    assert active_calls == len(calls)
+    assert delegated_policies == [policy] * len(calls)
+
+
+def test_storage_operations_propagate_the_captured_payload_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=64 * 1024**2,
+        environ={
+            "QRP_TASK_MEMORY_BUDGET_MB": "32",
+            "QRP_PAYLOAD_TARGET_MB": "16",
+        },
+    )
+    root = make_dataset_artifact_root(tmp_path, "policy_propagation")
+    frame = make_default_dataset_frame()
+    writer_targets: list[int] = []
+    read_targets: list[int] = []
+    inspection_targets: list[int] = []
+    fingerprint_physical_targets: list[int] = []
+    fingerprint_hash_targets: list[int] = []
+
+    writer_decode = dataset_writing.iter_parquet_arrow_batches
+    read_chunks = dataset_reading.iter_dataset_chunks
+    inspect_batches = dataset_inspection.iter_dataset_file_batches
+    fingerprint_batches = dataset_fingerprinting.iter_dataset_file_batches
+    fingerprint_hashable = dataset_fingerprinting._hashable_fingerprint_frame
+
+    def record_writer_target(*args, **kwargs):
+        writer_targets.append(kwargs["target_chunk_bytes"])
+        yield from writer_decode(*args, **kwargs)
+
+    def record_read_target(*args, **kwargs):
+        read_targets.append(kwargs["target_chunk_bytes"])
+        yield from read_chunks(*args, **kwargs)
+
+    def record_inspection_target(*args, **kwargs):
+        inspection_targets.append(kwargs["target_chunk_bytes"])
+        yield from inspect_batches(*args, **kwargs)
+
+    def record_fingerprint_physical_target(*args, **kwargs):
+        fingerprint_physical_targets.append(kwargs["target_chunk_bytes"])
+        yield from fingerprint_batches(*args, **kwargs)
+
+    def record_fingerprint_hash_target(*args, **kwargs):
+        fingerprint_hash_targets.append(kwargs["target_bytes"])
+        return fingerprint_hashable(*args, **kwargs)
+
+    monkeypatch.setattr(
+        dataset_writing,
+        "iter_parquet_arrow_batches",
+        record_writer_target,
+    )
+    monkeypatch.setattr(dataset_reading, "iter_dataset_chunks", record_read_target)
+    monkeypatch.setattr(
+        dataset_inspection,
+        "iter_dataset_file_batches",
+        record_inspection_target,
+    )
+    monkeypatch.setattr(
+        dataset_fingerprinting,
+        "iter_dataset_file_batches",
+        record_fingerprint_physical_target,
+    )
+    monkeypatch.setattr(
+        dataset_fingerprinting,
+        "_hashable_fingerprint_frame",
+        record_fingerprint_hash_target,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        write_dataset(
+            root,
+            frame,
+            spec=make_processed_dataset_spec("policy_propagation"),
+        )
+        read_dataset(root)
+        list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+        inspect_dataset(
+            root,
+            time_window=TimeWindow("2014-01-01", "2015-12-31"),
+        )
+        fingerprint_dataset(root)
+
+    assert writer_targets and set(writer_targets) == {policy.payload_target_bytes}
+    assert read_targets == [policy.payload_target_bytes] * 2
+    assert inspection_targets and set(inspection_targets) == {
+        policy.payload_target_bytes
+    }
+    assert fingerprint_physical_targets and set(fingerprint_physical_targets) == {
+        policy.payload_target_bytes
+    }
+    assert fingerprint_hash_targets and set(fingerprint_hash_targets) == {
+        policy.payload_target_bytes
+    }
+
+
+def test_compare_reuses_one_policy_for_both_fingerprints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024**2,
+        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
+    )
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    observed: list[RuntimeResourcePolicy] = []
+
+    def fake_fingerprint(*_args, resource_policy, **_kwargs):
+        observed.append(resource_policy)
+        return SimpleNamespace(
+            schema_hash="schema",
+            column_names=("value",),
+            row_count=0,
+            key_columns=("value",),
+            content_hash="content",
+            partition_fingerprints=(),
+            file_count=1,
+        )
+
+    monkeypatch.setattr(dataset_comparison, "fingerprint_dataset", fake_fingerprint)
+
+    comparison = dataset_comparison.compare_datasets(
+        left,
+        right,
+        resource_policy=policy,
+    )
+
+    assert comparison.status == "MATCH"
+    assert observed == [policy, policy]
 
 
 def test_storage_datasets_public_api_is_hard_cutover() -> None:

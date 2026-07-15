@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from collections.abc import Iterator
@@ -30,6 +31,12 @@ from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.markets.implementations.a_share.verification import (
     aggregates,
+)
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+
+RESOURCE_POLICY = RuntimeResourcePolicy.from_environment(
+    available_memory_bytes=1024**3,
+    environ={},
 )
 
 
@@ -169,15 +176,14 @@ def test_aggregates_output_frames_are_lazy(
         raising=False,
     )
     monkeypatch.setattr(aggregates.pd, "read_parquet", reject_full_file_read)
-    policy = aggregates.RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=64 * 1024,
-        memory_safety_factor=1.0,
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=64 * 1024,
+        environ={},
     )
     with aggregates.runtime_resource_policy_scope(policy):
         frames = aggregates._iter_output_frames(
             (report_root,),
-            target_chunk_bytes=64 * 1024,
+            target_chunk_bytes=policy.payload_target_bytes,
         )
 
         assert read_order == []
@@ -185,7 +191,7 @@ def test_aggregates_output_frames_are_lazy(
         assert read_order == ["metrics.parquet"]
         next(frames)
         assert read_order == ["metrics.parquet", "grouped_label_values.parquet"]
-    assert observed_targets == [policy.effective_chunk_bytes] * 2
+    assert observed_targets == [policy.payload_target_bytes] * 2
 
 
 def test_aggregates_validate_all_members_before_selecting_parquet(tmp_path) -> None:
@@ -489,7 +495,7 @@ def test_aggregates_summary_is_dynamic_hash_block_insensitive(
 ) -> None:
     frame = pd.concat([_base_frame()] * 2000, ignore_index=True)
     baseline = _summary(frame, tmp_path)
-    monkeypatch.setattr(aggregates, "HASH_BLOCK_MAX_ROWS", 7)
+    monkeypatch.setattr(aggregates, "HASH_BLOCK_ROWS", 7)
 
     assert _summary(frame, tmp_path).aggregate_checksum == baseline.aggregate_checksum
 
@@ -504,51 +510,28 @@ def test_aggregates_summary_ignores_dataframe_index_labels(tmp_path) -> None:
     )
 
 
-def test_aggregates_dynamic_hash_block_uses_runtime_policy(
-    monkeypatch,
-) -> None:
-    class SmallPolicy:
-        effective_chunk_bytes = 64 * 1024
-
-    class LargePolicy:
-        effective_chunk_bytes = 512 * 1024 * 1024
-
-    monkeypatch.setattr(
-        aggregates.RuntimeResourcePolicy,
-        "from_environment",
-        staticmethod(lambda: SmallPolicy()),
-    )
-    small_rows = aggregates._hash_block_rows(value_width=1)
-    monkeypatch.setattr(
-        aggregates.RuntimeResourcePolicy,
-        "from_environment",
-        staticmethod(lambda: LargePolicy()),
-    )
-    large_rows = aggregates._hash_block_rows(value_width=1)
-
-    assert small_rows < large_rows
-    assert aggregates.HASH_BLOCK_MIN_ROWS <= small_rows
-    assert large_rows <= aggregates.HASH_BLOCK_MAX_ROWS
-
-
-def test_aggregates_dynamic_hash_block_uses_conservative_fallback(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        aggregates.RuntimeResourcePolicy,
-        "from_environment",
-        staticmethod(lambda: (_ for _ in ()).throw(RuntimeError("no_memory_probe"))),
+def test_aggregate_hash_and_minmax_blocks_are_resource_contract_independent() -> None:
+    source = "\n".join(
+        inspect.getsource(function)
+        for function in (
+            aggregates._series_hash_blocks,
+            aggregates._key_hash_blocks,
+            aggregates._finite_numeric_min_max,
+        )
     )
 
-    assert aggregates._hash_block_rows(value_width=3) >= (
-        aggregates.HASH_BLOCK_MIN_ROWS
-    )
+    assert "payload_target" not in source
+    assert "active_runtime_resource_policy" not in source
+    assert "memory_usage" not in source
 
 
 def test_aggregates_numeric_min_max_ignores_all_null_datetimes() -> None:
     series = pd.Series(pd.to_datetime([None, None]))
 
-    assert aggregates._finite_numeric_min_max(series) is None
+    assert (
+        aggregates._finite_numeric_min_max(series)
+        is None
+    )
 
 
 def test_aggregates_dataset_summary_cache_reuses_same_root(
@@ -564,8 +547,16 @@ def test_aggregates_dataset_summary_cache_reuses_same_root(
     cache = {}
     root = tmp_path / "dataset"
 
-    first = aggregates._summarize_dataset_root(root, summary_cache=cache)
-    second = aggregates._summarize_dataset_root(root, summary_cache=cache)
+    first = aggregates._summarize_dataset_root(
+        root,
+        summary_cache=cache,
+        resource_policy=RESOURCE_POLICY,
+    )
+    second = aggregates._summarize_dataset_root(
+        root,
+        summary_cache=cache,
+        resource_policy=RESOURCE_POLICY,
+    )
 
     assert first.aggregate_checksum == second.aggregate_checksum
     assert reader.calls == 1
@@ -584,9 +575,23 @@ def test_aggregates_dataset_summary_cache_keeps_year_filters_distinct(
     cache = {}
     root = tmp_path / "dataset"
 
-    aggregates._summarize_dataset_root(root, years=(2014,), summary_cache=cache)
-    aggregates._summarize_dataset_root(root, summary_cache=cache)
-    aggregates._summarize_dataset_root(root, years=(2014,), summary_cache=cache)
+    aggregates._summarize_dataset_root(
+        root,
+        years=(2014,),
+        summary_cache=cache,
+        resource_policy=RESOURCE_POLICY,
+    )
+    aggregates._summarize_dataset_root(
+        root,
+        summary_cache=cache,
+        resource_policy=RESOURCE_POLICY,
+    )
+    aggregates._summarize_dataset_root(
+        root,
+        years=(2014,),
+        summary_cache=cache,
+        resource_policy=RESOURCE_POLICY,
+    )
 
     assert reader.calls == 2
 
@@ -608,11 +613,13 @@ def test_aggregates_dataset_summary_cache_normalizes_year_order(
         root,
         years=(2015, 2014),
         summary_cache=cache,
+        resource_policy=RESOURCE_POLICY,
     )
     aggregates._summarize_dataset_root(
         root,
         years=(2014, 2015),
         summary_cache=cache,
+        resource_policy=RESOURCE_POLICY,
     )
 
     assert reader.calls == 1

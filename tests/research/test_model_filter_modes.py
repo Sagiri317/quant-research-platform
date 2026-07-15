@@ -20,6 +20,10 @@ from quant_research_platform.research.models import (
 from quant_research_platform.research.models.supervised import (
     model_algorithm_ids,
 )
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
 from tests.helpers.research_specs import (
     make_signal_spec,
 )
@@ -555,9 +559,7 @@ def test_rank_ensemble_prediction_outputs_are_chunk_boundary_invariant(
     )
 
 
-def test_model_rank_deficient_fit_matches_direct_lstsq_design(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_model_rank_deficient_fit_matches_direct_lstsq_design() -> None:
     x1 = [
         0.1257302210933933,
         -0.1321048632913019,
@@ -630,8 +632,12 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design(
 
     assert result.coefficients.tolist() == pytest.approx(expected.tolist())
 
-    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.003")
-    tiny_result = fit_model_result(frame, spec)
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=4_000,
+        environ={},
+    )
+    with runtime_resource_policy_scope(policy):
+        tiny_result = fit_model_result(frame, spec)
 
     assert tiny_result.coefficients.tolist() == pytest.approx(
         expected.tolist(),

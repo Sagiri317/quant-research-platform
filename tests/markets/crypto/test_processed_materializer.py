@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import sys
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +24,6 @@ from quant_research_platform.markets.implementations.crypto.labels.definitions i
     CRYPTO_FORWARD_RETURN_HORIZONS,
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
-    materialization_resources,
     materialization_validation,
     materialize_factors,
     materialize_labels,
@@ -140,10 +138,9 @@ def test_crypto_processed_materializer_uses_policy_bounded_physical_reads(
     layout = StorageLayout(project_root=tmp_path)
     materialize_interim_data(layout=layout, row_batch_size=2)
     calls: list[tuple[str, str, int]] = []
-    policy = RuntimeResourcePolicy(
-        available_memory_bytes=1024**3,
-        chunk_target_bytes=128 * 1024,
-        memory_safety_factor=1.0,
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=128 * 1024,
+        environ={},
     )
 
     def spy(module_name: str, module):
@@ -190,11 +187,7 @@ def test_crypto_processed_materializer_uses_policy_bounded_physical_reads(
             ("validation", "market_panel_1m"),
         }
     )
-    assert {target for _, _, target in calls} == {
-        materialization_resources.MaterializationBudget.from_policy(
-            policy
-        ).physical_read_bytes
-    }
+    assert {target for _, _, target in calls} == {policy.payload_target_bytes}
 
 
 def test_crypto_factor_time_window_uses_prior_warmup_minutes() -> None:
@@ -647,13 +640,19 @@ def test_crypto_factor_label_emit_only_core_window(tmp_path: Path) -> None:
         factor_spec,
         layout=layout,
         time_window=core,
-        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=1024**3,
+            environ={},
+        ),
     )
     materialize_labels.write_labels(
         label_spec,
         layout=layout,
         time_window=core,
-        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=1024**3,
+            environ={},
+        ),
     )
 
     factors = read_dataset(
@@ -749,7 +748,6 @@ def test_crypto_panel_source_parts_require_one_asset_per_physical_part(
             ("BTCUSDT",): (shared_path,),
             ("ETHUSDT",): (shared_path,),
         },
-        retained_bytes=0,
     )
     monkeypatch.setattr(
         materialize_panel,
@@ -772,8 +770,9 @@ def test_crypto_panel_source_parts_require_one_asset_per_physical_part(
                 layout=StorageLayout(project_root=tmp_path),
                 source_id=SourceId("synthetic_crypto"),
                 time_window=TimeWindow("2026-07-06", "2026-07-06"),
-                resource_policy=RuntimeResourcePolicy(
-                    available_memory_bytes=1024**3
+                resource_policy=RuntimeResourcePolicy.from_environment(
+                    available_memory_bytes=1024**3,
+                    environ={},
                 ),
             )
         )
@@ -787,41 +786,7 @@ def _physical_group_plan(keys: tuple[tuple[object, ...], ...]) -> SimpleNamespac
     return SimpleNamespace(
         keys=keys,
         paths_by_key=SimpleNamespace(items=lambda: items),
-        retained_bytes=0,
     )
-
-
-def test_crypto_source_asset_index_counts_unicode_object_storage() -> None:
-    source_asset_id = "𐐀" * 10_000 + "USDT"
-
-    with pytest.raises(
-        ValueError,
-        match="crypto_panel_asset_index_exceeds_resource_budget",
-    ):
-        materialize_panel._canonical_source_assets(
-            ((source_asset_id,),),
-            target_state_bytes=50_000,
-        )
-
-
-def test_crypto_source_asset_index_preflights_finalization_state() -> None:
-    source_by_canonical = {
-        "btc_usdt": "BTCUSDT",
-        "eth_usdt": "ETHUSDT",
-    }
-    retained_bytes = sys.getsizeof(source_by_canonical) + sum(
-        sys.getsizeof(key) + sys.getsizeof(value)
-        for key, value in source_by_canonical.items()
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="crypto_panel_asset_index_exceeds_resource_budget",
-    ):
-        materialize_panel._canonical_source_assets(
-            (("BTCUSDT",), ("ETHUSDT",)),
-            target_state_bytes=retained_bytes,
-        )
 
 
 @pytest.mark.parametrize("index", [[100 + index for index in range(30)], [0] * 30])
@@ -851,7 +816,6 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
                 paths_by_key={
                     ("crypto", "btc_usdt"): (Path("part-000.parquet"),)
                 },
-                retained_bytes=0,
             ),
         )
         monkeypatch.setattr(
@@ -859,7 +823,10 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
             "dataset_context_for_equality_group",
             lambda context, _plan, _key: context,
         )
-    policy = RuntimeResourcePolicy(available_memory_bytes=1024**3)
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
 
     factors = pd.concat(
         materialize_factors._iter_factor_chunks(
@@ -921,7 +888,10 @@ def test_crypto_panel_matching_rejects_invalid_timestamps(
                     "2026-07-06T00:00:00",
                     "2026-07-06T00:00:00",
                 ),
-                resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+                resource_policy=RuntimeResourcePolicy.from_environment(
+                    available_memory_bytes=1024**3,
+                    environ={},
+                ),
             )
 
 
@@ -959,7 +929,10 @@ def test_crypto_panel_matching_rejects_invalid_source_asset_id(
             layout=layout,
             source_id=SourceId("synthetic_crypto"),
             time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+            resource_policy=RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=1024**3,
+                environ={},
+            ),
         )
 
 
@@ -988,7 +961,10 @@ def test_crypto_panel_matching_rejects_missing_source_asset_id_column(
             layout=layout,
             source_id=SourceId("synthetic_crypto"),
             time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+            resource_policy=RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=1024**3,
+                environ={},
+            ),
         )
 
 
@@ -1004,7 +980,10 @@ def test_crypto_panel_matching_accepts_valid_source_asset_id(
         layout=layout,
         source_id=SourceId("synthetic_crypto"),
         time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=1024**3,
+            environ={},
+        ),
     )
 
     final_root = layout.processed_data_root(
@@ -1055,7 +1034,10 @@ def test_crypto_panel_validation_failure_never_publishes_final_dataset(
                 "2026-07-06T00:00:00",
                 "2026-07-06T00:00:00",
             ),
-            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+            resource_policy=RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=1024**3,
+                environ={},
+            ),
         )
 
     assert len(observed_roots) == 1
@@ -1138,10 +1120,9 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
         layout=layout,
         source_id=SourceId("binance"),
         time_window=TimeWindow("2026-07-06", "2026-07-06"),
-        resource_policy=RuntimeResourcePolicy(
-            available_memory_bytes=1024**2,
-            chunk_target_bytes=64 * 1024,
-            memory_safety_factor=1.0,
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=64 * 1024,
+            environ={},
         ),
     )
 
@@ -1200,7 +1181,10 @@ def test_crypto_panel_materializer_validates_complete_trades_across_chunks(
         layout=layout,
         source_id=SourceId("synthetic_crypto"),
         time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=1024**3,
+            environ={},
+        ),
     )
 
     panel = read_dataset(
@@ -1244,7 +1228,10 @@ def test_crypto_panel_materializer_rejects_incomplete_trade_range_across_chunks(
                 "2026-07-06T00:00:00",
                 "2026-07-06T00:00:00",
             ),
-            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+            resource_policy=RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=1024**3,
+                environ={},
+            ),
         )
 
 
@@ -1283,7 +1270,10 @@ def test_crypto_panel_materializer_merges_depth_snapshot_across_storage_chunks(
         layout=layout,
         source_id=SourceId("synthetic_crypto"),
         time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-        resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=1024**3,
+            environ={},
+        ),
     )
 
     panel = read_dataset(
@@ -1333,7 +1323,10 @@ def test_crypto_panel_bar_contract_fails_before_auxiliary_reads(
             layout=StorageLayout(project_root=tmp_path),
             source_id=SourceId("synthetic_crypto"),
             time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+            resource_policy=RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=1024**3,
+                environ={},
+            ),
         )
 
     assert auxiliary_reads == []
@@ -1344,15 +1337,17 @@ def test_crypto_panel_small_and_large_resource_windows_match(tmp_path: Path) -> 
     for name, policy in (
         (
             "large",
-            RuntimeResourcePolicy(available_memory_bytes=1024**3),
+            RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=1024**3,
+                environ={},
+            ),
         ),
         (
             "small",
-                RuntimeResourcePolicy(
-                    available_memory_bytes=1024**2,
-                    chunk_target_bytes=64 * 1024,
-                    memory_safety_factor=1.0,
-                ),
+            RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=64 * 1024,
+                environ={},
+            ),
         ),
     ):
         project_root = tmp_path / name
@@ -1907,7 +1902,10 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
             layout=StorageLayout(project_root=tmp_path),
             source_id=SourceId("binance"),
             time_window=TimeWindow("2026-07-06", "2026-07-06"),
-            resource_policy=RuntimeResourcePolicy(available_memory_bytes=1024**3),
+            resource_policy=RuntimeResourcePolicy.from_environment(
+                available_memory_bytes=1024**3,
+                environ={},
+            ),
         )
     )
     keys = pd.concat(chunks, ignore_index=True).loc[
@@ -2001,8 +1999,9 @@ def test_panel_chunks_reject_same_asset_cross_chunk_time_reversal(
                 layout=StorageLayout(project_root=tmp_path),
                 source_id=SourceId("binance"),
                 time_window=TimeWindow("2026-07-06", "2026-07-06"),
-                resource_policy=RuntimeResourcePolicy(
-                    available_memory_bytes=1024**3
+                resource_policy=RuntimeResourcePolicy.from_environment(
+                    available_memory_bytes=1024**3,
+                    environ={},
                 ),
             )
         )

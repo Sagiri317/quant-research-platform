@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage._dataset_fingerprinting import (
     fingerprint_dataset,
     partition_keys,
@@ -19,6 +20,7 @@ def compare_datasets(
     *,
     columns: tuple[str, ...] | list[str] | None = None,
     time_window: TimeWindow | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> DatasetComparison:
     left_path = Path(left_root)
     right_path = Path(right_root)
@@ -31,11 +33,13 @@ def compare_datasets(
             left_path,
             columns=columns,
             time_window=time_window,
+            resource_policy=resource_policy,
         )
         right = fingerprint_dataset(
             right_path,
             columns=columns,
             time_window=time_window,
+            resource_policy=resource_policy,
         )
     except Exception:
         return _comparison(

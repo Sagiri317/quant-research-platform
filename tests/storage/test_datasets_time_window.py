@@ -282,7 +282,10 @@ def test_inspection_runtime_metadata_rejects_invalid_timestamp_values(
         ),
     )
     with pytest.raises(ValueError, match="invalid_time_window_timestamp_value"):
-        _inspection_runtime_metadata(context)
+        _inspection_runtime_metadata(
+            context,
+            target_chunk_bytes=1024**2,
+        )
 
 
 def test_fingerprint_dataset_time_window_hashes_window_only(tmp_path: Path) -> None:
