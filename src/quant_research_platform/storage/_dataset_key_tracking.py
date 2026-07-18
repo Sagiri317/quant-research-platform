@@ -22,6 +22,7 @@ from quant_research_platform.storage._scratch_ownership import (
 )
 
 _MAX_SQLITE_CACHE_BYTES = 8 * 1024 * 1024
+EXACT_KEY_SQLITE_PAGE_BYTES = 1024
 
 
 class ExactPrimaryKeyIndex:
@@ -34,7 +35,7 @@ class ExactPrimaryKeyIndex:
         timestamp_columns: Sequence[str],
         scratch_parent: Path,
         key_schema: pa.Schema | None = None,
-        sqlite_cache_bytes: int = 1024 * 1024,
+        sqlite_cache_bytes: int = EXACT_KEY_SQLITE_PAGE_BYTES,
     ) -> None:
         self._primary_key = tuple(str(column) for column in primary_key)
         self._timestamp_columns = frozenset(
@@ -58,6 +59,12 @@ class ExactPrimaryKeyIndex:
         if self._temporary_directory is None:
             raise RuntimeError("exact_primary_key_index_not_open")
         return Path(self._temporary_directory.name) / "k.sqlite3"
+
+    @property
+    def retained_memory_bytes(self) -> int:
+        """Return the Storage-controlled SQLite page-cache reserve."""
+
+        return self._sqlite_cache_kib * 1024
 
     def __enter__(self) -> ExactPrimaryKeyIndex:
         if self._connection is not None:

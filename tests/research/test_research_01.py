@@ -238,7 +238,7 @@ def test_research_output_disk_guard_checks_each_chunk(
     assert [len(frame) for frame in result] == [1, 1]
     assert observed == [tmp_path, tmp_path]
     assert "_iter_disk_guarded_output_chunks(" in inspect.getsource(
-        assembler_module._assemble_research_dataset_with_policy
+        assembler_module._assemble_research_dataset_from_sessions
     )
 
 
@@ -251,7 +251,7 @@ def test_research_time_key_scan_uses_payload_target(
         available_memory_bytes=1024,
         environ={},
     )
-    session = SimpleNamespace()
+    session = SimpleNamespace(path_selection=None, close=lambda: None)
     monkeypatch.setattr(
         assembler_module,
         "_research_session_view",
@@ -290,7 +290,7 @@ def test_research_time_key_scan_preserves_single_timestamp(
         available_memory_bytes=320,
         environ={},
     )
-    session = SimpleNamespace()
+    session = SimpleNamespace(path_selection=None, close=lambda: None)
     monkeypatch.setattr(
         assembler_module,
         "_research_session_view",
@@ -299,8 +299,11 @@ def test_research_time_key_scan_preserves_single_timestamp(
     monkeypatch.setattr(
         assembler_module,
         "iter_dataset_chunks",
-        lambda *_args, **_kwargs: iter(
-            (pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")]}),)
+        lambda *_args, **_kwargs: (
+            frame
+            for frame in (
+                pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")]}),
+            )
         ),
     )
 
@@ -313,6 +316,58 @@ def test_research_time_key_scan_preserves_single_timestamp(
         ),
         resource_policy=policy,
     ) == (pd.Timestamp("2026-01-01"),)
+
+
+def test_research_time_key_scan_closes_iterator_before_view_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024,
+        environ={},
+    )
+
+    class Inventory:
+        def release_path_selection(self, selection: int) -> None:
+            assert selection == 1
+            events.append("selection_release")
+
+    base_session = SimpleNamespace(
+        inventory=Inventory(),
+        path_selection=None,
+    )
+    view = SimpleNamespace(
+        inventory=base_session.inventory,
+        path_selection=1,
+        close=lambda: events.append("view_close"),
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "_research_session_view",
+        lambda *_args, **_kwargs: view,
+    )
+
+    def chunks():
+        try:
+            yield pd.DataFrame({"not_timestamp": [1]})
+        finally:
+            events.append("iterator_close")
+
+    iterator = chunks()
+    monkeypatch.setattr(
+        assembler_module,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iterator,
+    )
+
+    with pytest.raises(KeyError, match="timestamp"):
+        assembler_module._time_keys_from_base_input(
+            base_session,
+            primary_key=platform_entity_time_key(),
+            time_window=TimeWindow("2026-01-01", "2026-01-01"),
+            resource_policy=policy,
+        )
+    assert events == ["iterator_close", "selection_release", "view_close"]
 
 
 def test_research_processed_input_uses_task_budget_for_materialization(
@@ -331,7 +386,11 @@ def test_research_processed_input_uses_task_budget_for_materialization(
         processed_spec,
         existing_columns=(),
     )
-    context = SimpleNamespace(logical_columns=columns)
+    context = SimpleNamespace(
+        logical_columns=columns,
+        path_selection=None,
+        close=lambda: None,
+    )
     monkeypatch.setattr(
         assembler_module,
         "_research_session_view",
@@ -676,6 +735,102 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
     )
 
 
+def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = make_demo_processed_catalog()
+    frame = _research_rows_for_dates(["2014-12-31", "2015-01-02"])
+    write_demo_processed_inputs(layout, processed_catalog, frame=frame)
+    processed_spec = processed_catalog.get("demo_factors")
+    dataset_spec = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    ).get("demo")
+    columns = assembler_module._processed_input_columns(
+        dataset_spec,
+        processed_spec,
+        existing_columns=(),
+    )
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    with assembler_module.open_dataset_session(
+        layout.processed_data_root(
+            processed_spec.market_id,
+            processed_spec.kind,
+            processed_spec.data_id,
+        ),
+        columns=columns,
+        time_window=TimeWindow("2014-12-31", "2015-01-02"),
+        resource_policy=policy,
+    ) as session:
+        view = assembler_module._research_session_view(
+            session,
+            time_window=TimeWindow("2015-01-02", "2015-01-02"),
+            resource_policy=policy,
+        )
+
+        assert len(session.read_paths) == 2
+        assert len(view.read_paths) == 1
+        assert view.read_paths[0].parent.name == "year=2015"
+        assert view.path_selection is not None
+        session.inventory.release_path_selection(view.path_selection)
+
+        observed_selections: list[int] = []
+
+        def materialize(current, **_kwargs):  # noqa: ANN001
+            assert len(current.read_paths) == 1
+            assert current.path_selection is not None
+            observed_selections.append(current.path_selection)
+            return pd.DataFrame()
+
+        monkeypatch.setattr(
+            assembler_module,
+            "materialize_dataset_session",
+            materialize,
+        )
+        assembler_module._read_processed_input(
+            dataset_spec=dataset_spec,
+            processed_spec=processed_spec,
+            session=session,
+            existing_columns=(),
+            time_window=TimeWindow("2014-12-31", "2014-12-31"),
+            resource_policy=policy,
+        )
+        normal_selection = observed_selections.pop()
+        assert session.inventory.path_count(
+            selected=True,
+            path_selection=normal_selection,
+        ) == 0
+
+        def fail_materialization(current, **_kwargs):  # noqa: ANN001
+            assert current.path_selection is not None
+            observed_selections.append(current.path_selection)
+            raise RuntimeError("research_test_materialization_failure")
+
+        monkeypatch.setattr(
+            assembler_module,
+            "materialize_dataset_session",
+            fail_materialization,
+        )
+        with pytest.raises(RuntimeError, match="research_test_materialization_failure"):
+            assembler_module._read_processed_input(
+                dataset_spec=dataset_spec,
+                processed_spec=processed_spec,
+                session=session,
+                existing_columns=(),
+                time_window=TimeWindow("2015-01-02", "2015-01-02"),
+                resource_policy=policy,
+            )
+        error_selection = observed_selections.pop()
+        assert session.inventory.path_count(
+            selected=True,
+            path_selection=error_selection,
+        ) == 0
+
+
 def test_research_dataset_sizing_accounts_for_assembly_peak_memory() -> None:
     frame = _research_rows_for_dates(["2014-01-02", "2014-01-03"])
 
@@ -688,8 +843,7 @@ def test_research_dataset_sizing_accounts_for_assembly_peak_memory() -> None:
     raw_per_session = max(1, ceil(frame.memory_usage(index=True, deep=True).sum() / 2))
     assert (
         measured
-        == raw_per_session
-        * assembler_module.RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER
+        == raw_per_session * assembler_module.RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER
     )
 
 
@@ -736,9 +890,7 @@ def test_research_assembly_rejects_dependency_replacement_after_identity_capture
     write_demo_processed_inputs(
         replacement_layout,
         processed_catalog,
-        frame=_research_rows_for_dates(
-            ["2014-01-02", "2014-01-03", "2014-01-04"]
-        ),
+        frame=_research_rows_for_dates(["2014-01-02", "2014-01-03", "2014-01-04"]),
     )
     factor_spec = processed_catalog.get("demo_factors")
     current_root = layout.processed_data_root(
@@ -878,9 +1030,7 @@ def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
     write_demo_processed_inputs(
         replacement_layout,
         processed_catalog,
-        frame=_research_rows_for_dates(
-            ["2014-01-02", "2014-01-03", "2014-01-04"]
-        ),
+        frame=_research_rows_for_dates(["2014-01-02", "2014-01-03", "2014-01-04"]),
     )
     factor_spec = processed_catalog.get("demo_factors")
     current_root = layout.processed_data_root(

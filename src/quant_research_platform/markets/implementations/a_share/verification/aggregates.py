@@ -49,7 +49,10 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
+from quant_research_platform.storage._dataset_key_tracking import (
+    EXACT_KEY_SQLITE_PAGE_BYTES,
+    ExactPrimaryKeyIndex,
+)
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
     dataset_file_identity,
@@ -626,12 +629,16 @@ def _summarize_generated_full_market_panel(
     *,
     resource_policy: RuntimeResourcePolicy,
 ) -> AggregateSummary:
+    retained_payload_bytes = [0]
     return _summarize_frames(
         _iter_generated_full_market_panel_chunks(
             project_root,
             resource_policy=resource_policy,
+            _retained_payload_bytes=retained_payload_bytes,
         ),
         scratch_parent=project_root,
+        resource_policy=resource_policy,
+        _retained_payload_bytes=retained_payload_bytes,
     )
 
 
@@ -639,10 +646,12 @@ def _iter_generated_full_market_panel_chunks(
     project_root: Path,
     *,
     resource_policy: RuntimeResourcePolicy,
+    _retained_payload_bytes: list[int] | None = None,
 ) -> Iterator[pd.DataFrame]:
     yield from _iter_generated_full_market_panel_session_chunks(
         project_root,
         resource_policy=resource_policy,
+        _retained_payload_bytes=_retained_payload_bytes,
     )
 
 
@@ -650,6 +659,7 @@ def _iter_generated_full_market_panel_session_chunks(
     project_root: Path,
     *,
     resource_policy: RuntimeResourcePolicy,
+    _retained_payload_bytes: list[int] | None = None,
 ) -> Iterator[pd.DataFrame]:
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog as processed_catalog,
@@ -677,8 +687,7 @@ def _iter_generated_full_market_panel_session_chunks(
             "timestamp",
         ),
         retained_payload_bytes=sum(
-            pandas_frame_payload_bytes(frame)
-            for frame in (stock_master, market_cap)
+            pandas_frame_payload_bytes(frame) for frame in (stock_master, market_cap)
         ),
     )
     retained_inputs = (stock_master, market_cap, trading_calendar)
@@ -722,6 +731,8 @@ def _iter_generated_full_market_panel_session_chunks(
         reason="verification_summary_generated_panel",
     )
     market_bars_columns = tuple(inspect_dataset(market_bars_root).columns)
+    previous_window_payload_bytes = 0
+    previous_yielded_frame: pd.DataFrame | None = None
     for window in windows:
         market_bars = materialization_io.read_materialized_dataset(
             market_bars_root,
@@ -729,11 +740,12 @@ def _iter_generated_full_market_panel_session_chunks(
             columns=market_bars_columns,
             resource_policy=policy,
             retained_payload_bytes=sum(
-                pandas_frame_payload_bytes(frame)
-                for frame in retained_inputs
-            ),
+                pandas_frame_payload_bytes(frame) for frame in retained_inputs
+            )
+            + previous_window_payload_bytes,
         )
         if market_bars.empty:
+            del market_bars
             continue
         panel = panels.compute_market_panel(
             market_bars,
@@ -747,11 +759,29 @@ def _iter_generated_full_market_panel_session_chunks(
             window.core_sessions,
         ).reset_index(drop=True)
         materialization_planning.require_known_materialization_payload_bound(
-            frames=(*retained_inputs, market_bars, panel, output),
+            frames=(
+                *retained_inputs,
+                market_bars,
+                panel,
+                output,
+                *(
+                    (previous_yielded_frame,)
+                    if previous_yielded_frame is not None
+                    else ()
+                ),
+            ),
             output=selected,
             resource_policy=policy,
         )
+        previous_yielded_frame = selected
+        if _retained_payload_bytes is not None:
+            _retained_payload_bytes[0] = sum(
+                pandas_frame_payload_bytes(frame)
+                for frame in (*retained_inputs, market_bars, panel, output)
+            )
+        previous_window_payload_bytes = pandas_frame_payload_bytes(selected)
         yield selected
+        del market_bars, panel, output, selected
 
 
 def _local_interim_root(
@@ -828,17 +858,27 @@ def _summarize_output_bundles(
         raise ValueError("aggregate_output_roots_required")
     scratch_parent = Path(roots[0]).parent
     if any(
-        Path(root).resolve().anchor != scratch_parent.resolve().anchor
-        for root in roots
+        Path(root).resolve().anchor != scratch_parent.resolve().anchor for root in roots
     ):
         raise ValueError("aggregate_output_roots_cross_volume")
     policy = resource_policy
+    operation_headroom_bytes = (
+        policy.task_memory_budget_bytes - EXACT_KEY_SQLITE_PAGE_BYTES
+    )
+    if operation_headroom_bytes <= 0:
+        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+    retained_payload_bytes = [0]
     return _summarize_frames(
         _iter_output_frames(
             roots,
             target_chunk_bytes=policy.payload_target_bytes,
+            operation_headroom_bytes=operation_headroom_bytes,
+            _retained_payload_bytes=retained_payload_bytes,
         ),
         scratch_parent=scratch_parent,
+        sqlite_cache_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
+        resource_policy=policy,
+        _retained_payload_bytes=retained_payload_bytes,
     )
 
 
@@ -846,7 +886,15 @@ def _iter_output_frames(
     roots: tuple[Path, ...],
     *,
     target_chunk_bytes: int,
+    operation_headroom_bytes: int,
+    _retained_payload_bytes: list[int] | None = None,
 ) -> Iterator[pd.DataFrame]:
+    previous_output_bytes = [0]
+
+    def observe_batch(batch, _frame: pd.DataFrame) -> None:  # noqa: ANN001
+        assert _retained_payload_bytes is not None
+        _retained_payload_bytes[0] = batch.get_total_buffer_size()
+
     for root in roots:
         frozen = _freeze_output_bundle(root)
         try:
@@ -854,7 +902,12 @@ def _iter_output_frames(
                 yield from iter_declared_parquet_member_batches(
                     file,
                     target_chunk_bytes=target_chunk_bytes,
+                    operation_headroom_bytes=operation_headroom_bytes,
                     expected_identity=identity,
+                    batch_observer=(
+                        observe_batch if _retained_payload_bytes is not None else None
+                    ),
+                    _previous_output_bytes=previous_output_bytes,
                 )
         finally:
             _verify_frozen_output_bundle(frozen)
@@ -910,15 +963,19 @@ def _summarize_dataset_root(
         if cached is not None:
             return cached
     policy = resource_policy
+    retained_payload_bytes = [0]
     chunks = materialization_io.iter_dataset_chunks_with_policy(
         root,
         time_window=_time_window_from_years(years),
         resource_policy=policy,
         target_chunk_bytes=policy.payload_target_bytes,
+        _retained_payload_bytes=retained_payload_bytes,
     )
     summary = _summarize_frames(
         chunks,
         scratch_parent=root.parent,
+        resource_policy=policy,
+        _retained_payload_bytes=retained_payload_bytes,
     )
     if summary_cache is not None:
         summary_cache[key] = summary
@@ -939,8 +996,18 @@ def _summarize_frames(
     frames: Iterable[pd.DataFrame],
     *,
     scratch_parent: Path,
+    resource_policy: RuntimeResourcePolicy,
     sqlite_cache_bytes: int | None = None,
+    _retained_payload_bytes: list[int] | None = None,
 ) -> AggregateSummary:
+    retained_payload_bytes = (
+        [0] if _retained_payload_bytes is None else _retained_payload_bytes
+    )
+    exact_key_cache_bytes = (
+        EXACT_KEY_SQLITE_PAGE_BYTES
+        if sqlite_cache_bytes is None
+        else sqlite_cache_bytes
+    )
     row_count = 0
     keyed_row_count = 0
     unkeyed_row_count = 0
@@ -954,68 +1021,214 @@ def _summarize_frames(
     max_date: pd.Timestamp | None = None
     exact_key_columns: tuple[str, ...] | None = None
     with ExitStack() as stack:
+        frame_iterator = iter(frames)
+        close_frames = getattr(frame_iterator, "close", None)
+        if callable(close_frames):
+            stack.callback(close_frames)
         key_index: ExactPrimaryKeyIndex | None = None
-        for frame in frames:
-            row_count += int(len(frame))
-            columns.update(str(column) for column in frame.columns)
-            for column in frame.columns:
-                column_name = str(column)
-                dtype_summary.setdefault(column_name, set()).add(
-                    str(frame[column].dtype)
-                )
-                null_summary[column_name] = null_summary.get(column_name, 0) + int(
-                    frame[column].isna().sum()
-                )
-                _update_content_summary(
-                    content_summary,
-                    column_name,
-                    frame[column],
-                )
+        for frame in frame_iterator:
             key_columns = tuple(_available_key_columns(frame))
+            reducer_headroom_bytes = (
+                resource_policy.task_memory_budget_bytes
+                - retained_payload_bytes[0]
+                - pandas_frame_payload_bytes(frame)
+                - exact_key_cache_bytes
+            )
+            if reducer_headroom_bytes <= 0:
+                raise ValueError("aggregate_working_set_exceeds_task_memory_budget")
             if key_columns:
-                if exact_key_columns is None:
-                    exact_key_columns = key_columns
-                    index_kwargs: dict[str, object] = {
-                        "primary_key": key_columns,
-                        "timestamp_columns": tuple(
-                            column for column in key_columns if column == "timestamp"
-                        ),
-                        "scratch_parent": scratch_parent,
-                    }
-                    if sqlite_cache_bytes is not None:
-                        index_kwargs["sqlite_cache_bytes"] = sqlite_cache_bytes
-                    key_index = stack.enter_context(
-                        ExactPrimaryKeyIndex(**index_kwargs)
-                    )
-                elif key_columns != exact_key_columns:
+                if exact_key_columns is not None and key_columns != exact_key_columns:
                     raise ValueError("aggregate_key_columns_mismatch")
-                assert key_index is not None
-                _update_key_value_paired_summary(
-                    key_value_paired_summary,
-                    frame,
-                    key_columns=list(key_columns),
+            if frame.empty:
+                columns.update(str(column) for column in frame.columns)
+                for column in frame.columns:
+                    column_name = str(column)
+                    dtype_summary.setdefault(column_name, set()).add(
+                        str(frame[column].dtype)
+                    )
+                if key_columns and exact_key_columns is None:
+                    exact_key_columns = key_columns
+                continue
+            rows_per_block = 1
+            previous_block_rows = 0
+            previous_block_working_bytes = 0
+            frame_metadata_recorded = False
+            start = 0
+            while start < len(frame):
+                while True:
+                    stop = min(len(frame), start + rows_per_block)
+                    block = frame.iloc[start:stop]
+                    candidate_payload_bytes = pandas_frame_payload_bytes(block)
+                    candidate_working_bytes = candidate_payload_bytes
+                    if previous_block_rows:
+                        candidate_working_bytes += (
+                            previous_block_working_bytes * len(block)
+                            + previous_block_rows
+                            - 1
+                        ) // previous_block_rows
+                    if candidate_working_bytes <= reducer_headroom_bytes:
+                        break
+                    if len(block) == 1:
+                        raise ValueError(
+                            "aggregate_working_set_exceeds_task_memory_budget"
+                        )
+                    rows_per_block = max(
+                        1,
+                        min(
+                            len(block) - 1,
+                            len(block)
+                            * reducer_headroom_bytes
+                            // candidate_working_bytes,
+                        ),
+                    )
+                    del block
+                block_null_summary: dict[str, int] = {}
+                block_content_summary: dict[str, dict[str, Any]] = {}
+                block_paired_summary: dict[str, dict[str, Any]] = {}
+                block_working_bytes = 0
+                for column in block.columns:
+                    column_name = str(column)
+                    block_null_summary[column_name] = block_null_summary.get(
+                        column_name,
+                        0,
+                    ) + int(block[column].isna().sum())
+                    block_working_bytes = max(
+                        block_working_bytes,
+                        _update_content_summary(
+                            block_content_summary,
+                            column_name,
+                            block[column],
+                        ),
+                    )
+                key_frame: pd.DataFrame | None = None
+                if key_columns:
+                    block_working_bytes = max(
+                        block_working_bytes,
+                        _update_key_value_paired_summary(
+                            block_paired_summary,
+                            block,
+                            key_columns=list(key_columns),
+                        ),
+                    )
+                    key_frame = block.loc[:, list(key_columns)]
+                    key_bytes = pandas_frame_payload_bytes(key_frame)
+                    block_working_bytes = max(block_working_bytes, key_bytes)
+                date_column = _date_column(block)
+                block_min_date: pd.Timestamp | None = None
+                block_max_date: pd.Timestamp | None = None
+                if date_column is not None:
+                    dates = pd.to_datetime(
+                        block[date_column],
+                        errors="coerce",
+                    ).dropna()
+                    block_working_bytes = max(
+                        block_working_bytes,
+                        pandas_frame_payload_bytes(dates.to_frame()),
+                    )
+                    if not dates.empty:
+                        block_min_date = dates.min()
+                        block_max_date = dates.max()
+                    del dates
+                block_total_working_bytes = (
+                    candidate_payload_bytes + block_working_bytes
                 )
-                key_frame = frame.loc[:, list(key_columns)]
-                key_bytes = pandas_frame_payload_bytes(key_frame)
-                require_free_disk_headroom(
-                    scratch_parent,
-                    reserve_bytes=key_bytes,
+                if block_total_working_bytes > reducer_headroom_bytes:
+                    if len(block) == 1:
+                        raise ValueError(
+                            "aggregate_working_set_exceeds_task_memory_budget"
+                        )
+                    rows_per_block = max(
+                        1,
+                        min(
+                            len(block) - 1,
+                            len(block)
+                            * reducer_headroom_bytes
+                            // block_total_working_bytes,
+                        ),
+                    )
+                    del block, block_null_summary, block_content_summary
+                    del block_paired_summary, key_frame
+                    continue
+                if key_columns:
+                    if exact_key_columns is None:
+                        exact_key_columns = key_columns
+                    if key_index is None:
+                        key_index = stack.enter_context(
+                            ExactPrimaryKeyIndex(
+                                primary_key=key_columns,
+                                timestamp_columns=tuple(
+                                    column
+                                    for column in key_columns
+                                    if column == "timestamp"
+                                ),
+                                scratch_parent=scratch_parent,
+                                sqlite_cache_bytes=exact_key_cache_bytes,
+                            )
+                        )
+                    assert key_frame is not None
+                    require_free_disk_headroom(
+                        scratch_parent,
+                        reserve_bytes=key_bytes,
+                    )
+                    duplicate_key_count += key_index.add_frame(
+                        key_frame,
+                        namespace="aggregate",
+                    )
+                    keyed_row_count += int(len(block))
+                else:
+                    unkeyed_row_count += int(len(block))
+                if not frame_metadata_recorded:
+                    columns.update(str(column) for column in frame.columns)
+                    for column in frame.columns:
+                        column_name = str(column)
+                        dtype_summary.setdefault(column_name, set()).add(
+                            str(frame[column].dtype)
+                        )
+                    frame_metadata_recorded = True
+                row_count += int(len(block))
+                for column_name, block_null_count in block_null_summary.items():
+                    null_summary[column_name] = (
+                        null_summary.get(column_name, 0) + block_null_count
+                    )
+                for column_name, stats in block_content_summary.items():
+                    _merge_content_stats(content_summary, column_name, stats)
+                for column_name, stats in block_paired_summary.items():
+                    _merge_content_stats(
+                        key_value_paired_summary,
+                        column_name,
+                        stats,
+                    )
+                if block_min_date is not None:
+                    min_date = (
+                        block_min_date
+                        if min_date is None
+                        else min(min_date, block_min_date)
+                    )
+                    assert block_max_date is not None
+                    max_date = (
+                        block_max_date
+                        if max_date is None
+                        else max(max_date, block_max_date)
+                    )
+                start = stop
+                previous_block_rows = len(block)
+                previous_block_working_bytes = max(
+                    1,
+                    block_working_bytes,
                 )
-                duplicate_key_count += key_index.add_frame(
-                    key_frame,
-                    namespace="aggregate",
-                )
-                keyed_row_count += int(len(frame))
-            else:
-                unkeyed_row_count += int(len(frame))
-            date_column = _date_column(frame)
-            if date_column is not None:
-                dates = pd.to_datetime(frame[date_column], errors="coerce").dropna()
-                if not dates.empty:
-                    file_min = dates.min()
-                    file_max = dates.max()
-                    min_date = file_min if min_date is None else min(min_date, file_min)
-                    max_date = file_max if max_date is None else max(max_date, file_max)
+                if start < len(frame):
+                    rows_per_block = max(
+                        1,
+                        min(
+                            HASH_BLOCK_ROWS,
+                            len(frame) - start,
+                            len(block)
+                            * reducer_headroom_bytes
+                            // block_total_working_bytes,
+                        ),
+                    )
+                del block, block_null_summary, block_content_summary
+                del block_paired_summary, key_frame
     normalized_dtypes = {
         column: tuple(sorted(values))
         for column, values in sorted(dtype_summary.items())
@@ -1098,22 +1311,30 @@ def _update_content_summary(
     content_summary: dict[str, dict[str, Any]],
     column: str,
     series: pd.Series,
-) -> None:
+) -> int:
     stats = content_summary.setdefault(
         column,
         {"hash_sum": 0, "hash_xor": 0, "non_null_count": 0},
     )
+    working_bytes = 0
     for hashes in _series_hash_blocks(series):
+        working_bytes = max(working_bytes, int(hashes.nbytes))
         stats["hash_sum"] = int(
             (int(stats["hash_sum"]) + int(hashes.sum())) % HASH_MODULUS
         )
         stats["hash_xor"] = int(stats["hash_xor"]) ^ int(
             np.bitwise_xor.reduce(hashes, initial=np.uint64(0))
         )
+        del hashes
     stats["non_null_count"] = int(stats["non_null_count"]) + int(series.notna().sum())
-    numeric_min_max = _finite_numeric_min_max(series)
+    numeric_working_bytes = [0]
+    numeric_min_max = _finite_numeric_min_max(
+        series,
+        _working_bytes=numeric_working_bytes,
+    )
+    working_bytes = max(working_bytes, numeric_working_bytes[0])
     if numeric_min_max is None:
-        return
+        return working_bytes
     numeric_min, numeric_max = numeric_min_max
     stats["numeric_min"] = min(
         float(stats.get("numeric_min", numeric_min)),
@@ -1123,6 +1344,7 @@ def _update_content_summary(
         float(stats.get("numeric_max", numeric_max)),
         numeric_max,
     )
+    return working_bytes
 
 
 def _update_key_value_paired_summary(
@@ -1130,7 +1352,7 @@ def _update_key_value_paired_summary(
     frame: pd.DataFrame,
     *,
     key_columns: list[str],
-) -> None:
+) -> int:
     data_columns = [
         str(column) for column in frame.columns if str(column) not in key_columns
     ]
@@ -1154,16 +1376,30 @@ def _update_key_value_paired_summary(
         stats["non_null_count"] = int(stats["non_null_count"]) + int(
             frame[column].notna().sum()
         )
+    working_bytes = 0
     for start, key_hashes in _key_hash_blocks(frame, key_columns):
         stop = start + len(key_hashes)
         for column_name in data_columns:
             stats = paired_summary[column_name]
             values = frame[column_name].iloc[start:stop]
-            value_hashes = _value_hashes(values)
+            value_working_bytes = [0]
+            value_hashes = _value_hashes(
+                values,
+                _working_bytes=value_working_bytes,
+            )
+            mix_working_bytes = [0]
             hashes = _mix_key_value_hashes(
                 key_hashes,
                 column_hash=column_hashes[column_name],
                 value_hashes=value_hashes,
+                _working_bytes=mix_working_bytes,
+            )
+            working_bytes = max(
+                working_bytes,
+                int(key_hashes.nbytes) + value_working_bytes[0],
+                int(key_hashes.nbytes)
+                + int(value_hashes.nbytes)
+                + mix_working_bytes[0],
             )
             stats["hash_sum"] = int(
                 (int(stats["hash_sum"]) + int(hashes.sum())) % HASH_MODULUS
@@ -1171,6 +1407,9 @@ def _update_key_value_paired_summary(
             stats["hash_xor"] = int(stats["hash_xor"]) ^ int(
                 np.bitwise_xor.reduce(hashes, initial=np.uint64(0))
             )
+            del values, value_hashes, hashes
+        del key_hashes
+    return working_bytes
 
 
 def _series_hash_blocks(
@@ -1195,7 +1434,10 @@ def _key_hash_blocks(
 
 def _finite_numeric_min_max(
     series: pd.Series,
+    *,
+    _working_bytes: list[int] | None = None,
 ) -> tuple[float, float] | None:
+    working_bytes = [0] if _working_bytes is None else _working_bytes
     values: list[tuple[float, float]] = []
     for start in range(0, len(series), HASH_BLOCK_ROWS):
         block = series.iloc[start : start + HASH_BLOCK_ROWS]
@@ -1210,31 +1452,62 @@ def _finite_numeric_min_max(
             datetimes = pd.to_datetime(block, errors="coerce")
             mask = datetimes.notna().to_numpy()
             if not bool(mask.any()):
+                del datetimes, mask
                 continue
             numeric = datetimes.astype("int64").to_numpy(dtype="float64")[mask]
+            working_bytes[0] = max(
+                working_bytes[0],
+                pandas_frame_payload_bytes(datetimes.to_frame())
+                + int(mask.nbytes)
+                + int(numeric.nbytes),
+            )
+            del datetimes, mask
         else:
             return None
         finite = np.isfinite(numeric)
         if bool(finite.any()):
             finite_values = numeric[finite]
+            working_bytes[0] = max(
+                working_bytes[0],
+                int(numeric.nbytes) + int(finite.nbytes) + int(finite_values.nbytes),
+            )
             values.append((float(finite_values.min()), float(finite_values.max())))
+            del finite_values
+        else:
+            working_bytes[0] = max(
+                working_bytes[0],
+                int(numeric.nbytes) + int(finite.nbytes),
+            )
+        del numeric, finite
     if not values:
         return None
     return min(item[0] for item in values), max(item[1] for item in values)
 
 
-def _value_hashes(series: pd.Series) -> np.ndarray:
+def _value_hashes(
+    series: pd.Series,
+    *,
+    _working_bytes: list[int] | None = None,
+) -> np.ndarray:
+    working_bytes = [0] if _working_bytes is None else _working_bytes
     if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
         numeric = pd.to_numeric(series, errors="coerce")
         numeric = numeric.mask(numeric.eq(0), 0.0)
-        return pd.util.hash_pandas_object(
+        hashes = pd.util.hash_pandas_object(
             numeric.reset_index(drop=True),
             index=False,
         ).to_numpy(dtype="uint64")
-    return pd.util.hash_pandas_object(
+        working_bytes[0] = max(
+            working_bytes[0],
+            pandas_frame_payload_bytes(numeric.to_frame()) + int(hashes.nbytes),
+        )
+        return hashes
+    hashes = pd.util.hash_pandas_object(
         series.reset_index(drop=True),
         index=False,
     ).to_numpy(dtype="uint64")
+    working_bytes[0] = max(working_bytes[0], int(hashes.nbytes))
+    return hashes
 
 
 def _mix_key_value_hashes(
@@ -1242,7 +1515,9 @@ def _mix_key_value_hashes(
     *,
     column_hash: np.uint64,
     value_hashes: np.ndarray,
+    _working_bytes: list[int] | None = None,
 ) -> np.ndarray:
+    working_bytes = [0] if _working_bytes is None else _working_bytes
     with np.errstate(over="ignore"):
         mixed = key_hashes ^ (
             value_hashes + KEY_VALUE_HASH_MIXER + (key_hashes << 6) + (key_hashes >> 2)
@@ -1250,6 +1525,10 @@ def _mix_key_value_hashes(
         result = mixed ^ (
             column_hash + KEY_VALUE_HASH_MIXER + (mixed << 6) + (mixed >> 2)
         )
+    working_bytes[0] = max(
+        working_bytes[0],
+        int(mixed.nbytes) + int(result.nbytes),
+    )
     return result
 
 

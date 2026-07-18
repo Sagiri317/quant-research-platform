@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Sequence
+from contextlib import closing
 from math import ceil
 from pathlib import Path
 
@@ -77,9 +78,7 @@ def require_dataset_coverage(
         resource_policy=resource_policy,
     )
     missing_sessions = [
-        session.date()
-        for session in target
-        if session.date() not in available_sessions
+        session.date() for session in target if session.date() not in available_sessions
     ]
     if missing_sessions:
         raise ValueError(
@@ -106,12 +105,12 @@ def _dataset_session_dates(
         target_chunk_bytes=resource_policy.payload_target_bytes,
     )
     dates: set[object] = set()
-    for chunk in chunks:
-        timestamp = strict_values.strict_timestamp_value_series(
-            chunk["timestamp"],
-            error="invalid_dataset_session_timestamp",
-        )
-        dates.update(timestamp.dt.date)
+    with closing(chunks):
+        for chunk in chunks:
+            timestamp = strict_values.strict_timestamp_value_series(
+                chunk["timestamp"], error="invalid_dataset_session_timestamp"
+            )
+            dates.update(timestamp.dt.date)
     return dates
 
 
@@ -138,29 +137,28 @@ def processed_panel_key_coverage(
         target_chunk_bytes=resource_policy.payload_target_bytes,
     )
     coverage: dict[object, set[pd.Timestamp]] = {}
-    for chunk in chunks:
-        if chunk.empty:
-            continue
-        keys = chunk.loc[:, ["asset_id", "timestamp"]].copy()
-        keys["asset_id"] = strict_hashable_key_series(
-            keys["asset_id"],
-            error="invalid_processed_panel_asset_id",
-        )
-        keys["timestamp"] = strict_values.strict_timestamp_value_series(
-            keys["timestamp"],
-            error="invalid_processed_panel_timestamp",
-        )
-        for asset_id, asset_rows in keys.groupby("asset_id", sort=False):
-            asset_dates = coverage.get(asset_id)
-            if asset_dates is None:
-                asset_dates = set()
-                coverage[asset_id] = asset_dates
-            new_dates = tuple(
-                pd.Timestamp(value)
-                for value in asset_rows["timestamp"].dt.normalize().unique()
-                if pd.Timestamp(value) not in asset_dates
+    with closing(chunks):
+        for chunk in chunks:
+            if chunk.empty:
+                continue
+            keys = chunk.loc[:, ["asset_id", "timestamp"]].copy()
+            keys["asset_id"] = strict_hashable_key_series(
+                keys["asset_id"], error="invalid_processed_panel_asset_id"
             )
-            asset_dates.update(new_dates)
+            keys["timestamp"] = strict_values.strict_timestamp_value_series(
+                keys["timestamp"], error="invalid_processed_panel_timestamp"
+            )
+            for asset_id, asset_rows in keys.groupby("asset_id", sort=False):
+                asset_dates = coverage.get(asset_id)
+                if asset_dates is None:
+                    asset_dates = set()
+                    coverage[asset_id] = asset_dates
+                new_dates = tuple(
+                    pd.Timestamp(value)
+                    for value in asset_rows["timestamp"].dt.normalize().unique()
+                    if pd.Timestamp(value) not in asset_dates
+                )
+                asset_dates.update(new_dates)
     result = {
         asset_id: tuple(sorted(asset_dates))
         for asset_id, asset_dates in coverage.items()
@@ -208,35 +206,36 @@ def available_trading_sessions(
     def result() -> tuple[pd.Timestamp, ...]:
         return (*before, *core, *after)
 
-    for calendar in chunks:
-        source_market_type = strict_values.strict_market_type_series(
-            calendar["source_market_type"],
-            error="invalid_source_market_type",
-        )
-        trading = strict_values.strict_trading_bool_series(
-            calendar["is_trading_day"],
-            error="invalid_is_trading_day",
-        )
-        timestamps = strict_values.strict_timestamp_value_series(
-            calendar["timestamp"],
-            error="invalid_trading_calendar_timestamp",
-        ).dt.normalize()
-        for session, is_trading in zip(
-            timestamps,
-            trading & source_market_type.isin(CURRENT_MARKET_TYPES),
-            strict=True,
-        ):
-            normalized = pd.Timestamp(session)
-            if current_session is not None and normalized < current_session:
-                raise ValueError("out_of_order_trading_calendar")
-            if current_session is None or normalized == current_session:
+    with closing(chunks):
+        for calendar in chunks:
+            source_market_type = strict_values.strict_market_type_series(
+                calendar["source_market_type"],
+                error="invalid_source_market_type",
+            )
+            trading = strict_values.strict_trading_bool_series(
+                calendar["is_trading_day"],
+                error="invalid_is_trading_day",
+            )
+            timestamps = strict_values.strict_timestamp_value_series(
+                calendar["timestamp"],
+                error="invalid_trading_calendar_timestamp",
+            ).dt.normalize()
+            for session, is_trading in zip(
+                timestamps,
+                trading & source_market_type.isin(CURRENT_MARKET_TYPES),
+                strict=True,
+            ):
+                normalized = pd.Timestamp(session)
+                if current_session is not None and normalized < current_session:
+                    raise ValueError("out_of_order_trading_calendar")
+                if current_session is None or normalized == current_session:
+                    current_session = normalized
+                    current_is_trading = current_is_trading or bool(is_trading)
+                    continue
+                if current_is_trading and retain_session(current_session):
+                    return result()
                 current_session = normalized
-                current_is_trading = current_is_trading or bool(is_trading)
-                continue
-            if current_is_trading and retain_session(current_session):
-                return result()
-            current_session = normalized
-            current_is_trading = bool(is_trading)
+                current_is_trading = bool(is_trading)
     if current_session is not None and current_is_trading:
         retain_session(current_session)
     return result()
@@ -483,9 +482,11 @@ def _measured_peak_bytes_per_session(
 ) -> int:
     if row_count <= 0:
         return 1
-    sample_bytes = retained_payload_bytes + sum(
-        pandas_frame_payload_bytes(frame) for frame in frames
-    ) + 4 * pandas_frame_payload_bytes(output)
+    sample_bytes = (
+        retained_payload_bytes
+        + sum(pandas_frame_payload_bytes(frame) for frame in frames)
+        + 4 * pandas_frame_payload_bytes(output)
+    )
     sample_rows_per_session = max(1, row_count) / max(1, len(sessions))
     target_rows_per_session = max(
         sample_rows_per_session,
@@ -505,14 +506,13 @@ def require_known_materialization_payload_bound(
     if output is not None:
         unique_frames.setdefault(id(output), output)
         if pandas_frame_payload_bytes(output) > resource_policy.payload_target_bytes:
-            raise ValueError(
-                "a_share_indivisible_market_unit_exceeds_payload_target"
-            )
+            raise ValueError("a_share_indivisible_market_unit_exceeds_payload_target")
     if (
         sum(pandas_frame_payload_bytes(frame) for frame in unique_frames.values())
         > resource_policy.task_memory_budget_bytes
     ):
         raise ValueError("a_share_known_payloads_exceed_task_memory_budget")
+
 
 __all__ = [
     "available_trading_sessions",

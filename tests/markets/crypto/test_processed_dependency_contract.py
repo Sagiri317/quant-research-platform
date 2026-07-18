@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -562,7 +563,9 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
     monkeypatch.setattr(
         materializer,
         "open_dataset_session",
-        lambda *_args, **_kwargs: SimpleNamespace(verify=lambda: None),
+        lambda *_args, **_kwargs: nullcontext(
+            SimpleNamespace(verify=lambda: None)
+        ),
     )
     monkeypatch.setattr(
         materializer,
@@ -584,16 +587,18 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
         record_validation,
     )
 
-    result, panel_session = materializer._inspect_existing_dependency(
-        StorageLayout(project_root=tmp_path),
-        processed_catalog().get("market_panel_1m"),
-        source_id=SourceId("synthetic_crypto"),
-        time_window=TimeWindow("2026-07-06", "2026-07-06"),
-        resource_policy=policy,
-    )
+    with ExitStack() as session_stack:
+        result, panel_session = materializer._inspect_existing_dependency(
+            StorageLayout(project_root=tmp_path),
+            processed_catalog().get("market_panel_1m"),
+            source_id=SourceId("synthetic_crypto"),
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            resource_policy=policy,
+            session_stack=session_stack,
+        )
 
-    assert result is inspection
-    panel_session.verify()
+        assert result is inspection
+        panel_session.verify()
     assert observed == [policy]
 
 
@@ -719,7 +724,9 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
         monkeypatch.setattr(
             module,
             "open_dataset_session",
-            lambda *_args, **_kwargs: SimpleNamespace(verify=lambda: None),
+            lambda *_args, **_kwargs: nullcontext(
+                SimpleNamespace(verify=lambda: None)
+            ),
         )
     else:
         kwargs["panel_session"] = SimpleNamespace(verify=lambda: None)
@@ -925,17 +932,24 @@ def _patch_mock_group_plan(
     monkeypatch.setattr(
         materialization_validation,
         "crypto_asset_session_views",
-        lambda *_args, **_kwargs: tuple(
-            (
-                key,
-                SimpleNamespace(
-                    row_filters=(
-                        ("market_id", "==", key[0]),
-                        ("asset_id", "==", key[1]),
+        lambda *_args, **_kwargs: _asset_views_context(
+            tuple(
+                (
+                    key,
+                    SimpleNamespace(
+                        row_filters=(
+                            ("market_id", "==", key[0]),
+                            ("asset_id", "==", key[1]),
+                        ),
+                        verify=lambda: None,
                     ),
-                    verify=lambda: None,
-                ),
+                )
+                for key in keys
             )
-            for key in keys
         ),
     )
+
+
+@contextmanager
+def _asset_views_context(views):  # noqa: ANN001
+    yield views

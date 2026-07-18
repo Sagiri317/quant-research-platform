@@ -59,7 +59,8 @@ def write_factors(
     panel_key_coverages: dict[
         Path,
         dict[object, tuple[pd.Timestamp, ...]],
-    ] | None = None,
+    ]
+    | None = None,
 ) -> DatasetInspection:
     catalog = processed_catalog()
     factor_catalog = factor_definitions.factor_catalog()
@@ -140,7 +141,9 @@ def write_factors(
                 output=selected,
                 resource_policy=policy,
             )
+            del read_window, processed_inputs, panel, factors, output
             yield selected
+            del selected
 
     return materialization_io.write_and_inspect(
         spec,

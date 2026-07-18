@@ -10,10 +10,51 @@ from quant_research_platform.agents.safety import (
 )
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
+    evidence_json_value_unsafe_reason,
     sanitize_shared_object,
     sanitize_shared_text,
     unsafe_for_share_reason,
 )
+
+
+def test_share_safety_failure_path_allows_logical_output_path() -> None:
+    assert (
+        evidence_json_value_unsafe_reason(
+            {"path": "outputs/x/a.md", "reason": "invalid_utf8"}
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        r"C:\repo\outputs\x\a.md",
+        r"\\server\share\outputs\x\a.md",
+        "/workspace/qrp/outputs/x/a.md",
+    ),
+)
+def test_share_safety_failure_path_still_rejects_absolute_paths(path: str) -> None:
+    assert (
+        evidence_json_value_unsafe_reason({"path": path, "reason": "invalid_utf8"})
+        == "absolute_path"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        r"outputs/x/C:\private\a.md",
+        r"outputs/x/\\server\share\a.md",
+        "outputs/x//workspace/qrp/a.md",
+        "outputs/x/anaconda3/envs/private/a.md",
+    ),
+)
+def test_logical_path_prefix_cannot_mask_embedded_absolute_token(path: str) -> None:
+    assert (
+        evidence_json_value_unsafe_reason({"path": path, "reason": "invalid_utf8"})
+        == "absolute_path"
+    )
 
 
 def test_sanitizer_redacts_windows_unc_and_posix_paths() -> None:

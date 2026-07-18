@@ -2,14 +2,28 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
+from quant_research_platform.workflows import local_verification as local_verification
+from tests.workflows.local_verification_fixtures import (
+    empty_processed_inputs,
+    fake_evaluation_result,
+    fake_portfolio_result,
+    fake_prediction_result,
+    make_local_verification_config,
+    persist_fake_research_root,
+    profile_with_materializers,
+    repo_run_root,
+    stub_interim_importer,
+    stub_output_writers,
+)
+
 SCRIPT = Path(
-    ".agents/skills/quant-research-platform-maintenance/scripts/"
-    "compare_run_results.py"
+    ".agents/skills/quant-research-platform-maintenance/scripts/compare_run_results.py"
 )
 
 
@@ -560,13 +574,13 @@ def test_compare_blocks_cross_field_run_evidence_contradictions(
             {"path": "summary.md", "reason": "unsafe"}
         ]
     elif mutation == "dataset_noncanonical_date":
-        payload["data"]["layers"][0]["datasets"][0]["manifest_summary"][
-            "date_min"
-        ] = "20240101"
+        payload["data"]["layers"][0]["datasets"][0]["manifest_summary"]["date_min"] = (
+            "20240101"
+        )
     elif mutation == "dataset_reversed_date":
-        payload["data"]["layers"][0]["datasets"][0]["manifest_summary"][
-            "date_min"
-        ] = "2024-01-04"
+        payload["data"]["layers"][0]["datasets"][0]["manifest_summary"]["date_min"] = (
+            "2024-01-04"
+        )
     elif mutation == "dataset_duplicate_pass":
         payload["data"]["layers"][0]["datasets"][0]["manifest_summary"][
             "duplicate_primary_key_count"
@@ -592,9 +606,9 @@ def test_compare_blocks_cross_field_run_evidence_contradictions(
     elif mutation == "share_safety_counter_mismatch":
         payload["checks"]["validation"]["share_safety_scan"]["missing_count"] = 1
     elif mutation == "share_safety_requested_path_substitution":
-        payload["checks"]["validation"]["share_safety_scan"][
-            "requested_paths"
-        ][-1] = "outputs/prediction_daily/opaque.md"
+        payload["checks"]["validation"]["share_safety_scan"]["requested_paths"][-1] = (
+            "outputs/prediction_daily/opaque.md"
+        )
     _write_json(path, payload)
 
     result = module.compare_runs(
@@ -644,6 +658,13 @@ def test_compare_blocks_addendum_run_fact_mutations(
         validation["partition_coverage_status"] = "FAIL"
         validation["failure_codes"] = ["dataset_manifest_missing"]
         validation["status"] = "FAIL"
+        payload["checks"]["schema_inventory"] = {
+            "schema_id": "qrp-schema-inventory-summary",
+            "status": "FAIL",
+            "failure_codes": validation["failure_codes"],
+            "dataset_count": 1,
+            "total_row_count": 3,
+        }
         payload["status"]["validation"] = "FAIL"
         payload["status"]["smoke"] = "FAIL"
         payload["status"]["validation_matrix"] = "FAIL"
@@ -743,6 +764,17 @@ def test_compare_accepts_truthful_failed_dataset_evidence_envelope(
         }[failure_code]
         payload["checks"]["validation"][detail_field] = ["research_dataset"]
         payload["checks"]["validation"]["status"] = "FAIL"
+        payload["checks"]["schema_inventory"] = {
+            "schema_id": "qrp-schema-inventory-summary",
+            "status": "FAIL",
+            "failure_codes": [
+                "dataset_validation_failed",
+                failure_code,
+                "layer_validation_failed",
+            ],
+            "dataset_count": 1,
+            "total_row_count": 3,
+        }
         payload["status"]["validation"] = "FAIL"
         payload["status"]["smoke"] = "FAIL"
         payload["status"]["validation_matrix"] = "FAIL"
@@ -787,6 +819,13 @@ def test_compare_accepts_truthful_invalid_manifest_evidence_envelope(
             "layer_validation_failed",
         ]
         validation["status"] = "FAIL"
+        payload["checks"]["schema_inventory"] = {
+            "schema_id": "qrp-schema-inventory-summary",
+            "status": "FAIL",
+            "failure_codes": validation["failure_codes"],
+            "dataset_count": 1,
+            "total_row_count": 3,
+        }
         payload["status"]["validation"] = "FAIL"
         payload["status"]["smoke"] = "FAIL"
         payload["status"]["validation_matrix"] = "FAIL"
@@ -802,6 +841,106 @@ def test_compare_accepts_truthful_invalid_manifest_evidence_envelope(
     assert result["overall_status"] == "PASS"
 
 
+@pytest.mark.parametrize(
+    "failure_code",
+    ("share_safety_scan_failed", "source_local_key_leakage"),
+)
+def test_local_verification_non_dataset_failure_is_typed_and_compare_consumable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_code: str,
+) -> None:
+    compare_module = _module()
+    monkeypatch.setattr(
+        local_verification,
+        "assemble_research_dataset",
+        persist_fake_research_root,
+    )
+    stub_output_writers(monkeypatch)
+    monkeypatch.setattr(
+        local_verification,
+        "build_evaluation_result_from_research_dataset",
+        lambda **kwargs: fake_evaluation_result(kwargs),
+    )
+    monkeypatch.setattr(
+        local_verification,
+        "build_prediction_result_from_research_dataset",
+        lambda **kwargs: fake_prediction_result(kwargs),
+    )
+    monkeypatch.setattr(
+        local_verification,
+        "build_portfolio_result_from_research_dataset",
+        lambda **kwargs: fake_portfolio_result(kwargs),
+    )
+    original_build_validation_summary = local_verification.build_validation_summary
+
+    def build_failed_validation_summary(**kwargs: object) -> dict[str, object]:
+        if failure_code == "share_safety_scan_failed":
+            generated_paths = kwargs["generated_text_paths"]
+            assert isinstance(generated_paths, tuple)
+            text_path = next(
+                path
+                for path in generated_paths
+                if isinstance(path, Path) and path.suffix.casefold() != ".json"
+            )
+            text_path.write_bytes(b"\xff")
+        summary = original_build_validation_summary(**kwargs)
+        if failure_code == "source_local_key_leakage":
+            summary["status"] = "FAIL"
+            summary["failure_codes"] = [failure_code]
+            date_ranges = summary["date_ranges"]
+            assert isinstance(date_ranges, list) and date_ranges
+            first_range = date_ranges[0]
+            assert isinstance(first_range, dict)
+            summary["source_local_key_leakage"] = [first_range["data_id"]]
+        return summary
+
+    monkeypatch.setattr(
+        local_verification,
+        "build_validation_summary",
+        build_failed_validation_summary,
+    )
+    run_root = repo_run_root(
+        tmp_path,
+        monkeypatch,
+        "test-runs",
+        {
+            "share_safety_scan_failed": "typed-share-safety",
+            "source_local_key_leakage": "typed-check-b",
+        }[failure_code],
+    )
+
+    result = local_verification.run_local_verification(
+        make_local_verification_config(
+            run_root=run_root,
+            start_date="2014-01-01",
+            end_date="2016-12-31",
+            profile=profile_with_materializers(
+                stub_interim_importer(),
+                empty_processed_inputs,
+            ),
+        )
+    )
+    run_payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+
+    assert result.status == "FAIL"
+    assert run_payload["checks"]["schema_inventory"] == {
+        "schema_id": "qrp-schema-inventory-summary",
+        "status": "FAIL",
+        "failure_codes": [failure_code],
+        "dataset_count": 2,
+        "total_row_count": 2,
+    }
+    current_root = run_root.with_name(f"{run_root.name}-current")
+    shutil.copytree(run_root, current_root)
+    compare_result = compare_module.compare_runs(
+        baseline_root=run_root,
+        current_root=current_root,
+        compare_root=run_root.with_name(f"{run_root.name}-compare"),
+    )
+    assert compare_result["overall_status"] == "PASS"
+
+
 def test_compare_rejects_failure_codes_with_data_pass(tmp_path: Path) -> None:
     module = _module()
     baseline = tmp_path / "baseline"
@@ -811,9 +950,7 @@ def test_compare_rejects_failure_codes_with_data_pass(tmp_path: Path) -> None:
     path = current / "run.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["checks"]["validation"]["failure_codes"] = ["primary_key_nulls"]
-    payload["checks"]["validation"]["primary_key_null_failures"] = [
-        "research_dataset"
-    ]
+    payload["checks"]["validation"]["primary_key_null_failures"] = ["research_dataset"]
     payload["checks"]["validation"]["status"] = "FAIL"
     payload["status"]["validation"] = "FAIL"
     payload["status"]["smoke"] = "FAIL"
@@ -1241,9 +1378,7 @@ def test_compare_pairs_file_rejects_duplicate_pair_members(
         },
         {
             "schema_id": "qrp-compare-pairs",
-            "pairs": [
-                {"baseline_output_id": 7, "current_output_id": "prediction_new"}
-            ],
+            "pairs": [{"baseline_output_id": 7, "current_output_id": "prediction_new"}],
         },
     ),
 )

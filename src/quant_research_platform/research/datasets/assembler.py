@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import ExitStack, closing
 from dataclasses import replace
 from math import ceil
 from pathlib import Path
@@ -87,12 +88,34 @@ def _assemble_research_dataset_with_policy(
     spec = dataset_catalog.get(dataset_id)
     policy = resource_policy
     _validate_research_input_specs(spec, processed_catalog)
-    input_sessions = _open_input_dataset_sessions(
-        layout=layout,
-        dataset_spec=spec,
-        processed_catalog=processed_catalog,
-        time_window=time_window,
-    )
+    with ExitStack() as stack:
+        input_sessions = _open_input_dataset_sessions(
+            layout=layout,
+            dataset_spec=spec,
+            processed_catalog=processed_catalog,
+            time_window=time_window,
+            resource_policy=policy,
+            stack=stack,
+        )
+        return _assemble_research_dataset_from_sessions(
+            layout=layout,
+            spec=spec,
+            processed_catalog=processed_catalog,
+            time_window=time_window,
+            policy=policy,
+            input_sessions=input_sessions,
+        )
+
+
+def _assemble_research_dataset_from_sessions(
+    *,
+    layout: StorageLayout,
+    spec: ResearchDatasetSpec,
+    processed_catalog: ProcessedDataCatalog,
+    time_window: TimeWindow,
+    policy: RuntimeResourcePolicy,
+    input_sessions: Mapping[str, DatasetSession],
+) -> Path:
     input_identities = _input_dataset_identities(
         dataset_spec=spec,
         sessions=input_sessions,
@@ -303,20 +326,35 @@ def _time_keys_from_base_input(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> tuple[pd.Timestamp, ...]:
-    session = _research_session_view(base_session, time_window=time_window)
-    timestamps: set[pd.Timestamp] = set()
-    intraday = is_intraday_time_window(time_window)
-    for chunk in iter_dataset_chunks(
-        session,
-        target_chunk_bytes=resource_policy.payload_target_bytes,
-    ):
-        for value in chunk["timestamp"].dropna().unique():
-            timestamp = pd.Timestamp(value)
-            if not intraday:
-                timestamp = timestamp.normalize()
-            if timestamp in timestamps:
-                continue
-            timestamps.add(timestamp)
+    session = _research_session_view(
+        base_session,
+        time_window=time_window,
+        resource_policy=resource_policy,
+    )
+    try:
+        timestamps: set[pd.Timestamp] = set()
+        intraday = is_intraday_time_window(time_window)
+        with closing(
+            iter_dataset_chunks(
+                session,
+                target_chunk_bytes=resource_policy.payload_target_bytes,
+            )
+        ) as chunks:
+            for chunk in chunks:
+                for value in chunk["timestamp"].dropna().unique():
+                    timestamp = pd.Timestamp(value)
+                    if not intraday:
+                        timestamp = timestamp.normalize()
+                    if timestamp in timestamps:
+                        continue
+                    timestamps.add(timestamp)
+    finally:
+        if (
+            session.path_selection is not None
+            and session.path_selection != base_session.path_selection
+        ):
+            base_session.inventory.release_path_selection(session.path_selection)
+        session.close()
     return tuple(sorted(timestamps))
 
 
@@ -387,9 +425,7 @@ def _validate_input_key_coverage(
     if policy == "sparse":
         return
     if policy != "strict":
-        raise ValueError(
-            f"invalid_research_key_coverage: {input_data_id}={policy}"
-        )
+        raise ValueError(f"invalid_research_key_coverage: {input_data_id}={policy}")
     missing = base_keys.merge(
         input_keys,
         on=key_columns,
@@ -418,12 +454,24 @@ def _read_processed_input(
     )
     if tuple(columns) != session.logical_columns:
         raise ValueError("research_input_session_columns_mismatch")
-    view = _research_session_view(session, time_window=time_window)
-    return materialize_dataset_session(
-        view,
-        target_chunk_bytes=resource_policy.payload_target_bytes,
-        materialized_budget_bytes=resource_policy.task_memory_budget_bytes,
+    view = _research_session_view(
+        session,
+        time_window=time_window,
+        resource_policy=resource_policy,
     )
+    try:
+        return materialize_dataset_session(
+            view,
+            target_chunk_bytes=resource_policy.payload_target_bytes,
+            materialized_budget_bytes=resource_policy.task_memory_budget_bytes,
+        )
+    finally:
+        if (
+            view.path_selection is not None
+            and view.path_selection != session.path_selection
+        ):
+            session.inventory.release_path_selection(view.path_selection)
+        view.close()
 
 
 def _processed_input_columns(
@@ -641,6 +689,8 @@ def _open_input_dataset_sessions(
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy,
+    stack: ExitStack,
 ) -> dict[str, DatasetSession]:
     sessions: dict[str, DatasetSession] = {}
     existing_columns: tuple[str, ...] = ()
@@ -657,10 +707,13 @@ def _open_input_dataset_sessions(
             processed_spec.data_id,
         )
         try:
-            session = open_dataset_session(
-                root,
-                columns=columns,
-                time_window=time_window,
+            session = stack.enter_context(
+                open_dataset_session(
+                    root,
+                    columns=columns,
+                    time_window=time_window,
+                    resource_policy=resource_policy,
+                ),
             )
         except ValueError as exc:
             if str(exc) == "dataset_column_not_found":
@@ -684,26 +737,42 @@ def _research_session_view(
     session: DatasetSession,
     *,
     time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy,
 ) -> DatasetSession:
-    filters = parquet_filters_for_time_window(
+    if resource_policy is not session.resource_policy:
+        raise ValueError("research_session_resource_policy_mismatch")
+    parquet_filters = parquet_filters_for_time_window(
         timestamp_column=session.timestamp_column,
         time_window=time_window,
     )
-    view = replace(
-        session,
-        read_paths=tuple(
-            prune_paths_for_time_window(
+    spec = session.spec
+    if tuple(spec.get("partition_columns", ())) != ("year",):
+        return replace(
+            session,
+            time_window=time_window,
+            parquet_filters=parquet_filters,
+            owns_inventory=False,
+        )
+    path_selection = session.inventory.new_path_selection()
+    try:
+        for path in session.read_paths:
+            if prune_paths_for_time_window(
                 session.data_root,
-                session.all_paths,
-                spec=session.spec,
+                (path,),
+                spec=spec,
                 time_window=time_window,
-            )
-        ),
-        time_window=time_window,
-        parquet_filters=tuple(filters) if filters else None,
-    )
-    view.verify()
-    return view
+            ):
+                session.inventory.select_path(path_selection, path)
+        return replace(
+            session,
+            path_selection=path_selection,
+            time_window=time_window,
+            parquet_filters=parquet_filters,
+            owns_inventory=False,
+        )
+    except BaseException:
+        session.inventory.release_path_selection(path_selection)
+        raise
 
 
 def _estimate_research_join_bytes_per_session(

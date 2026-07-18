@@ -75,7 +75,9 @@ def write_annotations(
                 output=output,
                 resource_policy=policy,
             )
+            del processed_inputs, panel, outputs
             yield output
+            del output
 
     return materialization_io.write_and_inspect(
         spec,

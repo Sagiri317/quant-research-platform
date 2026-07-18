@@ -266,6 +266,53 @@ def test_evaluation_rejects_pending_non_monotonic_time_overlap() -> None:
         )
 
 
+def test_complete_time_chunks_close_upstream_on_error_and_consumer_close() -> None:
+    from quant_research_platform.research._memory import (
+        iter_complete_time_sized_frames,
+    )
+
+    frame = make_filter_mode_frame().iloc[:1]
+    closed: list[str] = []
+
+    def retained(name: str, timestamps: tuple[str, ...]):
+        try:
+            for timestamp in timestamps:
+                yield frame.assign(timestamp=pd.Timestamp(timestamp))
+        finally:
+            closed.append(name)
+
+    invalid = iter_complete_time_sized_frames(
+        retained("error", ("2024-01-03", "2024-01-02")),
+        timestamp_column="timestamp",
+    )
+    with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
+        tuple(invalid)
+    assert closed == ["error"]
+
+    abandoned = iter_complete_time_sized_frames(
+        retained("early", ("2024-01-01", "2024-01-02", "2024-01-03")),
+        timestamp_column="timestamp",
+    )
+    next(abandoned)
+    abandoned.close()
+    assert closed == ["error", "early"]
+
+    ordinary = iter(
+        (
+            frame.assign(timestamp=pd.Timestamp("2024-01-01")),
+            frame.assign(timestamp=pd.Timestamp("2024-01-02")),
+        )
+    )
+    assert len(
+        tuple(
+            iter_complete_time_sized_frames(
+                ordinary,
+                timestamp_column="timestamp",
+            )
+        )
+    ) == 2
+
+
 def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

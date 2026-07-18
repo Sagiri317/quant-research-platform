@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import ExitStack
 
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.ids import SourceId
@@ -89,6 +90,28 @@ def _materialize_processed_data_with_policy(
             raise ValueError("dataset_exists")
     requested_by_id = {spec.data_id: spec for spec in requested}
     specs = _include_dependencies(requested_by_id)
+    with ExitStack() as session_stack:
+        return _materialize_requested_specs(
+            specs=specs,
+            requested_by_id=requested_by_id,
+            layout=layout,
+            source_id=source_id,
+            time_window=time_window,
+            resource_policy=policy,
+            session_stack=session_stack,
+        )
+
+
+def _materialize_requested_specs(
+    *,
+    specs: Mapping[str, ProcessedDataSpec],
+    requested_by_id: Mapping[str, ProcessedDataSpec],
+    layout: StorageLayout,
+    source_id: SourceId,
+    time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy,
+    session_stack: ExitStack,
+) -> dict[str, DatasetInspection]:
     written: dict[str, DatasetInspection] = {}
     panel_session: DatasetSession | None = None
     needs_panel_session = any(
@@ -121,7 +144,8 @@ def _materialize_processed_data_with_policy(
                 spec,
                 source_id=source_id,
                 time_window=target_time_window,
-                resource_policy=policy,
+                resource_policy=resource_policy,
+                session_stack=session_stack,
             )
             written[data_id] = inspection
             continue
@@ -130,14 +154,17 @@ def _materialize_processed_data_with_policy(
             layout=layout,
             source_id=source_id,
             time_window=target_time_window,
-            resource_policy=policy,
+            resource_policy=resource_policy,
             panel_session=panel_session,
         )
         if spec.kind is ProcessedDataKind.PANEL and needs_panel_session:
-            panel_session = open_dataset_session(
-                _processed_root(layout, spec),
-                columns=None,
-                time_window=target_time_window,
+            panel_session = session_stack.enter_context(
+                open_dataset_session(
+                    _processed_root(layout, spec),
+                    columns=None,
+                    time_window=target_time_window,
+                    resource_policy=resource_policy,
+                ),
             )
     return written
 
@@ -153,25 +180,32 @@ def _inspect_existing_dependency(
     source_id: SourceId,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
+    session_stack: ExitStack,
 ) -> tuple[DatasetInspection, DatasetSession]:
     bar_data_id = source_ids.market_bars_source_data_id(spec)
     trade_data_id = source_ids.aggregate_trades_source_data_id(spec)
     depth_data_id = source_ids.depth_levels_source_data_id(spec)
     input_sessions = {
-        data_id: open_dataset_session(
-            layout.interim_data_root(source_id, data_id),
-            columns=None,
-            time_window=time_window,
+        data_id: session_stack.enter_context(
+            open_dataset_session(
+                layout.interim_data_root(source_id, data_id),
+                columns=None,
+                time_window=time_window,
+                resource_policy=resource_policy,
+            ),
         )
         for data_id in (bar_data_id, trade_data_id, depth_data_id)
     }
     expected_input_identities = materialization_validation.input_dataset_identities(
         input_sessions
     )
-    panel_session = open_dataset_session(
-        _processed_root(layout, spec),
-        columns=None,
-        time_window=time_window,
+    panel_session = session_stack.enter_context(
+        open_dataset_session(
+            _processed_root(layout, spec),
+            columns=None,
+            time_window=time_window,
+            resource_policy=resource_policy,
+        ),
     )
     inspection = inspect_dataset_session(
         panel_session,

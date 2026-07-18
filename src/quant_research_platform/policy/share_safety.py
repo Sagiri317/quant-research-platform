@@ -113,6 +113,7 @@ SOURCE_LOCAL_KEYS = frozenset({"source_asset_id", "source_market_id"})
 JSON_LOGICAL_PATH_VALUE_KEYS = frozenset(
     {
         "manifest_path",
+        "path",
         "invalid",
         "invalid_dataset_manifests",
         "missing",
@@ -196,10 +197,6 @@ def unsafe_for_share_reason(
         return "local_run_path"
     if _ABSOLUTE_REPO_LOCAL_ONLY_PATH_RE.search(value):
         return "local_only_path"
-    if allow_logical_local_only_path:
-        value = _REPO_LOCAL_ONLY_PATH_RE.sub("[logical-local-only-path]", value)
-    elif _REPO_LOCAL_ONLY_PATH_RE.search(value):
-        return "local_only_path"
     if (
         _WINDOWS_DRIVE_PATH_RE.search(value)
         or _UNC_PATH_RE.search(value)
@@ -207,6 +204,10 @@ def unsafe_for_share_reason(
         or _ENVIRONMENT_PATH_RE.search(value)
     ):
         return "local_path"
+    if allow_logical_local_only_path:
+        value = _REPO_LOCAL_ONLY_PATH_RE.sub("[logical-local-only-path]", value)
+    elif _REPO_LOCAL_ONLY_PATH_RE.search(value):
+        return "local_only_path"
     if _ROW_SAMPLE_RE.search(value) or _ROW_SAMPLE_MARKER_RE.search(value):
         return "row_sample"
     if _RAW_EXPORT_FILENAME_RE.search(value):

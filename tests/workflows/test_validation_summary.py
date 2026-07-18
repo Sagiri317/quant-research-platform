@@ -188,8 +188,7 @@ def test_build_validation_summary_consumes_storage_invalid_manifest_classificati
     )
 
     expected_path = (
-        "data/processed/a_share/factor/invalid_manifest_demo/"
-        "_manifest/manifest.json"
+        "data/processed/a_share/factor/invalid_manifest_demo/_manifest/manifest.json"
     )
     assert summary["failure_codes"] == [
         "dataset_manifest_invalid",
@@ -229,12 +228,43 @@ def test_build_validation_summary_does_not_misclassify_physical_inspection_failu
         )
 
 
+def test_validation_summary_does_not_hide_physical_failure_behind_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_root = _valid_dataset(tmp_path, "inspection_manifest_conjunction")
+    layer_summary = _layer_summary(dataset_root)
+    manifest = manifests.read_dataset_manifest_evidence(dataset_root)
+    manifest["validation_status"] = "FAIL"
+    manifest["duplicate_primary_key_count"] = 1
+
+    monkeypatch.setattr(
+        "quant_research_platform.workflows.diagnostics.validation_summary.inspect_dataset",
+        lambda _root: (_ for _ in ()).throw(OSError("physical_inspection_failed")),
+    )
+    monkeypatch.setattr(
+        "quant_research_platform.workflows.diagnostics.validation_summary.read_dataset_manifest_evidence",
+        lambda _root: manifest,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="validation_summary_dataset_inspection_failed",
+    ):
+        build_validation_summary(
+            run_id="demo_run",
+            dataset_roots=(dataset_root,),
+            layer_summaries=(layer_summary,),
+            generated_text_paths=(_safe_evidence(tmp_path),),
+        )
+
+
 @pytest.mark.parametrize(
     "null_count_summary",
     ({}, {"market_id": 0, "asset_id": 0}),
     ids=("empty", "composite-key-member-omitted"),
 )
-def test_build_validation_summary_rejects_forged_primary_key_null_facts(
+def test_build_validation_summary_reports_forged_primary_key_null_facts(
     tmp_path: Path,
     null_count_summary: dict[str, int],
 ) -> None:
@@ -257,16 +287,19 @@ def test_build_validation_summary_rejects_forged_primary_key_null_facts(
     manifests.replace_qrp_json(manifest_path, manifest)
 
     layer_summary = _layer_summary(dataset_root)
-    with pytest.raises(
-        ValueError,
-        match="validation_summary_dataset_inspection_failed",
-    ):
-        build_validation_summary(
-            run_id="demo_run",
-            dataset_roots=(dataset_root,),
-            layer_summaries=(layer_summary,),
-            generated_text_paths=(_safe_evidence(tmp_path),),
-        )
+    result = build_validation_summary(
+        run_id="demo_run",
+        dataset_roots=(dataset_root,),
+        layer_summaries=(layer_summary,),
+        generated_text_paths=(_safe_evidence(tmp_path),),
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["failure_codes"] == [
+        "dataset_validation_failed",
+        "primary_key_nulls",
+        "layer_validation_failed",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -276,7 +309,7 @@ def test_build_validation_summary_rejects_forged_primary_key_null_facts(
         ("non_finite_count_summary", {"value": 1}),
     ),
 )
-def test_validation_summary_rejects_forged_storage_summary(
+def test_validation_summary_reports_forged_storage_summary(
     tmp_path: Path,
     field: str,
     value: object,
@@ -307,19 +340,27 @@ def test_validation_summary_rejects_forged_storage_summary(
     assert layer_summary["failed_dataset_validations"] == [
         "workflow_consumability_demo"
     ]
-    assert layer_summary["datasets"][0]["manifest_summary"][
-        "validation_status"
-    ] == "FAIL"
-    with pytest.raises(
-        ValueError,
-        match="validation_summary_dataset_inspection_failed",
-    ):
-        build_validation_summary(
-            run_id="demo_run",
-            dataset_roots=(dataset_root,),
-            layer_summaries=(layer_summary,),
-            generated_text_paths=(_safe_evidence(tmp_path),),
-        )
+    assert (
+        layer_summary["datasets"][0]["manifest_summary"]["validation_status"] == "FAIL"
+    )
+    result = build_validation_summary(
+        run_id="demo_run",
+        dataset_roots=(dataset_root,),
+        layer_summaries=(layer_summary,),
+        generated_text_paths=(_safe_evidence(tmp_path),),
+    )
+
+    expected_fact_code = (
+        "duplicate_primary_key"
+        if field == "duplicate_primary_key_count"
+        else "non_finite_values"
+    )
+    assert result["status"] == "FAIL"
+    assert result["failure_codes"] == [
+        "dataset_validation_failed",
+        expected_fact_code,
+        "layer_validation_failed",
+    ]
 
 
 @pytest.mark.parametrize(

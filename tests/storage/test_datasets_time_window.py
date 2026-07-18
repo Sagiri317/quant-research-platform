@@ -71,6 +71,30 @@ def test_read_dataset_time_window_uses_closed_interval(tmp_path: Path) -> None:
     assert list(result["value"]) == [1.0, 2.0]
 
 
+def test_partitioned_empty_dataset_keeps_root_sentinel_for_windowed_reads(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "windowed_empty_partition")
+    empty = make_time_window_dataset_frame().iloc[:0].copy()
+    write_dataset(
+        root,
+        empty,
+        spec=make_processed_dataset_spec("windowed_empty_partition"),
+    )
+
+    assert (root / "data" / "part-000.parquet").is_file()
+    window = TimeWindow("2015-01-01", "2015-12-31")
+    with open_dataset_session(root, columns=None, time_window=window) as session:
+        assert tuple(session.read_paths) == (root / "data" / "part-000.parquet",)
+    materialized = read_dataset(root, time_window=window)
+    chunks = list(
+        read_dataset(root, time_window=window, mode=DatasetReadMode.CHUNKED)
+    )
+    assert materialized.empty
+    assert len(chunks) == 1 and chunks[0].empty
+    assert tuple(materialized.dtypes.astype(str)) == tuple(chunks[0].dtypes.astype(str))
+
+
 def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_columns(
     tmp_path: Path,
 ) -> None:
@@ -239,9 +263,8 @@ def test_inspect_dataset_time_window_reports_window_scoped_counts(
     assert inspection.partition_row_counts == {"year=2015": 1}
 
 
-def test_selected_operations_ignore_unrelated_forged_full_history_summary(
+def test_selected_operations_reject_structurally_forged_full_history_summary(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "selected_forged_summary")
     write_dataset(
@@ -254,19 +277,11 @@ def test_selected_operations_ignore_unrelated_forged_full_history_summary(
     manifest["date_min"] = "1900-01-01"
     manifest["date_max"] = "2099-12-31"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    read_paths = capture_file_batch_paths(monkeypatch)
     window = TimeWindow("2015-01-01", "2015-12-31")
 
-    inspection = inspect_dataset(root, time_window=window)
-    fingerprint = fingerprint_dataset(root, time_window=window)
-
-    assert inspection.row_count == fingerprint.row_count == 1
-    assert inspection.date_min == inspection.date_max == "2015-01-05"
-    assert {path.parent.name for path in read_paths} == {"year=2015"}
-    session = open_dataset_session(root, columns=None, time_window=window)
-    manifest_path.write_bytes(session.manifest_bytes + b" ")
-    with pytest.raises(ValueError, match="dataset_manifest_identity_changed"):
-        session.verify()
+    for operation in (inspect_dataset, fingerprint_dataset):
+        with pytest.raises(ValueError, match="manifest_partition_date_mismatch"):
+            operation(root, time_window=window)
 
 
 def test_fingerprint_dataset_time_window_hashes_window_only(tmp_path: Path) -> None:

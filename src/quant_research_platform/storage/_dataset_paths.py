@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator, Mapping
+from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -18,7 +19,7 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.policy.share_safety import is_local_only_path
 
-_PART_FILE_PATTERN = re.compile(r"^part-(\d+)\.parquet$")
+_YEAR_PARTITION_PATTERN = re.compile(r"^year=([0-9]{4})$")
 
 
 def partition_timestamp_series(
@@ -60,7 +61,25 @@ def partition_frames(
         end = pd.Timestamp(year=year + 1, month=1, day=1, tz=timezone)
         mask = (timestamp >= start) & (timestamp < end)
         if bool(mask.any()):
-            yield f"year={int(year)}", frame.loc[mask]
+            yield format_year_partition_label(int(year)), frame.loc[mask]
+
+
+def parse_year_partition_label(label: object) -> int:
+    if type(label) is not str:
+        raise ValueError("invalid_dataset_part_files")
+    match = _YEAR_PARTITION_PATTERN.fullmatch(label)
+    if match is None:
+        raise ValueError("invalid_dataset_part_files")
+    year = int(match.group(1))
+    if year < date.min.year or year > date.max.year:
+        raise ValueError("invalid_dataset_part_files")
+    return year
+
+
+def format_year_partition_label(year: object) -> str:
+    if type(year) is not int or year < date.min.year or year > date.max.year:
+        raise ValueError("invalid_dataset_partition_year")
+    return f"year={year:04d}"
 
 
 def partition_part_path(root: Path, partition: str, part_index: int) -> Path:
@@ -187,137 +206,6 @@ def _is_research_dataset_output_suffix(
 
 def _matches_artifact_segment(segment: str, expected: str) -> bool:
     return segment == expected
-
-
-def candidate_data_files(
-    data_root: Path,
-    *,
-    spec: Mapping[str, Any],
-) -> list[Path]:
-    root = Path(data_root)
-    partition_columns = tuple(
-        str(column) for column in spec.get("partition_columns", ())
-    )
-    if partition_columns == ():
-        paths = _validated_part_paths(root)
-        _require_only_expected_parquet_paths(root, paths)
-        return paths
-    if partition_columns != ("year",):
-        raise ValueError("unsupported_partitioning")
-    unpartitioned = _validated_part_paths(root)
-    if unpartitioned:
-        _require_only_expected_parquet_paths(root, unpartitioned)
-        return unpartitioned
-    year_directories: list[tuple[int, Path]] = []
-    observed_years: set[int] = set()
-    for path in root.glob("year=*"):
-        if not path.is_dir():
-            continue
-        if _path_or_relative_component_is_alias(root, path):
-            raise ValueError("invalid_dataset_part_files")
-        value = path.name.removeprefix("year=")
-        if not value.isdigit():
-            raise ValueError("invalid_dataset_part_files")
-        year = int(value)
-        if year in observed_years:
-            raise ValueError("invalid_dataset_part_files")
-        observed_years.add(year)
-        year_directories.append((year, path))
-    paths: list[Path] = []
-    for _, directory in sorted(year_directories):
-        paths.extend(_validated_part_paths(directory))
-    _require_only_expected_parquet_paths(root, paths)
-    return paths
-
-
-def _validated_part_paths(directory: Path) -> list[Path]:
-    root = Path(directory)
-    if path_is_filesystem_alias(root):
-        raise ValueError("invalid_dataset_part_files")
-    indexed: list[tuple[int, Path]] = []
-    observed_indices: set[int] = set()
-    for path in root.iterdir():
-        if path.suffix.casefold() != ".parquet":
-            continue
-        match = _PART_FILE_PATTERN.fullmatch(path.name)
-        if (
-            match is None
-            or not path.is_file()
-            or _path_or_relative_component_is_alias(root, path)
-        ):
-            raise ValueError("invalid_dataset_part_files")
-        try:
-            if not path.resolve().is_relative_to(root.resolve()):
-                raise ValueError("invalid_dataset_part_files")
-        except OSError as exc:
-            raise ValueError("invalid_dataset_part_files") from exc
-        index = int(match.group(1))
-        if index in observed_indices:
-            raise ValueError("invalid_dataset_part_files")
-        observed_indices.add(index)
-        indexed.append((index, path))
-    return [path for _, path in sorted(indexed, key=lambda item: item[0])]
-
-
-def _require_only_expected_parquet_paths(
-    data_root: Path,
-    expected: list[Path],
-) -> None:
-    root = Path(data_root)
-    resolved_root = root.resolve()
-    if path_is_filesystem_alias(root):
-        raise ValueError("invalid_dataset_part_files")
-    observed_paths = [
-        path
-        for path in root.rglob("*")
-        if path.is_file() and path.suffix.casefold() == ".parquet"
-    ]
-    all_paths = [*expected, *observed_paths]
-    try:
-        if any(
-            not path.resolve().is_relative_to(resolved_root)
-            or _path_or_relative_component_is_alias(root, path)
-            for path in all_paths
-        ):
-            raise ValueError("invalid_dataset_part_files")
-    except OSError as exc:
-        raise ValueError("invalid_dataset_part_files") from exc
-    observed = {path.absolute() for path in observed_paths}
-    allowed = {path.absolute() for path in expected}
-    resolved_allowed = {path.resolve() for path in expected}
-    physical_allowed = {_physical_file_identity(path) for path in expected}
-    if (
-        observed != allowed
-        or len(resolved_allowed) != len(expected)
-        or len(physical_allowed) != len(expected)
-    ):
-        raise ValueError("invalid_dataset_part_files")
-
-
-def _path_or_relative_component_is_alias(root: Path, path: Path) -> bool:
-    candidate = Path(path)
-    try:
-        relative = candidate.relative_to(root)
-    except ValueError:
-        return True
-    current = Path(root)
-    if path_is_filesystem_alias(current):
-        return True
-    for part in relative.parts:
-        current /= part
-        if path_is_filesystem_alias(current):
-            return True
-    return False
-
-
-def _physical_file_identity(path: Path) -> tuple[int, int]:
-    try:
-        stat = Path(path).stat()
-    except OSError as exc:
-        raise ValueError("invalid_dataset_part_files") from exc
-    if int(stat.st_ino) <= 0 or int(stat.st_nlink) != 1:
-        raise ValueError("invalid_dataset_part_files")
-    return int(stat.st_dev), int(stat.st_ino)
 
 
 def path_is_filesystem_alias(path: Path) -> bool:

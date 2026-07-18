@@ -100,86 +100,86 @@ def _iter_label_chunks(
     buffer = pd.DataFrame()
     active_market_asset: tuple[str, str] | None = None
     order_state = materialization_validation.OrderedDependencyState()
-    asset_views = materialization_validation.crypto_asset_session_views(
+    with materialization_validation.crypto_asset_session_views(
         panel_session,
         columns=("market_id", "asset_id"),
         target_chunk_bytes=chunk_target_bytes,
         error="invalid_crypto_panel_physical_asset_grouping",
-    )
-    for (_market_id, _asset_id), asset_session in asset_views:
-        for panel in iter_dataset_chunks(
-            asset_session,
-            target_chunk_bytes=chunk_target_bytes,
-        ):
-            if panel.empty:
-                continue
-            panel = materialization_validation.validated_ordered_dependency_chunk(
-                panel,
-                state=order_state,
-                error="out_of_order_crypto_label_dependency",
-            )
-            panel = panel.copy()
-            panel[_CORE_ROW] = materialization_validation.core_time_window_mask(
-                panel,
-                time_window,
-            )
-            for (segment_market_id, segment_asset_id), asset_rows in panel.groupby(
-                ["market_id", "asset_id"],
-                sort=False,
-                dropna=False,
+    ) as asset_views:
+        for (_market_id, _asset_id), asset_session in asset_views:
+            for panel in iter_dataset_chunks(
+                asset_session,
+                target_chunk_bytes=chunk_target_bytes,
             ):
-                market_asset = (str(segment_market_id), str(segment_asset_id))
-                if active_market_asset is None:
-                    active_market_asset = market_asset
-                elif market_asset != active_market_asset:
-                    finalized = _final_label_output(buffer, spec)
-                    if not finalized.empty:
+                if panel.empty:
+                    continue
+                panel = materialization_validation.validated_ordered_dependency_chunk(
+                    panel,
+                    state=order_state,
+                    error="out_of_order_crypto_label_dependency",
+                )
+                panel = panel.copy()
+                panel[_CORE_ROW] = materialization_validation.core_time_window_mask(
+                    panel,
+                    time_window,
+                )
+                for (segment_market_id, segment_asset_id), asset_rows in panel.groupby(
+                    ["market_id", "asset_id"],
+                    sort=False,
+                    dropna=False,
+                ):
+                    market_asset = (str(segment_market_id), str(segment_asset_id))
+                    if active_market_asset is None:
+                        active_market_asset = market_asset
+                    elif market_asset != active_market_asset:
+                        finalized = _final_label_output(buffer, spec)
+                        if not finalized.empty:
+                            materialization_resources.require_frame_within_budget(
+                                finalized,
+                                target_bytes=resource_policy.payload_target_bytes,
+                                error=(
+                                    "crypto_indivisible_reducer_unit_exceeds_payload_target"
+                                ),
+                            )
+                            yield finalized
+                        buffer = pd.DataFrame()
+                        active_market_asset = market_asset
+                    buffer = (
+                        asset_rows.copy().reset_index(drop=True)
+                        if buffer.empty
+                        else pd.concat((buffer, asset_rows), ignore_index=True)
+                    )
+                    emit_mask = _label_emit_mask(buffer) & buffer[_CORE_ROW].astype(
+                        "boolean"
+                    )
+                    if emit_mask.any():
+                        labeled = _label_frame(buffer)
+                        output = labeled.loc[emit_mask].loc[:, spec.required_columns]
                         materialization_resources.require_frame_within_budget(
-                            finalized,
+                            output,
                             target_bytes=resource_policy.payload_target_bytes,
                             error=(
                                 "crypto_indivisible_reducer_unit_exceeds_payload_target"
                             ),
                         )
-                        yield finalized
-                    buffer = pd.DataFrame()
-                    active_market_asset = market_asset
-                buffer = (
-                    asset_rows.copy().reset_index(drop=True)
-                    if buffer.empty
-                    else pd.concat((buffer, asset_rows), ignore_index=True)
-                )
-                emit_mask = _label_emit_mask(buffer) & buffer[_CORE_ROW].astype(
-                    "boolean"
-                )
-                if emit_mask.any():
-                    labeled = _label_frame(buffer)
-                    output = labeled.loc[emit_mask].loc[:, spec.required_columns]
-                    materialization_resources.require_frame_within_budget(
-                        output,
-                        target_bytes=resource_policy.payload_target_bytes,
-                        error=(
+                        yield output
+                        buffer = buffer.loc[~emit_mask].copy()
+                    if (
+                        pandas_frame_payload_bytes(buffer)
+                        > resource_policy.payload_target_bytes
+                    ):
+                        raise ValueError(
                             "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                        ),
-                    )
-                    yield output
-                    buffer = buffer.loc[~emit_mask].copy()
-                if (
-                    pandas_frame_payload_bytes(buffer)
-                    > resource_policy.payload_target_bytes
-                ):
-                    raise ValueError(
-                        "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                    )
-    if not buffer.empty:
-        finalized = _final_label_output(buffer, spec)
-        if not finalized.empty:
-            materialization_resources.require_frame_within_budget(
-                finalized,
-                target_bytes=resource_policy.payload_target_bytes,
-                error="crypto_indivisible_reducer_unit_exceeds_payload_target",
-            )
-            yield finalized
+                        )
+        if not buffer.empty:
+            finalized = _final_label_output(buffer, spec)
+            if not finalized.empty:
+                materialization_resources.require_frame_within_budget(
+                    finalized,
+                    target_bytes=resource_policy.payload_target_bytes,
+                    error="crypto_indivisible_reducer_unit_exceeds_payload_target",
+                )
+                yield finalized
     panel_session.verify()
 
 

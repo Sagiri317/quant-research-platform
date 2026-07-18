@@ -10,7 +10,6 @@ import pandas as pd
 
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.runtime.resources import active_runtime_resource_policy
 from quant_research_platform.storage._dataset_comparison import (
     compare_datasets as _compare_datasets,
 )
@@ -46,9 +45,8 @@ def write_dataset(
         data,
         spec=spec,
         instance_metadata=instance_metadata,
-        resource_policy=active_runtime_resource_policy(),
+        resource_policy=None,
     )
-    return None
 
 
 def read_dataset(
@@ -63,7 +61,7 @@ def read_dataset(
         columns=columns,
         time_window=time_window,
         mode=mode,
-        resource_policy=active_runtime_resource_policy(),
+        resource_policy=None,
     )
 
 
@@ -75,7 +73,7 @@ def inspect_dataset(
     return _inspect_dataset(
         dataset_root,
         time_window=time_window,
-        resource_policy=active_runtime_resource_policy(),
+        resource_policy=None,
     )
 
 
@@ -89,7 +87,7 @@ def fingerprint_dataset(
         dataset_root,
         columns=columns,
         time_window=time_window,
-        resource_policy=active_runtime_resource_policy(),
+        resource_policy=None,
     )
 
 
@@ -105,7 +103,7 @@ def compare_datasets(
         right_root,
         columns=columns,
         time_window=time_window,
-        resource_policy=active_runtime_resource_policy(),
+        resource_policy=None,
     )
 
 

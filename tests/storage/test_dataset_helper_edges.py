@@ -29,6 +29,7 @@ from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage import datasets
+from quant_research_platform.storage._dataset_inventory import DatasetSessionInventory
 from quant_research_platform.storage._dataset_key_tracking import (
     ExactPrimaryKeyIndex,
 )
@@ -36,8 +37,6 @@ from quant_research_platform.storage._dataset_manifest_validation import (
     validate_manifest_runtime_metadata_shape,
 )
 from quant_research_platform.storage._dataset_paths import (
-    _require_only_expected_parquet_paths,
-    candidate_data_files,
     partition_frames,
     timestamp_column_from_spec_payload,
 )
@@ -62,6 +61,16 @@ from tests.storage.low_level_fixtures import (
     make_processed_dataset_spec,
     write_low_level_parquet_artifact,
 )
+
+
+def _discovered_paths(data_root: Path, *, spec: dict[str, object]) -> list[Path]:
+    with DatasetSessionInventory(
+        data_root=data_root,
+        scratch_parent=data_root.parent,
+        task_memory_budget_bytes=1024,
+    ) as inventory:
+        inventory.discover(spec)
+        return list(inventory.iter_candidate_paths())
 
 
 def test_exact_key_index_does_not_bypass_bounded_pandas_conversion() -> None:
@@ -167,8 +176,9 @@ def test_validate_dataset_spec_rejects_wrong_kind_research_fields(
         validate_dataset_spec(spec)
 
 
-def test_validate_dataset_spec_accepts_only_research_immutable_semantic_mappings(
-) -> None:
+def test_validate_dataset_spec_accepts_only_research_immutable_semantic_mappings() -> (
+    None
+):
     research = make_demo_research_dataset_spec()
 
     assert type(research.column_roles) is MappingProxyType
@@ -265,9 +275,7 @@ def test_manifest_spec_binding_is_typed_exact_recursively(
         "label_nan_profile": {},
         "validation_status": "PASS",
     }
-    manifest["logical_dtype_hash"] = canonical_json_hash(
-        manifest["logical_dtypes"]
-    )
+    manifest["logical_dtype_hash"] = canonical_json_hash(manifest["logical_dtypes"])
     manifest["feature_transforms"][0]["winsorize_quantiles"] = replacement
 
     with pytest.raises(ValueError, match="dataset_manifest_spec_mismatch"):
@@ -566,9 +574,7 @@ def test_exact_key_index_sqlite_page_fits_declared_cache_budget(
         sqlite_cache_bytes=cache_bytes,
     ) as index:
         assert index._connection is not None
-        page_size = int(
-            index._connection.execute("PRAGMA page_size").fetchone()[0]
-        )
+        page_size = int(index._connection.execute("PRAGMA page_size").fetchone()[0])
 
     assert page_size <= cache_bytes
 
@@ -613,9 +619,7 @@ def test_exact_key_index_stores_primary_keys_once_and_category_values_only(
             payloads=((b"b", b"value-b"), (b"a", b"value-a")),
         )
         assert list(
-            index.identity_payload_values(
-                namespace="logical-category:asset_id"
-            )
+            index.identity_payload_values(namespace="logical-category:asset_id")
         ) == [b"value-a", b"value-b"]
 
 
@@ -676,7 +680,7 @@ def test_dataset_comparison_failure_summary_does_not_expose_local_path(
     right.mkdir()
     monkeypatch.setattr(
         dataset_comparison,
-        "fingerprint_dataset",
+        "open_dataset_session",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError(str(tmp_path))),
     )
 
@@ -688,22 +692,28 @@ def test_dataset_comparison_failure_summary_does_not_expose_local_path(
 
 def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    with ExactPrimaryKeyIndex(
-        primary_key=spec.primary_key,
-        timestamp_columns=("timestamp",),
-        scratch_parent=tmp_path,
-    ) as tracker:
+    with (
+        ExactPrimaryKeyIndex(
+            primary_key=spec.primary_key,
+            timestamp_columns=("timestamp",),
+            scratch_parent=tmp_path,
+        ) as tracker,
+        DatasetSessionInventory(
+            data_root=Path("data"),
+            scratch_parent=tmp_path,
+            task_memory_budget_bytes=1024,
+        ) as inventory,
+    ):
         stats = _WriteStats(
             spec=spec,
             data_root=Path("data"),
             key_tracker=tracker,
+            inventory=inventory,
         )
 
         with pytest.raises(ValueError, match="unregistered_output_columns"):
             stats.declared_frame(
-                make_helper_edges_dataset_frame(market_id="dummy").assign(
-                    extra=1
-                ),
+                make_helper_edges_dataset_frame(market_id="dummy").assign(extra=1),
                 target_chunk_bytes=1024**2,
             )
         with pytest.raises(ValueError, match="missing_required_columns"):
@@ -718,6 +728,7 @@ def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
                 spec=spec,
                 data_root=Path("data"),
                 key_tracker=tracker,
+                inventory=inventory,
             ).payload(target_chunk_bytes=1024**2)
 
 
@@ -758,16 +769,24 @@ def test_exact_index_preserves_unclaimed_key_scratch_directory(
 
 def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    with ExactPrimaryKeyIndex(
-        primary_key=spec.primary_key,
-        timestamp_columns=("timestamp",),
-        scratch_parent=tmp_path,
-    ) as tracker:
+    with (
+        ExactPrimaryKeyIndex(
+            primary_key=spec.primary_key,
+            timestamp_columns=("timestamp",),
+            scratch_parent=tmp_path,
+        ) as tracker,
+        DatasetSessionInventory(
+            data_root=Path("data"),
+            scratch_parent=tmp_path,
+            task_memory_budget_bytes=1024,
+        ) as inventory,
+    ):
         with pytest.raises(ValueError, match="invalid_dataset_timestamp_value"):
             _WriteStats(
                 spec=spec,
                 data_root=Path("data"),
                 key_tracker=tracker,
+                inventory=inventory,
             ).prepare_frame(
                 make_helper_edges_dataset_frame(market_id="dummy").assign(
                     timestamp=["2024-01-02", "bad-date"]
@@ -829,20 +848,26 @@ def test_dataset_compare_and_filter_fail_closed_paths(tmp_path: Path) -> None:
 def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
     frame = make_helper_edges_dataset_frame(market_id="dummy")
 
-    assert list(
-        partition_frames(
-            frame.iloc[0:0],
-            timestamp_column="timestamp",
-            partition_columns=("year",),
+    assert (
+        list(
+            partition_frames(
+                frame.iloc[0:0],
+                timestamp_column="timestamp",
+                partition_columns=("year",),
+            )
         )
-    ) == []
-    assert list(
-        partition_frames(
-            frame,
-            timestamp_column="timestamp",
-            partition_columns=(),
-        )
-    )[0][0] == ""
+        == []
+    )
+    assert (
+        list(
+            partition_frames(
+                frame,
+                timestamp_column="timestamp",
+                partition_columns=(),
+            )
+        )[0][0]
+        == ""
+    )
     with pytest.raises(ValueError, match="unsupported_partitioning"):
         list(
             partition_frames(
@@ -850,7 +875,7 @@ def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
                 timestamp_column="timestamp",
                 partition_columns=("month",),
             )
-    )
+        )
     with pytest.raises(ValueError, match="missing_partition_timestamp_column"):
         list(
             partition_frames(
@@ -977,9 +1002,7 @@ def test_physical_schema_identity_is_recursive_and_parameter_complete() -> None:
                         [
                             pa.field(
                                 "items",
-                                pa.list_(
-                                    pa.field("item", pa.int64(), nullable=True)
-                                ),
+                                pa.list_(pa.field("item", pa.int64(), nullable=True)),
                                 nullable=True,
                             )
                         ]
@@ -1002,14 +1025,17 @@ def test_physical_schema_identity_is_recursive_and_parameter_complete() -> None:
             ]
         )
     )
-    assert len(
-        {
-            canonical_json_hash(identity),
-            canonical_json_hash(top_nullable),
-            canonical_json_hash(child_nullable),
-            canonical_json_hash(dictionary_changed),
-        }
-    ) == 4
+    assert (
+        len(
+            {
+                canonical_json_hash(identity),
+                canonical_json_hash(top_nullable),
+                canonical_json_hash(child_nullable),
+                canonical_json_hash(dictionary_changed),
+            }
+        )
+        == 4
+    )
 
 
 def test_physical_schema_identity_rejects_unsupported_or_mutated_grammar() -> None:
@@ -1196,16 +1222,21 @@ def test_dataset_timestamp_and_candidate_file_helpers(tmp_path: Path) -> None:
 
     data_root = tmp_path / "data"
     data_root.mkdir()
-    assert candidate_data_files(
-        data_root,
-        spec={**spec, "partition_columns": []},
-    ) == []
+    assert (
+        _discovered_paths(
+            data_root,
+            spec={**spec, "partition_columns": []},
+        )
+        == []
+    )
     with pytest.raises(ValueError, match="unsupported_partitioning"):
-        candidate_data_files(
+        _discovered_paths(
             data_root,
             spec={**spec, "partition_columns": ["month"]},
         )
-def test_candidate_data_files_orders_numeric_part_indices(tmp_path: Path) -> None:
+
+
+def test_inventory_discovery_orders_numeric_part_indices(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
     for index in (1001, 999, 1000, 998):
@@ -1214,7 +1245,7 @@ def test_candidate_data_files_orders_numeric_part_indices(tmp_path: Path) -> Non
             data_root / f"part-{index}.parquet",
         )
 
-    paths = candidate_data_files(
+    paths = _discovered_paths(
         data_root,
         spec={"partition_columns": []},
     )
@@ -1227,6 +1258,14 @@ def test_candidate_data_files_orders_numeric_part_indices(tmp_path: Path) -> Non
     ]
 
 
+def test_candidate_discovery_does_not_build_full_path_or_identity_containers() -> None:
+    source = inspect.getsource(DatasetSessionInventory._scan_filesystem)
+
+    assert "list[" not in source
+    assert "set[" not in source
+    assert "list(" not in source
+
+
 @pytest.mark.parametrize(
     "names",
     [
@@ -1236,7 +1275,7 @@ def test_candidate_data_files_orders_numeric_part_indices(tmp_path: Path) -> Non
     ],
     ids=["invalid", "duplicate-index", "stray"],
 )
-def test_candidate_data_files_rejects_invalid_or_ambiguous_parts(
+def test_inventory_discovery_rejects_invalid_or_ambiguous_parts(
     tmp_path: Path,
     names: tuple[str, ...],
 ) -> None:
@@ -1246,13 +1285,13 @@ def test_candidate_data_files_rejects_invalid_or_ambiguous_parts(
         pq.write_table(pa.table({"value": [1]}), data_root / name)
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        candidate_data_files(
+        _discovered_paths(
             data_root,
             spec={"partition_columns": []},
         )
 
 
-def test_candidate_data_files_rejects_duplicate_numeric_years(
+def test_inventory_discovery_rejects_duplicate_numeric_years(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
@@ -1262,13 +1301,13 @@ def test_candidate_data_files_rejects_duplicate_numeric_years(
         pq.write_table(pa.table({"value": [1]}), year_root / "part-000.parquet")
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        candidate_data_files(
+        _discovered_paths(
             data_root,
             spec={"partition_columns": ["year"]},
         )
 
 
-def test_candidate_data_files_rejects_resolved_path_outside_root(
+def test_inventory_discovery_rejects_resolved_path_outside_root(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
@@ -1277,10 +1316,15 @@ def test_candidate_data_files_rejects_resolved_path_outside_root(
     pq.write_table(pa.table({"value": [1]}), external)
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        _require_only_expected_parquet_paths(data_root, [external])
+        alias = data_root / "part-000.parquet"
+        try:
+            alias.symlink_to(external)
+        except OSError as exc:
+            pytest.skip(f"symlink_not_available: {exc}")
+        _discovered_paths(data_root, spec={"partition_columns": []})
 
 
-def test_candidate_data_files_rejects_symlinked_part_alias(tmp_path: Path) -> None:
+def test_inventory_discovery_rejects_symlinked_part_alias(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
     part = data_root / "part-000.parquet"
@@ -1292,10 +1336,10 @@ def test_candidate_data_files_rejects_symlinked_part_alias(tmp_path: Path) -> No
         pytest.skip(f"symlink_not_available: {exc}")
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        _require_only_expected_parquet_paths(data_root, [part, alias])
+        _discovered_paths(data_root, spec={"partition_columns": []})
 
 
-def test_candidate_data_files_rejects_symlinked_partition_alias(
+def test_inventory_discovery_rejects_symlinked_partition_alias(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
@@ -1309,11 +1353,14 @@ def test_candidate_data_files_rejects_symlinked_partition_alias(
         pytest.skip(f"symlink_not_available: {exc}")
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        candidate_data_files(data_root, spec={"partition_columns": ["year"]})
+        _discovered_paths(data_root, spec={"partition_columns": ["year"]})
 
 
-@pytest.mark.skipif(not hasattr(Path, "is_junction"), reason="junction API required")
-def test_candidate_data_files_rejects_junction_data_root(tmp_path: Path) -> None:
+@pytest.mark.skipif(
+    os.name != "nt" or not hasattr(Path, "is_junction"),
+    reason="Windows junction capability required",
+)
+def test_inventory_discovery_rejects_junction_data_root(tmp_path: Path) -> None:
     external = tmp_path / "external"
     external.mkdir()
     pq.write_table(pa.table({"value": [1]}), external / "part-000.parquet")
@@ -1329,10 +1376,10 @@ def test_candidate_data_files_rejects_junction_data_root(tmp_path: Path) -> None
 
     assert data_root.is_junction()
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        candidate_data_files(data_root, spec={"partition_columns": []})
+        _discovered_paths(data_root, spec={"partition_columns": []})
 
 
-def test_candidate_data_files_rejects_hardlinked_part_alias(tmp_path: Path) -> None:
+def test_inventory_discovery_rejects_hardlinked_part_alias(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
     first = data_root / "part-000.parquet"
@@ -1344,10 +1391,10 @@ def test_candidate_data_files_rejects_hardlinked_part_alias(tmp_path: Path) -> N
         pytest.skip("hardlink_not_available")
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        candidate_data_files(data_root, spec={"partition_columns": []})
+        _discovered_paths(data_root, spec={"partition_columns": []})
 
 
-def test_candidate_data_files_rejects_single_external_hardlink(tmp_path: Path) -> None:
+def test_inventory_discovery_rejects_single_external_hardlink(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
     external = tmp_path / "external.parquet"
@@ -1359,10 +1406,10 @@ def test_candidate_data_files_rejects_single_external_hardlink(tmp_path: Path) -
         pytest.skip("hardlink_not_available")
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        candidate_data_files(data_root, spec={"partition_columns": []})
+        _discovered_paths(data_root, spec={"partition_columns": []})
 
 
-def test_candidate_data_files_rejects_case_variant_parquet_suffix(
+def test_inventory_discovery_rejects_case_variant_parquet_suffix(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
@@ -1371,4 +1418,4 @@ def test_candidate_data_files_rejects_case_variant_parquet_suffix(
     pq.write_table(pa.table({"value": [2]}), data_root / "part-001.PARQUET")
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        candidate_data_files(data_root, spec={"partition_columns": []})
+        _discovered_paths(data_root, spec={"partition_columns": []})

@@ -68,8 +68,7 @@ def write_panel(
         columns=("open", "high", "low", "close", "volume", "amount"),
     )
     retained_payload_bytes = sum(
-        pandas_frame_payload_bytes(frame)
-        for frame in source_inputs.values()
+        pandas_frame_payload_bytes(frame) for frame in source_inputs.values()
     )
     estimated = materialization_planning.estimate_panel_bytes_per_session(
         sessions,
@@ -122,7 +121,9 @@ def write_panel(
                 output=selected,
                 resource_policy=policy,
             )
+            del market_bars, panel, output
             yield selected
+            del selected
 
     return materialization_io.write_and_inspect(
         spec,

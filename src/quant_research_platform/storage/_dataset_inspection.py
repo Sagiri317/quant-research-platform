@@ -6,8 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+)
 from quant_research_platform.storage._dataset_key_tracking import (
+    EXACT_KEY_SQLITE_PAGE_BYTES,
     ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage._dataset_observation import (
@@ -31,15 +35,17 @@ def inspect_dataset(
     dataset_root: Path,
     *,
     time_window: TimeWindow | None = None,
-    resource_policy: RuntimeResourcePolicy,
+    resource_policy: RuntimeResourcePolicy | None,
 ) -> DatasetInspection:
-    context = open_dataset_session(
+    issued_policy = resource_policy or active_runtime_resource_policy()
+    with open_dataset_session(
         dataset_root,
         columns=None,
         time_window=time_window,
         require_consumable=False,
-    )
-    return inspect_dataset_session(context, resource_policy=resource_policy)
+        resource_policy=issued_policy,
+    ) as context:
+        return inspect_dataset_session(context, resource_policy=issued_policy)
 
 
 def inspect_dataset_session(
@@ -102,6 +108,15 @@ def _inspection_runtime_metadata(
     *,
     target_chunk_bytes: int,
 ) -> dict[str, Any]:
+    retained_owner_bytes = (
+        context.inventory.retained_memory_bytes + EXACT_KEY_SQLITE_PAGE_BYTES
+    )
+    remaining_headroom = (
+        context.resource_policy.task_memory_budget_bytes - retained_owner_bytes
+    )
+    if remaining_headroom <= 0:
+        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+    target_chunk_bytes = min(target_chunk_bytes, remaining_headroom)
     timestamp_column = context.timestamp_column
     if context.time_window is not None and timestamp_column is None:
         raise ValueError("time_window_not_supported")
@@ -112,12 +127,14 @@ def _inspection_runtime_metadata(
         if context.spec["column_roles"].get(column) == "timestamp"
     )
     partition_row_counts: dict[str, int] = {}
-    observed_paths: set[Path] = set()
+    selected_file_count = 0
+    last_observed_path: Path | None = None
     with ExactPrimaryKeyIndex(
         primary_key=primary_key,
         timestamp_columns=timestamp_columns,
         scratch_parent=context.root.parent,
         key_schema=dataset_primary_key_schema(context, primary_key),
+        sqlite_cache_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
     ) as key_index:
         observer = DatasetSummaryObserver(
             primary_key=primary_key,
@@ -132,15 +149,21 @@ def _inspection_runtime_metadata(
             context,
             columns=tuple(context.arrow_schema.names),
             target_chunk_bytes=target_chunk_bytes,
+            operation_headroom_bytes=remaining_headroom,
+            batch_observer=lambda batch, logical_frame: observer.observe_batch(
+                batch,
+                frame=logical_frame,
+            ),
         ):
             if frame.empty:
                 continue
-            observed_paths.add(path)
+            if path != last_observed_path:
+                selected_file_count += 1
+                last_observed_path = path
             partition = relative_partition_label(context.data_root, path)
             partition_row_counts[partition] = (
                 partition_row_counts.get(partition, 0) + len(frame)
             )
-            observer.observe_frame(frame)
     if context.time_window is None:
         for path in context.all_paths:
             partition_row_counts.setdefault(
@@ -149,7 +172,7 @@ def _inspection_runtime_metadata(
             )
         file_count = len(context.all_paths)
     else:
-        file_count = len(observed_paths)
+        file_count = selected_file_count
     runtime_summary = {
         "file_count": file_count,
         "row_count": int(observer.row_count),

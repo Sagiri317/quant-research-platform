@@ -11,6 +11,7 @@ from tests.architecture.topology_helpers import call_name
 from tests.helpers.import_graph import import_edges_for_roots, is_relative_to
 
 SOURCE_ROOT = Path("src/quant_research_platform")
+PLATFORM_FLOW = Path("docs/code-map/platform-flow.md")
 FORBIDDEN_PUBLIC_STORAGE_PARAMS = {
     "output_dir",
     "partition_filter",
@@ -26,6 +27,17 @@ FORBIDDEN_INTERIM_FIELDS = {
     "can_enter",
     "can_exit",
 }
+
+
+def test_platform_flow_distinguishes_handle_checks_and_memory_diagnostics() -> None:
+    text = PLATFORM_FLOW.read_text(encoding="utf-8")
+
+    assert "same open Parquet handle" in text
+    assert "session final verification reopens" in text
+    assert "does not prove native memory, RSS, or the full working-set peak" in text
+    assert "actual peak remains 5B" in text
+
+
 DELETED_MODULE_PATHS = (
     SOURCE_ROOT / "markets/implementations/a_share/source_bindings",
     SOURCE_ROOT / "contracts/data_products.py",

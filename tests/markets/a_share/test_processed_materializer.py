@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -24,6 +25,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
 from quant_research_platform.markets.implementations.a_share.processed import (
     materialization_io,
     materialization_planning,
+    materialize_annotations,
     materialize_factors,
     materialize_labels,
     materialize_panel,
@@ -86,6 +88,115 @@ def test_a_share_output_disk_guard_checks_each_chunk(
     source = inspect.getsource(materialization_io.write_and_inspect)
     assert "resource_policy" in source
     assert "_iter_disk_guarded_output_chunks(" in source
+
+
+def test_a_share_output_wrappers_release_previous_chunk_before_next_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+    frame = pd.DataFrame(
+        {
+            column: (
+                pd.to_datetime(["2014-01-02"])
+                if column == "timestamp"
+                else ["a_share" if column == "market_id" else "value"]
+            )
+            for column in spec.required_columns
+        }
+    )
+    observed: list[tuple[set[str], set[str]]] = []
+
+    def source():  # noqa: ANN202
+        for current in (frame, frame.iloc[:0].copy(), frame.copy()):
+            yield current
+            sorted_frame = inspect.currentframe().f_back
+            assert sorted_frame is not None
+            disk_frame = sorted_frame.f_back
+            assert disk_frame is not None
+            observed.append(
+                (
+                    {"chunk", "output"}.intersection(sorted_frame.f_locals),
+                    {"chunk", "chunk_bytes"}.intersection(disk_frame.f_locals),
+                )
+            )
+
+    monkeypatch.setattr(
+        materialization_io,
+        "require_free_disk_headroom",
+        lambda *_args, **_kwargs: None,
+    )
+    chunks = materialization_io._iter_disk_guarded_output_chunks(
+        materialization_io.iter_sorted_output_chunks(source(), spec),
+        scratch_parent=tmp_path,
+    )
+
+    output = tuple(chunks)
+
+    assert len(output) == 2
+    assert observed[:2] == [(set(), set()), (set(), set())]
+
+
+@pytest.mark.parametrize(
+    "exit_mode",
+    ("success", "runtime_error", "keyboard_interrupt", "system_exit", "close"),
+)
+def test_a_share_output_wrapper_close_cascades_to_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_mode: str,
+) -> None:
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+    frame = pd.DataFrame(
+        {
+            column: (
+                pd.to_datetime(["2014-01-02"])
+                if column == "timestamp"
+                else ["a_share" if column == "market_id" else "value"]
+            )
+            for column in spec.required_columns
+        }
+    )
+    closed = False
+
+    def source():  # noqa: ANN202
+        nonlocal closed
+        try:
+            yield frame.iloc[:0].copy()
+            yield frame
+            yield frame.copy()
+        finally:
+            closed = True
+
+    failure_types = {
+        "runtime_error": RuntimeError,
+        "keyboard_interrupt": KeyboardInterrupt,
+        "system_exit": SystemExit,
+    }
+    failure_type = failure_types.get(exit_mode)
+
+    def disk_check(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        if failure_type is not None:
+            raise failure_type("disk_exit")
+
+    monkeypatch.setattr(materialization_io, "require_free_disk_headroom", disk_check)
+    source_chunks = source()
+    sorted_chunks = materialization_io.iter_sorted_output_chunks(source_chunks, spec)
+    chunks = materialization_io._iter_disk_guarded_output_chunks(
+        sorted_chunks,
+        scratch_parent=tmp_path,
+    )
+    if exit_mode == "success":
+        assert len(tuple(chunks)) == 2
+    elif exit_mode == "close":
+        assert len(next(chunks)) == 1
+        chunks.close()
+    else:
+        assert failure_type is not None
+        with pytest.raises(failure_type, match="disk_exit"):
+            next(chunks)
+
+    assert closed
 
 
 def test_write_and_inspect_activates_explicit_policy(
@@ -861,6 +972,316 @@ def test_materialize_processed_data_downstream_forced_tiny_chunks_equal_default_
         end_date=end_date,
         time_window=time_window,
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "module",
+        "yielded_name",
+        "stale_names",
+        "data_id",
+        "kind",
+        "end_date",
+        "time_window",
+    ),
+    (
+        (
+            materialize_factors,
+            "selected",
+            {"processed_inputs", "panel", "factors", "output"},
+            "price_volume",
+            "factor",
+            "2014-08-29",
+            TimeWindow("2014-01-02", "2014-02-28"),
+        ),
+        (
+            materialize_labels,
+            "selected",
+            {"processed_inputs", "panel", "labels", "output"},
+            "forward_returns",
+            "label",
+            "2014-08-29",
+            TimeWindow("2014-01-02", "2014-02-28"),
+        ),
+    ),
+)
+def test_a_share_window_pipeline_releases_previous_locals_before_next_compute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    module: object,
+    yielded_name: str,
+    stale_names: set[str],
+    data_id: str,
+    kind: str,
+    end_date: str,
+    time_window: TimeWindow,
+) -> None:
+    original_disk_guard = materialization_io._iter_disk_guarded_output_chunks
+    module_path = str(Path(module.__file__).resolve())
+    observed: list[tuple[set[str], set[str], set[str], bool, bool, bool]] = []
+
+    def inspect_disk_guard(chunks, *, scratch_parent):  # noqa: ANN001, ANN202
+        sorted_chunks = iter(chunks)
+        disk_chunks = original_disk_guard(
+            sorted_chunks,
+            scratch_parent=scratch_parent,
+        )
+        try:
+            for yielded in disk_chunks:
+                sorted_locals = inspect.getgeneratorlocals(sorted_chunks)
+                producer = sorted_locals.get("frames")
+                if (
+                    inspect.isgenerator(producer)
+                    and str(Path(producer.gi_code.co_filename).resolve()) == module_path
+                ):
+                    producer_locals = inspect.getgeneratorlocals(producer)
+                    disk_locals = inspect.getgeneratorlocals(disk_chunks)
+                    observed.append(
+                        (
+                            stale_names.intersection(producer_locals),
+                            {"chunk"}.intersection(sorted_locals),
+                            {"chunk_bytes"}.intersection(disk_locals),
+                            isinstance(producer_locals.get(yielded_name), pd.DataFrame),
+                            sorted_locals.get("output") is yielded,
+                            disk_locals.get("chunk") is yielded,
+                        )
+                    )
+                yield yielded
+        finally:
+            disk_chunks.close()
+
+    monkeypatch.setattr(
+        materialization_io,
+        "_iter_disk_guarded_output_chunks",
+        inspect_disk_guard,
+    )
+    assert_forced_tiny_processed_chunks_match_default(
+        tmp_path,
+        data_id=data_id,
+        kind=kind,
+        end_date=end_date,
+        time_window=time_window,
+    )
+
+    assert observed
+    assert observed == [(set(), set(), set(), True, True, True)] * len(observed)
+
+
+def test_panel_window_producer_releases_previous_locals_before_next_compute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+    windows = tuple(
+        SimpleNamespace(read=None, core_sessions=(pd.Timestamp(day),))
+        for day in ("2014-01-02", "2014-01-03")
+    )
+    output = pd.DataFrame(
+        {
+            column: [pd.Timestamp("2014-01-02") if column == "timestamp" else 1]
+            for column in spec.required_columns
+        }
+    )
+    read_observed: list[set[str]] = []
+    yield_observed: list[tuple[set[str], bool]] = []
+    result = object()
+
+    def read_market_bars(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        producer = inspect.currentframe().f_back
+        assert producer is not None
+        read_observed.append(
+            {"market_bars", "panel", "output", "selected"}.intersection(
+                producer.f_locals
+            )
+        )
+        return pd.DataFrame()
+
+    def compute(_market_bars, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        return output.copy()
+
+    def consume(_spec, frames, **_kwargs):  # noqa: ANN001, ANN003
+        iterator = iter(frames)
+        for _ in windows:
+            yielded = next(iterator)
+            producer_locals = inspect.getgeneratorlocals(iterator)
+            yield_observed.append(
+                (
+                    {"market_bars", "panel", "output"}.intersection(producer_locals),
+                    producer_locals.get("selected") is yielded,
+                )
+            )
+        with pytest.raises(StopIteration):
+            next(iterator)
+        return result
+
+    source_inputs = {
+        data_id: pd.DataFrame()
+        for data_id in ("stock_master", "market_cap", "trading_calendar")
+    }
+    monkeypatch.setattr(
+        materialize_panel.materialization_io,
+        "read_source_inputs_for_spec",
+        lambda *_args, **_kwargs: source_inputs,
+    )
+    monkeypatch.setattr(
+        materialize_panel.materialization_validation,
+        "require_source_inputs_for_spec",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "inspect_dataset",
+        lambda _root: SimpleNamespace(columns=()),
+    )
+    monkeypatch.setattr(
+        materialize_panel.materialization_validation,
+        "require_source_input_columns_from_schema",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materialize_panel.materialization_planning,
+        "estimate_panel_bytes_per_session",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        materialize_panel.materialization_planning,
+        "planned_session_windows",
+        lambda *_args, **_kwargs: windows,
+    )
+    monkeypatch.setattr(
+        materialize_panel.materialization_io,
+        "read_materialized_dataset",
+        read_market_bars,
+    )
+    monkeypatch.setattr(
+        materialize_panel.materialization_validation,
+        "require_source_input_columns",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(materialize_panel.panels, "compute_market_panel", compute)
+    monkeypatch.setattr(
+        materialize_panel.materialization_planning,
+        "filter_output_sessions",
+        lambda current, _sessions: current,
+    )
+    monkeypatch.setattr(
+        materialize_panel.materialization_planning,
+        "require_known_materialization_payload_bound",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materialize_panel.materialization_io, "write_and_inspect", consume
+    )
+
+    actual = materialize_panel.write_panel(
+        spec,
+        layout=StorageLayout(project_root=tmp_path),
+        source_id=SourceId("csmar"),
+        market_bars_data_id=MARKET_BARS_DATA_ID,
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        policy=active_runtime_resource_policy(),
+        sessions=tuple(window.core_sessions[0] for window in windows),
+        written={},
+    )
+
+    assert actual is result
+    assert read_observed == [set(), set()]
+    assert yield_observed == [(set(), True), (set(), True)]
+
+
+def test_annotation_window_producer_releases_previous_locals_before_next_compute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = processed_catalog().get("execution")
+    contract = (
+        materialize_annotations.materialization_validation.annotation_input_contract(
+            spec
+        )
+    )
+    panel = pd.DataFrame({"timestamp": pd.to_datetime(["2014-01-02"])})
+    windows = tuple(
+        SimpleNamespace(read=None, core_sessions=(pd.Timestamp(day),))
+        for day in ("2014-01-02", "2014-01-03")
+    )
+    transition_observed: list[set[str]] = []
+    yield_observed: list[tuple[set[str], bool]] = []
+    result = object()
+
+    def derive(current: pd.DataFrame, *, data_ids: tuple[str, ...]):
+        producer = inspect.currentframe().f_back
+        assert producer is not None
+        transition_observed.append(
+            {"outputs", "output"}.intersection(producer.f_locals)
+        )
+        return {data_ids[0]: current.copy()}
+
+    def consume(_spec, frames, **_kwargs):  # noqa: ANN001, ANN003
+        iterator = iter(frames)
+        for _ in windows:
+            yielded = next(iterator)
+            producer_locals = inspect.getgeneratorlocals(iterator)
+            yield_observed.append(
+                (
+                    {"processed_inputs", "panel", "outputs"}.intersection(
+                        producer_locals
+                    ),
+                    producer_locals.get("output") is yielded,
+                )
+            )
+        with pytest.raises(StopIteration):
+            next(iterator)
+        return result
+
+    monkeypatch.setattr(
+        materialize_annotations, "inspect_dataset", lambda _root: object()
+    )
+    monkeypatch.setattr(
+        materialize_annotations.materialization_planning,
+        "planned_session_windows",
+        lambda *_args, **_kwargs: windows,
+    )
+    monkeypatch.setattr(
+        materialize_annotations.materialization_io,
+        "read_processed_inputs_for_spec",
+        lambda *_args, **_kwargs: {contract.primary_input_data_id: panel.copy()},
+    )
+    monkeypatch.setattr(
+        materialize_annotations.materialization_validation,
+        "validate_processed_input_contract",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materialize_annotations.annotations, "derive_annotations", derive
+    )
+    monkeypatch.setattr(
+        materialize_annotations.materialization_planning,
+        "filter_output_sessions",
+        lambda output, _sessions: output,
+    )
+    monkeypatch.setattr(
+        materialize_annotations.materialization_planning,
+        "require_known_materialization_payload_bound",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materialize_annotations.materialization_io,
+        "write_and_inspect",
+        consume,
+    )
+
+    actual = materialize_annotations.write_annotations(
+        spec,
+        layout=StorageLayout(project_root=tmp_path),
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        policy=active_runtime_resource_policy(),
+        sessions=tuple(window.core_sessions[0] for window in windows),
+        written={},
+    )
+
+    assert actual is result
+    assert transition_observed == [set(), set()]
+    assert yield_observed == [(set(), True), (set(), True)]
 
 
 def _catalog_with_processed_inputs(

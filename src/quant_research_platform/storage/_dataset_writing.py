@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,11 +20,17 @@ from quant_research_platform.contracts._json import (
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+)
 from quant_research_platform.storage._dataset_inspection import (
     _inspection_from_persisted_session,
 )
+from quant_research_platform.storage._dataset_inventory import DatasetSessionInventory
 from quant_research_platform.storage._dataset_key_tracking import (
+    EXACT_KEY_SQLITE_PAGE_BYTES,
     ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage._dataset_observation import (
@@ -43,7 +50,7 @@ from quant_research_platform.storage._dataset_physical import (
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
     _bounded_frame_chunks,
-    _dataset_session_from_observed_parts,
+    dataset_session_from_inventory,
     iter_declared_parquet_member_batches,
 )
 from quant_research_platform.storage._dataset_schema import (
@@ -79,6 +86,7 @@ class _WriteStats:
     spec: DataSpec
     data_root: Path
     key_tracker: ExactPrimaryKeyIndex
+    inventory: DatasetSessionInventory
     row_count: int = 0
     file_count: int = 0
     file_size_bytes: int = 0
@@ -91,9 +99,6 @@ class _WriteStats:
     _schema: list[dict[str, Any]] | None = None
     _arrow_schema: pa.Schema | None = None
     _logical_dtype_plan: dict[str, Any] | None = None
-    _observed_parts: list[tuple[Path, DatasetPartMetadata]] = field(
-        default_factory=list
-    )
     _summary_observer: DatasetSummaryObserver = field(init=False)
 
     def __post_init__(self) -> None:
@@ -114,8 +119,13 @@ class _WriteStats:
     ) -> pd.DataFrame:
         """Validate the input declaration without copying or Arrow conversion."""
 
-        if not isinstance(frame, pd.DataFrame):
+        if type(frame) is not pd.DataFrame:
             raise TypeError("invalid_dataset_chunk")
+        labels = list(frame.columns)
+        if any(type(column) is not str or not column for column in labels) or len(
+            labels
+        ) != len(set(labels)):
+            raise ValueError("invalid_dataset_column_labels")
         unregistered = sorted(set(frame.columns).difference(self.spec.column_roles))
         if unregistered:
             raise ValueError(f"unregistered_output_columns: {', '.join(unregistered)}")
@@ -161,6 +171,7 @@ class _WriteStats:
         path: Path,
         *,
         target_chunk_bytes: int,
+        operation_headroom_bytes: int,
     ) -> None:
         observed_metadata: DatasetPartMetadata | None = None
         observed_logical_dtypes: dict[str, Any] | None = None
@@ -211,6 +222,7 @@ class _WriteStats:
             path,
             expected_identity=dataset_file_identity(path),
             target_chunk_bytes=target_chunk_bytes,
+            operation_headroom_bytes=operation_headroom_bytes,
             metadata_observer=observe_metadata,
             dtype_overrides=dtype_overrides,
             persisted_frame_observer=observe_persisted_frame,
@@ -228,7 +240,7 @@ class _WriteStats:
         self.partition_row_counts[partition] = (
             self.partition_row_counts.get(partition, 0) + observed_rows
         )
-        self._observed_parts.append((path, observed_metadata))
+        self.inventory.add(path, observed_metadata, selected=True)
 
     def observe_logical_dtype_payload(
         self,
@@ -306,9 +318,7 @@ class _WriteStats:
     ) -> dict[str, Any]:
         if self._logical_dtype_plan is None:
             raise ValueError("dataset_logical_dtypes_missing")
-        logical_dtypes = merge_logical_dtype_payloads(
-            [self._logical_dtype_plan]
-        )
+        logical_dtypes = merge_logical_dtype_payloads([self._logical_dtype_plan])
 
         def streamed_category_payloads(
             descriptor: Mapping[str, Any],
@@ -340,6 +350,7 @@ class _WriteStats:
             raise AssertionError("dataset_logical_dtype_metadata_size_mismatch")
         return logical_dtypes
 
+
 def write_dataset(
     dataset_root: Path,
     data: pd.DataFrame | Iterable[pd.DataFrame],
@@ -347,71 +358,110 @@ def write_dataset(
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
-    resource_policy: RuntimeResourcePolicy,
+    resource_policy: RuntimeResourcePolicy | None,
 ) -> DatasetInspection:
     final_root = Path(dataset_root)
     validate_dataset_spec(spec)
     validate_dataset_artifact_root(final_root, spec)
+    issued_policy = resource_policy or active_runtime_resource_policy()
+    input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
+    close = getattr(input_chunks, "close", None)
+    input_closed = close is None
+
+    def close_input_once() -> None:
+        nonlocal input_closed
+        if input_closed:
+            return
+        input_closed = True
+        if sys.exception() is None:
+            close()
+            return
+        try:
+            close()
+        except BaseException:
+            pass
 
     def _writer(temp_root: Path) -> DatasetInspection:
-        timestamp_columns = tuple(
-            column
-            for column in spec.primary_key
-            if spec.column_roles.get(column) is ColumnRole.TIMESTAMP
-        )
-        with ExactPrimaryKeyIndex(
-            primary_key=spec.primary_key,
-            timestamp_columns=timestamp_columns,
-            scratch_parent=temp_root,
-        ) as key_tracker:
-            accumulator = _write_contents(
-                _iter_input_chunks(data),
-                temp_root / "data",
-                spec=spec,
-                target_chunk_bytes=resource_policy.payload_target_bytes,
-                key_tracker=key_tracker,
+        try:
+            timestamp_columns = tuple(
+                column
+                for column in spec.primary_key
+                if spec.column_roles.get(column) is ColumnRole.TIMESTAMP
             )
-            write_internal_artifact_manifest(
-                temp_root / "spec.json",
-                data_spec_payload(spec),
-            )
-            manifest = merge_dataset_instance_metadata(
-                {
-                    **accumulator.payload(
-                        target_chunk_bytes=resource_policy.payload_target_bytes
-                    ),
-                    "schema_id": "qrp-dataset-manifest",
-                },
-                instance_metadata,
-            )
-            write_internal_artifact_manifest(
-                temp_root / "_manifest" / "manifest.json",
-                manifest,
-            )
-            session = _dataset_session_from_observed_parts(
-                temp_root,
-                metadata_items=tuple(accumulator._observed_parts),
-                columns=None,
-                time_window=None,
-            )
-            if staged_validator is not None:
-                staged_validator(
-                    DatasetWriteReceipt(
-                        root=temp_root,
-                        session=session,
-                        exact_primary_key_index=key_tracker,
-                    )
+            with (
+                ExactPrimaryKeyIndex(
+                    primary_key=spec.primary_key,
+                    timestamp_columns=timestamp_columns,
+                    scratch_parent=temp_root,
+                    sqlite_cache_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
+                ) as key_tracker,
+                DatasetSessionInventory(
+                    data_root=temp_root / "data",
+                    scratch_parent=temp_root,
+                    task_memory_budget_bytes=issued_policy.task_memory_budget_bytes,
+                ) as inventory,
+            ):
+                working_headroom = issued_policy.task_memory_budget_bytes - (
+                    key_tracker.retained_memory_bytes + inventory.retained_memory_bytes
                 )
-            session.verify()
-            return _inspection_from_persisted_session(
-                session,
-                published_root=final_root,
-            )
+                if working_headroom <= 0:
+                    raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+                accumulator = _write_contents(
+                    input_chunks,
+                    temp_root / "data",
+                    spec=spec,
+                    target_chunk_bytes=issued_policy.payload_target_bytes,
+                    task_memory_budget_bytes=working_headroom,
+                    key_tracker=key_tracker,
+                    inventory=inventory,
+                )
+                write_internal_artifact_manifest(
+                    temp_root / "spec.json",
+                    data_spec_payload(spec),
+                )
+                manifest = merge_dataset_instance_metadata(
+                    {
+                        **accumulator.payload(
+                            target_chunk_bytes=issued_policy.payload_target_bytes
+                        ),
+                        "schema_id": "qrp-dataset-manifest",
+                    },
+                    instance_metadata,
+                )
+                write_internal_artifact_manifest(
+                    temp_root / "_manifest" / "manifest.json",
+                    manifest,
+                )
+                session = dataset_session_from_inventory(
+                    temp_root,
+                    inventory=inventory,
+                    columns=None,
+                    time_window=None,
+                    resource_policy=issued_policy,
+                )
+                if staged_validator is not None:
+                    staged_validator(
+                        DatasetWriteReceipt(
+                            root=temp_root,
+                            session=session,
+                            exact_primary_key_index=key_tracker,
+                        )
+                    )
+                session.verify()
+                return _inspection_from_persisted_session(
+                    session,
+                    published_root=final_root,
+                )
+        finally:
+            close_input_once()
 
     try:
-        return atomic_write_directory(final_root, _writer)
-    except OutputAlreadyExistsError as exc:
-        raise ValueError("dataset_exists") from exc
+        try:
+            return atomic_write_directory(final_root, _writer)
+        except OutputAlreadyExistsError as exc:
+            raise ValueError("dataset_exists") from exc
+    finally:
+        close_input_once()
 
 
 def _write_contents(
@@ -420,16 +470,19 @@ def _write_contents(
     *,
     spec: DataSpec,
     target_chunk_bytes: int,
+    task_memory_budget_bytes: int,
     key_tracker: ExactPrimaryKeyIndex,
+    inventory: DatasetSessionInventory,
 ) -> _WriteStats:
     timestamp_column = validate_dataset_spec(spec)
     accumulator = _WriteStats(
         spec=spec,
         data_root=root,
         key_tracker=key_tracker,
+        inventory=inventory,
     )
     part_indices: dict[str, int] = {}
-    empty_frame: pd.DataFrame | None = None
+    saw_empty_schema = False
     for chunk in chunks:
         declared = accumulator.declared_frame(
             chunk,
@@ -437,13 +490,19 @@ def _write_contents(
         )
         if declared.empty:
             frame, logical_dtypes = accumulator.prepare_frame(declared)
-            accumulator.table_for_frame(frame)
+            table = accumulator.table_for_frame(frame)
+            _require_writer_headroom(
+                task_memory_budget_bytes,
+                declared,
+                frame,
+                arrow_bytes=table.nbytes,
+            )
             accumulator.observe_logical_dtype_payload(
                 logical_dtypes,
                 target_chunk_bytes=target_chunk_bytes,
             )
-            if empty_frame is None:
-                empty_frame = frame
+            saw_empty_schema = True
+            del table, frame, logical_dtypes, declared, chunk
             continue
         for bounded_frame in _bounded_frame_chunks(
             declared,
@@ -451,6 +510,11 @@ def _write_contents(
         ):
             prepared_frame, bounded_logical_dtypes = accumulator.prepare_frame(
                 bounded_frame
+            )
+            _require_writer_headroom(
+                task_memory_budget_bytes,
+                bounded_frame,
+                prepared_frame,
             )
             for partition, partition_frame in partition_frames(
                 prepared_frame,
@@ -462,6 +526,17 @@ def _write_contents(
                     target_chunk_bytes=target_chunk_bytes,
                 ):
                     table = accumulator.table_for_frame(bounded_partition)
+                    remaining_headroom = _require_writer_headroom(
+                        task_memory_budget_bytes,
+                        bounded_frame,
+                        prepared_frame,
+                        bounded_partition,
+                        arrow_bytes=table.nbytes,
+                    )
+                    if remaining_headroom <= 0:
+                        raise ValueError(
+                            "dataset_working_set_exceeds_task_memory_budget"
+                        )
                     for persisted_table in _bounded_persisted_tables(
                         table,
                         logical_dtypes=bounded_logical_dtypes,
@@ -478,26 +553,32 @@ def _write_contents(
                         accumulator.observe_file(
                             output_path,
                             target_chunk_bytes=target_chunk_bytes,
+                            operation_headroom_bytes=remaining_headroom,
                         )
                         _raise_accumulated_failures(accumulator)
-    if accumulator.row_count == 0 and empty_frame is None:
+                        del persisted_table, output_path
+                    del table, remaining_headroom, bounded_partition
+                del partition, partition_frame
+            del prepared_frame, bounded_logical_dtypes, bounded_frame
+        del declared, chunk
+    if accumulator.row_count == 0 and not saw_empty_schema:
         raise ValueError("empty_dataset_schema_missing")
-    if empty_frame is not None:
+    if saw_empty_schema:
         logical_dtypes = accumulator.materialized_logical_dtypes(
             target_chunk_bytes=target_chunk_bytes
         )
-        dtype_overrides = pandas_dtype_overrides_from_logical_payload(
-            logical_dtypes,
-            columns=tuple(empty_frame.columns),
-        )
-        if dtype_overrides:
-            empty_frame = empty_frame.astype(dtype_overrides)
         partition = "" if accumulator.row_count == 0 else min(part_indices)
         part_index = part_indices.get(partition, 0)
         part_indices[partition] = part_index + 1
         output_path = partition_part_path(root, partition, part_index)
         assert accumulator._arrow_schema is not None
-        empty_table = accumulator.table_for_frame(empty_frame)
+        empty_table = pa.Table.from_batches([], schema=accumulator._arrow_schema)
+        remaining_headroom = _require_writer_headroom(
+            task_memory_budget_bytes,
+            arrow_bytes=empty_table.nbytes,
+        )
+        if remaining_headroom <= 0:
+            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         persisted_table = next(
             _bounded_persisted_tables(
                 empty_table,
@@ -509,20 +590,30 @@ def _write_contents(
         accumulator.observe_file(
             output_path,
             target_chunk_bytes=target_chunk_bytes,
+            operation_headroom_bytes=remaining_headroom,
         )
     return accumulator
 
 
-def _iter_input_chunks(
-    data: pd.DataFrame | Iterable[pd.DataFrame],
-) -> Iterator[pd.DataFrame]:
-    if isinstance(data, pd.DataFrame):
-        yield data
-        return
-    for chunk in data:
-        if not isinstance(chunk, pd.DataFrame):
-            raise TypeError("invalid_dataset_chunk")
-        yield chunk
+def _require_writer_headroom(
+    task_memory_budget_bytes: int,
+    *frames: pd.DataFrame,
+    arrow_bytes: int = 0,
+) -> int:
+    if (
+        type(task_memory_budget_bytes) is not int
+        or task_memory_budget_bytes <= 0
+        or type(arrow_bytes) is not int
+        or arrow_bytes < 0
+    ):
+        raise ValueError("invalid_dataset_task_memory_budget")
+    retained_bytes = arrow_bytes + sum(
+        pandas_frame_payload_bytes(frame)
+        for frame in {id(item): item for item in frames}.values()
+    )
+    if retained_bytes > task_memory_budget_bytes:
+        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+    return task_memory_budget_bytes - retained_bytes
 
 
 def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
@@ -531,9 +622,7 @@ def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
         raise ValueError("duplicate_dataset_primary_key")
     if any(int(count) > 0 for count in summary.null_count_summary.values()):
         raise ValueError("dataset_primary_key_null")
-    if any(
-        int(count) > 0 for count in summary.non_finite_count_summary.values()
-    ):
+    if any(int(count) > 0 for count in summary.non_finite_count_summary.values()):
         raise ValueError("dataset_infinite_value")
 
 

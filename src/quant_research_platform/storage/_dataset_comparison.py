@@ -6,11 +6,15 @@ from pathlib import Path
 from typing import Any
 
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+)
 from quant_research_platform.storage._dataset_fingerprinting import (
-    fingerprint_dataset,
+    fingerprint_dataset_session,
     partition_keys,
 )
+from quant_research_platform.storage._dataset_reading import open_dataset_session
 from quant_research_platform.storage._dataset_types import DatasetComparison
 
 
@@ -20,7 +24,7 @@ def compare_datasets(
     *,
     columns: tuple[str, ...] | list[str] | None = None,
     time_window: TimeWindow | None = None,
-    resource_policy: RuntimeResourcePolicy,
+    resource_policy: RuntimeResourcePolicy | None,
 ) -> DatasetComparison:
     left_path = Path(left_root)
     right_path = Path(right_root)
@@ -29,18 +33,25 @@ def compare_datasets(
     if not right_path.exists():
         return _comparison("MISSING_RIGHT")
     try:
-        left = fingerprint_dataset(
+        issued_policy = resource_policy or active_runtime_resource_policy()
+        with open_dataset_session(
             left_path,
             columns=columns,
             time_window=time_window,
-            resource_policy=resource_policy,
-        )
-        right = fingerprint_dataset(
+            resource_policy=issued_policy,
+        ) as left_context:
+            left = fingerprint_dataset_session(
+                left_context, resource_policy=issued_policy
+            )
+        with open_dataset_session(
             right_path,
             columns=columns,
             time_window=time_window,
-            resource_policy=resource_policy,
-        )
+            resource_policy=issued_policy,
+        ) as right_context:
+            right = fingerprint_dataset_session(
+                right_context, resource_policy=issued_policy
+            )
     except Exception:
         return _comparison(
             "INSPECTION_FAILED",

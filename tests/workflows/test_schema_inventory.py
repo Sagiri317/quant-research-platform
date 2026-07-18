@@ -16,6 +16,9 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.workflows import (
+    validate_schema_inventory_summary,
+)
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
@@ -43,14 +46,7 @@ def test_schema_inventory_uses_storage_exact_duplicate_fact(
         primary_key=("market_id", "asset_id", "timestamp"),
         partition_columns=("year",),
     )
-    root = (
-        tmp_path
-        / "data"
-        / "processed"
-        / "a_share"
-        / "factor"
-        / spec.data_id
-    )
+    root = tmp_path / "data" / "processed" / "a_share" / "factor" / spec.data_id
     write_dataset(
         root,
         pd.DataFrame(
@@ -138,7 +134,9 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
 
 
 def test_schema_inventory_reuses_session_duplicate_count() -> None:
-    source = inspect.getsource(schema_inventory._inventory_item)
+    source = inspect.getsource(schema_inventory._inventory_item) + inspect.getsource(
+        schema_inventory._inventory_item_from_session
+    )
 
     assert "inspect_dataset_session(" in source
     assert 'inspection.manifest["duplicate_primary_key_count"]' in source
@@ -164,14 +162,7 @@ def test_schema_inventory_rejects_replacement_between_open_and_stats(
         primary_key=("market_id", "asset_id", "timestamp"),
         partition_columns=("year",),
     )
-    current_root = (
-        tmp_path
-        / "data"
-        / "processed"
-        / "a_share"
-        / "factor"
-        / spec.data_id
-    )
+    current_root = tmp_path / "data" / "processed" / "a_share" / "factor" / spec.data_id
     replacement_root = (
         tmp_path
         / "replacement"
@@ -237,7 +228,7 @@ def test_schema_inventory_rejects_replacement_between_open_and_stats(
                 "partitions": ["year=2099"],
                 "partition_row_counts": {"year=2099": 2},
             },
-            "manifest_partition_row_counts_mismatch",
+            "manifest_partition_date_mismatch",
         ),
         (
             {
@@ -272,14 +263,7 @@ def test_schema_inventory_rejects_forged_storage_summary(
         primary_key=("market_id", "asset_id", "timestamp"),
         partition_columns=("year",),
     )
-    root = (
-        tmp_path
-        / "data"
-        / "processed"
-        / "a_share"
-        / "factor"
-        / spec.data_id
-    )
+    root = tmp_path / "data" / "processed" / "a_share" / "factor" / spec.data_id
     write_dataset(
         root,
         pd.DataFrame(
@@ -371,6 +355,28 @@ def test_schema_inventory_summary_validates_complete_exact_payload() -> None:
     assert len(summary["schema_hash"]) == 64
 
 
+@pytest.mark.parametrize("failure_codes", ({"failure": "code"}, ("failure",)))
+def test_schema_inventory_summary_rejects_non_list_validation_failure_codes(
+    failure_codes: object,
+) -> None:
+    value = {
+        "schema_id": "qrp-schema-inventory-summary",
+        "status": "FAIL",
+        "failure_codes": failure_codes,
+        "dataset_count": 1,
+        "total_row_count": 2,
+    }
+
+    with pytest.raises(ValueError, match="schema_inventory_summary_invalid"):
+        validate_schema_inventory_summary(
+            value,
+            validation_status="FAIL",
+            validation_failure_codes=failure_codes,  # type: ignore[arg-type]
+            dataset_count=1,
+            total_row_count=2,
+        )
+
+
 @pytest.mark.parametrize(
     ("layer", "kind", "logical_roots"),
     (
@@ -419,9 +425,10 @@ def test_schema_inventory_namespace_is_part_of_dataset_identity_and_summary_hash
 
     validated = schema_inventory.validate_schema_inventory_payload(combined)
     assert len(validated["datasets"]) == 2
-    assert schema_inventory.summarize_schema_inventory_payload(payload)[
-        "schema_hash"
-    ] != schema_inventory.summarize_schema_inventory_payload(alternate)["schema_hash"]
+    assert (
+        schema_inventory.summarize_schema_inventory_payload(payload)["schema_hash"]
+        != schema_inventory.summarize_schema_inventory_payload(alternate)["schema_hash"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -529,9 +536,7 @@ def test_schema_inventory_exact_grammar_rejects_mutations(mutation: str) -> None
     elif mutation == "unsorted_datasets":
         second = deepcopy(dataset)
         second["artifact_id"] = "another_factor"
-        second["logical_relative_root"] = (
-            "data/processed/a_share/factor/another_factor"
-        )
+        second["logical_relative_root"] = "data/processed/a_share/factor/another_factor"
         payload["datasets"] = [dataset, second]
 
     with pytest.raises(ValueError, match="schema_inventory_"):

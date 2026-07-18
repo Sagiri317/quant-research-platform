@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from itertools import zip_longest
 from pathlib import Path
@@ -42,6 +43,7 @@ class OrderedDependencyState:
     last_key: tuple[str, str, pd.Timestamp] | None = None
 
 
+@contextmanager
 def crypto_asset_session_views(
     session: DatasetSession,
     *,
@@ -49,11 +51,12 @@ def crypto_asset_session_views(
     target_chunk_bytes: int,
     error: str,
     key_error: str | None = None,
-) -> tuple[tuple[tuple[str, ...], DatasetSession], ...]:
+) -> Iterator[tuple[tuple[tuple[str, ...], DatasetSession], ...]]:
     if not columns:
         raise ValueError(error)
-    key_by_path: dict[Path, tuple[str, ...]] = {}
-    paths_by_key: dict[tuple[str, ...], list[Path]] = {}
+    selections: dict[tuple[str, ...], int] = {}
+    current_path: Path | None = None
+    current_key: tuple[str, ...] | None = None
     discovery_columns = tuple(
         dict.fromkeys(
             (
@@ -65,41 +68,56 @@ def crypto_asset_session_views(
             )
         )
     )
-    for path, frame in iter_dataset_file_batches(
-        session,
-        columns=discovery_columns,
-        target_chunk_bytes=target_chunk_bytes,
-    ):
-        for row in frame.loc[:, list(columns)].itertuples(index=False, name=None):
-            if any(not isinstance(value, str) or not value for value in row):
-                raise ValueError(error if key_error is None else key_error)
-            key = tuple(row)
-            existing = key_by_path.setdefault(path, key)
-            if existing != key:
-                raise ValueError(error)
-            paths = paths_by_key.setdefault(key, [])
-            if path not in paths:
-                paths.append(path)
-    if not paths_by_key:
-        raise ValueError(error if key_error is None else key_error)
-    views: list[tuple[tuple[str, ...], DatasetSession]] = []
-    for key in sorted(paths_by_key):
-        views.append(
+
+    def select_current_path() -> None:
+        if current_path is None or current_key is None:
+            return
+        selection = selections.get(current_key)
+        if selection is None:
+            selection = session.inventory.new_path_selection()
+            selections[current_key] = selection
+        session.inventory.select_path(selection, current_path)
+
+    try:
+        for path, frame in iter_dataset_file_batches(
+            session,
+            columns=discovery_columns,
+            target_chunk_bytes=target_chunk_bytes,
+        ):
+            for row in frame.loc[:, list(columns)].itertuples(index=False, name=None):
+                if any(not isinstance(value, str) or not value for value in row):
+                    raise ValueError(error if key_error is None else key_error)
+                key = tuple(row)
+                if path != current_path:
+                    select_current_path()
+                    current_path = path
+                    current_key = key
+                elif current_key != key:
+                    raise ValueError(error)
+        select_current_path()
+        if not selections:
+            raise ValueError(error if key_error is None else key_error)
+        views = tuple(
             (
                 key,
                 replace(
                     session,
-                    read_paths=tuple(paths_by_key[key]),
                     parquet_filters=tuple(session.parquet_filters or ())
                     + tuple(
                         (column, "==", value)
                         for column, value in zip(columns, key, strict=True)
                     ),
+                    path_selection=selections[key],
+                    owns_inventory=False,
                 ),
             )
+            for key in sorted(selections)
         )
-    session.verify()
-    return tuple(views)
+        session.verify()
+        yield views
+    finally:
+        for selection in selections.values():
+            session.inventory.release_path_selection(selection)
 
 
 def core_time_window_mask(
@@ -162,19 +180,27 @@ def validate_panel_materialization(
         error="crypto_panel_input_dataset_identity_mismatch",
     )
     chunk_target_bytes = resource_policy.payload_target_bytes
-    _validate_receipt_key_coverage(
-        _iter_panel_primary_key_chunks(
+    with (
+        closing(
             iter_dataset_chunks(
                 bar_session,
                 target_chunk_bytes=chunk_target_bytes,
-            ),
+            )
+        ) as bar_chunks,
+        closing(
+            _iter_panel_primary_key_chunks(
+                bar_chunks,
+                primary_key=spec.primary_key,
+            )
+        ) as key_chunks,
+    ):
+        _validate_receipt_key_coverage(
+            key_chunks,
+            receipt,
             primary_key=spec.primary_key,
-        ),
-        receipt,
-        primary_key=spec.primary_key,
-        error="invalid_crypto_panel_key_coverage",
-        resource_policy=resource_policy,
-    )
+            error="invalid_crypto_panel_key_coverage",
+            resource_policy=resource_policy,
+        )
 
 
 def validate_panel_dependent_materialization(
@@ -252,21 +278,32 @@ def validate_existing_panel_materialization(
         error="crypto_panel_input_dataset_identity_mismatch",
     )
     chunk_target_bytes = resource_policy.payload_target_bytes
-    _validate_ordered_key_stream_coverage(
-        _iter_panel_primary_key_chunks(
+    with (
+        closing(
             iter_dataset_chunks(
                 bar_session,
                 target_chunk_bytes=chunk_target_bytes,
-            ),
+            )
+        ) as bar_chunks,
+        closing(
+            _iter_panel_primary_key_chunks(
+                bar_chunks,
+                primary_key=spec.primary_key,
+            )
+        ) as expected_chunks,
+        closing(
+            iter_dataset_chunks(
+                panel_session,
+                target_chunk_bytes=chunk_target_bytes,
+            )
+        ) as actual_chunks,
+    ):
+        _validate_ordered_key_stream_coverage(
+            expected_chunks,
+            actual_chunks,
             primary_key=spec.primary_key,
-        ),
-        iter_dataset_chunks(
-            panel_session,
-            target_chunk_bytes=chunk_target_bytes,
-        ),
-        primary_key=spec.primary_key,
-        error="invalid_crypto_panel_key_coverage",
-    )
+            error="invalid_crypto_panel_key_coverage",
+        )
 
 
 def _iter_core_window_chunks(
@@ -339,9 +376,11 @@ def validated_ordered_dependency_chunk(
         raise ValueError(error)
     ordered = frame.copy()
     for column in ("market_id", "asset_id"):
-        if not ordered[column].map(
-            lambda value: isinstance(value, str) and bool(value)
-        ).all():
+        if (
+            not ordered[column]
+            .map(lambda value: isinstance(value, str) and bool(value))
+            .all()
+        ):
             raise ValueError(error)
     ordered["timestamp"] = strict_timestamp_series(
         ordered["timestamp"],
@@ -387,9 +426,7 @@ def _panel_primary_keys(
     expected = pd.DataFrame(index=bars.index)
     expected["market_id"] = str(MARKET_ID)
     try:
-        expected["asset_id"] = bars["source_asset_id"].map(
-            canonical_crypto_asset_id
-        )
+        expected["asset_id"] = bars["source_asset_id"].map(canonical_crypto_asset_id)
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid_crypto_panel_source_asset_id") from exc
     expected["timestamp"] = strict_timestamp_series(

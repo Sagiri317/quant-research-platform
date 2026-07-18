@@ -673,6 +673,18 @@ STALE_GOVERNANCE_TRUTH_RULES = (
         r"(?:PROJECT_STATUS\.md|current-qrp-status\.md)",
         example="PROJECT_STATUS.md",
     ),
+    TextRule(
+        "retired_storage_session_future_truth",
+        r"stable handles/session ownership.*(?:not guarantees|session cutover)",
+        re.IGNORECASE,
+        "stable handles/session ownership belong to the storage session cutover",
+    ),
+    TextRule(
+        "retired_storage_decoder_mechanics_truth",
+        r"(?:page-header preflight|private component split|equality-group discovery)",
+        re.IGNORECASE,
+        "page-header preflight",
+    ),
 )
 
 ACTIVE_DOC_HISTORY_NARRATIVE_RULES = (

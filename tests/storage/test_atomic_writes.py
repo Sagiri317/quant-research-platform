@@ -151,27 +151,77 @@ def test_atomic_directory_recovers_orphan_stale_marker(
     assert not stale_marker.exists()
 
 
+def test_atomic_target_marker_rejects_hardlink_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    external = tmp_path / "external-target"
+    external.write_text("outside", encoding="utf-8")
+    marker = tmp_path / "stage.target"
+    try:
+        os.link(external, marker)
+    except OSError:
+        pytest.skip("hardlink_not_available")
+    monkeypatch.setattr(
+        Path,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hardlinked_marker_opened")
+        ),
+    )
+
+    with pytest.raises(OSError, match="invalid_atomic_target_marker"):
+        atomic._read_atomic_target_marker(marker)
+
+
+def test_atomic_cleanup_preserves_nonempty_stage_with_hardlinked_marker(
+    tmp_path: Path,
+) -> None:
+    final_root = tmp_path / "bundle"
+    prefix = atomic._atomic_directory_scratch_prefix(final_root)
+    stale = tmp_path / f"{prefix}qzzzzzz-stale"
+    stale.mkdir()
+    (stale / "partial").write_text("keep", encoding="utf-8")
+    external = tmp_path / "external-target"
+    external.write_text(atomic._atomic_target_identity(final_root), encoding="utf-8")
+    marker = Path(f"{stale}.target")
+    try:
+        os.link(external, marker)
+    except OSError:
+        pytest.skip("hardlink_not_available")
+
+    atomic._cleanup_stale_atomic_directories(
+        final_root,
+        prefix=prefix,
+        target_identity=atomic._atomic_target_identity(final_root),
+    )
+
+    assert stale.is_dir()
+    assert marker.is_file()
+    assert external.is_file()
+
+
 def test_atomic_write_directory_retries_transient_permission_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     final_root = tmp_path / "outputs" / "local" / "a_share" / "bundle"
-    original_rename = Path.rename
+    original_rename = atomic._rename_no_replace
     calls = 0
     scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
 
-    def flaky_rename(self: Path, target: Path) -> Path:
+    def flaky_rename(source: Path, target: Path) -> None:
         nonlocal calls
         if (
-            self.name.startswith(scratch_prefix)
+            source.name.startswith(scratch_prefix)
             and Path(target) == final_root
             and calls == 0
         ):
             calls += 1
             raise PermissionError(5, "Access is denied")
-        return original_rename(self, target)
+        original_rename(source, target)
 
-    monkeypatch.setattr(Path, "rename", flaky_rename)
+    monkeypatch.setattr(atomic, "_rename_no_replace", flaky_rename)
     atomic_write_directory(
         final_root,
         lambda temp_root: (temp_root / "done.txt").write_text("ok\n", encoding="utf-8"),

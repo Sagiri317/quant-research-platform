@@ -6,6 +6,7 @@ import errno
 import hashlib
 import os
 import shutil
+import stat
 import sys
 import time
 from collections.abc import Callable
@@ -20,6 +21,8 @@ from quant_research_platform.storage._scratch_ownership import (
     scratch_owner_is_stale,
 )
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
+
+_MAX_ATOMIC_TARGET_MARKER_BYTES = 32 * 1024
 
 
 def reject_if_exists(path: Path) -> None:
@@ -135,7 +138,7 @@ def _cleanup_stale_atomic_directories(
         stage_is_empty = not any(temp_root.iterdir())
         if target_marker.is_file():
             try:
-                observed_identity = target_marker.read_text(encoding="utf-8")
+                observed_identity = _read_atomic_target_marker(target_marker)
             except (OSError, UnicodeError):
                 if not stage_is_empty:
                     continue
@@ -168,6 +171,25 @@ def _atomic_target_identity(final_root: Path) -> str:
 
 def _atomic_target_marker(temp_root: Path) -> Path:
     return Path(f"{temp_root}.target")
+
+
+def _read_atomic_target_marker(path: Path) -> str:
+    candidate = Path(path)
+    try:
+        metadata = candidate.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or int(metadata.st_nlink) != 1
+            or metadata.st_size > _MAX_ATOMIC_TARGET_MARKER_BYTES
+        ):
+            raise OSError("invalid_atomic_target_marker")
+        with candidate.open("rb") as handle:
+            raw = handle.read(_MAX_ATOMIC_TARGET_MARKER_BYTES + 1)
+    except OSError:
+        raise
+    if len(raw) > _MAX_ATOMIC_TARGET_MARKER_BYTES:
+        raise OSError("invalid_atomic_target_marker")
+    return raw.decode("utf-8", errors="strict")
 
 
 def _remove_atomic_target_marker(target_marker: Path) -> None:

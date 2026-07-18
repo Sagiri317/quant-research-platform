@@ -95,64 +95,64 @@ def _iter_factor_chunks(
     active_key: tuple[str, str] | None = None
     active_carry: pd.DataFrame | None = None
     order_state = materialization_validation.OrderedDependencyState()
-    asset_views = materialization_validation.crypto_asset_session_views(
+    with materialization_validation.crypto_asset_session_views(
         panel_session,
         columns=("market_id", "asset_id"),
         target_chunk_bytes=chunk_target_bytes,
         error="invalid_crypto_panel_physical_asset_grouping",
-    )
-    for (_market_id, _asset_id), asset_session in asset_views:
-        for panel in iter_dataset_chunks(
-            asset_session,
-            target_chunk_bytes=chunk_target_bytes,
-        ):
-            if panel.empty:
-                continue
-            panel = materialization_validation.validated_ordered_dependency_chunk(
-                panel,
-                state=order_state,
-                error="out_of_order_crypto_factor_dependency",
-            )
-            panel = panel.copy()
-            panel[_CORE_ROW] = materialization_validation.core_time_window_mask(
-                panel,
-                time_window,
-            )
-            for (segment_market_id, segment_asset_id), segment in panel.groupby(
-                ["market_id", "asset_id"],
-                sort=False,
-                dropna=False,
+    ) as asset_views:
+        for (_market_id, _asset_id), asset_session in asset_views:
+            for panel in iter_dataset_chunks(
+                asset_session,
+                target_chunk_bytes=chunk_target_bytes,
             ):
-                key = (str(segment_market_id), str(segment_asset_id))
-                if active_key != key:
-                    active_key = key
-                    active_carry = None
-                combined = _append_active_factor_carry(segment, active_carry)
-                factors = calculate_microstructure_factors(
-                    combined,
-                    expected_interval=pd.Timedelta(minutes=1),
-                    min_periods=MICROSTRUCTURE_ROLLING_WINDOW_MINUTES,
-                    trade_flow_observed_column="trade_flow_observed",
+                if panel.empty:
+                    continue
+                panel = materialization_validation.validated_ordered_dependency_chunk(
+                    panel,
+                    state=order_state,
+                    error="out_of_order_crypto_factor_dependency",
                 )
-                output = factors.loc[factors[_CORE_ROW]].copy()
-                active_carry = _next_factor_carry(combined)
-                if (
-                    pandas_frame_payload_bytes(active_carry)
-                    > resource_policy.payload_target_bytes
+                panel = panel.copy()
+                panel[_CORE_ROW] = materialization_validation.core_time_window_mask(
+                    panel,
+                    time_window,
+                )
+                for (segment_market_id, segment_asset_id), segment in panel.groupby(
+                    ["market_id", "asset_id"],
+                    sort=False,
+                    dropna=False,
                 ):
-                    raise ValueError(
-                        "crypto_indivisible_reducer_unit_exceeds_payload_target"
+                    key = (str(segment_market_id), str(segment_asset_id))
+                    if active_key != key:
+                        active_key = key
+                        active_carry = None
+                    combined = _append_active_factor_carry(segment, active_carry)
+                    factors = calculate_microstructure_factors(
+                        combined,
+                        expected_interval=pd.Timedelta(minutes=1),
+                        min_periods=MICROSTRUCTURE_ROLLING_WINDOW_MINUTES,
+                        trade_flow_observed_column="trade_flow_observed",
                     )
-                if not output.empty:
-                    result = output.loc[:, spec.required_columns]
-                    materialization_resources.require_frame_within_budget(
-                        result,
-                        target_bytes=resource_policy.payload_target_bytes,
-                        error=(
+                    output = factors.loc[factors[_CORE_ROW]].copy()
+                    active_carry = _next_factor_carry(combined)
+                    if (
+                        pandas_frame_payload_bytes(active_carry)
+                        > resource_policy.payload_target_bytes
+                    ):
+                        raise ValueError(
                             "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                        ),
-                    )
-                    yield result
+                        )
+                    if not output.empty:
+                        result = output.loc[:, spec.required_columns]
+                        materialization_resources.require_frame_within_budget(
+                            result,
+                            target_bytes=resource_policy.payload_target_bytes,
+                            error=(
+                                "crypto_indivisible_reducer_unit_exceeds_payload_target"
+                            ),
+                        )
+                        yield result
     panel_session.verify()
 
 

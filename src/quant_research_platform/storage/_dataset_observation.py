@@ -102,12 +102,9 @@ class DatasetSummaryObserver:
                 self.label_nan_profile[column] = (
                     self.label_nan_profile.get(column, 0) + nan_count
                 )
-            if not pd.api.types.is_numeric_dtype(series):
+            if not pd.api.types.is_float_dtype(series.dtype):
                 continue
-            values = pd.to_numeric(series, errors="coerce").to_numpy(
-                dtype="float64",
-                na_value=np.nan,
-            )
+            values = series.dropna().to_numpy(copy=False)
             inf_count = int(np.isinf(values).sum())
             if inf_count:
                 self.non_finite_count_summary[column] = (

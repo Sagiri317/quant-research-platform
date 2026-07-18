@@ -24,6 +24,10 @@ from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.workflows import (
+    build_failed_schema_inventory_summary,
+    validate_schema_inventory_summary,
+)
 from quant_research_platform.policy.check_status import (
     overall_verification_status,
     require_status,
@@ -297,21 +301,13 @@ def _run_local_verification_with_policy(
         *(Path(portfolio_root) for portfolio_root in portfolio_roots),
     )
     output_indexes = tuple(
-        _output_index(root, run_root, expected_run_id=run_id)
-        for root in output_bundles
+        _output_index(root, run_root, expected_run_id=run_id) for root in output_bundles
     )
     layer_summaries = _build_layer_summaries(
         layout=layout,
         dataset_roots=dataset_roots,
     )
     with recorder.record("validation_summary"):
-        schema_inventory = build_schema_inventory_payload(
-            run_root,
-            important_null_count_columns=(
-                config.profile.schema_inventory_important_columns()
-            ),
-        )
-        schema_inventory_summary = summarize_schema_inventory_payload(schema_inventory)
         validation_summary = build_validation_summary(
             run_id=run_id,
             dataset_roots=dataset_roots,
@@ -321,6 +317,31 @@ def _run_local_verification_with_policy(
                 output_indexes=output_indexes,
             ),
         )
+        dataset_count = sum(int(item["dataset_count"]) for item in layer_summaries)
+        total_row_count = sum(int(item["total_rows"]) for item in layer_summaries)
+        if validation_summary["failure_codes"]:
+            schema_inventory_summary = build_failed_schema_inventory_summary(
+                failure_codes=list(validation_summary["failure_codes"]),
+                dataset_count=dataset_count,
+                total_row_count=total_row_count,
+            )
+        else:
+            schema_inventory = build_schema_inventory_payload(
+                run_root,
+                important_null_count_columns=(
+                    config.profile.schema_inventory_important_columns()
+                ),
+            )
+            schema_inventory_summary = summarize_schema_inventory_payload(
+                schema_inventory
+            )
+            schema_inventory_summary = validate_schema_inventory_summary(
+                schema_inventory_summary,
+                validation_status=str(validation_summary["status"]),
+                validation_failure_codes=list(validation_summary["failure_codes"]),
+                dataset_count=dataset_count,
+                total_row_count=total_row_count,
+            )
     validation_status = require_status(validation_summary.get("status"))
     share_safety_scan = validation_summary.get("share_safety_scan")
     if type(share_safety_scan) is not dict:
@@ -691,15 +712,17 @@ def _dataset_roots(
 
 def _logical_layer(dataset_root: Path, run_root: Path) -> str:
     try:
-        relative_root = Path(dataset_root).resolve(strict=False).relative_to(
-            Path(run_root).resolve(strict=False)
+        relative_root = (
+            Path(dataset_root)
+            .resolve(strict=False)
+            .relative_to(Path(run_root).resolve(strict=False))
         )
     except ValueError:
         raise ValueError("local_verification_dataset_layer_invalid") from None
     logical_layer = dataset_layer_from_path(relative_root)
-    if (
-        logical_layer not in RUN_RESULT_DATASET_LAYERS
-        or relative_root.parts[:2] != ("data", logical_layer)
+    if logical_layer not in RUN_RESULT_DATASET_LAYERS or relative_root.parts[:2] != (
+        "data",
+        logical_layer,
     ):
         raise ValueError("local_verification_dataset_layer_invalid")
     return logical_layer
@@ -745,9 +768,7 @@ def _output_index(
     manifest_path = resolved_output_bundle / "manifest.json"
     output_id = payload["output_id"]
     try:
-        manifest_relative_path = manifest_path.relative_to(
-            resolved_run_root
-        ).as_posix()
+        manifest_relative_path = manifest_path.relative_to(resolved_run_root).as_posix()
     except ValueError:
         raise ValueError("output_manifest_schema_id_invalid") from None
     if manifest_relative_path != f"outputs/{output_id}/manifest.json":

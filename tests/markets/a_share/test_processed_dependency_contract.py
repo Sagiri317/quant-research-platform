@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -139,7 +140,7 @@ def test_source_input_physical_reads_use_owner_resource_policy(
     monkeypatch.setattr(
         materialization_io,
         "open_dataset_session",
-        lambda root, **_kwargs: root,
+        lambda root, **_kwargs: nullcontext(root),
         raising=False,
     )
 
@@ -183,7 +184,7 @@ def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
     monkeypatch.setattr(
         materialization_io,
         "open_dataset_session",
-        lambda root, **_kwargs: root,
+        lambda root, **_kwargs: nullcontext(root),
     )
 
     def fake_materialize_dataset_session(  # noqa: ANN001
@@ -239,6 +240,65 @@ def test_materialized_read_rejects_negative_retained_state() -> None:
             ),
             retained_payload_bytes=-1,
         )
+
+
+def test_chunk_target_rejection_happens_before_dataset_session_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
+    )
+    acquisitions = 0
+
+    def forbidden_open(*_args: object, **_kwargs: object) -> object:
+        nonlocal acquisitions
+        acquisitions += 1
+        raise AssertionError("dataset_session_acquired_before_target_validation")
+
+    monkeypatch.setattr(materialization_io, "open_dataset_session", forbidden_open)
+    chunks = materialization_io.iter_dataset_chunks_with_policy(
+        Path("dataset"),
+        resource_policy=policy,
+        target_chunk_bytes=policy.payload_target_bytes + 1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="a_share_indivisible_market_unit_exceeds_payload_target",
+    ):
+        next(chunks)
+
+    assert acquisitions == 0
+
+
+@pytest.mark.parametrize("target_chunk_bytes", (0, -1, False))
+def test_invalid_chunk_target_rejection_happens_before_dataset_session_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+    target_chunk_bytes: object,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
+    )
+    acquisitions = 0
+
+    def forbidden_open(*_args: object, **_kwargs: object) -> object:
+        nonlocal acquisitions
+        acquisitions += 1
+        raise AssertionError("dataset_session_acquired_before_target_validation")
+
+    monkeypatch.setattr(materialization_io, "open_dataset_session", forbidden_open)
+    chunks = materialization_io.iter_dataset_chunks_with_policy(
+        Path("dataset"),
+        resource_policy=policy,
+        target_chunk_bytes=target_chunk_bytes,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ValueError, match="invalid_target_chunk_bytes"):
+        next(chunks)
+
+    assert acquisitions == 0
 
 
 def test_a_share_indivisible_output_rejects_payload_over_target() -> None:
@@ -510,7 +570,7 @@ def test_write_paths_read_processed_inputs_via_helper(
 
     def iter_dataset_chunks_with_policy(*args: object, **kwargs: object):
         del args, kwargs
-        return iter((_key_frame(),))
+        return (_key_frame() for _ in range(1))
 
     monkeypatch.setattr(
         materialization_planning,
@@ -640,7 +700,10 @@ def test_processed_panel_key_coverage_rejects_invalid_keys(monkeypatch) -> None:
         materialization_io,
         "iter_dataset_chunks_with_policy",
         lambda *args, **kwargs: (
-            pd.DataFrame({"asset_id": [[]], "timestamp": ["2024-01-02"]}),
+            frame
+            for frame in (
+                pd.DataFrame({"asset_id": [[]], "timestamp": ["2024-01-02"]}),
+            )
         ),
     )
 
@@ -657,7 +720,12 @@ def test_processed_panel_key_coverage_rejects_invalid_keys(monkeypatch) -> None:
         materialization_io,
         "iter_dataset_chunks_with_policy",
         lambda *args, **kwargs: (
-            pd.DataFrame({"asset_id": ["asset_a"], "timestamp": ["not-a-date"]}),
+            frame
+            for frame in (
+                pd.DataFrame(
+                    {"asset_id": ["asset_a"], "timestamp": ["not-a-date"]}
+                ),
+            )
         ),
     )
 
@@ -669,6 +737,96 @@ def test_processed_panel_key_coverage_rejects_invalid_keys(monkeypatch) -> None:
                 environ={},
             ),
         )
+
+
+def test_a_share_direct_dataset_consumers_use_deterministic_iterator_closing() -> None:
+    functions = (
+        materialization_planning._dataset_session_dates,
+        materialization_planning.processed_panel_key_coverage,
+        materialization_planning.available_trading_sessions,
+    )
+
+    for function in functions:
+        source = inspect.getsource(function)
+        assert "with closing(" in source
+
+
+def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3, environ={}
+    )
+    retained: list[object] = []
+    closed: list[str] = []
+
+    def iterator(name: str, frames: tuple[pd.DataFrame, ...]):
+        def generate():
+            try:
+                yield from frames
+            finally:
+                closed.append(name)
+
+        current = generate()
+        retained.append(current)
+        return current
+
+    monkeypatch.setattr(
+        materialization_planning,
+        "inspect_dataset",
+        lambda _root: SimpleNamespace(columns=("asset_id", "timestamp")),
+    )
+    monkeypatch.setattr(
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
+        lambda *args, **kwargs: iterator(
+            "normal", (pd.DataFrame({"timestamp": ["2024-01-02"]}),)
+        ),
+    )
+    assert materialization_planning._dataset_session_dates(
+        Path("panel"), TimeWindow("2024-01-02", "2024-01-02"), resource_policy=policy
+    )
+
+    monkeypatch.setattr(
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
+        lambda *args, **kwargs: iterator(
+            "error",
+            (pd.DataFrame({"asset_id": [[]], "timestamp": ["2024-01-02"]}),),
+        ),
+    )
+    with pytest.raises(ValueError, match="invalid_processed_panel_asset_id"):
+        materialization_planning.processed_panel_key_coverage(
+            Path("panel"), resource_policy=policy
+        )
+
+    market_type = next(iter(materialization_planning.CURRENT_MARKET_TYPES))
+    monkeypatch.setattr(
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
+        lambda *args, **kwargs: iterator(
+            "early",
+            (
+                pd.DataFrame(
+                    {
+                        "source_market_type": [market_type, market_type],
+                        "is_trading_day": [True, True],
+                        "timestamp": ["2024-01-02", "2024-01-03"],
+                    }
+                ),
+            ),
+        ),
+    )
+    result = materialization_planning.available_trading_sessions(
+        SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
+        "source",  # type: ignore[arg-type]
+        time_window=TimeWindow("2024-01-02", "2024-01-02"),
+        lookback_sessions=0,
+        lookahead_sessions=0,
+        resource_policy=policy,
+    )
+    assert result
+    assert closed == ["normal", "error", "early"]
 
 
 def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,10 +28,55 @@ from quant_research_platform.storage._dataset_schema import (
 from quant_research_platform.storage.atomic import atomic_write_text
 
 _DATASET_LOGICAL_PATH_MARKERS = ("data",)
+_MAX_QRP_JSON_BYTES = 1024 * 1024
+
+
+def read_bounded_qrp_json(path: Path) -> tuple[bytes, dict[str, Any]]:
+    candidate = Path(path)
+    try:
+        path_stat = candidate.lstat()
+    except OSError as exc:
+        raise ValueError("dataset_metadata_file_invalid") from exc
+    if (
+        not stat.S_ISREG(path_stat.st_mode)
+        or int(path_stat.st_nlink) != 1
+        or candidate.is_symlink()
+        or (hasattr(candidate, "is_junction") and candidate.is_junction())
+        or path_stat.st_size > _MAX_QRP_JSON_BYTES
+    ):
+        error = (
+            "dataset_metadata_file_too_large"
+            if path_stat.st_size > _MAX_QRP_JSON_BYTES
+            else "dataset_metadata_file_invalid"
+        )
+        raise ValueError(error)
+    identity = (
+        int(path_stat.st_dev),
+        int(path_stat.st_ino),
+        int(path_stat.st_size),
+        int(path_stat.st_mtime_ns),
+    )
+    try:
+        with candidate.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            raw = handle.read(_MAX_QRP_JSON_BYTES + 1)
+            after = os.fstat(handle.fileno())
+        current = candidate.stat()
+    except OSError as exc:
+        raise ValueError("dataset_metadata_file_invalid") from exc
+    if len(raw) > _MAX_QRP_JSON_BYTES:
+        raise ValueError("dataset_metadata_file_too_large")
+    observed = tuple(
+        (int(item.st_dev), int(item.st_ino), int(item.st_size), int(item.st_mtime_ns))
+        for item in (before, after, current)
+    )
+    if any(item != identity for item in observed):
+        raise ValueError("dataset_metadata_file_identity_changed")
+    return raw, parse_qrp_json_object(raw)
 
 
 def read_manifest(path: Path) -> dict[str, Any]:
-    return parse_qrp_json_object(Path(path).read_bytes())
+    return read_bounded_qrp_json(path)[1]
 
 
 def read_qrp_json(

@@ -204,6 +204,13 @@ def test_local_verification_workflow_fails_when_primary_key_null_facts_are_missi
         "primary_key_nulls",
         "layer_validation_failed",
     ]
+    assert run_payload["checks"]["schema_inventory"] == {
+        "schema_id": "qrp-schema-inventory-summary",
+        "status": "FAIL",
+        "failure_codes": validation["failure_codes"],
+        "dataset_count": 2,
+        "total_row_count": 2,
+    }
     assert validation["primary_key_null_failures"] == [
         frequency_ids.MARKET_BARS_DATA_ID
     ]

@@ -27,6 +27,9 @@ from quant_research_platform.contracts._json import (  # noqa: E402
     render_qrp_json_object,
 )
 from quant_research_platform.contracts.run_id import validate_run_id  # noqa: E402
+from quant_research_platform.contracts.workflows import (  # noqa: E402
+    validate_schema_inventory_summary,
+)
 from quant_research_platform.policy.check_status import (  # noqa: E402
     aggregate_validation_matrix_status,
     overall_verification_status,
@@ -127,9 +130,6 @@ _DATA_VALIDATION_FAILURE_CODES = frozenset(
     }
 )
 _WORKFLOW_ID = "local_verification"
-_SCHEMA_INVENTORY_SUMMARY_KEYS = frozenset(
-    {"schema_id", "dataset_count", "total_row_count", "schema_hash"}
-)
 _VALIDATION_CHECK_KEYS = frozenset(
     {
         "run_id",
@@ -192,9 +192,7 @@ class _RunDataFacts:
         failed_dataset_ids: tuple[str, ...],
         missing_manifest_paths: tuple[str, ...],
         invalid_manifest_paths: tuple[str, ...],
-        dataset_date_ranges: tuple[
-            tuple[str, str | None, str | None, int], ...
-        ],
+        dataset_date_ranges: tuple[tuple[str, str | None, str | None, int], ...],
         duplicate_dataset_ids: tuple[str, ...],
         total_row_count: int,
     ) -> None:
@@ -425,9 +423,7 @@ def _validate_run_outputs(
         persisted_payload = dict(item)
         manifest_path_value = persisted_payload.pop("manifest_path")
         try:
-            validated = validate_output_manifest_business_envelope(
-                persisted_payload
-            )
+            validated = validate_output_manifest_business_envelope(persisted_payload)
         except ValueError as exc:
             raise CompareBlockedError(str(exc)) from exc
         if validated["run_id"] != run_id:
@@ -577,22 +573,6 @@ def _validate_run_status_evidence_bindings(
 ) -> None:
     if type(checks) is not dict or set(checks) != {"schema_inventory", "validation"}:
         raise CompareBlockedError("run_checks_invalid")
-    inventory = checks["schema_inventory"]
-    if type(inventory) is not dict or set(inventory) != _SCHEMA_INVENTORY_SUMMARY_KEYS:
-        raise CompareBlockedError("run_schema_inventory_invalid")
-    if (
-        inventory["schema_id"] != "qrp-schema-inventory-summary"
-        or _exact_positive_int(
-            inventory["dataset_count"], "run_schema_inventory_invalid"
-        )
-        != len(data_facts.dataset_ids)
-        or _exact_nonnegative_int(
-            inventory["total_row_count"], "run_schema_inventory_invalid"
-        )
-        != data_facts.total_row_count
-        or not _is_lower_sha256(inventory["schema_hash"])
-    ):
-        raise CompareBlockedError("run_schema_inventory_invalid")
     validation = checks["validation"]
     if type(validation) is not dict or set(validation) != _VALIDATION_CHECK_KEYS:
         raise CompareBlockedError("run_validation_check_invalid")
@@ -607,6 +587,16 @@ def _validate_run_status_evidence_bindings(
         validation_status = require_status(validation["status"])
     except ValueError as exc:
         raise CompareBlockedError("run_validation_check_invalid") from exc
+    try:
+        validate_schema_inventory_summary(
+            checks["schema_inventory"],
+            validation_status=validation_status,
+            validation_failure_codes=validation["failure_codes"],
+            dataset_count=len(data_facts.dataset_ids),
+            total_row_count=data_facts.total_row_count,
+        )
+    except ValueError as exc:
+        raise CompareBlockedError("run_schema_inventory_invalid") from exc
     share_safety = validation["share_safety_scan"]
     try:
         share_safety_status = require_status(share_safety["status"])
@@ -619,9 +609,7 @@ def _validate_run_status_evidence_bindings(
     if any(code not in _VALIDATION_FAILURE_CODES for code in failure_codes):
         raise CompareBlockedError("run_validation_check_invalid")
     expected_failure_codes = [
-        code
-        for code in _VALIDATION_FAILURE_CODE_ORDER
-        if bool(detail_bindings[code])
+        code for code in _VALIDATION_FAILURE_CODE_ORDER if bool(detail_bindings[code])
     ]
     if failure_codes != expected_failure_codes:
         raise CompareBlockedError("run_validation_detail_facts_mismatch")
@@ -636,9 +624,7 @@ def _validate_run_status_evidence_bindings(
         data_facts.status != "PASS"
     ):
         raise CompareBlockedError("run_validation_data_facts_mismatch")
-    if ("share_safety_scan_failed" in failure_codes) != (
-        share_safety_status != "PASS"
-    ):
+    if ("share_safety_scan_failed" in failure_codes) != (share_safety_status != "PASS"):
         raise CompareBlockedError("run_validation_share_safety_facts_mismatch")
     if status["validation"] != validation_status:
         raise CompareBlockedError("run_status_validation_check_mismatch")
@@ -718,8 +704,7 @@ def _validate_validation_evidence_shape(
     if (
         missing != list(data_facts.missing_manifest_paths)
         or invalid != list(data_facts.invalid_manifest_paths)
-        or checked_count
-        != len(data_facts.dataset_ids) + len(missing) + len(invalid)
+        or checked_count != len(data_facts.dataset_ids) + len(missing) + len(invalid)
         or validation["partition_coverage_status"]
         != ("FAIL" if missing or invalid else "PASS")
     ):
@@ -734,9 +719,13 @@ def _validate_validation_evidence_shape(
     layer_missing = _exact_string_list(
         layer_completeness["missing"], "run_validation_check_invalid"
     )
-    if _exact_positive_int(
-        layer_completeness["checked_count"], "run_validation_check_invalid"
-    ) != len(data_facts.layer_ids) or layer_missing:
+    if (
+        _exact_positive_int(
+            layer_completeness["checked_count"], "run_validation_check_invalid"
+        )
+        != len(data_facts.layer_ids)
+        or layer_missing
+    ):
         raise CompareBlockedError("run_validation_check_invalid")
     _exact_nonempty_string(validation["created_at"], "run_validation_check_invalid")
     _validate_share_safety_evidence(
@@ -807,9 +796,7 @@ def _validate_share_safety_evidence(
         path = _canonical_relative_posix_path(
             item["path"], "run_validation_check_invalid"
         )
-        reason = _exact_nonempty_string(
-            item["reason"], "run_validation_check_invalid"
-        )
+        reason = _exact_nonempty_string(item["reason"], "run_validation_check_invalid")
         if (path, reason) in observed_failures:
             raise CompareBlockedError("run_validation_check_invalid")
         observed_failures.add((path, reason))
@@ -889,9 +876,7 @@ def _validate_run_layer(
         value["failed_dataset_validations"], "run_data_layer_invalid"
     )
     for path in [*missing, *invalid]:
-        canonical_path = _canonical_relative_posix_path(
-            path, "run_data_layer_invalid"
-        )
+        canonical_path = _canonical_relative_posix_path(path, "run_data_layer_invalid")
         if not _manifest_path_belongs_to_layer(canonical_path, logical_layer):
             raise CompareBlockedError("run_data_layer_invalid")
     layer_date_min, layer_date_max = _canonical_date_range(
@@ -1057,14 +1042,14 @@ def _resolve_pairs(
         current_ids = _output_ids(current_run)
         baseline_pair_ids = [pair["baseline_output_id"] for pair in pairs]
         current_pair_ids = [pair["current_output_id"] for pair in pairs]
-        if (
-            len(baseline_pair_ids) != len(set(baseline_pair_ids))
-            or len(current_pair_ids) != len(set(current_pair_ids))
-        ):
-            raise CompareBlockedError("pairs_file_pair_duplicate")
-        if not set(baseline_pair_ids) <= baseline_ids or not set(
+        if len(baseline_pair_ids) != len(set(baseline_pair_ids)) or len(
             current_pair_ids
-        ) <= current_ids:
+        ) != len(set(current_pair_ids)):
+            raise CompareBlockedError("pairs_file_pair_duplicate")
+        if (
+            not set(baseline_pair_ids) <= baseline_ids
+            or not set(current_pair_ids) <= current_ids
+        ):
             raise CompareBlockedError("pairs_file_output_not_declared")
         return pairs, "pairs_file"
 

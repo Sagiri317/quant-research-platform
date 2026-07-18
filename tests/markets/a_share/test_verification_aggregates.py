@@ -78,6 +78,7 @@ def test_aggregates_summarizes_frames_without_row_level_output(tmp_path: Path) -
     summary = aggregates._summarize_frames(
         [frame],
         scratch_parent=tmp_path,
+        resource_policy=RESOURCE_POLICY,
     )
 
     assert summary.row_count == 3
@@ -115,6 +116,7 @@ def test_aggregate_duplicate_truth_does_not_depend_on_64_bit_hashes(
     summary = aggregates._summarize_frames(
         (frame,),
         scratch_parent=tmp_path,
+        resource_policy=RESOURCE_POLICY,
     )
 
     assert summary.key_count == 3
@@ -138,6 +140,7 @@ def test_aggregates_combines_summaries_and_area_records(
             )
         ],
         scratch_parent=tmp_path,
+        resource_policy=RESOURCE_POLICY,
     )
     second = aggregates._summarize_frames(
         [
@@ -149,6 +152,7 @@ def test_aggregates_combines_summaries_and_area_records(
             )
         ],
         scratch_parent=tmp_path,
+        resource_policy=RESOURCE_POLICY,
     )
     combined = aggregates._combine_summaries([first, second])
 
@@ -199,6 +203,7 @@ def test_review_safe_aggregate_evidence_orchestrates_area_inputs(
             )
         ],
         scratch_parent=tmp_path,
+        resource_policy=RESOURCE_POLICY,
     )
     monkeypatch.setattr(
         aggregates,
@@ -289,6 +294,7 @@ def test_aggregates_area_inputs_and_inventory_helpers(
                 )
             ],
             scratch_parent=tmp_path,
+            resource_policy=RESOURCE_POLICY,
         ),
     )
 

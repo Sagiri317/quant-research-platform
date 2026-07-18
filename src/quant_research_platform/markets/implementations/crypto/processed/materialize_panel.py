@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Hashable, Iterator, Mapping
+from contextlib import ExitStack, closing
 from dataclasses import replace
 
 import pandas as pd
@@ -51,25 +52,34 @@ def write_panel(
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-    with runtime_resource_policy_scope(resource_policy):
+    with runtime_resource_policy_scope(resource_policy), ExitStack() as session_stack:
         bar_data_id = source_ids.market_bars_source_data_id(spec)
         trade_data_id = source_ids.aggregate_trades_source_data_id(spec)
         depth_data_id = source_ids.depth_levels_source_data_id(spec)
         input_sessions = {
-            bar_data_id: open_dataset_session(
-                layout.interim_data_root(source_id, bar_data_id),
-                columns=None,
-                time_window=time_window,
+            bar_data_id: session_stack.enter_context(
+                open_dataset_session(
+                    layout.interim_data_root(source_id, bar_data_id),
+                    columns=None,
+                    time_window=time_window,
+                    resource_policy=resource_policy,
+                ),
             ),
-            trade_data_id: open_dataset_session(
-                layout.interim_data_root(source_id, trade_data_id),
-                columns=None,
-                time_window=None,
+            trade_data_id: session_stack.enter_context(
+                open_dataset_session(
+                    layout.interim_data_root(source_id, trade_data_id),
+                    columns=None,
+                    time_window=None,
+                    resource_policy=resource_policy,
+                ),
             ),
-            depth_data_id: open_dataset_session(
-                layout.interim_data_root(source_id, depth_data_id),
-                columns=None,
-                time_window=None,
+            depth_data_id: session_stack.enter_context(
+                open_dataset_session(
+                    layout.interim_data_root(source_id, depth_data_id),
+                    columns=None,
+                    time_window=None,
+                    resource_policy=resource_policy,
+                ),
             ),
         }
         input_identities = materialization_validation.input_dataset_identities(
@@ -95,6 +105,7 @@ def write_panel(
             )
             for session in input_sessions.values():
                 session.verify()
+
         return write_dataset(
             root,
             chunks,
@@ -116,69 +127,73 @@ def _iter_panel_chunks(
     bar_session = input_sessions[source_ids.market_bars_source_data_id(spec)]
     trade_session = input_sessions[source_ids.aggregate_trades_source_data_id(spec)]
     depth_session = input_sessions[source_ids.depth_levels_source_data_id(spec)]
-    source_asset_views = materialization_validation.crypto_asset_session_views(
+    with materialization_validation.crypto_asset_session_views(
         bar_session,
         columns=("source_asset_id",),
         target_chunk_bytes=chunk_target_bytes,
         error="invalid_crypto_panel_source_physical_asset_grouping",
         key_error="invalid_crypto_matching_bar_source_asset_id",
-    )
-    source_assets = _canonical_source_assets(
-        tuple(key for key, _view in source_asset_views)
-    )
-    view_by_source_asset = {
-        key[0]: view for key, view in source_asset_views
-    }
-    order_state = materialization_validation.OrderedDependencyState()
-    for source_asset_id in source_assets:
-        trade_continuity_state = (
-            panel_input_reducers.AggregateTradeContinuityState()
+    ) as source_asset_views:
+        source_assets = _canonical_source_assets(
+            tuple(key for key, _view in source_asset_views)
         )
-        asset_session = view_by_source_asset[source_asset_id]
-        for bars in iter_dataset_chunks(
-            asset_session,
-            target_chunk_bytes=chunk_target_bytes,
-        ):
-            if bars.empty:
-                continue
-            _validate_matching_bar_keys(bars)
-            prepared_bars = panels.prepare_panel_bars(bars)
-            prepared_bars = (
-                materialization_validation.validated_ordered_dependency_chunk(
-                    prepared_bars,
-                    state=order_state,
-                    error="out_of_order_crypto_panel_dependency",
+        view_by_source_asset = {key[0]: view for key, view in source_asset_views}
+        order_state = materialization_validation.OrderedDependencyState()
+        for source_asset_id in source_assets:
+            trade_continuity_state = (
+                panel_input_reducers.AggregateTradeContinuityState()
+            )
+            asset_session = view_by_source_asset[source_asset_id]
+            for bars in iter_dataset_chunks(
+                asset_session,
+                target_chunk_bytes=chunk_target_bytes,
+            ):
+                if bars.empty:
+                    continue
+                _validate_matching_bar_keys(bars)
+                prepared_bars = panels.prepare_panel_bars(bars)
+                prepared_bars = (
+                    materialization_validation.validated_ordered_dependency_chunk(
+                        prepared_bars,
+                        state=order_state,
+                        error="out_of_order_crypto_panel_dependency",
+                    )
                 )
-            )
-            materialization_resources.require_frame_within_budget(
-                prepared_bars,
-                target_bytes=resource_policy.payload_target_bytes,
-                error="crypto_indivisible_reducer_unit_exceeds_payload_target",
-            )
-            trade_chunks = _iter_matching_trade_chunks(
-                trade_session,
-                prepared_bars,
-                target_chunk_bytes=chunk_target_bytes,
-            )
-            depth_chunks = _iter_matching_depth_chunks(
-                depth_session,
-                prepared_bars,
-                target_chunk_bytes=chunk_target_bytes,
-            )
-            output = panels.calculate_market_panel_from_chunks(
-                prepared_bars,
-                trade_chunks=trade_chunks,
-                depth_chunks=depth_chunks,
-                payload_target_bytes=resource_policy.payload_target_bytes,
-                trade_continuity_state=trade_continuity_state,
-                max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
-            ).loc[:, spec.required_columns]
-            materialization_resources.require_frame_within_budget(
-                output,
-                target_bytes=resource_policy.payload_target_bytes,
-                error="crypto_indivisible_reducer_unit_exceeds_payload_target",
-            )
-            yield output
+                materialization_resources.require_frame_within_budget(
+                    prepared_bars,
+                    target_bytes=resource_policy.payload_target_bytes,
+                    error="crypto_indivisible_reducer_unit_exceeds_payload_target",
+                )
+                with (
+                    closing(
+                        _iter_matching_trade_chunks(
+                            trade_session,
+                            prepared_bars,
+                            target_chunk_bytes=chunk_target_bytes,
+                        )
+                    ) as trade_chunks,
+                    closing(
+                        _iter_matching_depth_chunks(
+                            depth_session,
+                            prepared_bars,
+                            target_chunk_bytes=chunk_target_bytes,
+                        )
+                    ) as depth_chunks,
+                ):
+                    output = panels.calculate_market_panel_from_chunks(
+                        prepared_bars,
+                        trade_chunks=trade_chunks,
+                        depth_chunks=depth_chunks,
+                        payload_target_bytes=resource_policy.payload_target_bytes,
+                        trade_continuity_state=trade_continuity_state,
+                        max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
+                    ).loc[:, spec.required_columns]
+                materialization_resources.require_frame_within_budget(
+                    output,
+                    target_bytes=resource_policy.payload_target_bytes,
+                    error="crypto_indivisible_reducer_unit_exceeds_payload_target",
+                )
+                yield output
     for session in input_sessions.values():
         session.verify()
 
@@ -199,8 +214,7 @@ def _canonical_source_assets(
             continue
         source_by_canonical[canonical] = source_value
     return tuple(
-        source_by_canonical[canonical]
-        for canonical in sorted(source_by_canonical)
+        source_by_canonical[canonical] for canonical in sorted(source_by_canonical)
     )
 
 
@@ -313,25 +327,29 @@ def _iter_matching_chunks(
         time_window=time_window,
         asset_ids=asset_ids,
     )
-    for chunk in iter_dataset_chunks(
-        view,
-        target_chunk_bytes=target_chunk_bytes,
-    ):
-        if chunk.empty:
-            continue
-        matching = chunk.loc[
-            _matching_window_mask(
-                chunk,
-                asset_ids=asset_ids,
-                start=start,
-                end=end,
-                max_quote_age=max_quote_age,
-                source_asset_error=source_asset_error,
-                timestamp_error=timestamp_error,
-            )
-        ].copy()
-        if not matching.empty:
-            yield matching
+    try:
+        for chunk in iter_dataset_chunks(
+            view,
+            target_chunk_bytes=target_chunk_bytes,
+        ):
+            if chunk.empty:
+                continue
+            matching = chunk.loc[
+                _matching_window_mask(
+                    chunk,
+                    asset_ids=asset_ids,
+                    start=start,
+                    end=end,
+                    max_quote_age=max_quote_age,
+                    source_asset_error=source_asset_error,
+                    timestamp_error=timestamp_error,
+                )
+            ].copy()
+            if not matching.empty:
+                yield matching
+    finally:
+        if view.path_selection is not None:
+            session.inventory.release_path_selection(view.path_selection)
 
 
 def _matching_session_view(
@@ -340,29 +358,36 @@ def _matching_session_view(
     time_window: TimeWindow,
     asset_ids: set[str],
 ) -> DatasetSession:
-    filters = tuple(
-        parquet_filters_for_time_window(
-            timestamp_column=session.timestamp_column,
-            time_window=time_window,
-        )
-        or ()
-    )
-    if len(asset_ids) == 1:
-        filters += (("source_asset_id", "==", next(iter(asset_ids))),)
-    view = replace(
-        session,
-        read_paths=tuple(
-            prune_paths_for_time_window(
+    path_selection = session.inventory.new_path_selection()
+    try:
+        for path in session.all_paths:
+            if prune_paths_for_time_window(
                 session.data_root,
-                session.all_paths,
+                (path,),
                 spec=session.spec,
                 time_window=time_window,
+            ):
+                session.inventory.select_path(path_selection, path)
+        filters = tuple(
+            parquet_filters_for_time_window(
+                timestamp_column=session.timestamp_column,
+                time_window=time_window,
             )
-        ),
-        time_window=time_window,
-        parquet_filters=filters or None,
-    )
-    view.verify()
+            or ()
+        )
+        if len(asset_ids) == 1:
+            filters += (("source_asset_id", "==", next(iter(asset_ids))),)
+        view = replace(
+            session,
+            path_selection=path_selection,
+            time_window=time_window,
+            parquet_filters=filters or None,
+            owns_inventory=False,
+        )
+        view.verify()
+    except BaseException:
+        session.inventory.release_path_selection(path_selection)
+        raise
     return view
 
 

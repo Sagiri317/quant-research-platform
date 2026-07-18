@@ -338,12 +338,30 @@ def _inventory_item(
     important_null_count_columns: frozenset[str],
     resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
-    session = open_dataset_session(
+    with open_dataset_session(
         artifact_root,
         columns=None,
         time_window=None,
         require_consumable=False,
-    )
+        resource_policy=resource_policy,
+    ) as session:
+        return _inventory_item_from_session(
+            project_root,
+            artifact_root,
+            session=session,
+            important_null_count_columns=important_null_count_columns,
+            resource_policy=resource_policy,
+        )
+
+
+def _inventory_item_from_session(
+    project_root: Path,
+    artifact_root: Path,
+    *,
+    session: DatasetSession,
+    important_null_count_columns: frozenset[str],
+    resource_policy: RuntimeResourcePolicy,
+) -> dict[str, Any]:
     inspection = inspect_dataset_session(
         session,
         resource_policy=resource_policy,

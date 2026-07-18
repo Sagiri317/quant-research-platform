@@ -3,8 +3,9 @@ from __future__ import annotations
 import inspect
 import json
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -54,6 +55,23 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
+from tests.storage.low_level_fixtures import (
+    make_dataset_artifact_root,
+    make_default_dataset_frame,
+    make_processed_dataset_spec,
+)
+
+
+class SimpleNamespace(_SimpleNamespace):
+    """Dataset-session test double with the production context protocol."""
+
+    def __enter__(self):  # noqa: ANN204
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        close = getattr(self, "close", None)
+        if close is not None:
+            close()
 
 
 def test_crypto_processed_materializer_builds_panel_factors_and_labels(
@@ -87,19 +105,13 @@ def test_crypto_processed_materializer_builds_panel_factors_and_labels(
         layout.processed_data_root("crypto", ProcessedDataKind.LABEL, "forward_returns")
     )
     panel_inspection = inspect_dataset(
-        layout.processed_data_root(
-            "crypto", ProcessedDataKind.PANEL, "market_panel_1m"
-        )
+        layout.processed_data_root("crypto", ProcessedDataKind.PANEL, "market_panel_1m")
     )
     factor_inspection = inspect_dataset(
-        layout.processed_data_root(
-            "crypto", ProcessedDataKind.FACTOR, "microstructure"
-        )
+        layout.processed_data_root("crypto", ProcessedDataKind.FACTOR, "microstructure")
     )
     label_inspection = inspect_dataset(
-        layout.processed_data_root(
-            "crypto", ProcessedDataKind.LABEL, "forward_returns"
-        )
+        layout.processed_data_root("crypto", ProcessedDataKind.LABEL, "forward_returns")
     )
 
     assert panel.loc[0, "market_id"] == "crypto"
@@ -616,17 +628,17 @@ def test_crypto_materializer_invalid_dependency_timestamp_is_not_coverage(
 
     def invalid_target_read(context, **kwargs):
         if context.root.name == "market_panel_1m":
-            return iter(
-                (
-                    pd.DataFrame(
-                        {
-                            "market_id": ["crypto"],
-                            "asset_id": ["btc_usdt"],
-                            "timestamp": ["bad"],
-                        }
-                    ),
+
+            def invalid_chunks():
+                yield pd.DataFrame(
+                    {
+                        "market_id": ["crypto"],
+                        "asset_id": ["btc_usdt"],
+                        "timestamp": ["bad"],
+                    }
                 )
-            )
+
+            return invalid_chunks()
         return real_iterator(context, **kwargs)
 
     monkeypatch.setattr(
@@ -896,6 +908,300 @@ def test_crypto_panel_source_parts_require_one_asset_per_physical_part(
         )
 
 
+def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "crypto_physical_views")
+    frame = make_default_dataset_frame(
+        asset_ids=("BTCUSDT", "BTCUSDT", "ETHUSDT", "ETHUSDT"),
+        dates=("2025-01-02", "2026-01-02", "2025-01-02", "2026-01-02"),
+        values=(1.0, 2.0, 3.0, 4.0),
+        market_id="crypto",
+    )
+    write_dataset(
+        root,
+        tuple(frame.iloc[index : index + 1].copy() for index in range(len(frame))),
+        spec=make_processed_dataset_spec("crypto_physical_views"),
+    )
+
+    with open_dataset_session(root, columns=None, time_window=None) as session:
+        with materialization_validation.crypto_asset_session_views(
+            session,
+            columns=("asset_id",),
+            target_chunk_bytes=session.resource_policy.payload_target_bytes,
+            error="invalid_crypto_test_asset_grouping",
+        ) as views:
+            normal_selections = tuple(view.path_selection for _key, view in views)
+            assert {key[0]: len(view.read_paths) for key, view in views} == {
+                "BTCUSDT": 2,
+                "ETHUSDT": 2,
+            }
+            assert set(views[0][1].read_paths).isdisjoint(
+                set(views[1][1].read_paths)
+            )
+        assert all(
+            session.inventory.path_count(
+                selected=True,
+                path_selection=selection,
+            )
+            == 0
+            for selection in normal_selections
+        )
+
+        consumer_selections: tuple[int | None, ...] = ()
+        with pytest.raises(RuntimeError, match="crypto_view_consumer_failed"):
+            with materialization_validation.crypto_asset_session_views(
+                session,
+                columns=("asset_id",),
+                target_chunk_bytes=session.resource_policy.payload_target_bytes,
+                error="invalid_crypto_test_asset_grouping",
+            ) as views:
+                consumer_selections = tuple(
+                    view.path_selection for _key, view in views
+                )
+                raise RuntimeError("crypto_view_consumer_failed")
+        assert all(
+            session.inventory.path_count(
+                selected=True,
+                path_selection=selection,
+            )
+            == 0
+            for selection in consumer_selections
+        )
+
+        allocated: list[int] = []
+        inventory_type = type(session.inventory)
+        original_allocate = inventory_type.new_path_selection
+
+        def allocate(current) -> int:  # noqa: ANN001
+            selection = original_allocate(current)
+            allocated.append(selection)
+            return selection
+
+        monkeypatch.setattr(inventory_type, "new_path_selection", allocate)
+        original_verify = type(session).verify
+        verify_calls = 0
+
+        def fail_verify(current) -> None:  # noqa: ANN001
+            nonlocal verify_calls
+            if current is session:
+                verify_calls += 1
+            if current is session and verify_calls == 3:
+                raise RuntimeError("crypto_view_verify_failed")
+            original_verify(current)
+
+        monkeypatch.setattr(type(session), "verify", fail_verify)
+        with pytest.raises(RuntimeError, match="crypto_view_verify_failed"):
+            with materialization_validation.crypto_asset_session_views(
+                session,
+                columns=("asset_id",),
+                target_chunk_bytes=session.resource_policy.payload_target_bytes,
+                error="invalid_crypto_test_asset_grouping",
+            ):
+                raise AssertionError("unreachable")
+        assert allocated
+        assert all(
+            session.inventory.path_count(
+                selected=True,
+                path_selection=selection,
+            )
+            == 0
+            for selection in allocated
+        )
+
+        window_view = materialize_panel._matching_session_view(
+            session,
+            time_window=TimeWindow("2026-01-01", "2026-12-31"),
+            asset_ids={"BTCUSDT"},
+        )
+        assert len(window_view.read_paths) == 2
+        assert {path.parent.name for path in window_view.read_paths} == {"year=2026"}
+    assert not list(root.parent.glob(".dataset-inventory-*"))
+
+
+def test_crypto_asset_view_callers_own_context_and_release_on_early_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for function in (
+        materialize_panel._iter_panel_chunks,
+        materialize_factors._iter_factor_chunks,
+        materialize_labels._iter_label_chunks,
+    ):
+        assert "with materialization_validation.crypto_asset_session_views(" in (
+            inspect.getsource(function)
+        )
+
+    panel = _panel_frame(minutes=70)
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    for module, iterator_name, spec_id in (
+        (materialize_factors, "_iter_factor_chunks", "microstructure"),
+        (materialize_labels, "_iter_label_chunks", "forward_returns"),
+    ):
+        events: list[str] = []
+        session = _SimpleNamespace(verify=lambda: None)
+
+        @contextmanager
+        def asset_views(current, _events=events, **_kwargs):  # noqa: ANN001, B008
+            _events.append("enter")
+            try:
+                yield ((('crypto', 'btc_usdt'), current),)
+            finally:
+                _events.append("exit")
+
+        monkeypatch.setattr(
+            materialization_validation,
+            "crypto_asset_session_views",
+            asset_views,
+        )
+        monkeypatch.setattr(
+            module,
+            "iter_dataset_chunks",
+            lambda *_args, **_kwargs: iter((panel.copy(),)),
+        )
+        chunks = getattr(module, iterator_name)(
+            processed_catalog().get(spec_id),
+            panel_session=session,
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            resource_policy=policy,
+        )
+        next(chunks)
+        chunks.close()
+        assert events == ["enter", "exit"]
+
+
+def test_matching_session_view_releases_selection_on_construction_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "crypto_matching_view_failure")
+    write_dataset(
+        root,
+        make_default_dataset_frame(
+            asset_ids=("BTCUSDT", "BTCUSDT"),
+            dates=("2025-01-02", "2026-01-02"),
+            values=(1.0, 2.0),
+            market_id="crypto",
+        ),
+        spec=make_processed_dataset_spec("crypto_matching_view_failure"),
+    )
+
+    with open_dataset_session(root, columns=None, time_window=None) as session:
+        allocated: list[int] = []
+        inventory_type = type(session.inventory)
+        original_allocate = inventory_type.new_path_selection
+
+        def allocate(current) -> int:  # noqa: ANN001
+            selection = original_allocate(current)
+            allocated.append(selection)
+            return selection
+
+        monkeypatch.setattr(inventory_type, "new_path_selection", allocate)
+        session_type = type(session)
+        original_verify = session_type.verify
+
+        def fail_view_verify(current) -> None:  # noqa: ANN001
+            if current is not session and current.path_selection == allocated[-1]:
+                raise RuntimeError("matching_view_verify_failed")
+            original_verify(current)
+
+        monkeypatch.setattr(session_type, "verify", fail_view_verify)
+        with pytest.raises(RuntimeError, match="matching_view_verify_failed"):
+            materialize_panel._matching_session_view(
+                session,
+                time_window=TimeWindow("2026-01-01", "2026-12-31"),
+                asset_ids={"BTCUSDT"},
+            )
+
+        assert allocated
+        assert session.inventory.path_count(
+            selected=True,
+            path_selection=allocated[-1],
+        ) == 0
+
+
+def test_matching_chunk_caller_releases_selection_on_all_exit_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "crypto_matching_caller_cleanup")
+    write_dataset(
+        root,
+        make_default_dataset_frame(
+            asset_ids=("BTCUSDT", "BTCUSDT"),
+            dates=("2025-01-02", "2026-01-02"),
+            values=(1.0, 2.0),
+            market_id="crypto",
+        ),
+        spec=make_processed_dataset_spec("crypto_matching_caller_cleanup"),
+    )
+
+    with open_dataset_session(root, columns=None, time_window=None) as session:
+        allocated: list[int] = []
+        inventory_type = type(session.inventory)
+        original_allocate = inventory_type.new_path_selection
+
+        def allocate(current) -> int:  # noqa: ANN001
+            selection = original_allocate(current)
+            allocated.append(selection)
+            return selection
+
+        monkeypatch.setattr(inventory_type, "new_path_selection", allocate)
+        timestamp = pd.Timestamp("2026-01-02")
+        kwargs = {
+            "asset_ids": {"BTCUSDT"},
+            "start": timestamp,
+            "end": timestamp,
+            "time_window": TimeWindow("2026-01-01", "2026-12-31"),
+            "max_quote_age": pd.Timedelta(minutes=1),
+            "source_asset_error": "invalid_test_source_asset_id",
+            "timestamp_error": "invalid_test_timestamp",
+            "target_chunk_bytes": session.resource_policy.payload_target_bytes,
+        }
+
+        def empty_chunks(*_args, **_kwargs):
+            yield from ()
+
+        monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", empty_chunks)
+        assert list(materialize_panel._iter_matching_chunks(session, **kwargs)) == []
+        assert session.inventory.path_count(
+            selected=True,
+            path_selection=allocated[-1],
+        ) == 0
+
+        def failing_chunks(*_args, **_kwargs):
+            raise RuntimeError("matching_consumer_failed")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", failing_chunks)
+        with pytest.raises(RuntimeError, match="matching_consumer_failed"):
+            list(materialize_panel._iter_matching_chunks(session, **kwargs))
+        assert session.inventory.path_count(
+            selected=True,
+            path_selection=allocated[-1],
+        ) == 0
+
+        def one_chunk(*_args, **_kwargs):
+            yield pd.DataFrame(
+                {
+                    "source_asset_id": ["BTCUSDT"],
+                    "timestamp": [timestamp],
+                }
+            )
+
+        monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", one_chunk)
+        chunks = materialize_panel._iter_matching_chunks(session, **kwargs)
+        next(chunks)
+        chunks.close()
+        assert session.inventory.path_count(
+            selected=True,
+            path_selection=allocated[-1],
+        ) == 0
+
+
 @pytest.mark.parametrize("index", [[100 + index for index in range(30)], [0] * 30])
 def test_crypto_factor_label_materialization_core_selection_uses_positions(
     monkeypatch,
@@ -913,7 +1219,9 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
     monkeypatch.setattr(
         materialization_validation,
         "crypto_asset_session_views",
-        lambda session, **_kwargs: ((('crypto', 'btc_usdt'), session),),
+        lambda session, **_kwargs: _asset_views_context(
+            ((("crypto", "btc_usdt"), session),)
+        ),
     )
     policy = RuntimeResourcePolicy.from_environment(
         available_memory_bytes=1024**3,
@@ -1404,7 +1712,9 @@ def test_crypto_panel_bar_contract_fails_before_auxiliary_reads(
     monkeypatch.setattr(
         materialization_validation,
         "crypto_asset_session_views",
-        lambda session, **_kwargs: ((('BTCUSDT',), session),),
+        lambda session, **_kwargs: _asset_views_context(
+            ((("BTCUSDT",), session),)
+        ),
     )
     _patch_panel_lifecycle_validation(monkeypatch)
 
@@ -1469,6 +1779,11 @@ def _count_yielded_chunks(iterator, counts: dict[str, int], root_name: str):
     for chunk in iterator:
         counts[root_name] += 1
         yield chunk
+
+
+@contextmanager
+def _asset_views_context(views):  # noqa: ANN001
+    yield views
 
 
 def _panel_frame(*, minutes: int) -> pd.DataFrame:
@@ -1538,9 +1853,7 @@ def _matching_panel_frames() -> dict[str, pd.DataFrame]:
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58", "2026-07-06 00:00:58"]),
             "side": ["ask", "bid"],
             "level": [1, 1],
             "price": [100.2, 100.0],
@@ -1567,13 +1880,34 @@ def _patch_panel_physical_chunks(
     monkeypatch,
     chunks_by_root: dict[str, tuple[pd.DataFrame, ...]],
 ) -> None:
+    class SelectionInventory:
+        def __init__(self) -> None:
+            self.next_selection = 0
+            self.active_selections: set[int] = set()
+
+        def allocate(self) -> int:
+            self.next_selection += 1
+            self.active_selections.add(self.next_selection)
+            return self.next_selection
+
+        def release_path_selection(self, selection: int) -> None:
+            self.active_selections.remove(selection)
+
+    inventory = SelectionInventory()
+
+    def assert_selections_released() -> None:
+        assert inventory.active_selections == set()
+
     monkeypatch.setattr(
         materialize_panel,
         "open_dataset_session",
         lambda dataset_root, **kwargs: SimpleNamespace(
             root=Path(dataset_root),
             row_filters=kwargs.get("row_filters", ()),
+            inventory=inventory,
+            path_selection=None,
             verify=lambda: None,
+            close=assert_selections_released,
         ),
     )
 
@@ -1582,38 +1916,46 @@ def _patch_panel_physical_chunks(
         (value,)
         for chunk in bars
         for value in (
-            chunk["source_asset_id"].tolist()
-            if "source_asset_id" in chunk
-            else [None]
+            chunk["source_asset_id"].tolist() if "source_asset_id" in chunk else [None]
         )
     )
     monkeypatch.setattr(
         materialization_validation,
         "crypto_asset_session_views",
-        lambda session, **_kwargs: tuple(
-            (
-                key,
-                SimpleNamespace(
-                    root=session.root,
-                    row_filters=(("source_asset_id", "==", key[0]),),
-                    verify=lambda: None,
-                ),
+        lambda session, **_kwargs: _asset_views_context(
+            tuple(
+                (
+                    key,
+                    SimpleNamespace(
+                        root=session.root,
+                        row_filters=(("source_asset_id", "==", key[0]),),
+                        inventory=session.inventory,
+                        path_selection=None,
+                        verify=lambda: None,
+                    ),
+                )
+                for key in source_asset_ids
             )
-            for key in source_asset_ids
         ),
     )
-    monkeypatch.setattr(
-        materialize_panel,
-        "_matching_session_view",
-        lambda session, *, asset_ids, **_kwargs: SimpleNamespace(
+
+    def matching_session_view(session, *, asset_ids, **_kwargs):
+        return SimpleNamespace(
             root=session.root,
             row_filters=(
                 (("source_asset_id", "==", next(iter(asset_ids))),)
                 if len(asset_ids) == 1
                 else ()
             ),
+            inventory=session.inventory,
+            path_selection=session.inventory.allocate(),
             verify=lambda: None,
-        ),
+        )
+
+    monkeypatch.setattr(
+        materialize_panel,
+        "_matching_session_view",
+        matching_session_view,
     )
 
     def fake_iterator(context, *, target_chunk_bytes):
@@ -1847,9 +2189,7 @@ def _write_existing_panel_dependency(
             source_ids.depth_levels_source_data_id(panel_spec),
         )
     }
-    identities = materialization_validation.input_dataset_identities(
-        sessions
-    )
+    identities = materialization_validation.input_dataset_identities(sessions)
     write_dataset(
         layout.processed_data_root(
             "crypto",
@@ -1980,21 +2320,23 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
     monkeypatch.setattr(
         materialization_validation,
         "crypto_asset_session_views",
-        lambda session, **_kwargs: (
+        lambda session, **_kwargs: _asset_views_context(
             (
-                ("ETHFIUSDT",),
-                SimpleNamespace(
-                    row_filters=(("source_asset_id", "==", "ETHFIUSDT"),),
-                    verify=lambda: None,
+                (
+                    ("ETHFIUSDT",),
+                    SimpleNamespace(
+                        row_filters=(("source_asset_id", "==", "ETHFIUSDT"),),
+                        verify=lambda: None,
+                    ),
                 ),
-            ),
-            (
-                ("ETHUSDT",),
-                SimpleNamespace(
-                    row_filters=(("source_asset_id", "==", "ETHUSDT"),),
-                    verify=lambda: None,
+                (
+                    ("ETHUSDT",),
+                    SimpleNamespace(
+                        row_filters=(("source_asset_id", "==", "ETHUSDT"),),
+                        verify=lambda: None,
+                    ),
                 ),
-            ),
+            )
         ),
     )
     monkeypatch.setattr(
@@ -2024,12 +2366,12 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
     monkeypatch.setattr(
         materialize_panel,
         "_iter_matching_trade_chunks",
-        lambda *_args, **_kwargs: iter(()),
+        lambda *_args, **_kwargs: (_ for _ in ()),
     )
     monkeypatch.setattr(
         materialize_panel,
         "_iter_matching_depth_chunks",
-        lambda *_args, **_kwargs: iter(()),
+        lambda *_args, **_kwargs: (_ for _ in ()),
     )
     monkeypatch.setattr(
         materialize_panel.panels,
@@ -2079,9 +2421,7 @@ def test_panel_chunks_reject_same_asset_cross_chunk_time_reversal(
                 "timestamp": [timestamp],
             }
         )
-        for timestamp in pd.to_datetime(
-            ["2026-07-06 00:01", "2026-07-06 00:00"]
-        )
+        for timestamp in pd.to_datetime(["2026-07-06 00:01", "2026-07-06 00:00"])
     )
     monkeypatch.setattr(
         materialize_panel,
@@ -2094,7 +2434,9 @@ def test_panel_chunks_reject_same_asset_cross_chunk_time_reversal(
     monkeypatch.setattr(
         materialization_validation,
         "crypto_asset_session_views",
-        lambda session, **_kwargs: ((('BTCUSDT',), session),),
+        lambda session, **_kwargs: _asset_views_context(
+            ((("BTCUSDT",), session),)
+        ),
     )
     monkeypatch.setattr(
         materialize_panel,
@@ -2124,12 +2466,12 @@ def test_panel_chunks_reject_same_asset_cross_chunk_time_reversal(
     monkeypatch.setattr(
         materialize_panel,
         "_iter_matching_trade_chunks",
-        lambda *_args, **_kwargs: iter(()),
+        lambda *_args, **_kwargs: (_ for _ in ()),
     )
     monkeypatch.setattr(
         materialize_panel,
         "_iter_matching_depth_chunks",
-        lambda *_args, **_kwargs: iter(()),
+        lambda *_args, **_kwargs: (_ for _ in ()),
     )
     monkeypatch.setattr(
         materialize_panel.panels,

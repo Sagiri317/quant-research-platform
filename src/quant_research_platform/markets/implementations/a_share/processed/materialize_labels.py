@@ -59,7 +59,8 @@ def write_labels(
     panel_key_coverages: dict[
         Path,
         dict[object, tuple[pd.Timestamp, ...]],
-    ] | None = None,
+    ]
+    | None = None,
 ) -> DatasetInspection:
     catalog = processed_catalog()
     label_catalog = label_definitions.label_catalog()
@@ -140,7 +141,9 @@ def write_labels(
                 output=selected,
                 resource_policy=policy,
             )
+            del read_window, processed_inputs, panel, labels, output
             yield selected
+            del selected
 
     return materialization_io.write_and_inspect(
         spec,

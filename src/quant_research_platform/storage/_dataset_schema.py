@@ -38,6 +38,10 @@ from quant_research_platform.contracts.features import (
 )
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.policy.check_status import VALID_STATUS_TOKENS
+from quant_research_platform.storage._dataset_paths import (
+    parse_year_partition_label,
+    timestamp_column_from_spec_payload,
+)
 
 _DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset({"input_dataset_identities"})
 _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
@@ -1311,13 +1315,16 @@ def validate_dataset_manifest_payload(
     if sum(partition_counts.values()) != manifest["row_count"]:
         raise ValueError("manifest_row_count_mismatch")
 
-    _validate_date_range(manifest.get("date_min"), manifest.get("date_max"))
-    _require_count_mapping(
+    date_range = _validate_date_range(
+        manifest.get("date_min"),
+        manifest.get("date_max"),
+    )
+    null_counts = _require_count_mapping(
         manifest.get("null_count_summary"),
         allowed_keys=set(columns),
         error="manifest_null_count_summary_invalid",
     )
-    _require_count_mapping(
+    non_finite_counts = _require_count_mapping(
         manifest.get("non_finite_count_summary"),
         allowed_keys=set(columns),
         error="manifest_non_finite_count_summary_invalid",
@@ -1332,16 +1339,63 @@ def validate_dataset_manifest_payload(
         for column, role in spec["column_roles"].items()
         if role == ColumnRole.LABEL.value
     }
-    _require_count_mapping(
+    factor_counts = _require_count_mapping(
         manifest.get("factor_nan_profile"),
         allowed_keys=factor_columns,
         error="manifest_factor_nan_profile_invalid",
     )
-    _require_count_mapping(
+    label_counts = _require_count_mapping(
         manifest.get("label_nan_profile"),
         allowed_keys=label_columns,
         error="manifest_label_nan_profile_invalid",
     )
+    row_count = manifest["row_count"]
+    if any(
+        count > row_count
+        for counts in (
+            null_counts,
+            non_finite_counts,
+            factor_counts,
+            label_counts,
+        )
+        for count in counts.values()
+    ) or manifest["duplicate_primary_key_count"] > row_count:
+        raise ValueError("manifest_summary_count_invalid")
+    timestamp_column = timestamp_column_from_spec_payload(spec)
+    if timestamp_column is not None:
+        if (row_count == 0) != (date_range is None):
+            raise ValueError("manifest_date_range_invalid")
+        if tuple(spec["partition_columns"]) == ("year",):
+            partition_year_by_label: dict[str, int] = {}
+            for partition in partitions:
+                if (
+                    partition == "unpartitioned"
+                    and row_count == 0
+                    and partition_counts[partition] == 0
+                ):
+                    continue
+                partition_year_by_label[partition] = parse_year_partition_label(
+                    partition
+                )
+            partition_years = {
+                partition_year_by_label[partition]
+                for partition in partitions
+                if partition_counts[partition] > 0
+            }
+            if date_range is not None:
+                minimum, maximum = date_range
+                if (
+                    not partition_years
+                    or minimum.year not in partition_years
+                    or maximum.year not in partition_years
+                    or any(
+                        year < minimum.year or year > maximum.year
+                        for year in partition_years
+                    )
+                ):
+                    raise ValueError("manifest_partition_date_mismatch")
+    elif date_range is not None:
+        raise ValueError("manifest_date_range_invalid")
     status = manifest.get("validation_status")
     if not isinstance(status, str) or status not in VALID_STATUS_TOKENS:
         raise ValueError("manifest_validation_status_invalid")
@@ -1659,9 +1713,12 @@ def _require_count_mapping(
     return result
 
 
-def _validate_date_range(date_min: object, date_max: object) -> None:
+def _validate_date_range(
+    date_min: object,
+    date_max: object,
+) -> tuple[date, date] | None:
     if date_min is None and date_max is None:
-        return
+        return None
     if not isinstance(date_min, str) or not isinstance(date_max, str):
         raise ValueError("manifest_date_range_invalid")
     try:
@@ -1673,6 +1730,7 @@ def _validate_date_range(date_min: object, date_max: object) -> None:
         raise ValueError("manifest_date_range_invalid")
     if minimum > maximum:
         raise ValueError("manifest_date_range_invalid")
+    return minimum, maximum
 
 
 def _require_exact_keys(value: Mapping[str, Any], expected: set[str]) -> None:

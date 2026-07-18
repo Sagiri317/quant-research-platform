@@ -16,10 +16,12 @@ from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    active_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
 from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_reading import (
+    DatasetSession,
     iter_dataset_file_batches,
     open_dataset_session,
     read_columns_for_time_window,
@@ -32,14 +34,30 @@ def fingerprint_dataset(
     *,
     columns: tuple[str, ...] | list[str] | None = None,
     time_window: TimeWindow | None = None,
-    resource_policy: RuntimeResourcePolicy,
+    resource_policy: RuntimeResourcePolicy | None,
 ) -> DatasetFingerprint:
-    context = open_dataset_session(
+    issued_policy = resource_policy or active_runtime_resource_policy()
+    with open_dataset_session(
         dataset_root,
         columns=columns,
         time_window=time_window,
-    )
+        resource_policy=issued_policy,
+    ) as context:
+        return fingerprint_dataset_session(context, resource_policy=issued_policy)
+
+
+def fingerprint_dataset_session(
+    context: DatasetSession,
+    *,
+    resource_policy: RuntimeResourcePolicy,
+) -> DatasetFingerprint:
     payload_target_bytes = resource_policy.payload_target_bytes
+    operation_headroom_bytes = (
+        resource_policy.task_memory_budget_bytes
+        - context.inventory.retained_memory_bytes
+    )
+    if operation_headroom_bytes <= 0:
+        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
     key_columns = tuple(str(column) for column in context.spec["primary_key"])
     hash_columns = tuple(dict.fromkeys((*key_columns, *context.logical_columns)))
     hash_physical_columns = read_columns_for_time_window(
@@ -55,25 +73,43 @@ def fingerprint_dataset(
     partition_hash_sum: dict[str, int] = {}
     partition_hash_xor: dict[str, int] = {}
 
-    observed_paths: set[Path] = set()
+    file_count = 0
+    last_observed_path: Path | None = None
+    accepted_arrow_bytes: int | None = None
+
+    def observe_batch(batch: Any, _frame: pd.DataFrame) -> None:
+        nonlocal accepted_arrow_bytes
+        if accepted_arrow_bytes is not None:
+            raise RuntimeError("dataset_fingerprint_batch_observer_out_of_sequence")
+        accepted_arrow_bytes = batch.get_total_buffer_size()
+
     for path, chunk in iter_dataset_file_batches(
         context,
         columns=hash_physical_columns,
         target_chunk_bytes=payload_target_bytes,
+        operation_headroom_bytes=operation_headroom_bytes,
+        batch_observer=observe_batch,
     ):
+        if accepted_arrow_bytes is None:
+            raise RuntimeError("dataset_fingerprint_batch_observer_missing")
+        hash_target_bytes = operation_headroom_bytes - accepted_arrow_bytes
+        accepted_arrow_bytes = None
         chunk = chunk.loc[:, list(hash_columns)]
         if chunk.empty:
             continue
-        observed_paths.add(path)
+        if path != last_observed_path:
+            file_count += 1
+            last_observed_path = path
         hashes = pd.util.hash_pandas_object(
             _hashable_fingerprint_frame(
                 chunk,
-                target_bytes=payload_target_bytes,
+                target_bytes=hash_target_bytes,
             ),
             index=False,
         ).to_numpy("uint64")
         chunk_sum = int(hashes.sum(dtype=np.uint64))
         chunk_xor = int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0)))
+        del hashes
         partition = relative_partition_label(context.data_root, path)
         row_count += int(len(chunk))
         row_hash_sum = (row_hash_sum + chunk_sum) % 2**64
@@ -114,7 +150,7 @@ def fingerprint_dataset(
         key_columns=key_columns,
         content_hash=content_hash,
         partition_fingerprints=partition_fingerprints,
-        file_count=len(observed_paths),
+        file_count=file_count,
         column_names=output_columns,
     )
 
@@ -127,14 +163,16 @@ def _hashable_fingerprint_frame(
     if target_bytes <= 0:
         raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
     input_payload_bytes = pandas_frame_payload_bytes(frame)
-    output = frame.copy()
-    if input_payload_bytes + pandas_frame_payload_bytes(output) > target_bytes:
+    if input_payload_bytes > target_bytes:
         raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
-    for column in output.columns:
+    output = frame
+    for column in frame.columns:
         try:
-            pd.util.hash_pandas_object(output[column], index=False)
+            pd.util.hash_pandas_object(frame[column], index=False)
         except TypeError:
-            output[column] = output[column].map(_canonical_nested_value)
+            if output is frame:
+                output = frame.copy()
+            output[column] = frame[column].map(_canonical_nested_value)
             if input_payload_bytes + pandas_frame_payload_bytes(output) > target_bytes:
                 raise ValueError(
                     "dataset_fingerprint_value_exceeds_target_bytes"

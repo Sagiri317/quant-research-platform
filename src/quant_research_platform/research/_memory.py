@@ -87,12 +87,17 @@ def iter_complete_time_sized_frames(
     """Yield chunks without splitting any timestamp session across inputs."""
 
     policy = resource_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(policy):
-        yield from _iter_complete_time_sized_frames_with_policy(
-            frames,
-            timestamp_column=timestamp_column,
-            resource_policy=policy,
-        )
+    try:
+        with runtime_resource_policy_scope(policy):
+            yield from _iter_complete_time_sized_frames_with_policy(
+                frames,
+                timestamp_column=timestamp_column,
+                resource_policy=policy,
+            )
+    finally:
+        close = getattr(frames, "close", None)
+        if close is not None:
+            close()
 
 
 def _iter_complete_time_sized_frames_with_policy(

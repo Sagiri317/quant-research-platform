@@ -88,11 +88,17 @@ def build_validation_summary(
             root / "_manifest" / "manifest.json",
             markers=RUN_RESULT_LOGICAL_PATH_MARKERS,
         )
+        inspection_failed = False
+        manifest_summary_mismatch = False
         try:
             inspection = inspect_dataset(root)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            manifest_summary_mismatch = (
+                type(exc) is ValueError
+                and str(exc) == "dataset_manifest_summary_mismatch"
+            )
             try:
-                read_dataset_manifest_evidence(root)
+                manifest = read_dataset_manifest_evidence(root)
             except FileNotFoundError:
                 missing_dataset_manifests.append(manifest_logical_path)
                 observed_layer_missing[logical_layer].append(manifest_logical_path)
@@ -100,11 +106,11 @@ def build_validation_summary(
                 invalid_dataset_manifests.append(manifest_logical_path)
                 observed_layer_invalid[logical_layer].append(manifest_logical_path)
             else:
-                raise ValueError(
-                    "validation_summary_dataset_inspection_failed"
-                ) from None
-            continue
-        manifest = inspection.manifest
+                inspection_failed = True
+            if not inspection_failed:
+                continue
+        else:
+            manifest = inspection.manifest
         if not manifest:
             invalid_dataset_manifests.append(manifest_logical_path)
             observed_layer_invalid[logical_layer].append(manifest_logical_path)
@@ -115,6 +121,8 @@ def build_validation_summary(
             manifest_consumable = True
         except ValueError:
             manifest_consumable = False
+        if inspection_failed and not manifest_summary_mismatch:
+            raise ValueError("validation_summary_dataset_inspection_failed") from None
         if require_status(manifest.get("validation_status")) != "PASS":
             dataset_failures.append(data_id)
         # This existing failure class covers an invalid required PK-null fact;
@@ -304,9 +312,7 @@ def _validate_layer_summary_graph(
     declared_missing: list[str] = []
     declared_invalid: list[str] = []
     declared_failed: list[str] = []
-    for summary, logical_layer in zip(
-        layer_summaries, logical_layers, strict=True
-    ):
+    for summary, logical_layer in zip(layer_summaries, logical_layers, strict=True):
         if type(summary) is not dict or set(summary) != _LAYER_SUMMARY_KEYS:
             raise ValueError("validation_summary_layer_invalid")
         if type(summary["created_at"]) is not str or not summary["created_at"]:
@@ -338,8 +344,7 @@ def _validate_layer_summary_graph(
             "dataset_count": len(datasets),
             "datasets": datasets,
             "total_rows": sum(
-                int(item["manifest_summary"]["row_count"])
-                for item in datasets
+                int(item["manifest_summary"]["row_count"]) for item in datasets
             ),
             "date_min": min(date_mins) if date_mins else None,
             "date_max": max(date_maxs) if date_maxs else None,
@@ -350,9 +355,7 @@ def _validate_layer_summary_graph(
                 "PASS" if not missing and not invalid and not failed else "FAIL"
             ),
         }
-        observed = {
-            key: item for key, item in summary.items() if key != "created_at"
-        }
+        observed = {key: item for key, item in summary.items() if key != "created_at"}
         try:
             matches = canonical_identity_bytes(observed) == canonical_identity_bytes(
                 expected
