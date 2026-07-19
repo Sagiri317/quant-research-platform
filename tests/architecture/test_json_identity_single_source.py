@@ -15,7 +15,6 @@ DIRECT_STDLIB_JSON_ALLOWLIST = {
     Path("src/quant_research_platform/contracts/_json.py"): {"dumps", "loads"},
     Path("src/quant_research_platform/sources/binance/raw_exports.py"): {"loads"},
     Path("src/quant_research_platform/sources/csmar/interim.py"): {"loads"},
-    Path("src/quant_research_platform/storage/_dataset_fingerprinting.py"): {"dumps"},
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/"
         "governance_contract.py"
@@ -38,16 +37,13 @@ def test_qrp_structural_json_has_one_internal_non_root_owner() -> None:
     assert observed == DIRECT_STDLIB_JSON_ALLOWLIST
 
 
-def test_external_json_allowlist_is_read_only_and_fingerprint_is_phase1d_only() -> None:
+def test_external_json_allowlist_is_read_only() -> None:
     assert DIRECT_STDLIB_JSON_ALLOWLIST[
         Path("src/quant_research_platform/sources/binance/raw_exports.py")
     ] == {"loads"}
     assert DIRECT_STDLIB_JSON_ALLOWLIST[
         Path("src/quant_research_platform/sources/csmar/interim.py")
     ] == {"loads"}
-    assert DIRECT_STDLIB_JSON_ALLOWLIST[
-        Path("src/quant_research_platform/storage/_dataset_fingerprinting.py")
-    ] == {"dumps"}
     assert DIRECT_STDLIB_JSON_ALLOWLIST[
         Path(
             ".agents/skills/quant-research-platform-maintenance/scripts/"
@@ -87,6 +83,47 @@ def test_canonical_hash_and_retired_helpers_have_no_parallel_definition() -> Non
 
     assert canonical_definitions == ["src/quant_research_platform/contracts/_json.py"]
     assert retired_hits == []
+
+
+def test_canonical_identity_writer_is_internal_single_owner() -> None:
+    definitions: list[str] = []
+    for path in _owned_qrp_json_paths():
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "CanonicalIdentityWriter"
+            ):
+                definitions.append(path.as_posix())
+
+    assert definitions == ["src/quant_research_platform/contracts/_json.py"]
+    assert not hasattr(contracts, "CanonicalIdentityWriter")
+
+
+def test_fingerprint_uses_conceptual_contract_writer_without_framing_copy() -> None:
+    path = SOURCE_ROOT / "storage/_dataset_fingerprinting.py"
+    source = path.read_text(encoding="utf-8-sig")
+    tree = ast.parse(source, filename=str(path))
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "quant_research_platform.contracts._json"
+        for alias in node.names
+    }
+    function_names = {
+        node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    }
+
+    assert "CanonicalIdentityWriter" in imported_names
+    assert "canonical_identity_bytes" not in imported_names
+    assert "_nested_identity_model" not in function_names
+    assert "_frame" not in function_names
+    assert "_sequence_payload" not in function_names
+    assert "_mapping_payload" not in function_names
+    assert "canonical_mapping_order" not in source
+    assert "tuple(value.items())" not in source
+    assert "depth > 256" not in source
 
 
 def test_stdlib_json_calls_detects_nested_import_aliases(tmp_path: Path) -> None:

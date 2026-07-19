@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 import numpy as np
@@ -123,8 +126,19 @@ class DatasetSession:
     def __enter__(self) -> DatasetSession:
         return self
 
-    def __exit__(self, *_: object) -> None:
-        self.close()
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        if exc_type is None:
+            self.close()
+            return
+        try:
+            self.close()
+        except BaseException:
+            pass
 
     def verify(self) -> None:
         spec_bytes, _ = read_bounded_qrp_json(self.root / "spec.json")
@@ -296,9 +310,7 @@ def _scan_materialized_shape(
             if object_columns:
                 object_bytes += _object_payload_bytes(frame, columns=object_columns)
     finally:
-        close = getattr(chunks, "close", None)
-        if close is not None:
-            close()
+        _close_iterator_preserving_primary(chunks)
     return row_count, string_bytes, object_bytes
 
 
@@ -404,9 +416,7 @@ def _fill_materialized_buffers(
                 _fill_materialized_column(buffer, frame[name], start=cursor)
             cursor = stop
     finally:
-        close = getattr(chunks, "close", None)
-        if close is not None:
-            close()
+        _close_iterator_preserving_primary(chunks)
     if cursor != row_count:
         raise ValueError("dataset_materialized_row_count_changed")
     for buffer in buffers.values():
@@ -870,7 +880,7 @@ def iter_dataset_chunks(
                 target_chunk_bytes=target_bytes,
             )
     finally:
-        context.verify()
+        _verify_preserving_primary(context)
 
 
 def iter_declared_parquet_member_batches(
@@ -954,7 +964,42 @@ def iter_dataset_file_batches(
             ):
                 yield path, frame
     finally:
+        _verify_preserving_primary(context)
+
+
+def _verify_preserving_primary(context: DatasetSession) -> None:
+    active = sys.exception()
+    if active is None or isinstance(active, GeneratorExit):
         context.verify()
+        return
+    try:
+        context.verify()
+    except BaseException:
+        pass
+
+
+def _close_iterator_preserving_primary(iterator: object) -> None:
+    close = getattr(iterator, "close", None)
+    if close is None:
+        return
+    active = sys.exception()
+    if active is None or isinstance(active, GeneratorExit):
+        close()
+        return
+    try:
+        close()
+    except BaseException:
+        pass
+
+
+@contextmanager
+def closing_dataset_iterator(iterator: Iterator[Any]):  # type: ignore[no-untyped-def]
+    """Close one dataset traversal without replacing its caller's primary error."""
+
+    try:
+        yield iterator
+    finally:
+        _close_iterator_preserving_primary(iterator)
 
 
 def dataset_primary_key_schema(
@@ -1145,8 +1190,7 @@ def _arrow_batch_to_bounded_pandas(
             output = frame
         output_bytes = pandas_frame_payload_bytes(output)
         if output_bytes > pandas_budget or (
-            output is not frame
-            and frame_bytes + output_bytes > current_pandas_budget
+            output is not frame and frame_bytes + output_bytes > current_pandas_budget
         ):
             if len(frame) == 1:
                 if output_bytes > pandas_budget:

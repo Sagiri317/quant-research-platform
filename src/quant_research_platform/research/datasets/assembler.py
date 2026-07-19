@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import ExitStack, closing
+from contextlib import ExitStack
 from dataclasses import replace
 from math import ceil
 from pathlib import Path
@@ -34,6 +34,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
+    closing_dataset_iterator,
     iter_dataset_chunks,
     materialize_dataset_session,
     open_dataset_session,
@@ -334,7 +335,7 @@ def _time_keys_from_base_input(
     try:
         timestamps: set[pd.Timestamp] = set()
         intraday = is_intraday_time_window(time_window)
-        with closing(
+        with closing_dataset_iterator(
             iter_dataset_chunks(
                 session,
                 target_chunk_bytes=resource_policy.payload_target_bytes,

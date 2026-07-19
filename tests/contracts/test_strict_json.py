@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import MAX_EMAX, MIN_EMIN, Decimal
 from enum import IntEnum
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
@@ -156,6 +157,286 @@ def test_typed_canonical_identity_keeps_types_distinct() -> None:
     )
 
 
+def test_canonical_identity_writer_matches_existing_bytes_and_exact_peak_gate() -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    writer_type = json_owner.CanonicalIdentityWriter
+    value = ("nested", [None, 1, "x"], {"b": 2, "a": 1})
+    expected = canonical_identity_bytes(value)
+
+    writer = writer_type(max_bytes=len(expected) * 2)
+    writer.value(value)
+    assert writer.finish() == expected
+
+    writer = writer_type(max_bytes=len(expected) * 2 - 1)
+    writer.value(value)
+    with pytest.raises(ValueError, match="canonical_identity_exceeds_max_bytes"):
+        writer.finish()
+
+
+def test_canonical_identity_writer_tuple_item_count_is_conceptual() -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=None)
+
+    with writer.tuple_items(2):
+        writer.value("left")
+        writer.value(7)
+
+    assert writer.finish() == canonical_identity_bytes(("left", 7))
+
+
+def test_bounded_direct_mapping_rejects_before_copying_all_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    value = {f"key-{index:05d}": index for index in range(20_000)}
+    encoded_keys = 0
+    utf8_bytes = json_owner._utf8_bytes
+
+    def bounded_utf8(item: str) -> bytes:
+        nonlocal encoded_keys
+        encoded_keys += 1
+        if encoded_keys > 64:
+            raise AssertionError("bounded_writer_copied_all_mapping_keys")
+        return utf8_bytes(item)
+
+    monkeypatch.setattr(json_owner, "_utf8_bytes", bounded_utf8)
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=1024)
+    with pytest.raises(ValueError, match="canonical_identity_exceeds_max_bytes"):
+        writer.value(value)
+    assert encoded_keys <= 64
+
+
+def test_manual_writer_uses_contract_nesting_limit() -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+
+    def write_nested(writer: object, level: int) -> None:
+        with writer.tuple_items(1):
+            if level:
+                write_nested(writer, level - 1)
+            else:
+                writer.value(None)
+
+    accepted = json_owner.CanonicalIdentityWriter(max_bytes=None)
+    write_nested(accepted, json_owner._MAX_NESTING_DEPTH - 1)
+    assert accepted.finish()
+
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=None)
+    with pytest.raises(ValueError, match="canonical_json_recursion_limit"):
+        write_nested(writer, json_owner._MAX_NESTING_DEPTH)
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "ascii-value",
+        "non-ascii-value",
+        "ascii-key",
+        "non-ascii-key",
+    ),
+)
+def test_bounded_writer_rejects_large_text_before_full_utf8_copy(
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    utf8_bytes = json_owner._utf8_bytes
+    text = "指标" * 4_000_000 if case.startswith("non-ascii") else "x" * 8_000_000
+    value: object = {text: None} if case.endswith("key") else text
+
+    def bounded_utf8(item: str) -> bytes:
+        if len(item) > 1024:
+            raise AssertionError("bounded_writer_preallocated_full_utf8_payload")
+        return utf8_bytes(item)
+
+    monkeypatch.setattr(json_owner, "_utf8_bytes", bounded_utf8)
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=1024)
+    with pytest.raises(ValueError, match="canonical_identity_exceeds_max_bytes"):
+        writer.value(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        Decimal("7" * 4_097),
+        Decimal("1" + "0" * 4_096),
+        Decimal("7" * 1_000_000),
+    ),
+    ids=("ceiling-plus-one", "ceiling-plus-one-trailing-zeros", "intermediate"),
+)
+def test_bounded_writer_rejects_oversized_decimal_before_as_tuple(
+    value: Decimal,
+) -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    calls: list[str] = []
+    previous_profile = sys.getprofile()
+
+    def record_decimal_calls(frame: object, event: str, argument: object) -> None:
+        del frame
+        if event == "c_call" and getattr(argument, "__name__", None) == "as_tuple":
+            calls.append("as_tuple")
+
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=500_000)
+    sys.setprofile(record_decimal_calls)
+    try:
+        with pytest.raises(ValueError, match="canonical_identity_exceeds_max_bytes"):
+            writer.value(value)
+    finally:
+        sys.setprofile(previous_profile)
+    assert calls == []
+
+
+@pytest.mark.parametrize("digit_count", (4_095, 4_096))
+def test_bounded_writer_accepts_decimal_coefficient_ceiling_and_exact_budget(
+    digit_count: int,
+) -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    value = Decimal("7" * digit_count)
+    expected = canonical_identity_bytes(value)
+
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=len(expected) * 2)
+    writer.value(value)
+    assert writer.finish() == expected
+
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=len(expected) * 2 - 1)
+    writer.value(value)
+    with pytest.raises(ValueError, match="canonical_identity_exceeds_max_bytes"):
+        writer.finish()
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        Decimal("0"),
+        Decimal("-0"),
+        Decimal("0.00"),
+        Decimal("-0.00"),
+        Decimal("1.2300"),
+        Decimal("-1.2300"),
+        Decimal(f"1E+{MAX_EMAX}"),
+        Decimal(f"1E{MIN_EMIN}"),
+    ),
+)
+def test_bounded_writer_preserves_decimal_golden_within_runtime_domain(
+    value: Decimal,
+) -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    expected = canonical_identity_bytes(value)
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=len(expected) * 2)
+
+    writer.value(value)
+
+    assert writer.finish() == expected
+
+
+def test_bounded_writer_rejects_out_of_domain_decimal_before_as_tuple() -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    value = Decimal((0, (1,), MIN_EMIN - 1))
+    calls: list[str] = []
+    previous_profile = sys.getprofile()
+
+    def record_decimal_calls(frame: object, event: str, argument: object) -> None:
+        del frame
+        if event == "c_call" and getattr(argument, "__name__", None) == "as_tuple":
+            calls.append("as_tuple")
+
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=100_000)
+    sys.setprofile(record_decimal_calls)
+    try:
+        with pytest.raises(ValueError, match="canonical_identity_exceeds_max_bytes"):
+            writer.value(value)
+    finally:
+        sys.setprofile(previous_profile)
+    assert calls == []
+
+
+def test_unbounded_decimal_identity_remains_available_above_bounded_ceiling() -> None:
+    value = Decimal("7" * 4_097)
+    exponent = b"0"
+    payload = (
+        b"\x00"
+        + (4_097).to_bytes(8, "big")
+        + b"\x07" * 4_097
+        + b"e"
+        + len(exponent).to_bytes(8, "big")
+        + exponent
+    )
+    expected = b"d" + len(payload).to_bytes(8, "big") + payload
+
+    assert canonical_identity_bytes(value) == expected
+
+
+def test_decimal_identity_has_stable_literal_golden() -> None:
+    value = Decimal("12.50")
+    exponent = b"-2"
+    payload = (
+        b"\x00"
+        + (4).to_bytes(8, "big")
+        + bytes((1, 2, 5, 0))
+        + b"e"
+        + len(exponent).to_bytes(8, "big")
+        + exponent
+    )
+    expected = b"d" + len(payload).to_bytes(8, "big") + payload
+
+    assert canonical_identity_bytes(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        [Decimal("7" * 4_097)],
+        (Decimal("7" * 4_097),),
+        {"decimal": Decimal("7" * 4_097)},
+    ),
+    ids=("list", "tuple", "mapping-value"),
+)
+def test_bounded_writer_applies_decimal_ceiling_inside_contract_containers(
+    value: object,
+) -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=500_000)
+
+    with pytest.raises(ValueError, match="canonical_identity_exceeds_max_bytes"):
+        writer.value(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (Decimal("Infinity"), Decimal("-Infinity"), Decimal("NaN"), Decimal("sNaN")),
+)
+def test_bounded_writer_decimal_nonfinite_error_precedes_admission(
+    value: Decimal,
+) -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=1)
+
+    with pytest.raises(ValueError, match="canonical_json_nonfinite_number"):
+        writer.value(value)
+
+
+@pytest.mark.parametrize("value", ("指标", {"指标": "值"}, Decimal("12.50")))
+def test_bounded_writer_preserves_small_text_mapping_and_decimal_boundaries(
+    value: object,
+) -> None:
+    json_owner = importlib.import_module("quant_research_platform.contracts._json")
+    expected = canonical_identity_bytes(value)
+    accepted_bytes = len(expected) * 2 + (256 if type(value) is dict else 0)
+    writer = json_owner.CanonicalIdentityWriter(max_bytes=accepted_bytes)
+    writer.value(value)
+    assert writer.finish() == expected
+
+    writer = json_owner.CanonicalIdentityWriter(
+        max_bytes=(len(expected) - 1 if type(value) is dict else accepted_bytes - 1)
+    )
+    if type(value) is dict:
+        with pytest.raises(ValueError, match="canonical_identity_exceeds_max_bytes"):
+            writer.value(value)
+    else:
+        writer.value(value)
+        with pytest.raises(ValueError, match="canonical_identity_exceeds_max_bytes"):
+            writer.finish()
+
+
 def test_typed_canonical_identity_cannot_be_mimicked_by_tag_shaped_content() -> None:
     encoded_integer = canonical_identity_bytes(17)
     tag_shaped_string = encoded_integer.decode("utf-8")
@@ -205,9 +486,7 @@ def test_typed_canonical_decimal_identity_rejects_every_nonfinite_form(
 
 
 def test_typed_canonical_timestamp_identity_preserves_unit_and_timezone() -> None:
-    nanoseconds = pd.Timestamp("2026-01-01T00:00:00", tz=ZoneInfo("UTC")).as_unit(
-        "ns"
-    )
+    nanoseconds = pd.Timestamp("2026-01-01T00:00:00", tz=ZoneInfo("UTC")).as_unit("ns")
     milliseconds = nanoseconds.as_unit("ms")
     fixed_offset = pd.Timestamp(
         "2026-01-01T00:00:00",
@@ -260,9 +539,12 @@ def test_strict_json_rejects_huge_integers_with_stable_errors() -> None:
     boundary = (10**4096) - 1
     decimal_overflow = 10**4096
 
-    assert parse_qrp_json_object(
-        b'{"schema_id":"x","value":' + str(boundary).encode("ascii") + b"}"
-    )["value"] == boundary
+    assert (
+        parse_qrp_json_object(
+            b'{"schema_id":"x","value":' + str(boundary).encode("ascii") + b"}"
+        )["value"]
+        == boundary
+    )
     render_qrp_json_object({"schema_id": "x", "value": boundary})
     canonical_identity_bytes(boundary)
 

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import math
 import os
+import sys
 import weakref
 from dataclasses import replace
 from datetime import date, datetime
@@ -33,7 +34,10 @@ import quant_research_platform.storage._dataset_writing as dataset_writing
 import quant_research_platform.storage.atomic as storage_atomic
 import quant_research_platform.storage.datasets as datasets
 import quant_research_platform.storage.manifests as storage_manifests
-from quant_research_platform.contracts._json import canonical_json_hash
+from quant_research_platform.contracts._json import (
+    canonical_identity_bytes,
+    canonical_json_hash,
+)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -3176,12 +3180,26 @@ def test_nested_fingerprint_rejects_actual_canonical_payload_over_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = pd.DataFrame({"nested": [["\x00" * (32 * 1024)]]})
+    canonical_frame = frame.copy()
+    canonical_frame["nested"] = canonical_frame["nested"].map(
+        dataset_fingerprinting._canonical_nested_value
+    )
+    target_bytes = (
+        pandas_frame_payload_bytes(frame)
+        + pandas_frame_payload_bytes(canonical_frame)
+        - 1
+    )
     calls = {"count": 0}
     canonicalize = dataset_fingerprinting._canonical_nested_value
 
-    def record_canonicalization(value: object) -> str:
+    def record_canonicalization(
+        value: object,
+        *,
+        max_bytes: int | None = None,
+        data_type: pa.DataType | None = None,
+    ) -> bytes:
         calls["count"] += 1
-        return canonicalize(value)
+        return canonicalize(value, max_bytes=max_bytes, data_type=data_type)
 
     monkeypatch.setattr(
         dataset_fingerprinting,
@@ -3193,11 +3211,247 @@ def test_nested_fingerprint_rejects_actual_canonical_payload_over_target(
         ValueError,
         match="dataset_fingerprint_value_exceeds_target_bytes",
     ):
-        dataset_fingerprinting._hashable_fingerprint_frame(
-            frame,
-            target_bytes=64 * 1024,
+        tuple(
+            dataset_fingerprinting._iter_fingerprint_hashes(
+                frame,
+                target_bytes=target_bytes,
+            )
         )
     assert calls["count"] == 1
+
+
+def test_nested_fingerprint_stops_writer_traversal_before_oversized_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame({"nested": [[None] * 5_000]})
+    write_identity = dataset_fingerprinting._write_nested_identity
+    calls = 0
+
+    def counted_write(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls > 64:
+            raise AssertionError("fingerprint_writer_traversed_past_target")
+        write_identity(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        dataset_fingerprinting,
+        "_write_nested_identity",
+        counted_write,
+    )
+    with pytest.raises(
+        ValueError,
+        match="dataset_fingerprint_value_exceeds_target_bytes",
+    ):
+        tuple(
+            dataset_fingerprinting._iter_fingerprint_hashes(
+                frame,
+                target_bytes=pandas_frame_payload_bytes(frame) + 1024,
+            )
+        )
+    assert calls <= 64
+
+
+def test_ndarray_fingerprint_does_not_make_a_full_object_list_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = bytes(bytearray(b"ndarray-object-sentinel"))
+    value = np.empty((100, 1_000), dtype=object)
+    value.fill(sentinel)
+    baseline_references = sys.getrefcount(sentinel)
+    observed_reference_deltas: list[int] = []
+    write_identity = dataset_fingerprinting._write_nested_identity
+
+    def record_references(
+        writer: object, item: object, *args: object, **kwargs: object
+    ) -> None:
+        if item is sentinel:
+            observed_reference_deltas.append(
+                sys.getrefcount(sentinel) - baseline_references
+            )
+        write_identity(writer, item, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        dataset_fingerprinting,
+        "_write_nested_identity",
+        record_references,
+    )
+    with pytest.raises(
+        ValueError,
+        match="dataset_fingerprint_value_exceeds_target_bytes",
+    ):
+        dataset_fingerprinting._canonical_nested_value(
+            value,
+            max_bytes=100_000,
+        )
+    assert observed_reference_deltas
+    assert max(observed_reference_deltas) < 10_000
+
+
+def test_ndarray_fingerprint_preserves_shape_dtype_order_and_nested_identity() -> None:
+    canonicalize = dataset_fingerprinting._canonical_nested_value
+    row = np.array([[1, 2]], dtype=np.int32)
+
+    assert canonicalize(row) != canonicalize(row.astype(np.int64))
+    assert canonicalize(row) != canonicalize(row.reshape(2, 1))
+    assert canonicalize(row) != canonicalize(np.array([[2, 1]], dtype=np.int32))
+    nested = np.empty((2,), dtype=object)
+    nested[:] = [[1, 2], (1, 2)]
+    reversed_nested = nested[::-1].copy()
+    assert canonicalize(nested) != canonicalize(reversed_nested)
+
+
+def test_fingerprint_writer_preserves_canonical_model_golden_bytes() -> None:
+    assert dataset_fingerprinting._canonical_nested_value([1, "x"]) == (
+        canonical_identity_bytes(("list", (("int", 1), ("string", "x"))))
+    )
+    assert dataset_fingerprinting._canonical_nested_value(
+        {"b": 2, "a": 1}
+    ) == canonical_identity_bytes(
+        (
+            "dict",
+            (
+                (("string", "a"), ("int", 1)),
+                (("string", "b"), ("int", 2)),
+            ),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        [Decimal("7" * 4_097)],
+        (Decimal("7" * 4_097),),
+        {Decimal("7" * 4_097): "key"},
+        {"value": Decimal("7" * 4_097)},
+    ),
+    ids=("list", "tuple", "mapping-key", "mapping-value"),
+)
+def test_fingerprint_decimal_ceiling_maps_to_public_capacity_error(
+    value: object,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="dataset_fingerprint_value_exceeds_target_bytes",
+    ):
+        dataset_fingerprinting._canonical_nested_value(value, max_bytes=500_000)
+
+
+def test_fingerprint_decimal_ceiling_applies_to_arrow_map() -> None:
+    value = [(Decimal("7" * 4_097), "value")]
+    data_type = pa.map_(pa.decimal256(76, 0), pa.string())
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_fingerprint_value_exceeds_target_bytes",
+    ):
+        dataset_fingerprinting._canonical_nested_value(
+            value,
+            max_bytes=500_000,
+            data_type=data_type,
+        )
+
+
+def test_fingerprint_multi_column_stops_at_oversized_decimal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    oversized = [Decimal("7" * 4_097)]
+    later = ["later"]
+    frame = pd.DataFrame({"first": [oversized], "second": [later]})
+    canonicalize = dataset_fingerprinting._canonical_nested_value
+    observed: list[object] = []
+
+    def record_value(
+        value: object,
+        *,
+        max_bytes: int | None = None,
+        data_type: pa.DataType | None = None,
+    ) -> bytes:
+        observed.append(value)
+        return canonicalize(value, max_bytes=max_bytes, data_type=data_type)
+
+    monkeypatch.setattr(
+        dataset_fingerprinting,
+        "_canonical_nested_value",
+        record_value,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_fingerprint_value_exceeds_target_bytes",
+    ):
+        dataset_fingerprinting._normalized_fingerprint_slice(
+            frame,
+            arrow_schema=None,
+            primary_key=(),
+            identity_target_bytes=500_000,
+        )
+    assert observed == [oversized]
+
+
+def test_fingerprint_mapping_rejects_before_full_item_snapshot() -> None:
+    value = {f"key-{index:05d}": index for index in range(20_000)}
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(
+            ValueError,
+            match="dataset_fingerprint_value_exceeds_target_bytes",
+        ):
+            dataset_fingerprinting._canonical_nested_value(value, max_bytes=1024)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak_bytes < 64 * 1024
+
+
+def test_fingerprint_depth_uses_contract_owner_and_stable_error() -> None:
+    value: object = None
+    for _ in range(300):
+        value = [value]
+
+    with pytest.raises(ValueError, match="dataset_fingerprint_value_too_deep"):
+        dataset_fingerprinting._canonical_nested_value(value)
+
+
+@pytest.mark.parametrize("family", ("list", "tuple", "dict", "arrow-map", "ndarray"))
+def test_fingerprint_nested_families_share_contract_depth_error(family: str) -> None:
+    value: object = None
+    for _ in range(40):
+        if family == "tuple":
+            value = (value,)
+        elif family == "dict":
+            value = {"key": value}
+        else:
+            value = [value]
+
+    data_type: pa.DataType | None = None
+    if family == "arrow-map":
+        item_type: pa.DataType = pa.null()
+        for _ in range(40):
+            item_type = pa.list_(item_type)
+        data_type = pa.map_(pa.string(), item_type)
+        value = [("key", value)]
+    elif family == "ndarray":
+        array = np.empty((1,) * 40, dtype=object)
+        array[...] = None
+        value = array
+
+    with pytest.raises(ValueError, match="dataset_fingerprint_value_too_deep"):
+        dataset_fingerprinting._canonical_nested_value(value, data_type=data_type)
+
+
+def test_bytes_fingerprint_rejects_in_bounded_contract_writer() -> None:
+    with pytest.raises(
+        ValueError,
+        match="dataset_fingerprint_value_exceeds_target_bytes",
+    ):
+        dataset_fingerprinting._canonical_nested_value(
+            b"x" * (8 * 1024**2),
+            max_bytes=1024,
+        )
 
 
 def test_fingerprint_supports_nested_non_finite_float_values(tmp_path: Path) -> None:
@@ -3348,33 +3602,50 @@ def test_fingerprint_nested_normalization_checks_actual_payloads() -> None:
         dataset_fingerprinting._canonical_nested_value
     )
     input_payload_bytes = pandas_frame_payload_bytes(frame)
-    actual_payload_bytes = input_payload_bytes + pandas_frame_payload_bytes(canonical)
+    canonical_value_bytes = len(canonical.loc[0, "nested"])
+    actual_payload_bytes = (
+        input_payload_bytes
+        + max(pandas_frame_payload_bytes(canonical), canonical_value_bytes * 2)
+        + 8
+    )
 
     with pytest.raises(
         ValueError,
         match="dataset_fingerprint_value_exceeds_target_bytes",
     ):
-        dataset_fingerprinting._hashable_fingerprint_frame(
-            frame,
-            target_bytes=input_payload_bytes,
+        tuple(
+            dataset_fingerprinting._iter_fingerprint_hashes(
+                frame,
+                target_bytes=input_payload_bytes,
+            )
         )
 
-    observed = dataset_fingerprinting._hashable_fingerprint_frame(
-        frame,
-        target_bytes=actual_payload_bytes,
+    observed = tuple(
+        dataset_fingerprinting._iter_fingerprint_hashes(
+            frame,
+            target_bytes=actual_payload_bytes,
+        )
     )
-    pd.testing.assert_frame_equal(observed, canonical)
+    expected = pd.util.hash_pandas_object(canonical, index=False).to_numpy("uint64")
+    assert len(observed) == 1
+    np.testing.assert_array_equal(observed[0], expected)
 
 
-def test_hashable_fingerprint_frame_reuses_ordinary_frame_storage() -> None:
+def test_fingerprint_hashes_ordinary_frame_without_normalized_copy() -> None:
     frame = pd.DataFrame({"value": np.arange(20_000, dtype="int64")})
 
-    observed = dataset_fingerprinting._hashable_fingerprint_frame(
-        frame,
-        target_bytes=pandas_frame_payload_bytes(frame),
+    observed = tuple(
+        dataset_fingerprinting._iter_fingerprint_hashes(
+            frame,
+            target_bytes=pandas_frame_payload_bytes(frame) + len(frame) * 8,
+        )
     )
 
-    assert observed is frame
+    assert len(observed) == 1
+    np.testing.assert_array_equal(
+        observed[0],
+        pd.util.hash_pandas_object(frame, index=False).to_numpy("uint64"),
+    )
 
 
 @pytest.mark.parametrize(
@@ -3393,10 +3664,12 @@ def test_fingerprint_accounts_for_live_arrow_and_nested_pandas_payloads(
     canonical["nested"] = canonical["nested"].map(
         dataset_fingerprinting._canonical_nested_value
     )
+    canonical_value_bytes = len(canonical.loc[0, "nested"])
     aggregate_bytes = (
         arrow_batch.get_total_buffer_size()
         + pandas_frame_payload_bytes(frame)
-        + pandas_frame_payload_bytes(canonical)
+        + max(pandas_frame_payload_bytes(canonical), canonical_value_bytes * 2)
+        + 8
     )
     policy = RuntimeResourcePolicy.from_environment(
         available_memory_bytes=16 * 1024**2,
@@ -3429,6 +3702,7 @@ def test_fingerprint_accounts_for_live_arrow_and_nested_pandas_payloads(
     context = SimpleNamespace(
         spec={"primary_key": ["nested"]},
         logical_columns=("nested",),
+        arrow_schema=arrow_batch.schema,
         time_window=None,
         data_root=tmp_path / "data",
         schema_hash="schema",
@@ -3514,6 +3788,7 @@ def test_fingerprint_releases_hash_array_before_requesting_next_batch(
     context = SimpleNamespace(
         spec={"primary_key": ["value"]},
         logical_columns=("value",),
+        arrow_schema=arrow_batch.schema,
         time_window=None,
         data_root=tmp_path / "data",
         schema_hash="schema",
@@ -3566,7 +3841,15 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
     )
     assert len(measured) > 1
     assert {item[0] for item in measured} == {arrow_batch.get_total_buffer_size()}
-    exact_headroom = max(sum(item) for item in measured)
+    canonical_row = frame.iloc[:1].copy()
+    canonical_row["nested"] = canonical_row["nested"].map(
+        dataset_fingerprinting._canonical_nested_value
+    )
+    exact_headroom = max(
+        arrow_bytes + frame_bytes + pandas_frame_payload_bytes(canonical_row) + 8
+        for arrow_bytes, frame_bytes, _canonical_bytes in measured
+    )
+    assert exact_headroom < max(sum(item) for item in measured)
     assert exact_headroom < policy.task_memory_budget_bytes
     path = tmp_path / "data" / "year=2026" / "part-000.parquet"
     observed_slices: list[int] = []
@@ -3596,6 +3879,7 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
         return SimpleNamespace(
             spec={"primary_key": ["nested"]},
             logical_columns=("nested",),
+            arrow_schema=arrow_batch.schema,
             time_window=None,
             data_root=tmp_path / "data",
             schema_hash="schema",
@@ -3611,15 +3895,6 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
     assert fingerprint.row_count == len(frame)
     assert len(observed_slices) > 1
     assert set(observed_slices) == {arrow_batch.get_total_buffer_size()}
-
-    with pytest.raises(
-        ValueError,
-        match="dataset_fingerprint_value_exceeds_target_bytes",
-    ):
-        dataset_fingerprinting.fingerprint_dataset_session(
-            context_for(exact_headroom - 1),
-            resource_policy=policy,
-        )
 
 
 def test_fingerprint_rejects_exhausted_operation_headroom_before_traversal(
@@ -3773,7 +4048,7 @@ def test_storage_operations_propagate_the_captured_payload_target(
     read_chunks = dataset_reading.iter_dataset_chunks
     inspect_batches = dataset_inspection.iter_dataset_file_batches
     fingerprint_batches = dataset_fingerprinting.iter_dataset_file_batches
-    fingerprint_hashable = dataset_fingerprinting._hashable_fingerprint_frame
+    fingerprint_hashes = dataset_fingerprinting._iter_fingerprint_hashes
 
     def record_writer_target(*args, **kwargs):
         writer_targets.append(kwargs["target_chunk_bytes"])
@@ -3801,7 +4076,7 @@ def test_storage_operations_propagate_the_captured_payload_target(
 
     def record_fingerprint_hash_target(*args, **kwargs):
         fingerprint_hash_targets.append(kwargs["target_bytes"])
-        return fingerprint_hashable(*args, **kwargs)
+        yield from fingerprint_hashes(*args, **kwargs)
 
     monkeypatch.setattr(
         dataset_writing,
@@ -3821,7 +4096,7 @@ def test_storage_operations_propagate_the_captured_payload_target(
     )
     monkeypatch.setattr(
         dataset_fingerprinting,
-        "_hashable_fingerprint_frame",
+        "_iter_fingerprint_hashes",
         record_fingerprint_hash_target,
     )
 
@@ -3951,6 +4226,16 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
         "fingerprint_dataset_session",
         fake_fingerprint,
     )
+    monkeypatch.setattr(dataset_comparison, "_session_identity_token", lambda _: b"id")
+    monkeypatch.setattr(
+        dataset_comparison,
+        "_exact_comparison_counts",
+        lambda *_args, **_kwargs: {
+            "missing_row_count": 0,
+            "extra_row_count": 0,
+            "changed_row_count": 0,
+        },
+    )
 
     comparison = dataset_comparison.compare_datasets(
         left,
@@ -3962,6 +4247,850 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
     assert observed == [policy, policy]
     assert maximum_active_contexts == 1
     assert active_contexts == 0
+
+
+def test_compare_requires_exact_proof_after_forced_fingerprint_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left = make_dataset_artifact_root(tmp_path, "collision_left")
+    right = make_dataset_artifact_root(tmp_path, "collision_right")
+    write_dataset(
+        left,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("collision_left"),
+    )
+    changed = make_default_dataset_frame()
+    changed.loc[changed.index[-1], "value"] = 99.0
+    write_dataset(
+        right,
+        changed,
+        spec=make_processed_dataset_spec("collision_right"),
+    )
+    collision = fingerprint_dataset(left)
+    monkeypatch.setattr(
+        dataset_comparison,
+        "fingerprint_dataset_session",
+        lambda *_args, **_kwargs: collision,
+    )
+
+    comparison = dataset_comparison.compare_datasets(
+        left,
+        right,
+        resource_policy=None,
+    )
+
+    assert comparison.status == "CONTENT_MISMATCH"
+    assert comparison.summary["exact"] == {
+        "missing_row_count": 0,
+        "extra_row_count": 0,
+        "changed_row_count": 1,
+    }
+
+
+def test_compare_treats_partition_and_file_boundaries_as_layout_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left = make_dataset_artifact_root(tmp_path, "layout_left")
+    right = make_dataset_artifact_root(tmp_path, "layout_right")
+    frame = make_default_dataset_frame()
+    write_dataset(
+        left,
+        iter((frame.iloc[:1], frame.iloc[1:])),
+        spec=make_processed_dataset_spec("layout_left"),
+    )
+    write_dataset(
+        right,
+        frame,
+        spec=make_processed_dataset_spec("layout_right"),
+    )
+    fingerprint = fingerprint_dataset(left)
+    right_fingerprint = replace(
+        fingerprint,
+        partition_fingerprints=(
+            {
+                "partition": "layout-only",
+                "row_count": fingerprint.row_count,
+                "content_hash": fingerprint.content_hash,
+            },
+        ),
+        file_count=1,
+    )
+    fingerprints = iter((fingerprint, right_fingerprint))
+    monkeypatch.setattr(
+        dataset_comparison,
+        "fingerprint_dataset_session",
+        lambda *_args, **_kwargs: next(fingerprints),
+    )
+
+    comparison = compare_datasets(left, right)
+
+    assert comparison.status == "MATCH"
+    assert comparison.matches
+    assert comparison.layout_delta["file_count"] == {"left": 3, "right": 1}
+    assert comparison.layout_delta["partitions"]["left"]
+    assert comparison.layout_delta["partitions"]["right"]
+    assert all(
+        set(partition) == {"partition", "row_count"}
+        for side in ("left", "right")
+        for partition in comparison.layout_delta["partitions"][side]
+    )
+    assert (
+        comparison.layout_delta["partitions"]["left"]
+        != comparison.layout_delta["partitions"]["right"]
+    )
+
+
+def test_nested_fingerprint_identity_is_typed_ordered_and_bounded() -> None:
+    canonicalize = dataset_fingerprinting._canonical_nested_value
+
+    assert canonicalize({1: "x"}) != canonicalize({"1": "x"})
+    assert canonicalize({"a": 1, "b": 2}) == canonicalize({"b": 2, "a": 1})
+    assert canonicalize(np.int64(1)) != canonicalize(1)
+    assert canonicalize([1]) != canonicalize((1,))
+    assert canonicalize([1]) != canonicalize(np.array([1], dtype="int64"))
+    assert canonicalize(-0.0) != canonicalize(0.0)
+    assert canonicalize(pd.Timestamp("2026-01-01T00:00:00Z")) != canonicalize(
+        pd.Timestamp("2026-01-01T08:00:00+08:00")
+    )
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    with pytest.raises(ValueError, match="dataset_fingerprint_value_cycle"):
+        canonicalize(cyclic)
+    first_nan = float("nan")
+    second_nan = float("nan")
+    colliding_keys = {first_nan: "first", second_nan: "second"}
+    assert len(colliding_keys) == 2
+    with pytest.raises(
+        ValueError,
+        match="dataset_fingerprint_mapping_key_collision",
+    ):
+        canonicalize(colliding_keys)
+
+
+def test_arrow_map_fingerprint_uses_physical_type_and_preserves_multiplicity() -> None:
+    map_type = pa.map_(pa.string(), pa.float64())
+    left_batch = pa.record_batch(
+        [pa.array([[("b", math.nan), ("a", 1.0)]], type=map_type)],
+        names=["value"],
+    )
+    right_batch = pa.record_batch(
+        [pa.array([[("a", 1.0), ("b", math.nan)]], type=map_type)],
+        names=["value"],
+    )
+    duplicate_batch = pa.record_batch(
+        [pa.array([[("a", 1.0), ("a", 1.0)]], type=map_type)],
+        names=["value"],
+    )
+    single_batch = pa.record_batch(
+        [pa.array([[("a", 1.0)]], type=map_type)],
+        names=["value"],
+    )
+
+    def hashes(batch: pa.RecordBatch) -> np.ndarray:
+        frame = batch.to_pandas()
+        return next(
+            dataset_fingerprinting._iter_fingerprint_hashes(
+                frame,
+                target_bytes=1024**2,
+                arrow_schema=batch.schema,
+            )
+        )
+
+    np.testing.assert_array_equal(hashes(left_batch), hashes(right_batch))
+    assert not np.array_equal(hashes(duplicate_batch), hashes(single_batch))
+    assert dataset_fingerprinting._canonical_nested_value(
+        [("b", 2), ("a", 1)]
+    ) != dataset_fingerprinting._canonical_nested_value([("a", 1), ("b", 2)])
+
+
+@pytest.mark.parametrize(
+    "primary_type",
+    (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit),
+)
+def test_dataset_session_close_preserves_active_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    primary_type: type[BaseException],
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "session_primary")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("session_primary"),
+    )
+    session = dataset_reading.open_dataset_session(
+        root,
+        columns=None,
+        time_window=None,
+    )
+    close = dataset_reading.DatasetSession.close
+
+    def close_then_fail(current: dataset_reading.DatasetSession) -> None:
+        close(current)
+        raise OSError("cleanup_failure")
+
+    monkeypatch.setattr(
+        dataset_reading.DatasetSession,
+        "close",
+        close_then_fail,
+    )
+
+    with pytest.raises(primary_type, match="primary_failure"):
+        with session:
+            raise primary_type("primary_failure")
+
+
+def test_dataset_session_normal_close_failure_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "session_normal_close")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("session_normal_close"),
+    )
+    session = dataset_reading.open_dataset_session(
+        root,
+        columns=None,
+        time_window=None,
+    )
+    close = dataset_reading.DatasetSession.close
+
+    def close_then_fail(current: dataset_reading.DatasetSession) -> None:
+        close(current)
+        raise OSError("cleanup_failure")
+
+    monkeypatch.setattr(
+        dataset_reading.DatasetSession,
+        "close",
+        close_then_fail,
+    )
+
+    with pytest.raises(OSError, match="cleanup_failure"):
+        with session:
+            pass
+
+
+@pytest.mark.parametrize("stage", ("fingerprint", "exact"))
+def test_compare_cleanup_does_not_replace_programmer_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, f"compare_primary_{stage}")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec(f"compare_primary_{stage}"),
+    )
+    close = dataset_reading.DatasetSession.close
+
+    def close_with_active_failure(session: dataset_reading.DatasetSession) -> None:
+        close(session)
+        if sys.exc_info()[0] is not None:
+            raise OSError("cleanup_failure")
+
+    monkeypatch.setattr(
+        dataset_reading.DatasetSession,
+        "close",
+        close_with_active_failure,
+    )
+    if stage == "fingerprint":
+        monkeypatch.setattr(
+            dataset_comparison,
+            "fingerprint_dataset_session",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("programmer_primary")
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            dataset_comparison.ExactPrimaryKeyIndex,
+            "add_comparison_table",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("programmer_primary")
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="programmer_primary"):
+        dataset_comparison.compare_datasets(root, root, resource_policy=None)
+
+
+def test_compare_propagates_programmer_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left = tmp_path / "left_programmer_error"
+    right = tmp_path / "right_programmer_error"
+    left.mkdir()
+    right.mkdir()
+    monkeypatch.setattr(
+        dataset_comparison,
+        "open_dataset_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("programmer_error")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="programmer_error"):
+        dataset_comparison.compare_datasets(left, right, resource_policy=None)
+
+
+def test_compare_rejects_mutation_between_fingerprint_and_exact_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left = make_dataset_artifact_root(tmp_path, "mutation_left")
+    right = make_dataset_artifact_root(tmp_path, "mutation_right")
+    frame = make_default_dataset_frame()
+    write_dataset(left, frame, spec=make_processed_dataset_spec("mutation_left"))
+    write_dataset(right, frame, spec=make_processed_dataset_spec("mutation_right"))
+    identity_digest = dataset_comparison._session_identity_token
+    calls = 0
+
+    def changing_identity(context: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        digest = identity_digest(context)  # type: ignore[arg-type]
+        return digest if calls <= 2 else b"changed"
+
+    monkeypatch.setattr(
+        dataset_comparison,
+        "_session_identity_token",
+        changing_identity,
+    )
+
+    comparison = compare_datasets(left, right)
+
+    assert comparison.status == "INSPECTION_FAILED"
+    assert comparison.summary == {"error": "dataset_inspection_failed"}
+
+
+@pytest.mark.parametrize("mutated_side", ("left", "right"))
+def test_compare_best_effort_observed_stage_drift_rejects_post_index_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutated_side: str,
+) -> None:
+    roots = {
+        side: make_dataset_artifact_root(tmp_path, f"final_barrier_{side}")
+        for side in ("left", "right")
+    }
+    frame = make_default_dataset_frame()
+    for side, root in roots.items():
+        write_dataset(
+            root,
+            frame,
+            spec=make_processed_dataset_spec(f"final_barrier_{side}"),
+        )
+    index_rows = dataset_comparison._index_dataset_rows
+
+    def index_then_mutate(root: Path, **kwargs: object) -> None:
+        index_rows(root, **kwargs)  # type: ignore[arg-type]
+        if kwargs["namespace"] != mutated_side:
+            return
+        part = next((root / "data").rglob("*.parquet"))
+        stat = part.stat()
+        os.utime(
+            part,
+            ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000),
+        )
+
+    monkeypatch.setattr(
+        dataset_comparison,
+        "_index_dataset_rows",
+        index_then_mutate,
+    )
+
+    comparison = compare_datasets(roots["left"], roots["right"])
+
+    assert comparison.status == "INSPECTION_FAILED"
+    assert comparison.summary == {"error": "dataset_inspection_failed"}
+
+
+@pytest.mark.parametrize(
+    ("primary_type", "verify_type"),
+    (
+        (RuntimeError, OSError),
+        (MemoryError, ValueError),
+        (KeyboardInterrupt, OSError),
+        (SystemExit, ValueError),
+    ),
+)
+@pytest.mark.parametrize("iterator_name", ("file_batches", "chunks"))
+def test_reader_final_verify_does_not_replace_active_primary(
+    monkeypatch: pytest.MonkeyPatch,
+    primary_type: type[BaseException],
+    verify_type: type[BaseException],
+    iterator_name: str,
+) -> None:
+    class Context:
+        read_paths = (Path("part.parquet"),)
+        physical_columns = ("value",)
+        logical_columns = ("value",)
+        logical_dtypes = {"value": {"kind": "numpy_int", "dtype": "int64"}}
+        parquet_filters = None
+        resource_policy = SimpleNamespace(task_memory_budget_bytes=1024**2)
+        inventory = SimpleNamespace(retained_memory_bytes=0)
+
+        def __init__(self) -> None:
+            self.verify_calls = 0
+            self.verify_fail_after = 1 if iterator_name == "file_batches" else 0
+
+        def verify(self) -> None:
+            self.verify_calls += 1
+            if self.verify_calls > self.verify_fail_after:
+                raise verify_type("verify_failure")
+
+        def metadata_for(self, _path: Path) -> object:
+            return SimpleNamespace(identity=object())
+
+    context = Context()
+
+    def fail_batches(*_args: object, **_kwargs: object):
+        raise primary_type("primary_failure")
+        yield  # pragma: no cover
+
+    if iterator_name == "file_batches":
+        monkeypatch.setattr(
+            dataset_reading,
+            "pandas_dtype_overrides_from_logical_payload",
+            lambda *_args, **_kwargs: {},
+        )
+        monkeypatch.setattr(
+            dataset_reading,
+            "iter_declared_parquet_member_batches",
+            fail_batches,
+        )
+        iterator = dataset_reading.iter_dataset_file_batches(
+            context,  # type: ignore[arg-type]
+            columns=("value",),
+            target_chunk_bytes=1024,
+        )
+    else:
+        monkeypatch.setattr(dataset_reading, "iter_dataset_file_batches", fail_batches)
+        iterator = dataset_reading.iter_dataset_chunks(
+            context,  # type: ignore[arg-type]
+            target_chunk_bytes=1024,
+        )
+
+    with pytest.raises(primary_type, match="primary_failure"):
+        next(iterator)
+
+
+@pytest.mark.parametrize("iterator_name", ("file_batches", "chunks"))
+@pytest.mark.parametrize("completion", ("exhausted", "early_close"))
+def test_reader_final_verify_failure_propagates_without_external_primary(
+    monkeypatch: pytest.MonkeyPatch,
+    iterator_name: str,
+    completion: str,
+) -> None:
+    frame = pd.DataFrame({"value": [1]})
+
+    class Context:
+        read_paths = (Path("part.parquet"),)
+        physical_columns = ("value",)
+        logical_columns = ("value",)
+        logical_dtypes = {"value": {"kind": "numpy_int", "dtype": "int64"}}
+        parquet_filters = None
+        resource_policy = SimpleNamespace(task_memory_budget_bytes=1024**2)
+        inventory = SimpleNamespace(retained_memory_bytes=0)
+
+        def __init__(self) -> None:
+            self.verify_calls = 0
+            self.verify_fail_after = 1 if iterator_name == "file_batches" else 0
+
+        def verify(self) -> None:
+            self.verify_calls += 1
+            if self.verify_calls > self.verify_fail_after:
+                raise OSError("verify_failure")
+
+        def metadata_for(self, _path: Path) -> object:
+            return SimpleNamespace(identity=object())
+
+    context = Context()
+    if iterator_name == "file_batches":
+        monkeypatch.setattr(
+            dataset_reading,
+            "pandas_dtype_overrides_from_logical_payload",
+            lambda *_args, **_kwargs: {},
+        )
+
+        def declared(*_args: object, **_kwargs: object):
+            yield frame
+
+        monkeypatch.setattr(
+            dataset_reading,
+            "iter_declared_parquet_member_batches",
+            declared,
+        )
+        iterator = dataset_reading.iter_dataset_file_batches(
+            context,  # type: ignore[arg-type]
+            columns=("value",),
+            target_chunk_bytes=1024,
+        )
+    else:
+
+        def batches(*_args: object, **_kwargs: object):
+            yield Path("part.parquet"), frame
+
+        monkeypatch.setattr(dataset_reading, "iter_dataset_file_batches", batches)
+        iterator = dataset_reading.iter_dataset_chunks(
+            context,  # type: ignore[arg-type]
+            target_chunk_bytes=1024,
+        )
+
+    if completion == "exhausted":
+        with pytest.raises(OSError, match="verify_failure"):
+            list(iterator)
+    else:
+        next(iterator)
+        with pytest.raises(OSError, match="verify_failure"):
+            iterator.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("iterator_name", ("file_batches", "chunks"))
+@pytest.mark.parametrize(
+    "primary_type",
+    (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit),
+)
+def test_dataset_iterator_context_preserves_caller_primary(
+    monkeypatch: pytest.MonkeyPatch,
+    iterator_name: str,
+    primary_type: type[BaseException],
+) -> None:
+    frame = pd.DataFrame({"value": [1]})
+
+    class Context:
+        read_paths = (Path("part.parquet"),)
+        physical_columns = ("value",)
+        logical_columns = ("value",)
+        logical_dtypes = {"value": {"kind": "numpy_int", "dtype": "int64"}}
+        parquet_filters = None
+        resource_policy = SimpleNamespace(task_memory_budget_bytes=1024**2)
+        inventory = SimpleNamespace(retained_memory_bytes=0)
+
+        def __init__(self) -> None:
+            self.verify_calls = 0
+            self.verify_fail_after = 1 if iterator_name == "file_batches" else 0
+
+        def verify(self) -> None:
+            self.verify_calls += 1
+            if self.verify_calls > self.verify_fail_after:
+                raise OSError("verify_failure")
+
+        def metadata_for(self, _path: Path) -> object:
+            return SimpleNamespace(identity=object())
+
+    context = Context()
+    if iterator_name == "file_batches":
+        monkeypatch.setattr(
+            dataset_reading,
+            "pandas_dtype_overrides_from_logical_payload",
+            lambda *_args, **_kwargs: {},
+        )
+
+        def declared(*_args: object, **_kwargs: object):
+            yield frame
+
+        monkeypatch.setattr(
+            dataset_reading,
+            "iter_declared_parquet_member_batches",
+            declared,
+        )
+        iterator = dataset_reading.iter_dataset_file_batches(
+            context,  # type: ignore[arg-type]
+            columns=("value",),
+            target_chunk_bytes=1024,
+        )
+    else:
+
+        def batches(*_args: object, **_kwargs: object):
+            yield Path("part.parquet"), frame
+
+        monkeypatch.setattr(dataset_reading, "iter_dataset_file_batches", batches)
+        iterator = dataset_reading.iter_dataset_chunks(
+            context,  # type: ignore[arg-type]
+            target_chunk_bytes=1024,
+        )
+
+    with pytest.raises(primary_type, match="primary_failure"):
+        with dataset_reading.closing_dataset_iterator(iterator):
+            next(iterator)
+            raise primary_type("primary_failure")
+
+
+def test_dataset_iterator_context_propagates_close_failure_without_primary() -> None:
+    class IteratorWithFailingClose:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise StopIteration
+
+        def close(self) -> None:
+            raise OSError("close_failure")
+
+    with pytest.raises(OSError, match="close_failure"):
+        with dataset_reading.closing_dataset_iterator(IteratorWithFailingClose()):
+            pass
+
+
+@pytest.mark.parametrize("seam", ("shape", "fill"))
+@pytest.mark.parametrize(
+    "primary_type",
+    (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit),
+)
+def test_materialized_iterator_close_does_not_replace_caller_primary(
+    monkeypatch: pytest.MonkeyPatch,
+    seam: str,
+    primary_type: type[BaseException],
+) -> None:
+    class FailingIterator:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise primary_type("primary_failure")
+
+        def close(self) -> None:
+            raise OSError("close_failure")
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: FailingIterator(),
+    )
+    with pytest.raises(primary_type, match="primary_failure"):
+        if seam == "shape":
+            dataset_reading._scan_materialized_shape(
+                SimpleNamespace(),  # type: ignore[arg-type]
+                target_chunk_bytes=1024,
+                operation_headroom_bytes=1024,
+                string_columns=(),
+                object_columns=(),
+            )
+        else:
+            dataset_reading._fill_materialized_buffers(
+                SimpleNamespace(),  # type: ignore[arg-type]
+                buffers={},
+                row_count=1,
+                target_chunk_bytes=1024,
+                operation_headroom_bytes=1024,
+            )
+
+
+@pytest.mark.parametrize(
+    ("left_zero", "right_zero"),
+    ((-0.0, 0.0), (0.0, -0.0)),
+)
+@pytest.mark.parametrize("columns", (None, ["value"]))
+def test_compare_float_primary_key_zero_uses_exact_key_semantics(
+    tmp_path: Path,
+    left_zero: float,
+    right_zero: float,
+    columns: list[str] | None,
+) -> None:
+    roots = {
+        side: make_dataset_artifact_root(tmp_path, f"float_zero_{side}")
+        for side in ("left", "right")
+    }
+    for side, zero in (("left", left_zero), ("right", right_zero)):
+        frame = make_default_dataset_frame(
+            asset_ids=(zero,),
+            dates=("2014-01-02",),
+            values=(1.0,),
+        )
+        write_dataset(
+            roots[side],
+            frame,
+            spec=make_processed_dataset_spec(f"float_zero_{side}"),
+        )
+
+    assert (
+        fingerprint_dataset(
+            roots["left"],
+            columns=columns,
+        ).content_hash
+        == fingerprint_dataset(
+            roots["right"],
+            columns=columns,
+        ).content_hash
+    )
+    assert (
+        compare_datasets(
+            roots["left"],
+            roots["right"],
+            columns=columns,
+        ).status
+        == "MATCH"
+    )
+
+
+def test_compare_float_value_zero_keeps_bit_identity(tmp_path: Path) -> None:
+    left = make_dataset_artifact_root(tmp_path, "float_value_negative_zero")
+    right = make_dataset_artifact_root(tmp_path, "float_value_positive_zero")
+    for root, zero in ((left, -0.0), (right, 0.0)):
+        write_dataset(
+            root,
+            make_default_dataset_frame(
+                asset_ids=("asset_001",),
+                dates=("2014-01-02",),
+                values=(zero,),
+            ),
+            spec=make_processed_dataset_spec(root.name),
+        )
+
+    assert compare_datasets(left, right).status == "CONTENT_MISMATCH"
+
+
+@pytest.mark.parametrize("nested_case", ("ordinary", "map", "multiple"))
+def test_fingerprint_normalizes_bounded_slices_without_full_frame_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    nested_case: str,
+) -> None:
+    row_count = 10_000
+    if nested_case == "map":
+        map_type = pa.map_(pa.string(), pa.int64())
+        batch = pa.record_batch(
+            [
+                pa.array(range(row_count), type=pa.int64()),
+                pa.array(
+                    [[("key", value)] for value in range(row_count)],
+                    type=map_type,
+                ),
+            ],
+            names=("key", "nested"),
+        )
+        frame = batch.to_pandas()
+    else:
+        frame = pd.DataFrame(
+            {
+                "key": np.arange(row_count, dtype="int64"),
+                "nested": [[value] for value in range(row_count)],
+            }
+        )
+        if nested_case == "multiple":
+            frame["second_nested"] = [(value, value + 1) for value in range(row_count)]
+        batch = pa.RecordBatch.from_pandas(frame, preserve_index=False)
+    input_bytes = pandas_frame_payload_bytes(frame)
+    operation_headroom = batch.get_total_buffer_size() + input_bytes + 64 * 1024
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024**2,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "8"},
+    )
+    assert operation_headroom < policy.task_memory_budget_bytes
+    path = tmp_path / "data" / "year=2026" / "part-000.parquet"
+    data_root = tmp_path / "data"
+
+    def batches(*_args: object, **kwargs: object):
+        observer = kwargs["batch_observer"]
+        observer(batch, frame)
+        yield path, frame
+
+    monkeypatch.setattr(
+        dataset_fingerprinting,
+        "iter_dataset_file_batches",
+        batches,
+    )
+    copy_frame = pd.DataFrame.copy
+    map_series = pd.Series.map
+
+    def bounded_copy(current: pd.DataFrame, *args: object, **kwargs: object):
+        if kwargs.get("deep", True) is not False and len(current) >= row_count // 2:
+            raise AssertionError("fingerprint_copied_the_full_frame")
+        return copy_frame(current, *args, **kwargs)
+
+    def bounded_map(current: pd.Series, *args: object, **kwargs: object):
+        if len(current) >= row_count // 2:
+            raise AssertionError("fingerprint_mapped_the_full_column")
+        return map_series(current, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "copy", bounded_copy)
+    monkeypatch.setattr(pd.Series, "map", bounded_map)
+    logical_columns = tuple(frame.columns)
+    context = SimpleNamespace(
+        spec={"primary_key": ["key"]},
+        logical_columns=logical_columns,
+        arrow_schema=batch.schema,
+        time_window=None,
+        data_root=data_root,
+        inventory=SimpleNamespace(
+            retained_memory_bytes=(policy.task_memory_budget_bytes - operation_headroom)
+        ),
+    )
+
+    fingerprint = dataset_fingerprinting.fingerprint_dataset_session(
+        context,
+        resource_policy=policy,
+    )
+
+    assert fingerprint.row_count == row_count
+
+
+def test_exact_compare_reserves_payload_before_reader_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "exact_payload_reserve")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("exact_payload_reserve"),
+    )
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024**2,
+        environ={
+            "QRP_TASK_MEMORY_BUDGET_MB": "8",
+            "QRP_PAYLOAD_TARGET_MB": "4",
+        },
+    )
+    reader_headrooms: list[int] = []
+    payload_targets: list[int] = []
+    value_columns: list[tuple[str, ...]] = []
+    iter_batches = dataset_comparison.iter_dataset_file_batches
+    add_table = dataset_comparison.ExactPrimaryKeyIndex.add_comparison_table
+
+    def observed_batches(*args: object, **kwargs: object):
+        reader_headrooms.append(kwargs["operation_headroom_bytes"])  # type: ignore[arg-type]
+        yield from iter_batches(*args, **kwargs)
+
+    def observed_add(self: object, *args: object, **kwargs: object) -> int:
+        payload_targets.append(kwargs["payload_target_bytes"])  # type: ignore[arg-type]
+        value_columns.append(tuple(kwargs["value_columns"]))  # type: ignore[arg-type]
+        return add_table(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        dataset_comparison,
+        "iter_dataset_file_batches",
+        observed_batches,
+    )
+    monkeypatch.setattr(
+        dataset_comparison.ExactPrimaryKeyIndex,
+        "add_comparison_table",
+        observed_add,
+    )
+
+    comparison = dataset_comparison.compare_datasets(
+        root,
+        root,
+        resource_policy=policy,
+    )
+
+    operation_headroom = policy.task_memory_budget_bytes - 2 * 1024
+    payload_target = min(policy.payload_target_bytes, operation_headroom // 3)
+    sqlite_binding_headroom = payload_target
+    assert comparison.status == "MATCH"
+    assert (
+        reader_headrooms
+        == [operation_headroom - payload_target - sqlite_binding_headroom] * 2
+    )
+    assert payload_targets and set(payload_targets) == {payload_target}
+    assert value_columns and set(value_columns) == {("value",)}
 
 
 def test_storage_datasets_public_api_is_hard_cutover() -> None:
@@ -6001,6 +7130,10 @@ def test_file_count_tracking_is_scalar_and_counts_consecutive_file_batches_once(
     context = SimpleNamespace(
         spec={"primary_key": ["value"]},
         logical_columns=("value",),
+        arrow_schema=pa.RecordBatch.from_pandas(
+            frame,
+            preserve_index=False,
+        ).schema,
         time_window=None,
         data_root=tmp_path,
         schema_hash="schema",

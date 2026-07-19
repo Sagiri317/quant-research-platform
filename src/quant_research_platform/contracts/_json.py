@@ -6,9 +6,11 @@ import hashlib
 import json
 import math
 import struct
+from array import array
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, Rounded
 from typing import Any, NoReturn
 
 import pandas as pd
@@ -17,6 +19,9 @@ _LENGTH_BYTES = 8
 _MAX_INTEGER_DECIMAL_DIGITS = 4_096
 _MAX_INTEGER_BITS = 13_607
 _MAX_NESTING_DEPTH = 64
+_TEXT_CHUNK_CHARACTERS = 16 * 1024
+_TUPLE_BASE_BYTES = ().__sizeof__()
+_POINTER_BYTES = struct.calcsize("P")
 _RETIRED_JSON_IDENTITY_KEYS = frozenset({"contract_version", "schema_version"})
 
 
@@ -170,79 +175,382 @@ def canonical_identity_bytes(value: object) -> bytes:
     """Return the typed canonical identity encoding for ``value``."""
 
     try:
-        return _canonical_identity_bytes(value, active=set(), depth=0)
+        writer = CanonicalIdentityWriter(max_bytes=None)
+        writer.value(value)
+        return writer.finish()
     except RecursionError as exc:
         raise ValueError("canonical_json_recursion_limit") from exc
 
 
-def _canonical_identity_bytes(
-    value: object,
-    *,
-    active: set[int],
-    depth: int,
-) -> bytes:
-    if depth > _MAX_NESTING_DEPTH:
-        raise ValueError("canonical_json_recursion_limit")
+class CanonicalIdentityWriter:
+    """Internal bounded writer for conceptual canonical identity values."""
 
-    if value is None:
-        return _frame(b"n", b"")
-    if value is False:
-        return _frame(b"f", b"")
-    if value is True:
-        return _frame(b"t", b"")
-    if type(value) is int:
-        _validate_integer_size(value, error="canonical_json_integer_too_large")
-        return _frame(b"i", str(value).encode("ascii"))
-    if type(value) is float:
-        if not math.isfinite(value):
+    __slots__ = (
+        "_active",
+        "_auxiliary_bytes",
+        "_buffer",
+        "_finished",
+        "_manual_base_depth",
+        "_manual_counts",
+        "_max_bytes",
+        "_root_count",
+    )
+
+    def __init__(self, max_bytes: int | None) -> None:
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+            raise ValueError("canonical_identity_max_bytes_invalid")
+        self._active: set[int] = set()
+        self._auxiliary_bytes = 0
+        self._buffer = bytearray()
+        self._finished = False
+        self._manual_base_depth = 0
+        self._manual_counts: list[list[int]] = []
+        self._max_bytes = max_bytes
+        self._root_count = 0
+
+    def value(self, value: object) -> None:
+        self._claim_item()
+        self._write_value(
+            value,
+            depth=self._manual_base_depth + len(self._manual_counts),
+        )
+
+    @contextmanager
+    def tuple_items(self, item_count: int):  # type: ignore[no-untyped-def]
+        if type(item_count) is not int or item_count < 0:
+            raise ValueError("canonical_identity_item_count_invalid")
+        if self._manual_base_depth + len(self._manual_counts) > _MAX_NESTING_DEPTH:
+            raise ValueError("canonical_json_recursion_limit")
+        self._claim_item()
+        length_offset, payload_start = self._start_frame(b"u")
+        self._append(_uint64(item_count))
+        state = [item_count, 0]
+        self._manual_counts.append(state)
+        try:
+            yield self
+            if state[1] != state[0]:
+                raise ValueError("canonical_identity_item_count_mismatch")
+        finally:
+            self._manual_counts.pop()
+        self._finish_frame(length_offset, payload_start)
+
+    @contextmanager
+    def canonical_order(
+        self,
+        item_count: int,
+        emit: Callable[[CanonicalIdentityWriter, Any], None],
+        *,
+        collision_error: str | None = None,
+        mapping: dict[object, object] | None = None,
+    ):  # type: ignore[no-untyped-def]
+        """Yield compact indexes ordered by one conceptual emitted identity."""
+
+        if type(item_count) is not int or item_count < 0:
+            raise ValueError("canonical_identity_item_count_invalid")
+        if mapping is not None and len(mapping) != item_count:
+            raise ValueError("canonical_identity_item_count_mismatch")
+        snapshot_bytes = (
+            0 if mapping is None else _TUPLE_BASE_BYTES + item_count * _POINTER_BYTES
+        )
+        auxiliary_bytes = snapshot_bytes + (item_count + 1 + item_count) * 8
+        self._reserve_auxiliary(auxiliary_bytes)
+        keys: tuple[object, ...] | None = None
+        offsets = array("Q")
+        order = array("Q")
+        checkpoint = len(self._buffer)
+        saved_counts = self._manual_counts
+        saved_base_depth = self._manual_base_depth
+        saved_root_count = self._root_count
+        try:
+            if mapping is not None:
+                keys = tuple(mapping)
+                if len(keys) != item_count:
+                    raise RuntimeError("canonical_identity_mapping_changed")
+            self._manual_base_depth += len(saved_counts)
+            self._manual_counts = []
+            offsets.append(checkpoint)
+            for index in range(item_count):
+                self._root_count = 0
+                emit(self, index if keys is None else keys[index])
+                if self._root_count != 1:
+                    raise ValueError("canonical_identity_order_key_required")
+                offsets.append(len(self._buffer))
+                order.append(index)
+            _heap_sort_identity_ranges(self._buffer, offsets, order)
+            if collision_error is not None and any(
+                _compare_identity_ranges(
+                    self._buffer,
+                    offsets[order[index]],
+                    offsets[order[index] + 1],
+                    offsets[order[index - 1]],
+                    offsets[order[index - 1] + 1],
+                )
+                == 0
+                for index in range(1, item_count)
+            ):
+                raise ValueError(collision_error)
+            del self._buffer[checkpoint:]
+            self._manual_counts = saved_counts
+            self._manual_base_depth = saved_base_depth
+            self._root_count = saved_root_count
+            yield order if keys is None else (keys, order)
+        finally:
+            if (
+                len(self._buffer) > checkpoint
+                and self._manual_counts is not saved_counts
+            ):
+                del self._buffer[checkpoint:]
+            self._manual_counts = saved_counts
+            self._manual_base_depth = saved_base_depth
+            self._root_count = saved_root_count
+            self._release_auxiliary(auxiliary_bytes)
+
+    def finish(self) -> bytes:
+        if self._finished:
+            raise RuntimeError("canonical_identity_writer_finished")
+        if self._manual_counts or self._root_count != 1:
+            raise ValueError("canonical_identity_single_value_required")
+        self._require_capacity(len(self._buffer))
+        payload = bytes(self._buffer)
+        self._buffer.clear()
+        self._finished = True
+        return payload
+
+    def _claim_item(self) -> None:
+        if self._finished:
+            raise RuntimeError("canonical_identity_writer_finished")
+        if self._manual_counts:
+            state = self._manual_counts[-1]
+            state[1] += 1
+            if state[1] > state[0]:
+                raise ValueError("canonical_identity_item_count_mismatch")
+        else:
+            self._root_count += 1
+            if self._root_count > 1:
+                raise ValueError("canonical_identity_single_value_required")
+
+    def _write_value(self, value: object, *, depth: int) -> None:
+        if depth > _MAX_NESTING_DEPTH:
+            raise ValueError("canonical_json_recursion_limit")
+        if value is None:
+            self._write_frame(b"n", b"")
+        elif value is False:
+            self._write_frame(b"f", b"")
+        elif value is True:
+            self._write_frame(b"t", b"")
+        elif type(value) is int:
+            _validate_integer_size(value, error="canonical_json_integer_too_large")
+            self._write_frame(b"i", str(value).encode("ascii"))
+        elif type(value) is float:
+            if not math.isfinite(value):
+                raise ValueError("canonical_json_nonfinite_number")
+            normalized = 0.0 if value == 0.0 else value
+            self._write_frame(b"r", struct.pack(">d", normalized))
+        elif type(value) is str:
+            self._write_text_frame(b"s", value)
+        elif type(value) is bytes:
+            self._write_frame(b"b", value)
+        elif value is pd.NaT:
+            raise ValueError("canonical_json_invalid_timestamp")
+        elif type(value) is Decimal:
+            self._write_decimal_frame(value)
+        elif type(value) is pd.Timestamp:
+            self._write_frame(b"p", _timestamp_payload(value))
+        elif type(value) is datetime:
+            self._write_frame(b"z", _datetime_payload(value))
+        elif type(value) is date:
+            self._write_frame(b"a", _date_payload(value))
+        elif type(value) is list:
+            self._write_sequence(value, tag=b"l", depth=depth)
+        elif type(value) is tuple:
+            self._write_sequence(value, tag=b"u", depth=depth)
+        elif type(value) is dict:
+            self._write_mapping(value, depth=depth)
+        else:
+            raise ValueError("canonical_json_unsupported_value")
+
+    def _write_sequence(
+        self, value: list[object] | tuple[object, ...], *, tag: bytes, depth: int
+    ) -> None:
+        identity = self._activate(value)
+        try:
+            length_offset, payload_start = self._start_frame(tag)
+            self._append(_uint64(len(value)))
+            for item in value:
+                self._write_value(item, depth=depth + 1)
+            self._finish_frame(length_offset, payload_start)
+        finally:
+            self._active.remove(identity)
+
+    def _write_mapping(self, value: dict[object, object], *, depth: int) -> None:
+        identity = self._activate(value)
+        try:
+            for key in value:
+                if type(key) is not str:
+                    raise ValueError("canonical_json_non_string_key")
+
+            def emit_key(target: CanonicalIdentityWriter, key: object) -> None:
+                assert type(key) is str
+                target._claim_item()
+                target._append_utf8(key)
+
+            with self.canonical_order(
+                len(value),
+                emit_key,
+                mapping=value,
+            ) as (keys, order):
+                length_offset, payload_start = self._start_frame(b"m")
+                self._append(_uint64(len(keys)))
+                for index in order:
+                    key = keys[index]
+                    assert type(key) is str
+                    self._write_text_frame(b"k", key)
+                    self._write_value(value[key], depth=depth + 1)
+                self._finish_frame(length_offset, payload_start)
+        finally:
+            self._active.remove(identity)
+
+    def _activate(self, value: object) -> int:
+        identity = id(value)
+        if identity in self._active:
+            raise ValueError("canonical_json_cycle")
+        self._active.add(identity)
+        return identity
+
+    def _write_frame(self, tag: bytes, payload: bytes) -> None:
+        length_offset, payload_start = self._start_frame(tag)
+        self._append(payload)
+        self._finish_frame(length_offset, payload_start)
+
+    def _write_text_frame(self, tag: bytes, value: str) -> None:
+        length_offset, payload_start = self._start_frame(tag)
+        self._append_utf8(value)
+        self._finish_frame(length_offset, payload_start)
+
+    def _append_utf8(self, value: str) -> None:
+        offset = 0
+        while offset < len(value):
+            chunk_characters = _TEXT_CHUNK_CHARACTERS
+            if self._max_bytes is not None:
+                remaining = self._max_bytes - len(self._buffer) - self._auxiliary_bytes
+                if remaining <= 0:
+                    self._require_capacity(1)
+                chunk_characters = min(
+                    chunk_characters,
+                    max(1, remaining // 4),
+                )
+            chunk = value[offset : offset + chunk_characters]
+            self._append(_utf8_bytes(chunk))
+            offset += len(chunk)
+
+    def _write_decimal_frame(self, value: Decimal) -> None:
+        if not value.is_finite():
             raise ValueError("canonical_json_nonfinite_number")
-        normalized = 0.0 if value == 0.0 else value
-        return _frame(b"r", struct.pack(">d", normalized))
-    if type(value) is str:
-        return _frame(b"s", _utf8_bytes(value))
-    if type(value) is bytes:
-        return _frame(b"b", value)
-    if value is pd.NaT:
-        raise ValueError("canonical_json_invalid_timestamp")
-    if type(value) is Decimal:
-        return _frame(b"d", _decimal_payload(value))
-    if type(value) is pd.Timestamp:
-        return _frame(b"p", _timestamp_payload(value))
-    if type(value) is datetime:
-        return _frame(b"z", _datetime_payload(value))
-    if type(value) is date:
-        return _frame(b"a", _date_payload(value))
-    if type(value) is list:
-        return _with_active_container(
-            value,
-            active=active,
-            error="canonical_json_cycle",
-            build=lambda: _frame(
-                b"l",
-                _sequence_payload(value, active=active, depth=depth + 1),
-            ),
+        if self._max_bytes is not None:
+            adjusted_exponent = value.adjusted()
+            if adjusted_exponent < MIN_EMIN or adjusted_exponent > MAX_EMAX:
+                raise ValueError("canonical_identity_exceeds_max_bytes")
+            admission = Context(
+                prec=_MAX_INTEGER_DECIMAL_DIGITS,
+                Emin=MIN_EMIN,
+                Emax=MAX_EMAX,
+                traps=[Rounded],
+            )
+            try:
+                admission.plus(value)
+            except Rounded as exc:
+                raise ValueError("canonical_identity_exceeds_max_bytes") from exc
+        decimal_tuple = value.as_tuple()
+        is_zero = not any(decimal_tuple.digits)
+        sign = 0 if is_zero else int(decimal_tuple.sign)
+        exponent = str(decimal_tuple.exponent).encode("ascii")
+        payload_bytes = 1 + _LENGTH_BYTES + len(decimal_tuple.digits)
+        payload_bytes += 1 + _LENGTH_BYTES + len(exponent)
+        self._require_capacity(1 + _LENGTH_BYTES + payload_bytes)
+        length_offset, payload_start = self._start_frame(b"d")
+        self._append(bytes((sign,)))
+        self._append(_uint64(len(decimal_tuple.digits)))
+        self._append(bytes(decimal_tuple.digits))
+        self._write_frame(b"e", exponent)
+        self._finish_frame(length_offset, payload_start)
+
+    def _start_frame(self, tag: bytes) -> tuple[int, int]:
+        if len(tag) != 1:
+            raise AssertionError("canonical_json_tag_must_be_one_byte")
+        self._append(tag)
+        length_offset = len(self._buffer)
+        self._append(b"\x00" * _LENGTH_BYTES)
+        return length_offset, len(self._buffer)
+
+    def _finish_frame(self, length_offset: int, payload_start: int) -> None:
+        struct.pack_into(
+            ">Q",
+            self._buffer,
+            length_offset,
+            len(self._buffer) - payload_start,
         )
-    if type(value) is tuple:
-        return _with_active_container(
-            value,
-            active=active,
-            error="canonical_json_cycle",
-            build=lambda: _frame(
-                b"u",
-                _sequence_payload(value, active=active, depth=depth + 1),
-            ),
+
+    def _append(self, payload: bytes) -> None:
+        self._require_capacity(len(payload))
+        self._buffer.extend(payload)
+
+    def _require_capacity(self, additional_bytes: int) -> None:
+        if self._max_bytes is not None and (
+            len(self._buffer) + self._auxiliary_bytes + additional_bytes
+            > self._max_bytes
+        ):
+            raise ValueError("canonical_identity_exceeds_max_bytes")
+
+    def _reserve_auxiliary(self, size: int) -> None:
+        self._require_capacity(size)
+        self._auxiliary_bytes += size
+
+    def _release_auxiliary(self, size: int) -> None:
+        self._auxiliary_bytes -= size
+
+
+def _compare_identity_ranges(
+    buffer: bytearray, left_start: int, left_end: int, right_start: int, right_end: int
+) -> int:
+    left = memoryview(buffer)[left_start:left_end]
+    right = memoryview(buffer)[right_start:right_end]
+    for left_byte, right_byte in zip(left, right, strict=False):
+        if left_byte != right_byte:
+            return -1 if left_byte < right_byte else 1
+    return (left_end - left_start > right_end - right_start) - (
+        left_end - left_start < right_end - right_start
+    )
+
+
+def _heap_sort_identity_ranges(
+    buffer: bytearray, offsets: array[int], order: array[int]
+) -> None:
+    def greater(left: int, right: int) -> bool:
+        return (
+            _compare_identity_ranges(
+                buffer,
+                offsets[left],
+                offsets[left + 1],
+                offsets[right],
+                offsets[right + 1],
+            )
+            > 0
         )
-    if type(value) is dict:
-        return _with_active_container(
-            value,
-            active=active,
-            error="canonical_json_cycle",
-            build=lambda: _frame(
-                b"m",
-                _mapping_payload(value, active=active, depth=depth + 1),
-            ),
-        )
-    raise ValueError("canonical_json_unsupported_value")
+
+    def sift(root: int, stop: int) -> None:
+        while (child := root * 2 + 1) < stop:
+            if child + 1 < stop and greater(order[child + 1], order[child]):
+                child += 1
+            if not greater(order[child], order[root]):
+                return
+            order[root], order[child] = order[child], order[root]
+            root = child
+
+    for root in range(len(order) // 2 - 1, -1, -1):
+        sift(root, len(order))
+    for stop in range(len(order) - 1, 0, -1):
+        order[0], order[stop] = order[stop], order[0]
+        sift(0, stop)
 
 
 def _strict_object_from_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -344,73 +652,11 @@ def _uint64(value: int) -> bytes:
     return value.to_bytes(_LENGTH_BYTES, byteorder="big", signed=False)
 
 
-def _sequence_payload(
-    value: list[object] | tuple[object, ...],
-    *,
-    active: set[int],
-    depth: int,
-) -> bytes:
-    return _uint64(len(value)) + b"".join(
-        _canonical_identity_bytes(item, active=active, depth=depth) for item in value
-    )
-
-
-def _mapping_payload(
-    value: Mapping[object, object],
-    *,
-    active: set[int],
-    depth: int,
-) -> bytes:
-    entries: list[tuple[bytes, object]] = []
-    for key, item in value.items():
-        if type(key) is not str:
-            raise ValueError("canonical_json_non_string_key")
-        entries.append((_utf8_bytes(key), item))
-    entries.sort(key=lambda item: item[0])
-    return _uint64(len(entries)) + b"".join(
-        _frame(b"k", key)
-        + _canonical_identity_bytes(item, active=active, depth=depth)
-        for key, item in entries
-    )
-
-
-def _with_active_container(
-    value: object,
-    *,
-    active: set[int],
-    error: str,
-    build: Callable[[], bytes],
-) -> bytes:
-    identity = id(value)
-    if identity in active:
-        raise ValueError(error)
-    active.add(identity)
-    try:
-        return build()
-    finally:
-        active.remove(identity)
-
-
 def _validate_integer_size(value: int, *, error: str) -> None:
     if value.bit_length() > _MAX_INTEGER_BITS:
         raise ValueError(error)
     if len(str(abs(value))) > _MAX_INTEGER_DECIMAL_DIGITS:
         raise ValueError(error)
-
-
-def _decimal_payload(value: Decimal) -> bytes:
-    if not value.is_finite():
-        raise ValueError("canonical_json_nonfinite_number")
-    decimal_tuple = value.as_tuple()
-    is_zero = not any(decimal_tuple.digits)
-    sign = 0 if is_zero else int(decimal_tuple.sign)
-    digits = bytes(decimal_tuple.digits)
-    return (
-        bytes((sign,))
-        + _uint64(len(digits))
-        + digits
-        + _frame(b"e", str(decimal_tuple.exponent).encode("ascii"))
-    )
 
 
 def _timestamp_payload(value: pd.Timestamp) -> bytes:

@@ -748,7 +748,7 @@ def test_a_share_direct_dataset_consumers_use_deterministic_iterator_closing() -
 
     for function in functions:
         source = inspect.getsource(function)
-        assert "with closing(" in source
+        assert "with closing_dataset_iterator(" in source
 
 
 def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(

@@ -38,6 +38,22 @@ def test_platform_flow_distinguishes_handle_checks_and_memory_diagnostics() -> N
     assert "actual peak remains 5B" in text
 
 
+def test_compare_contract_requires_quiescence_without_joint_barrier_claim() -> None:
+    platform = PLATFORM_FLOW.read_text(encoding="utf-8")
+    engineering = Path("docs/architecture/engineering-contract.md").read_text(
+        encoding="utf-8"
+    )
+    combined = f"{platform}\n{engineering}"
+
+    assert "整个比较过程中保持静止（quiescent）" in combined
+    assert (
+        "尽力而为的已观测漂移检测（best-effort observed-drift detection）"
+        in combined
+    )
+    assert "final identity barrier" not in combined
+    assert "joint stable point" not in combined
+
+
 DELETED_MODULE_PATHS = (
     SOURCE_ROOT / "markets/implementations/a_share/source_bindings",
     SOURCE_ROOT / "contracts/data_products.py",
@@ -428,6 +444,37 @@ def test_runtime_resource_contract_has_no_generic_planner_surface() -> None:
     assert not Path(
         "src/quant_research_platform/runtime/_resource_accounting.py"
     ).exists()
+
+
+def test_dataset_iterator_closing_has_one_internal_storage_owner() -> None:
+    owner = SOURCE_ROOT / "storage/_dataset_reading.py"
+    definitions: list[str] = []
+    callers: dict[str, int] = {}
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        if any(
+            isinstance(node, ast.FunctionDef)
+            and node.name == "closing_dataset_iterator"
+            for node in ast.walk(tree)
+        ):
+            definitions.append(path.as_posix())
+        count = source.count("closing_dataset_iterator(")
+        if count and path != owner:
+            callers[path.as_posix()] = count
+
+    assert definitions == [owner.as_posix()]
+    assert callers == {
+        "src/quant_research_platform/markets/implementations/a_share/processed/"
+        "materialization_planning.py": 3,
+        "src/quant_research_platform/markets/implementations/crypto/processed/"
+        "materialization_validation.py": 5,
+        "src/quant_research_platform/markets/implementations/crypto/processed/"
+        "materialize_panel.py": 2,
+        "src/quant_research_platform/research/datasets/assembler.py": 1,
+    }
+    storage_facade = importlib.import_module("quant_research_platform.storage.datasets")
+    assert not hasattr(storage_facade, "closing_dataset_iterator")
 
 
 def test_runtime_resource_contract_has_one_current_source_surface() -> None:

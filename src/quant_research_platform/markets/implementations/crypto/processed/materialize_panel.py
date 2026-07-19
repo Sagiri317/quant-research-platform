@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Hashable, Iterator, Mapping
-from contextlib import ExitStack, closing
+from contextlib import ExitStack
 from dataclasses import replace
 
 import pandas as pd
@@ -28,6 +28,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
+    closing_dataset_iterator,
     iter_dataset_chunks,
     open_dataset_session,
     parquet_filters_for_time_window,
@@ -165,14 +166,14 @@ def _iter_panel_chunks(
                     error="crypto_indivisible_reducer_unit_exceeds_payload_target",
                 )
                 with (
-                    closing(
+                    closing_dataset_iterator(
                         _iter_matching_trade_chunks(
                             trade_session,
                             prepared_bars,
                             target_chunk_bytes=chunk_target_bytes,
                         )
                     ) as trade_chunks,
-                    closing(
+                    closing_dataset_iterator(
                         _iter_matching_depth_chunks(
                             depth_session,
                             prepared_bars,

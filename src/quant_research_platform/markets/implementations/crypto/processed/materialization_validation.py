@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from itertools import zip_longest
 from pathlib import Path
@@ -26,6 +26,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
+    closing_dataset_iterator,
     filter_frame_by_time_window,
     iter_dataset_chunks,
     iter_dataset_file_batches,
@@ -181,13 +182,13 @@ def validate_panel_materialization(
     )
     chunk_target_bytes = resource_policy.payload_target_bytes
     with (
-        closing(
+        closing_dataset_iterator(
             iter_dataset_chunks(
                 bar_session,
                 target_chunk_bytes=chunk_target_bytes,
             )
         ) as bar_chunks,
-        closing(
+        closing_dataset_iterator(
             _iter_panel_primary_key_chunks(
                 bar_chunks,
                 primary_key=spec.primary_key,
@@ -279,19 +280,19 @@ def validate_existing_panel_materialization(
     )
     chunk_target_bytes = resource_policy.payload_target_bytes
     with (
-        closing(
+        closing_dataset_iterator(
             iter_dataset_chunks(
                 bar_session,
                 target_chunk_bytes=chunk_target_bytes,
             )
         ) as bar_chunks,
-        closing(
+        closing_dataset_iterator(
             _iter_panel_primary_key_chunks(
                 bar_chunks,
                 primary_key=spec.primary_key,
             )
         ) as expected_chunks,
-        closing(
+        closing_dataset_iterator(
             iter_dataset_chunks(
                 panel_session,
                 target_chunk_bytes=chunk_target_bytes,

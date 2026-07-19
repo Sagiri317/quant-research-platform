@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Sequence
-from contextlib import closing
 from math import ceil
 from pathlib import Path
 
@@ -39,6 +38,7 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
 )
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     inspect_dataset,
@@ -105,7 +105,7 @@ def _dataset_session_dates(
         target_chunk_bytes=resource_policy.payload_target_bytes,
     )
     dates: set[object] = set()
-    with closing(chunks):
+    with closing_dataset_iterator(chunks):
         for chunk in chunks:
             timestamp = strict_values.strict_timestamp_value_series(
                 chunk["timestamp"], error="invalid_dataset_session_timestamp"
@@ -137,7 +137,7 @@ def processed_panel_key_coverage(
         target_chunk_bytes=resource_policy.payload_target_bytes,
     )
     coverage: dict[object, set[pd.Timestamp]] = {}
-    with closing(chunks):
+    with closing_dataset_iterator(chunks):
         for chunk in chunks:
             if chunk.empty:
                 continue
@@ -206,7 +206,7 @@ def available_trading_sessions(
     def result() -> tuple[pd.Timestamp, ...]:
         return (*before, *core, *after)
 
-    with closing(chunks):
+    with closing_dataset_iterator(chunks):
         for calendar in chunks:
             source_market_type = strict_values.strict_market_type_series(
                 calendar["source_market_type"],
