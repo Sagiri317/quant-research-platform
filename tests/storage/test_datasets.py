@@ -7,6 +7,7 @@ import math
 import os
 import sys
 import weakref
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -69,6 +70,90 @@ from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
     make_processed_dataset_spec,
+)
+
+
+def _issued_test_policy(task_bytes: int = 16 * 1024**2) -> RuntimeResourcePolicy:
+    return RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=task_bytes * 5 // 4,
+        environ={},
+    )
+
+
+_ARROW_SCALAR_LOGICAL_DTYPE_CASES = (
+    ("boolean", pa.bool_(), "nullable_boolean", "boolean", True),
+    ("int8", pa.int8(), "nullable_integer", "Int8", 1),
+    ("int16", pa.int16(), "nullable_integer", "Int16", 1),
+    ("int32", pa.int32(), "nullable_integer", "Int32", 1),
+    ("int64", pa.int64(), "nullable_integer", "Int64", 1),
+    ("uint8", pa.uint8(), "nullable_integer", "UInt8", 1),
+    ("uint16", pa.uint16(), "nullable_integer", "UInt16", 1),
+    ("uint32", pa.uint32(), "nullable_integer", "UInt32", 1),
+    ("uint64", pa.uint64(), "nullable_integer", "UInt64", 1),
+    ("float32", pa.float32(), "nullable_float", "Float32", 1.5),
+    ("float64", pa.float64(), "nullable_float", "Float64", 1.5),
+    (
+        "timestamp-s",
+        pa.timestamp("s"),
+        "datetime",
+        "datetime64[s]",
+        pd.Timestamp("2026-01-01"),
+    ),
+    (
+        "timestamp-ms",
+        pa.timestamp("ms"),
+        "datetime",
+        "datetime64[ms]",
+        pd.Timestamp("2026-01-01"),
+    ),
+    (
+        "timestamp-us",
+        pa.timestamp("us"),
+        "datetime",
+        "datetime64[us]",
+        pd.Timestamp("2026-01-01"),
+    ),
+    (
+        "timestamp-ns",
+        pa.timestamp("ns"),
+        "datetime",
+        "datetime64[ns]",
+        pd.Timestamp("2026-01-01"),
+    ),
+    (
+        "timestamp-s-utc",
+        pa.timestamp("s", tz="UTC"),
+        "datetime",
+        "datetime64[s, UTC]",
+        pd.Timestamp("2026-01-01", tz="UTC"),
+    ),
+    (
+        "timestamp-ms-utc",
+        pa.timestamp("ms", tz="UTC"),
+        "datetime",
+        "datetime64[ms, UTC]",
+        pd.Timestamp("2026-01-01", tz="UTC"),
+    ),
+    (
+        "timestamp-us-utc",
+        pa.timestamp("us", tz="UTC"),
+        "datetime",
+        "datetime64[us, UTC]",
+        pd.Timestamp("2026-01-01", tz="UTC"),
+    ),
+    (
+        "timestamp-ns-utc",
+        pa.timestamp("ns", tz="UTC"),
+        "datetime",
+        "datetime64[ns, UTC]",
+        pd.Timestamp("2026-01-01", tz="UTC"),
+    ),
+    ("string", pa.string(), "string", "string", "value"),
+    ("large-string", pa.large_string(), "string", "string", "value"),
+)
+
+_ARROW_TIMESTAMP_LOGICAL_DTYPE_CASES = tuple(
+    case for case in _ARROW_SCALAR_LOGICAL_DTYPE_CASES if case[2] == "datetime"
 )
 
 
@@ -194,26 +279,26 @@ def test_full_inspection_rejects_forged_persisted_shape_summary(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec(),
     )
-    session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
         require_consumable=False,
-    )
-    manifest = session.manifest
-    manifest.update(forged_summary)
-    forged_manifest_bytes = (json.dumps(manifest) + "\n").encode("utf-8")
-    (root / "_manifest" / "manifest.json").write_bytes(forged_manifest_bytes)
-    forged_session = replace(
-        session,
-        manifest_bytes=forged_manifest_bytes,
-    )
-
-    with pytest.raises(ValueError, match="dataset_manifest_summary_mismatch"):
-        dataset_inspection.inspect_dataset_session(
-            forged_session,
-            resource_policy=active_runtime_resource_policy(),
+    ) as session:
+        manifest = session.manifest
+        manifest.update(forged_summary)
+        forged_manifest_bytes = (json.dumps(manifest) + "\n").encode("utf-8")
+        (root / "_manifest" / "manifest.json").write_bytes(forged_manifest_bytes)
+        forged_session = replace(
+            session,
+            manifest_bytes=forged_manifest_bytes,
         )
+
+        with pytest.raises(ValueError, match="dataset_manifest_summary_mismatch"):
+            dataset_inspection.inspect_dataset_session(
+                forged_session,
+                resource_policy=forged_session.resource_policy,
+            )
 
 
 def test_session_consuming_inspection_does_not_reopen_dataset(
@@ -226,28 +311,28 @@ def test_session_consuming_inspection_does_not_reopen_dataset(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec(),
     )
-    session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
         require_consumable=False,
-    )
-    monkeypatch.setattr(
-        dataset_inspection,
-        "open_dataset_session",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("session_inspection_reopened_dataset")
-        ),
-    )
+    ) as session:
+        monkeypatch.setattr(
+            dataset_inspection,
+            "open_dataset_session",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("session_inspection_reopened_dataset")
+            ),
+        )
 
-    inspection = dataset_inspection.inspect_dataset_session(
-        session,
-        resource_policy=active_runtime_resource_policy(),
-    )
+        inspection = dataset_inspection.inspect_dataset_session(
+            session,
+            resource_policy=session.resource_policy,
+        )
 
-    assert inspection.root == root
-    assert inspection.row_count == 3
-    assert inspection.file_count == 2
+        assert inspection.root == root
+        assert inspection.row_count == 3
+        assert inspection.file_count == 2
 
 
 def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
@@ -1019,6 +1104,7 @@ def test_dataset_file_batches_account_for_previous_output_across_files(
         lambda path, **_kwargs: iter((batches[Path(path)],)),
     )
     context = SimpleNamespace(
+        resource_policy=_issued_test_policy(),
         logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
         parquet_filters=None,
         read_paths=paths,
@@ -1234,30 +1320,30 @@ def test_chunk_iterator_verifies_session_on_close_empty_and_error(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("iterator_final_verify"),
     )
-    session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    calls = 0
-    original_verify = dataset_reading.DatasetSession.verify
+    ) as session:
+        calls = 0
+        original_verify = dataset_reading.DatasetSession.verify
 
-    def record_verify(current: dataset_reading.DatasetSession) -> None:
-        nonlocal calls
-        if current.root == root:
-            calls += 1
-        original_verify(current)
+        def record_verify(current: dataset_reading.DatasetSession) -> None:
+            nonlocal calls
+            if current.root == root:
+                calls += 1
+            original_verify(current)
 
-    monkeypatch.setattr(dataset_reading.DatasetSession, "verify", record_verify)
+        monkeypatch.setattr(dataset_reading.DatasetSession, "verify", record_verify)
 
-    iterator = dataset_reading.iter_dataset_chunks(
-        session,
-        target_chunk_bytes=1024**2,
-    )
-    next(iterator)
-    before_close = calls
-    iterator.close()
-    assert calls > before_close
+        iterator = dataset_reading.iter_dataset_chunks(
+            session,
+            target_chunk_bytes=1024**2,
+        )
+        next(iterator)
+        before_close = calls
+        iterator.close()
+        assert calls > before_close
 
     with dataset_reading.open_dataset_session(
         root,
@@ -1288,15 +1374,19 @@ def test_chunk_iterator_verifies_session_on_close_empty_and_error(
         fail_batches,
     )
     before_error = calls
-    with pytest.raises(RuntimeError, match="injected_read_failure"):
-        list(
-            dataset_reading.iter_dataset_chunks(
-                session,
-                target_chunk_bytes=1024**2,
+    with dataset_reading.open_dataset_session(
+        root,
+        columns=None,
+        time_window=None,
+    ) as error_session:
+        with pytest.raises(RuntimeError, match="injected_read_failure"):
+            list(
+                dataset_reading.iter_dataset_chunks(
+                    error_session,
+                    target_chunk_bytes=1024**2,
+                )
             )
-        )
     assert calls > before_error
-    session.close()
 
 
 @pytest.mark.parametrize(
@@ -1447,6 +1537,7 @@ def test_materialized_context_fails_before_second_pass_allocation(
     ):
         dataset_reading.materialize_dataset_session(
             SimpleNamespace(
+                resource_policy=_issued_test_policy(),
                 logical_columns=tuple(sample.columns),
                 logical_dtypes=logical_dtype_payload_from_frame(sample),
                 inventory=SimpleNamespace(retained_memory_bytes=1024),
@@ -1471,6 +1562,7 @@ def test_materialized_session_accounts_for_concat_transition(
         lambda *_args, **_kwargs: iter((expected,)),
     )
     context = SimpleNamespace(
+        resource_policy=_issued_test_policy(),
         logical_columns=tuple(expected.columns),
         logical_dtypes=logical_dtype_payload_from_frame(expected),
         inventory=SimpleNamespace(retained_memory_bytes=1024),
@@ -1510,6 +1602,7 @@ def test_materialized_session_uses_two_pass_exact_buffers_without_concat(
     calls: list[object] = []
     allocated: dict[str, dataset_reading._MaterializedColumnBuffer] = {}
     context = SimpleNamespace(
+        resource_policy=_issued_test_policy(),
         logical_columns=tuple(expected.columns),
         logical_dtypes=logical_dtype_payload_from_frame(expected),
         inventory=SimpleNamespace(retained_memory_bytes=1024),
@@ -1578,6 +1671,7 @@ def test_materialized_session_uses_two_pass_exact_buffers_without_concat(
         }
     )
     empty_context = SimpleNamespace(
+        resource_policy=_issued_test_policy(),
         logical_columns=tuple(empty.columns),
         logical_dtypes=logical_dtype_payload_from_frame(empty),
         inventory=SimpleNamespace(retained_memory_bytes=1024),
@@ -1654,6 +1748,7 @@ def test_materialized_second_pass_failure_closes_both_streams(
             closed += 1
 
     context = SimpleNamespace(
+        resource_policy=_issued_test_policy(),
         logical_columns=tuple(expected.columns),
         logical_dtypes=logical_dtype_payload_from_frame(expected),
         inventory=SimpleNamespace(retained_memory_bytes=1024),
@@ -1695,6 +1790,7 @@ def test_materialized_passes_existing_headroom_to_each_conversion_pass(
         yield frame
 
     context = SimpleNamespace(
+        resource_policy=_issued_test_policy(),
         logical_columns=("value",),
         logical_dtypes=logical_dtype_payload_from_frame(frame),
         inventory=SimpleNamespace(retained_memory_bytes=1024),
@@ -1732,7 +1828,10 @@ def test_materialized_budget_deducts_inventory_before_decoder(
         match="dataset_materialized_result_exceeds_target_bytes",
     ):
         dataset_reading.materialize_dataset_session(
-            SimpleNamespace(inventory=SimpleNamespace(retained_memory_bytes=1024)),
+            SimpleNamespace(
+                resource_policy=_issued_test_policy(),
+                inventory=SimpleNamespace(retained_memory_bytes=1024),
+            ),
             target_chunk_bytes=1024,
             materialized_budget_bytes=1024,
         )
@@ -1750,6 +1849,7 @@ def test_materialized_zero_transition_headroom_skips_second_pass(
         yield frame
 
     context = SimpleNamespace(
+        resource_policy=_issued_test_policy(),
         logical_columns=("value",),
         logical_dtypes=logical_dtype_payload_from_frame(frame),
         inventory=SimpleNamespace(retained_memory_bytes=1024),
@@ -1802,6 +1902,50 @@ def test_chunked_and_materialized_reads_share_nullable_numeric_dtype(
     assert {str(chunk["value"].dtype) for chunk in chunks} == {
         str(materialized["value"].dtype)
     }
+
+
+@pytest.mark.parametrize(
+    "reverse",
+    (False, True),
+    ids=("native-first", "nullable-first"),
+)
+@pytest.mark.parametrize(
+    ("native_dtype", "nullable_dtype"),
+    (("float32", "Float32"), ("float64", "Float64")),
+)
+def test_nullable_float_plan_is_chunk_order_independent(
+    tmp_path: Path,
+    reverse: bool,
+    native_dtype: str,
+    nullable_dtype: str,
+) -> None:
+    root = make_dataset_artifact_root(
+        tmp_path,
+        f"nullable_{nullable_dtype.lower()}_{reverse}",
+    )
+    base = make_default_dataset_frame().iloc[:2].copy()
+    native = base.iloc[:1].copy()
+    nullable = base.iloc[1:].copy()
+    native["value"] = pd.Series([1.5], index=native.index, dtype=native_dtype)
+    nullable["value"] = pd.Series(
+        [pd.NA],
+        index=nullable.index,
+        dtype=nullable_dtype,
+    )
+    chunks = (nullable, native) if reverse else (native, nullable)
+
+    write_dataset(
+        root,
+        chunks,
+        spec=make_processed_dataset_spec(
+            f"nullable_{nullable_dtype.lower()}_{reverse}"
+        ),
+    )
+
+    materialized = read_dataset(root)
+    chunked = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+    assert str(materialized["value"].dtype) == nullable_dtype
+    assert {str(chunk["value"].dtype) for chunk in chunked} == {nullable_dtype}
 
 
 def test_nullable_uint64_read_and_fingerprint_preserve_large_integer_identity(
@@ -2699,19 +2843,18 @@ def test_internal_physical_reader_uses_bounded_record_batches(
         spec=make_processed_dataset_spec("bounded_reader", market_id="dummy"),
     )
     assert hasattr(dataset_reading, "iter_dataset_chunks")
-    context = dataset_reading.open_dataset_session(
+    target_chunk_bytes = 512 * 1024
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    target_chunk_bytes = 512 * 1024
-
-    chunks = list(
-        dataset_reading.iter_dataset_chunks(
-            context,
-            target_chunk_bytes=target_chunk_bytes,
+    ) as context:
+        chunks = list(
+            dataset_reading.iter_dataset_chunks(
+                context,
+                target_chunk_bytes=target_chunk_bytes,
+            )
         )
-    )
 
     assert len(chunks) > 1
     assert all(
@@ -2726,18 +2869,18 @@ def test_internal_physical_reader_uses_bounded_record_batches(
         frame.loc[28, "timestamp"],
         frame.loc[36, "timestamp"],
     )
-    projected_context = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=("asset_id", "value"),
         time_window=window,
-    )
-    projected = pd.concat(
-        dataset_reading.iter_dataset_chunks(
-            projected_context,
-            target_chunk_bytes=target_chunk_bytes,
-        ),
-        ignore_index=True,
-    )
+    ) as projected_context:
+        projected = pd.concat(
+            dataset_reading.iter_dataset_chunks(
+                projected_context,
+                target_chunk_bytes=target_chunk_bytes,
+            ),
+            ignore_index=True,
+        )
     expected_projected = ordered_input.loc[
         ordered_input["timestamp"].between(
             pd.Timestamp(window.start),
@@ -2773,19 +2916,18 @@ def test_internal_physical_reader_rejects_single_row_over_target(
         ),
     )
     assert hasattr(dataset_reading, "iter_dataset_chunks")
-    context = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-
-    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
-        list(
-            dataset_reading.iter_dataset_chunks(
-                context,
-                target_chunk_bytes=512,
+    ) as context:
+        with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
+            list(
+                dataset_reading.iter_dataset_chunks(
+                    context,
+                    target_chunk_bytes=512,
+                )
             )
-        )
 
 
 def test_bounded_dataset_read_path_never_calls_full_file_pandas_reader(
@@ -3700,6 +3842,7 @@ def test_fingerprint_accounts_for_live_arrow_and_nested_pandas_payloads(
         batches,
     )
     context = SimpleNamespace(
+        resource_policy=policy,
         spec={"primary_key": ["nested"]},
         logical_columns=("nested",),
         arrow_schema=arrow_batch.schema,
@@ -3786,6 +3929,7 @@ def test_fingerprint_releases_hash_array_before_requesting_next_batch(
         environ={"QRP_PAYLOAD_TARGET_MB": "4"},
     )
     context = SimpleNamespace(
+        resource_policy=policy,
         spec={"primary_key": ["value"]},
         logical_columns=("value",),
         arrow_schema=arrow_batch.schema,
@@ -3877,6 +4021,7 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
 
     def context_for(headroom_bytes: int) -> SimpleNamespace:
         return SimpleNamespace(
+            resource_policy=policy,
             spec={"primary_key": ["nested"]},
             logical_columns=("nested",),
             arrow_schema=arrow_batch.schema,
@@ -3917,6 +4062,7 @@ def test_fingerprint_rejects_exhausted_operation_headroom_before_traversal(
         forbidden_traversal,
     )
     context = SimpleNamespace(
+        resource_policy=policy,
         inventory=SimpleNamespace(
             retained_memory_bytes=policy.task_memory_budget_bytes
         ),
@@ -3934,11 +4080,11 @@ def test_fingerprint_rejects_exhausted_operation_headroom_before_traversal(
     assert traversals == 0
 
 
-def test_bounded_frame_chunks_reuse_bounded_frame_storage() -> None:
+def test_iter_bounded_frame_chunks_reuses_bounded_frame_storage() -> None:
     frame = pd.DataFrame({"value": np.arange(20_000, dtype="int64")})
 
     chunks = tuple(
-        dataset_reading._bounded_frame_chunks(
+        dataset_reading.iter_bounded_frame_chunks(
             frame,
             target_chunk_bytes=pandas_frame_payload_bytes(frame) // 2,
         )
@@ -4145,7 +4291,7 @@ def test_file_batch_default_derives_converter_headroom_from_session_owner_state(
 
     context = SimpleNamespace(
         logical_dtypes=logical_dtype_payload_from_frame(frame),
-        resource_policy=SimpleNamespace(task_memory_budget_bytes=4096),
+        resource_policy=_issued_test_policy(4096),
         inventory=SimpleNamespace(retained_memory_bytes=1024),
         read_paths=(path,),
         parquet_filters=None,
@@ -4420,11 +4566,6 @@ def test_dataset_session_close_preserves_active_primary(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("session_primary"),
     )
-    session = dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-    )
     close = dataset_reading.DatasetSession.close
 
     def close_then_fail(current: dataset_reading.DatasetSession) -> None:
@@ -4438,7 +4579,11 @@ def test_dataset_session_close_preserves_active_primary(
     )
 
     with pytest.raises(primary_type, match="primary_failure"):
-        with session:
+        with dataset_reading.open_dataset_session(
+            root,
+            columns=None,
+            time_window=None,
+        ):
             raise primary_type("primary_failure")
 
 
@@ -4451,11 +4596,6 @@ def test_dataset_session_normal_close_failure_propagates(
         root,
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("session_normal_close"),
-    )
-    session = dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
     )
     close = dataset_reading.DatasetSession.close
 
@@ -4470,7 +4610,11 @@ def test_dataset_session_normal_close_failure_propagates(
     )
 
     with pytest.raises(OSError, match="cleanup_failure"):
-        with session:
+        with dataset_reading.open_dataset_session(
+            root,
+            columns=None,
+            time_window=None,
+        ):
             pass
 
 
@@ -4633,7 +4777,7 @@ def test_reader_final_verify_does_not_replace_active_primary(
         logical_columns = ("value",)
         logical_dtypes = {"value": {"kind": "numpy_int", "dtype": "int64"}}
         parquet_filters = None
-        resource_policy = SimpleNamespace(task_memory_budget_bytes=1024**2)
+        resource_policy = _issued_test_policy(1024**2)
         inventory = SimpleNamespace(retained_memory_bytes=0)
 
         def __init__(self) -> None:
@@ -4696,7 +4840,7 @@ def test_reader_final_verify_failure_propagates_without_external_primary(
         logical_columns = ("value",)
         logical_dtypes = {"value": {"kind": "numpy_int", "dtype": "int64"}}
         parquet_filters = None
-        resource_policy = SimpleNamespace(task_memory_budget_bytes=1024**2)
+        resource_policy = _issued_test_policy(1024**2)
         inventory = SimpleNamespace(retained_memory_bytes=0)
 
         def __init__(self) -> None:
@@ -4748,8 +4892,8 @@ def test_reader_final_verify_failure_propagates_without_external_primary(
             list(iterator)
     else:
         next(iterator)
-        with pytest.raises(OSError, match="verify_failure"):
-            iterator.close()  # type: ignore[attr-defined]
+        iterator.close()  # type: ignore[attr-defined]
+        assert context.verify_calls > context.verify_fail_after
 
 
 @pytest.mark.parametrize("iterator_name", ("file_batches", "chunks"))
@@ -4770,7 +4914,7 @@ def test_dataset_iterator_context_preserves_caller_primary(
         logical_columns = ("value",)
         logical_dtypes = {"value": {"kind": "numpy_int", "dtype": "int64"}}
         parquet_filters = None
-        resource_policy = SimpleNamespace(task_memory_budget_bytes=1024**2)
+        resource_policy = _issued_test_policy(1024**2)
         inventory = SimpleNamespace(retained_memory_bytes=0)
 
         def __init__(self) -> None:
@@ -5014,6 +5158,7 @@ def test_fingerprint_normalizes_bounded_slices_without_full_frame_copy(
     monkeypatch.setattr(pd.Series, "map", bounded_map)
     logical_columns = tuple(frame.columns)
     context = SimpleNamespace(
+        resource_policy=policy,
         spec={"primary_key": ["key"]},
         logical_columns=logical_columns,
         arrow_schema=batch.schema,
@@ -5158,24 +5303,24 @@ def test_dataset_session_returns_fresh_contract_views_and_keeps_frozen_truth(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("immutable_session"),
     )
-    session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    expected_primary_key = tuple(session.spec["primary_key"])
-    expected_schema = session.schema
-    expected_logical = session.logical_dtypes
+    ) as session:
+        expected_primary_key = tuple(session.spec["primary_key"])
+        expected_schema = session.schema
+        expected_logical = session.logical_dtypes
 
-    session.spec["primary_key"].clear()
-    session.manifest["physical_schema"].clear()
-    session.schema.clear()
-    session.logical_dtypes["columns"].clear()
+        session.spec["primary_key"].clear()
+        session.manifest["physical_schema"].clear()
+        session.schema.clear()
+        session.logical_dtypes["columns"].clear()
 
-    assert tuple(session.spec["primary_key"]) == expected_primary_key
-    assert session.schema == expected_schema
-    assert session.logical_dtypes == expected_logical
-    session.verify()
+        assert tuple(session.spec["primary_key"]) == expected_primary_key
+        assert session.schema == expected_schema
+        assert session.logical_dtypes == expected_logical
+        session.verify()
 
 
 def test_dataset_session_rejects_raw_contract_and_inventory_drift(
@@ -5189,39 +5334,39 @@ def test_dataset_session_rejects_raw_contract_and_inventory_drift(
         spec=make_processed_dataset_spec("session_drift"),
     )
 
-    raw_session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    spec_path = root / "spec.json"
-    spec_path.write_bytes(raw_session.spec_bytes + b" ")
-    with pytest.raises(ValueError, match="dataset_spec_identity_changed"):
-        raw_session.verify()
-    spec_path.write_bytes(raw_session.spec_bytes)
+    ) as raw_session:
+        spec_path = root / "spec.json"
+        spec_path.write_bytes(raw_session.spec_bytes + b" ")
+        with pytest.raises(ValueError, match="dataset_spec_identity_changed"):
+            raw_session.verify()
+        spec_path.write_bytes(raw_session.spec_bytes)
 
-    inventory_session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    added = root / "data" / "year=2016" / "part-000.parquet"
-    dataset_writing.write_parquet_file(
-        _persisted_table(frame),
-        added,
-    )
-    with pytest.raises(ValueError, match="dataset_inventory_changed"):
-        inventory_session.verify()
-    added.unlink()
+    ) as inventory_session:
+        added = root / "data" / "year=2016" / "part-000.parquet"
+        dataset_writing.write_parquet_file(
+            _persisted_table(frame),
+            added,
+        )
+        with pytest.raises(ValueError, match="dataset_inventory_changed"):
+            inventory_session.verify()
+        added.unlink()
 
-    removal_session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    removal_session.all_paths[0].unlink()
-    with pytest.raises(ValueError, match="dataset_inventory_changed"):
-        removal_session.verify()
+    ) as removal_session:
+        removal_session.all_paths[0].unlink()
+        with pytest.raises(ValueError, match="dataset_inventory_changed"):
+            removal_session.verify()
 
 
 def test_physical_decoder_rechecks_the_same_handle_after_decode(
@@ -5233,25 +5378,25 @@ def test_physical_decoder_rechecks_the_same_handle_after_decode(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("handle_drift"),
     )
-    session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    path = session.all_paths[0]
+    ) as session:
+        path = session.all_paths[0]
 
-    def mutate_after_open(_metadata) -> None:  # noqa: ANN001
-        path.touch()
+        def mutate_after_open(_metadata) -> None:  # noqa: ANN001
+            path.touch()
 
-    with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-        list(
-            dataset_physical.iter_dataset_part_batches(
-                path,
-                expected_identity=session.metadata_for(path).identity,
-                target_chunk_bytes=1024**2,
-                metadata_observer=mutate_after_open,
+        with pytest.raises(ValueError, match="dataset_file_identity_changed"):
+            list(
+                dataset_physical.iter_dataset_part_batches(
+                    path,
+                    expected_identity=session.metadata_for(path).identity,
+                    target_chunk_bytes=1024**2,
+                    metadata_observer=mutate_after_open,
+                )
             )
-        )
 
 
 def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
@@ -5306,14 +5451,13 @@ def test_open_dataset_session_owns_and_closes_inventory(tmp_path: Path) -> None:
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("session_inventory_owner"),
     )
-    session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    scratch = session.inventory.scratch_path
-
-    session.close()
+    ) as session:
+        scratch = session.inventory.scratch_path
+        assert scratch.exists()
 
     assert not scratch.exists()
 
@@ -5393,15 +5537,14 @@ def test_private_writer_returns_final_inspection_and_public_writer_returns_none(
     assert private_result.root == private_root
     assert private_result.data_root == private_root / "data"
     assert private_result.manifest["row_count"] == private_result.row_count
-    with runtime_resource_policy_scope(policy):
-        assert (
-            write_dataset(
-                public_root,
-                make_default_dataset_frame(),
-                spec=make_processed_dataset_spec("public_return"),
-            )
-            is None
+    assert (
+        write_dataset(
+            public_root,
+            make_default_dataset_frame(),
+            spec=make_processed_dataset_spec("public_return"),
         )
+        is None
+    )
 
 
 def test_writer_manifest_uses_persisted_bytes_not_prewrite_summary(
@@ -5669,26 +5812,44 @@ def test_dataset_session_rejects_mutable_filter_values(tmp_path: Path) -> None:
         spec=make_processed_dataset_spec("immutable_filter"),
     )
     with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
-        dataset_reading.open_dataset_session(
+        with dataset_reading.open_dataset_session(
             root,
             columns=None,
             time_window=None,
             row_filters=(("asset_id", "==", ["A"]),),
-        )
-
-
-@pytest.mark.parametrize("dtype", ("Int64", "boolean", "string"))
+        ):
+            pass
+@pytest.mark.parametrize(
+    "dtype",
+    (
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+        "boolean",
+        "Float32",
+        "Float64",
+        "string",
+    ),
+)
 def test_dataset_global_extension_dtype_survives_read_scopes(
     tmp_path: Path,
     dtype: str,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, f"extension_{dtype}")
     frame = make_default_dataset_frame()
-    values = {
-        "Int64": [1, 2, 3],
-        "boolean": [True, False, True],
-        "string": ["x", "y", "z"],
-    }[dtype]
+    if dtype == "boolean":
+        values = [True, pd.NA, False]
+    elif dtype == "string":
+        values = ["x", pd.NA, "z"]
+    elif dtype.startswith("Float"):
+        values = [1.5, pd.NA, 3.5]
+    else:
+        values = [1, pd.NA, 3]
     frame["value"] = pd.Series(values, index=frame.index, dtype=dtype)
     write_dataset(
         root,
@@ -5774,6 +5935,171 @@ def test_logical_dtype_grammar_round_trips_writer_canonical_families(
     payload = logical_dtype_payload_from_frame(frame)
 
     assert dataset_schema.validate_logical_dtype_payload(payload) == payload
+
+
+@pytest.mark.parametrize(
+    ("_case_id", "arrow_type", "expected_kind", "expected_dtype", "sample"),
+    _ARROW_SCALAR_LOGICAL_DTYPE_CASES,
+    ids=[case[0] for case in _ARROW_SCALAR_LOGICAL_DTYPE_CASES],
+)
+@pytest.mark.parametrize("shape", ("empty", "null", "value"))
+def test_arrow_scalar_logical_dtypes_use_canonical_pandas_semantic_family(
+    _case_id: str,
+    arrow_type: pa.DataType,
+    expected_kind: str,
+    expected_dtype: str,
+    sample: object,
+    shape: str,
+) -> None:
+    values = {"empty": [], "null": [None], "value": [sample]}[shape]
+    frame = pd.DataFrame(
+        {"value": pd.array(values, dtype=pd.ArrowDtype(arrow_type))}
+    )
+
+    payload = logical_dtype_payload_from_frame(frame)
+    descriptor = payload["columns"][0]
+    overrides = dataset_schema.pandas_dtype_overrides_from_logical_payload(
+        payload,
+        columns=("value",),
+    )
+
+    assert descriptor == {
+        "name": "value",
+        "kind": expected_kind,
+        "dtype": expected_dtype,
+    }
+    parsed = overrides["value"]
+    assert not isinstance(parsed, str)
+    assert parsed == pd.api.types.pandas_dtype(expected_dtype)
+
+
+@pytest.mark.parametrize(
+    ("_case_id", "arrow_type", "_expected_kind", "expected_dtype", "sample"),
+    _ARROW_SCALAR_LOGICAL_DTYPE_CASES,
+    ids=[case[0] for case in _ARROW_SCALAR_LOGICAL_DTYPE_CASES],
+)
+def test_arrow_scalar_dtypes_are_stable_across_storage_read_boundaries(
+    tmp_path: Path,
+    _case_id: str,
+    arrow_type: pa.DataType,
+    _expected_kind: str,
+    expected_dtype: str,
+    sample: object,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, f"arrow_{_case_id}")
+    frame = make_default_dataset_frame()
+    frame["value"] = pd.Series(
+        pd.array([sample, None, sample], dtype=pd.ArrowDtype(arrow_type)),
+        index=frame.index,
+    )
+    write_dataset(
+        root,
+        (frame.iloc[1:].copy(), frame.iloc[:1].copy()),
+        spec=make_processed_dataset_spec(
+            f"arrow_{_case_id}",
+            value_role=ColumnRole.CONTEXT,
+        ),
+    )
+
+    materialized = read_dataset(root, columns=("timestamp", "value"))
+    chunks = list(
+        read_dataset(
+            root,
+            columns=("timestamp", "value"),
+            mode=DatasetReadMode.CHUNKED,
+        )
+    )
+    windowed = read_dataset(
+        root,
+        columns=("timestamp", "value"),
+        time_window=TimeWindow(date(2015, 1, 1), date(2015, 12, 31)),
+    )
+
+    assert str(materialized["value"].dtype) == expected_dtype
+    assert {str(chunk["value"].dtype) for chunk in chunks} == {expected_dtype}
+    assert str(windowed["value"].dtype) == expected_dtype
+
+
+@pytest.mark.parametrize(
+    ("_case_id", "arrow_type", "_expected_kind", "expected_dtype", "sample"),
+    _ARROW_TIMESTAMP_LOGICAL_DTYPE_CASES,
+    ids=[case[0] for case in _ARROW_TIMESTAMP_LOGICAL_DTYPE_CASES],
+)
+def test_arrow_datetime_dtype_is_stable_for_filter_empty_direct_session(
+    tmp_path: Path,
+    _case_id: str,
+    arrow_type: pa.DataType,
+    _expected_kind: str,
+    expected_dtype: str,
+    sample: object,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, f"arrow_filter_empty_{_case_id}")
+    frame = make_default_dataset_frame()
+    frame["value"] = pd.Series(
+        pd.array([sample, None, sample], dtype=pd.ArrowDtype(arrow_type)),
+        index=frame.index,
+    )
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec(
+            f"arrow_filter_empty_{_case_id}",
+            value_role=ColumnRole.CONTEXT,
+        ),
+    )
+    policy = _issued_test_policy()
+
+    with runtime_resource_policy_scope(policy):
+        with dataset_reading.open_dataset_session(
+            root,
+            columns=("value",),
+            time_window=None,
+            row_filters=(("asset_id", "==", "missing"),),
+            resource_policy=policy,
+        ) as session:
+            chunks = list(
+                dataset_reading.iter_dataset_chunks(
+                    session,
+                    target_chunk_bytes=policy.payload_target_bytes,
+                )
+            )
+            materialized = dataset_reading.materialize_dataset_session(
+                session,
+                target_chunk_bytes=policy.payload_target_bytes,
+                materialized_budget_bytes=policy.task_memory_budget_bytes,
+            )
+
+    assert len(chunks) == 1
+    assert chunks[0].empty
+    assert materialized.empty
+    assert str(chunks[0]["value"].dtype) == expected_dtype
+    assert str(materialized["value"].dtype) == expected_dtype
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    (
+        {"name": "value", "kind": "numpy_boolean", "dtype": "bool[pyarrow]"},
+        {"name": "value", "kind": "numpy_integer", "dtype": "int16[pyarrow]"},
+        {"name": "value", "kind": "numpy_float", "dtype": "float[pyarrow]"},
+        {
+            "name": "value",
+            "kind": "datetime",
+            "dtype": "timestamp[ms][pyarrow]",
+        },
+        {"name": "value", "kind": "string", "dtype": "string[pyarrow]"},
+    ),
+)
+def test_old_arrow_backend_logical_dtype_metadata_fails_closed(
+    descriptor: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
+        dataset_schema.validate_logical_dtype_payload(
+            {
+                "schema_id": "qrp-dataset-part-logical-dtypes",
+                "columns": [descriptor],
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -5989,25 +6315,25 @@ def test_empty_unordered_category_domain_unions_with_nonempty_domain(
         manifest = json.loads(
             (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
         )
-        session = dataset_reading.open_dataset_session(
+        with dataset_reading.open_dataset_session(
             root,
             columns=None,
             time_window=None,
-        )
-        assert manifest["row_count"] == 1
-        assert manifest["file_count"] == len(session.all_paths) == 2
-        assert manifest["partition_count"] == 1
-        expected_partition = f"year={nonempty['timestamp'].iloc[0].year}"
-        assert manifest["partition_row_counts"] == {expected_partition: 1}
-        assert [path.name for path in session.all_paths] == [
-            "part-000.parquet",
-            "part-001.parquet",
-        ]
-        assert len({path.parent for path in session.all_paths}) == 1
-        assert tuple(
-            session.metadata_for(path).row_count for path in session.all_paths
-        ) == (1, 0)
-        assert session.logical_dtypes == manifest["logical_dtypes"]
+        ) as session:
+            assert manifest["row_count"] == 1
+            assert manifest["file_count"] == len(session.all_paths) == 2
+            assert manifest["partition_count"] == 1
+            expected_partition = f"year={nonempty['timestamp'].iloc[0].year}"
+            assert manifest["partition_row_counts"] == {expected_partition: 1}
+            assert [path.name for path in session.all_paths] == [
+                "part-000.parquet",
+                "part-001.parquet",
+            ]
+            assert len({path.parent for path in session.all_paths}) == 1
+            assert tuple(
+                session.metadata_for(path).row_count for path in session.all_paths
+            ) == (1, 0)
+            assert session.logical_dtypes == manifest["logical_dtypes"]
         assert read_dataset(root)["asset_id"].astype("string").tolist() == ["live-only"]
         manifests.append(manifest)
 
@@ -6252,28 +6578,28 @@ def test_session_detects_part_manifest_and_same_size_identity_changes(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("identity_changes"),
     )
-    session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest_path.write_bytes(session.manifest_bytes + b" ")
-    with pytest.raises(ValueError, match="dataset_manifest_identity_changed"):
-        session.verify()
-    manifest_path.write_bytes(session.manifest_bytes)
+    ) as session:
+        manifest_path = root / "_manifest" / "manifest.json"
+        manifest_path.write_bytes(session.manifest_bytes + b" ")
+        with pytest.raises(ValueError, match="dataset_manifest_identity_changed"):
+            session.verify()
+        manifest_path.write_bytes(session.manifest_bytes)
 
-    session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    part = session.all_paths[0]
-    raw = bytearray(part.read_bytes())
-    raw[len(raw) // 2] ^= 1
-    part.write_bytes(raw)
-    with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-        session.verify()
+    ) as session:
+        part = session.all_paths[0]
+        raw = bytearray(part.read_bytes())
+        raw[len(raw) // 2] ^= 1
+        part.write_bytes(raw)
+        with pytest.raises(ValueError, match="dataset_file_identity_changed"):
+            session.verify()
 
 
 def test_session_detects_part_replacement_after_issue(tmp_path: Path) -> None:
@@ -6283,17 +6609,17 @@ def test_session_detects_part_replacement_after_issue(tmp_path: Path) -> None:
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("part_replacement"),
     )
-    session = dataset_reading.open_dataset_session(
+    with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
-    )
-    part = session.all_paths[0]
-    replacement = tmp_path / "replacement.parquet"
-    replacement.write_bytes(part.read_bytes())
-    replacement.replace(part)
-    with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-        session.verify()
+    ) as session:
+        part = session.all_paths[0]
+        replacement = tmp_path / "replacement.parquet"
+        replacement.write_bytes(part.read_bytes())
+        replacement.replace(part)
+        with pytest.raises(ValueError, match="dataset_file_identity_changed"):
+            session.verify()
 
 
 def test_exact_key_decimal_zero_and_numpy_scalar_identity(
@@ -6366,11 +6692,12 @@ def test_noncanonical_year_partition_is_rejected_with_and_without_window(
 
     for window in (None, TimeWindow("2014-01-01", "2014-12-31")):
         with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-            dataset_reading.open_dataset_session(
+            with dataset_reading.open_dataset_session(
                 root,
                 columns=None,
                 time_window=window,
-            )
+            ):
+                pass
 
 
 @pytest.mark.parametrize(
@@ -6430,12 +6757,13 @@ def test_physical_filter_rejects_nonfinite_or_schema_incompatible_scalar(
         spec=make_processed_dataset_spec("filter_grammar"),
     )
     with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
-        dataset_reading.open_dataset_session(
+        with dataset_reading.open_dataset_session(
             root,
             columns=None,
             time_window=None,
             row_filters=(("value", "==", value),),
-        )
+        ):
+            pass
 
 
 @pytest.mark.parametrize(
@@ -6534,11 +6862,12 @@ def test_session_metadata_reader_rejects_oversize_before_buffering(
     )
     (root / "_manifest" / "manifest.json").write_bytes(b" " * (1024 * 1024 + 1))
     with pytest.raises(ValueError, match="dataset_metadata_file_too_large"):
-        dataset_reading.open_dataset_session(
+        with dataset_reading.open_dataset_session(
             root,
             columns=None,
             time_window=None,
-        )
+        ):
+            pass
 
 
 @pytest.mark.parametrize("materialized_budget_bytes", (1025, 1026))
@@ -6570,6 +6899,7 @@ def test_materialize_rejects_exact_buffers_before_allocation(
         ),
     )
     context = SimpleNamespace(
+        resource_policy=_issued_test_policy(),
         logical_columns=("value",),
         logical_dtypes=logical_dtype_payload_from_frame(frames[0]),
         inventory=SimpleNamespace(retained_memory_bytes=1024),
@@ -6834,6 +7164,58 @@ def test_chunked_read_defers_session_inventory_until_activation(
     assert events == ["inventory"]
 
 
+def test_chunked_explicit_inactive_policy_preflights_before_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024**2,
+        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
+    )
+
+    class Session:
+        resource_policy = policy
+
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, *_args):  # noqa: ANN204
+            events.append("cleanup")
+
+    @contextmanager
+    def preflight(*_args, **_kwargs):  # noqa: ANN202
+        events.append("preflight")
+        with scope(policy):
+            with Session() as session:
+                yield session
+
+    @contextmanager
+    def scope(_policy):  # noqa: ANN001, ANN202
+        events.append("admission")
+        try:
+            yield policy
+        finally:
+            events.append("release")
+
+    monkeypatch.setattr(dataset_reading, "open_dataset_session", preflight)
+    monkeypatch.setattr(dataset_reading, "runtime_resource_policy_scope", scope)
+    monkeypatch.setattr(
+        dataset_reading,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter(()),
+    )
+
+    chunks = dataset_reading.read_dataset(
+        Path("dataset"),
+        mode=DatasetReadMode.CHUNKED,
+        resource_policy=policy,
+    )
+    assert events == []
+    list(chunks)
+
+    assert events == ["preflight", "admission", "cleanup", "release"]
+
+
 def test_writer_and_session_do_not_retain_full_inventory_containers() -> None:
     assert "_observed_parts" not in dataset_writing._WriteStats.__dataclass_fields__
     fields = dataset_reading.DatasetSession.__dataclass_fields__
@@ -6940,11 +7322,12 @@ def test_dataset_inventory_low_budget_and_inspection_failure_clean_up(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("inspect_failed")),
     )
     with pytest.raises(RuntimeError, match="inspect_failed"):
-        dataset_reading.open_dataset_session(
+        with dataset_reading.open_dataset_session(
             root,
             columns=None,
             time_window=None,
-        )
+        ):
+            pass
     assert not list(root.parent.glob(".dataset-inventory-*"))
 
 
@@ -7027,11 +7410,12 @@ def test_dataset_inventory_insert_disk_failure_cleans_scratch(
         fail_first_row,
     )
     with pytest.raises(OSError, match="inventory_disk_full"):
-        dataset_reading.open_dataset_session(
+        with dataset_reading.open_dataset_session(
             root,
             columns=None,
             time_window=None,
-        )
+        ):
+            pass
 
     assert reserve_calls == 2
     assert not list(root.parent.glob(".dataset-inventory-*"))
@@ -7127,7 +7511,12 @@ def test_file_count_tracking_is_scalar_and_counts_consecutive_file_batches_once(
         "iter_dataset_file_batches",
         observed_batches,
     )
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024**2,
+        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
+    )
     context = SimpleNamespace(
+        resource_policy=policy,
         spec={"primary_key": ["value"]},
         logical_columns=("value",),
         arrow_schema=pa.RecordBatch.from_pandas(
@@ -7138,10 +7527,6 @@ def test_file_count_tracking_is_scalar_and_counts_consecutive_file_batches_once(
         data_root=tmp_path,
         schema_hash="schema",
         inventory=SimpleNamespace(retained_memory_bytes=0),
-    )
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=16 * 1024**2,
-        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
     )
 
     fingerprint = dataset_fingerprinting.fingerprint_dataset_session(

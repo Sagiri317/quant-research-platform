@@ -66,15 +66,14 @@ def assemble_research_dataset(
     """Assemble one registered research dataset from processed inputs."""
 
     policy = resource_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(policy):
-        return _assemble_research_dataset_with_policy(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            processed_catalog=processed_catalog,
-            dataset_id=dataset_id,
-            time_window=time_window,
-            resource_policy=policy,
-        )
+    return _assemble_research_dataset_with_policy(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id=dataset_id,
+        time_window=time_window,
+        resource_policy=policy,
+    )
 
 
 def _assemble_research_dataset_with_policy(
@@ -89,23 +88,24 @@ def _assemble_research_dataset_with_policy(
     spec = dataset_catalog.get(dataset_id)
     policy = resource_policy
     _validate_research_input_specs(spec, processed_catalog)
-    with ExitStack() as stack:
-        input_sessions = _open_input_dataset_sessions(
-            layout=layout,
-            dataset_spec=spec,
-            processed_catalog=processed_catalog,
-            time_window=time_window,
-            resource_policy=policy,
-            stack=stack,
-        )
-        return _assemble_research_dataset_from_sessions(
-            layout=layout,
-            spec=spec,
-            processed_catalog=processed_catalog,
-            time_window=time_window,
-            policy=policy,
-            input_sessions=input_sessions,
-        )
+    with runtime_resource_policy_scope(policy):
+        with ExitStack() as stack:
+            input_sessions = _open_input_dataset_sessions(
+                layout=layout,
+                dataset_spec=spec,
+                processed_catalog=processed_catalog,
+                time_window=time_window,
+                resource_policy=policy,
+                stack=stack,
+            )
+            return _assemble_research_dataset_from_sessions(
+                layout=layout,
+                spec=spec,
+                processed_catalog=processed_catalog,
+                time_window=time_window,
+                policy=policy,
+                input_sessions=input_sessions,
+            )
 
 
 def _assemble_research_dataset_from_sessions(

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from weakref import WeakKeyDictionary
 
 import pandas as pd
@@ -76,10 +78,18 @@ class RuntimeResourcePolicy:
         }
 
 
+@dataclass(slots=True)
+class _PolicyIssuance:
+    task_memory_budget_bytes: int
+    payload_target_bytes: int
+    state: str
+    issuer_pid: int
+
+
 def _build_policy_factory():
     issued_policies: WeakKeyDictionary[
         RuntimeResourcePolicy,
-        tuple[int, int],
+        _PolicyIssuance,
     ] = WeakKeyDictionary()
 
     def factory(
@@ -114,30 +124,104 @@ def _build_policy_factory():
                 "runtime_payload_target_exceeds_task_memory_budget"
             )
         policy = object.__new__(RuntimeResourcePolicy)
-        issued_policies[policy] = (task_budget, payload_target)
+        issued_policies[policy] = _PolicyIssuance(
+            task_memory_budget_bytes=task_budget,
+            payload_target_bytes=payload_target,
+            state="ISSUED_UNUSED",
+            issuer_pid=os.getpid(),
+        )
         return policy
 
-    def issued_values(policy: object) -> tuple[int, int]:
+    def issuance(policy: object) -> _PolicyIssuance:
         if type(policy) is not RuntimeResourcePolicy:
             raise TypeError("invalid_runtime_resource_policy")
-        expected = issued_policies.get(policy)
-        if expected is None:
+        record = issued_policies.get(policy)
+        if record is None:
             raise TypeError("invalid_runtime_resource_policy")
-        return expected
+        if record.issuer_pid != os.getpid():
+            raise RuntimeError("runtime_resource_policy_wrong_process")
+        return record
 
-    return factory, issued_values
+    def issued_values(policy: object) -> tuple[int, int]:
+        record = issuance(policy)
+        return record.task_memory_budget_bytes, record.payload_target_bytes
+
+    def activate(policy: object) -> None:
+        record = issuance(policy)
+        if record.state == "RETIRED":
+            raise RuntimeError("runtime_resource_policy_retired")
+        if record.state != "ISSUED_UNUSED":
+            raise RuntimeError("runtime_resource_policy_already_active")
+        record.state = "ACTIVE"
+
+    def require_active(policy: object) -> None:
+        record = issuance(policy)
+        if record.state == "RETIRED":
+            raise RuntimeError("runtime_resource_policy_retired")
+        if record.state != "ACTIVE":
+            raise RuntimeError("runtime_resource_policy_not_active")
+
+    def retire(policy: object) -> None:
+        record = issuance(policy)
+        if record.state != "ACTIVE":
+            raise RuntimeError("runtime_resource_policy_not_active")
+        record.state = "RETIRED"
+
+    return factory, issued_values, activate, require_active, retire
 
 
-_runtime_resource_policy_factory, _issued_policy_values = _build_policy_factory()
+(
+    _runtime_resource_policy_factory,
+    _issued_policy_values,
+    _activate_issued_policy,
+    _require_active_issued_policy,
+    _retire_issued_policy,
+) = _build_policy_factory()
 _ACTIVE_RUNTIME_RESOURCE_POLICY: ContextVar[RuntimeResourcePolicy | None] = (
     ContextVar("qrp_active_runtime_resource_policy", default=None)
 )
+_RUNTIME_RESOURCE_OPERATION_LOCK = Lock()
+
+
+def _reset_runtime_resource_state_after_fork() -> None:
+    global _ACTIVE_RUNTIME_RESOURCE_POLICY, _RUNTIME_RESOURCE_OPERATION_LOCK
+    _ACTIVE_RUNTIME_RESOURCE_POLICY = ContextVar(
+        "qrp_active_runtime_resource_policy",
+        default=None,
+    )
+    _RUNTIME_RESOURCE_OPERATION_LOCK = Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_runtime_resource_state_after_fork)
+
+
+def current_runtime_resource_policy() -> RuntimeResourcePolicy | None:
+    """Return the active policy without admitting a new root operation."""
+
+    policy = _ACTIVE_RUNTIME_RESOURCE_POLICY.get()
+    if policy is not None:
+        _require_active_issued_policy(policy)
+    return policy
+
+
+def bind_runtime_resource_policy(
+    explicit: RuntimeResourcePolicy | None,
+) -> RuntimeResourcePolicy | None:
+    """Bind a lazy operation to its exact creation-time policy."""
+
+    if explicit is not None:
+        _issued_policy_values(explicit)
+    active = current_runtime_resource_policy()
+    if active is not None and explicit is not None and explicit is not active:
+        raise RuntimeError("runtime_resource_policy_conflict")
+    return active if active is not None else explicit
 
 
 def active_runtime_resource_policy() -> RuntimeResourcePolicy:
     """Return the active snapshot or discover one for the caller to capture."""
 
-    policy = _ACTIVE_RUNTIME_RESOURCE_POLICY.get()
+    policy = current_runtime_resource_policy()
     if policy is None:
         return RuntimeResourcePolicy.from_environment()
     _issued_policy_values(policy)
@@ -151,14 +235,55 @@ def runtime_resource_policy_scope(
     """Temporarily expose one factory-issued exact policy snapshot."""
 
     _issued_policy_values(policy)
-    policy_context_handle = _ACTIVE_RUNTIME_RESOURCE_POLICY.set(policy)
+    active = current_runtime_resource_policy()
+    if active is not None:
+        if active is not policy:
+            raise RuntimeError("runtime_resource_policy_conflict")
+        yield policy
+        return
+    if not _RUNTIME_RESOURCE_OPERATION_LOCK.acquire(blocking=False):
+        raise RuntimeError("runtime_resource_operation_already_active")
+    try:
+        _activate_issued_policy(policy)
+    except BaseException:
+        try:
+            _RUNTIME_RESOURCE_OPERATION_LOCK.release()
+        except BaseException:
+            pass
+        raise
+    try:
+        policy_context_handle = _ACTIVE_RUNTIME_RESOURCE_POLICY.set(policy)
+    except BaseException:
+        try:
+            _retire_issued_policy(policy)
+        except BaseException:
+            pass
+        try:
+            _RUNTIME_RESOURCE_OPERATION_LOCK.release()
+        except BaseException:
+            pass
+        raise
     try:
         yield policy
     finally:
+        primary = sys.exception()
+        cleanup_failure: BaseException | None = None
         try:
-            _issued_policy_values(policy)
-        finally:
+            _retire_issued_policy(policy)
+        except BaseException as exc:
+            cleanup_failure = exc
+        try:
             _ACTIVE_RUNTIME_RESOURCE_POLICY.reset(policy_context_handle)
+        except BaseException as exc:
+            if cleanup_failure is None:
+                cleanup_failure = exc
+        try:
+            _RUNTIME_RESOURCE_OPERATION_LOCK.release()
+        except BaseException as exc:
+            if cleanup_failure is None:
+                cleanup_failure = exc
+        if primary is None and cleanup_failure is not None:
+            raise cleanup_failure
 
 
 def pandas_frame_payload_bytes(frame: pd.DataFrame) -> int:

@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import csv
 import re
-from collections.abc import Iterable
+import sys
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+
+from quant_research_platform.runtime.resources import (
+    active_runtime_resource_policy,
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 
 from .raw_schemas import RawExportInspection, inspect_raw_export_file
 
@@ -82,7 +90,8 @@ def read_private_export_file(path: str | Path, dataset: str) -> pd.DataFrame:
     if dataset != "index_info":
         return pd.read_csv(export_path, dtype=STRING_CODE_DTYPES)
 
-    with export_path.open("r", encoding="utf-8-sig", newline="") as handle:
+    handle = export_path.open("r", encoding="utf-8-sig", newline="")
+    try:
         reader = csv.reader(handle)
         header = next(reader)
         rows: list[list[str]] = []
@@ -121,6 +130,14 @@ def read_private_export_file(path: str | Path, dataset: str) -> pd.DataFrame:
             rows.append(_normalize_index_info_row(row, len(header), row_number))
         if pending_row is not None:
             raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
+    finally:
+        if sys.exception() is None:
+            handle.close()
+        else:
+            try:
+                handle.close()
+            except BaseException:
+                pass
     frame = pd.DataFrame(rows, columns=header).replace("", pd.NA)
     return _clean_index_info_source_codes(frame)
 
@@ -221,13 +238,30 @@ def iter_private_export_chunks(
 ) -> Iterable[pd.DataFrame]:
     """Yield raw export chunks for large time-series files."""
 
-    export_path = Path(path)
-    if dataset == "index_info":
-        yield read_private_export_file(export_path, dataset)
-        return
-    yield from pd.read_csv(export_path, chunksize=chunksize, dtype=STRING_CODE_DTYPES)
+    bound_policy = current_runtime_resource_policy()
 
+    def activate() -> Iterator[pd.DataFrame]:
+        policy = bound_policy or active_runtime_resource_policy()
+        with runtime_resource_policy_scope(policy):
+            export_path = Path(path)
+            if dataset == "index_info":
+                yield read_private_export_file(export_path, dataset)
+                return
+            chunks = iter(
+                pd.read_csv(
+                    export_path,
+                    chunksize=chunksize,
+                    dtype=STRING_CODE_DTYPES,
+                )
+            )
+            with closing_dataset_iterator(chunks):
+                while True:
+                    try:
+                        yield next(chunks)
+                    except StopIteration:
+                        break
 
+    return activate()
 def find_dataset_files(raw_root: Path, dataset: str) -> list[Path]:
     """Find raw CSMAR CSV files for one normalized dataset id."""
 

@@ -1,18 +1,151 @@
 from __future__ import annotations
 
+import gc
+import sys
 import warnings
+from contextlib import contextmanager
+from contextvars import copy_context
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 
+import quant_research_platform.research._memory as memory_owner
 from quant_research_platform.research._memory import (
     _concat_time_boundary_frames,
     iter_complete_time_sized_frames,
     iter_time_sized_frames,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
+
+
+def _single_time_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"], utc=True),
+            "value": [1],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    (iter_time_sized_frames, iter_complete_time_sized_frames),
+)
+@pytest.mark.parametrize("explicit_mode", ("none", "same"))
+def test_lazy_memory_factories_bind_outer_for_active_consumption(
+    factory,
+    explicit_mode: str,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    frame = _single_time_frame()
+    subject = frame if factory is iter_time_sized_frames else iter((frame,))
+    with runtime_resource_policy_scope(policy):
+        chunks = factory(
+            subject,
+            timestamp_column="timestamp",
+            resource_policy=policy if explicit_mode == "same" else None,
+        )
+        assert len(list(chunks)) == 1
+
+
+@pytest.mark.parametrize(
+    "factory",
+    (iter_time_sized_frames, iter_complete_time_sized_frames),
+)
+@pytest.mark.parametrize("explicit_mode", ("none", "same"))
+def test_lazy_memory_factories_reject_delayed_consumption_after_outer_exit(
+    factory,
+    explicit_mode: str,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    frame = _single_time_frame()
+    subject = frame if factory is iter_time_sized_frames else iter((frame,))
+    with runtime_resource_policy_scope(policy):
+        chunks = factory(
+            subject,
+            timestamp_column="timestamp",
+            resource_policy=policy if explicit_mode == "same" else None,
+        )
+
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+        next(chunks)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    (iter_time_sized_frames, iter_complete_time_sized_frames),
+)
+def test_lazy_memory_factories_reject_different_explicit_policy_at_creation(
+    factory,
+) -> None:
+    active = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    different = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "2"},
+    )
+    frame = _single_time_frame()
+    subject = frame if factory is iter_time_sized_frames else iter((frame,))
+
+    with runtime_resource_policy_scope(active):
+        with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
+            factory(
+                subject,
+                timestamp_column="timestamp",
+                resource_policy=different,
+            )
+
+
+@pytest.mark.parametrize("close_fails", (False, True))
+def test_complete_memory_factory_closes_once_on_creation_policy_conflict(
+    close_fails: bool,
+) -> None:
+    active = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    different = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "2"},
+    )
+    close_calls = 0
+
+    class Frames:
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            pytest.fail("frames consumed after creation-time conflict")
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_fails:
+                raise OSError("close_secondary")
+
+    with runtime_resource_policy_scope(active):
+        with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
+            iter_complete_time_sized_frames(
+                Frames(),
+                timestamp_column="timestamp",
+                resource_policy=different,
+            )
+
+    assert close_calls == 1
 
 
 def test_complete_time_sized_frames_preserves_all_empty_chunk_schema() -> None:
@@ -117,3 +250,298 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
             frame.iloc[100:].copy(),
             resource_policy=policy,
         )
+
+
+@pytest.mark.parametrize("close_fails", (False, True))
+def test_complete_frames_own_copied_retired_context_input_before_capture(
+    close_fails: bool,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    close_calls = 0
+
+    class Frames:
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            pytest.fail("frames consumed after retired policy capture")
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_fails:
+                raise OSError("close_secondary")
+
+    frames = Frames()
+    with runtime_resource_policy_scope(policy):
+        copied = copy_context()
+
+    with pytest.raises(RuntimeError) as raised:
+        copied.run(
+            iter_complete_time_sized_frames,
+            frames,
+            timestamp_column="timestamp",
+        )
+
+    assert str(raised.value) == "runtime_resource_policy_retired"
+    assert close_calls == 1
+
+
+@pytest.mark.parametrize("exit_kind", ("normal", "body_error", "consumer_close"))
+def test_complete_frames_transfer_captured_input_to_lazy_activation(
+    exit_kind: str,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    close_calls = 0
+
+    class Frames:
+        def __init__(self) -> None:
+            first = pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(["2026-01-01"]),
+                    "value": [1],
+                }
+            )
+            second = pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(["2026-01-02"]),
+                    "value": [2],
+                }
+            )
+            if exit_kind == "body_error":
+                first = first.rename(columns={"timestamp": "wrong"})
+            self._frames = iter((first, second))
+
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            return next(self._frames)
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+
+    with runtime_resource_policy_scope(policy):
+        chunks = iter_complete_time_sized_frames(
+            Frames(),
+            timestamp_column="timestamp",
+        )
+        if exit_kind == "normal":
+            assert len(list(chunks)) == 2
+        elif exit_kind == "body_error":
+            with pytest.raises(
+                ValueError,
+                match="missing_time_chunk_timestamp_column",
+            ):
+                next(chunks)
+        else:
+            next(chunks)
+            chunks.close()
+
+    assert close_calls == 1
+
+
+@pytest.mark.parametrize("policy_mode", ("explicit", "captured"))
+@pytest.mark.parametrize("termination", ("double_close", "gc"))
+@pytest.mark.parametrize("close_fails", (False, True))
+def test_unactivated_complete_frames_close_once_without_unraisable(
+    monkeypatch: pytest.MonkeyPatch,
+    policy_mode: str,
+    termination: str,
+    close_fails: bool,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    next_calls = 0
+    close_calls = 0
+    unraisable: list[object] = []
+
+    class Frames:
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            nonlocal next_calls
+            next_calls += 1
+            raise AssertionError("unactivated frames were consumed")
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_fails:
+                raise OSError("close_secondary")
+
+    frames = Frames()
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    if policy_mode == "captured":
+        with runtime_resource_policy_scope(policy):
+            chunks = iter_complete_time_sized_frames(
+                frames,
+                timestamp_column="timestamp",
+            )
+    else:
+        chunks = iter_complete_time_sized_frames(
+            frames,
+            timestamp_column="timestamp",
+            resource_policy=policy,
+        )
+
+    if termination == "double_close":
+        chunks.close()
+        assert close_calls == 1
+        chunks.close()
+    else:
+        del chunks
+        gc.collect()
+
+    assert next_calls == 0
+    assert close_calls == 1
+    assert unraisable == []
+
+
+@pytest.mark.parametrize(
+    "primary_type",
+    (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit, GeneratorExit),
+)
+def test_complete_time_frames_close_upstream_inside_policy_scope(
+    primary_type: type[BaseException],
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    primary = primary_type("upstream_primary")
+    closed_under: list[RuntimeResourcePolicy | None] = []
+
+    class Frames:
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            raise primary
+
+        def close(self) -> None:
+            closed_under.append(current_runtime_resource_policy())
+            raise OSError("close_secondary")
+
+    chunks = iter_complete_time_sized_frames(
+        Frames(),
+        timestamp_column="timestamp",
+        resource_policy=policy,
+    )
+    with pytest.raises(primary_type) as raised:
+        next(chunks)
+
+    assert raised.value is primary
+    assert closed_under == [policy]
+
+
+@pytest.mark.parametrize(
+    "entry_error",
+    (
+        RuntimeError("runtime_resource_policy_retired"),
+        RuntimeError("runtime_resource_policy_conflict"),
+        RuntimeError("runtime_resource_policy_concurrent_root"),
+    ),
+)
+@pytest.mark.parametrize("close_fails", (False, True))
+def test_complete_time_frames_close_once_when_policy_entry_fails(
+    entry_error: RuntimeError,
+    close_fails: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    close_calls = 0
+
+    class Frames:
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            pytest.fail("frames consumed after policy entry failure")
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_fails:
+                raise OSError("close_secondary")
+
+    @contextmanager
+    def failing_scope(_policy):  # noqa: ANN001, ANN202
+        raise entry_error
+        yield
+
+    monkeypatch.setattr(memory_owner, "runtime_resource_policy_scope", failing_scope)
+    chunks = iter_complete_time_sized_frames(
+        Frames(),
+        timestamp_column="timestamp",
+        resource_policy=policy,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        next(chunks)
+
+    assert raised.value is entry_error
+    assert close_calls == 1
+
+
+@pytest.mark.parametrize(
+    "resolution_error",
+    (
+        RuntimeError("policy_factory_failed"),
+        ValueError("retired_runtime_resource_setting"),
+        RuntimeError("runtime_available_memory_discovery_failed"),
+        OSError("policy_resolution_failed"),
+    ),
+)
+@pytest.mark.parametrize("close_fails", (False, True))
+def test_complete_time_frames_close_once_when_policy_resolution_fails(
+    resolution_error: BaseException,
+    close_fails: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    close_calls = 0
+
+    class Frames:
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            pytest.fail("frames consumed after policy resolution failure")
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_fails:
+                raise OSError("close_secondary")
+
+    def fail_resolution() -> RuntimeResourcePolicy:
+        raise resolution_error
+
+    monkeypatch.setattr(
+        memory_owner,
+        "active_runtime_resource_policy",
+        fail_resolution,
+    )
+    chunks = iter_complete_time_sized_frames(
+        Frames(),
+        timestamp_column="timestamp",
+    )
+
+    with pytest.raises(BaseException) as raised:
+        next(chunks)
+
+    assert raised.value is resolution_error
+    assert close_calls == 1

@@ -106,12 +106,6 @@ def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_column
     )
     full = read_dataset(root)
     window = TimeWindow("2015-01-01", "2015-01-05")
-    context = open_dataset_session(
-        root,
-        columns=["asset_id", "value"],
-        time_window=window,
-    )
-
     result = read_dataset(
         root,
         columns=["asset_id", "value"],
@@ -125,7 +119,12 @@ def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_column
 
     assert list(result.columns) == ["asset_id", "value"]
     pd.testing.assert_frame_equal(result, manual)
-    assert {path.parent.name for path in context.read_paths} == {"year=2015"}
+    with open_dataset_session(
+        root,
+        columns=["asset_id", "value"],
+        time_window=window,
+    ) as context:
+        assert {path.parent.name for path in context.read_paths} == {"year=2015"}
 
 
 def test_read_dataset_datetime_time_window_filters_intraday_precisely(
@@ -208,11 +207,6 @@ def test_time_window_normalizes_timezone_aware_bounds_to_naive_utc(
     )
 
     assert result["value"].tolist() == [1.0, 2.0]
-
-
-def test_time_window_invalid_string_raises_stable_error() -> None:
-    with pytest.raises(ValueError, match="invalid_time_window_bound"):
-        TimeWindow("not-a-date", "2026-07-06")
 
 
 def test_chunked_datetime_window_preserves_empty_schema(tmp_path: Path) -> None:

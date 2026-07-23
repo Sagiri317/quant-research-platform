@@ -6,6 +6,7 @@ import math
 import shutil
 import sqlite3
 import struct
+import sys
 import tempfile
 from array import array
 from bisect import bisect_right
@@ -139,7 +140,14 @@ class ExactPrimaryKeyIndex:
         try:
             if connection is not None:
                 connection.close()
-        finally:
+        except BaseException:
+            if temporary_directory is not None:
+                try:
+                    temporary_directory.cleanup()
+                except BaseException:
+                    pass
+            raise
+        else:
             if temporary_directory is not None:
                 temporary_directory.cleanup()
 
@@ -294,7 +302,13 @@ class ExactPrimaryKeyIndex:
                     raise ValueError("exact_key_identity_payload_missing")
                 yield bytes(row[0])
         finally:
-            rows.close()
+            if sys.exception() is None:
+                rows.close()
+            else:
+                try:
+                    rows.close()
+                except BaseException:
+                    pass
 
     def difference_counts(
         self,
@@ -771,10 +785,41 @@ def _compare_buffer_ranges(
 
 
 def _cleanup_stale_key_scratch(parent: Path) -> None:
-    for scratch in parent.glob(".k-*"):
-        if not scratch.is_dir() or not scratch_owner_is_stale(
-            scratch,
-            prefix=".k-",
-        ):
+    first_failure: BaseException | None = None
+    try:
+        candidates = iter(parent.glob(".k-*"))
+    except BaseException as exc:
+        first_failure = exc
+        candidates = iter(())
+    while True:
+        try:
+            scratch = next(candidates)
+        except StopIteration:
+            break
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
             continue
-        shutil.rmtree(scratch)
+        try:
+            is_directory = scratch.is_dir()
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+            continue
+        if not is_directory:
+            continue
+        try:
+            is_stale = scratch_owner_is_stale(scratch, prefix=".k-")
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+            continue
+        if not is_stale:
+            continue
+        try:
+            shutil.rmtree(scratch)
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+    if first_failure is not None:
+        raise first_failure

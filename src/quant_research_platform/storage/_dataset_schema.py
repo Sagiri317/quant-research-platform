@@ -14,7 +14,7 @@ import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.contracts._json import (
-    _bounded_rendered_qrp_json_object_size,
+    bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
     parse_qrp_json_object,
@@ -541,7 +541,7 @@ def require_logical_dtype_metadata_within_target(
         if descriptor["kind"] == "categorical"
     }
     try:
-        rendered_size = _bounded_rendered_qrp_json_object_size(
+        rendered_size = bounded_rendered_qrp_json_object_size(
             skeleton,
             lazy_arrays=lazy_arrays,
             max_bytes=target_chunk_bytes - 1,
@@ -619,14 +619,14 @@ def _validated_category_payloads(
             matches = False
         if not matches:
             raise ValueError("dataset_logical_dtypes_invalid")
-        _encoded_logical_category_value(
+        encode_logical_category_value(
             canonical,
             target_chunk_bytes=target_chunk_bytes,
         )
         yield canonical
 
 
-def _encoded_logical_category_value(
+def encode_logical_category_value(
     value: Mapping[str, Any],
     *,
     target_chunk_bytes: int,
@@ -770,6 +770,11 @@ def _promote_compatible_logical_dtype(
     if kinds == {"numpy_boolean", "nullable_boolean"}:
         nullable_descriptor = left if left["kind"] == "nullable_boolean" else right
         return dict(nullable_descriptor)
+    if kinds == {"numpy_float", "nullable_float"}:
+        numpy_descriptor = left if left["kind"] == "numpy_float" else right
+        nullable_descriptor = left if left["kind"] == "nullable_float" else right
+        if nullable_descriptor["dtype"].lower() == numpy_descriptor["dtype"]:
+            return dict(nullable_descriptor)
     return None
 
 
@@ -793,13 +798,19 @@ def pandas_dtype_overrides_from_logical_payload(
                 ],
                 ordered=bool(descriptor["ordered"]),
             )
-        elif kind in {"nullable_integer", "nullable_boolean", "string"}:
-            result[name] = descriptor["dtype"]
+        elif kind in {
+            "nullable_integer",
+            "nullable_boolean",
+            "nullable_float",
+            "string",
+            "datetime",
+        }:
+            result[name] = pd.api.types.pandas_dtype(descriptor["dtype"])
     return result
 
 
 def _logical_dtype_descriptor(name: str, series: pd.Series) -> dict[str, Any]:
-    dtype = series.dtype
+    dtype = _canonical_pandas_logical_dtype(series.dtype)
     if isinstance(dtype, pd.CategoricalDtype):
         return {
             "name": name,
@@ -818,6 +829,8 @@ def _logical_dtype_descriptor(name: str, series: pd.Series) -> dict[str, Any]:
         ("Int", "UInt")
     ):
         kind = "nullable_integer"
+    elif isinstance(dtype, (pd.Float32Dtype, pd.Float64Dtype)):
+        kind = "nullable_float"
     elif pd.api.types.is_integer_dtype(dtype):
         kind = "numpy_integer"
     elif pd.api.types.is_bool_dtype(dtype):
@@ -833,6 +846,27 @@ def _logical_dtype_descriptor(name: str, series: pd.Series) -> dict[str, Any]:
     else:
         raise ValueError("unsupported_dataset_logical_dtype")
     return {"name": name, "kind": kind, "dtype": dtype_name}
+
+
+def _canonical_pandas_logical_dtype(dtype: object) -> object:
+    if not isinstance(dtype, pd.ArrowDtype):
+        return dtype
+    arrow_type = dtype.pyarrow_dtype
+    if pa.types.is_boolean(arrow_type):
+        return pd.BooleanDtype()
+    if pa.types.is_signed_integer(arrow_type):
+        return pd.api.types.pandas_dtype(f"Int{arrow_type.bit_width}")
+    if pa.types.is_unsigned_integer(arrow_type):
+        return pd.api.types.pandas_dtype(f"UInt{arrow_type.bit_width}")
+    if pa.types.is_floating(arrow_type) and arrow_type.bit_width in {32, 64}:
+        return pd.api.types.pandas_dtype(f"Float{arrow_type.bit_width}")
+    if pa.types.is_timestamp(arrow_type):
+        if arrow_type.tz is not None:
+            return pd.DatetimeTZDtype(unit=arrow_type.unit, tz=arrow_type.tz)
+        return np.dtype(f"datetime64[{arrow_type.unit}]")
+    if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
+        return pd.StringDtype()
+    raise ValueError("unsupported_dataset_logical_dtype")
 
 
 def _typed_category_value_payload(value: object) -> dict[str, Any]:

@@ -87,12 +87,14 @@ class DataSpec:
     def __post_init__(self) -> None:
         if self.schema_version != "0.1":
             raise ValueError("unsupported_schema_version")
+        column_roles = dict(self.column_roles)
+        object.__setattr__(self, "column_roles", column_roles)
         missing = [
-            column for column in self.primary_key if column not in self.column_roles
+            column for column in self.primary_key if column not in column_roles
         ]
         if missing:
             raise ValueError(f"missing_primary_key_columns: {', '.join(missing)}")
-        object.__setattr__(self, "required_columns", tuple(self.column_roles))
+        object.__setattr__(self, "required_columns", tuple(column_roles))
 
 
 @dataclass(frozen=True, kw_only=True)

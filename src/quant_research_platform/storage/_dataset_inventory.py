@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import sqlite3
+import sys
 import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -151,7 +152,13 @@ class DatasetSessionInventory:
         return self
 
     def __exit__(self, *_: object) -> None:
-        self.close()
+        if _[0] is None:
+            self.close()
+            return
+        try:
+            self.close()
+        except BaseException:
+            pass
 
     def __del__(self) -> None:
         try:
@@ -167,7 +174,14 @@ class DatasetSessionInventory:
         try:
             if connection is not None:
                 connection.close()
-        finally:
+        except BaseException:
+            if temporary is not None:
+                try:
+                    temporary.cleanup()
+                except BaseException:
+                    pass
+            raise
+        else:
             if temporary is not None:
                 temporary.cleanup()
 
@@ -238,7 +252,7 @@ class DatasetSessionInventory:
             for row in cursor:
                 yield self.data_root / str(row[0])
         finally:
-            cursor.close()
+            _close_cursor_preserving_primary(cursor)
 
     def add(self, path: Path, metadata: DatasetPartMetadata, *, selected: bool) -> None:
         """Insert one writer-observed part using its exact numeric order key."""
@@ -386,7 +400,7 @@ class DatasetSessionInventory:
                     ),
                 )
         finally:
-            cursor.close()
+            _close_cursor_preserving_primary(cursor)
 
     def iter_paths(
         self,
@@ -399,7 +413,6 @@ class DatasetSessionInventory:
             path_selection=path_selection,
         ):
             yield path
-
     def path_count(
         self,
         *,
@@ -638,6 +651,16 @@ class DatasetSessionInventory:
         return self._connection
 
 
+def _close_cursor_preserving_primary(cursor: sqlite3.Cursor) -> None:
+    if sys.exception() is None:
+        cursor.close()
+        return
+    try:
+        cursor.close()
+    except BaseException:
+        pass
+
+
 def _identity_values(identity: DatasetFileIdentity) -> tuple[str, str, str, str]:
     return (
         str(identity.device),
@@ -693,6 +716,41 @@ def _metadata_from_row(
 
 
 def _cleanup_stale_inventory(parent: Path) -> None:
-    for scratch in parent.glob(f"{_PREFIX}*"):
-        if scratch.is_dir() and scratch_owner_is_stale(scratch, prefix=_PREFIX):
+    first_failure: BaseException | None = None
+    try:
+        candidates = iter(parent.glob(f"{_PREFIX}*"))
+    except BaseException as exc:
+        first_failure = exc
+        candidates = iter(())
+    while True:
+        try:
+            scratch = next(candidates)
+        except StopIteration:
+            break
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+            continue
+        try:
+            is_directory = scratch.is_dir()
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+            continue
+        if not is_directory:
+            continue
+        try:
+            is_stale = scratch_owner_is_stale(scratch, prefix=_PREFIX)
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+            continue
+        if not is_stale:
+            continue
+        try:
             shutil.rmtree(scratch)
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+    if first_failure is not None:
+        raise first_failure

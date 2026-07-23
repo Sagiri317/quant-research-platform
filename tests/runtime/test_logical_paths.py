@@ -18,6 +18,10 @@ def test_logical_path_prefers_run_root_when_available(tmp_path: Path) -> None:
     assert logical_path(path, run_root=run_root) == ("outputs/a_share/manifest.json")
 
 
+def test_logical_path_uses_posix_form() -> None:
+    assert logical_path(Path("plain") / "path") == "plain/path"
+
+
 def test_logical_path_uses_last_generated_marker_under_parent_data_path() -> None:
     path = Path("sandbox-output/team/qrp/outputs/run/manifest.json")
 

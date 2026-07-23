@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +37,7 @@ from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_dependencies,
     materialization_io,
     materialization_planning,
     materialization_validation,
@@ -53,7 +54,11 @@ from quant_research_platform.research.factors.price_volume import (
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -211,6 +216,104 @@ def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
 
     available = policy.task_memory_budget_bytes - retained_payload_bytes
     assert observed == [(policy.payload_target_bytes, available)]
+
+
+@pytest.mark.parametrize("operation", ("materialized", "chunked"))
+def test_dataset_read_scope_remains_active_through_session_exit(
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    competing = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+
+    class Session:
+        resource_policy = policy
+
+        def __enter__(self) -> Session:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            assert current_runtime_resource_policy() is policy
+            with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
+                with runtime_resource_policy_scope(competing):
+                    pass
+
+    @contextmanager
+    def open_session(*_args, **_kwargs):  # noqa: ANN202
+        with runtime_resource_policy_scope(policy):
+            with Session() as session:
+                yield session
+
+    monkeypatch.setattr(materialization_io, "open_dataset_session", open_session)
+    monkeypatch.setattr(
+        materialization_io,
+        "materialize_dataset_session",
+        lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        materialization_io,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter(()),
+    )
+
+    if operation == "materialized":
+        materialization_io.read_materialized_dataset(
+            Path("dataset"),
+            resource_policy=policy,
+        )
+    else:
+        list(
+            materialization_io.iter_dataset_chunks_with_policy(
+                Path("dataset"),
+                resource_policy=policy,
+            )
+        )
+
+
+@pytest.mark.parametrize("operation", ("materialized", "chunked"))
+def test_dataset_read_does_not_construct_session_when_policy_entry_fails(
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    primary = RuntimeError("runtime_resource_policy_concurrent_root")
+    @contextmanager
+    def failing_scope(_policy):  # noqa: ANN001, ANN202
+        raise primary
+        yield
+
+    @contextmanager
+    def open_session(*_args, **_kwargs):  # noqa: ANN202
+        with failing_scope(policy):
+            pytest.fail("session constructed after policy entry failure")
+            yield
+
+    monkeypatch.setattr(materialization_io, "open_dataset_session", open_session)
+
+    with pytest.raises(RuntimeError) as raised:
+        if operation == "materialized":
+            materialization_io.read_materialized_dataset(
+                Path("dataset"),
+                resource_policy=policy,
+            )
+        else:
+            list(
+                materialization_io.iter_dataset_chunks_with_policy(
+                    Path("dataset"),
+                    resource_policy=policy,
+                )
+            )
+
+    assert raised.value is primary
 
 
 def test_materialized_read_rejects_exhausted_retained_state_before_decoder() -> None:
@@ -883,6 +986,187 @@ def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
                 ),
             ),
         )
+
+
+def test_source_input_root_keeps_one_policy_active_for_all_children(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    spec = _processed_spec(
+        "target",
+        kind=ProcessedDataKind.ANNOTATION,
+        source_input_data_ids=("left", "right"),
+    )
+    observed: list[str] = []
+
+    def read_child(root: Path, **_kwargs: object) -> pd.DataFrame:
+        assert current_runtime_resource_policy() is policy
+        observed.append(root.name)
+        return _key_frame()
+
+    monkeypatch.setattr(materialization_io, "read_materialized_dataset", read_child)
+
+    inputs = materialization_io.read_source_inputs_for_spec(
+        spec,
+        layout=StorageLayout(project_root=tmp_path),
+        source_id=SourceId("synthetic_vendor_a"),
+        resource_policy=policy,
+    )
+
+    assert list(inputs) == ["left", "right"]
+    assert observed == ["left", "right"]
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+        with runtime_resource_policy_scope(policy):
+            pass
+
+
+@pytest.mark.parametrize(
+    "primary_type",
+    (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit, GeneratorExit),
+)
+def test_source_input_root_retires_policy_after_every_primary(
+    primary_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    primary = primary_type("source_child_primary")
+    spec = _processed_spec(
+        "target",
+        kind=ProcessedDataKind.ANNOTATION,
+        source_input_data_ids=("left", "right"),
+    )
+
+    def fail_child(*_args: object, **_kwargs: object) -> pd.DataFrame:
+        assert current_runtime_resource_policy() is policy
+        raise primary
+
+    monkeypatch.setattr(materialization_io, "read_materialized_dataset", fail_child)
+
+    with pytest.raises(primary_type) as raised:
+        materialization_io.read_source_inputs_for_spec(
+            spec,
+            layout=StorageLayout(project_root=tmp_path),
+            source_id=SourceId("synthetic_vendor_a"),
+            resource_policy=policy,
+        )
+    assert raised.value is primary
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+        with runtime_resource_policy_scope(policy):
+            pass
+
+
+@pytest.mark.parametrize(
+    "existing",
+    ((True, True), (False, False), (True, False)),
+    ids=("two-existing", "two-missing", "mixed"),
+)
+def test_dependency_root_keeps_one_policy_active_for_all_children(
+    existing: tuple[bool, bool],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    left = _processed_spec("left", kind=ProcessedDataKind.ANNOTATION)
+    right = _processed_spec("right", kind=ProcessedDataKind.ANNOTATION)
+    target = _processed_spec(
+        "target",
+        kind=ProcessedDataKind.ANNOTATION,
+        processed_input_data_ids=("left", "right"),
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    for dependency, present in zip((left, right), existing, strict=True):
+        if present:
+            materialization_io.processed_root(layout, dependency).mkdir(parents=True)
+    observed: list[tuple[str, str]] = []
+
+    def require_coverage(root: Path, *_args: object, **_kwargs: object) -> None:
+        assert current_runtime_resource_policy() is policy
+        observed.append((root.name, "existing"))
+
+    def materialize_one(dependency: ProcessedDataSpec, **_kwargs: object) -> None:
+        assert current_runtime_resource_policy() is policy
+        observed.append((dependency.data_id, "missing"))
+
+    monkeypatch.setattr(
+        materialization_dependencies.materialization_planning,
+        "require_dataset_coverage",
+        require_coverage,
+    )
+
+    materialization_dependencies.ensure_processed_dependencies(
+        target,
+        layout=layout,
+        source_id=SourceId("synthetic_vendor_a"),
+        time_window=TimeWindow("2024-01-02", "2024-01-03"),
+        policy=policy,
+        sessions=(pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")),
+        written={},
+        processed_catalog=_catalog(left, right, target),
+        dependency_windows={},
+        panel_key_coverages={},
+        materialize_one=materialize_one,
+    )
+
+    assert len(observed) == 2
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+        with runtime_resource_policy_scope(policy):
+            pass
+
+
+@pytest.mark.parametrize(
+    "primary_type",
+    (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit, GeneratorExit),
+)
+def test_dependency_root_retires_policy_after_every_primary(
+    primary_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    primary = primary_type("dependency_child_primary")
+    dependency = _processed_spec("left", kind=ProcessedDataKind.ANNOTATION)
+    target = _processed_spec(
+        "target",
+        kind=ProcessedDataKind.ANNOTATION,
+        processed_input_data_ids=("left",),
+    )
+
+    def fail_child(*_args: object, **_kwargs: object) -> None:
+        assert current_runtime_resource_policy() is policy
+        raise primary
+
+    with pytest.raises(primary_type) as raised:
+        materialization_dependencies.ensure_processed_dependencies(
+            target,
+            layout=StorageLayout(project_root=tmp_path),
+            source_id=SourceId("synthetic_vendor_a"),
+            time_window=TimeWindow("2024-01-02", "2024-01-03"),
+            policy=policy,
+            sessions=(pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")),
+            written={},
+            processed_catalog=_catalog(dependency, target),
+            dependency_windows={},
+            panel_key_coverages={},
+            materialize_one=fail_child,
+        )
+    assert raised.value is primary
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+        with runtime_resource_policy_scope(policy):
+            pass
 
 
 def _catalog(*specs: ProcessedDataSpec) -> ProcessedDataCatalog:

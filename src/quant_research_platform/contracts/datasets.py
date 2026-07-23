@@ -34,12 +34,12 @@ class ResearchDatasetSpec(DataSpec):
             for column, role in self.column_roles.items()
         ):
             raise ValueError("invalid_research_column_roles")
+        super().__post_init__()
         object.__setattr__(
             self,
             "column_roles",
-            MappingProxyType(dict(self.column_roles)),
+            MappingProxyType(self.column_roles),
         )
-        super().__post_init__()
         if type(self.key_coverage) not in (dict, MappingProxyType) or any(
             type(data_id) is not str for data_id in self.key_coverage
         ):

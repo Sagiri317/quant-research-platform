@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Hashable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import replace
@@ -124,79 +125,85 @@ def _iter_panel_chunks(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
-    chunk_target_bytes = resource_policy.payload_target_bytes
-    bar_session = input_sessions[source_ids.market_bars_source_data_id(spec)]
-    trade_session = input_sessions[source_ids.aggregate_trades_source_data_id(spec)]
-    depth_session = input_sessions[source_ids.depth_levels_source_data_id(spec)]
-    with materialization_validation.crypto_asset_session_views(
-        bar_session,
-        columns=("source_asset_id",),
-        target_chunk_bytes=chunk_target_bytes,
-        error="invalid_crypto_panel_source_physical_asset_grouping",
-        key_error="invalid_crypto_matching_bar_source_asset_id",
-    ) as source_asset_views:
-        source_assets = _canonical_source_assets(
-            tuple(key for key, _view in source_asset_views)
-        )
-        view_by_source_asset = {key[0]: view for key, view in source_asset_views}
-        order_state = materialization_validation.OrderedDependencyState()
-        for source_asset_id in source_assets:
-            trade_continuity_state = (
-                panel_input_reducers.AggregateTradeContinuityState()
+    if any(
+        session.resource_policy is not resource_policy
+        for session in input_sessions.values()
+    ):
+        raise RuntimeError("runtime_resource_policy_conflict")
+    with runtime_resource_policy_scope(resource_policy):
+        chunk_target_bytes = resource_policy.payload_target_bytes
+        bar_session = input_sessions[source_ids.market_bars_source_data_id(spec)]
+        trade_session = input_sessions[source_ids.aggregate_trades_source_data_id(spec)]
+        depth_session = input_sessions[source_ids.depth_levels_source_data_id(spec)]
+        with materialization_validation.crypto_asset_session_views(
+            bar_session,
+            columns=("source_asset_id",),
+            target_chunk_bytes=chunk_target_bytes,
+            error="invalid_crypto_panel_source_physical_asset_grouping",
+            key_error="invalid_crypto_matching_bar_source_asset_id",
+        ) as source_asset_views:
+            source_assets = _canonical_source_assets(
+                tuple(key for key, _view in source_asset_views)
             )
-            asset_session = view_by_source_asset[source_asset_id]
-            for bars in iter_dataset_chunks(
-                asset_session,
-                target_chunk_bytes=chunk_target_bytes,
-            ):
-                if bars.empty:
-                    continue
-                _validate_matching_bar_keys(bars)
-                prepared_bars = panels.prepare_panel_bars(bars)
-                prepared_bars = (
-                    materialization_validation.validated_ordered_dependency_chunk(
-                        prepared_bars,
-                        state=order_state,
-                        error="out_of_order_crypto_panel_dependency",
-                    )
+            view_by_source_asset = {key[0]: view for key, view in source_asset_views}
+            order_state = materialization_validation.OrderedDependencyState()
+            for source_asset_id in source_assets:
+                trade_continuity_state = (
+                    panel_input_reducers.AggregateTradeContinuityState()
                 )
-                materialization_resources.require_frame_within_budget(
-                    prepared_bars,
-                    target_bytes=resource_policy.payload_target_bytes,
-                    error="crypto_indivisible_reducer_unit_exceeds_payload_target",
-                )
-                with (
-                    closing_dataset_iterator(
-                        _iter_matching_trade_chunks(
-                            trade_session,
-                            prepared_bars,
-                            target_chunk_bytes=chunk_target_bytes,
-                        )
-                    ) as trade_chunks,
-                    closing_dataset_iterator(
-                        _iter_matching_depth_chunks(
-                            depth_session,
-                            prepared_bars,
-                            target_chunk_bytes=chunk_target_bytes,
-                        )
-                    ) as depth_chunks,
+                asset_session = view_by_source_asset[source_asset_id]
+                for bars in iter_dataset_chunks(
+                    asset_session,
+                    target_chunk_bytes=chunk_target_bytes,
                 ):
-                    output = panels.calculate_market_panel_from_chunks(
+                    if bars.empty:
+                        continue
+                    _validate_matching_bar_keys(bars)
+                    prepared_bars = panels.prepare_panel_bars(bars)
+                    prepared_bars = (
+                        materialization_validation.validated_ordered_dependency_chunk(
+                            prepared_bars,
+                            state=order_state,
+                            error="out_of_order_crypto_panel_dependency",
+                        )
+                    )
+                    materialization_resources.require_frame_within_budget(
                         prepared_bars,
-                        trade_chunks=trade_chunks,
-                        depth_chunks=depth_chunks,
-                        payload_target_bytes=resource_policy.payload_target_bytes,
-                        trade_continuity_state=trade_continuity_state,
-                        max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
-                    ).loc[:, spec.required_columns]
-                materialization_resources.require_frame_within_budget(
-                    output,
-                    target_bytes=resource_policy.payload_target_bytes,
-                    error="crypto_indivisible_reducer_unit_exceeds_payload_target",
-                )
-                yield output
-    for session in input_sessions.values():
-        session.verify()
+                        target_bytes=resource_policy.payload_target_bytes,
+                        error="crypto_indivisible_reducer_unit_exceeds_payload_target",
+                    )
+                    with (
+                        closing_dataset_iterator(
+                            _iter_matching_trade_chunks(
+                                trade_session,
+                                prepared_bars,
+                                target_chunk_bytes=chunk_target_bytes,
+                            )
+                        ) as trade_chunks,
+                        closing_dataset_iterator(
+                            _iter_matching_depth_chunks(
+                                depth_session,
+                                prepared_bars,
+                                target_chunk_bytes=chunk_target_bytes,
+                            )
+                        ) as depth_chunks,
+                    ):
+                        output = panels.calculate_market_panel_from_chunks(
+                            prepared_bars,
+                            trade_chunks=trade_chunks,
+                            depth_chunks=depth_chunks,
+                            payload_target_bytes=resource_policy.payload_target_bytes,
+                            trade_continuity_state=trade_continuity_state,
+                            max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
+                        ).loc[:, spec.required_columns]
+                    materialization_resources.require_frame_within_budget(
+                        output,
+                        target_bytes=resource_policy.payload_target_bytes,
+                        error="crypto_indivisible_reducer_unit_exceeds_payload_target",
+                    )
+                    yield output
+        for session in input_sessions.values():
+            session.verify()
 
 
 def _canonical_source_assets(
@@ -350,7 +357,12 @@ def _iter_matching_chunks(
                 yield matching
     finally:
         if view.path_selection is not None:
-            session.inventory.release_path_selection(view.path_selection)
+            primary = sys.exception()
+            try:
+                session.inventory.release_path_selection(view.path_selection)
+            except BaseException:
+                if primary is None:
+                    raise
 
 
 def _matching_session_view(
@@ -387,8 +399,13 @@ def _matching_session_view(
         )
         view.verify()
     except BaseException:
-        session.inventory.release_path_selection(path_selection)
-        raise
+        primary = sys.exception()
+        try:
+            session.inventory.release_path_selection(path_selection)
+        except BaseException:
+            pass
+        if primary is not None:
+            raise
     return view
 
 

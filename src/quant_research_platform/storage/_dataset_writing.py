@@ -24,9 +24,10 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
     pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
-    _inspection_from_persisted_session,
+    inspection_from_persisted_session,
 )
 from quant_research_platform.storage._dataset_inventory import DatasetSessionInventory
 from quant_research_platform.storage._dataset_key_tracking import (
@@ -49,13 +50,13 @@ from quant_research_platform.storage._dataset_physical import (
 )
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
-    _bounded_frame_chunks,
     dataset_session_from_inventory,
+    iter_bounded_frame_chunks,
     iter_declared_parquet_member_batches,
 )
 from quant_research_platform.storage._dataset_schema import (
-    _encoded_logical_category_value,
     data_spec_payload,
+    encode_logical_category_value,
     logical_dtype_metadata_bytes,
     logical_dtype_payload_from_frame,
     merge_dataset_instance_metadata,
@@ -256,7 +257,7 @@ class _WriteStats:
             current = dict(descriptor)
             if current["kind"] == "categorical":
                 encoded_values = (
-                    _encoded_logical_category_value(
+                    encode_logical_category_value(
                         item,
                         target_chunk_bytes=target_chunk_bytes,
                     )
@@ -364,6 +365,26 @@ def write_dataset(
     validate_dataset_spec(spec)
     validate_dataset_artifact_root(final_root, spec)
     issued_policy = resource_policy or active_runtime_resource_policy()
+    with runtime_resource_policy_scope(issued_policy):
+        return _write_dataset_under_policy(
+            final_root,
+            data,
+            spec=spec,
+            instance_metadata=instance_metadata,
+            staged_validator=staged_validator,
+            resource_policy=issued_policy,
+        )
+
+
+def _write_dataset_under_policy(
+    final_root: Path,
+    data: pd.DataFrame | Iterable[pd.DataFrame],
+    *,
+    spec: DataSpec,
+    instance_metadata: Mapping[str, Any] | None,
+    staged_validator: Callable[[DatasetWriteReceipt], None] | None,
+    resource_policy: RuntimeResourcePolicy,
+) -> DatasetInspection:
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     close = getattr(input_chunks, "close", None)
     input_closed = close is None
@@ -398,10 +419,10 @@ def write_dataset(
                 DatasetSessionInventory(
                     data_root=temp_root / "data",
                     scratch_parent=temp_root,
-                    task_memory_budget_bytes=issued_policy.task_memory_budget_bytes,
+                    task_memory_budget_bytes=resource_policy.task_memory_budget_bytes,
                 ) as inventory,
             ):
-                working_headroom = issued_policy.task_memory_budget_bytes - (
+                working_headroom = resource_policy.task_memory_budget_bytes - (
                     key_tracker.retained_memory_bytes + inventory.retained_memory_bytes
                 )
                 if working_headroom <= 0:
@@ -410,7 +431,7 @@ def write_dataset(
                     input_chunks,
                     temp_root / "data",
                     spec=spec,
-                    target_chunk_bytes=issued_policy.payload_target_bytes,
+                    target_chunk_bytes=resource_policy.payload_target_bytes,
                     task_memory_budget_bytes=working_headroom,
                     key_tracker=key_tracker,
                     inventory=inventory,
@@ -422,7 +443,7 @@ def write_dataset(
                 manifest = merge_dataset_instance_metadata(
                     {
                         **accumulator.payload(
-                            target_chunk_bytes=issued_policy.payload_target_bytes
+                            target_chunk_bytes=resource_policy.payload_target_bytes
                         ),
                         "schema_id": "qrp-dataset-manifest",
                     },
@@ -437,7 +458,7 @@ def write_dataset(
                     inventory=inventory,
                     columns=None,
                     time_window=None,
-                    resource_policy=issued_policy,
+                    resource_policy=resource_policy,
                 )
                 if staged_validator is not None:
                     staged_validator(
@@ -448,7 +469,7 @@ def write_dataset(
                         )
                     )
                 session.verify()
-                return _inspection_from_persisted_session(
+                return inspection_from_persisted_session(
                     session,
                     published_root=final_root,
                 )
@@ -504,7 +525,7 @@ def _write_contents(
             saw_empty_schema = True
             del table, frame, logical_dtypes, declared, chunk
             continue
-        for bounded_frame in _bounded_frame_chunks(
+        for bounded_frame in iter_bounded_frame_chunks(
             declared,
             target_chunk_bytes=target_chunk_bytes,
         ):
@@ -521,7 +542,7 @@ def _write_contents(
                 timestamp_column=timestamp_column,
                 partition_columns=spec.partition_columns,
             ):
-                for bounded_partition in _bounded_frame_chunks(
+                for bounded_partition in iter_bounded_frame_chunks(
                     partition_frame,
                     target_chunk_bytes=target_chunk_bytes,
                 ):

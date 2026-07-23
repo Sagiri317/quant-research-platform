@@ -64,6 +64,61 @@ def test_structure_audit_json_gate_passes() -> None:
     } <= check_names
 
 
+def _write_owner_provenance_fixture(
+    root: Path,
+    *,
+    test_source: str,
+) -> None:
+    for owner in ("storage", "gadgets"):
+        package = root / "src" / "quant_research_platform" / owner
+        package.mkdir(parents=True, exist_ok=True)
+        (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    test_root = root / "tests" / "storage"
+    test_root.mkdir(parents=True)
+    (test_root / "test_behavior.py").write_text(test_source, encoding="utf-8")
+
+
+def test_owner_placement_rejects_foreign_only_production_subject(
+    tmp_path: Path,
+) -> None:
+    audit = _load_structure_audit()
+    _write_owner_provenance_fixture(
+        tmp_path,
+        test_source=(
+            "import quant_research_platform.gadgets as subject\n"
+            "def test_behavior():\n"
+            "    assert subject.VALUE == 1\n"
+        ),
+    )
+
+    check = audit._test_owner_placement(tmp_path)
+
+    assert check.status == "FAIL"
+    assert any(
+        "foreign_owner_without_local_owner:gadgets" in item
+        for item in check.findings
+    )
+
+
+def test_owner_placement_accepts_local_subject_with_foreign_collaborator(
+    tmp_path: Path,
+) -> None:
+    audit = _load_structure_audit()
+    _write_owner_provenance_fixture(
+        tmp_path,
+        test_source=(
+            "import quant_research_platform.storage as subject\n"
+            "import quant_research_platform.gadgets as collaborator\n"
+            "def test_behavior():\n"
+            "    assert subject.VALUE == collaborator.VALUE\n"
+        ),
+    )
+
+    check = audit._test_owner_placement(tmp_path)
+
+    assert check.status == "PASS"
+
+
 def test_structure_audit_detects_package_build_isolation_mutation(
     tmp_path: Path,
 ) -> None:

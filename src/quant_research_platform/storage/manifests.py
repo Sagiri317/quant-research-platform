@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from quant_research_platform.contracts._json import (
+    bounded_rendered_qrp_json_object_size,
     parse_qrp_json_object,
     render_qrp_json_object,
 )
@@ -57,7 +61,7 @@ def read_bounded_qrp_json(path: Path) -> tuple[bytes, dict[str, Any]]:
         int(path_stat.st_mtime_ns),
     )
     try:
-        with candidate.open("rb") as handle:
+        with _open_file_preserving_primary(candidate, "rb") as handle:
             before = os.fstat(handle.fileno())
             raw = handle.read(_MAX_QRP_JSON_BYTES + 1)
             after = os.fstat(handle.fileno())
@@ -114,7 +118,7 @@ def read_dataset_manifest_evidence(dataset_root: Path) -> dict[str, Any]:
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
     _require_schema_id(payload)
-    text = render_qrp_json_object(sanitize_shared_object(payload)) + "\n"
+    text = _bounded_qrp_json_text(sanitize_shared_object(payload))
     return atomic_write_text(path, text, encoding="utf-8")
 
 
@@ -128,7 +132,7 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
 
     _require_schema_id(payload)
     assert_internal_artifact_metadata_safe(payload)
-    text = render_qrp_json_object(payload) + "\n"
+    text = _bounded_qrp_json_text(payload)
     return atomic_write_text(path, text, encoding="utf-8")
 
 
@@ -140,20 +144,27 @@ def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
     if unsafe is not None:
         raise ValueError(f"unsafe_qrp_json: {unsafe}")
     final_path = Path(path)
-    text = render_qrp_json_object(payload) + "\n"
+    text = _bounded_qrp_json_text(payload)
     final_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = final_path.with_name(f".tmp-{uuid4().hex[:12]}")
     claimed_temp = False
     try:
-        with temp_path.open("x", encoding="utf-8") as handle:
+        with _open_file_preserving_primary(
+            temp_path,
+            "x",
+            encoding="utf-8",
+        ) as handle:
             claimed_temp = True
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         temp_path.replace(final_path)
     except BaseException:
-        if claimed_temp and temp_path.exists():
-            temp_path.unlink()
+        if claimed_temp:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except BaseException:
+                pass
         raise
     return final_path
 
@@ -257,12 +268,40 @@ def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+@contextmanager
+def _open_file_preserving_primary(
+    path: Path,
+    *args: Any,
+    **kwargs: Any,
+) -> Iterator[Any]:
+    handle = path.open(*args, **kwargs)
+    try:
+        yield handle
+    finally:
+        if sys.exception() is None:
+            handle.close()
+        else:
+            try:
+                handle.close()
+            except BaseException:
+                pass
+
+
 def _require_schema_id(payload: object) -> None:
     if not isinstance(payload, dict):
         raise ValueError("manifest_json_identity_invalid")
     schema_id = payload.get("schema_id")
     if not isinstance(schema_id, str) or not schema_id or "/" in schema_id:
         raise ValueError("manifest_json_identity_invalid")
+
+
+def _bounded_qrp_json_text(payload: dict[str, Any]) -> str:
+    bounded_rendered_qrp_json_object_size(
+        payload,
+        lazy_arrays={},
+        max_bytes=_MAX_QRP_JSON_BYTES - 1,
+    )
+    return render_qrp_json_object(payload) + "\n"
 
 
 __all__ = [

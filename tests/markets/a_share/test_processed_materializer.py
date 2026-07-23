@@ -199,6 +199,271 @@ def test_a_share_output_wrapper_close_cascades_to_source(
     assert closed
 
 
+_IO_WRAPPER_FAILURE_TYPES = (
+    RuntimeError,
+    OSError,
+    MemoryError,
+    KeyboardInterrupt,
+    SystemExit,
+    GeneratorExit,
+)
+
+
+@pytest.mark.parametrize(
+    "wrapper_name",
+    ("sorted", "disk_guarded", "dataset_session"),
+)
+@pytest.mark.parametrize("failure_type", _IO_WRAPPER_FAILURE_TYPES)
+@pytest.mark.parametrize("failure_after_yield", (False, True))
+def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
+    wrapper_name: str,
+    failure_type: type[BaseException],
+    failure_after_yield: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+    frame = pd.DataFrame(
+        {
+            column: (
+                pd.to_datetime(["2014-01-02"])
+                if column == "timestamp"
+                else ["a_share" if column == "market_id" else "value"]
+            )
+            for column in spec.required_columns
+        }
+    )
+    primary = failure_type("body_failure")
+    close_failure = OSError("close_failure")
+    cleanup_calls = 0
+
+    class Source:
+        def __init__(self) -> None:
+            self.yielded = False
+
+        def __iter__(self):  # noqa: ANN204
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            if failure_after_yield and not self.yielded:
+                self.yielded = True
+                return frame
+            raise primary
+
+        def close(self) -> None:
+            nonlocal cleanup_calls
+            if wrapper_name == "dataset_session":
+                return
+            cleanup_calls += 1
+            raise close_failure
+
+    source = Source()
+    if wrapper_name == "sorted":
+        wrapped = materialization_io.iter_sorted_output_chunks(source, spec)
+    elif wrapper_name == "disk_guarded":
+        monkeypatch.setattr(
+            materialization_io,
+            "require_free_disk_headroom",
+            lambda *_args, **_kwargs: None,
+        )
+        wrapped = materialization_io._iter_disk_guarded_output_chunks(
+            source,
+            scratch_parent=tmp_path,
+        )
+    else:
+        policy = RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=16 * 1024 * 1024,
+            environ={},
+        )
+
+        class Session:
+            resource_policy = policy
+
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                _exc_value: BaseException | None,
+                _traceback: object,
+            ) -> None:
+                if exc_type is None:
+                    self.close()
+                    return
+                try:
+                    self.close()
+                except BaseException:
+                    pass
+
+            def close(self) -> None:
+                nonlocal cleanup_calls
+                cleanup_calls += 1
+                raise close_failure
+
+        session = Session()
+        monkeypatch.setattr(
+            materialization_io,
+            "open_dataset_session",
+            lambda *_args, **_kwargs: session,
+        )
+        monkeypatch.setattr(
+            materialization_io,
+            "iter_dataset_chunks",
+            lambda *_args, **_kwargs: source,
+        )
+        wrapped = materialization_io.iter_dataset_chunks_with_policy(
+            tmp_path,
+            resource_policy=policy,
+        )
+
+    observed: BaseException | None = None
+    try:
+        if failure_after_yield:
+            next(wrapped)
+        next(wrapped)
+    except BaseException as raised:
+        observed = raised
+
+    assert observed is primary
+    assert cleanup_calls == 1
+
+
+@pytest.mark.parametrize(
+    "wrapper_name",
+    ("sorted", "disk_guarded", "dataset_session"),
+)
+@pytest.mark.parametrize(
+    ("item_count", "close_fails", "early_close"),
+    (
+        (0, False, False),
+        (1, False, False),
+        (0, True, False),
+        (1, True, False),
+        (1, True, True),
+    ),
+)
+def test_a_share_io_wrapper_cleanup_lifecycle(
+    wrapper_name: str,
+    item_count: int,
+    close_fails: bool,
+    early_close: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+    frame = pd.DataFrame(
+        {
+            column: (
+                pd.to_datetime(["2014-01-02"])
+                if column == "timestamp"
+                else ["a_share" if column == "market_id" else "value"]
+            )
+            for column in spec.required_columns
+        }
+    )
+    close_failure = OSError("close_failure")
+    cleanup_calls = 0
+
+    class Source:
+        def __init__(self) -> None:
+            self.remaining = item_count
+
+        def __iter__(self):  # noqa: ANN204
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            if self.remaining == 0:
+                raise StopIteration
+            self.remaining -= 1
+            return frame
+
+        def close(self) -> None:
+            nonlocal cleanup_calls
+            if wrapper_name == "dataset_session":
+                return
+            cleanup_calls += 1
+            if close_fails:
+                raise close_failure
+
+    source = Source()
+    if wrapper_name == "sorted":
+        wrapped = materialization_io.iter_sorted_output_chunks(source, spec)
+    elif wrapper_name == "disk_guarded":
+        monkeypatch.setattr(
+            materialization_io,
+            "require_free_disk_headroom",
+            lambda *_args, **_kwargs: None,
+        )
+        wrapped = materialization_io._iter_disk_guarded_output_chunks(
+            source,
+            scratch_parent=tmp_path,
+        )
+    else:
+        policy = RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=16 * 1024 * 1024,
+            environ={},
+        )
+
+        class Session:
+            resource_policy = policy
+
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                _exc_value: BaseException | None,
+                _traceback: object,
+            ) -> None:
+                if exc_type is None:
+                    self.close()
+                    return
+                try:
+                    self.close()
+                except BaseException:
+                    pass
+
+            def close(self) -> None:
+                nonlocal cleanup_calls
+                cleanup_calls += 1
+                if close_fails:
+                    raise close_failure
+
+        session = Session()
+        monkeypatch.setattr(
+            materialization_io,
+            "open_dataset_session",
+            lambda *_args, **_kwargs: session,
+        )
+        monkeypatch.setattr(
+            materialization_io,
+            "iter_dataset_chunks",
+            lambda *_args, **_kwargs: source,
+        )
+        wrapped = materialization_io.iter_dataset_chunks_with_policy(
+            tmp_path,
+            resource_policy=policy,
+        )
+
+    observed: BaseException | None = None
+    outputs: list[pd.DataFrame] = []
+    try:
+        if early_close:
+            outputs.append(next(wrapped))
+            wrapped.close()
+        else:
+            outputs.extend(wrapped)
+    except BaseException as raised:
+        observed = raised
+
+    expected = close_failure if close_fails and not early_close else None
+    assert observed is expected
+    assert len(outputs) == item_count
+    assert cleanup_calls == 1
+
+
 def test_write_and_inspect_activates_explicit_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

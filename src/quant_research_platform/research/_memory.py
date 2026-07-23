@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import ExitStack
 from math import ceil
 
 import pandas as pd
@@ -11,9 +12,11 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    bind_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 
 
 def iter_time_sized_frames(
@@ -24,13 +27,18 @@ def iter_time_sized_frames(
 ) -> Iterator[pd.DataFrame]:
     """Yield timestamp-session chunks sized by the shared runtime policy."""
 
-    policy = resource_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(policy):
-        yield from _iter_time_sized_frames_with_policy(
-            frame,
-            timestamp_column=timestamp_column,
-            resource_policy=policy,
-        )
+    bound_policy = bind_runtime_resource_policy(resource_policy)
+
+    def activate() -> Iterator[pd.DataFrame]:
+        policy = bound_policy or active_runtime_resource_policy()
+        with runtime_resource_policy_scope(policy):
+            yield from _iter_time_sized_frames_with_policy(
+                frame,
+                timestamp_column=timestamp_column,
+                resource_policy=policy,
+            )
+
+    return activate()
 
 
 def _iter_time_sized_frames_with_policy(
@@ -86,18 +94,24 @@ def iter_complete_time_sized_frames(
 ) -> Iterator[pd.DataFrame]:
     """Yield chunks without splitting any timestamp session across inputs."""
 
-    policy = resource_policy or active_runtime_resource_policy()
-    try:
-        with runtime_resource_policy_scope(policy):
-            yield from _iter_complete_time_sized_frames_with_policy(
-                frames,
-                timestamp_column=timestamp_column,
-                resource_policy=policy,
-            )
-    finally:
-        close = getattr(frames, "close", None)
-        if close is not None:
-            close()
+    with ExitStack() as pending_capture_cleanup:
+        pending_capture_cleanup.enter_context(closing_dataset_iterator(frames))
+        bound_policy = bind_runtime_resource_policy(resource_policy)
+        activation_cleanup = pending_capture_cleanup.pop_all()
+
+    def activate() -> Iterator[pd.DataFrame]:
+        with ExitStack() as pending_entry_cleanup:
+            pending_entry_cleanup.enter_context(activation_cleanup)
+            policy = bound_policy or active_runtime_resource_policy()
+            with runtime_resource_policy_scope(policy):
+                with pending_entry_cleanup.pop_all():
+                    yield from _iter_complete_time_sized_frames_with_policy(
+                        frames,
+                        timestamp_column=timestamp_column,
+                        resource_policy=policy,
+                    )
+
+    return activate()
 
 
 def _iter_complete_time_sized_frames_with_policy(

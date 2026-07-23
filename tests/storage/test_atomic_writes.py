@@ -350,7 +350,7 @@ def test_atomic_directory_target_identity_normalizes_windows_case_aliases(
     ) == atomic._atomic_directory_scratch_prefix(lower)
 
 
-def test_atomic_directory_marker_cleanup_does_not_reverse_publication(
+def test_atomic_directory_marker_cleanup_failure_propagates_after_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -364,12 +364,14 @@ def test_atomic_directory_marker_cleanup_does_not_reverse_publication(
 
     monkeypatch.setattr(Path, "unlink", deny_marker_unlink)
 
-    atomic_write_directory(
-        final_root,
-        lambda root: (root / "done.txt").write_text("ok\n", encoding="utf-8"),
-    )
+    with pytest.raises(PermissionError, match="Access is denied"):
+        atomic_write_directory(
+            final_root,
+            lambda root: (root / "done.txt").write_text("ok\n", encoding="utf-8"),
+        )
 
     assert (final_root / "done.txt").read_text(encoding="utf-8") == "ok\n"
+    assert list(tmp_path.glob(".atomic-*.target"))
 
 
 def test_atomic_write_text_creates_nested_temp_parent(tmp_path: Path) -> None:

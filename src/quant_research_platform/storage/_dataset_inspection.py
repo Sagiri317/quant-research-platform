@@ -8,7 +8,7 @@ from typing import Any
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import (
     EXACT_KEY_SQLITE_PAGE_BYTES,
@@ -37,15 +37,17 @@ def inspect_dataset(
     time_window: TimeWindow | None = None,
     resource_policy: RuntimeResourcePolicy | None,
 ) -> DatasetInspection:
-    issued_policy = resource_policy or active_runtime_resource_policy()
     with open_dataset_session(
         dataset_root,
         columns=None,
         time_window=time_window,
         require_consumable=False,
-        resource_policy=issued_policy,
+        resource_policy=resource_policy,
     ) as context:
-        return inspect_dataset_session(context, resource_policy=issued_policy)
+        return inspect_dataset_session(
+            context,
+            resource_policy=context.resource_policy,
+        )
 
 
 def inspect_dataset_session(
@@ -55,27 +57,30 @@ def inspect_dataset_session(
 ) -> DatasetInspection:
     """Inspect one already frozen Storage session without reopening its dataset."""
 
-    runtime = _inspection_runtime_metadata(
-        context,
-        target_chunk_bytes=resource_policy.payload_target_bytes,
-    )
-    return DatasetInspection(
-        root=context.root,
-        data_root=context.data_root,
-        spec=context.spec,
-        columns=physical_schema_columns(context.schema),
-        schema_hash=context.schema_hash,
-        file_count=int(runtime["file_count"]),
-        row_count=int(runtime["row_count"]),
-        partitions=tuple(runtime["partitions"]),
-        partition_row_counts=dict(runtime["partition_row_counts"]),
-        date_min=runtime["date_min"],
-        date_max=runtime["date_max"],
-        manifest=context.manifest,
-    )
+    if context.resource_policy is not resource_policy:
+        raise RuntimeError("runtime_resource_policy_conflict")
+    with runtime_resource_policy_scope(resource_policy):
+        runtime = _inspection_runtime_metadata(
+            context,
+            target_chunk_bytes=resource_policy.payload_target_bytes,
+        )
+        return DatasetInspection(
+            root=context.root,
+            data_root=context.data_root,
+            spec=context.spec,
+            columns=physical_schema_columns(context.schema),
+            schema_hash=context.schema_hash,
+            file_count=int(runtime["file_count"]),
+            row_count=int(runtime["row_count"]),
+            partitions=tuple(runtime["partitions"]),
+            partition_row_counts=dict(runtime["partition_row_counts"]),
+            date_min=runtime["date_min"],
+            date_max=runtime["date_max"],
+            manifest=context.manifest,
+        )
 
 
-def _inspection_from_persisted_session(
+def inspection_from_persisted_session(
     context: DatasetSession,
     *,
     published_root: Path,

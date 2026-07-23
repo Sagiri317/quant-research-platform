@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -107,7 +108,8 @@ def _opened_parquet(
     expected_identity: DatasetFileIdentity | None,
 ) -> Iterator[tuple[pq.ParquetFile, DatasetFileIdentity]]:
     resolved = Path(path)
-    with resolved.open("rb") as handle:
+    handle = resolved.open("rb")
+    try:
         before = _identity_from_stat(os.fstat(handle.fileno()))
         if expected_identity is not None and before != expected_identity:
             raise ValueError("dataset_file_identity_changed")
@@ -115,10 +117,35 @@ def _opened_parquet(
         try:
             yield parquet_file, before
         finally:
-            after = _identity_from_stat(os.fstat(handle.fileno()))
-            parquet_file.close()
-            if after != before:
-                raise ValueError("dataset_file_identity_changed")
+            if sys.exception() is not None:
+                try:
+                    os.fstat(handle.fileno())
+                except BaseException:
+                    pass
+                try:
+                    parquet_file.close()
+                except BaseException:
+                    pass
+            else:
+                try:
+                    after = _identity_from_stat(os.fstat(handle.fileno()))
+                except BaseException:
+                    try:
+                        parquet_file.close()
+                    except BaseException:
+                        pass
+                    raise
+                parquet_file.close()
+                if after != before:
+                    raise ValueError("dataset_file_identity_changed")
+    finally:
+        if sys.exception() is None:
+            handle.close()
+        else:
+            try:
+                handle.close()
+            except BaseException:
+                pass
 
 
 def _part_metadata(

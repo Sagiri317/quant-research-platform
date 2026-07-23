@@ -52,15 +52,14 @@ def materialize_processed_data(
     """Materialize registered crypto processed datasets from local interim data."""
 
     policy = resource_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(policy):
-        return _materialize_processed_data_with_policy(
-            layout=layout,
-            source_id=source_id,
-            time_window=time_window,
-            data_ids=data_ids,
-            kinds=kinds,
-            resource_policy=policy,
-        )
+    return _materialize_processed_data_with_policy(
+        layout=layout,
+        source_id=source_id,
+        time_window=time_window,
+        data_ids=data_ids,
+        kinds=kinds,
+        resource_policy=policy,
+    )
 
 
 def _materialize_processed_data_with_policy(
@@ -90,16 +89,17 @@ def _materialize_processed_data_with_policy(
             raise ValueError("dataset_exists")
     requested_by_id = {spec.data_id: spec for spec in requested}
     specs = _include_dependencies(requested_by_id)
-    with ExitStack() as session_stack:
-        return _materialize_requested_specs(
-            specs=specs,
-            requested_by_id=requested_by_id,
-            layout=layout,
-            source_id=source_id,
-            time_window=time_window,
-            resource_policy=policy,
-            session_stack=session_stack,
-        )
+    with runtime_resource_policy_scope(policy):
+        with ExitStack() as session_stack:
+            return _materialize_requested_specs(
+                specs=specs,
+                requested_by_id=requested_by_id,
+                layout=layout,
+                source_id=source_id,
+                time_window=time_window,
+                resource_policy=policy,
+                session_stack=session_stack,
+            )
 
 
 def _materialize_requested_specs(

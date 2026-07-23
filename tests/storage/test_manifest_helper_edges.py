@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.storage import manifests
 from quant_research_platform.storage.datasets import write_dataset
 from tests.storage.low_level_fixtures import (
@@ -270,13 +269,3 @@ def test_run_data_summary_rejects_logical_layer_coercion(
                 },
             )
         )
-
-
-def test_manifest_logical_path_uses_posix_form() -> None:
-    assert logical_path(Path("plain") / "path") == "plain/path"
-
-
-def test_manifest_logical_path_uses_last_generated_marker() -> None:
-    path = Path("sandbox/team/qrp/outputs/run/manifest.json")
-
-    assert logical_path(path) == "outputs/run/manifest.json"

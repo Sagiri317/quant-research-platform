@@ -46,15 +46,14 @@ def materialize_processed_data(
     """Materialize registered A-share processed datasets."""
 
     policy = resource_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(policy):
-        return _materialize_processed_data_with_policy(
-            layout=layout,
-            source_id=source_id,
-            time_window=time_window,
-            data_ids=data_ids,
-            kinds=kinds,
-            resource_policy=policy,
-        )
+    return _materialize_processed_data_with_policy(
+        layout=layout,
+        source_id=source_id,
+        time_window=time_window,
+        data_ids=data_ids,
+        kinds=kinds,
+        resource_policy=policy,
+    )
 
 
 def _materialize_processed_data_with_policy(
@@ -85,44 +84,45 @@ def _materialize_processed_data_with_policy(
     lookback_sessions, lookahead_sessions = (
         materialization_dependencies.required_session_offsets(targets)
     )
-    sessions = materialization_planning.available_trading_sessions(
-        layout,
-        source_id,
-        time_window=time_window,
-        lookback_sessions=lookback_sessions,
-        lookahead_sessions=lookahead_sessions,
-        resource_policy=policy,
-    )
-    materialization_planning.require_target_sessions(sessions, time_window)
-    dependency_windows = (
-        materialization_dependencies.planned_processed_dependency_windows(
-            targets,
-            layout=layout,
-            source_id=source_id,
+    with runtime_resource_policy_scope(policy):
+        sessions = materialization_planning.available_trading_sessions(
+            layout,
+            source_id,
             time_window=time_window,
-            sessions=sessions,
+            lookback_sessions=lookback_sessions,
+            lookahead_sessions=lookahead_sessions,
+            resource_policy=policy,
         )
-    )
-    written: dict[str, DatasetInspection] = {}
-    panel_key_coverages: dict[Path, dict[object, tuple[pd.Timestamp, ...]]] = {}
-    for spec in targets:
-        target_time_window = materialization_dependencies.merge_time_windows(
-            time_window,
-            dependency_windows.get(spec.data_id, time_window),
+        materialization_planning.require_target_sessions(sessions, time_window)
+        dependency_windows = (
+            materialization_dependencies.planned_processed_dependency_windows(
+                targets,
+                layout=layout,
+                source_id=source_id,
+                time_window=time_window,
+                sessions=sessions,
+            )
         )
-        _materialize_one(
-            spec,
-            layout=layout,
-            source_id=source_id,
-            time_window=target_time_window,
-            policy=policy,
-            sessions=sessions,
-            written=written,
-            requested=True,
-            dependency_windows=dependency_windows,
-            panel_key_coverages=panel_key_coverages,
-        )
-    return written
+        written: dict[str, DatasetInspection] = {}
+        panel_key_coverages: dict[Path, dict[object, tuple[pd.Timestamp, ...]]] = {}
+        for spec in targets:
+            target_time_window = materialization_dependencies.merge_time_windows(
+                time_window,
+                dependency_windows.get(spec.data_id, time_window),
+            )
+            _materialize_one(
+                spec,
+                layout=layout,
+                source_id=source_id,
+                time_window=target_time_window,
+                policy=policy,
+                sessions=sessions,
+                written=written,
+                requested=True,
+                dependency_windows=dependency_windows,
+                panel_key_coverages=panel_key_coverages,
+            )
+        return written
 
 
 def _materialize_one(

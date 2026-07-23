@@ -26,6 +26,7 @@ from quant_research_platform.artifacts._portfolio_output_validation import (
 )
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
@@ -144,48 +145,53 @@ def _write_portfolio_row_artifact_chunks(
     }
     row_counts = {artifact_name: 0 for artifact_name in PORTFOLIO_ARTIFACTS}
     try:
-        for artifact_chunk in artifact_chunks:
-            artifact_chunk = validate_portfolio_artifact_mapping_keys(
-                artifact_chunk,
-                expected_names=row_artifacts,
-                error="portfolio_row_artifacts_invalid",
-            )
-            for artifact_name in row_artifacts:
-                frame = artifact_chunk[artifact_name]
-                selected = _portfolio_output_chunk_frame(
-                    frame,
-                    artifact_name=artifact_name,
-                    required=required_columns[artifact_name],
-                    spec=spec,
+        with closing_dataset_iterator(iter(artifact_chunks)) as active_chunks:
+            for artifact_chunk in active_chunks:
+                artifact_chunk = validate_portfolio_artifact_mapping_keys(
+                    artifact_chunk,
+                    expected_names=row_artifacts,
+                    error="portfolio_row_artifacts_invalid",
                 )
-                if selected.empty:
-                    continue
-                table = pa.Table.from_pandas(selected, preserve_index=False)
-                writer = writers.get(artifact_name)
-                if writer is None:
-                    writer = pq.ParquetWriter(
-                        temp_paths[artifact_name],
-                        table.schema,
-                        compression="zstd",
+                for artifact_name in row_artifacts:
+                    frame = artifact_chunk[artifact_name]
+                    selected = _portfolio_output_chunk_frame(
+                        frame,
+                        artifact_name=artifact_name,
+                        required=required_columns[artifact_name],
+                        spec=spec,
                     )
-                    writers[artifact_name] = writer
-                writer.write_table(table)
-                row_counts[artifact_name] += len(selected)
-        for writer in writers.values():
-            writer.close()
-        writers.clear()
-        for artifact_name in row_artifacts:
-            if row_counts[artifact_name] == 0:
-                write_parquet(
-                    pd.DataFrame(columns=list(required_columns[artifact_name])),
-                    temp_paths[artifact_name],
-                    engine="pyarrow",
-                    compression="zstd",
-                    index=False,
-                )
+                    if selected.empty:
+                        continue
+                    table = pa.Table.from_pandas(selected, preserve_index=False)
+                    writer = writers.get(artifact_name)
+                    if writer is None:
+                        writer = pq.ParquetWriter(
+                            temp_paths[artifact_name],
+                            table.schema,
+                            compression="zstd",
+                        )
+                        writers[artifact_name] = writer
+                    writer.write_table(table)
+                    row_counts[artifact_name] += len(selected)
+            for artifact_name in tuple(writers):
+                writer = writers.pop(artifact_name)
+                writer.close()
+            for artifact_name in row_artifacts:
+                if row_counts[artifact_name] == 0:
+                    write_parquet(
+                        pd.DataFrame(columns=list(required_columns[artifact_name])),
+                        temp_paths[artifact_name],
+                        engine="pyarrow",
+                        compression="zstd",
+                        index=False,
+                    )
     except BaseException:
-        for writer in writers.values():
-            writer.close()
+        for artifact_name in tuple(writers):
+            writer = writers.pop(artifact_name)
+            try:
+                writer.close()
+            except BaseException:
+                pass
         raise
     return row_counts
 

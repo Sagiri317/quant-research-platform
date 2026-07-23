@@ -465,16 +465,72 @@ def test_dataset_iterator_closing_has_one_internal_storage_owner() -> None:
 
     assert definitions == [owner.as_posix()]
     assert callers == {
+        "src/quant_research_platform/artifacts/_parquet_writers.py": 1,
+        "src/quant_research_platform/artifacts/_portfolio_outputs.py": 1,
+        "src/quant_research_platform/markets/implementations/a_share/processed/"
+        "materialization_io.py": 2,
         "src/quant_research_platform/markets/implementations/a_share/processed/"
         "materialization_planning.py": 3,
+        "src/quant_research_platform/markets/implementations/a_share/verification/"
+        "aggregates.py": 1,
         "src/quant_research_platform/markets/implementations/crypto/processed/"
         "materialization_validation.py": 5,
         "src/quant_research_platform/markets/implementations/crypto/processed/"
         "materialize_panel.py": 2,
+        "src/quant_research_platform/research/_memory.py": 1,
         "src/quant_research_platform/research/datasets/assembler.py": 1,
+        "src/quant_research_platform/sources/csmar/interim.py": 3,
+        "src/quant_research_platform/sources/csmar/raw_exports.py": 1,
     }
     storage_facade = importlib.import_module("quant_research_platform.storage.datasets")
     assert not hasattr(storage_facade, "closing_dataset_iterator")
+
+
+def test_open_dataset_session_is_the_only_storage_session_scope_owner() -> None:
+    owner = SOURCE_ROOT / "storage/_dataset_reading.py"
+    definitions: list[str] = []
+    callers: dict[str, int] = {}
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        if any(
+            isinstance(node, ast.FunctionDef)
+            and node.name == "open_dataset_session"
+            for node in ast.walk(tree)
+        ):
+            definitions.append(path.as_posix())
+        assert "owned_dataset_session_scope" not in source
+        count = source.count("open_dataset_session(")
+        if count and path != owner:
+            callers[path.as_posix()] = count
+
+    assert definitions == [owner.as_posix()]
+    assert callers == {
+        "src/quant_research_platform/markets/implementations/crypto/processed/"
+        "materialize_panel.py": 3,
+        "src/quant_research_platform/markets/implementations/crypto/processed/"
+        "materializer.py": 3,
+        "src/quant_research_platform/markets/implementations/a_share/processed/"
+        "materialization_io.py": 2,
+        "src/quant_research_platform/research/datasets/assembler.py": 1,
+        "src/quant_research_platform/storage/_dataset_comparison.py": 4,
+        "src/quant_research_platform/storage/_dataset_fingerprinting.py": 1,
+        "src/quant_research_platform/storage/_dataset_inspection.py": 1,
+        "src/quant_research_platform/workflows/diagnostics/schema_inventory.py": 1,
+    }
+    reading = importlib.import_module(
+        "quant_research_platform.storage._dataset_reading"
+    )
+    assert tuple(inspect.signature(reading.open_dataset_session).parameters) == (
+        "dataset_root",
+        "columns",
+        "time_window",
+        "row_filters",
+        "require_consumable",
+        "resource_policy",
+    )
+    storage_facade = importlib.import_module("quant_research_platform.storage.datasets")
+    assert not hasattr(storage_facade, "owned_dataset_session_scope")
 
 
 def test_runtime_resource_contract_has_one_current_source_surface() -> None:

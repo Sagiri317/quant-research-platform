@@ -225,10 +225,11 @@ def test_scope_revalidates_active_policy_and_exit(
     with runtime_resource_policy_scope(policy):
         assert active_runtime_resource_policy() is policy
 
-    assert validated == [policy, policy, policy]
+    assert len(validated) == 2
+    assert all(candidate is policy for candidate in validated)
 
 
-def test_scope_exit_resets_context_when_revalidation_fails(
+def test_scope_exit_does_not_revalidate_and_resets_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = RuntimeResourcePolicy.from_environment(
@@ -238,17 +239,17 @@ def test_scope_exit_resets_context_when_revalidation_fails(
     validate = resources._issued_policy_values
     calls = 0
 
-    def fail_exit_validation(candidate: object) -> tuple[int, int]:
+    def reject_redundant_validation(candidate: object) -> tuple[int, int]:
         nonlocal calls
         calls += 1
-        if calls == 2:
-            raise TypeError("invalid_runtime_resource_policy")
+        if calls > 1:
+            raise AssertionError("runtime_policy_revalidated_on_exit")
         return validate(candidate)
 
-    monkeypatch.setattr(resources, "_issued_policy_values", fail_exit_validation)
+    monkeypatch.setattr(resources, "_issued_policy_values", reject_redundant_validation)
 
-    with pytest.raises(TypeError, match="invalid_runtime_resource_policy"):
-        with runtime_resource_policy_scope(policy):
-            pass
+    with runtime_resource_policy_scope(policy):
+        pass
 
     assert resources._ACTIVE_RUNTIME_RESOURCE_POLICY.get() is None
+    assert calls == 1

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pyarrow as pa
@@ -9,6 +10,11 @@ import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.csmar import (
     checksums,
     field_mappings,
@@ -1009,3 +1015,222 @@ def _index_info_raw_row(
         "Idxinfo07": index_class,
         "Idxinfo10": "formula",
     }
+
+
+@pytest.mark.parametrize(
+    "primary_type",
+    (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit, GeneratorExit),
+)
+def test_csmar_reference_frames_close_under_policy_and_preserve_primary(
+    primary_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    primary = primary_type("reference_primary")
+    closed_under: list[RuntimeResourcePolicy | None] = []
+
+    class Frames:
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            raise primary
+
+        def close(self) -> None:
+            closed_under.append(current_runtime_resource_policy())
+            raise OSError("close_secondary")
+
+    monkeypatch.setattr(
+        interim,
+        "interim_catalog",
+        lambda: SimpleNamespace(
+            get=lambda _data_id: SimpleNamespace(primary_key=("id",))
+        ),
+    )
+    with runtime_resource_policy_scope(policy):
+        chunks = interim._iter_deduped_reference_frames(
+            Frames(),
+            data_id="reference",
+            pruning_reports=None,
+        )
+        with pytest.raises(primary_type) as raised:
+            next(chunks)
+
+    assert raised.value is primary
+    assert closed_under == [policy]
+
+
+@pytest.mark.parametrize(
+    "primary_type",
+    (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit, GeneratorExit),
+)
+def test_csmar_index_info_handle_close_preserves_active_primary(
+    primary_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = primary_type("csv_primary")
+
+    class Handle:
+        def __enter__(self) -> Handle:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.close()
+
+        def __iter__(self) -> Handle:
+            return self
+
+        def __next__(self) -> str:
+            raise primary
+
+        def close(self) -> None:
+            raise OSError("handle_close_secondary")
+
+    monkeypatch.setattr(Path, "open", lambda *_a, **_k: Handle())
+
+    with pytest.raises(primary_type) as raised:
+        raw_exports.read_private_export_file(Path("index.csv"), "index_info")
+
+    assert raised.value is primary
+
+
+@pytest.mark.parametrize(
+    "primary_type",
+    (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit, GeneratorExit),
+)
+def test_csmar_text_reader_closes_under_policy_and_preserves_primary(
+    primary_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    primary = primary_type("reader_primary")
+    closed_under: list[RuntimeResourcePolicy | None] = []
+
+    class Reader:
+        def __iter__(self) -> Reader:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            raise primary
+
+        def close(self) -> None:
+            closed_under.append(current_runtime_resource_policy())
+            raise OSError("reader_close_secondary")
+
+    def read_csv(*_args: object, **kwargs: object) -> object:
+        if "nrows" in kwargs:
+            return pd.DataFrame({"value": ["x"]})
+        return Reader()
+
+    monkeypatch.setattr(raw_exports.pd, "read_csv", read_csv)
+
+    with runtime_resource_policy_scope(policy):
+        chunks = iter(
+            raw_exports.iter_private_export_chunks(
+                Path("export.csv"),
+                dataset="daily",
+                chunksize=10,
+            )
+        )
+        with pytest.raises(primary_type) as raised:
+            next(chunks)
+
+    assert raised.value is primary
+    assert closed_under == [policy]
+
+
+def test_csmar_text_reader_close_preserves_consumer_generator_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    closed_under: list[RuntimeResourcePolicy | None] = []
+
+    class Reader:
+        yielded = False
+
+        def __iter__(self) -> Reader:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            if self.yielded:
+                raise StopIteration
+            self.yielded = True
+            return pd.DataFrame({"value": ["y"]})
+
+        def close(self) -> None:
+            closed_under.append(current_runtime_resource_policy())
+            raise OSError("reader_close_secondary")
+
+    def read_csv(*_args: object, **kwargs: object) -> object:
+        if "nrows" in kwargs:
+            return pd.DataFrame({"value": ["x"]})
+        return Reader()
+
+    monkeypatch.setattr(raw_exports.pd, "read_csv", read_csv)
+
+    with runtime_resource_policy_scope(policy):
+        chunks = iter(
+            raw_exports.iter_private_export_chunks(
+                Path("export.csv"),
+                dataset="daily",
+                chunksize=10,
+            )
+        )
+        next(chunks)
+        chunks.close()
+
+    assert closed_under == [policy]
+
+
+def test_csmar_nonreference_frames_close_preserves_consumer_generator_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    closed_under: list[RuntimeResourcePolicy | None] = []
+
+    class Frames:
+        yielded = False
+
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            if self.yielded:
+                raise StopIteration
+            self.yielded = True
+            return pd.DataFrame({"value": ["x"]})
+
+        def close(self) -> None:
+            closed_under.append(current_runtime_resource_policy())
+            raise OSError("frames_close_secondary")
+
+    monkeypatch.setattr(interim, "_raw_dataset_for_interim", lambda _data_id: "raw")
+    monkeypatch.setattr(
+        interim,
+        "_iter_pruned_interim_frames",
+        lambda **_kwargs: Frames(),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        chunks = interim.iter_interim_frames(
+            data_id="nonreference",
+            input_files=[],
+            start_date=None,
+            end_date=None,
+        )
+        next(chunks)
+        chunks.close()
+
+    assert closed_under == [policy]

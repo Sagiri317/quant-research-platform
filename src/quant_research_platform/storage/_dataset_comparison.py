@@ -13,6 +13,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_fingerprinting import (
     fingerprint_dataset_session,
@@ -43,8 +44,33 @@ def compare_datasets(
         return _comparison("MISSING_LEFT")
     if not right_path.exists():
         return _comparison("MISSING_RIGHT")
+    issued_policy = resource_policy or active_runtime_resource_policy()
+    with runtime_resource_policy_scope(issued_policy):
+        return _compare_datasets_under_policy(
+            left_path,
+            right_path,
+            columns=columns,
+            time_window=time_window,
+            resource_policy=issued_policy,
+        )
+
+
+def _compare_datasets_under_policy(
+    left_root: Path,
+    right_root: Path,
+    *,
+    columns: tuple[str, ...] | list[str] | None = None,
+    time_window: TimeWindow | None = None,
+    resource_policy: RuntimeResourcePolicy,
+) -> DatasetComparison:
+    left_path = Path(left_root)
+    right_path = Path(right_root)
+    if not left_path.exists():
+        return _comparison("MISSING_LEFT")
+    if not right_path.exists():
+        return _comparison("MISSING_RIGHT")
     try:
-        issued_policy = resource_policy or active_runtime_resource_policy()
+        issued_policy = resource_policy
         with open_dataset_session(
             left_path,
             columns=columns,

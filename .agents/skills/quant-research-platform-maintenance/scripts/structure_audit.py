@@ -393,7 +393,78 @@ def _test_owner_placement(repo_root: Path) -> AuditCheck:
         forbidden = ("ast.parse", "import_graph", 'rglob("*.py")', "rglob('*.py')")
         if any(token in text for token in forbidden):
             findings.append(path.as_posix())
+    production_root = repo_root / "src" / "quant_research_platform"
+    production_owners = {
+        path.name for path in production_root.iterdir() if path.is_dir()
+    }
+    storage_owner = "storage"
+    if storage_owner in production_owners:
+        storage_tests = (repo_root / "tests" / storage_owner).rglob("test_*.py")
+    else:
+        storage_tests = ()
+    for path in storage_tests:
+        tree = _parse_python_file(path)
+        bindings = _production_owner_bindings(tree)
+        for node in ast.iter_child_nodes(tree):
+            if not isinstance(node, ast.FunctionDef) or not node.name.startswith(
+                "test_"
+            ):
+                continue
+            referenced = _referenced_production_owners(node, bindings)
+            if referenced and storage_owner not in referenced:
+                foreign = ",".join(sorted(referenced))
+                findings.append(
+                    f"{path.relative_to(repo_root).as_posix()}::{node.name}:"
+                    f"foreign_owner_without_local_owner:{foreign}"
+                )
     return _check("test_owner_placement", tuple(findings))
+
+
+def _production_owner_bindings(tree: ast.Module) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                if len(parts) >= 2 and parts[0] == "quant_research_platform":
+                    bindings[alias.asname or parts[0]] = parts[1]
+        elif isinstance(node, ast.ImportFrom):
+            parts = (node.module or "").split(".")
+            if len(parts) < 2 or parts[0] != "quant_research_platform":
+                continue
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = parts[1]
+    return bindings
+
+
+def _referenced_production_owners(
+    node: ast.FunctionDef,
+    bindings: dict[str, str],
+) -> set[str]:
+    owners = {
+        bindings[child.id]
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name) and child.id in bindings
+    }
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call) or not child.args:
+            continue
+        module_name: str | None = None
+        if isinstance(child.func, ast.Name) and child.func.id == "__import__":
+            argument = child.args[0]
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                module_name = argument.value
+        elif (
+            isinstance(child.func, ast.Attribute)
+            and child.func.attr == "import_module"
+        ):
+            argument = child.args[0]
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                module_name = argument.value
+        parts = module_name.split(".") if module_name is not None else ()
+        if len(parts) >= 2 and parts[0] == "quant_research_platform":
+            owners.add(parts[1])
+    return owners
 
 
 def _validation_fail_packages_rejected(repo_root: Path) -> AuditCheck:

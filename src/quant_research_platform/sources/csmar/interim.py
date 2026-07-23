@@ -18,6 +18,11 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.validation import strict_string_series
+from quant_research_platform.runtime.resources import (
+    active_runtime_resource_policy,
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.csmar.field_mappings import (
     map_columns,
     normalize_stock_code,
@@ -28,6 +33,7 @@ from quant_research_platform.sources.csmar.raw_exports import (
     dataset_files_by_id,
     iter_private_export_chunks,
 )
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -410,25 +416,35 @@ def iter_interim_frames(
     chunksize: int = 500_000,
     pruning_reports: list[dict[str, object]] | None = None,
 ) -> Iterator[pd.DataFrame]:
-    raw_dataset = _raw_dataset_for_interim(data_id)
-    frames = _iter_pruned_interim_frames(
-        data_id=data_id,
-        raw_dataset=raw_dataset,
-        input_files=input_files,
-        start_date=start_date,
-        end_date=end_date,
-        overrides=overrides,
-        chunksize=chunksize,
-        pruning_reports=pruning_reports,
-    )
-    if data_id in SOURCE_REFERENCE_DATA_IDS:
-        yield from _iter_deduped_reference_frames(
-            frames,
-            data_id=data_id,
-            pruning_reports=pruning_reports,
-        )
-        return
-    yield from frames
+    bound_policy = current_runtime_resource_policy()
+
+    def activate() -> Iterator[pd.DataFrame]:
+        policy = bound_policy or active_runtime_resource_policy()
+        with runtime_resource_policy_scope(policy):
+            raw_dataset = _raw_dataset_for_interim(data_id)
+            frames = _iter_pruned_interim_frames(
+                data_id=data_id,
+                raw_dataset=raw_dataset,
+                input_files=input_files,
+                start_date=start_date,
+                end_date=end_date,
+                overrides=overrides,
+                chunksize=chunksize,
+                pruning_reports=pruning_reports,
+            )
+            if data_id in SOURCE_REFERENCE_DATA_IDS:
+                reference_frames = _iter_deduped_reference_frames(
+                    frames, data_id=data_id, pruning_reports=pruning_reports
+                )
+                with closing_dataset_iterator(reference_frames):
+                    for frame in reference_frames:
+                        yield frame
+                return
+            with closing_dataset_iterator(frames):
+                for frame in frames:
+                    yield frame
+
+    return activate()
 
 
 def materialize_interim_data(
@@ -529,32 +545,35 @@ def _iter_deduped_reference_frames(
     seen_rows: dict[tuple[object, ...], tuple[object, ...]] = {}
     exact_duplicate_count = 0
     try:
-        for frame in frames:
-            missing = [
-                column for column in primary_key if column not in frame.columns
-            ]
-            if missing:
-                raise ValueError(
-                    "missing_reference_primary_key_columns: " + ", ".join(missing)
-                )
-            keep_positions: list[int] = []
-            for position, row in enumerate(frame.itertuples(index=False, name=None)):
-                columns = tuple(str(column) for column in frame.columns)
-                values = dict(zip(columns, row, strict=True))
-                key = tuple(values[column] for column in primary_key)
-                payload = tuple(values[column] for column in columns)
-                previous = seen_rows.get(key)
-                if previous is None:
-                    seen_rows[key] = payload
-                    keep_positions.append(position)
-                    continue
-                if previous != payload:
+        with closing_dataset_iterator(frames):
+            for frame in frames:
+                missing = [
+                    column for column in primary_key if column not in frame.columns
+                ]
+                if missing:
                     raise ValueError(
-                        f"conflicting_reference_primary_key_duplicates: {data_id}"
+                        "missing_reference_primary_key_columns: " + ", ".join(missing)
                     )
-                exact_duplicate_count += 1
-            if keep_positions:
-                yield frame.iloc[keep_positions].reset_index(drop=True)
+                keep_positions: list[int] = []
+                for position, row in enumerate(
+                    frame.itertuples(index=False, name=None)
+                ):
+                    columns = tuple(str(column) for column in frame.columns)
+                    values = dict(zip(columns, row, strict=True))
+                    key = tuple(values[column] for column in primary_key)
+                    payload = tuple(values[column] for column in columns)
+                    previous = seen_rows.get(key)
+                    if previous is None:
+                        seen_rows[key] = payload
+                        keep_positions.append(position)
+                        continue
+                    if previous != payload:
+                        raise ValueError(
+                            f"conflicting_reference_primary_key_duplicates: {data_id}"
+                        )
+                    exact_duplicate_count += 1
+                if keep_positions:
+                    yield frame.iloc[keep_positions].reset_index(drop=True)
     finally:
         if pruning_reports is not None:
             _append_reference_duplicate_summary(

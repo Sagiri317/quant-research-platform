@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -58,6 +59,7 @@ from quant_research_platform.storage._dataset_physical import (
     dataset_file_identity,
 )
 from quant_research_platform.storage._dataset_reading import (
+    closing_dataset_iterator,
     iter_declared_parquet_member_batches,
 )
 from quant_research_platform.storage.datasets import inspect_dataset
@@ -209,13 +211,13 @@ def build_local_verification_inventory_payload(
     root = Path(project_root)
     generated_at = generated_at or datetime.now(UTC)
     policy = resource_policy or active_runtime_resource_policy()
-    if evidence_payload is None:
-        evidence_payload = build_review_safe_aggregate_evidence_payload(
-            root,
-            generated_at=generated_at,
-            resource_policy=policy,
-        )
     with runtime_resource_policy_scope(policy):
+        if evidence_payload is None:
+            evidence_payload = build_review_safe_aggregate_evidence_payload(
+                root,
+                generated_at=generated_at,
+                resource_policy=policy,
+            )
         inventory = _dataset_inventory(
             root,
             summary_cache={},
@@ -910,7 +912,13 @@ def _iter_output_frames(
                     _previous_output_bytes=previous_output_bytes,
                 )
         finally:
-            _verify_frozen_output_bundle(frozen)
+            if sys.exception() is None:
+                _verify_frozen_output_bundle(frozen)
+            else:
+                try:
+                    _verify_frozen_output_bundle(frozen)
+                except BaseException:
+                    pass
 
 
 def _freeze_output_bundle(root: Path) -> _FrozenOutputBundle:
@@ -1022,9 +1030,7 @@ def _summarize_frames(
     exact_key_columns: tuple[str, ...] | None = None
     with ExitStack() as stack:
         frame_iterator = iter(frames)
-        close_frames = getattr(frame_iterator, "close", None)
-        if callable(close_frames):
-            stack.callback(close_frames)
+        stack.enter_context(closing_dataset_iterator(frame_iterator))
         key_index: ExactPrimaryKeyIndex | None = None
         for frame in frame_iterator:
             key_columns = tuple(_available_key_columns(frame))

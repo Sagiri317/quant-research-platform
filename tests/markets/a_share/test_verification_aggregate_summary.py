@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
@@ -47,6 +48,15 @@ from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 RESOURCE_POLICY = RuntimeResourcePolicy.from_environment(
     available_memory_bytes=1024**3,
     environ={},
+)
+
+_LIFECYCLE_PRIMARY_TYPES = (
+    RuntimeError,
+    MemoryError,
+    KeyboardInterrupt,
+    SystemExit,
+    GeneratorExit,
+    asyncio.CancelledError,
 )
 
 
@@ -715,6 +725,25 @@ def test_dataset_summary_retained_cell_records_arrow_parent_only(
     closed = False
 
     class Session:
+        resource_policy = RESOURCE_POLICY
+
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            _exc_value: BaseException | None,
+            _traceback: object,
+        ) -> None:
+            if exc_type is None:
+                self.close()
+                return
+            try:
+                self.close()
+            except BaseException:
+                pass
+
         def close(self) -> None:
             nonlocal closed
             closed = True
@@ -921,6 +950,184 @@ def test_summary_callers_close_upstream_on_success_error_and_cancel(
             invoke()
 
     assert closed
+
+
+@pytest.mark.parametrize("primary_type", _LIFECYCLE_PRIMARY_TYPES)
+def test_output_frames_preserve_traversal_primary_over_frozen_verify(
+    monkeypatch: pytest.MonkeyPatch,
+    primary_type: type[BaseException],
+) -> None:
+    primary = primary_type("traversal_primary")
+    verify_calls = 0
+    frozen = SimpleNamespace(parquet_members=((Path("member.parquet"), object()),))
+
+    def fail_traversal(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise primary
+        yield
+
+    def fail_verify(_frozen: object) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        raise OSError("verify_secondary")
+
+    monkeypatch.setattr(aggregates, "_freeze_output_bundle", lambda _root: frozen)
+    monkeypatch.setattr(
+        aggregates,
+        "iter_declared_parquet_member_batches",
+        fail_traversal,
+    )
+    monkeypatch.setattr(aggregates, "_verify_frozen_output_bundle", fail_verify)
+
+    with pytest.raises(primary_type) as raised:
+        list(
+            aggregates._iter_output_frames(
+                (Path("output"),),
+                target_chunk_bytes=1024,
+                operation_headroom_bytes=2048,
+            )
+        )
+
+    assert raised.value is primary
+    assert verify_calls == 1
+
+
+def test_output_frames_propagate_frozen_verify_failure_without_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verify_failure = OSError("verify_only")
+    verify_calls = 0
+    frozen = SimpleNamespace(parquet_members=((Path("member.parquet"), object()),))
+
+    def fail_verify(_frozen: object) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        raise verify_failure
+
+    monkeypatch.setattr(aggregates, "_freeze_output_bundle", lambda _root: frozen)
+    monkeypatch.setattr(
+        aggregates,
+        "iter_declared_parquet_member_batches",
+        lambda *_args, **_kwargs: iter(()),
+    )
+    monkeypatch.setattr(aggregates, "_verify_frozen_output_bundle", fail_verify)
+
+    with pytest.raises(OSError) as raised:
+        list(
+            aggregates._iter_output_frames(
+                (Path("output"),),
+                target_chunk_bytes=1024,
+                operation_headroom_bytes=2048,
+            )
+        )
+
+    assert raised.value is verify_failure
+    assert verify_calls == 1
+
+
+def test_output_frames_consumer_close_preserves_abandonment_over_frozen_verify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verify_calls = 0
+    frozen = SimpleNamespace(parquet_members=((Path("member.parquet"), object()),))
+
+    def batches(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        yield _base_frame()
+        pytest.fail("consumer close did not abandon traversal")
+
+    def fail_verify(_frozen: object) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        raise OSError("verify_secondary")
+
+    monkeypatch.setattr(aggregates, "_freeze_output_bundle", lambda _root: frozen)
+    monkeypatch.setattr(
+        aggregates,
+        "iter_declared_parquet_member_batches",
+        batches,
+    )
+    monkeypatch.setattr(aggregates, "_verify_frozen_output_bundle", fail_verify)
+
+    frames = aggregates._iter_output_frames(
+        (Path("output"),),
+        target_chunk_bytes=1024,
+        operation_headroom_bytes=2048,
+    )
+    next(frames)
+    frames.close()
+
+    assert verify_calls == 1
+
+
+@pytest.mark.parametrize("primary_type", _LIFECYCLE_PRIMARY_TYPES)
+def test_summarize_frames_preserves_body_primary_over_input_close(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    primary_type: type[BaseException],
+) -> None:
+    primary = primary_type("summary_primary")
+    close_calls = 0
+
+    class Frames:
+        def __init__(self) -> None:
+            self._frames = iter((_base_frame(),))
+
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            return next(self._frames)
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            raise OSError("close_secondary")
+
+    def fail_summary(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise primary
+
+    monkeypatch.setattr(aggregates, "_update_content_summary", fail_summary)
+
+    with pytest.raises(primary_type) as raised:
+        aggregates._summarize_frames(
+            Frames(),
+            scratch_parent=tmp_path,
+            resource_policy=RESOURCE_POLICY,
+        )
+
+    assert raised.value is primary
+    assert close_calls == 1
+
+
+def test_summarize_frames_propagates_input_close_failure_without_primary(
+    tmp_path: Path,
+) -> None:
+    close_failure = OSError("close_only")
+    close_calls = 0
+
+    class Frames:
+        def __init__(self) -> None:
+            self._frames = iter((_base_frame(),))
+
+        def __iter__(self) -> Frames:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            return next(self._frames)
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            raise close_failure
+
+    with pytest.raises(OSError) as raised:
+        aggregates._summarize_frames(
+            Frames(),
+            scratch_parent=tmp_path,
+            resource_policy=RESOURCE_POLICY,
+        )
+
+    assert raised.value is close_failure
+    assert close_calls == 1
 
 
 def test_aggregates_validate_all_members_before_selecting_parquet(tmp_path) -> None:

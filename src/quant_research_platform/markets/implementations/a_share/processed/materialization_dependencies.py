@@ -29,7 +29,10 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     materialize_factors,
     materialize_labels,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -55,35 +58,36 @@ def ensure_processed_dependencies(
         time_window=time_window,
         sessions=sessions,
     )
-    for data_id in spec.processed_input_data_ids:
-        dependency = processed_catalog.get(data_id)
-        required_window = merge_time_windows(
-            dependency_window,
-            dependency_windows.get(data_id, dependency_window),
-        )
-        dependency_root = materialization_io.processed_root(layout, dependency)
-        if dependency_root.exists():
-            if data_id in written:
-                continue
-            materialization_planning.require_dataset_coverage(
-                dependency_root,
-                required_window,
-                sessions=sessions,
-                resource_policy=policy,
+    with runtime_resource_policy_scope(policy):
+        for data_id in spec.processed_input_data_ids:
+            dependency = processed_catalog.get(data_id)
+            required_window = merge_time_windows(
+                dependency_window,
+                dependency_windows.get(data_id, dependency_window),
             )
-            continue
-        materialize_one(
-            dependency,
-            layout=layout,
-            source_id=source_id,
-            time_window=required_window,
-            policy=policy,
-            sessions=sessions,
-            written=written,
-            requested=False,
-            dependency_windows=dependency_windows,
-            panel_key_coverages=panel_key_coverages,
-        )
+            dependency_root = materialization_io.processed_root(layout, dependency)
+            if dependency_root.exists():
+                if data_id in written:
+                    continue
+                materialization_planning.require_dataset_coverage(
+                    dependency_root,
+                    required_window,
+                    sessions=sessions,
+                    resource_policy=policy,
+                )
+                continue
+            materialize_one(
+                dependency,
+                layout=layout,
+                source_id=source_id,
+                time_window=required_window,
+                policy=policy,
+                sessions=sessions,
+                written=written,
+                requested=False,
+                dependency_windows=dependency_windows,
+                panel_key_coverages=panel_key_coverages,
+            )
 
 
 def planned_processed_dependency_windows(

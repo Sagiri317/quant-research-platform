@@ -14,7 +14,7 @@ import pytest
 
 import quant_research_platform.contracts as contracts
 from quant_research_platform.contracts._json import (
-    _bounded_rendered_qrp_json_object_size,
+    bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
     parse_qrp_json_object,
@@ -50,7 +50,7 @@ def test_bounded_strict_renderer_matches_existing_renderer_for_lazy_arrays() -> 
     expected_size = len(render_qrp_json_object(full).encode("utf-8"))
 
     assert (
-        _bounded_rendered_qrp_json_object_size(
+        bounded_rendered_qrp_json_object_size(
             skeleton,
             lazy_arrays={("columns", 0, "categories"): iter(categories)},
             max_bytes=expected_size,
@@ -77,7 +77,7 @@ def test_bounded_strict_renderer_stops_before_lazy_array_tail() -> None:
         ).encode("utf-8")
     )
     with pytest.raises(ValueError, match="qrp_json_render_exceeds_max_bytes"):
-        _bounded_rendered_qrp_json_object_size(
+        bounded_rendered_qrp_json_object_size(
             skeleton,
             lazy_arrays={("values",): values()},
             max_bytes=one_item_size,

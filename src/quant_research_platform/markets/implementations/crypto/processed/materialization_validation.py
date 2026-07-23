@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -23,6 +24,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
@@ -55,70 +57,82 @@ def crypto_asset_session_views(
 ) -> Iterator[tuple[tuple[tuple[str, ...], DatasetSession], ...]]:
     if not columns:
         raise ValueError(error)
-    selections: dict[tuple[str, ...], int] = {}
-    current_path: Path | None = None
-    current_key: tuple[str, ...] | None = None
-    discovery_columns = tuple(
-        dict.fromkeys(
-            (
-                *columns,
-                *(
-                    column
-                    for column, _operator, _value in session.parquet_filters or ()
-                ),
-            )
-        )
-    )
-
-    def select_current_path() -> None:
-        if current_path is None or current_key is None:
-            return
-        selection = selections.get(current_key)
-        if selection is None:
-            selection = session.inventory.new_path_selection()
-            selections[current_key] = selection
-        session.inventory.select_path(selection, current_path)
-
-    try:
-        for path, frame in iter_dataset_file_batches(
-            session,
-            columns=discovery_columns,
-            target_chunk_bytes=target_chunk_bytes,
-        ):
-            for row in frame.loc[:, list(columns)].itertuples(index=False, name=None):
-                if any(not isinstance(value, str) or not value for value in row):
-                    raise ValueError(error if key_error is None else key_error)
-                key = tuple(row)
-                if path != current_path:
-                    select_current_path()
-                    current_path = path
-                    current_key = key
-                elif current_key != key:
-                    raise ValueError(error)
-        select_current_path()
-        if not selections:
-            raise ValueError(error if key_error is None else key_error)
-        views = tuple(
-            (
-                key,
-                replace(
-                    session,
-                    parquet_filters=tuple(session.parquet_filters or ())
-                    + tuple(
-                        (column, "==", value)
-                        for column, value in zip(columns, key, strict=True)
+    with runtime_resource_policy_scope(session.resource_policy):
+        selections: dict[tuple[str, ...], int] = {}
+        current_path: Path | None = None
+        current_key: tuple[str, ...] | None = None
+        discovery_columns = tuple(
+            dict.fromkeys(
+                (
+                    *columns,
+                    *(
+                        column
+                        for column, _operator, _value in session.parquet_filters or ()
                     ),
-                    path_selection=selections[key],
-                    owns_inventory=False,
-                ),
+                )
             )
-            for key in sorted(selections)
         )
-        session.verify()
-        yield views
-    finally:
-        for selection in selections.values():
-            session.inventory.release_path_selection(selection)
+
+        def select_current_path() -> None:
+            if current_path is None or current_key is None:
+                return
+            selection = selections.get(current_key)
+            if selection is None:
+                selection = session.inventory.new_path_selection()
+                selections[current_key] = selection
+            session.inventory.select_path(selection, current_path)
+
+        try:
+            for path, frame in iter_dataset_file_batches(
+                session,
+                columns=discovery_columns,
+                target_chunk_bytes=target_chunk_bytes,
+            ):
+                for row in frame.loc[:, list(columns)].itertuples(
+                    index=False,
+                    name=None,
+                ):
+                    if any(not isinstance(value, str) or not value for value in row):
+                        raise ValueError(error if key_error is None else key_error)
+                    key = tuple(row)
+                    if path != current_path:
+                        select_current_path()
+                        current_path = path
+                        current_key = key
+                    elif current_key != key:
+                        raise ValueError(error)
+            select_current_path()
+            if not selections:
+                raise ValueError(error if key_error is None else key_error)
+            views = tuple(
+                (
+                    key,
+                    replace(
+                        session,
+                        parquet_filters=tuple(session.parquet_filters or ())
+                        + tuple(
+                            (column, "==", value)
+                            for column, value in zip(columns, key, strict=True)
+                        ),
+                        path_selection=selections[key],
+                        owns_inventory=False,
+                    ),
+                )
+                for key in sorted(selections)
+            )
+            session.verify()
+            yield views
+        finally:
+            primary = sys.exception()
+            first_failure: BaseException | None = None
+            for selection in selections.values():
+                try:
+                    session.inventory.release_path_selection(selection)
+                except BaseException as exc:
+                    if primary is None and first_failure is None:
+                        first_failure = exc
+            if first_failure is not None:
+                raise first_failure
 
 
 def core_time_window_mask(
@@ -175,33 +189,39 @@ def validate_panel_materialization(
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
-    validate_materialization_input_identities(
-        receipt.session.manifest,
-        expected=expected_input_identities,
-        error="crypto_panel_input_dataset_identity_mismatch",
-    )
-    chunk_target_bytes = resource_policy.payload_target_bytes
-    with (
-        closing_dataset_iterator(
-            iter_dataset_chunks(
-                bar_session,
-                target_chunk_bytes=chunk_target_bytes,
-            )
-        ) as bar_chunks,
-        closing_dataset_iterator(
-            _iter_panel_primary_key_chunks(
-                bar_chunks,
-                primary_key=spec.primary_key,
-            )
-        ) as key_chunks,
+    if (
+        receipt.session.resource_policy is not resource_policy
+        or bar_session.resource_policy is not resource_policy
     ):
-        _validate_receipt_key_coverage(
-            key_chunks,
-            receipt,
-            primary_key=spec.primary_key,
-            error="invalid_crypto_panel_key_coverage",
-            resource_policy=resource_policy,
+        raise RuntimeError("runtime_resource_policy_conflict")
+    with runtime_resource_policy_scope(resource_policy):
+        validate_materialization_input_identities(
+            receipt.session.manifest,
+            expected=expected_input_identities,
+            error="crypto_panel_input_dataset_identity_mismatch",
         )
+        chunk_target_bytes = resource_policy.payload_target_bytes
+        with (
+            closing_dataset_iterator(
+                iter_dataset_chunks(
+                    bar_session,
+                    target_chunk_bytes=chunk_target_bytes,
+                )
+            ) as bar_chunks,
+            closing_dataset_iterator(
+                _iter_panel_primary_key_chunks(
+                    bar_chunks,
+                    primary_key=spec.primary_key,
+                )
+            ) as key_chunks,
+        ):
+            _validate_receipt_key_coverage(
+                key_chunks,
+                receipt,
+                primary_key=spec.primary_key,
+                error="invalid_crypto_panel_key_coverage",
+                resource_policy=resource_policy,
+            )
 
 
 def validate_panel_dependent_materialization(
@@ -213,23 +233,29 @@ def validate_panel_dependent_materialization(
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
-    validate_materialization_input_identities(
-        receipt.session.manifest,
-        expected=expected_input_identities,
-        error="crypto_processed_input_dataset_identity_mismatch",
-    )
-    chunk_target_bytes = resource_policy.payload_target_bytes
-    _validate_receipt_key_coverage(
-        _iter_core_window_chunks(
-            panel_session,
-            time_window=time_window,
-            target_chunk_bytes=chunk_target_bytes,
-        ),
-        receipt,
-        primary_key=spec.primary_key,
-        error="invalid_crypto_processed_key_coverage",
-        resource_policy=resource_policy,
-    )
+    if (
+        receipt.session.resource_policy is not resource_policy
+        or panel_session.resource_policy is not resource_policy
+    ):
+        raise RuntimeError("runtime_resource_policy_conflict")
+    with runtime_resource_policy_scope(resource_policy):
+        validate_materialization_input_identities(
+            receipt.session.manifest,
+            expected=expected_input_identities,
+            error="crypto_processed_input_dataset_identity_mismatch",
+        )
+        chunk_target_bytes = resource_policy.payload_target_bytes
+        _validate_receipt_key_coverage(
+            _iter_core_window_chunks(
+                panel_session,
+                time_window=time_window,
+                target_chunk_bytes=chunk_target_bytes,
+            ),
+            receipt,
+            primary_key=spec.primary_key,
+            error="invalid_crypto_processed_key_coverage",
+            resource_policy=resource_policy,
+        )
 
 
 def _validate_receipt_key_coverage(
@@ -273,38 +299,44 @@ def validate_existing_panel_materialization(
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
-    validate_materialization_input_identities(
-        panel_session.manifest,
-        expected=expected_input_identities,
-        error="crypto_panel_input_dataset_identity_mismatch",
-    )
-    chunk_target_bytes = resource_policy.payload_target_bytes
-    with (
-        closing_dataset_iterator(
-            iter_dataset_chunks(
-                bar_session,
-                target_chunk_bytes=chunk_target_bytes,
-            )
-        ) as bar_chunks,
-        closing_dataset_iterator(
-            _iter_panel_primary_key_chunks(
-                bar_chunks,
-                primary_key=spec.primary_key,
-            )
-        ) as expected_chunks,
-        closing_dataset_iterator(
-            iter_dataset_chunks(
-                panel_session,
-                target_chunk_bytes=chunk_target_bytes,
-            )
-        ) as actual_chunks,
+    if (
+        panel_session.resource_policy is not resource_policy
+        or bar_session.resource_policy is not resource_policy
     ):
-        _validate_ordered_key_stream_coverage(
-            expected_chunks,
-            actual_chunks,
-            primary_key=spec.primary_key,
-            error="invalid_crypto_panel_key_coverage",
+        raise RuntimeError("runtime_resource_policy_conflict")
+    with runtime_resource_policy_scope(resource_policy):
+        validate_materialization_input_identities(
+            panel_session.manifest,
+            expected=expected_input_identities,
+            error="crypto_panel_input_dataset_identity_mismatch",
         )
+        chunk_target_bytes = resource_policy.payload_target_bytes
+        with (
+            closing_dataset_iterator(
+                iter_dataset_chunks(
+                    bar_session,
+                    target_chunk_bytes=chunk_target_bytes,
+                )
+            ) as bar_chunks,
+            closing_dataset_iterator(
+                _iter_panel_primary_key_chunks(
+                    bar_chunks,
+                    primary_key=spec.primary_key,
+                )
+            ) as expected_chunks,
+            closing_dataset_iterator(
+                iter_dataset_chunks(
+                    panel_session,
+                    target_chunk_bytes=chunk_target_bytes,
+                )
+            ) as actual_chunks,
+        ):
+            _validate_ordered_key_stream_coverage(
+                expected_chunks,
+                actual_chunks,
+                primary_key=spec.primary_key,
+                error="invalid_crypto_panel_key_coverage",
+            )
 
 
 def _iter_core_window_chunks(

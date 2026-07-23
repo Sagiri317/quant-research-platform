@@ -15,6 +15,378 @@ from tests.artifacts.output_edge_fixtures import (
     write_output_edge_portfolio_chunks,
 )
 
+_TERMINAL_PRIMARY_TYPES = (
+    RuntimeError,
+    MemoryError,
+    KeyboardInterrupt,
+    SystemExit,
+)
+
+_WRITER_BODY_PRIMARY_TYPES = (*_TERMINAL_PRIMARY_TYPES, GeneratorExit)
+
+
+class _TerminalInput:
+    def __init__(
+        self,
+        *,
+        values: tuple[object, ...] = (),
+        primary: BaseException | None = None,
+        close_failure: BaseException | None = None,
+    ) -> None:
+        self._values = iter(values)
+        self.primary = primary
+        self.close_failure = close_failure
+        self.close_calls = 0
+
+    def __iter__(self) -> _TerminalInput:
+        return self
+
+    def __next__(self) -> object:
+        if self.primary is not None:
+            raise self.primary
+        return next(self._values)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.close_failure is not None:
+            raise self.close_failure
+
+
+def _run_terminal_writer(
+    owner: str,
+    source: _TerminalInput,
+    tmp_path: Path,
+) -> object:
+    if owner == "prediction":
+        return parquet_writers.write_parquet_chunks(
+            source,  # type: ignore[arg-type]
+            tmp_path / "prediction.parquet",
+            required=("timestamp", "value"),
+            key_columns=("timestamp",),
+            compression="snappy",
+        )
+    return portfolio_outputs._write_portfolio_row_artifact_chunks(
+        source,  # type: ignore[arg-type]
+        temp_root=tmp_path,
+        row_artifacts=(),
+        required_columns={},
+        spec=object(),  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.parametrize("owner", ("prediction", "portfolio"))
+@pytest.mark.parametrize("primary_type", _TERMINAL_PRIMARY_TYPES)
+def test_terminal_writer_closes_input_once_without_replacing_primary(
+    owner: str,
+    primary_type: type[BaseException],
+    tmp_path: Path,
+) -> None:
+    primary = primary_type("body_primary")
+    source = _TerminalInput(
+        primary=primary,
+        close_failure=OSError("close_secondary"),
+    )
+
+    with pytest.raises(primary_type) as raised:
+        _run_terminal_writer(owner, source, tmp_path)
+
+    assert raised.value is primary
+    assert source.close_calls == 1
+
+
+@pytest.mark.parametrize("owner", ("prediction", "portfolio"))
+def test_terminal_writer_propagates_close_only_failure_once(
+    owner: str,
+    tmp_path: Path,
+) -> None:
+    close_failure = OSError("close_failed")
+    source = _TerminalInput(close_failure=close_failure)
+
+    with pytest.raises(OSError) as raised:
+        _run_terminal_writer(owner, source, tmp_path)
+
+    assert raised.value is close_failure
+    assert source.close_calls == 1
+
+
+@pytest.mark.parametrize("owner", ("prediction", "portfolio"))
+def test_terminal_writer_preserves_validation_primary_over_input_close(
+    owner: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    primary = ValueError("validation_primary")
+    source = _TerminalInput(
+        values=(pd.DataFrame(),) if owner == "prediction" else ({},),
+        close_failure=OSError("close_secondary"),
+    )
+    if owner == "prediction":
+        monkeypatch.setattr(
+            parquet_writers,
+            "_prediction_output_chunk_frame",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(primary),
+        )
+    else:
+        monkeypatch.setattr(
+            portfolio_outputs,
+            "validate_portfolio_artifact_mapping_keys",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(primary),
+        )
+
+    with pytest.raises(ValueError) as raised:
+        _run_terminal_writer(owner, source, tmp_path)
+
+    assert raised.value is primary
+    assert source.close_calls == 1
+
+
+def test_prediction_path_preflight_does_not_activate_terminal_input(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    activations = 0
+
+    class Input:
+        def __iter__(self) -> object:
+            nonlocal activations
+            activations += 1
+            raise AssertionError("input_activated_before_path_preflight")
+
+    preflight_failure = FileExistsError("output_exists")
+    monkeypatch.setattr(
+        parquet_writers,
+        "reject_if_exists",
+        lambda _path: (_ for _ in ()).throw(preflight_failure),
+    )
+
+    with pytest.raises(FileExistsError) as raised:
+        parquet_writers.write_parquet_chunks(
+            Input(),  # type: ignore[arg-type]
+            tmp_path / "prediction.parquet",
+            required=("timestamp", "value"),
+            key_columns=("timestamp",),
+            compression="snappy",
+        )
+
+    assert raised.value is preflight_failure
+    assert activations == 0
+
+
+def test_prediction_writer_close_is_attempted_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    close_failure = OSError("writer_close_failed")
+
+    class KeyIndex:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> KeyIndex:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def add_table(self, _table: object) -> int:
+            return 0
+
+    class Writer:
+        close_calls = 0
+
+        def write_table(self, _table: object) -> None:
+            pass
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise close_failure
+
+    writer = Writer()
+    monkeypatch.setattr(parquet_writers, "ExactPrimaryKeyIndex", KeyIndex)
+    monkeypatch.setattr(
+        parquet_writers.pq,
+        "ParquetWriter",
+        lambda *_args, **_kwargs: writer,
+    )
+    frames = (
+        pd.DataFrame(
+            {"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]}
+        )
+        for _ in range(2)
+    )
+
+    with pytest.raises(OSError) as raised:
+        parquet_writers.write_parquet_chunks(
+            frames,
+            tmp_path / "prediction.parquet",
+            required=("timestamp", "value"),
+            key_columns=("timestamp",),
+            compression="snappy",
+        )
+
+    assert raised.value is close_failure
+    assert writer.close_calls == 1
+
+
+@pytest.mark.parametrize("failure_position", (0, 1, 2))
+def test_portfolio_writers_close_once_and_attempt_all(
+    failure_position: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    close_failure = OSError("writer_close_failed")
+
+    class Writer:
+        def __init__(self, position: int) -> None:
+            self.position = position
+            self.close_calls = 0
+
+        def write_table(self, _table: object) -> None:
+            pass
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.position == failure_position:
+                raise close_failure
+
+    writers: list[Writer] = []
+
+    def writer_factory(*_args: object, **_kwargs: object) -> Writer:
+        writer = Writer(len(writers))
+        writers.append(writer)
+        return writer
+
+    row_artifacts = tuple(portfolio_outputs.PORTFOLIO_ARTIFACTS)[:3]
+    frame = pd.DataFrame({"value": [1.0]})
+    monkeypatch.setattr(
+        portfolio_outputs,
+        "validate_portfolio_artifact_mapping_keys",
+        lambda value, **_kwargs: value,
+    )
+    monkeypatch.setattr(
+        portfolio_outputs,
+        "_portfolio_output_chunk_frame",
+        lambda value, **_kwargs: value,
+    )
+    monkeypatch.setattr(portfolio_outputs.pq, "ParquetWriter", writer_factory)
+
+    with pytest.raises(OSError) as raised:
+        portfolio_outputs._write_portfolio_row_artifact_chunks(
+            [{name: frame for name in row_artifacts}],
+            temp_root=tmp_path,
+            row_artifacts=row_artifacts,
+            required_columns={name: ("value",) for name in row_artifacts},
+            spec=object(),  # type: ignore[arg-type]
+        )
+
+    assert raised.value is close_failure
+    assert [writer.close_calls for writer in writers] == [1, 1, 1]
+
+
+@pytest.mark.parametrize("owner", ("prediction", "portfolio"))
+@pytest.mark.parametrize("primary_type", _WRITER_BODY_PRIMARY_TYPES)
+def test_parquet_writers_close_once_without_replacing_body_primary(
+    owner: str,
+    primary_type: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    primary = primary_type("body_primary")
+    close_failure = OSError("writer_close_secondary")
+    row_artifacts = tuple(portfolio_outputs.PORTFOLIO_ARTIFACTS)[:3]
+    frame = pd.DataFrame(
+        {"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]}
+    )
+    first = frame if owner == "prediction" else {
+        name: frame[["value"]] for name in row_artifacts
+    }
+
+    class BodyPrimaryInput:
+        yielded = False
+
+        def __iter__(self) -> BodyPrimaryInput:
+            return self
+
+        def __next__(self) -> object:
+            if not self.yielded:
+                self.yielded = True
+                return first
+            raise primary
+
+        def close(self) -> None:
+            pass
+
+    class KeyIndex:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> KeyIndex:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def add_table(self, _table: object) -> int:
+            return 0
+
+    class Writer:
+        def __init__(self) -> None:
+            self.close_calls = 0
+            self.write_calls = 0
+
+        def write_table(self, _table: object) -> None:
+            self.write_calls += 1
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise close_failure
+
+    writers: list[Writer] = []
+
+    def writer_factory(*_args: object, **_kwargs: object) -> Writer:
+        writer = Writer()
+        writers.append(writer)
+        return writer
+
+    if owner == "prediction":
+        monkeypatch.setattr(parquet_writers, "ExactPrimaryKeyIndex", KeyIndex)
+        monkeypatch.setattr(parquet_writers.pq, "ParquetWriter", writer_factory)
+    else:
+        monkeypatch.setattr(
+            portfolio_outputs,
+            "validate_portfolio_artifact_mapping_keys",
+            lambda value, **_kwargs: value,
+        )
+        monkeypatch.setattr(
+            portfolio_outputs,
+            "_portfolio_output_chunk_frame",
+            lambda value, **_kwargs: value,
+        )
+        monkeypatch.setattr(portfolio_outputs.pq, "ParquetWriter", writer_factory)
+
+    with pytest.raises(primary_type) as raised:
+        if owner == "prediction":
+            parquet_writers.write_parquet_chunks(
+                BodyPrimaryInput(),  # type: ignore[arg-type]
+                tmp_path / "prediction.parquet",
+                required=("timestamp", "value"),
+                key_columns=("timestamp",),
+                compression="snappy",
+            )
+        else:
+            portfolio_outputs._write_portfolio_row_artifact_chunks(
+                BodyPrimaryInput(),  # type: ignore[arg-type]
+                temp_root=tmp_path,
+                row_artifacts=row_artifacts,
+                required_columns={name: ("value",) for name in row_artifacts},
+                spec=object(),  # type: ignore[arg-type]
+            )
+
+    assert raised.value is primary
+    assert len(writers) == (1 if owner == "prediction" else 3)
+    assert all(writer.write_calls == 1 for writer in writers)
+    assert all(writer.close_calls == 1 for writer in writers)
+
 
 def test_portfolio_outputs_clean_temp_bundle_directory_on_failure(
     monkeypatch,
@@ -105,3 +477,94 @@ def test_report_parquet_writer_does_not_overwrite_unclaimed_temp_collision(
 
     assert live_temp.read_text(encoding="utf-8") == "live\n"
     assert not final_path.exists()
+
+
+def test_artifact_parquet_cleanup_preserves_active_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "to_parquet",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(GeneratorExit()),
+    )
+    monkeypatch.setattr(
+        Path,
+        "unlink",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("unlink_failed")
+        ),
+    )
+
+    with pytest.raises(GeneratorExit):
+        parquet_writers.write_parquet(
+            pd.DataFrame({"value": [1]}),
+            tmp_path / "x.parquet",
+        )
+
+
+@pytest.mark.parametrize("writer_name", ("write_parquet", "write_parquet_chunks"))
+def test_parquet_cleanup_does_not_check_exists_before_guarded_unlink(
+    writer_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_path = tmp_path / "output.parquet"
+    temp_path = final_path.with_name(f".{final_path.name}.tmp-{'c' * 12}")
+    events: list[str] = []
+    original_exists = Path.exists
+    original_unlink = Path.unlink
+
+    def exists(path: Path) -> bool:
+        if path == temp_path:
+            raise OSError("exists_secondary")
+        return original_exists(path)
+
+    def unlink(path: Path, *, missing_ok: bool = False) -> None:
+        if path == temp_path:
+            assert missing_ok is True
+            events.append("unlink")
+            raise OSError("unlink_secondary")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(
+        parquet_writers,
+        "uuid4",
+        lambda: type("Uuid", (), {"hex": "c" * 32})(),
+    )
+    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    if writer_name == "write_parquet":
+        monkeypatch.setattr(
+            pd.DataFrame,
+            "to_parquet",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("body_primary")
+            ),
+        )
+
+        def operation() -> object:
+            return parquet_writers.write_parquet(
+                pd.DataFrame({"value": [1]}),
+                final_path,
+            )
+
+    else:
+
+        def frames():  # type: ignore[no-untyped-def]
+            raise RuntimeError("body_primary")
+            yield pd.DataFrame()
+
+        def operation() -> object:
+            return parquet_writers.write_parquet_chunks(
+                frames(),
+                final_path,
+                required=("timestamp", "value"),
+                key_columns=("timestamp",),
+                compression="snappy",
+            )
+
+    with pytest.raises(RuntimeError, match="body_primary"):
+        operation()
+
+    assert events == ["unlink"]

@@ -24,6 +24,7 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage._dataset_reading import open_dataset_session
@@ -73,6 +74,199 @@ def test_input_dataset_identities_distinguish_source_and_manifest() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("module", "writer_name", "data_id"),
+    (
+        (materialize_factors, "write_factors", "microstructure"),
+        (materialize_labels, "write_labels", "forward_returns"),
+    ),
+)
+def test_panel_dependent_writer_rejects_policy_mismatch_before_input_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    module,
+    writer_name: str,
+    data_id: str,
+) -> None:
+    session_policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    explicit_policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    panel_session = SimpleNamespace(resource_policy=session_policy)
+    monkeypatch.setattr(
+        materialization_validation,
+        "input_dataset_identities",
+        lambda *_args, **_kwargs: pytest.fail("input identity reached"),
+    )
+    monkeypatch.setattr(
+        module,
+        "write_dataset",
+        lambda *_args, **_kwargs: pytest.fail("write reached"),
+    )
+
+    with pytest.raises(RuntimeError, match="^runtime_resource_policy_conflict$"):
+        getattr(module, writer_name)(
+            processed_catalog().get(data_id),
+            layout=StorageLayout(project_root=tmp_path),
+            panel_session=panel_session,
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            resource_policy=explicit_policy,
+        )
+
+
+@pytest.mark.parametrize(
+    ("module", "iterator_name", "data_id"),
+    (
+        (materialize_factors, "_iter_factor_chunks", "microstructure"),
+        (materialize_labels, "_iter_label_chunks", "forward_returns"),
+    ),
+)
+def test_panel_dependent_iterator_rejects_policy_mismatch_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    module,
+    iterator_name: str,
+    data_id: str,
+) -> None:
+    session_policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    explicit_policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    panel_session = SimpleNamespace(resource_policy=session_policy)
+    monkeypatch.setattr(
+        materialization_validation,
+        "crypto_asset_session_views",
+        lambda *_args, **_kwargs: pytest.fail("selection reached"),
+    )
+
+    iterator = getattr(module, iterator_name)(
+        processed_catalog().get(data_id),
+        panel_session=panel_session,
+        time_window=TimeWindow("2026-07-06", "2026-07-06"),
+        resource_policy=explicit_policy,
+    )
+    with pytest.raises(RuntimeError, match="^runtime_resource_policy_conflict$"):
+        next(iterator)
+
+
+def test_panel_iterator_rejects_any_session_policy_mismatch_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = processed_catalog().get("market_panel_1m")
+    explicit_policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    other_policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    data_ids = (
+        materialize_panel.source_ids.market_bars_source_data_id(spec),
+        materialize_panel.source_ids.aggregate_trades_source_data_id(spec),
+        materialize_panel.source_ids.depth_levels_source_data_id(spec),
+    )
+    sessions = {
+        data_id: SimpleNamespace(
+            resource_policy=other_policy if index == 1 else explicit_policy
+        )
+        for index, data_id in enumerate(data_ids)
+    }
+    monkeypatch.setattr(
+        materialization_validation,
+        "crypto_asset_session_views",
+        lambda *_args, **_kwargs: pytest.fail("selection reached"),
+    )
+
+    iterator = materialize_panel._iter_panel_chunks(
+        spec,
+        input_sessions=sessions,
+        time_window=TimeWindow("2026-07-06", "2026-07-06"),
+        resource_policy=explicit_policy,
+    )
+    with pytest.raises(RuntimeError, match="^runtime_resource_policy_conflict$"):
+        next(iterator)
+
+
+@pytest.mark.parametrize(
+    ("owner", "mismatch"),
+    (
+        ("panel", "receipt"),
+        ("panel", "bar"),
+        ("dependent", "receipt"),
+        ("dependent", "panel"),
+        ("existing", "panel"),
+        ("existing", "bar"),
+    ),
+)
+def test_validation_rejects_session_policy_mismatch_before_identity_or_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+    mismatch: str,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    other_policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+
+    def session(name: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            name=name,
+            resource_policy=other_policy if mismatch == name else policy,
+            manifest={},
+        )
+
+    receipt = SimpleNamespace(session=session("receipt"))
+    panel_session = session("panel")
+    bar_session = session("bar")
+    monkeypatch.setattr(
+        materialization_validation,
+        "validate_materialization_input_identities",
+        lambda *_args, **_kwargs: pytest.fail("identity validation reached"),
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: pytest.fail("traversal reached"),
+    )
+
+    with pytest.raises(RuntimeError, match="^runtime_resource_policy_conflict$"):
+        if owner == "panel":
+            materialization_validation.validate_panel_materialization(
+                receipt,
+                bar_session=bar_session,
+                spec=SimpleNamespace(primary_key=("value",)),
+                expected_input_identities={},
+                resource_policy=policy,
+            )
+        elif owner == "dependent":
+            materialization_validation.validate_panel_dependent_materialization(
+                receipt,
+                panel_session=panel_session,
+                spec=SimpleNamespace(primary_key=("value",)),
+                time_window=TimeWindow("2026-07-06", "2026-07-06"),
+                expected_input_identities={},
+                resource_policy=policy,
+            )
+        else:
+            materialization_validation.validate_existing_panel_materialization(
+                panel_session,
+                bar_session=bar_session,
+                spec=SimpleNamespace(primary_key=("value",)),
+                expected_input_identities={},
+                resource_policy=policy,
+            )
 def test_materialization_input_identity_validation_is_exact() -> None:
     source = _inspection("market_bars_1m")
     expected = materialization_validation.input_dataset_identities(
@@ -270,13 +464,20 @@ def test_factor_carry_processing_is_linear_in_asset_count(
         record_rows,
     )
     spec = processed_catalog().get("microstructure")
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
 
     list(
         materialize_factors._iter_factor_chunks(
             spec,
-            panel_session=SimpleNamespace(verify=lambda: None),
+            panel_session=SimpleNamespace(
+                resource_policy=policy,
+                verify=lambda: None,
+            ),
             time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:05"),
-            resource_policy=RESOURCE_POLICY,
+            resource_policy=policy,
         )
     )
 
@@ -321,28 +522,27 @@ def test_panel_dependents_reject_mixed_asset_physical_parts_before_repeated_read
         else "_iter_label_chunks"
     )
     iterator = getattr(module, iterator_name)
-    panel_session = open_dataset_session(
+    with open_dataset_session(
         panel_root,
         columns=None,
         time_window=None,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="invalid_crypto_panel_physical_asset_grouping",
-    ):
-        list(
-            iterator(
-                catalog.get(output_data_id),
-                panel_session=panel_session,
-                time_window=TimeWindow(
-                    pd.Timestamp("2026-07-06 00:00:00"),
-                    pd.Timestamp("2026-07-06 00:00:00")
-                    + pd.Timedelta(minutes=minutes - 1),
-                ),
-                resource_policy=RESOURCE_POLICY,
+    ) as panel_session:
+        with pytest.raises(
+            ValueError,
+            match="invalid_crypto_panel_physical_asset_grouping",
+        ):
+            list(
+                iterator(
+                    catalog.get(output_data_id),
+                    panel_session=panel_session,
+                    time_window=TimeWindow(
+                        pd.Timestamp("2026-07-06 00:00:00"),
+                        pd.Timestamp("2026-07-06 00:00:00")
+                        + pd.Timedelta(minutes=minutes - 1),
+                    ),
+                    resource_policy=panel_session.resource_policy,
+                )
             )
-        )
 
 
 def test_canonical_asset_normalization_is_linear(
@@ -405,21 +605,22 @@ def test_panel_dependencies_remain_asset_major_across_year_partitions(
         spec=processed_catalog().get("market_panel_1m"),
     )
 
-    outputs = list(
-        getattr(module, iterator_name)(
-            processed_catalog().get(data_id),
-            panel_session=open_dataset_session(
-                panel_root,
-                columns=None,
-                time_window=None,
-            ),
-            time_window=TimeWindow(
-                "2025-12-31 23:55",
-                "2026-01-01 00:04",
-            ),
-            resource_policy=RESOURCE_POLICY,
+    with open_dataset_session(
+        panel_root,
+        columns=None,
+        time_window=None,
+    ) as panel_session, runtime_resource_policy_scope(panel_session.resource_policy):
+        outputs = list(
+            getattr(module, iterator_name)(
+                processed_catalog().get(data_id),
+                panel_session=panel_session,
+                time_window=TimeWindow(
+                    "2025-12-31 23:55",
+                    "2026-01-01 00:04",
+                ),
+                resource_policy=panel_session.resource_policy,
+            )
         )
-    )
 
     assert outputs
     observed = pd.concat(outputs, ignore_index=True).loc[
@@ -725,11 +926,17 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
             module,
             "open_dataset_session",
             lambda *_args, **_kwargs: nullcontext(
-                SimpleNamespace(verify=lambda: None)
+                SimpleNamespace(
+                    resource_policy=policy,
+                    verify=lambda: None,
+                )
             ),
         )
     else:
-        kwargs["panel_session"] = SimpleNamespace(verify=lambda: None)
+        kwargs["panel_session"] = SimpleNamespace(
+            resource_policy=policy,
+            verify=lambda: None,
+        )
 
     result = getattr(module, function_name)(
         processed_catalog().get(data_id),
@@ -786,14 +993,20 @@ def test_factor_and_label_materializers_reject_non_monotonic_chunks(
     iterator = (
         module._iter_factor_chunks(
             spec,
-            panel_session=SimpleNamespace(verify=lambda: None),
+            panel_session=SimpleNamespace(
+                resource_policy=policy,
+                verify=lambda: None,
+            ),
             time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:10"),
             resource_policy=policy,
         )
         if module_name == "factor"
         else module._iter_label_chunks(
             spec,
-            panel_session=SimpleNamespace(verify=lambda: None),
+            panel_session=SimpleNamespace(
+                resource_policy=policy,
+                verify=lambda: None,
+            ),
             time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:10"),
             resource_policy=policy,
         )

@@ -51,7 +51,7 @@ def iter_research_dataset_chunks(
     )
     if isinstance(chunks, pd.DataFrame):
         raise TypeError("research_dataset_chunk_reader_not_iterable")
-    yield from chunks
+    return chunks
 
 
 def inspect_research_dataset(

@@ -30,7 +30,10 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    bind_runtime_resource_policy,
+    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inventory import (
     DatasetInventoryPaths,
@@ -161,13 +164,30 @@ def read_dataset(
     resource_policy: RuntimeResourcePolicy | None,
 ) -> pd.DataFrame | Iterator[pd.DataFrame]:
     if mode is DatasetReadMode.CHUNKED:
+        captured_policy = current_runtime_resource_policy()
+        bound_policy = bind_runtime_resource_policy(resource_policy)
 
         def activate() -> Iterator[pd.DataFrame]:
+            if captured_policy is not None:
+                with runtime_resource_policy_scope(bound_policy):
+                    with open_dataset_session(
+                        dataset_root,
+                        columns=columns,
+                        time_window=time_window,
+                        resource_policy=bound_policy,
+                    ) as context:
+                        yield from iter_dataset_chunks(
+                            context,
+                            target_chunk_bytes=(
+                                context.resource_policy.payload_target_bytes
+                            ),
+                        )
+                return
             with open_dataset_session(
                 dataset_root,
                 columns=columns,
                 time_window=time_window,
-                resource_policy=resource_policy,
+                resource_policy=bound_policy,
             ) as context:
                 yield from iter_dataset_chunks(
                     context,
@@ -191,6 +211,22 @@ def read_dataset(
 
 
 def materialize_dataset_session(
+    context: DatasetSession,
+    *,
+    target_chunk_bytes: int,
+    materialized_budget_bytes: int | None = None,
+) -> pd.DataFrame:
+    """Materialize one validated context under its captured policy."""
+
+    with runtime_resource_policy_scope(context.resource_policy):
+        return _materialize_dataset_session(
+            context,
+            target_chunk_bytes=target_chunk_bytes,
+            materialized_budget_bytes=materialized_budget_bytes,
+        )
+
+
+def _materialize_dataset_session(
     context: DatasetSession,
     *,
     target_chunk_bytes: int,
@@ -602,6 +638,7 @@ def _materialized_frame(
     return pd.DataFrame(columns, copy=False)
 
 
+@contextmanager
 def open_dataset_session(
     dataset_root: Path,
     *,
@@ -610,7 +647,7 @@ def open_dataset_session(
     row_filters: tuple[tuple[str, str, Any], ...] = (),
     require_consumable: bool = True,
     resource_policy: RuntimeResourcePolicy | None = None,
-) -> DatasetSession:
+) -> Iterator[DatasetSession]:
     root = require_artifact_root(Path(dataset_root))
     spec_path = root / "spec.json"
     data_root = root / "data"
@@ -634,40 +671,46 @@ def open_dataset_session(
     if not manifest_has_runtime_metadata(manifest):
         raise ValueError("manifest_runtime_metadata_missing")
     issued_policy = resource_policy or active_runtime_resource_policy()
-    inventory = DatasetSessionInventory(
-        data_root=data_root,
-        scratch_parent=root.parent,
-        task_memory_budget_bytes=issued_policy.task_memory_budget_bytes,
-    )
-    try:
-        inventory.discover(spec_payload)
-        if inventory.path_count(selected=False) == 0:
-            raise ValueError("dataset_data_dir_missing")
-        for path in inventory.iter_candidate_paths():
-            selected = path in prune_paths_for_time_window(
-                data_root, (path,), spec=spec_payload, time_window=time_window
-            )
-            inventory.observe(
-                path,
-                inspect_dataset_part(path),
-                selected=selected,
-            )
-        return _build_dataset_session(
-            root=root,
+    with runtime_resource_policy_scope(issued_policy):
+        inventory = DatasetSessionInventory(
             data_root=data_root,
-            spec_bytes=spec_bytes,
-            manifest_bytes=manifest_bytes,
-            inventory=inventory,
-            columns=columns,
-            time_window=time_window,
-            row_filters=row_filters,
-            require_consumable=require_consumable,
-            resource_policy=issued_policy,
-            owns_inventory=True,
+            scratch_parent=root.parent,
+            task_memory_budget_bytes=issued_policy.task_memory_budget_bytes,
         )
-    except BaseException:
-        inventory.close()
-        raise
+        try:
+            inventory.discover(spec_payload)
+            if inventory.path_count(selected=False) == 0:
+                raise ValueError("dataset_data_dir_missing")
+            for path in inventory.iter_candidate_paths():
+                selected = path in prune_paths_for_time_window(
+                    data_root, (path,), spec=spec_payload, time_window=time_window
+                )
+                inventory.observe(
+                    path,
+                    inspect_dataset_part(path),
+                    selected=selected,
+                )
+            session = _build_dataset_session(
+                root=root,
+                data_root=data_root,
+                spec_bytes=spec_bytes,
+                manifest_bytes=manifest_bytes,
+                inventory=inventory,
+                columns=columns,
+                time_window=time_window,
+                row_filters=row_filters,
+                require_consumable=require_consumable,
+                resource_policy=issued_policy,
+                owns_inventory=True,
+            )
+        except BaseException:
+            try:
+                inventory.close()
+            except BaseException:
+                pass
+            raise
+        with session:
+            yield session
 
 
 def dataset_session_from_inventory(
@@ -849,6 +892,22 @@ def iter_dataset_chunks(
     operation_headroom_bytes: int | None = None,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
 ) -> Iterator[pd.DataFrame]:
+    with runtime_resource_policy_scope(context.resource_policy):
+        yield from _iter_dataset_chunks(
+            context,
+            target_chunk_bytes=target_chunk_bytes,
+            operation_headroom_bytes=operation_headroom_bytes,
+            batch_observer=batch_observer,
+        )
+
+
+def _iter_dataset_chunks(
+    context: DatasetSession,
+    *,
+    target_chunk_bytes: int,
+    operation_headroom_bytes: int | None = None,
+    batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
+) -> Iterator[pd.DataFrame]:
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     try:
         if not context.read_paths:
@@ -867,7 +926,7 @@ def iter_dataset_chunks(
             batch_observer=batch_observer,
         ):
             filtered = frame.loc[:, list(context.logical_columns)]
-            for chunk in _bounded_frame_chunks(
+            for chunk in iter_bounded_frame_chunks(
                 filtered,
                 target_chunk_bytes=target_bytes,
             ):
@@ -930,6 +989,26 @@ def iter_dataset_file_batches(
     operation_headroom_bytes: int | None = None,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
 ) -> Iterator[tuple[Path, pd.DataFrame]]:
+    """Yield deterministic file batches under the session's captured policy."""
+
+    with runtime_resource_policy_scope(context.resource_policy):
+        yield from _iter_dataset_file_batches(
+            context,
+            columns=columns,
+            target_chunk_bytes=target_chunk_bytes,
+            operation_headroom_bytes=operation_headroom_bytes,
+            batch_observer=batch_observer,
+        )
+
+
+def _iter_dataset_file_batches(
+    context: DatasetSession,
+    *,
+    columns: tuple[str, ...],
+    target_chunk_bytes: int,
+    operation_headroom_bytes: int | None = None,
+    batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
+) -> Iterator[tuple[Path, pd.DataFrame]]:
     """Yield deterministic file batches after Arrow-level bounded conversion."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
@@ -969,7 +1048,7 @@ def iter_dataset_file_batches(
 
 def _verify_preserving_primary(context: DatasetSession) -> None:
     active = sys.exception()
-    if active is None or isinstance(active, GeneratorExit):
+    if active is None:
         context.verify()
         return
     try:
@@ -983,7 +1062,7 @@ def _close_iterator_preserving_primary(iterator: object) -> None:
     if close is None:
         return
     active = sys.exception()
-    if active is None or isinstance(active, GeneratorExit):
+    if active is None:
         close()
         return
     try:
@@ -1248,7 +1327,7 @@ def _arrow_slice_to_pandas(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
     return arrow_slice.to_pandas(use_threads=False)
 
 
-def _bounded_frame_chunks(
+def iter_bounded_frame_chunks(
     frame: pd.DataFrame,
     *,
     target_chunk_bytes: int,

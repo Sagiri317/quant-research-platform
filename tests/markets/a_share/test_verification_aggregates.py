@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -24,7 +25,10 @@ from quant_research_platform.markets.implementations.a_share.research_scenarios 
 from quant_research_platform.markets.implementations.a_share.verification import (
     aggregates,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    current_runtime_resource_policy,
+)
 from tests.helpers import frequency_ids
 
 RESOURCE_POLICY = RuntimeResourcePolicy.from_environment(
@@ -467,3 +471,36 @@ def test_local_verification_summary_uses_inventory(
     assert summary["handoff_ready"] is False
     assert summary["covered_roots"] == [frequency_ids.market_panel_logical_root()]
     assert summary["uncovered_roots"] == ["processed/a_share/other/demo"]
+
+
+def test_local_verification_inventory_uses_one_outer_resource_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024**2,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+    original_scope = aggregates.runtime_resource_policy_scope
+    root_entries: list[bool] = []
+
+    @contextmanager
+    def recording_scope(candidate: RuntimeResourcePolicy):
+        root_entries.append(current_runtime_resource_policy() is None)
+        with original_scope(candidate):
+            yield candidate
+
+    monkeypatch.setattr(aggregates, "runtime_resource_policy_scope", recording_scope)
+    monkeypatch.setattr(
+        aggregates,
+        "_build_review_safe_aggregate_evidence_payload_with_cache",
+        lambda *_a, **_k: {"handoff_ready": True},
+    )
+    monkeypatch.setattr(aggregates, "_dataset_inventory", lambda *_a, **_k: [])
+
+    aggregates.build_local_verification_inventory_payload(
+        tmp_path,
+        resource_policy=policy,
+    )
+
+    assert root_entries == [True, False]
