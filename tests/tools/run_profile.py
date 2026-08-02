@@ -93,7 +93,6 @@ PROFILES: dict[str, Profile] = {
             "tests/agents/handoff/test_hard_scan_receipt_contract.py",
             "tests/agents/handoff/test_validation_summary_contract.py",
             "tests/agents/handoff/test_replay_command_contract.py",
-            "tests/agents/handoff/test_handoff_package_verifier.py",
             "tests/architecture/test_handoff_contract_single_source.py",
         ),
         marker=FAST_EXCLUDES,
