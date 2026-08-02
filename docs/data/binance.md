@@ -92,4 +92,4 @@ narrow windows; a `data_id` with no discovered raw files remains skipped.
 
 ## Safety Boundary
 
-Binance public market data is still treated as local input until transformed into REVIEW_SAFE summaries or generated test fixtures. Do not copy raw connector payloads into docs, handoff, reports, final answers, or REVIEW_SAFE evidence.
+Binance public market data is still treated as local input until transformed into REVIEW_SAFE summaries or generated test fixtures. Do not copy raw connector payloads into docs, reports, final answers, or REVIEW_SAFE evidence.

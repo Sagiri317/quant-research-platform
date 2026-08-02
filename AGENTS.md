@@ -1,107 +1,89 @@
 # QRP Agent 指令
 
-本文件是 QRP 仓库中面向 coding agent 的根指令。它只保存长期稳定的执行规则，不保存当前分支、当前阶段、最近运行结果、PR 状态或下一步任务。所有 agent 在计划、审查、修改、验证前，必须先从 live git baseline 重建现场事实。
+本文件只保存长期执行边界。当前 branch、phase、review、PR 和运行结果必须从本轮用户指令、live Git 与当前文件重建，不写入仓库文档。
 
-## 1. 项目边界
+## 1. Live baseline
 
-QRP 是本地量化研究平台，目标是支持数据合同、因子研究、特征处理、模型训练、预测、评估、组合构建、报告和 evidence 管理。QRP 不是生产交易系统，不是 paper trading 系统，不是 live trading 系统，不接 broker，不接 exchange，不提供 investment advice。
+任何修改或审查前运行：
 
-未经用户明确批准，禁止新增 public API、CLI、registry、store、facade、scheduler、worker、deployment、external LLM API、vendor API、broker connector、exchange connector。未经用户明确批准，禁止访问 private data 或生成 row-level private-derived review-safe output。
-
-## 2. live git baseline
-
-任何任务开始时，必须运行并记录：
-
-```bash
+```text
 git status --short --branch
 git log -1 --date=iso-strict --format="%H%n%cd%n%s"
 git branch -a
 ```
 
-如果任务涉及远端分支或 merge，还必须检查 upstream、divergence 和目标分支。当前事实只来自本轮用户指令、live git baseline 和当前仓库文件。
+涉及远端或 merge 时再检查 upstream 与 divergence。事实优先级是：用户本轮指令、live Git/代码/测试/配置、本文、当前合同文档；叙事与可执行行为冲突时停止并报告。
 
-仓库文档不得声明当前分支、当前阶段、当前 PR 状态或当前 merge gate。需要当前事实时，使用 live git baseline 和当前用户指令。
+## 2. 产品与安全边界
 
-## 3. 事实源优先级
+QRP 是本地量化研究平台，不是 live/paper trading、broker/exchange connector、deployment、SaaS 或 investment-advice 系统。未经明确批准，不新增 public API/CLI、依赖、framework、registry、scheduler、worker、deployment、connector 或 external LLM/vendor API。
 
-执行优先级如下：
+不读取、复制、提交或公开 private data、secret、vendor raw marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE 内容只包含 schema、计数、hash、状态、逻辑路径结构与无私有行的摘要。
 
-1. 用户本轮明确指令和 approved task envelope
-2. live git baseline 与当前仓库文件
-3. 本文件
-4. `.agents/skills/quant-research-platform-maintenance/SKILL.md`
-5. `.agents/skills/quant-research-platform-maintenance/references/**`
-6. `docs/**` 的当前合同文档
-如果文档和代码、tests、contracts、schemas、runtime behavior 冲突，以可执行合同和当前仓库状态为准；停止并报告冲突，不要用叙事文档覆盖现场事实。
+## 3. 执行角色与修改范围
 
-## 4. `.agents` 与 `.run`
+受控 Goal/Phase 同时至多一个 writable implementer；controller 只管理控制状态、派发与只读 reconciliation，不修改或提交 tracked implementation；reviewer 必须独立只读。实现者不得自审，review finding 由 controller 复现并按唯一 owner family 回交修正。
 
-`.agents/skills/quant-research-platform-maintenance/scripts/` 是 tracked governance tooling。handoff builder、verifier、governance check 等工具必须从这里读取。
+默认只修改任务直接相关的最小文件。修改 public/machine contract、schema、CLI、持久化布局、跨层依赖或业务语义前停止并请求批准。新实现替代旧实现，不保留 compatibility shim、alias、parallel path、tests-only API 或 proof-only framework。
 
-`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、source-tree sensitive-text 精确例外、layer/writer owner 规则和 package safety 路径。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
+## 4. Current contract 与 owner
 
-`.agents` handoff verifier 必须校验正式 handoff 的 REVIEW_SAFE evidence 完整性，并拒绝 status-only 摘要。handoff package layout、sidecar shape、task metadata shape 和 validation summary 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有；receipt schema、receipt invariant 和 receipt 聚合由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有；governance/source-tree scan 和共享 safety 路径由 `governance_contract.py` 拥有。handoff 使用 compact replayable receipts：machine validation 只来自 REVIEW_SAFE replay-backed receipts；private/local 检查不得支撑 machine validation `PASS`，无法公开复验时在 reviewer evidence 或 final report 中诚实记录 `NOT_RUN` 或 `BLOCKED`。当前 validation 状态由 builder 从 receipts 派生为 `handoff_evidence/validation-summary.json`。Codex 不应手写 handoff evidence，也不应把 raw grep output、完整 pytest log、完整 stdout/stderr、wheel、sdist、完整 subagent transcript 或本地临时安装目录打入 handoff。
+QRP 采用 current-contract-only。行为、public machine contract、owner tests 与 dependency direction 定义当前事实；历史名称、目录或实现形状不构成兼容要求。
 
-package smoke 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`；构建后端依赖由 `environment.yml` 显式提供。package smoke 由 wheel 解压后的 `PYTHONPATH` import smoke 定义。`profile_smoke` validation row 的 replay command 是正式 profile runner 的 `profile-smoke` profile。
+- `contracts/`：结构合同、枚举、ID、时间窗口和基础校验。
+- `sources/`：摄取、raw schema、字段映射和 raw/interim 转换。
+- `markets/`：市场领域；具体市场语义位于对应 implementation。
+- `policy/`：共享安全规则与 `PASS`/`FAIL`/`NOT_RUN`/`BLOCKED` 聚合，不依赖业务层。
+- `profiles/`：API、CLI 与 workflow 的组合根。
+- `research/`、`compute/`：纯研究与数值计算，不写文件。
+- `storage/`：dataset IO、identity、exact compare 与 data layout。
+- `runtime/`：资源 policy、logical paths 与 execution metrics。
+- `reports/`：构建内容，不写文件、不重算研究逻辑。
+- `artifacts/`：写 LOCAL_ONLY outputs 与 REVIEW_SAFE evidence。
+- `workflows/`：编排 research -> reports -> artifacts。
+- `interfaces/`：已批准的 API、CLI 与 service adapter。
 
-`.run/` 只是 output layer 和 evidence layer。它可以保存运行产物、handoff zip、manifest、logs、reports、temporary evidence，但不能反向定义架构、合同、工具入口或当前状态。
+## 5. 资源生命周期硬合同
 
-正式 pytest profile runner 位于 `tests/tools/run_profile.py`。`.run/` 只保存输出、临时文件、profile 和 handoff/review artifacts。测试入口保持 Python-only；`.ps1` 和 `.sh` 不属于官方测试入口层。测试 profile 的输出路径和临时路径必须通过参数指定，未运行项状态为 `NOT_RUN`。
+每个 top-level resource-bearing operation 在首次数据规模 read、decode 或 allocation 前只 admission 一次：
 
-## 5. 验证状态语义
+```text
+captured_available_memory_bytes
+= min(OS available memory, applicable cgroup/container/job/process headroom)
 
-所有最终报告、sidecar、handoff、review、prompt 和 PR 总结只能使用以下状态：
-
-- `PASS`：实际运行并通过，必须附 command、scope、result 或 artifact path。
-- `FAIL`：实际运行并失败，必须说明失败范围和下一步。
-- `NOT_RUN`：未运行，不得伪装为 PASS。
-- `BLOCKED`：因环境、依赖、权限、超时或边界无法运行，必须说明阻塞条件。
-
-pytest PASS、governance PASS、handoff verifier PASS、share-safety PASS、source-tree scan PASS、compare PASS、sidecar PASS 不能互相替代。每个 PASS 只覆盖对应命令和对应 scope。
-
-## 6. 架构职责
-
-`contracts/` 只定义结构合同、枚举、ID、时间窗口和基础校验。`catalog/` 只负责注册描述与组合入口。`sources/` 负责数据源摄取、raw schema、字段映射和 raw/interim 转换，不承载市场语义。
-
-`markets/` 是通用市场领域层；`markets/implementations/a_share/` 承载 A 股 calendar、processed data、mask、factor/label binding 和 profile/scenario。通用 session window 的唯一 owner 是 `markets/session_windows.py`。
-
-`policy/` 只负责共享安全规则、ID 安全判断和 PASS/FAIL/NOT_RUN/BLOCKED 状态聚合，不 import QRP 业务层。`contracts/` 只定义结构合同、枚举、ID、时间窗口和基础校验，不保存共享安全规则事实。`catalog/` 只负责 generic registry class。
-
-`profiles/` 是 API、CLI 和 workflow 共用的组合根，可以组装 catalog、source、market implementation 和 materializer。`research/` 是通用研究计算层，只构建 result，不写文件，不依赖具体市场实现或 sources。`compute/` 是 DataFrame portfolio math 和 performance 数值核心。`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data/raw、data/interim、data/processed、data/research layout，不定义 run outputs、reports 或 review-safe file writers。
-
-`runtime/` 只提供 resources、logical paths 和 execution metrics payload，不写报告内容。`reports/` 只 build/render evidence/report 内容，不写文件，不重算研究逻辑。`artifacts/` 只负责把 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 写成文件。`workflows/` 只编排 research -> reports -> artifacts，不定义 policy regex，不直接写底层文件。`interfaces/` 只提供已批准的 API、CLI 和 service adapter。`.agents/` 只承载治理、handoff 和 prompt tooling。
-
-## 7. current-contract-only
-
-QRP 采用 current-contract-only。普通 tests 只保护当前合同；边界回归由对应 owner-layer negative tests 和治理 gate 控制。未经用户批准，禁止新增兼容读取、兼容字段、alias 字段或 silent drop。
-
-新实现应替代被替换实现，不应并行保留两个语义相同的入口。确需并行时，必须说明语义差异、生命周期、owner layer 和未来收敛方式。
-
-Current contract 由 public machine contract、owner 行为测试和依赖方向 gate 保护；普通名称、目录位置、历史词汇或实现形状不作为独立失败条件。QRP-owned generated JSON 顶层身份只使用 `schema_id`；Python internal model version 字段不能作为 generated JSON identity。
-
-## 8. private safety
-
-禁止把 private data、vendor marker、本地绝对路径、股票代码样本、raw traceback、row-level sample 写入 REVIEW_SAFE docs、handoff、reports、logs 或 final response。需要引用本地验证时，只写摘要、计数、hash、schema、command status 和 REVIEW_SAFE evidence。run output 主轴是 `LOCAL_ONLY` 和 `REVIEW_SAFE`。
-
-## 9. 修改边界
-
-默认允许修改与任务直接相关的最小文件集合。修改 docs、governance scripts、handoff scripts、tests 时，必须同步更新相关验证。修改业务逻辑时，必须有用户明确授权。
-
-禁止为了让测试通过而恢复被替换的文档事实。遇到脚本引用被替换的 governance path 时，应修脚本和测试。
-
-## 10. 推荐验证命令
-
-按任务范围选择最小充分命令，不要把未运行项写成 PASS。项目 Python 验证、构建和测试使用 `conda run -n <environment.yml name>`；环境名从 `environment.yml` 动态读取，不写死在文档或脚本中：
-
-```bash
-git diff --check
-conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py --repo-root . --json
-conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
-conda run -n <environment.yml name> python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
+task_memory_budget_bytes
+= min(floor(captured_available_memory_bytes * 0.80), valid explicit cap if any)
 ```
 
-如果完整测试因环境或超时不可行，必须分段运行并明确写 `BLOCKED` 或 `NOT_RUN`。
+显式 cap 只能降低预算。适用平台上限无法可靠读取时使用可证明的更保守上限；无法建立安全上限则在数据规模分配前 fail closed。Policy 与 budget 捕获后 immutable；available memory 增加不能上调预算，已观察到 pressure 后只能 shrink、release、spill 或 fail closed。
 
-## 11. 提交流程
+一个 process 默认只有一个 active root policy、一个 execution owner/lease 和一个 total reservation ledger。Nested owner 继承同一 policy identity；different-policy nesting/parallel root fail closed。Same-policy reentry 只允许同 owner 真嵌套，copied context 跨 thread/task 不继承 authority，child 不得越过 root lifetime。
 
-commit 前必须运行 `git status --short --branch` 并检查 diff。禁止 force push、main push、未经批准的 rebase、amend、squash、merge main。最终报告必须列出 branch、HEAD、changed files、validation results、remaining issues 和 working tree status。
+Resource-bearing child process 不得重新捕获 80% 预算；父 operation 必须从 root budget 划分并显式传递 child cap。跨进程共享 reservation 未实现前，production resource-bearing execution 保持 single-process。
+
+raw/decoded/Arrow/Pandas/copy/index/sort/join/reducer/planner/model/native/output/writer/readback/spill/overlap state 共用一个预算。每次数据规模 allocation 前 reserve conservative owner-local upper bound，planned reservation 绝不超过 budget；不足则 shrink、release、spill 或 fail closed。不可分割结果超预算时必须在完整创建前失败。不建立 universal deep-size framework，不用 probe 波动为计划超额分配发明容忍线。
+
+## 6. Identity、原子性与异常
+
+保持 factor/label/mask、registered schema/dtype/PK、逻辑时间与输出范围、确定性和已批准 public machine contracts。QRP-owned generated JSON 顶层身份只使用 `schema_id`。
+
+Storage 拥有唯一 physical traversal/session。Fingerprint 只能 quick reject；只有 exact comparison 可以产生 `MATCH`。发布必须 staged/atomic 并保留 old-good；partial-run 状态必须真实。Cleanup 只处理 owner-qualified resources，`BaseException` active primary 不得被 cleanup、metrics 或 secondary failure 覆盖。
+
+## 7. 验证
+
+只使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`；每个 `PASS` 绑定实际 command、scope 与 result。先运行最窄相关测试，再按任务要求运行 direct full suite。环境名从 `environment.yml` 动态读取。
+
+```text
+git diff --check
+conda run -n <env> ruff check .
+conda run -n <env> python -m pytest -q -o "addopts=--import-mode=importlib --strict-markers" tests
+conda run -n <env> python -m build --no-isolation --sdist --wheel --outdir <run-dir>
+```
+
+构建 smoke 不安装 package：用标准库解压 wheel，再以解压目录作为 `PYTHONPATH` import。不得把未运行或阻塞的检查写成 `PASS`。
+
+## 8. Git 与环境安全
+
+编辑和 commit 前检查 `git status` 与 diff，不丢弃或覆盖无法解释的 WIP。未经明确批准，不执行 reset、restore、clean、stash、rebase、amend、force push、main push、branch deletion、递归/通配删除、依赖安装或系统/环境配置修改。删除必须绑定已批准的精确路径。
+
+最终报告列出 branch、HEAD、changed/deleted files、每条验证状态、remaining issues 与 working tree status。

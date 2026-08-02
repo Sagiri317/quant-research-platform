@@ -24,22 +24,17 @@ RUNTIME_DEPENDENCIES = {
 }
 DEV_DEPENDENCIES = {
     "build",
-    "coverage",
     "httpx",
     "pytest",
-    "pytest-cov",
-    "pytest-xdist",
     "ruff",
-}
-PYPROJECT_TO_CONDA_DEV_PACKAGES = {
-    "build": "python-build",
-    "pytest-xdist": "pytest-xdist",
 }
 BUILD_SYSTEM_TO_CONDA_PACKAGES = {
     "build": "python-build",
     "setuptools": "setuptools",
     "wheel": "wheel",
 }
+
+
 def test_python_and_ruff_contracts_follow_root_config() -> None:
     pyproject = _load_pyproject()
     requires_python = pyproject["project"]["requires-python"]
@@ -62,21 +57,6 @@ def test_core_dependencies_have_version_boundaries() -> None:
     assert _unbounded(dev) == []
 
 
-def test_pyproject_dev_dependencies_have_conda_environment_packages() -> None:
-    pyproject = _load_pyproject()
-    environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
-    dev = _dependency_specs(pyproject["project"]["optional-dependencies"]["dev"])
-    conda_packages = set(_environment_dependency_specs(environment))
-
-    missing = {
-        pyproject_name: conda_name
-        for pyproject_name, conda_name in PYPROJECT_TO_CONDA_DEV_PACKAGES.items()
-        if pyproject_name in dev and conda_name not in conda_packages
-    }
-
-    assert missing == {}
-
-
 def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> None:
     pyproject = _load_pyproject()
     environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
@@ -90,7 +70,6 @@ def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> 
         "wheel": ("wheel", build_system_requires["wheel"]),
         "pyarrow": ("pyarrow", runtime["pyarrow"]),
         "pytest": ("pytest", dev["pytest"]),
-        "pytest-xdist": ("pytest-xdist", dev["pytest-xdist"]),
         "ruff": ("ruff", dev["ruff"]),
     }
     mismatches = {

@@ -11,10 +11,79 @@ from tests.helpers.import_graph import (
     _import_edges_from_trees,
     import_edges_under,
 )
-from tests.helpers.maintenance_script_loader import load_maintenance_script_module
 
 SOURCE_ROOT = Path("src/quant_research_platform")
 PACKAGE_PREFIX = "quant_research_platform"
+LAYER_BOUNDARIES = {
+    "contracts": (
+        "quant_research_platform.compute",
+        "quant_research_platform.interfaces",
+        "quant_research_platform.markets",
+        "quant_research_platform.reports",
+        "quant_research_platform.runtime",
+        "quant_research_platform.sources",
+        "quant_research_platform.storage",
+        "quant_research_platform.workflows",
+    ),
+    "sources": (
+        "quant_research_platform.artifacts",
+        "quant_research_platform.interfaces",
+        "quant_research_platform.markets",
+        "quant_research_platform.reports",
+        "quant_research_platform.research",
+        "quant_research_platform.workflows",
+    ),
+    "policy": (
+        "quant_research_platform.artifacts",
+        "quant_research_platform.catalog",
+        "quant_research_platform.compute",
+        "quant_research_platform.contracts",
+        "quant_research_platform.interfaces",
+        "quant_research_platform.markets",
+        "quant_research_platform.reports",
+        "quant_research_platform.research",
+        "quant_research_platform.runtime",
+        "quant_research_platform.sources",
+        "quant_research_platform.storage",
+        "quant_research_platform.workflows",
+    ),
+    "catalog": (
+        "quant_research_platform.markets.implementations",
+        "quant_research_platform.reports",
+        "quant_research_platform.sources",
+    ),
+    "runtime": ("quant_research_platform.reports",),
+    "research": (
+        "quant_research_platform.artifacts",
+        "quant_research_platform.markets.implementations",
+        "quant_research_platform.reports",
+        "quant_research_platform.sources",
+    ),
+    "reports": (
+        "quant_research_platform.compute",
+        "quant_research_platform.research",
+        "quant_research_platform.artifacts",
+        "quant_research_platform.workflows",
+        "quant_research_platform.interfaces",
+        "quant_research_platform.markets.implementations",
+        "quant_research_platform.storage",
+    ),
+    "artifacts": (
+        "quant_research_platform.research",
+        "quant_research_platform.reports",
+        "quant_research_platform.markets.implementations",
+    ),
+    "compute": (
+        "quant_research_platform.reports",
+        "quant_research_platform.artifacts",
+        "quant_research_platform.workflows",
+        "quant_research_platform.interfaces",
+    ),
+    "interfaces": (
+        "quant_research_platform.sources",
+        "quant_research_platform.markets.implementations",
+    ),
+}
 
 
 def test_active_source_modules_import_without_side_effect_failures() -> None:
@@ -28,16 +97,15 @@ def test_active_source_modules_import_without_side_effect_failures() -> None:
     assert failures == []
 
 
-def test_owner_layer_import_boundaries_are_enforced_from_governance_contract(
+def test_owner_layer_import_boundaries_are_enforced(
     import_edges: tuple[ImportEdge, ...],
 ) -> None:
-    contract = load_maintenance_script_module("governance_contract")
     violations: list[str] = []
-    for rule in contract.layer_boundary_import_rules():
-        for edge in import_edges_under(import_edges, SOURCE_ROOT / rule["root"]):
+    for root, forbidden_prefixes in LAYER_BOUNDARIES.items():
+        for edge in import_edges_under(import_edges, SOURCE_ROOT / root):
             if any(
                 edge.module.startswith(prefix)
-                for prefix in rule["forbidden_prefixes"]
+                for prefix in forbidden_prefixes
             ):
                 violations.append(
                     f"{edge.path.as_posix()}:{edge.lineno}:{edge.module}"
@@ -82,16 +150,10 @@ def test_owner_layer_boundaries_reject_real_dependency_directions(
     module: str,
 ) -> None:
     edge = _import_edges_from_trees({path: ast.parse(source)})[0]
-    rules = {
-        rule["root"]: rule["forbidden_prefixes"]
-        for rule in load_maintenance_script_module(
-            "governance_contract"
-        ).layer_boundary_import_rules()
-    }
     root = path.relative_to(SOURCE_ROOT).parts[0]
 
     assert edge.module == module
-    assert any(module.startswith(prefix) for prefix in rules.get(root, ()))
+    assert any(module.startswith(prefix) for prefix in LAYER_BOUNDARIES.get(root, ()))
 
 
 def test_status_aggregation_rejects_pass_with_not_run_child() -> None:

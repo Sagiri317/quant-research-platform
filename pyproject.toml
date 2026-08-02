@@ -24,10 +24,7 @@ dependencies = [
 dev = [
   "build>=1.5,<2",
   "pytest>=9,<10",
-  "pytest-xdist>=3.8,<4",
   "ruff>=0.15,<0.16",
-  "pytest-cov>=7,<8",
-  "coverage>=7.14,<8",
   "httpx>=0.28,<1",
 ]
 
@@ -43,18 +40,11 @@ addopts = [
   "--import-mode=importlib",
   "--strict-markers",
   "-m",
-  "not integration and not mutation and not slow and not performance and not requires_local_data",
+  "not slow",
 ]
 markers = [
-  "contract: tests that lock current data, report, handoff, and API contracts",
-  "architecture: tests that enforce owner-layer and import-boundary rules",
-  "privacy: tests that enforce REVIEW_SAFE safety contracts",
   "guardrails: tests that enforce approved safety and scope boundaries",
-  "integration: tests that exercise real IO, subprocess, git, or package-build paths",
-  "mutation: tests that mutate package, manifest, sidecar, source-tree, or hostile-input artifacts",
   "slow: tests that are materially slower than the fast path",
-  "performance: profiling, benchmark, or runtime/memory tests",
-  "requires_local_data: tests that require local-only data or local/private environment state",
 ]
 
 [tool.ruff]
@@ -64,15 +54,3 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 ignore = []
-
-[tool.coverage.run]
-branch = true
-patch = ["subprocess"]
-source = ["src/quant_research_platform"]
-
-[tool.coverage.report]
-fail_under = 90
-include = ["src/quant_research_platform/*"]
-precision = 6
-show_missing = true
-skip_covered = false

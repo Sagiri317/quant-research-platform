@@ -1,154 +1,86 @@
 # QRP
 
-QRP 是一个本地量化研究平台，用于组织数据合同、因子研究、特征处理、模型训练、预测、评估、组合构建、报告与 evidence。它面向研究和演示，不是生产交易系统，不接 broker 或 exchange，不提供 investment advice。
+QRP 是本地量化研究平台，用于数据合同、因子与特征研究、模型训练、预测、评估、组合构建、报告和 evidence。它不是生产或模拟交易系统，不接 broker/exchange，不提供 investment advice。
 
-## 当前定位
+## 现场事实
 
-QRP 的长期定位是：用严格合同、可复现 evidence 和受控 agent workflow 支撑量化研究迭代。仓库文档只描述长期合同和操作规则，不记录当前分支、当前阶段、当前 PR、最近运行结果或下一步任务。
+仓库文档只描述长期合同。当前 branch、phase、review 与运行结果从 live Git 和本轮任务读取：
 
-当前状态必须从 git 和当前任务现场读取：
-
-```bash
+```text
 git status --short --branch
 git log -1 --date=iso-strict --format="%H%n%cd%n%s"
 ```
 
-## 目录概览
+Agent 执行规则见 `AGENTS.md`。
+
+## 目录与 owner
 
 ```text
-.agents/     agent 指令、skills、governance scripts、handoff tooling
-src/         QRP 源码
-tests/       当前合同测试、治理测试、架构测试
-docs/        当前合同文档和代码地图
-data/        本地数据占位说明，不提交私有数据
-.run/        本地运行产物和 evidence，不作为 tracked tooling source
+src/         QRP production code
+tests/       当前行为、合同与架构测试
+docs/        当前合同文档
+data/        本地数据占位；不提交 private data
+.run/        ignored local outputs/evidence；不定义代码事实
 ```
 
-核心 owner 边界：
+- `sources/` 负责摄取、raw schema 和 raw/interim 转换。
+- `markets/` 负责市场领域与具体市场实现。
+- `contracts/` 定义结构合同；`policy/` 定义共享安全规则。
+- `profiles/` 是 API、CLI 与 workflow 的组合根。
+- `research/` 和 `compute/` 只做研究与数值计算。
+- `storage/` 拥有 dataset IO、persisted identity、exact compare 与 data layout。
+- `runtime/` 拥有 resource policy 与 execution metrics。
+- `reports/` 构建内容；`artifacts/` 写 LOCAL_ONLY/REVIEW_SAFE 文件。
+- `workflows/` 只编排；`interfaces/` 暴露已批准 API/CLI。
 
-- `sources/`：数据源摄取、raw schema、字段映射和 raw/interim 转换。
-- `markets/`：通用市场领域与 session window；A 股实现位于 `markets/implementations/a_share/`。
-- `policy/`：共享安全规则、ID 安全判断和 PASS/FAIL/NOT_RUN/BLOCKED 状态聚合。
-- `contracts/`：结构合同、枚举、ID、时间窗口和基础校验，不保存共享安全规则事实。
-- `catalog/`：generic registry class。
-- `profiles/`：API、CLI 和 workflow 共用组合根，组装 catalog/source/market/materializer。
-- `research/`：通用研究计算，只构建 result，不写文件，不依赖具体市场实现或 sources。
-- `compute/`：DataFrame portfolio math 和 performance 数值核心。
-- `storage/`：只负责 dataset IO 与 data/raw、data/interim、data/processed、data/research layout。
-- `runtime/`：resources、logical paths 和 execution metrics payload，不写报告内容。
-- `reports/`：只 build/render evidence/report 内容，不写文件。
-- `artifacts/`：只负责写入 LOCAL_ONLY outputs 和 REVIEW_SAFE evidence。
-- `workflows/`：只编排 research -> reports -> artifacts。
-- `.agents/`：治理、handoff 和 prompt tooling，不承载 runtime 业务逻辑。
+## 核心合同
 
-## 运行结果合同
+一个 resource-bearing operation 只捕获一次有效 available memory，预算不高于其 80%，并在一个 root policy、execution lease 与 total reservation ledger 下覆盖全部 Python/native/input/output/overlap state。每次数据规模 allocation 前先 reserve；无法证明安全上限时 fail closed。
 
-运行根由 workflow 或用户显式指定：
+Dataset identity 由 persisted schema、dtype、PK、logical window 与 exact content 定义。Fingerprint 只用于 quick reject；只有 exact compare 可以产生 `MATCH`。Publication 必须 atomic、保留 old-good，cleanup 只处理 owner-qualified resources，active `BaseException` primary 不被 secondary failure 覆盖。
+
+QRP 采用 current-contract-only：替换旧实现时删除旧入口，不保留 alias、compat reader 或平行实现。
+
+## 运行结果
 
 ```text
 <run_root>/
   run.json
-  data/
-    interim/
-    processed/
-    research/
-  outputs/
-    <output_id>/
-      manifest.json
+  data/{interim,processed,research}/
+  outputs/<output_id>/manifest.json
   logs/
   summary.md
 ```
 
-`run.json` 是唯一运行级机器事实源，`summary.md` 是唯一运行级人读摘要。dataset 保留 `spec.json` 与 `_manifest/manifest.json`。所有 QRP-owned JSON 顶层必须是 object，并使用不带版本后缀的 `schema_id`。
+`run.json` 是运行级 machine truth，`summary.md` 是人读摘要。Dataset 使用 `spec.json` 与 `_manifest/manifest.json`。QRP-owned JSON 顶层是 object，并使用不带版本后缀的 `schema_id`。
 
-compare 默认按 `output_id` 配对，并用 `output_definition_id` 与 metadata 校验语义；特殊映射由 pairs file 显式提供。handoff 是最小 REVIEW_SAFE reproducible package，具体布局由 tracked handoff tooling 文档和合同模块定义。状态聚合唯一 owner 是 `policy/check_status.py`；`governance_contract.py` 只定义治理扫描规则。
-
-## 当前 public surface
-
-当前 public API 只有：
+## Public surface
 
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
 GET  /api/0.1/research-datasets/{dataset_id}/requirements
-```
 
-当前 public CLI 只有：
-
-```text
 qrp catalog factors
 qrp catalog labels
 qrp research-datasets requirements <dataset_id>
 ```
 
-## agent 入口
+新增 public API/CLI、依赖、framework、connector 或 deployment 需要明确批准。
 
-coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/quant-research-platform-maintenance/SKILL.md`。需要深入执行时，再按需读取 `.agents/skills/quant-research-platform-maintenance/references/**`。
+## 直接验证
 
-`AGENTS.md` 不是状态板。需要当前事实时，必须使用 live git baseline。
+环境名以 `environment.yml` 的 `name` 为准：
 
-## 文档原则
-
-- 文档只保存当前合同。
-- open issues 只保存当前 open 或 deferred 问题。
-- `.agents` 是 tracked tooling source。
-- `.run` 是 output layer 和 evidence layer。
-- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、`SourceTreeScanInput` 驱动的 source-tree scan、共享安全路径和 tests 的 current-contract-only 规则只从这里读取或派生。
-- handoff package contract 由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有；receipt contract 由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有；package load path 由 `verify_handoff_package.py` 的 `HandoffPackagePayload` 拥有。
-- 边界回归由 owner-layer negative tests 和治理 gate 记录为 `FAIL`，不靠文本关键词绕过。
-
-## 验证原则
-
-所有验证结果必须使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。`PASS` 必须对应实际命令或可检查 artifact。未运行、阻塞或超时的检查不能写成 PASS。
-
-测试分层由 `pyproject.toml` 的 pytest markers 和
-`tests/tools/run_profile.py` 的 profile 定义共同约束。profile 清单和选择逻辑
-以 runner 输出为准，文档不复制 marker expression。
-
-`integration`、`mutation`、`slow`、`performance` 和
-`requires_local_data` 必须由对应 profile 或 `all` profile 显式选择。
-`slow` 只表示运行慢，`requires_local_data` 只表示需要本地数据或本地环境；
-两者彼此正交。`performance` 是轻量性能和治理工具 runtime evidence profile。
-性能收口依据实际耗时画像、slowest tests/files 和 before/after 对比，不使用
-硬编码秒数阈值或独立性能 gate 文件。
-
-常用治理验证：
-
-```bash
-git diff --check
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
-python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
+```text
+conda run -n <env> ruff check .
+conda run -n <env> python -m pytest -q
+conda run -n <env> python -m pytest -q -o "addopts=--import-mode=importlib --strict-markers" tests
+conda run -n <env> python -m build --no-isolation --sdist --wheel --outdir <run-dir>
 ```
 
-可用 profile 由 runner 输出：
-
-```bash
-python tests/tools/run_profile.py --list-profiles
-```
-
-日常 profile 入口：
-
-```bash
-python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
-```
-
-`.run/` 只保存输出、profile、临时文件和 handoff/review artifacts，不保存正式脚本。
-普通 `python -m pytest` 是开发者默认非重型 suite，默认排除
-`integration`、`mutation`、`slow`、`performance` 和 `requires_local_data`；
-正式 evidence 使用 `tests/tools/run_profile.py`，完整收口使用 runner 的
-`all` profile 显式选择。
-
-`pytest-xdist`（pytest 并行执行插件）只作为 dev-only speed gate（开发依赖速度门禁）。
-sequential `all` profile（串行全量运行配置）仍是 truth gate（正确性事实门禁）；
-`all-xdist` 不能替代 `all`，只能作为同一 scope 的耗时辅助信号。
-
-```bash
-python tests/tools/run_profile.py --profile all --run-dir .run/<purpose>/all -- --durations=100
-python tests/tools/run_profile.py --profile all --run-dir .run/<purpose>/all-xdist -- -n 4 --dist loadfile --durations=100
-```
-
-正式 handoff 的 REVIEW_SAFE evidence 完整性由 tracked builder、verifier、contract modules 和 tests 强制执行；status-only 摘要不能作为完整 evidence。
+默认 pytest 只排除明确标记的 `slow` tests；完整命令覆盖默认 `addopts`。Build smoke 解压 wheel 后用 `PYTHONPATH` import，不安装 package。
 
 ## 数据安全
 
-禁止提交 private data、vendor marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE evidence 只能包含摘要、schema、计数、hash、命令状态和路径结构；结果安全边界使用 LOCAL_ONLY / REVIEW_SAFE。
+不提交 private data、secret、vendor raw marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE evidence 只包含 schema、计数、hash、状态、逻辑路径结构和不含私有行的摘要。

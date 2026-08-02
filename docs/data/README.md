@@ -39,11 +39,10 @@ data/<layer>/<dataset>/_manifest/manifest.json
 - artifact path structure
 - summary statistics without private rows
 
-可用测试 profile 由 runner 输出，执行时传入 profile 名称：
+数据合同使用 direct pytest 验证：
 
-```bash
-python tests/tools/run_profile.py --list-profiles
-python tests/tools/run_profile.py --profile <profile> --run-dir .run/<purpose>/<profile>
+```text
+conda run -n <environment.yml name> python -m pytest -q tests/storage tests/sources
 ```
 
 ## Agent 规则
