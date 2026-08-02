@@ -17,7 +17,6 @@
 
 - pytest PASS
 - governance script PASS
-- code-map flow PASS
 - handoff verifier PASS
 - share-safety PASS
 - source-tree scan PASS
@@ -50,19 +49,17 @@ Diff-only governance gate 使用：
 conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope changed-files --base-ref <base> --json
 ```
 
-`--allow-active-docs` 和 `--scan-active-docs` 不是当前有效参数。
-
 内部治理规则事实源是：
 
 ```text
 .agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
 ```
 
-active doc roots、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 必须从这里读取或派生。
+active doc roots、sensitive-text 精确例外、layer/writer owner 规则和 package safety path parts 必须从这里读取或派生。
 
-source-tree sensitive scan 和 bundle share-safety scan 统一复用该事实源。扫描边界使用精确规则定义行和明确 root 列表。source-tree scan 由 `SourceTreeScanInput` 统一驱动；tracked text file、Python AST、owner ranges、allowlist definition lines 和 governance rule definition lines 只构造一次，individual scanner 不保留 `Path` 旧入口。
+source-tree sensitive scan 和 bundle share-safety scan 统一复用该事实源。source-tree scan 由 `SourceTreeScanInput` 驱动，只扫描明确的 tracked text roots；精确例外按 path、rule 和完整行匹配。
 
-handoff layout gate 由 `handoff/handoff_contract.py` 和 `handoff/verify_handoff_package.py` 拥有。`FieldSpec` 和 `allowed_keys()` 只由 `handoff_contract.py` 定义；`receipt_contract.py` 只拥有 receipt schema specs、invariants、normalization 和 comparison。source-tree retired surface gate 由 `governance_contract.py`、`verify_governance.py` 和 `tests/architecture/` 拥有。builder、collector、verifier 和 tests 不得复制平行 receipt validator 或 handoff layout 表。
+handoff layout gate 由 `handoff/handoff_contract.py` 和 `handoff/verify_handoff_package.py` 拥有。`FieldSpec` 和 exact schema validation 只由 `handoff_contract.py` 定义；`receipt_contract.py` 只拥有 receipt schema specs、invariants、normalization 和 comparison。source-tree sensitive boundary 由 `governance_contract.py`、`verify_governance.py` 和最小行为测试共同保护。builder、collector、verifier 和 tests 不得复制平行 receipt validator 或 handoff layout 表。
 
 Hard-scan gate 由正式 handoff builder/verifier 闭合：
 
@@ -80,18 +77,7 @@ package smoke receipt 使用 conda-managed non-isolated build：`python -m build
 conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py --repo-root . --json
 ```
 
-该 gate 覆盖 package build 必须使用 `--no-isolation`、不得使用 installer 或 skip-dependency fallback、package build/import subprocess timeout、build-system 到 conda backend dependency 映射，以及 content_scan 失败路径不得伪装为 `PASS`。
-`tooling_environment_dependency_sync` 只同步 handoff replay、package smoke 和
-speed/lint gate 需要的关键工具依赖、Python pin 以及 `ruff target-version`；它不是
-full dependency lockfile，也不强制同步全部 runtime dependencies。
-
-### Code-Map Gate
-
-```bash
-conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
-```
-
-该 gate 验证当前代码地图和长期合同一致。
+该 gate 只覆盖三项长期结构事实：`pyproject.toml` 与 `environment.yml` 的 dependency/Python/Ruff 同步、tracked `.agents` scripts 不依赖 tests，以及 handoff validation row/replay command ID 唯一且集合闭合。它不替代行为测试、package smoke 或 handoff verifier。
 
 ### Agent And Architecture Tests
 
@@ -101,7 +87,7 @@ conda run -n <environment.yml name> python tests/tools/run_profile.py --profile 
 conda run -n <environment.yml name> python tests/tools/run_profile.py --profile all --run-dir .run/<purpose>/all-xdist -- -n 4 --dist loadfile --durations=100
 ```
 
-`pytest-xdist` 只作为 dev-only speed gate 依赖，具体版本以 root config
+`pytest-xdist` 只作为 dev-only 耗时诊断依赖，具体版本以 root config
 当前声明为准。sequential `all` profile 是正式 truth gate；`all-xdist` 不能替代
 `all`，只能补充耗时证据。
 
@@ -123,67 +109,18 @@ Formal handoff validation gate 要求 mandatory validation rows 全部为 `PASS`
 
 active docs 的唯一可执行路径清单是 `governance_contract.ACTIVE_GOVERNANCE_DOC_ROOTS`，其中包含 handoff tooling README。其他脚本和测试只读取或验证该常量，不维护平行清单。
 
-active docs 只描述当前规则、职责、路径和命名。current-contract-only 边界回归由 gate 记录为 `FAIL`；完整路径规则只由 `governance_contract.py` 定义。
+active docs 只描述当前规则、职责、owner 和调用流。current-contract-only 边界回归由 owner 行为、真实调用流和 machine-consumed contract 裁决；词法或 AST 扫描只产生候选，不能仅凭名称、路径或语法返回 `FAIL`。
 
-命名边界扫描表面包括：
-
-```text
-file/path names
-Python function/class/fixture/constant/module-level assignment names
-JSON/YAML/TOML key names
-static string concatenation or simple join synthesis
-active docs current-truth wording
-```
-
-版本面规则由 `governance_contract.py` 和对应 tests 控制。QRP-owned JSON 必须是顶层 object，必须包含 `schema_id`，且 `schema_id` 不编码版本。
+QRP-owned JSON 的顶层 identity 由对应 artifact contract 与行为测试控制：payload 必须是 object，并使用该 owner 当前定义的精确 `schema_id`。
 
 ## 5. Current-Contract Surface
 
-current-contract-only 边界由 owner-layer negative tests 或明确 allowlist 控制。allowlist 必须说明目的和移除条件。
+current-contract-only 边界由 owner 行为测试、依赖方向、唯一 active registration 和公共 machine contract 控制。allowlist 必须说明真实例外和移除条件。平行实现按实际 caller、状态与副作用 owner 裁决；未接入的 deferred 代码和测试删除，只在仍有产品价值时保留 open issue。
 
-内部接口 gate 检查：
+测试通常随行为 owner 放置，便于定位和运行；目录、helper 可见性、`__all__` 形状或特定词汇本身不构成失败条件。
 
-- 跨文件 private symbol import。
-- `__all__` 单下划线导出。
-- owner-local internal API 从 package `__init__.py` 重导出。
-- storage/artifacts private module pattern。
-- tests 白盒调用 private helper 分类为 `test_white_box_allowed`。
-
-parallel/stale implementation gate 扫描 legacy、compat、deprecated、migration、old、new、v2、shim、fallback、wrapper 和 alias。真问题必须合并或删除；valuable deferred feature 必须有 owner、rationale、lifecycle 和 reference。
-
-测试位置 gate：
-
-- architecture boundary tests 放 `tests/architecture/`。
-- handoff builder/verifier/evidence tests 放 `tests/agents/handoff/`。
-- receipt payload invariant 放 `tests/agents/handoff/test_*_receipt_contract.py` 和 `tests/agents/handoff/test_validation_summary_contract.py`。
-- full zip mutation 放 `tests/agents/handoff/test_handoff_package_mutations.py`。
-- handoff single-source ownership 放 `tests/architecture/test_handoff_contract_single_source.py`。
-- source-tree retired-name gate 不放在 `tests/agents/handoff/`。
-- governance CLI/规则行为 tests 放 `tests/agents/`。
-- A 股 processed owner behavior tests 放 `tests/markets/a_share/`。
-- research behavior tests 放 `tests/research/`。
-- artifact/storage/compute/workflow behavior tests 放对应 owner 目录。
-
-A 股 owner-local naming gate 禁止 `markets/implementations/a_share/**` 内部 symbol、常量、文件名和 error code 重复 `a_share` / `ashare` / `china_a` / `china_share` 前缀；字符串 id 需要分类，不机械删除。
-
-关键测试入口：
-
-```text
-tests/agents/test_verify_governance_active_docs.py
-tests/agents/test_verify_governance_changed_files.py
-tests/agents/test_verify_governance_cli.py
-tests/architecture/test_governance_scan_boundaries.py
-tests/architecture/test_governance_active_docs.py
-tests/architecture/test_governance_profile_runner_contract.py
-tests/architecture/test_governance_source_tree_scan_contract.py
-tests/architecture/test_share_safe_evidence.py
-tests/architecture/test_share_safe_evidence_data_contract.py
-tests/architecture/test_compute_module_topology.py
-tests/architecture/test_csmar_source_topology.py
-tests/architecture/test_platform_package_topology.py
-tests/architecture/test_public_interface_topology.py
-tests/contracts/test_platform_contracts.py
-```
+Hard gate 只保护依赖方向、唯一 active owner、公共 machine contract、资源生命周期、
+REVIEW_SAFE 边界和 evidence truth；名称、文件位置与实现语法只产生审查候选。
 
 handoff 测试分层入口：
 

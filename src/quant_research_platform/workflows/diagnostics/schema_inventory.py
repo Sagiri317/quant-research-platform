@@ -9,7 +9,10 @@ from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.contracts._json import canonical_json_hash
+from quant_research_platform.contracts._json import (
+    canonical_json_hash,
+    render_qrp_json_object,
+)
 from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAYERS
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -17,10 +20,13 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
+    dataset_inspection_retained_memory_bytes,
     inspect_dataset_session,
 )
+from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
+    closing_dataset_iterator,
     iter_dataset_chunks,
     open_dataset_session,
 )
@@ -60,27 +66,36 @@ def build_schema_inventory_payload(
 
     root = Path(project_root)
     declared_important_columns = (
-        ()
-        if important_null_count_columns is None
-        else important_null_count_columns
+        () if important_null_count_columns is None else important_null_count_columns
     )
     if any(
-        type(column) is not str or not column
-        for column in declared_important_columns
+        type(column) is not str or not column for column in declared_important_columns
     ):
         raise ValueError("schema_inventory_important_columns_invalid")
     important_columns = frozenset(declared_important_columns)
+    data_root = root / "data"
+    for candidate in (
+        root,
+        data_root,
+        *(data_root / layer for layer in sorted(RUN_RESULT_DATASET_LAYERS)),
+    ):
+        require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
     resource_policy = active_runtime_resource_policy()
     with runtime_resource_policy_scope(resource_policy):
-        items = [
-            _inventory_item(
+        items = []
+        retained_item_bytes = 0
+        for artifact_root in _iter_dataset_artifact_roots(root):
+            item = _inventory_item(
                 root,
                 artifact_root,
                 important_null_count_columns=important_columns,
                 resource_policy=resource_policy,
+                retained_payload_bytes=retained_item_bytes,
             )
-            for artifact_root in _iter_dataset_artifact_roots(root)
-        ]
+            retained_item_bytes += len(render_qrp_json_object(item).encode("utf-8"))
+            if retained_item_bytes > resource_policy.task_memory_budget_bytes:
+                raise ValueError("schema_inventory_payload_exceeds_task_memory_budget")
+            items.append(item)
     if not items:
         raise ValueError("schema_inventory_no_datasets_found")
     return {
@@ -175,9 +190,7 @@ def _validate_schema_inventory_item(value: object) -> dict[str, Any]:
 
     columns = _exact_string_list(value["columns"], allow_empty=False)
     primary_key = _exact_string_list(value["primary_key"], allow_empty=True)
-    partition_columns = _exact_string_list(
-        value["partition_columns"], allow_empty=True
-    )
+    partition_columns = _exact_string_list(value["partition_columns"], allow_empty=True)
     warnings = _exact_string_list(value["warnings"], allow_empty=True)
     if warnings != sorted(warnings):
         raise ValueError("schema_inventory_dataset_invalid")
@@ -223,9 +236,7 @@ def _validate_schema_inventory_item(value: object) -> dict[str, Any]:
     if (
         years != sorted(years)
         or any(
-            len(year) != 4
-            or not year.isdecimal()
-            or row_count_by_year[year] == 0
+            len(year) != 4 or not year.isdecimal() or row_count_by_year[year] == 0
             for year in years
         )
         or sum(row_count_by_year.values()) > row_count
@@ -235,10 +246,7 @@ def _validate_schema_inventory_item(value: object) -> dict[str, Any]:
             and sum(row_count_by_year.values()) != row_count
         )
         or bool(years) != (date_min is not None)
-        or (
-            years
-            and (years[0] != date_min[:4] or years[-1] != date_max[:4])
-        )
+        or (years and (years[0] != date_min[:4] or years[-1] != date_max[:4]))
     ):
         raise ValueError("schema_inventory_dataset_invalid")
     return value
@@ -286,10 +294,7 @@ def _exact_string_mapping(
         type(value) is not dict
         or set(value) != expected_keys
         or any(
-            type(key) is not str
-            or not key
-            or type(item) is not str
-            or not item
+            type(key) is not str or not key or type(item) is not str or not item
             for key, item in value.items()
         )
     ):
@@ -320,15 +325,39 @@ def _exact_nonnegative_int(value: object) -> int:
 
 
 def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
+    data_root = project_root / "data"
+    require_unaliased_path(project_root, error="schema_inventory_dataset_invalid")
+    require_unaliased_path(data_root, error="schema_inventory_dataset_invalid")
     allowed_roots = tuple(
-        project_root / "data" / layer
-        for layer in sorted(RUN_RESULT_DATASET_LAYERS)
+        data_root / layer for layer in sorted(RUN_RESULT_DATASET_LAYERS)
     )
     for layer_root in allowed_roots:
+        require_unaliased_path(layer_root, error="schema_inventory_dataset_invalid")
         if not layer_root.exists():
             continue
-        for spec_path in sorted(layer_root.rglob("spec.json")):
-            yield spec_path.parent
+
+        def fail_walk(error: OSError) -> None:
+            raise ValueError("schema_inventory_dataset_invalid") from error
+
+        for parent, dirnames, filenames in layer_root.walk(
+            follow_symlinks=False,
+            on_error=fail_walk,
+        ):
+            require_unaliased_path(parent, error="schema_inventory_dataset_invalid")
+            dirnames.sort()
+            for name in dirnames:
+                require_unaliased_path(
+                    parent / name,
+                    error="schema_inventory_dataset_invalid",
+                )
+            for name in sorted(filenames):
+                if name != "spec.json":
+                    continue
+                spec_path = parent / name
+                require_unaliased_path(
+                    spec_path, error="schema_inventory_dataset_invalid"
+                )
+                yield parent
 
 
 def _inventory_item(
@@ -337,6 +366,7 @@ def _inventory_item(
     *,
     important_null_count_columns: frozenset[str],
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
 ) -> dict[str, Any]:
     with open_dataset_session(
         artifact_root,
@@ -344,6 +374,7 @@ def _inventory_item(
         time_window=None,
         require_consumable=False,
         resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
     ) as session:
         return _inventory_item_from_session(
             project_root,
@@ -351,6 +382,7 @@ def _inventory_item(
             session=session,
             important_null_count_columns=important_null_count_columns,
             resource_policy=resource_policy,
+            retained_payload_bytes=retained_payload_bytes,
         )
 
 
@@ -361,10 +393,12 @@ def _inventory_item_from_session(
     session: DatasetSession,
     important_null_count_columns: frozenset[str],
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int = 0,
 ) -> dict[str, Any]:
     inspection = inspect_dataset_session(
         session,
         resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
     )
     logical_root = artifact_root.relative_to(project_root).as_posix()
     spec_payload = inspection.spec
@@ -383,8 +417,10 @@ def _inventory_item_from_session(
         primary_key,
         important_null_count_columns=important_null_count_columns,
         resource_policy=resource_policy,
-        exact_duplicate_count=int(
-            inspection.manifest["duplicate_primary_key_count"]
+        exact_duplicate_count=int(inspection.manifest["duplicate_primary_key_count"]),
+        retained_payload_bytes=(
+            retained_payload_bytes
+            + dataset_inspection_retained_memory_bytes(inspection)
         ),
     )
     session.verify()
@@ -426,6 +462,7 @@ def _aggregate_dataset_stats(
     important_null_count_columns: frozenset[str],
     exact_duplicate_count: int,
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
 ) -> dict[str, Any]:
     dtypes: dict[str, str] = {}
     row_count = 0
@@ -441,37 +478,41 @@ def _aggregate_dataset_stats(
     chunks = iter_dataset_chunks(
         session,
         target_chunk_bytes=resource_policy.payload_target_bytes,
+        operation_headroom_bytes=(
+            resource_policy.task_memory_budget_bytes - retained_payload_bytes
+        ),
     )
-    for frame in chunks:
-        row_count += int(len(frame))
-        for column in frame.columns:
-            dtypes.setdefault(str(column), str(frame[column].dtype))
-        if "timestamp" in frame.columns:
-            timestamps = pd.to_datetime(
-                frame["timestamp"], errors="coerce"
-            ).dropna()
-            if not timestamps.empty:
-                year_counts = timestamps.dt.year.astype(str).value_counts()
-                for year, count in year_counts.items():
-                    row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
-                        count
+    with closing_dataset_iterator(chunks):
+        for frame in chunks:
+            row_count += int(len(frame))
+            for column in frame.columns:
+                dtypes.setdefault(str(column), str(frame[column].dtype))
+            if "timestamp" in frame.columns:
+                timestamps = pd.to_datetime(
+                    frame["timestamp"], errors="coerce"
+                ).dropna()
+                if not timestamps.empty:
+                    year_counts = timestamps.dt.year.astype(str).value_counts()
+                    for year, count in year_counts.items():
+                        row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
+                            count
+                        )
+                    chunk_min = timestamps.min()
+                    chunk_max = timestamps.max()
+                    min_timestamp = (
+                        chunk_min
+                        if min_timestamp is None
+                        else min(min_timestamp, chunk_min)
                     )
-                chunk_min = timestamps.min()
-                chunk_max = timestamps.max()
-                min_timestamp = (
-                    chunk_min
-                    if min_timestamp is None
-                    else min(min_timestamp, chunk_min)
-                )
-                max_timestamp = (
-                    chunk_max
-                    if max_timestamp is None
-                    else max(max_timestamp, chunk_max)
-                )
-        for column in primary_key:
-            null_key_counts[column] += int(frame[column].isna().sum())
-        for column in important_columns:
-            important_null_counts[column] += int(frame[column].isna().sum())
+                    max_timestamp = (
+                        chunk_max
+                        if max_timestamp is None
+                        else max(max_timestamp, chunk_max)
+                    )
+            for column in primary_key:
+                null_key_counts[column] += int(frame[column].isna().sum())
+            for column in important_columns:
+                important_null_counts[column] += int(frame[column].isna().sum())
 
     return {
         "dtypes": {column: dtypes.get(column, "") for column in columns},

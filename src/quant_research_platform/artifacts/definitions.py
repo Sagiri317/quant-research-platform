@@ -13,14 +13,6 @@ def output_catalog() -> OutputCatalog:
     catalog = OutputCatalog()
     catalog.register(
         OutputDefinition(
-            output_definition_id="stage_profile_diagnostic",
-            display_name="Stage profile diagnostic",
-            run_type="diagnostics",
-            scope=OutputScope.LOCAL_ONLY,
-        )
-    )
-    catalog.register(
-        OutputDefinition(
             output_definition_id="prediction_outputs",
             display_name="Prediction outputs",
             run_type="prediction",

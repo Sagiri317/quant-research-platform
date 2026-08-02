@@ -2,55 +2,46 @@ from __future__ import annotations
 
 import pytest
 
-import quant_research_platform.contracts.evaluations as evaluations_contracts
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.contracts.workflows import (
-    WorkflowRunPolicy,
-    WorkflowRunSummary,
-)
 
 
 def test_run_id_accepts_share_safe_lowercase_identifiers() -> None:
     report = OutputSpec(
-        output_id="stage_profile",
-        output_definition_id="stage_profile_local_diagnostic",
+        output_id="prediction_daily",
+        output_definition_id="prediction_outputs",
         run_id="run-01.alpha_beta",
         market_id=MarketId("a_share"),
-        run_type="diagnostics",
+        run_type="prediction",
         scope=OutputScope.LOCAL_ONLY,
     )
 
     assert report.run_id == "run-01.alpha_beta"
     assert (
         OutputSpec(
-            output_id="date_profile",
-            output_definition_id="stage_profile_local_diagnostic",
+            output_id="prediction_monthly",
+            output_definition_id="prediction_outputs",
             run_id="run_202606",
             market_id=MarketId("a_share"),
-            run_type="diagnostics",
+            run_type="prediction",
             scope=OutputScope.LOCAL_ONLY,
         ).run_id
         == "run_202606"
     )
     assert (
         OutputSpec(
-            output_id="date_parts_profile",
-            output_definition_id="stage_profile_local_diagnostic",
+            output_id="prediction_date_parts",
+            output_definition_id="prediction_outputs",
             run_id="run_2026_06",
             market_id=MarketId("a_share"),
-            run_type="diagnostics",
+            run_type="prediction",
             scope=OutputScope.LOCAL_ONLY,
         ).run_id
         == "run_2026_06"
     )
-
-
-def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
-    assert not hasattr(evaluations_contracts, "SignalSpec")
 
 
 @pytest.mark.parametrize(
@@ -84,16 +75,16 @@ def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
 def test_output_spec_rejects_invalid_run_ids(run_id: str) -> None:
     with pytest.raises(ValueError, match="invalid_run_id"):
         OutputSpec(
-            output_id="stage_profile",
-            output_definition_id="stage_profile_local_diagnostic",
+            output_id="prediction_daily",
+            output_definition_id="prediction_outputs",
             run_id=run_id,
             market_id=MarketId("a_share"),
-            run_type="diagnostics",
+            run_type="prediction",
             scope=OutputScope.LOCAL_ONLY,
         )
 
 
-def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None:
+def test_evaluation_and_prediction_specs_validate_run_ids() -> None:
     with pytest.raises(ValueError, match="invalid_run_id"):
         EvaluationSpec(
             run_id="run 01",
@@ -116,22 +107,4 @@ def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None
             research_dataset_id="dataset",
             train_end="2014-01-02",
             test_start="2014-01-03",
-        )
-
-    with pytest.raises(ValueError, match="invalid_run_id"):
-        WorkflowRunSummary(
-            workflow_id="workflow",
-            workflow_version="0.1",
-            run_policy=WorkflowRunPolicy.VALIDATE_ONLY,
-            run_id="000001.sz",
-            status="failed",
-            market_id="a_share",
-            run_type="workflow",
-            input_spec_ids=(),
-            output_spec_ids=(),
-            node_count=0,
-            completed_nodes=(),
-            scope=True,
-            artifact_writer_policy="none",
-            failure_code="invalid_run_id",
         )

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import inspect
-
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -20,19 +17,11 @@ from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
 from quant_research_platform.markets.session_windows import SessionWindow
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.calculations import (
     calculate_price_volume_factors,
+)
+from quant_research_platform.research.factors.price_volume.presets import (
     price_volume_factor_columns,
-)
-from quant_research_platform.research.factors.price_volume import (
-    calculations as price_volume_calculations,
-)
-from quant_research_platform.research.factors.price_volume import (
-    rolling as price_volume_rolling,
-)
-from quant_research_platform.research.factors.price_volume.rolling import (
-    _ROLLING_MOMENT_NEAR_ZERO_VARIANCE,
-    rolling_aggregate,
 )
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
@@ -62,113 +51,6 @@ def test_price_volume_all_factor_columns_match_qrp_reference() -> None:
         result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
     )
-
-
-def test_price_volume_rolling_moment_contract_names_near_zero_policy() -> None:
-    source = inspect.getsource(price_volume_calculations) + inspect.getsource(
-        price_volume_rolling
-    )
-
-    assert "stable =" not in source
-    assert "1e-14" not in source
-    assert ("_PANDAS_" + "MOMENT_FALLBACK_VARIANCE") not in source
-    assert "_replace_small_variance_with_pandas" not in source
-    assert "path selector" not in source
-    unsupported_assignment = "unsupported = unsupported_price_volume_factors(requested)"
-    assert source.count(unsupported_assignment) == 1
-    assert (
-        _ROLLING_MOMENT_NEAR_ZERO_VARIANCE
-        == REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE
-    )
-
-
-def testrolling_aggregate_preserves_groupby_rolling_row_alignment() -> None:
-    frame = pd.DataFrame(
-        {
-            "asset_id": ["asset_b", "asset_a", "asset_b", "asset_a", "asset_b"],
-            "value": [1.0, 10.0, 1.0, float("nan"), 1.0],
-        },
-        index=[101, 55, 77, 8, 42],
-    )
-    group_keys = frame["asset_id"]
-    grouped = frame["value"].groupby(group_keys, sort=False)
-    group_positions = tuple(frame.groupby("asset_id", sort=False).indices.values())
-
-    actual_mean = rolling_aggregate(
-        frame["value"],
-        grouped,
-        group_positions,
-        2,
-        "mean",
-    )
-    expected_mean = grouped.transform(
-        lambda series: series.rolling(2, min_periods=2).mean()
-    )
-    actual_std = rolling_aggregate(
-        frame["value"],
-        grouped,
-        group_positions,
-        2,
-        "std",
-    )
-    expected_std = grouped.transform(
-        lambda series: series.rolling(2, min_periods=2).std()
-    )
-
-    pd.testing.assert_series_equal(actual_mean, expected_mean)
-    pd.testing.assert_series_equal(actual_std, expected_std)
-
-
-def testrolling_aggregate_mean_is_segment_start_invariant() -> None:
-    rng = np.random.default_rng(7)
-    _ = rng.normal(size=3000)
-    values = pd.Series(
-        rng.normal(size=1000) * 1_000_000_000_000.0 + np.arange(1000) * 0.01
-    )
-    full = _calculaterolling_aggregate_segment(
-        values,
-        segment_start=0,
-        core_start=500,
-        window=120,
-    )
-    shifted = _calculaterolling_aggregate_segment(
-        values,
-        segment_start=100,
-        core_start=500,
-        window=120,
-    )
-
-    pd.testing.assert_series_equal(full, shifted, check_exact=True)
-
-
-def testrolling_aggregate_requires_finite_values_for_entire_window() -> None:
-    frame = pd.DataFrame(
-        {
-            "asset_id": ["asset_a"] * 5,
-            "value": [0.01, np.inf, 0.03, -np.inf, 0.05],
-        }
-    )
-    group_keys = frame["asset_id"]
-    grouped = frame["value"].groupby(group_keys, sort=False)
-    group_positions = tuple(frame.groupby("asset_id", sort=False).indices.values())
-
-    actual_min = rolling_aggregate(
-        frame["value"],
-        grouped,
-        group_positions,
-        2,
-        "min",
-    )
-    actual_max = rolling_aggregate(
-        frame["value"],
-        grouped,
-        group_positions,
-        2,
-        "max",
-    )
-
-    assert actual_min.isna().tolist() == [True, True, True, True, True]
-    assert actual_max.isna().tolist() == actual_min.isna().tolist()
 
 
 def test_price_volume_calculates_requested_factor_without_unneeded_inputs() -> None:
@@ -438,9 +320,13 @@ def test_price_volume_session_chunk_boundary_matches_unchunked_reference() -> No
     )
     sorted_chunked = chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
     assert (
-        sorted_chunked.loc[:, factor_columns].isna()
-        == expected.loc[:, factor_columns].isna()
-    ).all().all()
+        (
+            sorted_chunked.loc[:, factor_columns].isna()
+            == expected.loc[:, factor_columns].isna()
+        )
+        .all()
+        .all()
+    )
     assert sorted_chunked.duplicated(list(KEY_COLUMNS)).sum() == 0
 
 
@@ -551,9 +437,13 @@ def test_price_volume_valid_bar_session_chunks_match_full_run(
     sorted_chunked = chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
     sorted_full = full.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
     assert (
-        sorted_chunked.loc[:, factor_columns].isna()
-        == sorted_full.loc[:, factor_columns].isna()
-    ).all().all()
+        (
+            sorted_chunked.loc[:, factor_columns].isna()
+            == sorted_full.loc[:, factor_columns].isna()
+        )
+        .all()
+        .all()
+    )
     assert sorted_chunked.duplicated(list(KEY_COLUMNS)).sum() == 0
 
 
@@ -659,9 +549,13 @@ def test_forward_return_valid_bar_session_chunks_match_full_run(
     sorted_chunked = chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
     sorted_full = full.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
     assert (
-        sorted_chunked.loc[:, label_columns].isna()
-        == sorted_full.loc[:, label_columns].isna()
-    ).all().all()
+        (
+            sorted_chunked.loc[:, label_columns].isna()
+            == sorted_full.loc[:, label_columns].isna()
+        )
+        .all()
+        .all()
+    )
     assert sorted_chunked.duplicated(list(KEY_COLUMNS)).sum() == 0
 
 
@@ -707,15 +601,19 @@ def calculate_in_session_chunks(
             read_window=window.read,
             core_sessions=window.core_sessions,
         )
-        read_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
-            {
-                session
-                for session in sessions
-                if read_window.start <= session.date() <= read_window.end
-            }
+        read_mask = (
+            pd.to_datetime(ordered["timestamp"])
+            .dt.normalize()
+            .isin(
+                {
+                    session
+                    for session in sessions
+                    if read_window.start <= session.date() <= read_window.end
+                }
+            )
         )
-        core_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
-            core_sessions
+        core_mask = (
+            pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(core_sessions)
         )
         calculated = calculate_price_volume_factors(
             ordered.loc[read_mask],
@@ -765,15 +663,19 @@ def calculate_in_session_chunks_by_size(
             read_window=window.read,
             core_sessions=window.core_sessions,
         )
-        read_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
-            {
-                session
-                for session in sessions
-                if read_window.start <= session.date() <= read_window.end
-            }
+        read_mask = (
+            pd.to_datetime(ordered["timestamp"])
+            .dt.normalize()
+            .isin(
+                {
+                    session
+                    for session in sessions
+                    if read_window.start <= session.date() <= read_window.end
+                }
+            )
         )
-        core_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
-            core_sessions
+        core_mask = (
+            pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(core_sessions)
         )
         calculated = calculate_price_volume_factors(
             ordered.loc[read_mask],
@@ -823,15 +725,19 @@ def calculate_forward_returns_in_session_chunks(
             read_window=window.read,
             core_sessions=window.core_sessions,
         )
-        read_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
-            {
-                session
-                for session in sessions
-                if read_window.start <= session.date() <= read_window.end
-            }
+        read_mask = (
+            pd.to_datetime(ordered["timestamp"])
+            .dt.normalize()
+            .isin(
+                {
+                    session
+                    for session in sessions
+                    if read_window.start <= session.date() <= read_window.end
+                }
+            )
         )
-        core_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
-            core_sessions
+        core_mask = (
+            pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(core_sessions)
         )
         calculated = add_forward_return_labels(
             ordered.loc[read_mask],
@@ -840,29 +746,3 @@ def calculate_forward_returns_in_session_chunks(
         parts.append(calculated.loc[core_mask.loc[read_mask].to_numpy()])
     label_columns = tuple(f"forward_return_{horizon}d" for horizon in horizons)
     return pd.concat(parts, ignore_index=True).loc[:, [*KEY_COLUMNS, *label_columns]]
-
-
-def _calculaterolling_aggregate_segment(
-    values: pd.Series,
-    *,
-    segment_start: int,
-    core_start: int,
-    window: int,
-) -> pd.Series:
-    frame = pd.DataFrame(
-        {
-            "asset_id": ["asset_a"] * (len(values) - segment_start),
-            "value": values.iloc[segment_start:].to_numpy(dtype="float64"),
-        }
-    )
-    group_keys = frame["asset_id"]
-    grouped = frame["value"].groupby(group_keys, sort=False)
-    group_positions = tuple(frame.groupby("asset_id", sort=False).indices.values())
-    result = rolling_aggregate(
-        frame["value"],
-        grouped,
-        group_positions,
-        window,
-        "mean",
-    )
-    return result.iloc[core_start - segment_start :].reset_index(drop=True)

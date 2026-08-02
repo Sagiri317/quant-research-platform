@@ -3,30 +3,57 @@
 from __future__ import annotations
 
 import math
-import shutil
+import os
 import sqlite3
 import struct
 import sys
-import tempfile
 from array import array
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from types import TracebackType
+from uuid import uuid4
 
 import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import require_free_disk_headroom
+from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._scratch_ownership import (
-    owned_scratch_prefix,
-    scratch_owner_is_stale,
+    cleanup_stale_owned_scratch,
+    create_owned_scratch,
+    owned_scratch_name,
+    remove_owned_scratch,
+    require_owned_scratch,
 )
 
 _MAX_SQLITE_CACHE_BYTES = 8 * 1024 * 1024
 EXACT_KEY_SQLITE_PAGE_BYTES = 1024
+
+
+@dataclass(frozen=True, slots=True)
+class CompactPositionState(Sequence[int]):
+    """Expose admitted positions while retaining an explicit fixed backing state."""
+
+    _positions: array
+    keep_count: int
+
+    def __len__(self) -> int:
+        return self.keep_count
+
+    def __getitem__(self, index):  # noqa: ANN001, ANN204
+        return self.view[index]
+
+    @property
+    def view(self) -> memoryview:
+        return memoryview(self._positions)[: self.keep_count].toreadonly()
+
+    @property
+    def retained_memory_bytes(self) -> int:
+        return len(self._positions) * self._positions.itemsize
 
 
 class ExactPrimaryKeyIndex:
@@ -53,14 +80,15 @@ class ExactPrimaryKeyIndex:
         ):
             raise ValueError("invalid_exact_key_sqlite_cache_budget")
         self._sqlite_cache_kib = sqlite_cache_bytes // 1024
-        self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
+        self._temporary_directory: Path | None = None
+        self._temporary_identity: os.stat_result | None = None
         self._connection: sqlite3.Connection | None = None
 
     @property
     def database_path(self) -> Path:
         if self._temporary_directory is None:
             raise RuntimeError("exact_primary_key_index_not_open")
-        return Path(self._temporary_directory.name) / "k.sqlite3"
+        return self._temporary_directory / "k.sqlite3"
 
     @property
     def primary_key(self) -> tuple[str, ...]:
@@ -75,23 +103,47 @@ class ExactPrimaryKeyIndex:
     def __enter__(self) -> ExactPrimaryKeyIndex:
         if self._connection is not None:
             raise RuntimeError("exact_primary_key_index_already_open")
+        require_unaliased_path(
+            self._scratch_parent, error="invalid_storage_scratch_path"
+        )
         self._scratch_parent.mkdir(parents=True, exist_ok=True)
+        require_unaliased_path(
+            self._scratch_parent, error="invalid_storage_scratch_path"
+        )
         require_free_disk_headroom(
             self._scratch_parent,
             reserve_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
         )
-        _cleanup_stale_key_scratch(self._scratch_parent)
-        self._temporary_directory = tempfile.TemporaryDirectory(
-            prefix=owned_scratch_prefix(".k-"),
-            dir=self._scratch_parent,
+        parent_identity = self._scratch_parent.lstat()
+        cleanup_stale_owned_scratch(
+            self._scratch_parent,
+            parent_identity=parent_identity,
+            prefix=".k-",
+            directory=True,
         )
+        require_unaliased_path(
+            self._scratch_parent, error="invalid_storage_scratch_path"
+        )
+        temporary_directory = self._scratch_parent / owned_scratch_name(
+            ".k-", uuid4().hex[:12]
+        )
+        temporary_identity: os.stat_result | None = None
         connection: sqlite3.Connection | None = None
         try:
+            temporary_identity = create_owned_scratch(temporary_directory)
+            require_owned_scratch(self._scratch_parent, parent_identity)
+            self._temporary_directory = temporary_directory
+            self._temporary_identity = temporary_identity
+            require_unaliased_path(
+                temporary_directory,
+                error="invalid_storage_scratch_path",
+            )
+            require_owned_scratch(temporary_directory, temporary_identity)
             connection = sqlite3.connect(self.database_path)
             connection.execute("PRAGMA page_size=1024")
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
-            connection.execute("PRAGMA temp_store=MEMORY")
+            connection.execute("PRAGMA temp_store=FILE")
             connection.execute(f"PRAGMA cache_size=-{self._sqlite_cache_kib}")
             connection.execute(
                 "CREATE TABLE exact_keys ("
@@ -101,6 +153,18 @@ class ExactPrimaryKeyIndex:
                 "PRIMARY KEY(namespace, payload)"
                 ") WITHOUT ROWID"
             )
+            connection.execute(
+                "CREATE TABLE comparison_rows ("
+                "position INTEGER PRIMARY KEY, "
+                "namespace TEXT NOT NULL, "
+                "payload BLOB NOT NULL, "
+                "value BLOB NOT NULL"
+                ")"
+            )
+            connection.execute(
+                "CREATE INDEX comparison_rows_identity "
+                "ON comparison_rows(namespace, payload)"
+            )
             connection.commit()
         except BaseException:
             if connection is not None:
@@ -108,11 +172,13 @@ class ExactPrimaryKeyIndex:
                     connection.close()
                 except BaseException:
                     pass
-            try:
-                self._temporary_directory.cleanup()
-            except BaseException:
-                pass
+            if temporary_identity is not None:
+                try:
+                    remove_owned_scratch(temporary_directory, temporary_identity)
+                except BaseException:
+                    pass
             self._temporary_directory = None
+            self._temporary_identity = None
             raise
         assert connection is not None
         self._connection = connection
@@ -135,21 +201,23 @@ class ExactPrimaryKeyIndex:
     def close(self) -> None:
         connection = self._connection
         temporary_directory = self._temporary_directory
+        temporary_identity = self._temporary_identity
         self._connection = None
         self._temporary_directory = None
+        self._temporary_identity = None
         try:
             if connection is not None:
                 connection.close()
         except BaseException:
-            if temporary_directory is not None:
+            if temporary_directory is not None and temporary_identity is not None:
                 try:
-                    temporary_directory.cleanup()
+                    remove_owned_scratch(temporary_directory, temporary_identity)
                 except BaseException:
                     pass
             raise
         else:
-            if temporary_directory is not None:
-                temporary_directory.cleanup()
+            if temporary_directory is not None and temporary_identity is not None:
+                remove_owned_scratch(temporary_directory, temporary_identity)
 
     def add_frame(self, frame: pd.DataFrame, *, namespace: str = "dataset") -> int:
         missing = [column for column in self._primary_key if column not in frame]
@@ -204,23 +272,37 @@ class ExactPrimaryKeyIndex:
         *,
         namespace: str,
         payloads: Iterable[tuple[bytes, bytes]],
-    ) -> None:
+    ) -> int:
+        return self.add_identity_payload_rows(
+            rows=(
+                (namespace, bytes(identity), bytes(value))
+                for identity, value in payloads
+            )
+        )
+
+    def add_identity_payload_rows(
+        self,
+        *,
+        rows: Iterable[tuple[str, bytes, bytes]],
+    ) -> int:
         connection = self._connection
         if connection is None:
             raise RuntimeError("exact_primary_key_index_not_open")
-        if not isinstance(namespace, str) or not namespace:
-            raise ValueError("invalid_exact_key_namespace")
+        before = connection.total_changes
+
+        def validated_rows() -> Iterator[tuple[str, bytes, bytes]]:
+            for namespace, identity, value in rows:
+                if not isinstance(namespace, str) or not namespace:
+                    raise ValueError("invalid_exact_key_namespace")
+                yield namespace, bytes(identity), bytes(value)
+
         with connection:
             connection.executemany(
                 "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
                 "VALUES (?, ?, ?)",
-                self._gated_rows(
-                    (
-                        (namespace, bytes(identity), bytes(value))
-                        for identity, value in payloads
-                    )
-                ),
+                self._gated_rows(validated_rows()),
             )
+        return connection.total_changes - before
 
     def add_comparison_table(
         self,
@@ -235,26 +317,143 @@ class ExactPrimaryKeyIndex:
         connection = self._connection
         if connection is None:
             raise RuntimeError("exact_primary_key_index_not_open")
-        if not isinstance(namespace, str) or not namespace:
-            raise ValueError("invalid_exact_key_namespace")
-        if (
-            isinstance(payload_target_bytes, bool)
-            or not isinstance(payload_target_bytes, int)
-            or payload_target_bytes <= 0
-        ):
-            raise ValueError("invalid_dataset_comparison_payload_target")
-        selected = tuple(str(column) for column in value_columns)
-        if len(selected) != len(set(selected)) or any(
-            column in self._primary_key for column in selected
-        ):
-            raise ValueError("invalid_dataset_comparison_columns")
-        missing = [
-            column
-            for column in (*self._primary_key, *selected)
-            if column not in table.column_names
-        ]
-        if missing:
-            raise ValueError("missing_dataset_comparison_column")
+        before = connection.total_changes
+        with connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
+                "VALUES (?, ?, ?)",
+                self._prepared_comparison_rows(
+                    table,
+                    namespace=namespace,
+                    value_columns=value_columns,
+                    payload_target_bytes=payload_target_bytes,
+                ),
+            )
+        inserted = connection.total_changes - before
+        return int(table.num_rows - inserted)
+
+    def classify_comparison_table(
+        self,
+        table: pa.Table,
+        *,
+        namespace: str,
+        value_columns: Sequence[str],
+        payload_target_bytes: int,
+    ) -> tuple[CompactPositionState, int]:
+        """Return new-row positions while rejecting conflicting exact keys."""
+
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("exact_primary_key_index_not_open")
+        selected = self._validate_comparison_table_grammar(
+            table,
+            namespace=namespace,
+            value_columns=value_columns,
+            payload_target_bytes=payload_target_bytes,
+        )
+        position_bytes = table.num_rows * array("Q").itemsize
+        if position_bytes > payload_target_bytes:
+            raise ValueError("exact_key_position_state_exceeds_payload_target")
+        position_state = array("Q", [0]) * table.num_rows
+        rows = self._prepared_comparison_rows(
+            table,
+            namespace=namespace,
+            value_columns=value_columns,
+            payload_target_bytes=payload_target_bytes,
+            validated_columns=selected,
+        )
+        keep_count = 0
+        try:
+            with connection:
+                connection.execute("DELETE FROM comparison_rows")
+                connection.executemany(
+                    "INSERT INTO comparison_rows(position, namespace, payload, value) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        (position, row_namespace, identity, value)
+                        for position, (row_namespace, identity, value) in enumerate(
+                            rows
+                        )
+                    ),
+                )
+                incoming_conflict = connection.execute(
+                    "SELECT 1 FROM comparison_rows "
+                    "GROUP BY namespace, payload HAVING MIN(value) != MAX(value) "
+                    "LIMIT 1"
+                ).fetchone()
+                existing_conflict = connection.execute(
+                    "SELECT 1 FROM comparison_rows AS incoming "
+                    "JOIN exact_keys AS existing "
+                    "ON existing.namespace = incoming.namespace "
+                    "AND existing.payload = incoming.payload "
+                    "WHERE existing.value != incoming.value LIMIT 1"
+                ).fetchone()
+                if incoming_conflict is not None or existing_conflict is not None:
+                    raise ValueError("conflicting_exact_primary_key_payload")
+                admitted = connection.execute(
+                    "SELECT MIN(incoming.position) FROM comparison_rows AS incoming "
+                    "LEFT JOIN exact_keys AS existing "
+                    "ON existing.namespace = incoming.namespace "
+                    "AND existing.payload = incoming.payload "
+                    "WHERE existing.payload IS NULL "
+                    "GROUP BY incoming.namespace, incoming.payload "
+                    "ORDER BY MIN(incoming.position)"
+                )
+                for (position,) in admitted:
+                    position_state[keep_count] = int(position)
+                    keep_count += 1
+                reserve = connection.execute(
+                    "SELECT COALESCE(SUM(27 + length(CAST(namespace AS BLOB)) "
+                    "+ length(payload) + length(value)), 0) FROM ("
+                    "SELECT incoming.namespace, incoming.payload, MIN(incoming.value) "
+                    "AS value FROM comparison_rows AS incoming "
+                    "LEFT JOIN exact_keys AS existing "
+                    "ON existing.namespace = incoming.namespace "
+                    "AND existing.payload = incoming.payload "
+                    "WHERE existing.payload IS NULL "
+                    "GROUP BY incoming.namespace, incoming.payload)"
+                ).fetchone()
+                assert reserve is not None
+                if int(reserve[0]) > 0:
+                    require_free_disk_headroom(
+                        self._scratch_parent,
+                        reserve_bytes=int(reserve[0]),
+                    )
+                connection.execute(
+                    "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
+                    "SELECT namespace, payload, MIN(value) FROM comparison_rows "
+                    "GROUP BY namespace, payload"
+                )
+        finally:
+            primary = sys.exception()
+            try:
+                with connection:
+                    connection.execute("DELETE FROM comparison_rows")
+            except BaseException:
+                if primary is None:
+                    raise
+        return (
+            CompactPositionState(position_state, keep_count),
+            table.num_rows - keep_count,
+        )
+
+    def _prepared_comparison_rows(
+        self,
+        table: pa.Table,
+        *,
+        namespace: str,
+        value_columns: Sequence[str],
+        payload_target_bytes: int,
+        validated_columns: tuple[str, ...] | None = None,
+    ) -> Iterator[tuple[str, bytes, bytes]]:
+        selected = validated_columns
+        if selected is None:
+            selected = self._validate_comparison_table_grammar(
+                table,
+                namespace=namespace,
+                value_columns=value_columns,
+                payload_target_bytes=payload_target_bytes,
+            )
         keys = table.select(self._primary_key)
         if self._key_schema is None:
             self._key_schema = keys.schema.remove_metadata()
@@ -269,22 +468,42 @@ class ExactPrimaryKeyIndex:
                 raise ValueError("invalid_dataset_primary_key_value") from exc
         if any(column.null_count for column in keys.columns):
             raise ValueError("dataset_primary_key_null")
-        before = connection.total_changes
-        with connection:
-            connection.executemany(
-                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
-                "VALUES (?, ?, ?)",
-                self._gated_rows(
-                    self._comparison_payload_rows(
-                        keys,
-                        table.select(selected),
-                        namespace=namespace,
-                        payload_target_bytes=payload_target_bytes,
-                    )
-                ),
+        return self._gated_rows(
+            self._comparison_payload_rows(
+                keys,
+                table.select(selected),
+                namespace=namespace,
+                payload_target_bytes=payload_target_bytes,
             )
-        inserted = connection.total_changes - before
-        return int(table.num_rows - inserted)
+        )
+
+    def _validate_comparison_table_grammar(
+        self,
+        table: pa.Table,
+        *,
+        namespace: str,
+        value_columns: Sequence[str],
+        payload_target_bytes: int,
+    ) -> tuple[str, ...]:
+        if not isinstance(namespace, str) or not namespace:
+            raise ValueError("invalid_exact_key_namespace")
+        if (
+            isinstance(payload_target_bytes, bool)
+            or not isinstance(payload_target_bytes, int)
+            or payload_target_bytes <= 0
+        ):
+            raise ValueError("invalid_dataset_comparison_payload_target")
+        selected = tuple(str(column) for column in value_columns)
+        if len(selected) != len(set(selected)) or any(
+            column in self._primary_key for column in selected
+        ):
+            raise ValueError("invalid_dataset_comparison_columns")
+        if any(
+            column not in table.column_names
+            for column in (*self._primary_key, *selected)
+        ):
+            raise ValueError("missing_dataset_comparison_column")
+        return selected
 
     def identity_payload_values(self, *, namespace: str) -> Iterator[bytes]:
         connection = self._connection
@@ -466,25 +685,6 @@ class _BoundedPayloadSink:
 
     def release_auxiliary(self, size: int) -> None:
         self._auxiliary_bytes -= size
-
-
-def _canonical_arrow_scalar_payload(
-    value: pa.Scalar,
-    data_type: pa.DataType,
-    *,
-    allow_null: bool = False,
-    allow_nonfinite: bool = False,
-    remaining_bytes: int | None = None,
-) -> bytes:
-    sink = _BoundedPayloadSink(remaining_bytes)
-    _append_arrow_scalar_payload(
-        sink,
-        value,
-        data_type,
-        allow_null=allow_null,
-        allow_nonfinite=allow_nonfinite,
-    )
-    return bytes(sink.buffer)
 
 
 def _append_arrow_scalar_payload(
@@ -782,44 +982,3 @@ def _compare_buffer_ranges(
     left_length = left_end - left_start
     right_length = right_end - right_start
     return (left_length > right_length) - (left_length < right_length)
-
-
-def _cleanup_stale_key_scratch(parent: Path) -> None:
-    first_failure: BaseException | None = None
-    try:
-        candidates = iter(parent.glob(".k-*"))
-    except BaseException as exc:
-        first_failure = exc
-        candidates = iter(())
-    while True:
-        try:
-            scratch = next(candidates)
-        except StopIteration:
-            break
-        except BaseException as exc:
-            if first_failure is None:
-                first_failure = exc
-            continue
-        try:
-            is_directory = scratch.is_dir()
-        except BaseException as exc:
-            if first_failure is None:
-                first_failure = exc
-            continue
-        if not is_directory:
-            continue
-        try:
-            is_stale = scratch_owner_is_stale(scratch, prefix=".k-")
-        except BaseException as exc:
-            if first_failure is None:
-                first_failure = exc
-            continue
-        if not is_stale:
-            continue
-        try:
-            shutil.rmtree(scratch)
-        except BaseException as exc:
-            if first_failure is None:
-                first_failure = exc
-    if first_failure is not None:
-        raise first_failure

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import quant_research_platform.profiles.research as research_profiles
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
@@ -7,7 +8,6 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_dependencies,
 )
-from quant_research_platform.profiles import research as research_profiles
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.storage.layout import StorageLayout
 

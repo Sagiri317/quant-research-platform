@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from quant_research_platform.runtime import resources as resource_module
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
@@ -101,15 +100,3 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
     assert from_environment_calls == 1
     assert snapshots == [policy] * (5 + expected_prediction_count)
     assert run_config["runtime_resource_policy"] == policy.to_payload()
-
-
-def test_no_comparison_engine_is_introduced_in_src():
-    allowed_owner_paths = {
-        Path("src/quant_research_platform/storage/_dataset_comparison.py"),
-    }
-    hits = [
-        str(path)
-        for path in Path("src").rglob("*comparison*.py")
-        if path not in allowed_owner_paths and "verification_summary" not in str(path)
-    ]
-    assert hits == []

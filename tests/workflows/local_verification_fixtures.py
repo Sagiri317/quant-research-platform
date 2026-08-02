@@ -44,7 +44,6 @@ from quant_research_platform.workflows.local_verification import (
 from tests.helpers import frequency_ids
 from tests.helpers.report_output_frames import make_artifact_prediction_output_frame
 
-LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
 MIB = 1024 * 1024
 GIB = 1024 * 1024 * 1024
 SMOKE_PREDICTION_TRAIN_END = "2014-06-30"

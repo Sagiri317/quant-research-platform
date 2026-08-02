@@ -6,7 +6,7 @@ import pytest
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.calculations import (
     calculate_price_volume_factors,
 )
 from quant_research_platform.research.labels.forward_returns import (

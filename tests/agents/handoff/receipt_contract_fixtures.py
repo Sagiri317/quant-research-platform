@@ -79,10 +79,7 @@ def make_check_receipts_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_id": "qrp-check-receipts",
         "status": "PASS",
-        "checks": [
-            make_valid_check_row("profile-smoke"),
-            make_valid_check_row("code-map"),
-        ],
+        "checks": [make_valid_check_row("profile-smoke")],
     }
     payload.update(overrides)
     return payload
@@ -114,8 +111,8 @@ def make_hard_scan_receipt_payload(**overrides: object) -> dict[str, object]:
         "scanner_source_sha256": "2" * 64,
         "scan_runs": [
             {
-                "scan_id": "allowance_contract",
-                "rule_set_id": "source-tree:allowance_contract",
+                "scan_id": "sensitive_negative_literals",
+                "rule_set_id": "source-tree:sensitive_negative_literals",
                 "match_count": 0,
                 "actual_violation_count": 0,
                 "result_sha256": "3" * 64,

@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.outputs import OutputCatalog
-from quant_research_platform.catalog.workflows import WorkflowCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.outputs import (
     OutputDefinition,
     OutputScope,
 )
-from quant_research_platform.contracts.workflows import WorkflowSpec
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
@@ -20,14 +17,10 @@ from quant_research_platform.markets.implementations.a_share.fields import (
     field_catalog,
 )
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.presets import (
     price_volume_factor_columns,
 )
 from tests.helpers import frequency_ids
-
-
-def test_factor_catalog_is_pure_registry_without_market_bootstrap() -> None:
-    assert not hasattr(FactorCatalog, "bootstrap_default")
 
 
 def test_a_share_price_volume_factor_definitions_have_input_requirements() -> None:
@@ -127,18 +120,6 @@ def test_output_catalog_rejects_duplicate_definitions() -> None:
 
     assert catalog.get("evaluation_outputs") == definition
     assert catalog.list() == (definition,)
-
-
-def test_workflow_catalog_is_register_get_list_with_duplicate_validation() -> None:
-    catalog = WorkflowCatalog()
-    spec = WorkflowSpec(workflow_id="research_workflow", step_ids=("build",))
-
-    catalog.register(spec)
-    with pytest.raises(ValueError, match="duplicate_workflow"):
-        catalog.register(spec)
-
-    assert catalog.get("research_workflow") == spec
-    assert catalog.list() == (spec,)
 
 
 def test_source_registry_entries_are_internal_only() -> None:

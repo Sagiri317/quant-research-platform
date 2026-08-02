@@ -16,9 +16,6 @@ from quant_research_platform.artifacts._portfolio_outputs import (
 from quant_research_platform.artifacts._prediction_outputs import (
     write_prediction_outputs as _write_prediction_outputs,
 )
-from quant_research_platform.artifacts._stage_profile_outputs import (
-    write_stage_profile_outputs as _write_stage_profile_outputs,
-)
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
@@ -27,21 +24,6 @@ from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.storage.layout import StorageLayout
-
-
-def write_stage_profile_outputs(
-    frame: pd.DataFrame,
-    *,
-    spec: OutputSpec,
-    markdown_text: str,
-    layout: StorageLayout,
-) -> dict[str, Path]:
-    return _write_stage_profile_outputs(
-        frame,
-        spec=spec,
-        markdown_text=markdown_text,
-        layout=layout,
-    )
 
 
 def write_prediction_outputs(
@@ -109,5 +91,4 @@ __all__ = [
     "write_evaluation_outputs",
     "write_prediction_outputs",
     "write_portfolio_outputs",
-    "write_stage_profile_outputs",
 ]

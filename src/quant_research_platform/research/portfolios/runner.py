@@ -52,7 +52,11 @@ def build_portfolio_result_from_research_dataset(
         "feature": tuple(dataset_spec.feature_columns),
         "prediction": tuple(dataset_spec.context_columns),
     }
-    summary_state = _new_portfolio_summary_state()
+    summary_state: dict[str, object] = {
+        "return_records": [],
+        "exposure_periods": {},
+        "concentration_periods": {},
+    }
     output_chunks = _observe_portfolio_summary_chunks(
         _iter_portfolio_output_chunks(
             _portfolio_input_chunks(
@@ -178,14 +182,6 @@ def _iter_portfolio_output_chunks(
 
     if not saw_rows:
         raise ValueError("empty_portfolio_input")
-
-
-def _new_portfolio_summary_state() -> dict[str, object]:
-    return {
-        "return_records": [],
-        "exposure_periods": {},
-        "concentration_periods": {},
-    }
 
 
 def _observe_portfolio_summary_chunks(

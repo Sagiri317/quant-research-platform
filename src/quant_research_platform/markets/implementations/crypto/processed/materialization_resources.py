@@ -11,6 +11,7 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
 )
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 
 
 def iter_disk_guarded_chunks(
@@ -18,13 +19,14 @@ def iter_disk_guarded_chunks(
     *,
     scratch_parent: Path,
 ) -> Iterator[pd.DataFrame]:
-    for chunk in chunks:
-        chunk_bytes = pandas_frame_payload_bytes(chunk)
-        require_free_disk_headroom(
-            scratch_parent,
-            reserve_bytes=chunk_bytes,
-        )
-        yield chunk
+    with closing_dataset_iterator(iter(chunks)) as source_chunks:
+        for chunk in source_chunks:
+            chunk_bytes = pandas_frame_payload_bytes(chunk)
+            require_free_disk_headroom(
+                scratch_parent,
+                reserve_bytes=chunk_bytes,
+            )
+            yield chunk
 
 
 def require_frame_within_budget(

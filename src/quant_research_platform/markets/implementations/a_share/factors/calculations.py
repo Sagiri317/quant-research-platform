@@ -8,9 +8,13 @@ import pandas as pd
 
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.factors.price_volume import (
-    PRICE_VOLUME_FACTOR_FAMILY,
+from quant_research_platform.research.factors.price_volume.calculations import (
     calculate_price_volume_factors,
+)
+from quant_research_platform.research.factors.price_volume.definitions import (
+    PRICE_VOLUME_FACTOR_FAMILY,
+)
+from quant_research_platform.research.factors.price_volume.windows import (
     price_volume_valid_bar_read_window,
 )
 
@@ -48,7 +52,20 @@ def factor_panel_input_columns(
             family for family in families if family != PRICE_VOLUME_FACTOR_FAMILY
         )
         raise ValueError(f"unsupported_factor_family: {unsupported}")
-    return _factor_panel_columns(requested)
+    return tuple(
+        dict.fromkeys(
+            (
+                "market_id",
+                "asset_id",
+                "timestamp",
+                *(
+                    column
+                    for definition in requested
+                    for column in definition.input_columns
+                ),
+            )
+        )
+    )
 
 
 def factor_lookback_bars(definitions: Sequence[FactorDefinition]) -> int:
@@ -103,25 +120,6 @@ def _require_factor_input_columns(
         raise ValueError(
             f"missing_factor_input_columns: {family}: {', '.join(missing)}"
         )
-
-
-def _factor_panel_columns(
-    definitions: Sequence[FactorDefinition],
-) -> tuple[str, ...]:
-    return tuple(
-        dict.fromkeys(
-            (
-                "market_id",
-                "asset_id",
-                "timestamp",
-                *(
-                    column
-                    for definition in definitions
-                    for column in definition.input_columns
-                ),
-            )
-        )
-    )
 
 
 __all__ = [

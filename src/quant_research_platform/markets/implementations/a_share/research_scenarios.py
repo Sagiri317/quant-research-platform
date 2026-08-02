@@ -25,14 +25,14 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     MARKET_ID,
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
 )
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.columns import (
     price_volume_window_column,
 )
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
-from quant_research_platform.research.models.supervised import (
-    model_algorithm_definition,
+from quant_research_platform.research.models.algorithm_facts import (
+    algorithm_facts,
     model_algorithm_ids,
     model_smoke_hyperparameters,
 )
@@ -63,7 +63,6 @@ class _ScenarioDefaults:
     )
     execution_lag_steps: int = 1
     test_end: str | None = None
-    prediction_model_algorithm: str = "linear_regression"
     signal_columns: tuple[str, ...] = (
         DEFAULT_MOMENTUM_COLUMN,
         DEFAULT_REVERSAL_COLUMN,
@@ -85,7 +84,6 @@ DEFAULT_RETURN_SOURCE_COLUMN = forward_return_label_column(
 DEFAULT_MODEL_RANDOM_SEED = SCENARIO_DEFAULTS.random_seed
 DEFAULT_MAX_TRAIN_ROWS = SCENARIO_DEFAULTS.max_train_rows
 DEFAULT_TEST_END: str | None = SCENARIO_DEFAULTS.test_end
-DEFAULT_PREDICTION_MODEL_ALGORITHM = SCENARIO_DEFAULTS.prediction_model_algorithm
 DEFAULT_PORTFOLIO_DIAGNOSTICS_CONFIG = PortfolioDiagnosticsConfig(
     capacity_amount_column="amount",
     capacity_float_market_cap_column="float_market_cap",
@@ -124,22 +122,31 @@ def build_model_specs(
     random_seed: int | None = DEFAULT_MODEL_RANDOM_SEED,
     hyperparameter_preset: str = "smoke",
 ) -> tuple[ModelSpec, ...]:
-    return tuple(
-        ModelSpec(
-            model_id=_model_id(model_algorithm, return_source_column),
-            model_algorithm=model_algorithm,
-            input_factor_columns=_model_factor_inputs(model_algorithm),
-            input_feature_columns=_model_feature_inputs(model_algorithm),
-            label_column=return_source_column,
-            hyperparameters=_model_hyperparameters(
-                model_algorithm,
-                hyperparameter_preset=hyperparameter_preset,
-            ),
-            random_seed=random_seed,
-            max_train_rows=max_train_rows,
+    specs: list[ModelSpec] = []
+    for model_algorithm in sorted(model_algorithm_ids):
+        facts = algorithm_facts(model_algorithm)
+        if hyperparameter_preset != "smoke":
+            raise ValueError("unsupported_hyperparameter_preset")
+        single_factor = facts.input_kind == "single_factor_input"
+        specs.append(
+            ModelSpec(
+                model_id=_model_id(model_algorithm, return_source_column),
+                model_algorithm=model_algorithm,
+                input_factor_columns=(
+                    SCENARIO_DEFAULTS.baseline_factor_inputs
+                    if single_factor
+                    else SCENARIO_DEFAULTS.model_factor_inputs
+                ),
+                input_feature_columns=(
+                    () if single_factor else SCENARIO_DEFAULTS.model_feature_inputs
+                ),
+                label_column=return_source_column,
+                hyperparameters=model_smoke_hyperparameters(model_algorithm),
+                random_seed=random_seed,
+                max_train_rows=max_train_rows,
+            )
         )
-        for model_algorithm in sorted(model_algorithm_ids)
-    )
+    return tuple(specs)
 
 
 def build_prediction_specs(
@@ -152,7 +159,10 @@ def build_prediction_specs(
 ) -> tuple[PredictionSpec, ...]:
     return tuple(
         PredictionSpec(
-            prediction_id=_prediction_id(model_algorithm, test_start),
+            prediction_id=(
+                f"{model_algorithm}_{DEFAULT_MOMENTUM_COLUMN}_prediction_"
+                f"{test_start[:4]}"
+            ),
             model_id=_model_id(model_algorithm, return_source_column),
             research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             train_end=train_end,
@@ -170,9 +180,7 @@ def build_evaluation_specs(
 ) -> tuple[EvaluationSpec, ...]:
     return (
         EvaluationSpec(
-            run_id=default_evaluation_run_id(
-                return_source_column=return_source_column,
-            ),
+            run_id=f"signal_{return_source_column}",
             market_id=MARKET_ID,
             research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             signals=signals or build_signal_specs(),
@@ -274,77 +282,8 @@ def build_portfolio_catalog(
     return catalog
 
 
-def default_evaluation_run_id(
-    *,
-    return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
-) -> str:
-    return f"signal_{return_source_column}"
-
-
-def default_prediction_smoke_id(
-    *,
-    model_algorithm: str = DEFAULT_PREDICTION_MODEL_ALGORITHM,
-    test_start: str,
-) -> str:
-    return _prediction_id(model_algorithm, test_start)
-
-
-def default_prediction_oos_period(
-    *,
-    test_start: str,
-    evaluation_end: str,
-    train_end: str,
-    model_algorithm: str = DEFAULT_PREDICTION_MODEL_ALGORITHM,
-    test_end: str | None = DEFAULT_TEST_END,
-) -> str:
-    spec = build_prediction_specs(
-        model_algorithm_ids=(model_algorithm,),
-        train_end=train_end,
-        test_start=test_start,
-        test_end=test_end,
-    )[0]
-    return f"{spec.test_start} through {spec.test_end or evaluation_end}"
-
-
-def default_evaluation_period(
-    *,
-    evaluation_start: str,
-    evaluation_end: str,
-) -> str:
-    return f"{evaluation_start} through {evaluation_end}"
-
-
 def _model_id(model_algorithm: str, return_source_column: str) -> str:
     return f"{model_algorithm}_{DEFAULT_MOMENTUM_COLUMN}_{return_source_column}"
-
-
-def _prediction_id(model_algorithm: str, test_start: str) -> str:
-    year = test_start[:4]
-    return f"{model_algorithm}_{DEFAULT_MOMENTUM_COLUMN}_prediction_{year}"
-
-
-def _model_factor_inputs(model_algorithm: str) -> tuple[str, ...]:
-    facts = model_algorithm_definition(model_algorithm)
-    if facts.input_kind == "single_factor_input":
-        return SCENARIO_DEFAULTS.baseline_factor_inputs
-    return SCENARIO_DEFAULTS.model_factor_inputs
-
-
-def _model_feature_inputs(model_algorithm: str) -> tuple[str, ...]:
-    facts = model_algorithm_definition(model_algorithm)
-    if facts.input_kind == "single_factor_input":
-        return ()
-    return SCENARIO_DEFAULTS.model_feature_inputs
-
-
-def _model_hyperparameters(
-    model_algorithm: str,
-    *,
-    hyperparameter_preset: str,
-) -> dict[str, object]:
-    if hyperparameter_preset != "smoke":
-        raise ValueError("unsupported_hyperparameter_preset")
-    return model_smoke_hyperparameters(model_algorithm)
 
 
 __all__ = [

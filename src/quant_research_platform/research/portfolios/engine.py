@@ -29,7 +29,7 @@ from quant_research_platform.research.portfolios.diagnostics import (
     build_numeric_exposure_diagnostics,
 )
 from quant_research_platform.research.signals.materialization import (
-    materialize_signal_frame,
+    normalize_signal_frame,
 )
 
 
@@ -128,29 +128,8 @@ def construct_portfolio_positions(
     )
 
 
-def compute_portfolio_turnover(result: PortfolioComputationResult) -> pd.DataFrame:
-    return result.turnover.copy()
-
-
-def compute_portfolio_costs(result: PortfolioComputationResult) -> pd.DataFrame:
-    return result.cost_breakdown.copy()
-
-
-def compute_portfolio_returns(result: PortfolioComputationResult) -> pd.DataFrame:
-    return result.portfolio_returns.copy()
-
-
 def compute_cumulative_returns(portfolio_returns: pd.DataFrame) -> pd.DataFrame:
     return calculate_cumulative_returns(portfolio_returns)
-
-
-def compute_drawdowns(cumulative_returns: pd.DataFrame) -> pd.DataFrame:
-    columns = [
-        column
-        for column in ("timestamp", "signal", "high_water_mark", "drawdown")
-        if column in cumulative_returns.columns
-    ]
-    return cumulative_returns.loc[:, columns].copy()
 
 
 def compute_performance_summary(
@@ -287,7 +266,7 @@ def _portfolio_panel(
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"missing_portfolio_columns: {', '.join(missing)}")
-    panel = materialize_signal_frame(
+    panel = normalize_signal_frame(
         frame,
         spec.signals,
         source_columns_by_kind=source_columns_by_kind,
@@ -303,16 +282,10 @@ def _portfolio_panel(
     return panel
 
 
-
-
 __all__ = [
     "PortfolioComputationResult",
     "construct_portfolio_positions",
-    "compute_portfolio_turnover",
-    "compute_portfolio_costs",
-    "compute_portfolio_returns",
     "compute_cumulative_returns",
-    "compute_drawdowns",
     "compute_performance_summary",
     "compute_exposure_summary",
     "summarize_concentration",

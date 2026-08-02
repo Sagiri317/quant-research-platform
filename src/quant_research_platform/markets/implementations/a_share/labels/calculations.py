@@ -46,7 +46,20 @@ def label_panel_input_columns(
     if families != ("forward_return",):
         unsupported = next(family for family in families if family != "forward_return")
         raise ValueError(f"unsupported_label_family: {unsupported}")
-    return _label_panel_columns(requested)
+    return tuple(
+        dict.fromkeys(
+            (
+                "market_id",
+                "asset_id",
+                "timestamp",
+                *(
+                    column
+                    for definition in requested
+                    for column in definition.input_columns
+                ),
+            )
+        )
+    )
 
 
 def label_lookahead_bars(definitions: Sequence[LabelDefinition]) -> int:
@@ -90,25 +103,6 @@ def _require_label_input_columns(
                 "missing_label_input_columns: "
                 f"{definition.family}: {', '.join(missing)}"
             )
-
-
-def _label_panel_columns(
-    definitions: Sequence[LabelDefinition],
-) -> tuple[str, ...]:
-    return tuple(
-        dict.fromkeys(
-            (
-                "market_id",
-                "asset_id",
-                "timestamp",
-                *(
-                    column
-                    for definition in definitions
-                    for column in definition.input_columns
-                ),
-            )
-        )
-    )
 
 
 __all__ = [

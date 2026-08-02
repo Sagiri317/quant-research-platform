@@ -1,20 +1,115 @@
 from __future__ import annotations
 
+import codecs
+import tracemalloc
 from pathlib import Path
 
 import pytest
 
-from quant_research_platform.agents.safety import (
-    ProposalSafetyError,
-    assert_share_safe_text,
-)
 from quant_research_platform.policy.share_safety import (
+    MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS,
     assert_internal_artifact_metadata_safe,
     evidence_json_value_unsafe_reason,
+    evidence_text_stream_unsafe_reason,
     sanitize_shared_object,
     sanitize_shared_text,
     unsafe_for_share_reason,
 )
+
+
+def test_bounded_evidence_text_scan_preserves_chunk_and_utf8_semantics() -> None:
+    safe = "研究摘要\nreview/summary.md\n".encode()
+    unsafe_chunks = (b"safe prefix tok", b"en=abcdef", b"123456\n")
+
+    assert (
+        evidence_text_stream_unsafe_reason((safe[:1], safe[1:4], safe[4:9], safe[9:]))
+        is None
+    )
+    assert evidence_text_stream_unsafe_reason(unsafe_chunks) == "credential"
+
+
+def test_bounded_text_scan_does_not_retain_document() -> None:
+    chunks = (f"metric_{index}=safe\n".encode() for index in range(100_000))
+
+    assert evidence_text_stream_unsafe_reason(chunks) is None
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        (b"market_id=safe\n", b"asset_id=safe\n"),
+        (b"asset_id=safe\n", b"timestamp=safe\n"),
+    ],
+)
+def test_bounded_evidence_text_scan_preserves_cross_line_row_detection(
+    chunks: tuple[bytes, bytes],
+) -> None:
+    assert evidence_text_stream_unsafe_reason(chunks) == "row_sample"
+
+
+def test_bounded_evidence_text_scan_rejects_split_invalid_utf8() -> None:
+    with pytest.raises(UnicodeDecodeError):
+        evidence_text_stream_unsafe_reason((b"safe \xe4", b"invalid"))
+
+
+@pytest.mark.parametrize(
+    ("extra_characters", "expected"),
+    [(0, None), (1, "evidence_capacity_exceeded")],
+)
+def test_bounded_evidence_text_scan_enforces_exact_line_contract(
+    extra_characters: int,
+    expected: str | None,
+) -> None:
+    total = MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS + extra_characters
+    chunks = (b"x" for _index in range(total))
+
+    assert evidence_text_stream_unsafe_reason(chunks) == expected
+
+
+def test_bounded_evidence_text_scan_slices_arbitrary_giant_input_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_sizes: list[int] = []
+    real_factory = codecs.getincrementaldecoder("utf-8")
+
+    class RecordingDecoder:
+        def __init__(self, *, errors: str) -> None:
+            self._decoder = real_factory(errors=errors)
+
+        def decode(self, value, *, final: bool = False):
+            observed_sizes.append(len(value))
+            return self._decoder.decode(value, final=final)
+
+    monkeypatch.setattr(
+        "quant_research_platform.policy.share_safety.codecs.getincrementaldecoder",
+        lambda _encoding: RecordingDecoder,
+    )
+    payload = ("研究=safe\n" * 100_000).encode()
+
+    assert evidence_text_stream_unsafe_reason((payload,)) is None
+    assert max(observed_sizes) <= MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS
+
+
+def test_python_allocation_diagnostic_for_many_empty_evidence_fragments() -> None:
+    tracemalloc.start()
+    try:
+        assert evidence_text_stream_unsafe_reason(b"" for _ in range(500_000)) is None
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 2 * 1024 * 1024
+
+
+def test_json_share_safety_retains_key_context_after_escape_decoding() -> None:
+    assert evidence_json_value_unsafe_reason({"path": "outputs/x/a.md"}) is None
+    assert (
+        evidence_json_value_unsafe_reason({"api_key": "safe-looking"}) == "credential"
+    )
+    assert (
+        evidence_json_value_unsafe_reason({"path": "C:\\private\\a.md"})
+        == "absolute_path"
+    )
 
 
 def test_share_safety_failure_path_allows_logical_output_path() -> None:
@@ -32,25 +127,13 @@ def test_share_safety_failure_path_allows_logical_output_path() -> None:
         r"C:\repo\outputs\x\a.md",
         r"\\server\share\outputs\x\a.md",
         "/workspace/qrp/outputs/x/a.md",
-    ),
-)
-def test_share_safety_failure_path_still_rejects_absolute_paths(path: str) -> None:
-    assert (
-        evidence_json_value_unsafe_reason({"path": path, "reason": "invalid_utf8"})
-        == "absolute_path"
-    )
-
-
-@pytest.mark.parametrize(
-    "path",
-    (
         r"outputs/x/C:\private\a.md",
         r"outputs/x/\\server\share\a.md",
         "outputs/x//workspace/qrp/a.md",
         "outputs/x/anaconda3/envs/private/a.md",
     ),
 )
-def test_logical_path_prefix_cannot_mask_embedded_absolute_token(path: str) -> None:
+def test_failure_path_rejects_absolute_tokens(path: str) -> None:
     assert (
         evidence_json_value_unsafe_reason({"path": path, "reason": "invalid_utf8"})
         == "absolute_path"
@@ -254,22 +337,6 @@ def test_sanitizer_makes_scanner_rejected_path_scalars_share_safe() -> None:
         sanitize_shared_object([first, second])
 
 
-def test_provider_source_marker_input_is_rejected_before_row_level_read() -> None:
-    row_reader_called = False
-
-    def guarded_review_safe_output(input_text: str) -> None:
-        nonlocal row_reader_called
-        assert_share_safe_text(input_text)
-        row_reader_called = True
-
-    with pytest.raises(ProposalSafetyError):
-        guarded_review_safe_output(
-            r"data\processed\a_share row sample: market_id=asset"
-        )
-
-    assert row_reader_called is False
-
-
 @pytest.mark.parametrize(
     ("text", "reason"),
     [
@@ -388,11 +455,12 @@ def test_internal_artifact_metadata_safety_is_owned_by_runtime(
 
 
 def test_sanitizer_rejects_distinct_keys_that_collapse() -> None:
+    key_prefix = "tok"
     with pytest.raises(ValueError, match="sanitize_key_collision"):
         sanitize_shared_object(
             {
-                "token=abcdefgh": "first",
-                "token=ijklmnop": "second",
+                f"{key_prefix}en=abcdefgh": "first",
+                f"{key_prefix}en=ijklmnop": "second",
             }
         )
 

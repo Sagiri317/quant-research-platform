@@ -26,17 +26,15 @@ research 是通用研究算法层，可以依赖 contracts、storage、runtime r
 
 compute 只提供数值计算核心，不持有 market session domain 工具，也不写 report/storage 产物。
 
-`research/factors/price_volume/` 是量价因子的当前 owner。`columns.py` 只负责列名、列前缀、列集合和 feature exclusion；`presets.py` 负责 preset 名称与 factor 列集合；`requirements.py` 负责 factor 输入列需求；`windows.py` 负责 lookback 和 valid bar 读取窗口；`definitions.py` 负责 factor definition 语义；`calculations.py` 负责因子计算；`rolling.py` 和 `safety.py` 负责滚动数值与安全计算；`selection.py` 负责特征选择。package `__init__.py` 只导出当前 public names，不承载实现。
+`research/factors/price_volume/` 是量价因子的当前 owner。`columns.py` 负责列集合，`presets.py` 负责 preset，`requirements.py` 负责输入需求，`windows.py` 负责读取窗口，`definitions.py` 负责因子定义，`calculations.py`、`rolling.py` 和 `safety.py` 负责数值计算。package `__init__.py` 只保留当前公共面。
 
 `research/models/algorithm_facts.py` 是模型算法事实源。`estimators.py` 负责 estimator factories，`fitting.py` 负责 fit result、训练 frame 收集、线性拟合与 estimator fitting，`prediction.py` 负责预测输出 frame，`feature_importance.py` 负责特征重要性 payload，`rank_ensemble.py` 负责 rank ensemble predictor，`dependencies.py` 负责可选依赖状态，`validation_split.py` 负责训练 buffer 与 purge controls。`research/models/supervised.py` 保留当前 public boundary 并委派到这些 owner modules。单个算法字段使用 `model_algorithm`，算法 ID 集合使用 `model_algorithm_ids`。
 
-跨文件生产调用的 owner-local internal API 使用非下划线名称，可以留在 owner module 的 `__all__`，但不得从 package `__init__.py` 重导出为 public surface。同文件私有 helper 保留下划线且不进入 `__all__`。
-
-`markets/implementations/a_share/**` 内部命名遵守 owner-local naming；路径已经表达 A 股 owner，具体禁用前缀和允许 id 由 maintenance references 与 gates 执行。
+公共 package surface 由 current contract 管理；内部 helper 只在真实 caller 需要时保留，不以名称、可见性或 re-export 形状作为 gate。
 
 model selection 的 metric、direction 和 warning-free behavior 必须由合同与 owner-layer tests 保护，runner 不维护平行事实源。
 
-valuable deferred feature 可以保留在 owner layer，但不得接入当前 production path 或 claim DONE；具体分类要求由 governance/handoff evidence 规则执行。
+未接入当前 production path 的 deferred 实现、脚手架和测试不保留；仍有产品价值时只记录 open issue。
 
 ## 数据安全
 

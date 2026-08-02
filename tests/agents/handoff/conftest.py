@@ -144,26 +144,6 @@ def _write_minimal_project_files(repo: Path) -> None:
         + "\n[tool.setuptools.packages.find]\nwhere = [\"src\"]\n",
         encoding="utf-8",
     )
-    code_map = repo / "docs" / "code-map" / "platform-flow.md"
-    code_map.parent.mkdir(parents=True)
-    code_map.write_text(
-        "\n".join(
-            [
-                "# Platform Flow",
-                "local research platform",
-                "data -> feature -> signal/model -> evaluate -> evidence",
-                ".agents tooling",
-                ".run artifacts",
-                "private data safety",
-                "current contract",
-                "current-contract-only",
-                "no trading execution",
-                "no production trading boundary",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
     smoke_test = repo / "tests" / "agents" / "handoff" / "test_smoke.py"
     smoke_test.parent.mkdir(parents=True)
     smoke_test.write_text(
@@ -240,20 +220,6 @@ def run_git(repo: Path, *args: str) -> str:
     ).stdout
 
 
-def _validation_rows(status: str = "PASS") -> list[dict[str, str]]:
-    return [{"name": name, "status": status} for name in MANDATORY_VALIDATION_ROWS]
-
-
-def _validation_payload(
-    rows: list[dict[str, object]] | None = None,
-) -> dict[str, object]:
-    return {
-        "schema_id": "qrp-handoff-validation-summary",
-        "status": "PASS",
-        "rows": rows if rows is not None else _validation_rows("PASS"),
-    }
-
-
 def rewrite_handoff_package_member(package: Path, member: str, data: bytes) -> None:
     temp = package.with_suffix(".rewrite.zip")
     with zipfile.ZipFile(package, "r") as src, zipfile.ZipFile(temp, "w") as dst:
@@ -297,16 +263,3 @@ def refresh_handoff_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-
-
-def _replace_validation_summary(
-    package: Path,
-    sidecar: Path,
-    payload: dict[str, object],
-) -> None:
-    rewrite_handoff_package_member(
-        package,
-        "handoff_evidence/validation-summary.json",
-        (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
-    )
-    refresh_handoff_manifest_and_sidecar(package, sidecar)

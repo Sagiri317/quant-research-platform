@@ -172,6 +172,10 @@ def research_profile(profile_id: str | None = None) -> ResearchProfile:
 
 
 def _a_share_csmar_research_profile() -> ResearchProfile:
+    sources = SourceRegistry()
+    sources.register(source_definition())
+    markets = MarketRegistry()
+    markets.register(a_share_definition.market_definition())
     return ResearchProfile(
         profile_id=research_profile_id(
             MarketId("a_share"),
@@ -187,15 +191,17 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         models=a_share_research_scenarios.build_model_catalog(),
         predictions=PredictionCatalog(),
         portfolios=PortfolioCatalog(),
-        sources=_a_share_csmar_source_registry(),
-        markets=_a_share_market_registry(),
+        sources=sources,
+        markets=markets,
         outputs=output_catalog(),
-        source_interim_catalogs=_a_share_csmar_source_interim_catalogs(),
-        source_id=_active_source_id(),
+        source_interim_catalogs=_single_source_interim_catalogs(
+            csmar_interim_catalog()
+        ),
+        source_id=csmar_ids.SOURCE_ID,
         build_prediction_catalog=a_share_research_scenarios.build_prediction_catalog,
         build_portfolio_catalog=a_share_research_scenarios.build_portfolio_catalog,
-        materialize_interim_data=_materialize_a_share_csmar_interim_data,
-        materialize_processed_data=_materialize_processed_data,
+        materialize_interim_data=_materialize_csmar_interim_data,
+        materialize_processed_data=processed_materializer_module.materialize_processed_data,
         schema_inventory_important_columns=(
             processed_diagnostics_module.schema_inventory_important_columns
         ),
@@ -203,6 +209,10 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
 
 
 def _crypto_binance_research_profile() -> ResearchProfile:
+    sources = SourceRegistry()
+    sources.register(binance_source_definition())
+    markets = MarketRegistry()
+    markets.register(crypto_definition.market_definition())
     return ResearchProfile(
         profile_id=research_profile_id(
             MarketId("crypto"),
@@ -218,79 +228,30 @@ def _crypto_binance_research_profile() -> ResearchProfile:
         models=ModelCatalog(),
         predictions=PredictionCatalog(),
         portfolios=PortfolioCatalog(),
-        sources=_crypto_binance_source_registry(),
-        markets=_crypto_market_registry(),
+        sources=sources,
+        markets=markets,
         outputs=output_catalog(),
-        source_interim_catalogs=_crypto_binance_source_interim_catalogs(),
-        source_id=_crypto_active_source_id(),
+        source_interim_catalogs=_single_source_interim_catalogs(
+            binance_interim_catalog()
+        ),
+        source_id=binance_ids.SOURCE_ID,
         build_prediction_catalog=_empty_prediction_catalog,
         build_portfolio_catalog=_empty_portfolio_catalog,
         materialize_interim_data=_materialize_crypto_binance_interim_data,
-        materialize_processed_data=_materialize_crypto_processed_data,
+        materialize_processed_data=(
+            crypto_processed_materializer_module.materialize_processed_data
+        ),
         schema_inventory_important_columns=_crypto_schema_inventory_important_columns,
     )
 
 
-def _a_share_csmar_source_registry() -> SourceRegistry:
-    registry = SourceRegistry()
-    registry.register(source_definition())
-    return registry
-
-
-def _crypto_binance_source_registry() -> SourceRegistry:
-    registry = SourceRegistry()
-    registry.register(binance_source_definition())
-    return registry
-
-
-def _a_share_market_registry() -> MarketRegistry:
-    registry = MarketRegistry()
-    registry.register(a_share_definition.market_definition())
-    return registry
-
-
-def _crypto_market_registry() -> MarketRegistry:
-    registry = MarketRegistry()
-    registry.register(crypto_definition.market_definition())
-    return registry
-
-
-def _a_share_csmar_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]:
-    catalog = csmar_interim_catalog()
+def _single_source_interim_catalogs(
+    catalog: InterimDataCatalog,
+) -> Mapping[str, InterimDataCatalog]:
     source_ids = {str(spec.source_id) for spec in catalog.list()}
     if len(source_ids) != 1:
         raise ValueError("unexpected_source_interim_catalog_sources")
     return {next(iter(source_ids)): catalog}
-
-
-def _crypto_binance_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]:
-    catalog = binance_interim_catalog()
-    source_ids = {str(spec.source_id) for spec in catalog.list()}
-    if len(source_ids) != 1:
-        raise ValueError("unexpected_source_interim_catalog_sources")
-    return {next(iter(source_ids)): catalog}
-
-
-def _active_source_id() -> SourceId:
-    return csmar_ids.SOURCE_ID
-
-
-def _crypto_active_source_id() -> SourceId:
-    return binance_ids.SOURCE_ID
-
-
-def _materialize_a_share_csmar_interim_data(
-    layout: StorageLayout,
-    raw_root: Path,
-    start_date: str,
-    end_date: str,
-) -> object:
-    return _materialize_csmar_interim_data(
-        layout=layout,
-        raw_root=raw_root,
-        start_date=start_date,
-        end_date=end_date,
-    )
 
 
 def _materialize_crypto_binance_interim_data(
@@ -314,34 +275,6 @@ def _time_bound_to_iso(value: date | datetime) -> str:
     if isinstance(value, datetime):
         return value.isoformat(timespec="seconds")
     return value.isoformat()
-
-
-def _materialize_processed_data(
-    layout: StorageLayout,
-    source_id: SourceId,
-    time_window: TimeWindow,
-    kinds: frozenset[ProcessedDataKind],
-) -> Mapping[str, DatasetInspection]:
-    return processed_materializer_module.materialize_processed_data(
-        layout=layout,
-        source_id=source_id,
-        time_window=time_window,
-        kinds=kinds,
-    )
-
-
-def _materialize_crypto_processed_data(
-    layout: StorageLayout,
-    source_id: SourceId,
-    time_window: TimeWindow,
-    kinds: frozenset[ProcessedDataKind],
-) -> Mapping[str, DatasetInspection]:
-    return crypto_processed_materializer_module.materialize_processed_data(
-        layout=layout,
-        source_id=source_id,
-        time_window=time_window,
-        kinds=kinds,
-    )
 
 
 def _empty_prediction_catalog(**_: object) -> PredictionCatalog:

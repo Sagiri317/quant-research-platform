@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.markets.implementations.a_share.processed import (
-    diagnostics,
+    diagnostics as diagnostics,
 )
 
 

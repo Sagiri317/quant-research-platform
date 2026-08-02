@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import warnings
 from copy import deepcopy
 from datetime import timedelta, timezone
@@ -314,12 +313,6 @@ def test_prediction_output_nested_schema_identity_never_publishes_bundle(
     assert not (tmp_path / "outputs" / output_spec.output_id).exists()
 
 
-def test_prediction_chunk_writer_has_no_row_proportional_python_key_set() -> None:
-    source = inspect.getsource(parquet_writers.write_parquet_chunks)
-
-    assert "seen_keys" not in source
-
-
 def test_prediction_chunk_writer_rejects_cross_chunk_duplicate_and_cleans_scratch(
     tmp_path: Path,
 ) -> None:
@@ -357,10 +350,10 @@ def test_prediction_outputs_require_standard_metadata_attrs(
             spec=spec,
             output_spec=report_spec,
             layout=layout,
-    )
+        )
 
     incomplete_model = make_artifact_prediction_output_frame()
-    incomplete_model.attrs["model_metadata"] = {"contract_version": "0.1"}
+    incomplete_model.attrs["model_metadata"] = {"unexpected": True}
     with pytest.raises(ValueError, match="invalid_model_metadata"):
         outputs.write_prediction_outputs(
             incomplete_model,
@@ -370,7 +363,7 @@ def test_prediction_outputs_require_standard_metadata_attrs(
         )
 
     incomplete_prediction = make_artifact_prediction_output_frame()
-    incomplete_prediction.attrs["prediction_metadata"] = {"contract_version": "0.1"}
+    incomplete_prediction.attrs["prediction_metadata"] = {"unexpected": True}
     with pytest.raises(ValueError, match="invalid_prediction_metadata"):
         outputs.write_prediction_outputs(
             incomplete_prediction,
@@ -380,10 +373,8 @@ def test_prediction_outputs_require_standard_metadata_attrs(
         )
 
 
-@pytest.mark.parametrize("include_generic_metadata", [False, True])
 def test_prediction_outputs_require_prediction_metadata_attrs(
     tmp_path: Path,
-    include_generic_metadata: bool,
 ) -> None:
     spec = make_output_edge_prediction_spec()
     report_spec = make_output_edge_report_spec(
@@ -396,8 +387,6 @@ def test_prediction_outputs_require_prediction_metadata_attrs(
     frame.attrs["model_metadata"] = make_artifact_prediction_output_frame().attrs[
         "model_metadata"
     ]
-    if include_generic_metadata:
-        frame.attrs["metadata"] = {"contract_version": "0.1"}
 
     with pytest.raises(ValueError, match="missing_prediction_metadata"):
         outputs.write_prediction_outputs(
@@ -421,9 +410,7 @@ def test_prediction_outputs_reject_inconsistent_metadata(
 
     bad_rows = make_artifact_prediction_output_frame()
     bad_rows.attrs["prediction_metadata"] = {
-        **make_artifact_prediction_output_frame().attrs[
-            "prediction_metadata"
-        ],
+        **make_artifact_prediction_output_frame().attrs["prediction_metadata"],
         "prediction_rows": 2,
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -436,9 +423,7 @@ def test_prediction_outputs_reject_inconsistent_metadata(
 
     bad_window = make_artifact_prediction_output_frame()
     bad_window.attrs["prediction_metadata"] = {
-        **make_artifact_prediction_output_frame().attrs[
-            "prediction_metadata"
-        ],
+        **make_artifact_prediction_output_frame().attrs["prediction_metadata"],
         "test_start": "2024-01-03",
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -451,9 +436,7 @@ def test_prediction_outputs_reject_inconsistent_metadata(
 
     bad_train_end = make_artifact_prediction_output_frame()
     bad_train_end.attrs["prediction_metadata"] = {
-        **make_artifact_prediction_output_frame().attrs[
-            "prediction_metadata"
-        ],
+        **make_artifact_prediction_output_frame().attrs["prediction_metadata"],
         "train_end": "2024-01-02",
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -479,9 +462,7 @@ def test_prediction_outputs_reject_inconsistent_metadata(
 
     bad_feature_columns = make_artifact_prediction_output_frame()
     bad_feature_columns.attrs["prediction_metadata"] = {
-        **make_artifact_prediction_output_frame().attrs[
-            "prediction_metadata"
-        ],
+        **make_artifact_prediction_output_frame().attrs["prediction_metadata"],
         "input_columns": ["factor", "other_input"],
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -549,9 +530,7 @@ def test_prediction_outputs_reject_tampered_selected_model_input_columns(
         },
     }
     tampered.attrs["prediction_metadata"] = {
-        **make_artifact_prediction_output_frame().attrs[
-            "prediction_metadata"
-        ],
+        **make_artifact_prediction_output_frame().attrs["prediction_metadata"],
         "test_start": "2024-01-03",
         "effective_test_end": "2024-01-03",
     }
@@ -601,9 +580,7 @@ def test_prediction_outputs_bind_feature_importance_to_exact_model_inputs(
                 layout=layout,
                 output_chunks=(frame,),
                 model_metadata=model_metadata,
-                prediction_metadata_factory=lambda: frame.attrs[
-                    "prediction_metadata"
-                ],
+                prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
             )
         else:
             frame.attrs["model_metadata"] = model_metadata
@@ -673,9 +650,7 @@ def test_prediction_outputs_reject_tampered_model_selection_direction(
         },
     }
     tampered.attrs["prediction_metadata"] = {
-        **make_artifact_prediction_output_frame().attrs[
-            "prediction_metadata"
-        ],
+        **make_artifact_prediction_output_frame().attrs["prediction_metadata"],
         "test_start": "2024-01-03",
         "effective_test_end": "2024-01-03",
     }
@@ -810,9 +785,7 @@ def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
 
     bad_prediction_counts = make_artifact_prediction_output_frame()
     bad_prediction_counts.attrs["prediction_metadata"] = {
-        **make_artifact_prediction_output_frame().attrs[
-            "prediction_metadata"
-        ],
+        **make_artifact_prediction_output_frame().attrs["prediction_metadata"],
         "rows_after_input_dropna": 0,
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -838,9 +811,7 @@ def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
 
     bad_prediction_filter = make_artifact_prediction_output_frame()
     bad_prediction_filter.attrs["prediction_metadata"] = {
-        **make_artifact_prediction_output_frame().attrs[
-            "prediction_metadata"
-        ],
+        **make_artifact_prediction_output_frame().attrs["prediction_metadata"],
         "filter_columns_used": [],
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
@@ -876,9 +847,7 @@ def test_prediction_outputs_reject_bad_effective_test_end(
     )
     bad_effective_end = make_artifact_prediction_output_frame()
     bad_effective_end.attrs["prediction_metadata"] = {
-        **make_artifact_prediction_output_frame().attrs[
-            "prediction_metadata"
-        ],
+        **make_artifact_prediction_output_frame().attrs["prediction_metadata"],
         "effective_test_end": "2024-01-03",
     }
 
@@ -1018,9 +987,7 @@ def test_prediction_outputs_reject_effective_test_end_after_requested_end(
         "oos_end": "2024-01-02",
     }
     late_prediction.attrs["prediction_metadata"] = {
-        **make_artifact_prediction_output_frame().attrs[
-            "prediction_metadata"
-        ],
+        **make_artifact_prediction_output_frame().attrs["prediction_metadata"],
         "requested_test_end": "2024-01-02",
         "effective_test_end": "2024-01-03",
         "is_final_oos_window": False,

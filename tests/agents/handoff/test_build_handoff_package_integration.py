@@ -78,7 +78,6 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
         "base",
         "final_head",
     }
-    assert "mode" not in task_metadata
     assert task_metadata["task_name"] == "handoff-test"
     assert task_metadata["final_head"] == final_head
     assert set(validation_summary) == {"schema_id", "status", "rows"}
@@ -93,8 +92,7 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
         "BLOCKED",
     }
     assert {row["command_id"] for row in check_receipts["checks"]} == {
-        "profile-smoke",
-        "code-map",
+        "profile-smoke"
     }
     assert set(package_smoke) == {
         "schema_id",
@@ -121,16 +119,6 @@ def test_build_handoff_package_single_scripted_entrypoint(tmp_path: Path) -> Non
     assert {entry["path"] for entry in manifest["entries"]} == names - {
         "artifact_manifest.json"
     }
-
-
-def test_builder_cli_has_no_external_task_or_receipts_args() -> None:
-    builder = load_handoff_script_module("build_handoff_package")
-    source = Path(builder.__file__).read_text(encoding="utf-8")
-
-    assert '"--task"' not in source
-    assert '"--receipts-dir"' not in source
-    assert '"--mode"' not in source
-    assert '"--verify"' not in source
 
 
 def test_builder_generates_machine_receipts_from_bundle_clone(

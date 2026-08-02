@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
@@ -13,22 +11,42 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     catalog as processed_catalog_module,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
-    materialization_dependencies,
-    materialization_io,
-    materialization_planning,
-    materialization_validation,
-    materialize_annotations,
-    materialize_factors,
-    materialize_labels,
-    materialize_panel,
-    source_ids,
+    materialization_dependencies as materialization_dependencies,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_io as materialization_io,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_planning as materialization_planning,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_validation as materialization_validation,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialize_annotations as materialize_annotations,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialize_factors as materialize_factors,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialize_labels as materialize_labels,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialize_panel as materialize_panel,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    source_ids as source_ids,
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage.datasets import DatasetInspection, inspect_dataset
+from quant_research_platform.storage._dataset_inspection import (
+    dataset_inspection_retained_memory_bytes,
+    inspect_dataset,
+)
+from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
 processed_catalog = processed_catalog_module.processed_catalog
@@ -104,7 +122,6 @@ def _materialize_processed_data_with_policy(
             )
         )
         written: dict[str, DatasetInspection] = {}
-        panel_key_coverages: dict[Path, dict[object, tuple[pd.Timestamp, ...]]] = {}
         for spec in targets:
             target_time_window = materialization_dependencies.merge_time_windows(
                 time_window,
@@ -120,7 +137,6 @@ def _materialize_processed_data_with_policy(
                 written=written,
                 requested=True,
                 dependency_windows=dependency_windows,
-                panel_key_coverages=panel_key_coverages,
             )
         return written
 
@@ -132,15 +148,18 @@ def _materialize_one(
     source_id: SourceId,
     time_window: TimeWindow,
     policy: RuntimeResourcePolicy,
-    sessions: tuple[pd.Timestamp, ...],
+    sessions: pd.DatetimeIndex,
     written: dict[str, DatasetInspection],
     requested: bool,
     dependency_windows: dict[str, TimeWindow],
-    panel_key_coverages: dict[Path, dict[object, tuple[pd.Timestamp, ...]]],
 ) -> DatasetInspection:
     root = materialization_io.processed_root(layout, spec)
     if spec.data_id in written:
         return written[spec.data_id]
+    retained_written_bytes = sum(
+        dataset_inspection_retained_memory_bytes(inspection)
+        for inspection in written.values()
+    )
     if root.exists():
         if requested:
             raise ValueError("dataset_exists")
@@ -149,8 +168,14 @@ def _materialize_one(
             time_window,
             sessions=sessions,
             resource_policy=policy,
+            retained_payload_bytes=retained_written_bytes,
         )
-        return inspect_dataset(root, time_window=time_window)
+        return inspect_dataset(
+            root,
+            time_window=time_window,
+            resource_policy=policy,
+            retained_payload_bytes=retained_written_bytes,
+        )
     catalog = processed_catalog()
     materialization_dependencies.ensure_processed_dependencies(
         spec,
@@ -162,7 +187,6 @@ def _materialize_one(
         written=written,
         processed_catalog=catalog,
         dependency_windows=dependency_windows,
-        panel_key_coverages=panel_key_coverages,
         materialize_one=_materialize_one,
     )
     if spec.kind is ProcessedDataKind.PANEL:
@@ -193,7 +217,6 @@ def _materialize_one(
             policy=policy,
             sessions=sessions,
             written=written,
-            panel_key_coverages=panel_key_coverages,
         )
     if spec.kind is ProcessedDataKind.LABEL:
         return materialize_labels.write_labels(
@@ -203,7 +226,6 @@ def _materialize_one(
             policy=policy,
             sessions=sessions,
             written=written,
-            panel_key_coverages=panel_key_coverages,
         )
     raise ValueError(f"unsupported_processed_kind: {spec.kind}")
 

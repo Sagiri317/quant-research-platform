@@ -25,11 +25,3 @@ def csmar_market_bars_interim_root(root: Path) -> Path:
 
 def market_panel_processed_root(root: Path) -> Path:
     return root / "data" / "processed" / "a_share" / "panel" / MARKET_PANEL_DATA_ID
-
-
-def market_panel_logical_root() -> str:
-    return f"processed/a_share/panel/{MARKET_PANEL_DATA_ID}"
-
-
-def full_historical_market_panel_status_area() -> str:
-    return f"full_historical_{MARKET_PANEL_DATA_ID}_status"

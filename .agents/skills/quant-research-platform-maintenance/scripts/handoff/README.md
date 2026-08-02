@@ -11,7 +11,6 @@ receipt_contract.py
 replay_evidence.py
 build_handoff_package.py
 verify_handoff_package.py
-self_test.py
 README.md
 ```
 
@@ -19,7 +18,7 @@ README.md
 
 - `handoff_contract.py` 拥有 zip layout、sidecar schema、task metadata
   schema、artifact manifest schema、validation summary schema、`ProofClass`、
-  `FieldSpec`、`allowed_keys()`、validation row source contract 和 replay
+  `FieldSpec`、exact schema validation、validation row source contract 和 replay
   command contract。
 - `receipt_contract.py` 拥有 exact receipt schema specs、receipt invariants、
   normalization 和 replay comparison；它使用 `handoff_contract.py` 的共享
@@ -67,7 +66,7 @@ replay 自动生成。
 ## Package Contract
 
 Package layout、sidecar schema、task metadata schema、artifact manifest schema、
-validation summary schema、`ProofClass`、`FieldSpec`、`allowed_keys()`、
+validation summary schema、`ProofClass`、`FieldSpec`、exact schema validation、
 validation row source contract 和 replay command contract 由
 `handoff_contract.py` 定义。Receipt schemas、invariants、normalization 和
 comparison 由 `receipt_contract.py` 定义。

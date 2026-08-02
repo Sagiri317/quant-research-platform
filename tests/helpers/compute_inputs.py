@@ -32,15 +32,3 @@ def make_perfect_cross_section_compute_panel() -> pd.DataFrame:
         include_alt_signal=False,
         timestamps_as_datetime=False,
     )
-
-
-def make_two_asset_portfolio_compute_panel() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-            "asset": ["A", "B"],
-            "factor": [1.0, 2.0],
-            "label": [0.01, -0.02],
-            "segment": ["s1", "s1"],
-        }
-    )

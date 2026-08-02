@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.models.fitting as model_fitting
 from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
@@ -12,9 +13,11 @@ from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import (
     PredictionSpec,
 )
-from quant_research_platform.research.evaluations.engine import evaluate_signal_frame
-from quant_research_platform.research.models import (
-    fit_model_result,
+from quant_research_platform.research.evaluations.engine import (
+    evaluate_signal_frame_chunks,
+)
+from quant_research_platform.research.models.supervised import (
+    build_estimator_from_model_spec,
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -67,7 +70,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
-    expected = evaluate_signal_frame(frame, spec, n_groups=2)
+    expected = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
     original = eval_engine.compute_ic_and_grouped_label_values
     seen_columns: list[tuple[str, ...]] = []
 
@@ -86,7 +89,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         environ={},
     )
     with runtime_resource_policy_scope(policy):
-        result = evaluate_signal_frame(frame, spec, n_groups=2)
+        result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
 
     assert len(seen_columns) > 1
     pd.testing.assert_frame_equal(
@@ -116,7 +119,7 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
         signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
-    expected = evaluate_signal_frame(frame, spec, n_groups=2)
+    expected = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
 
     result = eval_engine.evaluate_signal_frame_chunks(
         (frame.iloc[:3], frame.iloc[3:]),
@@ -140,8 +143,7 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
 def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.research.models import fitting as model_fitting
-    from quant_research_platform.research.models import supervised as model_supervised
+    import quant_research_platform.research.models.supervised as model_supervised
 
     frame = make_filter_mode_frame()
     spec = ModelSpec(
@@ -303,14 +305,17 @@ def test_complete_time_chunks_close_upstream_on_error_and_consumer_close() -> No
             frame.assign(timestamp=pd.Timestamp("2024-01-02")),
         )
     )
-    assert len(
-        tuple(
-            iter_complete_time_sized_frames(
-                ordinary,
-                timestamp_column="timestamp",
+    assert (
+        len(
+            tuple(
+                iter_complete_time_sized_frames(
+                    ordinary,
+                    timestamp_column="timestamp",
+                )
             )
         )
-    ) == 2
+        == 2
+    )
 
 
 def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
@@ -353,9 +358,11 @@ def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
     )
 
     with pytest.raises(ValueError, match="invalid_time_chunk_timestamp_values"):
-        evaluate_signal_frame(
-            make_filter_mode_frame().assign(
-                timestamp=[pd.NaT] * len(make_filter_mode_frame()),
+        evaluate_signal_frame_chunks(
+            (
+                make_filter_mode_frame().assign(
+                    timestamp=[pd.NaT] * len(make_filter_mode_frame())
+                ),
             ),
             spec,
         )
@@ -364,7 +371,6 @@ def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
 def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.research.models import fitting as model_fitting
 
     frame = pd.concat(
         [
@@ -388,7 +394,9 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         label_column="label",
         max_train_rows=len(frame),
     )
-    expected = fit_model_result(frame, spec)
+    expected = model_fitting.fit_model_result_from_frames(
+        (frame,), spec, estimator=build_estimator_from_model_spec(spec)
+    )
     original_filter = model_fitting.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
@@ -406,7 +414,9 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         environ={},
     )
     with runtime_resource_policy_scope(policy):
-        result = fit_model_result(frame, spec)
+        result = model_fitting.fit_model_result_from_frames(
+            (frame,), spec, estimator=build_estimator_from_model_spec(spec)
+        )
 
     assert len(filtered_chunk_rows) > 1
     assert max(filtered_chunk_rows) < len(frame)

@@ -15,6 +15,9 @@ from quant_research_platform.artifacts import (
     _evaluation_output_validation as evaluation_output_validation,
 )
 from quant_research_platform.artifacts import (
+    _evaluation_outputs as evaluation_outputs_owner,
+)
+from quant_research_platform.artifacts import (
     outputs,
 )
 from quant_research_platform.artifacts._output_manifest import (
@@ -24,6 +27,9 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.policy.share_safety import (
+    MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from tests.artifacts.output_edge_fixtures import (
     make_output_edge_evaluation_diagnostics,
@@ -67,9 +73,7 @@ def test_evaluation_metadata_reuses_complete_business_owner_graph(
         evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
     )
     assert (
-        evaluation_output_validation.validate_evaluation_output_metadata_shape(
-            metadata
-        )
+        evaluation_output_validation.validate_evaluation_output_metadata_shape(metadata)
         is metadata
     )
     metadata = deepcopy(metadata)
@@ -95,9 +99,7 @@ def test_evaluation_metadata_reuses_complete_business_owner_graph(
         metadata["signals"][0]["source_column"] = metadata["label_columns"][0]
 
     with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
-        evaluation_output_validation.validate_evaluation_output_metadata_shape(
-            metadata
-        )
+        evaluation_output_validation.validate_evaluation_output_metadata_shape(metadata)
 
 
 def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> None:
@@ -210,9 +212,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
             layout=layout,
         )
 
-    skipped_metrics = make_artifact_evaluation_metrics_frame().assign(
-        n_obs=[1]
-    )
+    skipped_metrics = make_artifact_evaluation_metrics_frame().assign(n_obs=[1])
     bad_skipped = replace(
         make_output_edge_evaluation_diagnostics(),
         skipped_timestamp_count=0,
@@ -644,6 +644,108 @@ def test_evaluation_outputs_writes_share_safe_summary_md(tmp_path: Path) -> None
     assert "| signal | label | top_bottom_label_value_spread_mean |" in summary
     assert "source_asset_id" not in summary
     assert "data/raw" not in summary
+
+
+@pytest.mark.parametrize(
+    ("extra_characters", "should_pass"),
+    [(0, True), (1, False)],
+)
+def test_evaluation_outputs_enforces_evidence_line_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_characters: int,
+    should_pass: bool,
+) -> None:
+    monkeypatch.setattr(
+        evaluation_outputs_owner,
+        "_render_evaluation_summary",
+        lambda **_kwargs: (
+            "x" * (MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS + extra_characters)
+        ),
+    )
+    spec = EvaluationSpec(
+        run_id="eval_line_bound",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+
+    def write_outputs() -> Path:
+        return outputs.write_evaluation_outputs(
+            make_artifact_evaluation_metrics_frame(),
+            make_artifact_evaluation_grouped_label_values_frame(),
+            ic_summary=make_artifact_evaluation_ic_summary_frame(),
+            group_spread_summary=make_artifact_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
+            spec=spec,
+            output_spec=make_output_edge_report_spec(
+                "evaluation_outputs",
+                spec.run_id,
+                "evaluation",
+            ),
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+    if should_pass:
+        assert write_outputs().joinpath("summary.md").is_file()
+    else:
+        with pytest.raises(
+            ValueError,
+            match="evaluation_summary_share_unsafe: evidence_capacity_exceeded",
+        ):
+            write_outputs()
+
+
+def test_evaluation_outputs_feeds_bounded_encoded_summary_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rendered = "safe metric\n" * 100_000
+    observed_sizes: list[int] = []
+    real_scan = evaluation_outputs_owner.evidence_text_stream_unsafe_reason
+
+    def scan(chunks) -> str | None:
+        captured = []
+        for chunk in chunks:
+            observed_sizes.append(len(chunk))
+            captured.append(bytes(chunk))
+        assert b"".join(captured).decode("utf-8") == rendered
+        return real_scan(captured)
+
+    monkeypatch.setattr(
+        evaluation_outputs_owner,
+        "_render_evaluation_summary",
+        lambda **_kwargs: rendered,
+    )
+    monkeypatch.setattr(
+        evaluation_outputs_owner,
+        "evidence_text_stream_unsafe_reason",
+        scan,
+    )
+    spec = EvaluationSpec(
+        run_id="eval_bounded_feed",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+
+    output = outputs.write_evaluation_outputs(
+        make_artifact_evaluation_metrics_frame(),
+        make_artifact_evaluation_grouped_label_values_frame(),
+        ic_summary=make_artifact_evaluation_ic_summary_frame(),
+        group_spread_summary=make_artifact_evaluation_group_spread_summary_frame(),
+        evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
+        spec=spec,
+        output_spec=make_output_edge_report_spec(
+            "evaluation_outputs", spec.run_id, "evaluation"
+        ),
+        layout=StorageLayout(project_root=tmp_path),
+    )
+
+    assert output.joinpath("summary.md").is_file()
+    assert max(observed_sizes) <= MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS
 
 
 def test_summary_markdown_escapes_pipe_characters(tmp_path: Path) -> None:

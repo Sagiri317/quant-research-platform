@@ -1386,14 +1386,6 @@ def _exact_positive_int(value: object, error: str) -> int:
     return result
 
 
-def _is_lower_sha256(value: object) -> bool:
-    return (
-        type(value) is str
-        and len(value) == 64
-        and all(character in _LOWER_HEX for character in value)
-    )
-
-
 def _exact_string_list(value: object, error: str) -> list[str]:
     if (
         type(value) is not list
@@ -1425,26 +1417,20 @@ def _write_compare_artifacts(compare_root: Path, payload: dict[str, Any]) -> Non
             encoding="utf-8",
         )
         (staged_root / "summary.md").write_text(
-            _render_summary(payload),
+            "\n".join(
+                (
+                    "# QRP Run Comparison",
+                    "",
+                    f"- overall_status: `{payload['overall_status']}`",
+                    f"- data_results: `{len(payload['data_results'])}`",
+                    f"- output_results: `{len(payload['output_results'])}`",
+                    "",
+                )
+            ),
             encoding="utf-8",
         )
 
     atomic_write_directory(compare_root, _writer)
-
-
-def _render_summary(payload: dict[str, Any]) -> str:
-    return "\n".join(
-        (
-            "# QRP Run Comparison",
-            "",
-            f"- overall_status: `{payload['overall_status']}`",
-            f"- data_results: `{len(payload['data_results'])}`",
-            f"- output_results: `{len(payload['output_results'])}`",
-            "",
-        )
-    )
-
-
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline-root", type=Path, required=True)

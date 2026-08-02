@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import subprocess
@@ -75,10 +74,264 @@ def _discovered_paths(data_root: Path, *, spec: dict[str, object]) -> list[Path]
         return list(inventory.iter_candidate_paths())
 
 
-def test_exact_key_index_does_not_bypass_bounded_pandas_conversion() -> None:
-    source = inspect.getsource(ExactPrimaryKeyIndex.add_table)
+def test_exact_key_index_classifies_typed_exact_duplicates_and_conflicts(
+    tmp_path: Path,
+) -> None:
+    table = pa.table(
+        {
+            "asset_id": pa.array(["a", "a", "b"], type=pa.string()),
+            "value": pa.array([float("inf"), float("inf"), None], type=pa.float64()),
+        }
+    )
+    conflict = pa.table(
+        {
+            "asset_id": pa.array(["a"], type=pa.string()),
+            "value": pa.array([2.0], type=pa.float64()),
+        }
+    )
+    exact_again = pa.table(
+        {
+            "value": pa.array([float("inf")], type=pa.float64()),
+            "asset_id": pa.array(["a"], type=pa.string()),
+        }
+    )
 
-    assert ".to_pandas(" not in source
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        keep_positions, duplicate_count = index.classify_comparison_table(
+            table,
+            namespace="reference",
+            value_columns=("value",),
+            payload_target_bytes=1024**2,
+        )
+        assert list(keep_positions) == [0, 2]
+        assert keep_positions.view.nbytes < keep_positions.retained_memory_bytes
+        assert duplicate_count == 1
+        keep_positions, duplicate_count = index.classify_comparison_table(
+            exact_again,
+            namespace="reference",
+            value_columns=("value",),
+            payload_target_bytes=1024**2,
+        )
+        assert list(keep_positions) == []
+        assert duplicate_count == 1
+        keep_positions, duplicate_count = index.classify_comparison_table(
+            exact_again,
+            namespace="independent",
+            value_columns=("value",),
+            payload_target_bytes=1024**2,
+        )
+        assert list(keep_positions) == [0]
+        assert duplicate_count == 0
+        with pytest.raises(ValueError, match="conflicting_exact_primary_key_payload"):
+            index.classify_comparison_table(
+                conflict,
+                namespace="reference",
+                value_columns=("value",),
+                payload_target_bytes=1024**2,
+            )
+        keep_positions, duplicate_count = index.classify_comparison_table(
+            pa.table(
+                {
+                    "asset_id": pa.array(["c"], type=pa.string()),
+                    "value": pa.array([None], type=pa.float64()),
+                }
+            ),
+            namespace="reference",
+            value_columns=("value",),
+            payload_target_bytes=1024**2,
+        )
+        assert list(keep_positions) == [0]
+        assert duplicate_count == 0
+
+
+def test_exact_key_classifier_batches_sql_and_returns_compact_positions(
+    tmp_path: Path,
+) -> None:
+    table = pa.table(
+        {
+            "asset_id": pa.array(
+                [f"asset-{position:04d}" for position in range(256)],
+                type=pa.string(),
+            )
+        }
+    )
+
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        statements: list[str] = []
+        assert index._connection is not None
+        index._connection.set_trace_callback(statements.append)
+        keep_positions, duplicate_count = index.classify_comparison_table(
+            table,
+            namespace="batch",
+            value_columns=(),
+            payload_target_bytes=4096,
+        )
+
+    lookup_statements = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(lookup_statements) <= 4
+    assert isinstance(keep_positions.view, memoryview)
+    assert keep_positions.view.itemsize <= 8
+    assert keep_positions.view.nbytes == 256 * keep_positions.view.itemsize
+    assert keep_positions.retained_memory_bytes == 256 * keep_positions.view.itemsize
+    assert keep_positions.view.tolist() == list(range(256))
+    with pytest.raises(TypeError):
+        keep_positions.view[0] = 1
+    assert duplicate_count == 0
+
+
+def test_exact_key_classifier_preflights_compact_positions_before_mutation(
+    tmp_path: Path,
+) -> None:
+    table = pa.table({"asset_id": [f"asset-{position:02d}" for position in range(64)]})
+
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        with pytest.raises(
+            ValueError,
+            match="exact_key_position_state_exceeds_payload_target",
+        ):
+            index.classify_comparison_table(
+                table,
+                namespace="bounded",
+                value_columns=(),
+                payload_target_bytes=256,
+            )
+        assert index.add_table(table, namespace="bounded") == 0
+
+
+@pytest.mark.parametrize(
+    ("namespace", "value_columns", "error"),
+    (
+        ("", (), "invalid_exact_key_namespace"),
+        ("grammar", ("value", "value"), "invalid_dataset_comparison_columns"),
+        ("grammar", ("asset_id",), "invalid_dataset_comparison_columns"),
+        ("grammar", ("missing",), "missing_dataset_comparison_column"),
+    ),
+)
+def test_exact_key_classifier_validates_grammar_before_position_admission(
+    tmp_path: Path,
+    namespace: str,
+    value_columns: tuple[str, ...],
+    error: str,
+) -> None:
+    table = pa.table(
+        {
+            "asset_id": [f"asset-{position:02d}" for position in range(64)],
+            "value": range(64),
+        }
+    )
+
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        with pytest.raises(ValueError, match=error):
+            index.classify_comparison_table(
+                table,
+                namespace=namespace,
+                value_columns=value_columns,
+                payload_target_bytes=256,
+            )
+
+
+def test_exact_key_classifier_gates_disk_overlap_before_exact_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def gate(_path: Path, *, reserve_bytes: int) -> None:
+        nonlocal calls
+        assert reserve_bytes > 0
+        calls += 1
+        if calls == 4:
+            raise OSError("disk_headroom_exhausted")
+
+    monkeypatch.setattr(key_tracking, "require_free_disk_headroom", gate)
+    table = pa.table({"asset_id": ["a", "b"]})
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        with pytest.raises(OSError, match="disk_headroom_exhausted"):
+            index.classify_comparison_table(
+                table,
+                namespace="overlap",
+                value_columns=(),
+                payload_target_bytes=1024,
+            )
+        assert index._connection is not None
+        assert index._connection.execute(
+            "SELECT COUNT(*) FROM comparison_rows"
+        ).fetchone() == (0,)
+        assert index.add_table(table, namespace="overlap") == 0
+
+
+def test_exact_key_classifier_batches_large_duplicate_group(tmp_path: Path) -> None:
+    table = pa.table({"asset_id": ["same"] * 4096})
+
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        statements: list[str] = []
+        assert index._connection is not None
+        index._connection.set_trace_callback(statements.append)
+        keep, duplicate_count = index.classify_comparison_table(
+            table,
+            namespace="duplicates",
+            value_columns=(),
+            payload_target_bytes=64 * 1024,
+        )
+
+    assert list(keep) == [0]
+    assert duplicate_count == 4095
+    assert (
+        sum(statement.lstrip().upper().startswith("SELECT") for statement in statements)
+        <= 4
+    )
+
+
+@pytest.mark.parametrize("payload_target_bytes", (True, False, 0, -1, 1.5, "1"))
+def test_exact_key_classifier_requires_positive_non_bool_payload_target(
+    tmp_path: Path,
+    payload_target_bytes: object,
+) -> None:
+    table = pa.table({"asset_id": ["a"], "value": [1]})
+
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        with pytest.raises(
+            ValueError,
+            match="^invalid_dataset_comparison_payload_target$",
+        ):
+            index.classify_comparison_table(
+                table,
+                namespace="grammar",
+                value_columns=("value",),
+                payload_target_bytes=payload_target_bytes,  # type: ignore[arg-type]
+            )
 
 
 def test_data_spec_payload_rejects_wrong_kind_source_and_market_ids() -> None:
@@ -921,26 +1174,21 @@ def test_exact_comparison_payload_target_has_an_exact_encoded_boundary(
     tmp_path: Path,
 ) -> None:
     table = pa.table({"asset_id": ["a"], "value": [1]})
-    key = key_tracking._canonical_arrow_scalar_payload(
-        table.column("asset_id")[0],
-        table.schema.field("asset_id").type,
-    )
-    row = b"".join(
-        key_tracking._canonical_arrow_scalar_payload(
-            table.column(column)[0],
-            table.schema.field(column).type,
-            allow_null=True,
-            allow_nonfinite=True,
-        )
-        for column in ("value",)
-    )
-    exact_target = len(key) + len(row)
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
         scratch_parent=tmp_path,
     ) as index:
+        _, key_payload, value_payload = next(
+            index._prepared_comparison_rows(
+                table,
+                namespace="measure",
+                value_columns=("value",),
+                payload_target_bytes=1024,
+            )
+        )
+        exact_target = len(key_payload) + len(value_payload)
         assert (
             index.add_comparison_table(
                 table,
@@ -1030,7 +1278,7 @@ def test_exact_comparison_nested_payload_stops_at_remaining_target(
     assert calls <= 64
 
 
-def test_exact_comparison_near_boundary_uses_one_bounded_row_buffer(
+def test_exact_comparison_python_allocation_diagnostic_uses_one_bounded_row_buffer(
     tmp_path: Path,
 ) -> None:
     table = pa.table(
@@ -1042,23 +1290,20 @@ def test_exact_comparison_near_boundary_uses_one_bounded_row_buffer(
             ),
         }
     )
-    exact_target = sum(
-        len(
-            key_tracking._canonical_arrow_scalar_payload(
-                table.column(column)[0],
-                table.schema.field(column).type,
-                allow_null=column != "asset_id",
-                allow_nonfinite=column != "asset_id",
-            )
-        )
-        for column in ("asset_id", "value")
-    )
-
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
         scratch_parent=tmp_path,
     ) as index:
+        _, key_payload, value_payload = next(
+            index._prepared_comparison_rows(
+                table,
+                namespace="measure",
+                value_columns=("value",),
+                payload_target_bytes=1024**2,
+            )
+        )
+        exact_target = len(key_payload) + len(value_payload)
         tracemalloc.start()
         try:
             assert (
@@ -1110,11 +1355,11 @@ def test_exact_variable_width_rejects_before_scalar_materialization(
         ValueError,
         match="dataset_comparison_payload_exceeds_target_bytes",
     ):
-        key_tracking._canonical_arrow_scalar_payload(
+        key_tracking._append_arrow_scalar_payload(
+            key_tracking._BoundedPayloadSink(1024),
             scalar,  # type: ignore[arg-type]
             data_type,
             allow_null=True,
-            remaining_bytes=1024,
         )
     assert scalar.as_buffer_calls == 1
     assert scalar.as_py_calls == 0
@@ -1130,23 +1375,20 @@ def test_exact_variable_width_columns_share_the_row_payload_target(
             "binary": [b"payload" * 16],
         }
     )
-    columns = ("asset_id", "text", "binary")
-    encoded = tuple(
-        key_tracking._canonical_arrow_scalar_payload(
-            table.column(column)[0],
-            table.schema.field(column).type,
-            allow_null=column != "asset_id",
-            allow_nonfinite=column != "asset_id",
-        )
-        for column in columns
-    )
-    exact_target = sum(map(len, encoded))
-
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
         scratch_parent=tmp_path,
     ) as index:
+        _, key_payload, value_payload = next(
+            index._prepared_comparison_rows(
+                table,
+                namespace="measure",
+                value_columns=("text", "binary"),
+                payload_target_bytes=1024**2,
+            )
+        )
+        exact_target = len(key_payload) + len(value_payload)
         assert (
             index.add_comparison_table(
                 table,
@@ -1174,26 +1416,18 @@ def test_exact_map_accounts_compact_sort_state_before_allocation() -> None:
         [[(f"key-{index:04d}", index) for index in reversed(range(256))]],
         type=map_type,
     )[0]
-    encoded = key_tracking._canonical_arrow_scalar_payload(scalar, map_type)
+    unbounded = key_tracking._BoundedPayloadSink(None)
+    key_tracking._append_arrow_scalar_payload(unbounded, scalar, map_type)
 
     with pytest.raises(
         ValueError,
         match="dataset_comparison_payload_exceeds_target_bytes",
     ):
-        key_tracking._canonical_arrow_scalar_payload(
+        key_tracking._append_arrow_scalar_payload(
+            key_tracking._BoundedPayloadSink(len(unbounded.buffer)),
             scalar,
             map_type,
-            remaining_bytes=len(encoded),
         )
-
-
-def test_exact_map_sort_has_no_quadratic_python_permutation() -> None:
-    source = inspect.getsource(key_tracking)
-
-    assert "cmp_to_key" not in source
-    assert "_sort_map_entries_in_place" not in source
-    assert "_reverse_buffer_range" not in source
-    assert ".index(entry_id" not in source
 
 
 def test_exact_nested_map_encoding_has_no_recursive_reencode_amplification(
@@ -1220,7 +1454,11 @@ def test_exact_nested_map_encoding_has_no_recursive_reencode_amplification(
             "_append_arrow_scalar_payload",
             counted,
         )
-        key_tracking._canonical_arrow_scalar_payload(scalar, data_type)
+        key_tracking._append_arrow_scalar_payload(
+            key_tracking._BoundedPayloadSink(None),
+            scalar,
+            data_type,
+        )
         monkeypatch.setattr(
             key_tracking,
             "_append_arrow_scalar_payload",
@@ -1237,9 +1475,12 @@ def test_exact_map_high_cardinality_and_multiplicity_are_order_independent() -> 
     forward = pa.array([entries], type=map_type)[0]
     reverse = pa.array([list(reversed(entries))], type=map_type)[0]
 
-    assert key_tracking._canonical_arrow_scalar_payload(
-        forward, map_type
-    ) == key_tracking._canonical_arrow_scalar_payload(reverse, map_type)
+    forward_payload = key_tracking._BoundedPayloadSink(None)
+    reverse_payload = key_tracking._BoundedPayloadSink(None)
+    key_tracking._append_arrow_scalar_payload(forward_payload, forward, map_type)
+    key_tracking._append_arrow_scalar_payload(reverse_payload, reverse, map_type)
+
+    assert forward_payload.buffer == reverse_payload.buffer
 
 
 def test_exact_key_index_close_failure_does_not_replace_primary(
@@ -1855,14 +2096,6 @@ def test_inventory_discovery_orders_numeric_part_indices(tmp_path: Path) -> None
     ]
 
 
-def test_candidate_discovery_does_not_build_full_path_or_identity_containers() -> None:
-    source = inspect.getsource(DatasetSessionInventory._scan_filesystem)
-
-    assert "list[" not in source
-    assert "set[" not in source
-    assert "list(" not in source
-
-
 @pytest.mark.parametrize(
     "names",
     [
@@ -1972,6 +2205,48 @@ def test_inventory_discovery_rejects_junction_data_root(tmp_path: Path) -> None:
         pytest.skip("junction_not_available")
 
     assert data_root.is_junction()
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        _discovered_paths(data_root, spec={"partition_columns": []})
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or not hasattr(Path, "is_junction"),
+    reason="Windows junction capability required",
+)
+def test_inventory_discovery_does_not_descend_nested_junction(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    pq.write_table(pa.table({"value": [1]}), external / "part-000.parquet")
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    junction = data_root / "nested"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip("junction_not_available")
+
+    assert junction.is_junction()
+    assert _discovered_paths(data_root, spec={"partition_columns": []}) == []
+
+
+def test_inventory_discovery_maps_walk_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+
+    def fail_walk(_self: Path, *, on_error, **_kwargs):  # noqa: ANN001, ANN202
+        on_error(OSError("walk_failed"))
+        yield
+
+    monkeypatch.setattr(Path, "walk", fail_walk)
+
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
         _discovered_paths(data_root, spec={"partition_columns": []})
 

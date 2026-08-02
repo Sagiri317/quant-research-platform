@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
+import quant_research_platform.research.models.estimators as estimators
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research.models import estimators
 
 
 @dataclass(frozen=True)

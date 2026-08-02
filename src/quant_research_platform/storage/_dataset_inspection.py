@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.contracts._json import render_qrp_json_object
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -20,6 +21,7 @@ from quant_research_platform.storage._dataset_observation import (
 from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
+    dataset_partition_state_reserve_bytes,
     dataset_primary_key_schema,
     iter_dataset_file_batches,
     open_dataset_session,
@@ -36,6 +38,7 @@ def inspect_dataset(
     *,
     time_window: TimeWindow | None = None,
     resource_policy: RuntimeResourcePolicy | None,
+    retained_payload_bytes: int = 0,
 ) -> DatasetInspection:
     with open_dataset_session(
         dataset_root,
@@ -43,10 +46,12 @@ def inspect_dataset(
         time_window=time_window,
         require_consumable=False,
         resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
     ) as context:
         return inspect_dataset_session(
             context,
             resource_policy=context.resource_policy,
+            retained_payload_bytes=retained_payload_bytes,
         )
 
 
@@ -54,6 +59,7 @@ def inspect_dataset_session(
     context: DatasetSession,
     *,
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int = 0,
 ) -> DatasetInspection:
     """Inspect one already frozen Storage session without reopening its dataset."""
 
@@ -63,8 +69,9 @@ def inspect_dataset_session(
         runtime = _inspection_runtime_metadata(
             context,
             target_chunk_bytes=resource_policy.payload_target_bytes,
+            retained_payload_bytes=retained_payload_bytes,
         )
-        return DatasetInspection(
+        result = DatasetInspection(
             root=context.root,
             data_root=context.data_root,
             spec=context.spec,
@@ -72,12 +79,42 @@ def inspect_dataset_session(
             schema_hash=context.schema_hash,
             file_count=int(runtime["file_count"]),
             row_count=int(runtime["row_count"]),
-            partitions=tuple(runtime["partitions"]),
-            partition_row_counts=dict(runtime["partition_row_counts"]),
+            partitions=runtime["partitions"],
+            partition_row_counts=runtime["partition_row_counts"],
             date_min=runtime["date_min"],
             date_max=runtime["date_max"],
             manifest=context.manifest,
         )
+        result_bytes = dataset_inspection_retained_memory_bytes(result)
+        if (
+            retained_payload_bytes + context.retained_memory_bytes + result_bytes
+            > resource_policy.task_memory_budget_bytes
+        ):
+            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+        return result
+
+
+def dataset_inspection_retained_memory_bytes(value: DatasetInspection) -> int:
+    return _inspection_retained_memory_bytes(
+        spec=value.spec,
+        manifest=value.manifest,
+        columns=value.columns,
+        partitions=value.partitions,
+    )
+
+
+def _inspection_retained_memory_bytes(
+    *,
+    spec: dict[str, Any],
+    manifest: dict[str, Any],
+    columns: tuple[str, ...],
+    partitions: tuple[str, ...],
+) -> int:
+    retained = len(render_qrp_json_object(spec).encode("utf-8"))
+    retained += len(render_qrp_json_object(manifest).encode("utf-8"))
+    retained += sum(len(item.encode("utf-8")) for item in columns)
+    retained += sum(len(item.encode("utf-8")) for item in partitions)
+    return retained
 
 
 def inspection_from_persisted_session(
@@ -112,25 +149,39 @@ def _inspection_runtime_metadata(
     context: DatasetSession,
     *,
     target_chunk_bytes: int,
+    retained_payload_bytes: int,
 ) -> dict[str, Any]:
-    retained_owner_bytes = (
-        context.inventory.retained_memory_bytes + EXACT_KEY_SQLITE_PAGE_BYTES
+    if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
+        raise ValueError("invalid_dataset_inspection_retained_payload_bytes")
+    spec = context.spec
+    primary_key = tuple(str(column) for column in spec["primary_key"])
+    column_roles = {
+        str(column): str(role) for column, role in spec["column_roles"].items()
+    }
+    observer_state_bytes = sum(
+        len(column.encode("utf-8")) + len(role.encode("utf-8")) + 24
+        for column, role in column_roles.items()
     )
-    remaining_headroom = (
-        context.resource_policy.task_memory_budget_bytes - retained_owner_bytes
+    accumulated_state_bytes = (
+        dataset_partition_state_reserve_bytes(context) + observer_state_bytes
     )
+    reader_upstream_headroom = context.resource_policy.task_memory_budget_bytes
+    reader_upstream_headroom -= retained_payload_bytes
+    reader_upstream_headroom -= EXACT_KEY_SQLITE_PAGE_BYTES
+    reader_upstream_headroom -= accumulated_state_bytes
+    remaining_headroom = reader_upstream_headroom - context.retained_memory_bytes
     if remaining_headroom <= 0:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget")
     target_chunk_bytes = min(target_chunk_bytes, remaining_headroom)
     timestamp_column = context.timestamp_column
     if context.time_window is not None and timestamp_column is None:
         raise ValueError("time_window_not_supported")
-    primary_key = tuple(str(column) for column in context.spec["primary_key"])
     timestamp_columns = tuple(
         column
         for column in primary_key
-        if context.spec["column_roles"].get(column) == "timestamp"
+        if spec["column_roles"].get(column) == "timestamp"
     )
+    del spec
     partition_row_counts: dict[str, int] = {}
     selected_file_count = 0
     last_observed_path: Path | None = None
@@ -144,17 +195,14 @@ def _inspection_runtime_metadata(
         observer = DatasetSummaryObserver(
             primary_key=primary_key,
             timestamp_column=timestamp_column,
-            column_roles={
-                str(column): str(role)
-                for column, role in context.spec["column_roles"].items()
-            },
+            column_roles=column_roles,
             exact_key_index=key_index,
         )
         for path, frame in iter_dataset_file_batches(
             context,
             columns=tuple(context.arrow_schema.names),
             target_chunk_bytes=target_chunk_bytes,
-            operation_headroom_bytes=remaining_headroom,
+            operation_headroom_bytes=reader_upstream_headroom,
             batch_observer=lambda batch, logical_frame: observer.observe_batch(
                 batch,
                 frame=logical_frame,
@@ -166,9 +214,9 @@ def _inspection_runtime_metadata(
                 selected_file_count += 1
                 last_observed_path = path
             partition = relative_partition_label(context.data_root, path)
-            partition_row_counts[partition] = (
-                partition_row_counts.get(partition, 0) + len(frame)
-            )
+            partition_row_counts[partition] = partition_row_counts.get(
+                partition, 0
+            ) + len(frame)
     if context.time_window is None:
         for path in context.all_paths:
             partition_row_counts.setdefault(
@@ -178,17 +226,33 @@ def _inspection_runtime_metadata(
         file_count = len(context.all_paths)
     else:
         file_count = selected_file_count
+    partitions = tuple(sorted(partition_row_counts))
+    projected_result_bytes = _inspection_retained_memory_bytes(
+        spec=context.spec,
+        manifest=context.manifest,
+        columns=physical_schema_columns(context.schema),
+        partitions=partitions,
+    )
+    if (
+        retained_payload_bytes
+        + context.retained_memory_bytes
+        + accumulated_state_bytes
+        + projected_result_bytes
+        > context.resource_policy.task_memory_budget_bytes
+    ):
+        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
     runtime_summary = {
         "file_count": file_count,
         "row_count": int(observer.row_count),
-        "partitions": sorted(partition_row_counts),
-        "partition_row_counts": dict(sorted(partition_row_counts.items())),
+        "partitions": partitions,
+        "partition_row_counts": partition_row_counts,
         "date_min": date_string(observer.date_min),
         "date_max": date_string(observer.date_max),
     }
     if context.time_window is None:
         persisted_summary = {
             **runtime_summary,
+            "partitions": list(partitions),
             **observer.summary_payload(),
         }
         for key, value in persisted_summary.items():

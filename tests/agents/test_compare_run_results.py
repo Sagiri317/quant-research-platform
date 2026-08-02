@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
+from quant_research_platform.artifacts._output_manifest import (
+    prediction_output_metadata,
+)
 from quant_research_platform.workflows import local_verification as local_verification
+from tests.helpers.report_output_frames import (
+    make_report_prediction_output_frame,
+    make_report_prediction_spec,
+)
 from tests.workflows.local_verification_fixtures import (
     empty_processed_inputs,
     fake_evaluation_result,
@@ -41,6 +48,17 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _prediction_metadata(*, research_dataset_id: str = "demo") -> dict[str, object]:
+    frame = make_report_prediction_output_frame()
+    payload = prediction_output_metadata(
+        spec=make_report_prediction_spec(),
+        model_metadata=frame.attrs["model_metadata"],
+        prediction_metadata=frame.attrs["prediction_metadata"],
+    )
+    payload["research_dataset_id"] = research_dataset_id
+    return payload
+
+
 @pytest.mark.parametrize("logical_layer", ("interim", "processed", "research"))
 def test_compare_run_layer_accepts_exact_owner_members(logical_layer: str) -> None:
     module = _module()
@@ -70,7 +88,7 @@ def _run_payload(
     run_id: str,
     *,
     output_id: str = "prediction_daily",
-    output_definition_id: str = "stage_profile_diagnostic",
+    output_definition_id: str = "prediction_outputs",
     metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
@@ -141,19 +159,9 @@ def _run_payload(
                 "output_definition_id": output_definition_id,
                 "run_id": run_id,
                 "metadata": (
-                    metadata
-                    if metadata is not None
-                    else {
-                        "market_id": "a_share",
-                        "run_type": "diagnostics",
-                        "scope": "LOCAL_ONLY",
-                    }
+                    metadata if metadata is not None else _prediction_metadata()
                 ),
-                "files": [
-                    "stage_profile.csv",
-                    "stage_profile.json",
-                    "stage_profile.md",
-                ],
+                "files": ["prediction.parquet"],
                 "manifest_path": f"outputs/{output_id}/manifest.json",
             }
         ],
@@ -196,15 +204,12 @@ def _run_payload(
                 "share_safety_scan": {
                     "status": "PASS",
                     "failures": [],
-                    "checked_count": 4,
-                    "requested_count": 4,
-                    "existing_scanned_count": 4,
+                    "checked_count": 1,
+                    "requested_count": 1,
+                    "existing_scanned_count": 1,
                     "missing_count": 0,
                     "requested_paths": [
                         f"outputs/{output_id}/manifest.json",
-                        f"outputs/{output_id}/stage_profile.csv",
-                        f"outputs/{output_id}/stage_profile.json",
-                        f"outputs/{output_id}/stage_profile.md",
                     ],
                 },
                 "created_at": "2026-06-26T00:00:01Z",
@@ -221,7 +226,7 @@ def _write_run(
     run_id: str,
     *,
     output_id: str = "prediction_daily",
-    output_definition_id: str = "stage_profile_diagnostic",
+    output_definition_id: str = "prediction_outputs",
     metadata: dict[str, object] | None = None,
     file_content: bytes = b"same",
 ) -> None:
@@ -236,8 +241,7 @@ def _write_run(
     manifest = dict(payload["outputs"][0])
     manifest.pop("manifest_path")
     _write_json(root / "outputs" / output_id / "manifest.json", manifest)
-    for name in ("stage_profile.csv", "stage_profile.json", "stage_profile.md"):
-        (root / "outputs" / output_id / name).write_bytes(file_content)
+    (root / "outputs" / output_id / "prediction.parquet").write_bytes(file_content)
 
 
 def _write_run_without_outputs(root: Path, run_id: str) -> None:
@@ -262,18 +266,10 @@ def _append_output(root: Path, *, run_id: str, output_id: str) -> None:
     manifest = {
         "schema_id": "qrp-output-manifest",
         "output_id": output_id,
-        "output_definition_id": "stage_profile_diagnostic",
+        "output_definition_id": "prediction_outputs",
         "run_id": run_id,
-        "metadata": {
-            "market_id": "a_share",
-            "run_type": "diagnostics",
-            "scope": "LOCAL_ONLY",
-        },
-        "files": [
-            "stage_profile.csv",
-            "stage_profile.json",
-            "stage_profile.md",
-        ],
+        "metadata": _prediction_metadata(),
+        "files": ["prediction.parquet"],
     }
     payload["outputs"].append(
         {
@@ -284,9 +280,6 @@ def _append_output(root: Path, *, run_id: str, output_id: str) -> None:
     share_safety = payload["checks"]["validation"]["share_safety_scan"]
     appended_paths = [
         f"outputs/{output_id}/manifest.json",
-        f"outputs/{output_id}/stage_profile.csv",
-        f"outputs/{output_id}/stage_profile.json",
-        f"outputs/{output_id}/stage_profile.md",
     ]
     share_safety["requested_paths"].extend(appended_paths)
     share_safety["checked_count"] += len(appended_paths)
@@ -294,8 +287,7 @@ def _append_output(root: Path, *, run_id: str, output_id: str) -> None:
     share_safety["existing_scanned_count"] += len(appended_paths)
     _write_json(run_path, payload)
     _write_json(root / "outputs" / output_id / "manifest.json", manifest)
-    for name in ("stage_profile.csv", "stage_profile.json", "stage_profile.md"):
-        (root / "outputs" / output_id / name).write_bytes(b"same")
+    (root / "outputs" / output_id / "prediction.parquet").write_bytes(b"same")
 
 
 def test_compare_pairs_same_output_id_without_historical_path_assumptions(
@@ -876,12 +868,12 @@ def test_local_verification_non_dataset_failure_is_typed_and_compare_consumable(
 
     def build_failed_validation_summary(**kwargs: object) -> dict[str, object]:
         if failure_code == "share_safety_scan_failed":
-            generated_paths = kwargs["generated_text_paths"]
-            assert isinstance(generated_paths, tuple)
+            generated_members = kwargs["validated_output_members"]
+            assert isinstance(generated_members, tuple)
             text_path = next(
                 path
-                for path in generated_paths
-                if isinstance(path, Path) and path.suffix.casefold() != ".json"
+                for path, _identity in generated_members
+                if path.suffix.casefold() != ".json"
             )
             text_path.write_bytes(b"\xff")
         summary = original_build_validation_summary(**kwargs)
@@ -910,17 +902,16 @@ def test_local_verification_non_dataset_failure_is_typed_and_compare_consumable(
         }[failure_code],
     )
 
-    result = local_verification.run_local_verification(
-        make_local_verification_config(
-            run_root=run_root,
-            start_date="2014-01-01",
-            end_date="2016-12-31",
-            profile=profile_with_materializers(
-                stub_interim_importer(),
-                empty_processed_inputs,
-            ),
-        )
+    config = make_local_verification_config(
+        run_root=run_root,
+        start_date="2014-01-01",
+        end_date="2016-12-31",
+        profile=profile_with_materializers(
+            stub_interim_importer(),
+            empty_processed_inputs,
+        ),
     )
+    result = local_verification.run_local_verification(config)
     run_payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
 
     assert result.status == "FAIL"
@@ -1116,12 +1107,8 @@ def test_compare_rejects_semantically_invalid_run_output_index(
     ("mutation", "expected_failure"),
     (
         (
-            "schema_version",
-            "output_manifest_unreadable",
-        ),
-        (
-            "contract_version",
-            "output_manifest_unreadable",
+            "unexpected_metadata_field",
+            "output_manifest_metadata_invalid",
         ),
         (
             "versioned_schema_id",
@@ -1150,10 +1137,8 @@ def test_compare_rejects_invalid_output_manifest_identity_and_paths(
     _write_run(current, "current_run")
     manifest_path = current / "outputs" / "prediction_daily" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if mutation == "schema_version":
-        manifest["metadata"]["schema_version"] = "0.1"
-    elif mutation == "contract_version":
-        manifest["metadata"]["contract_version"] = "0.1"
+    if mutation == "unexpected_metadata_field":
+        manifest["metadata"]["unexpected"] = True
     elif mutation == "versioned_schema_id":
         manifest["schema_id"] = "qrp-output-manifest/0.1"
     elif mutation == "wrong_output_id":
@@ -1161,7 +1146,7 @@ def test_compare_rejects_invalid_output_manifest_identity_and_paths(
     elif mutation == "wrong_run_id":
         manifest["run_id"] = "other_run"
     elif mutation == "equal_output_and_definition_ids":
-        manifest["output_id"] = "stage_profile_diagnostic"
+        manifest["output_id"] = "prediction_outputs"
     elif mutation == "unknown_definition_id":
         manifest["output_definition_id"] = "unknown_outputs"
     elif mutation == "path_traversal":
@@ -1200,20 +1185,8 @@ def test_compare_rejects_invalid_output_manifest_identity_and_paths(
     ("baseline_kwargs", "current_kwargs", "failure"),
     (
         (
-            {
-                "metadata": {
-                    "market_id": "a_share",
-                    "run_type": "diagnostics",
-                    "scope": "LOCAL_ONLY",
-                }
-            },
-            {
-                "metadata": {
-                    "market_id": "crypto",
-                    "run_type": "diagnostics",
-                    "scope": "LOCAL_ONLY",
-                }
-            },
+            {"metadata": _prediction_metadata(research_dataset_id="left")},
+            {"metadata": _prediction_metadata(research_dataset_id="right")},
             "metadata_mismatch",
         ),
         (
@@ -1513,10 +1486,14 @@ def test_compare_output_directory_is_published_atomically(
     _write_run(baseline, "baseline_run")
     _write_run(current, "current_run")
 
-    def fail_summary(_payload: dict[str, object]) -> str:
-        raise RuntimeError("synthetic_summary_failure")
+    original_write_text = Path.write_text
 
-    monkeypatch.setattr(module, "_render_summary", fail_summary)
+    def fail_summary(path: Path, text: str, *args: object, **kwargs: object) -> int:
+        if path.name == "summary.md":
+            raise RuntimeError("synthetic_summary_failure")
+        return original_write_text(path, text, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_summary)
     with pytest.raises(RuntimeError, match="synthetic_summary_failure"):
         module.compare_runs(
             baseline_root=baseline,

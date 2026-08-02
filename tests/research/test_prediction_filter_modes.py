@@ -18,13 +18,15 @@ from quant_research_platform.contracts.predictions import (
     PredictionSpec,
 )
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.datasets import assemble_research_dataset
-from quant_research_platform.research.predictions import (
-    build_prediction_result_from_frames,
-    build_prediction_result_from_research_dataset,
+from quant_research_platform.research.datasets.assembler import (
+    assemble_research_dataset,
 )
 from quant_research_platform.research.predictions.outputs import (
+    build_prediction_result_from_frames,
     validate_prediction_outputs,
+)
+from quant_research_platform.research.predictions.runner import (
+    build_prediction_result_from_research_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
@@ -68,7 +70,6 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         input_columns=("factor",),
     )
 
-    assert "metadata" not in prediction.attrs
     assert prediction.attrs["prediction_metadata"] == {
         "prediction_mode": "minimal_oos",
         "sample_filter_mode": "eligible",
@@ -476,7 +477,6 @@ def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:
         input_columns=("factor",),
     )
 
-    assert "metadata" not in prediction.attrs
     assert prediction.attrs["prediction_metadata"]["rows_after_filter_mode"] == 6
     assert prediction.attrs["prediction_metadata"]["rows_after_input_dropna"] == 6
 

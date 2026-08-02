@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import inspect
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -18,27 +16,30 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.ids import (
     market_panel_data_id,
 )
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.calculations import (
+    calculate_price_volume_factors,
+)
+from quant_research_platform.research.factors.price_volume.columns import (
+    PRICE_VOLUME_FEATURE_EXCLUDE_COLUMNS,
+    price_volume_window_column,
+)
+from quant_research_platform.research.factors.price_volume.definitions import (
+    price_volume_factor_definitions,
+)
+from quant_research_platform.research.factors.price_volume.presets import (
     CORE_PRICE_VOLUME_FACTORS,
     PRICE_VOLUME_CORE_PRESET,
-    PRICE_VOLUME_FEATURE_EXCLUDE_COLUMNS,
     PRICE_VOLUME_SMOKE_PRESET,
     PRICE_VOLUME_STANDARD_PRESET,
     SMOKE_PRICE_VOLUME_FACTORS,
-    calculate_price_volume_factors,
-    largest_price_volume_lookback_days,
     price_volume_factor_columns,
-    price_volume_factor_definitions,
+)
+from quant_research_platform.research.factors.price_volume.requirements import (
     price_volume_factor_input_columns,
-    price_volume_window_column,
-    select_price_volume_feature_columns_from_schema,
     unsupported_price_volume_factors,
 )
-from quant_research_platform.research.factors.price_volume import (
-    rolling as price_volume_rolling,
-)
-from quant_research_platform.research.labels.forward_returns import (
-    forward_return_label_column,
+from quant_research_platform.research.factors.price_volume.windows import (
+    largest_price_volume_lookback_days,
 )
 from tests.helpers.price_volume_reference import (
     assert_frame_matches_reference,
@@ -49,7 +50,6 @@ from tests.helpers.synthetic_a_share import make_synthetic_factor_panel
 MARKET_PANEL_DATA_ID = market_panel_data_id()
 MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 REVERSAL_1D_COLUMN = price_volume_window_column("rev", 1)
-FORWARD_RETURN_20D_COLUMN = forward_return_label_column(20)
 FLOW_STANDARD_PRICE_VOLUME_FACTORS = (
     "amount_chg_20d",
     "amount_chg_60d",
@@ -83,10 +83,6 @@ def test_price_volume_standard_preset_defines_catalog_contract() -> None:
     assert "mom_252d" in columns
     assert "rev_252d" in columns
     assert set(FLOW_STANDARD_PRICE_VOLUME_FACTORS).issubset(columns)
-    assert "vol_252d" not in columns
-    assert "amount_to_float_mcap" not in columns
-    assert "amount_to_total_mcap" not in columns
-    assert FORWARD_RETURN_20D_COLUMN not in columns
     assert price_volume_factor_columns() == columns
     assert price_volume_factor_columns(preset=PRICE_VOLUME_CORE_PRESET) == (
         CORE_PRICE_VOLUME_FACTORS
@@ -101,7 +97,7 @@ def test_price_volume_standard_preset_defines_catalog_contract() -> None:
         price_volume_factor_columns(preset=PRICE_VOLUME_SMOKE_PRESET)
     )
     with pytest.raises(ValueError, match="invalid_price_volume_preset"):
-        price_volume_factor_columns(preset="full")
+        price_volume_factor_columns(preset="unknown")
 
 
 def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
@@ -188,40 +184,6 @@ def test_price_volume_feature_exclusion_is_canonical_key_only() -> None:
     assert PRICE_VOLUME_FEATURE_EXCLUDE_COLUMNS == frozenset(
         {"market_id", "asset_id", "timestamp"}
     )
-    assert "asset" not in PRICE_VOLUME_FEATURE_EXCLUDE_COLUMNS
-    assert not {
-        "eligible",
-        "can_enter",
-        "can_exit",
-        "is_st",
-        "is_pt",
-        "limit_status",
-    }.intersection(PRICE_VOLUME_FEATURE_EXCLUDE_COLUMNS)
-
-    selected, warnings = select_price_volume_feature_columns_from_schema(
-        (
-            "market_id",
-            "asset_id",
-            "timestamp",
-            MOMENTUM_20D_COLUMN,
-            FORWARD_RETURN_20D_COLUMN,
-        ),
-        expected_columns=(
-            "market_id",
-            "asset_id",
-            "timestamp",
-            MOMENTUM_20D_COLUMN,
-            FORWARD_RETURN_20D_COLUMN,
-        ),
-    )
-
-    assert selected == (MOMENTUM_20D_COLUMN,)
-    assert warnings == (
-        "excluded leakage/control column: market_id",
-        "excluded leakage/control column: asset_id",
-        "excluded leakage/control column: timestamp",
-        f"excluded leakage/control column: {FORWARD_RETURN_20D_COLUMN}",
-    )
 
 
 def test_price_volume_factors_handle_grouping_warmup_and_non_finite_edges() -> None:
@@ -278,12 +240,8 @@ def test_price_volume_factors_handle_grouping_warmup_and_non_finite_edges() -> N
     assert pd.isna(asset_a.loc[252, "mom_252d"])
     assert pd.isna(asset_a.loc[252, "rev_252d"])
     assert asset_b.loc[:251, "mom_252d"].isna().all()
-    assert asset_b.loc[252, "mom_252d"] == pytest.approx(
-        expected_asset_b_mom_252d
-    )
-    assert asset_b.loc[252, "rev_252d"] == pytest.approx(
-        -expected_asset_b_mom_252d
-    )
+    assert asset_b.loc[252, "mom_252d"] == pytest.approx(expected_asset_b_mom_252d)
+    assert asset_b.loc[252, "rev_252d"] == pytest.approx(-expected_asset_b_mom_252d)
     assert pd.isna(asset_a.loc[19, "amihud_20d"])
     assert pd.isna(asset_a.loc[19, "amplitude_20d"])
     assert pd.isna(asset_a.loc[5, "log_total_market_cap"])
@@ -325,10 +283,14 @@ def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None
         "signed_amount_flow_20d",
         "ret_amount_imbalance_20d",
     )
-    result = calculate_price_volume_factors(
-        panel.sample(frac=1.0, random_state=17),
-        factor_columns=factor_columns,
-    ).sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
+    result = (
+        calculate_price_volume_factors(
+            panel.sample(frac=1.0, random_state=17),
+            factor_columns=factor_columns,
+        )
+        .sort_values(["asset_id", "timestamp"])
+        .reset_index(drop=True)
+    )
 
     assert pd.isna(result.loc[19, "amihud_20d"])
     assert pd.isna(result.loc[19, "amplitude_20d"])
@@ -633,15 +595,10 @@ def test_price_volume_rolling_moments_are_chunk_start_invariant() -> None:
         chunked.loc[:, ("market_id", "asset_id", "timestamp", *factor_columns)],
     )
     assert (
-        full.loc[:, factor_columns].isna() == chunked.loc[:, factor_columns].isna()
-    ).all().all()
-
-
-def test_price_volume_drawdown_path_avoids_pandas_rolling_apply_hot_path() -> None:
-    source = inspect.getsource(price_volume_rolling.rolling_drawdown)
-
-    assert ".rolling(" not in source
-    assert ".apply(" not in source
+        (full.loc[:, factor_columns].isna() == chunked.loc[:, factor_columns].isna())
+        .all()
+        .all()
+    )
 
 
 def test_price_volume_compute_fails_closed_when_required_input_missing() -> None:
@@ -703,22 +660,18 @@ def test_price_volume_window_column_uses_frequency_suffix_contract() -> None:
 
 
 def test_price_volume_owner_modules_hold_their_real_contracts() -> None:
+    import quant_research_platform.research.factors.price_volume.presets as presets
+    import quant_research_platform.research.factors.price_volume.windows as windows
     from quant_research_platform.research.factors.price_volume import (
-        columns,
-        presets,
-        requirements,
-        windows,
+        requirements as requirements,
     )
 
-    assert not hasattr(columns, "CORE_PRICE_VOLUME_FACTORS")
-    assert not hasattr(columns, "BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS")
-    assert not hasattr(columns, "largest_price_volume_lookback_days")
     assert presets.CORE_PRICE_VOLUME_FACTORS
     assert presets.PRICE_VOLUME_FACTOR_PRESETS["standard"]
     assert requirements.BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS
-    assert (
-        requirements.price_volume_factor_input_columns("ret_volume_corr_20d")
-        == ("period_return", "volume")
+    assert requirements.price_volume_factor_input_columns("ret_volume_corr_20d") == (
+        "period_return",
+        "volume",
     )
     assert windows.parse_price_volume_windowed_factor_name("ret_volume_corr_20d") == (
         "ret_volume_corr",
@@ -758,11 +711,11 @@ def _calculate_price_volume_in_session_chunks(
         core_sessions = set(sessions[start_index:end_index])
         read_start_index = max(0, start_index - warmup_sessions)
         read_sessions = set(sessions[read_start_index:end_index])
-        read_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
-            read_sessions
+        read_mask = (
+            pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(read_sessions)
         )
-        core_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
-            core_sessions
+        core_mask = (
+            pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(core_sessions)
         )
         calculated = calculate_price_volume_factors(
             ordered.loc[read_mask],

@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.models.fitting as model_fitting
 from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
@@ -13,12 +14,12 @@ from quant_research_platform.contracts.predictions import (
     PREDICTION_SCORE_COLUMN,
     PredictionSpec,
 )
-from quant_research_platform.research.models import (
-    fit_model_result,
-    predict_model_frame,
-)
-from quant_research_platform.research.models.supervised import (
+from quant_research_platform.research.models.algorithm_facts import (
     model_algorithm_ids,
+)
+from quant_research_platform.research.models.prediction import predict_model_frame
+from quant_research_platform.research.models.supervised import (
+    build_estimator_from_model_spec,
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -73,8 +74,16 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
         max_train_rows=len(frame),
     )
 
-    eligible = fit_model_result(frame, eligible_spec)
-    unfiltered = fit_model_result(frame, unfiltered_spec)
+    eligible = model_fitting.fit_model_result_from_frames(
+        (frame,),
+        eligible_spec,
+        estimator=build_estimator_from_model_spec(eligible_spec),
+    )
+    unfiltered = model_fitting.fit_model_result_from_frames(
+        (frame,),
+        unfiltered_spec,
+        estimator=build_estimator_from_model_spec(unfiltered_spec),
+    )
 
     assert (
         eligible.metadata
@@ -139,7 +148,11 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
     assert unfiltered.coefficients.tolist() == pytest.approx([0.0, 0.01])
 
     all_tradability_blocked = frame.assign(can_enter=False, can_exit=False)
-    still_trains = fit_model_result(all_tradability_blocked, eligible_spec)
+    still_trains = model_fitting.fit_model_result_from_frames(
+        (all_tradability_blocked,),
+        eligible_spec,
+        estimator=build_estimator_from_model_spec(eligible_spec),
+    )
     assert still_trains.metadata["rows_after_input_label_dropna"] == 4
 
 
@@ -161,7 +174,7 @@ def test_model_metadata_rejects_invalid_count_values(
     field: str,
     value: object,
 ) -> None:
-    from quant_research_platform.research.models import fitting as model_fitting
+    import quant_research_platform.research.models.fitting as model_fitting
 
     spec = ModelSpec(
         model_id="linear_bad_metadata_count",
@@ -208,7 +221,7 @@ def test_model_streaming_fit_rejects_invalid_filter_metadata_counts(
     field: str,
     value: object,
 ) -> None:
-    from quant_research_platform.research.models import fitting as model_fitting
+    import quant_research_platform.research.models.fitting as model_fitting
 
     metadata = _model_filter_metadata()
     metadata[field] = value
@@ -225,7 +238,11 @@ def test_model_streaming_fit_rejects_invalid_filter_metadata_counts(
     )
 
     with pytest.raises(ValueError, match="invalid_model_metadata_count"):
-        fit_model_result(make_filter_mode_frame(), spec)
+        model_fitting.fit_model_result_from_frames(
+            (make_filter_mode_frame(),),
+            spec,
+            estimator=build_estimator_from_model_spec(spec),
+        )
 
 
 @pytest.mark.parametrize(
@@ -244,7 +261,7 @@ def test_model_training_collection_rejects_invalid_filter_metadata_counts(
     field: str,
     value: object,
 ) -> None:
-    from quant_research_platform.research.models import fitting as model_fitting
+    import quant_research_platform.research.models.fitting as model_fitting
 
     metadata = _model_filter_metadata()
     metadata[field] = value
@@ -268,7 +285,7 @@ def test_model_training_collection_rejects_invalid_filter_metadata_counts(
 def test_model_fit_accepts_valid_filter_metadata_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.research.models import fitting as model_fitting
+    import quant_research_platform.research.models.fitting as model_fitting
 
     def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
         return frame, _model_filter_metadata()
@@ -281,7 +298,11 @@ def test_model_fit_accepts_valid_filter_metadata_counts(
         label_column="label",
     )
 
-    result = fit_model_result(make_filter_mode_frame(), spec)
+    result = model_fitting.fit_model_result_from_frames(
+        (make_filter_mode_frame(),),
+        spec,
+        estimator=build_estimator_from_model_spec(spec),
+    )
 
     assert result.metadata["rows_input"] == 2
     assert result.metadata["rows_after_filter_mode"] == 2
@@ -327,7 +348,11 @@ def test_required_model_algorithm_ids_fit_and_predict(model_algorithm: str) -> N
         test_end="2024-01-03",
     )
 
-    result = fit_model_result(frame.loc[frame["timestamp"].lt("2024-01-03")], spec)
+    result = model_fitting.fit_model_result_from_frames(
+        (frame.loc[frame["timestamp"].lt("2024-01-03")],),
+        spec,
+        estimator=build_estimator_from_model_spec(spec),
+    )
     prediction = prediction_frame_from_artifact(
         frame,
         prediction_spec,
@@ -372,8 +397,14 @@ def test_model_training_controls_apply_to_linear_and_estimators(
         max_train_rows=len(frame),
     )
 
-    max_rows = fit_model_result(frame, max_rows_spec)
-    purge = fit_model_result(frame, purge_spec)
+    max_rows = model_fitting.fit_model_result_from_frames(
+        (frame,),
+        max_rows_spec,
+        estimator=build_estimator_from_model_spec(max_rows_spec),
+    )
+    purge = model_fitting.fit_model_result_from_frames(
+        (frame,), purge_spec, estimator=build_estimator_from_model_spec(purge_spec)
+    )
 
     assert max_rows.metadata["rows_after_input_label_dropna"] == 1
     assert max_rows.metadata["train_start"] == "2024-01-03"
@@ -386,8 +417,8 @@ def test_model_training_controls_apply_to_linear_and_estimators(
 def test_model_max_train_rows_trims_streaming_training_buffer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.research.models import fitting as model_fitting
-    from quant_research_platform.research.models import validation_split
+    import quant_research_platform.research.models.fitting as model_fitting
+    import quant_research_platform.research.models.validation_split as validation_split
 
     frame = pd.concat(
         [
@@ -436,7 +467,7 @@ def test_model_max_train_rows_trims_streaming_training_buffer(
 
 
 def test_model_training_collection_rejects_unbounded_collection() -> None:
-    from quant_research_platform.research.models import fitting as model_fitting
+    import quant_research_platform.research.models.fitting as model_fitting
 
     frame = pd.concat(
         [
@@ -494,7 +525,9 @@ def test_rank_ensembles_predict_cross_sectional_ranks_per_timestamp(
         max_train_rows=len(frame),
     )
 
-    result = fit_model_result(frame, spec)
+    result = model_fitting.fit_model_result_from_frames(
+        (frame,), spec, estimator=build_estimator_from_model_spec(spec)
+    )
     predicted = result.prediction_model.predict(frame)
     predicted_frame = predict_model_frame(frame, spec, result)
 
@@ -538,7 +571,9 @@ def test_rank_ensemble_prediction_outputs_are_chunk_boundary_invariant(
         train_end="2024-01-01",
         test_start="2024-01-02",
     )
-    result = fit_model_result(frame, model_spec)
+    result = model_fitting.fit_model_result_from_frames(
+        (frame,), model_spec, estimator=build_estimator_from_model_spec(model_spec)
+    )
 
     one_chunk = make_filter_mode_prediction_output_scores(
         [frame],
@@ -628,7 +663,9 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design() -> None:
     design[:, 1:] = x
     expected, *_ = np.linalg.lstsq(design, y, rcond=None)
 
-    result = fit_model_result(frame, spec)
+    result = model_fitting.fit_model_result_from_frames(
+        (frame,), spec, estimator=build_estimator_from_model_spec(spec)
+    )
 
     assert result.coefficients.tolist() == pytest.approx(expected.tolist())
 
@@ -637,7 +674,9 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design() -> None:
         environ={},
     )
     with runtime_resource_policy_scope(policy):
-        tiny_result = fit_model_result(frame, spec)
+        tiny_result = model_fitting.fit_model_result_from_frames(
+            (frame,), spec, estimator=build_estimator_from_model_spec(spec)
+        )
 
     assert tiny_result.coefficients.tolist() == pytest.approx(
         expected.tolist(),

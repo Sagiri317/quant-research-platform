@@ -19,12 +19,7 @@ def write_markdown_evidence(path: Path, text: str) -> Path:
     return atomic_write_text(path, text, encoding="utf-8")
 
 
-def write_run_summary_markdown(path: Path, text: str) -> Path:
-    return write_markdown_evidence(path, text)
-
-
 __all__ = [
     "write_json_evidence",
     "write_markdown_evidence",
-    "write_run_summary_markdown",
 ]

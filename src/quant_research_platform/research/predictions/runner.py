@@ -7,6 +7,7 @@ from dataclasses import replace
 
 import pandas as pd
 
+import quant_research_platform.research.models.fitting as fitting
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
@@ -16,10 +17,11 @@ from quant_research_platform.contracts.predictions import (
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.research.datasets import validate_prediction_input
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.datasets.validation import (
+    validate_prediction_input,
+)
 from quant_research_platform.research.filtering import apply_filter_mode
-from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
@@ -95,11 +97,20 @@ def build_prediction_result_from_research_dataset(
             model_catalog=model_catalog,
             chunks=_chunks,
         )
-    train_read_columns = _prediction_train_read_columns(dataset_spec, model_spec)
-    prediction_read_columns = _prediction_read_columns(
-        dataset_spec,
-        prediction_spec,
-        model_spec,
+    train_read_columns = _prediction_train_read_columns(
+        dataset_spec.primary_key,
+        model_spec.input_columns,
+        label_column=model_spec.label_column,
+        sample_filter_mode=model_spec.sample_filter_mode,
+    )
+    prediction_read_columns = tuple(
+        dict.fromkeys(
+            (
+                *dataset_spec.primary_key,
+                *model_spec.input_columns,
+                *required_filter_columns(prediction_spec.sample_filter_mode),
+            )
+        )
     )
     train_end = pd.Timestamp(prediction_spec.train_end)
     try:
@@ -128,34 +139,6 @@ def build_prediction_result_from_research_dataset(
     )
 
 
-def build_prediction_results_from_research_dataset(
-    *,
-    layout: StorageLayout,
-    dataset_catalog: ResearchDatasetCatalog,
-    model_catalog: ModelCatalog,
-    prediction_catalog: PredictionCatalog,
-    prediction_ids: Iterable[str],
-    time_window: TimeWindow | None = None,
-    prediction_train_end: str | None = None,
-    prediction_test_start: str | None = None,
-    prediction_test_end: str | None = None,
-) -> tuple[PredictionResult, ...]:
-    return tuple(
-        build_prediction_result_from_research_dataset(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            model_catalog=model_catalog,
-            prediction_catalog=prediction_catalog,
-            prediction_id=prediction_id,
-            time_window=time_window,
-            prediction_train_end=prediction_train_end,
-            prediction_test_start=prediction_test_start,
-            prediction_test_end=prediction_test_end,
-        )
-        for prediction_id in prediction_ids
-    )
-
-
 def _validated_prediction_chunks(
     chunks: Iterable[pd.DataFrame],
     *,
@@ -169,35 +152,6 @@ def _validated_prediction_chunks(
             input_columns=input_columns,
         )
         yield chunk
-
-
-def _prediction_train_read_columns(dataset_spec, model_spec) -> tuple[str, ...]:
-    return tuple(
-        dict.fromkeys(
-            (
-                *dataset_spec.primary_key,
-                *model_spec.input_columns,
-                model_spec.label_column,
-                *required_filter_columns(model_spec.sample_filter_mode),
-            )
-        )
-    )
-
-
-def _prediction_read_columns(
-    dataset_spec,
-    prediction_spec,
-    model_spec,
-) -> tuple[str, ...]:
-    return tuple(
-        dict.fromkeys(
-            (
-                *dataset_spec.primary_key,
-                *model_spec.input_columns,
-                *required_filter_columns(prediction_spec.sample_filter_mode),
-            )
-        )
-    )
 
 
 def _select_prediction_model_spec(
@@ -219,7 +173,7 @@ def _select_prediction_model_spec(
     validation_end = pd.Timestamp(prediction_spec.model_selection_validation_end)
     trial_metric_records: list[dict[str, object]] = []
     for candidate_spec in candidate_specs:
-        train_read_columns = _prediction_train_read_columns_from_inputs(
+        train_read_columns = _prediction_train_read_columns(
             dataset_spec.primary_key,
             candidate_spec.input_columns,
             label_column=label_column,
@@ -285,7 +239,7 @@ def _select_prediction_model_spec(
     return model_catalog.get(selected_model_id), metadata
 
 
-def _prediction_train_read_columns_from_inputs(
+def _prediction_train_read_columns(
     primary_key: tuple[str, ...],
     input_columns: tuple[str, ...],
     *,
@@ -377,5 +331,4 @@ def _prediction_timestamps(chunk: pd.DataFrame) -> pd.Series:
 
 __all__ = [
     "build_prediction_result_from_research_dataset",
-    "build_prediction_results_from_research_dataset",
 ]

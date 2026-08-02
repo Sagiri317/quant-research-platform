@@ -30,6 +30,9 @@ from quant_research_platform.contracts.evaluations import (
     strict_non_negative_count_series,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
+from quant_research_platform.policy.share_safety import (
+    evidence_text_stream_unsafe_reason,
+)
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
@@ -120,16 +123,20 @@ def write_evaluation_outputs(
             compression="zstd",
             index=False,
         )
-        (temp_root / "summary.md").write_text(
-            _render_evaluation_summary(
-                spec=spec,
-                evaluation_diagnostics=evaluation_diagnostics,
-                metrics=metrics,
-                ic_summary=ic_summary,
-                group_spread_summary=group_spread_summary,
-            ),
-            encoding="utf-8",
+        rendered_summary = _render_evaluation_summary(
+            spec=spec,
+            evaluation_diagnostics=evaluation_diagnostics,
+            metrics=metrics,
+            ic_summary=ic_summary,
+            group_spread_summary=group_spread_summary,
         )
+        unsafe_summary = evidence_text_stream_unsafe_reason(
+            rendered_summary[offset : offset + 2048].encode("utf-8")
+            for offset in range(0, len(rendered_summary), 2048)
+        )
+        if unsafe_summary is not None:
+            raise ValueError(f"evaluation_summary_share_unsafe: {unsafe_summary}")
+        (temp_root / "summary.md").write_text(rendered_summary, encoding="utf-8")
         write_manifest(
             temp_root / "manifest.json",
             output_manifest_payload(
@@ -202,9 +209,7 @@ def _markdown_table(frame: pd.DataFrame, columns: tuple[str, ...]) -> str:
     ]
     for _, row in frame.loc[:, list(columns)].iterrows():
         rows.append(
-            "| "
-            + " | ".join(_markdown_cell(row[column]) for column in columns)
-            + " |"
+            "| " + " | ".join(_markdown_cell(row[column]) for column in columns) + " |"
         )
     return "\n".join(rows)
 
@@ -223,10 +228,14 @@ def _signal_label_coverage_summary(metrics: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
     source = metrics.copy()
     if "n_obs" not in source:
-        return source.loc[:, ["signal", "label"]].drop_duplicates().assign(
-            mean_n_obs=pd.NA,
-            min_n_obs=pd.NA,
-            non_empty_period_count=pd.NA,
+        return (
+            source.loc[:, ["signal", "label"]]
+            .drop_duplicates()
+            .assign(
+                mean_n_obs=pd.NA,
+                min_n_obs=pd.NA,
+                non_empty_period_count=pd.NA,
+            )
         )
     source["n_obs"] = strict_non_negative_count_series(source["n_obs"])
     grouped = source.groupby(["signal", "label"], as_index=False, sort=True)["n_obs"]

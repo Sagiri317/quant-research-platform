@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 from pydantic import ValidationError
@@ -13,10 +14,7 @@ from quant_research_platform.compute._portfolio_math import (
     validate_tradability_columns,
     validate_weight_columns,
 )
-from quant_research_platform.compute.dataframe import constraints
-from quant_research_platform.compute.dataframe.construction import (
-    build_weighted_positions,
-)
+from quant_research_platform.compute.dataframe import constraints, position_math
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
     risk_values,
     select_signal,
@@ -173,31 +171,6 @@ def test_portfolio_helper_costs_signals_and_group_keys() -> None:
     }
 
 
-def test_rank_weighted_short_leg_weights_more_extreme_signals_more_heavily() -> None:
-    panel = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02"] * 4),
-            "asset": ["A", "B", "C", "D"],
-            "signal": [0.0, 1.0, 2.0, 3.0],
-            "label": [0.0, 0.0, 0.0, 0.0],
-        }
-    )
-    spec = ComputePanelSpec(signal_columns=("signal",), label_column="label")
-
-    positions, _diagnostics = build_weighted_positions(
-        panel,
-        spec,
-        WeightConfig(
-            method="rank_weighted_quantile",
-            top_quantile=0.5,
-            bottom_quantile=0.5,
-        ),
-    )
-    weights = positions.set_index("asset")["position"]
-    assert abs(weights["A"]) > abs(weights["B"])
-    assert abs(weights["D"]) > abs(weights["C"])
-
-
 def test_dataframe_tradability_helper_edges() -> None:
     spec = ComputePanelSpec(signal_columns=("signal",), label_column="label")
     frame = _compute_frame().assign(
@@ -223,8 +196,6 @@ def test_dataframe_tradability_helper_edges() -> None:
             TradabilityConfig(can_enter_column="can_enter"),
         )
 
-    assert not hasattr(constraints, "_filter_eligible_assets")
-    assert not hasattr(constraints, "_filter_new_entry_blocked_assets")
     counts = constraints.tradability_diagnostic_counts(
         timestamp_frame=frame,
         signal="signal",
@@ -253,6 +224,116 @@ def test_dataframe_tradability_helper_edges() -> None:
         can_enter_flags={"B": False},
         tradability_config=tradability,
     )
+
+
+def test_tradability_constraints_preserve_blocked_positions_and_reject_exit() -> None:
+    frame = _compute_frame().assign(can_enter=[False, False], can_exit=[False, True])
+    spec = ComputePanelSpec(signal_columns=("signal",), label_column="label")
+    carry = TradabilityConfig(
+        can_enter_column="can_enter",
+        can_exit_column="can_exit",
+        blocked_exit_policy="carry_forward",
+    )
+    context = {
+        "entry_checks_required": True,
+        "exit_checks_required": True,
+        "can_enter_flags": {"A": False, "B": False, "C": False, "D": False},
+        "can_exit_flags": {"A": False, "B": True, "C": True, "D": False},
+    }
+
+    adjusted = constraints.apply_tradability_constraints(
+        positions={"A": 0.0, "B": 1.0, "C": -1.0},
+        timestamp_frame=frame,
+        spec=spec,
+        tradability_config=carry,
+        previous_positions={"A": 1.0, "C": 1.0, "D": 1.0},
+        tradability_context=context,
+    )
+
+    assert adjusted == {"A": 1.0, "B": 0.0, "C": 1.0, "D": 1.0}
+    with pytest.raises(ValueError, match="exit is blocked"):
+        constraints.apply_tradability_constraints(
+            positions={"A": 0.0},
+            timestamp_frame=frame,
+            spec=spec,
+            tradability_config=TradabilityConfig(
+                can_exit_column="can_exit",
+                blocked_exit_policy="error",
+            ),
+            previous_positions={"A": 1.0},
+            tradability_context={
+                "entry_checks_required": False,
+                "exit_checks_required": True,
+                "can_enter_flags": None,
+                "can_exit_flags": {"A": False},
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("method", "risk", "sign"),
+    (
+        ("equal_weight_quantile", None, 1.0),
+        ("rank_weighted_quantile", None, -1.0),
+        ("zscore_weighted_quantile", None, 1.0),
+        ("signal_abs_weighted_quantile", None, 1.0),
+        ("inverse_vol_scaled_quantile", np.array([1.0, 2.0]), 1.0),
+    ),
+)
+def test_leg_weight_methods_normalize_one_signed_leg(
+    method: str,
+    risk: np.ndarray | None,
+    sign: float,
+) -> None:
+    weights, fallback = position_math._leg_weights(
+        asset_values=np.array(["A", "B"]),
+        signal_values=np.array([1.0, 3.0]),
+        risk_values=risk,
+        signal="signal",
+        weight_config=WeightConfig(
+            method=method,
+            risk_column="risk" if risk is not None else None,
+        ),
+        sign=sign,
+    )
+
+    assert sum(abs(value) for value in weights.values()) == pytest.approx(1.0)
+    assert all(np.sign(value) == sign for value in weights.values())
+    assert fallback == ""
+
+
+def test_zero_zscore_leg_uses_equal_weight_fallback() -> None:
+    weights, fallback = position_math._leg_weights(
+        asset_values=np.array(["A", "B"]),
+        signal_values=np.array([1.0, 1.0]),
+        risk_values=None,
+        signal="signal",
+        weight_config=WeightConfig(method="zscore_weighted_quantile"),
+        sign=1.0,
+    )
+
+    assert weights == {"A": 0.5, "B": 0.5}
+    assert fallback == "equal_weight_fallback"
+
+
+def test_position_validation_rejects_shape_and_key_ambiguity() -> None:
+    valid = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-02", "2026-01-01"],
+            "asset": ["B", "A"],
+            "signal": ["factor", "factor"],
+            "position": [0.5, -0.5],
+        }
+    )
+    assert position_math.validate_positions(valid)["asset"].tolist() == ["A", "B"]
+    with pytest.raises(TypeError, match="pandas DataFrame"):
+        position_math.validate_positions(object())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="missing columns"):
+        position_math.validate_positions(valid.drop(columns="signal"))
+    with pytest.raises(TypeError, match="position must be numeric"):
+        position_math.validate_positions(valid.assign(position=["x", "y"]))
+    with pytest.raises(ValueError, match="unique"):
+        position_math.validate_positions(pd.concat([valid, valid.iloc[[0]]]))
 
 
 def _compute_frame() -> pd.DataFrame:

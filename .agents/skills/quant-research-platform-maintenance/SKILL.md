@@ -10,7 +10,7 @@ description: QRP 仓库维护 skill。用于 governance、handoff、contracts、
 使用本 skill 的任务包括：
 
 - governance docs、agent instructions、prompt templates、handoff workflow
-- `verify_governance.py`、`verify_code_map_flow.py`、handoff builder/verifier
+- `verify_governance.py`、source-tree scan、handoff builder/verifier
 - `tests/agents/**`、`tests/architecture/**`、current-contract negative tests
 - docs hard cutover、open issues、REVIEW_SAFE evidence
 - current-contract-only、private data safety、PASS taxonomy
@@ -35,32 +35,20 @@ git branch -a
 
 ```text
 AGENTS.md
-.agents/briefs/repo-map.md
-.agents/briefs/user-principles.md
 ```
 
-再按任务读 references：
+再按任务只读仍存在的 references：
 
 ```text
-references/current-contract.md
 references/task-routing.md
 references/verification-and-gates.md
-references/handoff-and-evidence.md
 references/tooling-and-portability.md
 references/prompt-patterns.md
 ```
 
 只读相关文件，不要为了“全面”把所有 docs、archived reports 或 `.run/` 全量读入上下文。
 
-## 3. 当前分层事实
-
-`policy/` 管共享安全、ID 安全和状态聚合。`contracts/` 只管结构合同。`catalog/` 只管 generic registry class。`profiles/` 是 API、CLI、agent、workflow 共用组合根。`research/` 只构建 result，不写文件。`reports/` 只 build/render evidence/report 内容。`artifacts/` 只写 LOCAL_ONLY outputs 和 REVIEW_SAFE evidence 文件。`workflows/` 只编排 research -> reports -> artifacts。`storage/` 只管 dataset IO 和 data layout。
-
-运行结果合同是 `<run_root>/run.json`、`data/`、`outputs/<output_id>/`、`logs/` 和 `summary.md`。QRP-owned JSON 必须是 object，并使用不带版本后缀的 `schema_id`。compare 默认按 `output_id` 配对。状态聚合只由 `policy/check_status.py` 定义；`governance_contract.py` 只拥有扫描规则。
-
-`.agents` 是 tracked tooling source。`.run` 是 output/evidence layer；官方工具入口留在 tracked source 中。
-
-## 4. 验证纪律
+## 3. 验证纪律
 
 所有报告只用：`PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。
 
@@ -72,16 +60,14 @@ references/prompt-patterns.md
 .agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
 ```
 
-`verify_governance.py`、source-tree scan 和相关 tests 必须引用该事实源或由它派生规则。current-contract-only 规则、版本面规则、negative-test allowlist、source-tree scan allowlist、package safety path parts 和 status token 只从该事实源读取或派生。
-source-tree scan 由 `governance_contract.SourceTreeScanInput` 驱动；individual
-scanner 不保留 Path 旧入口。
+`verify_governance.py`、source-tree scan 和相关 tests 必须引用该事实源或由它派生规则。active doc roots、sensitive-text 精确例外、layer/writer owner 规则和 package safety path parts 只从该事实源读取或派生。普通名称、目录位置和实现形状不属于治理失败条件。
+source-tree scan 由 `governance_contract.SourceTreeScanInput` 驱动。
 
 建议命令：
 
 ```bash
 git diff --check
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 
@@ -92,7 +78,7 @@ expression。fast/contract 用于日常收口；integration 和 mutation 必须�
 evidence 放 `tests/agents/handoff/`，governance current-contract surface 放
 `tests/agents/` 或 `tests/architecture/`，import boundary 放 `tests/architecture/`。
 
-## 5. Handoff 纪律
+## 4. Handoff 纪律
 
 handoff scripts 位于：
 
@@ -108,7 +94,7 @@ package load path，并与 builder 共享 package payload validation。handoff a
 输出到 `.run/` 或用户指定输出目录；`.run/` 不定义合同。
 
 handoff package layout、sidecar、task metadata、validation summary、`FieldSpec`、
-`allowed_keys()` 和 validation row source contract 由 `handoff/handoff_contract.py`
+exact schema validation 和 validation row source contract 由 `handoff/handoff_contract.py`
 拥有。receipt schema specs、receipt invariant、normalize 和 compare 规则由
 `handoff/receipt_contract.py` 拥有。public machine replay 和 hard-scan receipt
 payload construction 由 `handoff/replay_evidence.py` 执行，但 replay 模块不定义合同
@@ -119,13 +105,13 @@ payload construction 由 `handoff/replay_evidence.py` 执行，但 replay 模块
 
 `.agents/` 只承载 governance、handoff 和 prompt tooling；runtime 业务逻辑必须留在 `src/quant_research_platform/` 的 owner layer。
 
-## 6. 修改边界
+## 5. 修改边界
 
 修改 docs 时，如果删除或改名 active docs，必须同步修治理脚本和测试。测试修复不能通过恢复被替换事实源完成。
 
 修脚本时，优先修 state-based scan 和测试覆盖。业务逻辑文件默认留在任务范围外，除非用户明确授权或当前任务本身要求迁移业务层边界。
 
-## 7. 结束报告
+## 6. 结束报告
 
 最终报告必须包含：
 

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import inspect
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -23,18 +21,27 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     market_panel_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
-    materialization_io,
-    materialization_planning,
-    materialize_annotations,
-    materialize_factors,
-    materialize_labels,
-    materialize_panel,
-    materializer,
+    materialization_io as materialization_io,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_planning as materialization_planning,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialize_factors as materialize_factors,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialize_labels as materialize_labels,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialize_panel as materialize_panel,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materializer as materializer,
 )
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.columns import (
     price_volume_window_column,
 )
 from quant_research_platform.research.labels.forward_returns import (
@@ -43,6 +50,8 @@ from quant_research_platform.research.labels.forward_returns import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import (
@@ -64,36 +73,100 @@ MARKET_PANEL_DATA_ID = market_panel_data_id()
 MARKET_CONTEXT_DATA_ID = market_context_data_id()
 
 
-def test_a_share_output_disk_guard_checks_each_chunk(
-    tmp_path: Path,
+def _publication_policy() -> RuntimeResourcePolicy:
+    return RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=2 * 1024**3,
+        environ={
+            "QRP_TASK_MEMORY_BUDGET_MB": "1024",
+            "QRP_PAYLOAD_TARGET_MB": "256",
+        },
+    )
+
+
+def test_a_share_output_publication_rejects_unordered_chunks_and_boundaries() -> None:
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+
+    def frame(timestamps: list[str]) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                column: (
+                    pd.to_datetime(timestamps)
+                    if column == "timestamp"
+                    else ["a_share" if column == "market_id" else "value"]
+                    * len(timestamps)
+                )
+                for column in spec.required_columns
+            }
+        )
+
+    with pytest.raises(ValueError, match="a_share_output_primary_key_order_regression"):
+        list(
+            materialization_io.iter_sorted_output_chunks(
+                frame(["2014-01-03", "2014-01-02"]),
+                spec,
+                resource_policy=_publication_policy(),
+            )
+        )
+    with pytest.raises(ValueError, match="a_share_output_primary_key_order_regression"):
+        list(
+            materialization_io.iter_sorted_output_chunks(
+                (frame(["2014-01-03"]), frame(["2014-01-02"])),
+                spec,
+                resource_policy=_publication_policy(),
+            )
+        )
+
+
+def test_a_share_output_publication_rejects_near_headroom_before_sort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed: list[Path] = []
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=4 * 1024**2,
+        environ={
+            "QRP_TASK_MEMORY_BUDGET_MB": "1",
+            "QRP_PAYLOAD_TARGET_MB": "1",
+        },
+    )
+    frame = pd.DataFrame(
+        {
+            column: (
+                pd.to_datetime(["2014-01-02", "2014-01-03"])
+                if column == "timestamp"
+                else ["a_share", "a_share"]
+            )
+            for column in spec.required_columns
+        }
+    )
+    temporary_bytes = len(frame) * (len(spec.primary_key) * 8 + 2 * 8)
     monkeypatch.setattr(
         materialization_io,
-        "require_free_disk_headroom",
-        lambda path, **_kwargs: observed.append(Path(path)),
+        "pandas_frame_payload_bytes",
+        lambda _frame: policy.task_memory_budget_bytes - temporary_bytes + 1,
     )
-    frames = (pd.DataFrame({"value": [1]}), pd.DataFrame({"value": [2]}))
 
-    result = list(
-        materialization_io._iter_disk_guarded_output_chunks(
-            frames,
-            scratch_parent=tmp_path,
+    def reject_sort(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("np.lexsort must not run before capacity admission")
+
+    monkeypatch.setattr(materialization_io.np, "lexsort", reject_sort)
+
+    with pytest.raises(
+        materialization_io.MaterializationCapacityExceeded,
+        match="a_share_known_payloads_exceed_task_memory_budget",
+    ):
+        list(
+            materialization_io.iter_sorted_output_chunks(
+                frame,
+                spec,
+                resource_policy=policy,
+            )
         )
-    )
-
-    assert [len(frame) for frame in result] == [1, 1]
-    assert observed == [tmp_path, tmp_path]
-    source = inspect.getsource(materialization_io.write_and_inspect)
-    assert "resource_policy" in source
-    assert "_iter_disk_guarded_output_chunks(" in source
 
 
-def test_a_share_output_wrappers_release_previous_chunk_before_next_source(
-    tmp_path: Path,
+def test_sorted_output_chunks_bind_creation_policy_and_activate_before_source_pull(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    policy = _publication_policy()
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
     frame = pd.DataFrame(
         {
@@ -105,36 +178,108 @@ def test_a_share_output_wrappers_release_previous_chunk_before_next_source(
             for column in spec.required_columns
         }
     )
-    observed: list[tuple[set[str], set[str]]] = []
+    observed: list[RuntimeResourcePolicy | None] = []
 
-    def source():  # noqa: ANN202
-        for current in (frame, frame.iloc[:0].copy(), frame.copy()):
-            yield current
-            sorted_frame = inspect.currentframe().f_back
-            assert sorted_frame is not None
-            disk_frame = sorted_frame.f_back
-            assert disk_frame is not None
-            observed.append(
-                (
-                    {"chunk", "output"}.intersection(sorted_frame.f_locals),
-                    {"chunk", "chunk_bytes"}.intersection(disk_frame.f_locals),
-                )
+    class Source:
+        def __init__(self) -> None:
+            self.remaining = 1
+
+        def __iter__(self):  # noqa: ANN204
+            observed.append(current_runtime_resource_policy())
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            observed.append(current_runtime_resource_policy())
+            if self.remaining == 0:
+                raise StopIteration
+            self.remaining -= 1
+            return frame
+
+        def close(self) -> None:
+            observed.append(current_runtime_resource_policy())
+
+    source = Source()
+    wrapped = materialization_io.iter_sorted_output_chunks(
+        source,
+        spec,
+        resource_policy=policy,
+    )
+
+    assert observed == []
+    assert list(wrapped) == [frame]
+    assert observed and all(item is policy for item in observed)
+    assert current_runtime_resource_policy() is None
+
+
+def test_sorted_output_chunks_reject_different_creation_and_activation_policies() -> (
+    None
+):
+    policy = _publication_policy()
+    creation_other_policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=2 * 1024**3,
+        environ={
+            "QRP_TASK_MEMORY_BUDGET_MB": "512",
+            "QRP_PAYLOAD_TARGET_MB": "128",
+        },
+    )
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+    source_pulls = 0
+
+    class Source:
+        def __iter__(self):  # noqa: ANN204
+            nonlocal source_pulls
+            source_pulls += 1
+            return iter(())
+
+    with runtime_resource_policy_scope(creation_other_policy):
+        with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
+            materialization_io.iter_sorted_output_chunks(
+                Source(), spec, resource_policy=policy
             )
 
-    monkeypatch.setattr(
-        materialization_io,
-        "require_free_disk_headroom",
-        lambda *_args, **_kwargs: None,
+    wrapped = materialization_io.iter_sorted_output_chunks(
+        Source(), spec, resource_policy=policy
     )
-    chunks = materialization_io._iter_disk_guarded_output_chunks(
-        materialization_io.iter_sorted_output_chunks(source(), spec),
-        scratch_parent=tmp_path,
+    activation_other_policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=2 * 1024**3,
+        environ={
+            "QRP_TASK_MEMORY_BUDGET_MB": "512",
+            "QRP_PAYLOAD_TARGET_MB": "128",
+        },
     )
+    with runtime_resource_policy_scope(activation_other_policy):
+        with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
+            next(iter(wrapped))
 
-    output = tuple(chunks)
+    assert source_pulls == 0
 
-    assert len(output) == 2
-    assert observed[:2] == [(set(), set()), (set(), set())]
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt])
+def test_sorted_output_chunks_closes_source_inside_bound_policy_on_failure(
+    failure: type[BaseException],
+) -> None:
+    policy = _publication_policy()
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+    closed_under: list[RuntimeResourcePolicy | None] = []
+
+    class Source:
+        def __iter__(self):  # noqa: ANN204
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            raise failure("source_failure")
+
+        def close(self) -> None:
+            closed_under.append(current_runtime_resource_policy())
+
+    wrapped = materialization_io.iter_sorted_output_chunks(
+        Source(), spec, resource_policy=policy
+    )
+    with pytest.raises(failure, match="source_failure"):
+        next(iter(wrapped))
+
+    assert closed_under == [policy]
+    assert current_runtime_resource_policy() is None
 
 
 @pytest.mark.parametrize(
@@ -181,7 +326,9 @@ def test_a_share_output_wrapper_close_cascades_to_source(
 
     monkeypatch.setattr(materialization_io, "require_free_disk_headroom", disk_check)
     source_chunks = source()
-    sorted_chunks = materialization_io.iter_sorted_output_chunks(source_chunks, spec)
+    sorted_chunks = materialization_io.iter_sorted_output_chunks(
+        source_chunks, spec, resource_policy=_publication_policy()
+    )
     chunks = materialization_io._iter_disk_guarded_output_chunks(
         sorted_chunks,
         scratch_parent=tmp_path,
@@ -259,7 +406,9 @@ def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
 
     source = Source()
     if wrapper_name == "sorted":
-        wrapped = materialization_io.iter_sorted_output_chunks(source, spec)
+        wrapped = materialization_io.iter_sorted_output_chunks(
+            source, spec, resource_policy=_publication_policy()
+        )
     elif wrapper_name == "disk_guarded":
         monkeypatch.setattr(
             materialization_io,
@@ -388,7 +537,9 @@ def test_a_share_io_wrapper_cleanup_lifecycle(
 
     source = Source()
     if wrapper_name == "sorted":
-        wrapped = materialization_io.iter_sorted_output_chunks(source, spec)
+        wrapped = materialization_io.iter_sorted_output_chunks(
+            source, spec, resource_policy=_publication_policy()
+        )
     elif wrapper_name == "disk_guarded":
         monkeypatch.setattr(
             materialization_io,
@@ -474,23 +625,33 @@ def test_write_and_inspect_activates_explicit_policy(
     )
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
     inspection = object()
-    observed: list[RuntimeResourcePolicy] = []
+    observed: list[tuple[RuntimeResourcePolicy, int]] = []
 
-    def capture_write(*_args: object, **_kwargs: object) -> None:
-        observed.append(active_runtime_resource_policy())
+    def capture_write(*_args: object, **kwargs: object) -> None:
+        observed.append(
+            (active_runtime_resource_policy(), kwargs["retained_payload_bytes"])
+        )
 
-    def capture_inspection(*_args: object, **_kwargs: object) -> object:
-        observed.append(active_runtime_resource_policy())
+    def capture_inspection(*_args: object, **kwargs: object) -> object:
+        observed.append(
+            (active_runtime_resource_policy(), kwargs["retained_payload_bytes"])
+        )
         return inspection
 
-    monkeypatch.setattr(materialization_io, "write_dataset", capture_write)
+    monkeypatch.setattr(materialization_io, "_write_dataset", capture_write)
     monkeypatch.setattr(materialization_io, "inspect_dataset", capture_inspection)
+    monkeypatch.setattr(
+        materialization_io,
+        "dataset_inspection_retained_memory_bytes",
+        lambda _inspection: 123,
+    )
     monkeypatch.setattr(
         materialization_io,
         "iter_sorted_output_chunks",
         lambda *_args, **_kwargs: (),
     )
-    written = {}
+    prior = object()
+    written = {"prior": prior}
 
     result = materialization_io.write_and_inspect(
         spec,
@@ -501,9 +662,9 @@ def test_write_and_inspect_activates_explicit_policy(
         resource_policy=policy,
     )
 
-    assert observed == [policy, policy]
+    assert observed == [(policy, 123), (policy, 123)]
     assert result is inspection
-    assert written == {spec.data_id: inspection}
+    assert written == {"prior": prior, spec.data_id: inspection}
 
 
 FORWARD_RETURN_1D_COLUMN = forward_return_label_column(1)
@@ -606,8 +767,11 @@ def test_panel_materializer_does_not_preload_full_market_bars(
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
         data_ids=(MARKET_PANEL_DATA_ID,),
         resource_policy=RuntimeResourcePolicy.from_environment(
-            available_memory_bytes=512 * 1024,
-            environ={},
+            available_memory_bytes=16 * 1024 * 1024,
+            environ={
+                "QRP_TASK_MEMORY_BUDGET_MB": "5",
+                "QRP_PAYLOAD_TARGET_MB": "1",
+            },
         ),
     )
 
@@ -668,7 +832,7 @@ def test_materialize_processed_data_rejects_non_daily_active_profile_before_io(
     def fail_if_sessions_are_read(
         *args: object,
         **kwargs: object,
-    ) -> tuple[pd.Timestamp, ...]:
+    ) -> pd.DatetimeIndex:
         raise AssertionError("frequency validation should run before source reads")
 
     monkeypatch.setattr(materializer, "processed_catalog", lambda: catalog)
@@ -1193,25 +1357,28 @@ def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(
         tmp_path,
         data_id=MARKET_PANEL_DATA_ID,
         kind="panel",
-        end_date="2014-01-08",
-        time_window=TimeWindow("2014-01-02", "2014-01-07"),
+        end_date="2014-02-28",
+        time_window=TimeWindow("2014-01-02", "2014-02-28"),
+        asset_count=256,
     )
 
 
 @pytest.mark.parametrize(
-    ("data_id", "kind", "end_date", "time_window"),
+    ("data_id", "kind", "end_date", "time_window", "asset_count"),
     [
         (
             "execution",
             "annotation",
-            "2014-01-08",
-            TimeWindow("2014-01-02", "2014-01-07"),
+            "2014-02-28",
+            TimeWindow("2014-01-02", "2014-02-28"),
+            256,
         ),
         pytest.param(
             "price_volume",
             "factor",
             "2014-08-29",
             TimeWindow("2014-01-02", "2014-02-28"),
+            64,
             marks=pytest.mark.slow,
         ),
         pytest.param(
@@ -1219,6 +1386,7 @@ def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(
             "label",
             "2014-08-29",
             TimeWindow("2014-01-02", "2014-02-28"),
+            64,
             marks=pytest.mark.slow,
         ),
     ],
@@ -1229,6 +1397,7 @@ def test_materialize_processed_data_downstream_forced_tiny_chunks_equal_default_
     kind: str,
     end_date: str,
     time_window: TimeWindow,
+    asset_count: int,
 ) -> None:
     assert_forced_tiny_processed_chunks_match_default(
         tmp_path,
@@ -1236,317 +1405,8 @@ def test_materialize_processed_data_downstream_forced_tiny_chunks_equal_default_
         kind=kind,
         end_date=end_date,
         time_window=time_window,
+        asset_count=asset_count,
     )
-
-
-@pytest.mark.parametrize(
-    (
-        "module",
-        "yielded_name",
-        "stale_names",
-        "data_id",
-        "kind",
-        "end_date",
-        "time_window",
-    ),
-    (
-        (
-            materialize_factors,
-            "selected",
-            {"processed_inputs", "panel", "factors", "output"},
-            "price_volume",
-            "factor",
-            "2014-08-29",
-            TimeWindow("2014-01-02", "2014-02-28"),
-        ),
-        (
-            materialize_labels,
-            "selected",
-            {"processed_inputs", "panel", "labels", "output"},
-            "forward_returns",
-            "label",
-            "2014-08-29",
-            TimeWindow("2014-01-02", "2014-02-28"),
-        ),
-    ),
-)
-def test_a_share_window_pipeline_releases_previous_locals_before_next_compute(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    module: object,
-    yielded_name: str,
-    stale_names: set[str],
-    data_id: str,
-    kind: str,
-    end_date: str,
-    time_window: TimeWindow,
-) -> None:
-    original_disk_guard = materialization_io._iter_disk_guarded_output_chunks
-    module_path = str(Path(module.__file__).resolve())
-    observed: list[tuple[set[str], set[str], set[str], bool, bool, bool]] = []
-
-    def inspect_disk_guard(chunks, *, scratch_parent):  # noqa: ANN001, ANN202
-        sorted_chunks = iter(chunks)
-        disk_chunks = original_disk_guard(
-            sorted_chunks,
-            scratch_parent=scratch_parent,
-        )
-        try:
-            for yielded in disk_chunks:
-                sorted_locals = inspect.getgeneratorlocals(sorted_chunks)
-                producer = sorted_locals.get("frames")
-                if (
-                    inspect.isgenerator(producer)
-                    and str(Path(producer.gi_code.co_filename).resolve()) == module_path
-                ):
-                    producer_locals = inspect.getgeneratorlocals(producer)
-                    disk_locals = inspect.getgeneratorlocals(disk_chunks)
-                    observed.append(
-                        (
-                            stale_names.intersection(producer_locals),
-                            {"chunk"}.intersection(sorted_locals),
-                            {"chunk_bytes"}.intersection(disk_locals),
-                            isinstance(producer_locals.get(yielded_name), pd.DataFrame),
-                            sorted_locals.get("output") is yielded,
-                            disk_locals.get("chunk") is yielded,
-                        )
-                    )
-                yield yielded
-        finally:
-            disk_chunks.close()
-
-    monkeypatch.setattr(
-        materialization_io,
-        "_iter_disk_guarded_output_chunks",
-        inspect_disk_guard,
-    )
-    assert_forced_tiny_processed_chunks_match_default(
-        tmp_path,
-        data_id=data_id,
-        kind=kind,
-        end_date=end_date,
-        time_window=time_window,
-    )
-
-    assert observed
-    assert observed == [(set(), set(), set(), True, True, True)] * len(observed)
-
-
-def test_panel_window_producer_releases_previous_locals_before_next_compute(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
-    windows = tuple(
-        SimpleNamespace(read=None, core_sessions=(pd.Timestamp(day),))
-        for day in ("2014-01-02", "2014-01-03")
-    )
-    output = pd.DataFrame(
-        {
-            column: [pd.Timestamp("2014-01-02") if column == "timestamp" else 1]
-            for column in spec.required_columns
-        }
-    )
-    read_observed: list[set[str]] = []
-    yield_observed: list[tuple[set[str], bool]] = []
-    result = object()
-
-    def read_market_bars(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
-        producer = inspect.currentframe().f_back
-        assert producer is not None
-        read_observed.append(
-            {"market_bars", "panel", "output", "selected"}.intersection(
-                producer.f_locals
-            )
-        )
-        return pd.DataFrame()
-
-    def compute(_market_bars, **_kwargs):  # noqa: ANN001, ANN003, ANN202
-        return output.copy()
-
-    def consume(_spec, frames, **_kwargs):  # noqa: ANN001, ANN003
-        iterator = iter(frames)
-        for _ in windows:
-            yielded = next(iterator)
-            producer_locals = inspect.getgeneratorlocals(iterator)
-            yield_observed.append(
-                (
-                    {"market_bars", "panel", "output"}.intersection(producer_locals),
-                    producer_locals.get("selected") is yielded,
-                )
-            )
-        with pytest.raises(StopIteration):
-            next(iterator)
-        return result
-
-    source_inputs = {
-        data_id: pd.DataFrame()
-        for data_id in ("stock_master", "market_cap", "trading_calendar")
-    }
-    monkeypatch.setattr(
-        materialize_panel.materialization_io,
-        "read_source_inputs_for_spec",
-        lambda *_args, **_kwargs: source_inputs,
-    )
-    monkeypatch.setattr(
-        materialize_panel.materialization_validation,
-        "require_source_inputs_for_spec",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        materialize_panel,
-        "inspect_dataset",
-        lambda _root: SimpleNamespace(columns=()),
-    )
-    monkeypatch.setattr(
-        materialize_panel.materialization_validation,
-        "require_source_input_columns_from_schema",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        materialize_panel.materialization_planning,
-        "estimate_panel_bytes_per_session",
-        lambda *_args, **_kwargs: 1,
-    )
-    monkeypatch.setattr(
-        materialize_panel.materialization_planning,
-        "planned_session_windows",
-        lambda *_args, **_kwargs: windows,
-    )
-    monkeypatch.setattr(
-        materialize_panel.materialization_io,
-        "read_materialized_dataset",
-        read_market_bars,
-    )
-    monkeypatch.setattr(
-        materialize_panel.materialization_validation,
-        "require_source_input_columns",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(materialize_panel.panels, "compute_market_panel", compute)
-    monkeypatch.setattr(
-        materialize_panel.materialization_planning,
-        "filter_output_sessions",
-        lambda current, _sessions: current,
-    )
-    monkeypatch.setattr(
-        materialize_panel.materialization_planning,
-        "require_known_materialization_payload_bound",
-        lambda **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        materialize_panel.materialization_io, "write_and_inspect", consume
-    )
-
-    actual = materialize_panel.write_panel(
-        spec,
-        layout=StorageLayout(project_root=tmp_path),
-        source_id=SourceId("csmar"),
-        market_bars_data_id=MARKET_BARS_DATA_ID,
-        time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        policy=active_runtime_resource_policy(),
-        sessions=tuple(window.core_sessions[0] for window in windows),
-        written={},
-    )
-
-    assert actual is result
-    assert read_observed == [set(), set()]
-    assert yield_observed == [(set(), True), (set(), True)]
-
-
-def test_annotation_window_producer_releases_previous_locals_before_next_compute(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    spec = processed_catalog().get("execution")
-    contract = (
-        materialize_annotations.materialization_validation.annotation_input_contract(
-            spec
-        )
-    )
-    panel = pd.DataFrame({"timestamp": pd.to_datetime(["2014-01-02"])})
-    windows = tuple(
-        SimpleNamespace(read=None, core_sessions=(pd.Timestamp(day),))
-        for day in ("2014-01-02", "2014-01-03")
-    )
-    transition_observed: list[set[str]] = []
-    yield_observed: list[tuple[set[str], bool]] = []
-    result = object()
-
-    def derive(current: pd.DataFrame, *, data_ids: tuple[str, ...]):
-        producer = inspect.currentframe().f_back
-        assert producer is not None
-        transition_observed.append(
-            {"outputs", "output"}.intersection(producer.f_locals)
-        )
-        return {data_ids[0]: current.copy()}
-
-    def consume(_spec, frames, **_kwargs):  # noqa: ANN001, ANN003
-        iterator = iter(frames)
-        for _ in windows:
-            yielded = next(iterator)
-            producer_locals = inspect.getgeneratorlocals(iterator)
-            yield_observed.append(
-                (
-                    {"processed_inputs", "panel", "outputs"}.intersection(
-                        producer_locals
-                    ),
-                    producer_locals.get("output") is yielded,
-                )
-            )
-        with pytest.raises(StopIteration):
-            next(iterator)
-        return result
-
-    monkeypatch.setattr(
-        materialize_annotations, "inspect_dataset", lambda _root: object()
-    )
-    monkeypatch.setattr(
-        materialize_annotations.materialization_planning,
-        "planned_session_windows",
-        lambda *_args, **_kwargs: windows,
-    )
-    monkeypatch.setattr(
-        materialize_annotations.materialization_io,
-        "read_processed_inputs_for_spec",
-        lambda *_args, **_kwargs: {contract.primary_input_data_id: panel.copy()},
-    )
-    monkeypatch.setattr(
-        materialize_annotations.materialization_validation,
-        "validate_processed_input_contract",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        materialize_annotations.annotations, "derive_annotations", derive
-    )
-    monkeypatch.setattr(
-        materialize_annotations.materialization_planning,
-        "filter_output_sessions",
-        lambda output, _sessions: output,
-    )
-    monkeypatch.setattr(
-        materialize_annotations.materialization_planning,
-        "require_known_materialization_payload_bound",
-        lambda **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        materialize_annotations.materialization_io,
-        "write_and_inspect",
-        consume,
-    )
-
-    actual = materialize_annotations.write_annotations(
-        spec,
-        layout=StorageLayout(project_root=tmp_path),
-        time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        policy=active_runtime_resource_policy(),
-        sessions=tuple(window.core_sessions[0] for window in windows),
-        written={},
-    )
-
-    assert actual is result
-    assert transition_observed == [set(), set()]
-    assert yield_observed == [(set(), True), (set(), True)]
 
 
 def _catalog_with_processed_inputs(
@@ -1556,10 +1416,7 @@ def _catalog_with_processed_inputs(
     catalog = ProcessedDataCatalog()
     for spec in processed_catalog().list():
         if spec.data_id == target_data_id:
-            spec = replace(
-                spec,
-                processed_input_data_ids=processed_input_data_ids,
-            )
+            spec = replace(spec, processed_input_data_ids=processed_input_data_ids)
         catalog.register(spec)
     return catalog
 
@@ -1568,13 +1425,15 @@ def _catalog_with_one_step_forward_return_only() -> ProcessedDataCatalog:
     catalog = ProcessedDataCatalog()
     for spec in processed_catalog().list():
         if spec.data_id == "forward_returns":
-            column_roles = {
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                FORWARD_RETURN_1D_COLUMN: ColumnRole.LABEL,
-            }
-            spec = replace(spec, column_roles=column_roles)
+            spec = replace(
+                spec,
+                column_roles={
+                    "market_id": ColumnRole.KEY,
+                    "asset_id": ColumnRole.KEY,
+                    "timestamp": ColumnRole.TIMESTAMP,
+                    FORWARD_RETURN_1D_COLUMN: ColumnRole.LABEL,
+                },
+            )
         catalog.register(spec)
     return catalog
 
@@ -1583,13 +1442,15 @@ def _catalog_with_momentum_20d_only() -> ProcessedDataCatalog:
     catalog = ProcessedDataCatalog()
     for spec in processed_catalog().list():
         if spec.data_id == "price_volume":
-            column_roles = {
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                MOMENTUM_20D_COLUMN: ColumnRole.FACTOR,
-            }
-            spec = replace(spec, column_roles=column_roles)
+            spec = replace(
+                spec,
+                column_roles={
+                    "market_id": ColumnRole.KEY,
+                    "asset_id": ColumnRole.KEY,
+                    "timestamp": ColumnRole.TIMESTAMP,
+                    MOMENTUM_20D_COLUMN: ColumnRole.FACTOR,
+                },
+            )
         catalog.register(spec)
     return catalog
 
@@ -1598,8 +1459,9 @@ def _factor_catalog_with_families(families: tuple[str, ...]) -> FactorCatalog:
     catalog = FactorCatalog()
     definitions = materialize_factors.factor_definitions.factor_definitions()
     for index, definition in enumerate(definitions):
-        family = families[min(index, len(families) - 1)]
-        catalog.register(replace(definition, family=family))
+        catalog.register(
+            replace(definition, family=families[min(index, len(families) - 1)])
+        )
     return catalog
 
 
@@ -1607,6 +1469,7 @@ def _label_catalog_with_families(families: tuple[str, ...]) -> LabelCatalog:
     catalog = LabelCatalog()
     definitions = materialize_labels.label_definitions.label_definitions()
     for index, definition in enumerate(definitions):
-        family = families[min(index, len(families) - 1)]
-        catalog.register(replace(definition, family=family))
+        catalog.register(
+            replace(definition, family=families[min(index, len(families) - 1)])
+        )
     return catalog

@@ -9,18 +9,14 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import quant_research_platform.contracts.time as time_contracts
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
-    DataSpec,
-    InterimDataSpec,
     ProcessedDataKind,
     ProcessedDataSpec,
 )
-from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.labels import LabelDefinition
@@ -83,27 +79,6 @@ importlib.import_module("tests.contracts.test_platform_contracts")
     assert result.returncode == 0, result.stderr
 
 
-def test_dataspec_hierarchy_uses_data_id_without_retired_id_fields() -> None:
-    base_fields = DataSpec.__dataclass_fields__
-    interim_fields = InterimDataSpec.__dataclass_fields__
-    processed_fields = ProcessedDataSpec.__dataclass_fields__
-    research_fields = ResearchDatasetSpec.__dataclass_fields__
-
-    assert "data_id" in base_fields
-    assert "market_id" not in base_fields
-    assert "market_id" not in interim_fields
-    assert "source_id" in interim_fields
-    assert "kind" in processed_fields
-    assert "source_input_data_ids" in processed_fields
-    assert "processed_input_data_ids" in processed_fields
-    assert "category" not in processed_fields
-    assert "input_data_ids" in research_fields
-    assert "base_input_data_id" in research_fields
-    assert "interim_data_id" not in interim_fields
-    assert "processed_data_id" not in processed_fields
-    assert "dataset_id" not in research_fields
-
-
 def test_processed_spec_uses_kind_and_canonical_key() -> None:
     spec = ProcessedDataSpec(
         data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
@@ -125,8 +100,6 @@ def test_processed_spec_uses_kind_and_canonical_key() -> None:
     assert spec.data_id == PRICE_VOLUME_PROCESSED_DATA_ID
     assert spec.kind is ProcessedDataKind.FACTOR
     assert spec.primary_key == ("market_id", "asset_id", "timestamp")
-    assert not hasattr(spec, "category")
-    assert not hasattr(spec, "processed_data_id")
 
 
 def test_time_window_is_required_closed_interval() -> None:
@@ -138,11 +111,7 @@ def test_time_window_is_required_closed_interval() -> None:
         TimeWindow("2014-12-31", "2014-01-01")
 
 
-def test_time_contract_has_no_replaced_timestamp_bounds_helper() -> None:
-    assert not hasattr(time_contracts, "time_window_timestamp_bounds")
-
-
-def test_factor_and_label_definitions_keep_future_flags_out() -> None:
+def test_factor_and_label_definitions_serialize_current_inputs() -> None:
     factor = FactorDefinition(
         factor_id="mom_20d",
         market_id=MarketId("a_share"),
@@ -165,15 +134,13 @@ def test_factor_and_label_definitions_keep_future_flags_out() -> None:
         exit_rule="example_exit_rule",
     )
 
-    assert "uses_future_data" not in factor.to_manifest()
-    assert "uses_future_data" not in label.to_manifest()
     assert factor.to_manifest()["input_columns"] == ["adj_close"]
     assert factor.to_manifest()["base_input_columns"] == ["adj_close"]
     assert factor.to_manifest()["derived_input_columns"] == []
     assert label.to_manifest()["lookahead"] == 21
 
 
-def test_factor_set_rejects_retired_aliases_without_catalog_resolver() -> None:
+def test_factor_set_rejects_unknown_value() -> None:
     definition = FactorDefinition(
         factor_id="rev_1d",
         market_id=MarketId("a_share"),
@@ -184,15 +151,8 @@ def test_factor_set_rejects_retired_aliases_without_catalog_resolver() -> None:
     )
 
     assert definition.factor_set == FactorSet.STANDARD
-    retired_values = (
-        "full",
-        "core_long_period",
-        "smoke_minimal",
-        "deprecated",
-    )
-    for value in retired_values:
-        with pytest.raises(ValueError, match="not a valid"):
-            FactorSet(value)
+    with pytest.raises(ValueError, match="not a valid"):
+        FactorSet("unknown")
 
 
 def test_storage_layout_uses_sealed_data_roots() -> None:

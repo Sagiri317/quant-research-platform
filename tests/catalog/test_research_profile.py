@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,33 +15,24 @@ from quant_research_platform.catalog.outputs import OutputCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.catalog.processed import (
-    InterimDataCatalog,
     ProcessedDataCatalog,
 )
 from quant_research_platform.catalog.sources import SourceRegistry
-from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import SourceId
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
     research_scenarios,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
 
 
 def test_research_profile_is_only_public_profile_builder() -> None:
     import quant_research_platform.profiles.research as profiles
 
-    all_names = set(profiles.__all__)
-    assert all_names == {"ResearchProfile", "research_profile", "research_profile_id"}
-    assert "research_profile_for_scenario" not in vars(profiles)
-    assert "resolve_a_share_prediction_catalog" not in vars(profiles)
-    old_portfolio_resolver = "resolve_" + "a_share_" + "portfolio_catalog"
-    assert old_portfolio_resolver not in vars(profiles)
-    assert "default_catalogs" not in vars(profiles)
-    assert "CatalogBundle" not in vars(profiles)
-    assert "local_a_share_csmar_catalogs" not in vars(profiles)
-    assert not [name for name in vars(profiles) if name.startswith("default_")]
+    assert set(profiles.__all__) == {
+        "ResearchProfile",
+        "research_profile",
+        "research_profile_id",
+    }
 
 
 def test_research_profile_contains_active_catalogs() -> None:
@@ -81,7 +71,9 @@ def test_research_profile_contains_active_catalogs() -> None:
 
 def test_research_profile_covers_required_models_predictions_and_signals() -> None:
     from quant_research_platform.profiles.research import research_profile
-    from quant_research_platform.research.models.supervised import model_algorithm_ids
+    from quant_research_platform.research.models.algorithm_facts import (
+        model_algorithm_ids,
+    )
 
     profile = research_profile()
     algorithms = tuple(model_algorithm_ids())
@@ -135,96 +127,6 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
     ]
 
 
-def test_catalog_profile_private_processed_helper_forwards_typed_source_id(
-    monkeypatch,
-) -> None:
-    import quant_research_platform.profiles.research as profiles
-
-    captured: dict[str, object] = {}
-
-    def fake_materialize(
-        *,
-        layout: StorageLayout,
-        source_id: SourceId,
-        time_window: TimeWindow,
-        kinds: frozenset[ProcessedDataKind],
-    ) -> str:
-        captured.update(
-            {
-                "layout": layout,
-                "source_id": source_id,
-                "time_window": time_window,
-                "kinds": kinds,
-            }
-        )
-        return "ok"
-
-    monkeypatch.setattr(
-        profiles.processed_materializer_module,
-        "materialize_processed_data",
-        fake_materialize,
-    )
-
-    layout = StorageLayout(project_root=Path("project"))
-    time_window = TimeWindow("2014-01-01", "2014-01-31")
-    kinds = frozenset({ProcessedDataKind.PANEL})
-
-    assert (
-        profiles._materialize_processed_data(
-            layout,
-            SourceId("csmar"),
-            time_window,
-            kinds,
-        )
-        == "ok"
-    )
-    assert captured["layout"] == layout
-    assert captured["source_id"] == SourceId("csmar")
-    assert captured["time_window"] == time_window
-    assert captured["kinds"] == kinds
-
-
-def test_catalog_profile_private_interim_helper_forwards_kwargs(monkeypatch) -> None:
-    import quant_research_platform.profiles.research as profiles
-
-    captured: dict[str, object] = {}
-
-    def fake_materialize(
-        *,
-        layout: StorageLayout,
-        raw_root: Path,
-        start_date: str,
-        end_date: str,
-    ) -> dict[str, object]:
-        captured.update(
-            {
-                "layout": layout,
-                "raw_root": raw_root,
-                "start_date": start_date,
-                "end_date": end_date,
-            }
-        )
-        return captured
-
-    monkeypatch.setattr(profiles, "_materialize_csmar_interim_data", fake_materialize)
-
-    layout = StorageLayout(project_root=Path("project"))
-    raw_root = Path("data/raw/csmar")
-    result = profiles._materialize_a_share_csmar_interim_data(
-        layout,
-        raw_root,
-        "2014-01-01",
-        "2014-01-31",
-    )
-
-    assert result == {
-        "layout": layout,
-        "raw_root": raw_root,
-        "start_date": "2014-01-01",
-        "end_date": "2014-01-31",
-    }
-
-
 def test_catalog_profile_source_interim_catalog_requires_single_source(
     monkeypatch,
 ) -> None:
@@ -241,14 +143,4 @@ def test_catalog_profile_source_interim_catalog_requires_single_source(
     monkeypatch.setattr(profiles, "csmar_interim_catalog", fake_catalog)
 
     with pytest.raises(ValueError, match="unexpected_source_interim_catalog_sources"):
-        profiles._a_share_csmar_source_interim_catalogs()
-
-
-def test_catalog_profile_source_id_matches_interim_catalog() -> None:
-    import quant_research_platform.profiles.research as profiles
-
-    assert profiles._active_source_id() == SourceId("csmar")
-    assert isinstance(
-        next(iter(profiles._a_share_csmar_source_interim_catalogs().values())),
-        InterimDataCatalog,
-    )
+        profiles.research_profile()

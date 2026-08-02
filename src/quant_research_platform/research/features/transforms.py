@@ -13,7 +13,9 @@ def apply_feature_transforms(
     *,
     timestamp_column: str = "timestamp",
 ) -> pd.DataFrame:
-    result = frame.copy()
+    if not transforms:
+        return frame.copy()
+    result = frame
     for transform in transforms:
         result = apply_feature_transform(
             result,
@@ -98,7 +100,7 @@ def _zscore(
 ) -> pd.Series:
     mean = grouped.transform("mean")
     std = grouped.transform(lambda item: item.std(ddof=0))
-    return (values - mean) / std.replace(0, pd.NA)
+    return (values - mean) / std.mask(std.eq(0))
 
 
 def _apply_fillna(

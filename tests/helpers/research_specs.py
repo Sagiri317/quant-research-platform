@@ -10,7 +10,7 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.columns import (
     price_volume_window_column,
 )
 from quant_research_platform.research.labels.forward_returns import (
@@ -181,9 +181,7 @@ def correctness_research_dataset_catalog(
     *,
     include_feature_transform: bool = False,
 ) -> ResearchDatasetCatalog:
-    feature_columns = (
-        (DEMO_FACTOR_ZSCORE_COLUMN,) if include_feature_transform else ()
-    )
+    feature_columns = (DEMO_FACTOR_ZSCORE_COLUMN,) if include_feature_transform else ()
     feature_transforms = (
         (
             FeatureTransformSpec(

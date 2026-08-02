@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+import quant_research_platform.research.models.estimators as estimators
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research.models import estimators
 from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
     RankEnsemblePredictor,

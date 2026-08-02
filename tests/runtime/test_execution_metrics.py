@@ -10,8 +10,6 @@ from quant_research_platform.runtime.execution_metrics import (
     ProcessMemorySampler,
 )
 
-LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
-
 
 def test_execution_metrics_recorder_exposes_payload_and_frame() -> None:
     recorder = ExecutionMetricsRecorder(memory_sampler=ProcessMemorySampler.disabled())
@@ -34,7 +32,6 @@ def test_execution_metrics_recorder_exposes_payload_and_frame() -> None:
     assert payload["records"][0]["rss_start_mb"] is None
     assert payload["records"][0]["rss_end_mb"] is None
     assert payload["records"][0]["rss_start_end_max_mb"] is None
-    assert LEGACY_RSS_PEAK_FIELD not in payload["records"][0]
     assert payload["records"][0]["rows_per_second"] is not None
     assert runtime_record.step_name == "build_processed"
     assert runtime_record.status == "success"
@@ -43,7 +40,6 @@ def test_execution_metrics_recorder_exposes_payload_and_frame() -> None:
     assert runtime_record.rss_sample_interval_seconds is None
     assert runtime_record.rss_sample_count == 0
     assert runtime_record.rss_sampler_unavailable is True
-    assert not hasattr(runtime_record, LEGACY_RSS_PEAK_FIELD)
 
 
 def test_execution_metrics_records_sampled_rss_fields(monkeypatch) -> None:
@@ -64,13 +60,11 @@ def test_execution_metrics_records_sampled_rss_fields(monkeypatch) -> None:
     assert record["rss_sample_interval_seconds"] == 0.001
     assert record["rss_sample_count"] >= 2
     assert record["rss_sampler_unavailable"] is False
-    assert "rss_samples_mb" not in record
     runtime_record = recorder.records[0]
     assert runtime_record.rss_sampled_max_mb
     assert runtime_record.rss_sample_interval_seconds == 0.001
     assert runtime_record.rss_sample_count >= 2
     assert runtime_record.rss_sampler_unavailable is False
-    assert not hasattr(runtime_record, "rss_samples_mb")
 
 
 def test_execution_metrics_keeps_start_end_rss_fields() -> None:
@@ -86,7 +80,6 @@ def test_execution_metrics_keeps_start_end_rss_fields() -> None:
     assert payload["records"][0]["rss_start_mb"] == 128.0
     assert payload["records"][0]["rss_end_mb"] == 128.0
     assert payload["records"][0]["rss_start_end_max_mb"] == 128.0
-    assert LEGACY_RSS_PEAK_FIELD not in payload["records"][0]
 
 
 def test_execution_metrics_records_failure_status_and_error_code() -> None:
@@ -129,7 +122,6 @@ def test_execution_metrics_sampler_exception_degrades_to_null_rss() -> None:
     assert record["rss_sample_interval_seconds"] is None
     assert record["rss_sample_count"] == 0
     assert record["rss_sampler_unavailable"] is True
-    assert LEGACY_RSS_PEAK_FIELD not in record
 
 
 def test_execution_metrics_sampler_unavailable_serializes_aggregate_fields() -> None:
@@ -144,7 +136,6 @@ def test_execution_metrics_sampler_unavailable_serializes_aggregate_fields() -> 
     assert record["rss_sample_interval_seconds"] is None
     assert record["rss_sample_count"] == 0
     assert record["rss_sampler_unavailable"] is True
-    assert "rss_samples_mb" not in record
 
 
 def test_invalid_rss_sample_interval_env_fails_closed(monkeypatch) -> None:

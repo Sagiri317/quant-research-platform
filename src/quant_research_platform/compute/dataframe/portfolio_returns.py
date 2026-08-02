@@ -23,9 +23,6 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
     TURNOVER_COLUMNS,
     WEIGHT_DIAGNOSTIC_COLUMNS,
 )
-from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    select_signal,
-)
 from quant_research_platform.compute.dataframe.position_math import (
     build_signal_positions,
 )
@@ -36,68 +33,13 @@ from quant_research_platform.compute.dataframe.turnover import (
 from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
-    validate_compute_panel,
 )
 from quant_research_platform.contracts.portfolios import (
     CostConfig,
     TradabilityConfig,
     WeightConfig,
 )
-from quant_research_platform.runtime.profiling import measure_stage
 
-
-def simulate_weighted_long_short_returns(
-    frame: pd.DataFrame,
-    spec: ComputePanelSpec,
-    weight_config: WeightConfig,
-    *,
-    segment_columns: tuple[str, ...] = (),
-    portfolio_signals: tuple[str, ...] | None = None,
-    tradability_config: TradabilityConfig | None = None,
-    cost_config: CostConfig | None = None,
-    return_source_column: str | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Simulate portfolio returns from weighted positions."""
-
-    return_source_column = require_return_source_column(return_source_column)
-    panel = validate_compute_panel(frame, spec, segment_columns=segment_columns)
-    return _simulate_weighted_long_short_returns_from_validated_panel(
-        panel,
-        spec,
-        weight_config,
-        segment_columns=segment_columns,
-        portfolio_signals=portfolio_signals,
-        tradability_config=tradability_config,
-        cost_config=cost_config,
-        return_source_column=return_source_column,
-    )
-
-def _simulate_weighted_long_short_returns_from_validated_panel(
-    panel: pd.DataFrame,
-    spec: ComputePanelSpec,
-    weight_config: WeightConfig,
-    *,
-    segment_columns: tuple[str, ...] = (),
-    portfolio_signals: tuple[str, ...] | None = None,
-    tradability_config: TradabilityConfig | None = None,
-    cost_config: CostConfig | None = None,
-    return_source_column: str | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Simulate returns from a validated timestamp-asset panel."""
-
-    positions, turnover, returns, diagnostics, _cost_breakdown = (
-        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
-            panel,
-            spec,
-            weight_config,
-            segment_columns=segment_columns,
-            portfolio_signals=portfolio_signals,
-            tradability_config=tradability_config,
-            cost_config=cost_config,
-            return_source_column=return_source_column,
-        )
-    )
-    return positions, turnover, returns, diagnostics
 
 def simulate_weighted_long_short_returns_and_cost_from_validated_panel(
     panel: pd.DataFrame,
@@ -112,20 +54,17 @@ def simulate_weighted_long_short_returns_and_cost_from_validated_panel(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Simulate returns and cost breakdown artifacts."""
 
-    return measure_stage(
-        "metric",
-        "portfolio_stream",
-        lambda: _stream_weighted_portfolio_from_validated_panel(
-            panel,
-            spec,
-            weight_config,
-            segment_columns=segment_columns,
-            portfolio_signals=portfolio_signals,
-            tradability_config=tradability_config,
-            cost_config=cost_config,
-            return_source_column=return_source_column,
-        ),
+    return _stream_weighted_portfolio_from_validated_panel(
+        panel,
+        spec,
+        weight_config,
+        segment_columns=segment_columns,
+        portfolio_signals=portfolio_signals,
+        tradability_config=tradability_config,
+        cost_config=cost_config,
+        return_source_column=return_source_column,
     )
+
 
 def _stream_weighted_portfolio_from_validated_panel(
     panel: pd.DataFrame,
@@ -246,31 +185,6 @@ def _stream_weighted_portfolio_from_validated_panel(
         pd.DataFrame.from_records(cost_records, columns=cost_columns),
     )
 
-def simulate_long_short_returns(
-    frame: pd.DataFrame,
-    spec: ComputePanelSpec,
-    top_quantile: float = 0.2,
-    bottom_quantile: float = 0.2,
-    cost_config: CostConfig | None = None,
-    signal_column: str | None = None,
-    return_source_column: str | None = None,
-) -> pd.DataFrame:
-    """Simulate equal-weight long-short returns with turnover-based costs."""
-
-    signal = select_signal(spec, signal_column)
-    _positions, _turnover, returns, _diagnostics = simulate_weighted_long_short_returns(
-        frame,
-        spec,
-        WeightConfig(
-            method="equal_weight_quantile",
-            top_quantile=top_quantile,
-            bottom_quantile=bottom_quantile,
-        ),
-        cost_config=cost_config,
-        portfolio_signals=(signal,),
-        return_source_column=return_source_column,
-    )
-    return returns[RETURNS_COLUMNS]
 
 def _timestamp_label_lookup(
     timestamp_frame: pd.DataFrame,
@@ -331,7 +245,7 @@ def _build_portfolio_return_record_from_positions(
         "short_count": int(short_count),
     }
 
+
 __all__ = [
-    "simulate_long_short_returns",
-    "simulate_weighted_long_short_returns",
+    "simulate_weighted_long_short_returns_and_cost_from_validated_panel",
 ]

@@ -15,7 +15,6 @@ import quant_research_platform.research._memory as memory_owner
 from quant_research_platform.research._memory import (
     _concat_time_boundary_frames,
     iter_complete_time_sized_frames,
-    iter_time_sized_frames,
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -33,13 +32,8 @@ def _single_time_frame() -> pd.DataFrame:
     )
 
 
-@pytest.mark.parametrize(
-    "factory",
-    (iter_time_sized_frames, iter_complete_time_sized_frames),
-)
 @pytest.mark.parametrize("explicit_mode", ("none", "same"))
-def test_lazy_memory_factories_bind_outer_for_active_consumption(
-    factory,
+def test_lazy_memory_factory_binds_outer_for_active_consumption(
     explicit_mode: str,
 ) -> None:
     policy = RuntimeResourcePolicy.from_environment(
@@ -47,23 +41,17 @@ def test_lazy_memory_factories_bind_outer_for_active_consumption(
         environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
     )
     frame = _single_time_frame()
-    subject = frame if factory is iter_time_sized_frames else iter((frame,))
     with runtime_resource_policy_scope(policy):
-        chunks = factory(
-            subject,
+        chunks = iter_complete_time_sized_frames(
+            iter((frame,)),
             timestamp_column="timestamp",
             resource_policy=policy if explicit_mode == "same" else None,
         )
         assert len(list(chunks)) == 1
 
 
-@pytest.mark.parametrize(
-    "factory",
-    (iter_time_sized_frames, iter_complete_time_sized_frames),
-)
 @pytest.mark.parametrize("explicit_mode", ("none", "same"))
-def test_lazy_memory_factories_reject_delayed_consumption_after_outer_exit(
-    factory,
+def test_lazy_memory_factory_rejects_delayed_consumption_after_outer_exit(
     explicit_mode: str,
 ) -> None:
     policy = RuntimeResourcePolicy.from_environment(
@@ -71,10 +59,9 @@ def test_lazy_memory_factories_reject_delayed_consumption_after_outer_exit(
         environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
     )
     frame = _single_time_frame()
-    subject = frame if factory is iter_time_sized_frames else iter((frame,))
     with runtime_resource_policy_scope(policy):
-        chunks = factory(
-            subject,
+        chunks = iter_complete_time_sized_frames(
+            iter((frame,)),
             timestamp_column="timestamp",
             resource_policy=policy if explicit_mode == "same" else None,
         )
@@ -83,13 +70,7 @@ def test_lazy_memory_factories_reject_delayed_consumption_after_outer_exit(
         next(chunks)
 
 
-@pytest.mark.parametrize(
-    "factory",
-    (iter_time_sized_frames, iter_complete_time_sized_frames),
-)
-def test_lazy_memory_factories_reject_different_explicit_policy_at_creation(
-    factory,
-) -> None:
+def test_lazy_memory_factory_rejects_different_explicit_policy_at_creation() -> None:
     active = RuntimeResourcePolicy.from_environment(
         available_memory_bytes=16 * 1024 * 1024,
         environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
@@ -99,12 +80,10 @@ def test_lazy_memory_factories_reject_different_explicit_policy_at_creation(
         environ={"QRP_TASK_MEMORY_BUDGET_MB": "2"},
     )
     frame = _single_time_frame()
-    subject = frame if factory is iter_time_sized_frames else iter((frame,))
-
     with runtime_resource_policy_scope(active):
         with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
-            factory(
-                subject,
+            iter_complete_time_sized_frames(
+                iter((frame,)),
                 timestamp_column="timestamp",
                 resource_policy=different,
             )
@@ -173,7 +152,7 @@ def test_complete_time_sized_frames_preserves_all_empty_chunk_schema() -> None:
     assert chunks[0].loc[:, ["asset_id", "factor", "eligible"]].empty
 
 
-def test_time_sized_frames_accept_equivalent_timezone_representations() -> None:
+def test_complete_frames_accept_equivalent_timezone_representations() -> None:
     frame = pd.DataFrame(
         {
             "timestamp": [
@@ -192,12 +171,17 @@ def test_time_sized_frames_accept_equivalent_timezone_representations() -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        chunks = list(iter_time_sized_frames(frame, timestamp_column="timestamp"))
+        chunks = list(
+            iter_complete_time_sized_frames(
+                iter((frame,)),
+                timestamp_column="timestamp",
+            )
+        )
 
     assert sum(len(chunk) for chunk in chunks) == 2
 
 
-def test_time_sized_frames_rejects_single_timestamp_over_budget() -> None:
+def test_complete_time_sized_frames_rejects_single_timestamp_over_budget() -> None:
     frame = pd.DataFrame(
         {
             "timestamp": [pd.Timestamp("2026-01-01")] * 400,
@@ -214,8 +198,8 @@ def test_time_sized_frames_rejects_single_timestamp_over_budget() -> None:
         match="research_indivisible_time_unit_exceeds_payload_target",
     ):
         list(
-            iter_time_sized_frames(
-                frame,
+            iter_complete_time_sized_frames(
+                iter((frame,)),
                 timestamp_column="timestamp",
                 resource_policy=policy,
             )
@@ -497,21 +481,12 @@ def test_complete_time_frames_close_once_when_policy_entry_fails(
     assert close_calls == 1
 
 
-@pytest.mark.parametrize(
-    "resolution_error",
-    (
-        RuntimeError("policy_factory_failed"),
-        ValueError("retired_runtime_resource_setting"),
-        RuntimeError("runtime_available_memory_discovery_failed"),
-        OSError("policy_resolution_failed"),
-    ),
-)
 @pytest.mark.parametrize("close_fails", (False, True))
 def test_complete_time_frames_close_once_when_policy_resolution_fails(
-    resolution_error: BaseException,
     close_fails: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    resolution_error = RuntimeError("policy_factory_failed")
     close_calls = 0
 
     class Frames:

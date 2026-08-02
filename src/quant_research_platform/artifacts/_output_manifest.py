@@ -41,14 +41,8 @@ _OUTPUT_MANIFEST_KEYS = frozenset(
         "files",
     }
 )
-STAGE_PROFILE_ARTIFACTS = (
-    "stage_profile.csv",
-    "stage_profile.json",
-    "stage_profile.md",
-)
 PREDICTION_ARTIFACTS = ("prediction.parquet",)
 _OUTPUT_DEFINITION_FILES = {
-    "stage_profile_diagnostic": STAGE_PROFILE_ARTIFACTS,
     "prediction_outputs": PREDICTION_ARTIFACTS,
     "evaluation_outputs": EVALUATION_ARTIFACTS,
     "portfolio_outputs": tuple(PORTFOLIO_ARTIFACTS.values()),
@@ -98,9 +92,7 @@ def validate_output_manifest_business_envelope(
     metadata = value["metadata"]
     if type(metadata) is not dict or _metadata_contains_schema_id(metadata):
         raise ValueError("output_manifest_metadata_invalid")
-    if output_definition_id == "stage_profile_diagnostic":
-        _validate_stage_profile_metadata(metadata)
-    elif output_definition_id == "prediction_outputs":
+    if output_definition_id == "prediction_outputs":
         validate_prediction_output_metadata_shape(metadata)
     elif output_definition_id == "evaluation_outputs":
         validate_evaluation_output_metadata_shape(metadata)
@@ -137,14 +129,6 @@ def validate_output_manifest_business_envelope(
     return value
 
 
-def _validate_stage_profile_metadata(metadata: dict[str, object]) -> None:
-    if set(metadata) != {"market_id", "run_type", "scope"} or any(
-        type(metadata[key]) is not str or not metadata[key]
-        for key in ("market_id", "run_type", "scope")
-    ):
-        raise ValueError("output_manifest_metadata_invalid")
-
-
 def _metadata_contains_schema_id(value: object) -> bool:
     if isinstance(value, Mapping):
         return "schema_id" in value or any(
@@ -153,21 +137,6 @@ def _metadata_contains_schema_id(value: object) -> bool:
     if type(value) is list:
         return any(_metadata_contains_schema_id(item) for item in value)
     return False
-
-
-def stage_profile_output_manifest_payload(
-    *,
-    spec: OutputSpec,
-) -> dict[str, object]:
-    return output_manifest_payload(
-        output_spec=spec,
-        metadata={
-            "market_id": str(spec.market_id),
-            "run_type": spec.run_type,
-            "scope": str(spec.scope),
-        },
-        files=STAGE_PROFILE_ARTIFACTS,
-    )
 
 
 def output_manifest_payload(

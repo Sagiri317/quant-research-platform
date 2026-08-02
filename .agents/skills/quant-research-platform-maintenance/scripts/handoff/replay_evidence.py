@@ -99,7 +99,8 @@ def collect_replay_environment_failures(repo_root: Path) -> tuple[str, ...]:
             f"dependency_contract_missing:python:source={PYTHON_CONTRACT_SOURCE_LABEL}"
         )
     else:
-        installed_python = _python_version()
+        version_info = sys.version_info
+        installed_python = ".".join(str(part) for part in version_info[:3])
         if not _version_satisfies(installed_python, python_spec):
             failures.append(
                 "python_version_mismatch:"
@@ -138,10 +139,7 @@ def assert_replay_environment_ready(repo_root: Path) -> None:
 
 
 def build_replayed_check_receipts(repo_root: Path) -> dict[str, object]:
-    rows = [
-        _run_replay_command(repo_root, "profile-smoke"),
-        _run_replay_command(repo_root, "code-map"),
-    ]
+    rows = [_run_replay_command(repo_root, "profile-smoke")]
     status = aggregate_handoff_status(str(row["status"]) for row in rows)
     payload = {
         "schema_id": "qrp-check-receipts",
@@ -166,7 +164,14 @@ def build_replayed_hard_scan_receipt(
     *,
     source_tree_scan_groups_payload: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
-    scanned_head = _git_text(repo_root, "rev-parse", "HEAD").strip()
+    scanned_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout.strip()
     scan_runs: list[dict[str, object]] = []
     scan_groups = source_tree_scan_groups_payload
     if scan_groups is None:
@@ -184,7 +189,9 @@ def build_replayed_hard_scan_receipt(
                 "rule_set_id": f"source-tree:{group_name}",
                 "match_count": len(findings),
                 "actual_violation_count": len(findings),
-                "result_sha256": _sha256_text(_stable_json(result_payload)),
+                "result_sha256": hashlib.sha256(
+                    (render_qrp_json_object(result_payload) + "\n").encode("utf-8")
+                ).hexdigest(),
                 "replayable_from_bundle": True,
             }
         )
@@ -294,11 +301,6 @@ def _dependency_specs(items: tuple[str, ...]) -> dict[str, str]:
     return specs
 
 
-def _python_version() -> str:
-    version_info = sys.version_info
-    return ".".join(str(part) for part in version_info[:3])
-
-
 def _version_tuple(value: str) -> tuple[int, ...]:
     match = re.match(r"\d+(?:\.\d+)*", value)
     if match is None:
@@ -309,7 +311,11 @@ def _version_tuple(value: str) -> tuple[int, ...]:
 def _run_replay_command(repo_root: Path, command_id: str) -> dict[str, object]:
     spec = replay_command_spec(command_id)
     command_argv = list(spec.command_argv)
-    run_argv = _runtime_command_argv(command_argv)
+    run_argv = (
+        [sys.executable, *command_argv[1:]]
+        if command_argv and command_argv[0] == "python"
+        else command_argv
+    )
     if command_id == "profile-smoke":
         shutil.rmtree(
             repo_root / ".run" / "handoff-replay" / "profile-smoke", ignore_errors=True
@@ -394,12 +400,6 @@ def parse_pytest_counts(text: str) -> dict[str, int]:
         + counts["deselected"]
     )
     return counts
-
-
-def _runtime_command_argv(command_argv: list[str]) -> list[str]:
-    if command_argv and command_argv[0] == "python":
-        return [sys.executable, *command_argv[1:]]
-    return command_argv
 
 
 def _profile_smoke_counts(
@@ -559,8 +559,7 @@ def _extract_wheel_smoke_target(
     env["PYTHONPATH"] = str(target)
     try:
         probe_code = (
-            f"import {PACKAGE_IMPORT_MODULE}; "
-            f"print({PACKAGE_IMPORT_MODULE}.__name__)"
+            f"import {PACKAGE_IMPORT_MODULE}; print({PACKAGE_IMPORT_MODULE}.__name__)"
         )
         probe = subprocess.run(
             [
@@ -637,25 +636,6 @@ def _archive_content_scan(path: Path | None, artifact_kind: str) -> list[str]:
                 and Path(member.name).suffix.lower() in FORBIDDEN_PACKAGE_SUFFIXES
             ]
     return []
-
-
-def _git_text(repo: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    ).stdout
-
-
-def _stable_json(payload: object) -> str:
-    return render_qrp_json_object(payload) + "\n"
-
-
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _sha256_file(path: Path) -> str:

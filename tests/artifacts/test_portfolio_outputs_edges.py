@@ -298,10 +298,6 @@ def test_portfolio_validation_rejects_invalid_membership_values() -> None:
             )
 
 
-def test_portfolio_validation_has_no_test_only_bulk_parallel_path() -> None:
-    assert not hasattr(validation, "validate_portfolio_artifact_semantics")
-
-
 @pytest.mark.parametrize(
     ("mapping_name", "mutation"),
     (

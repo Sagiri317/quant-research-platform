@@ -333,6 +333,7 @@ def write_synthetic_interim_inputs(
     start_date: str | None = None,
     end_date: str | None = None,
     asset_id: str = "000001",
+    asset_ids: Sequence[str] | None = None,
     market_type: int = 4,
     calendar_start_date: str = "2010-01-01",
     calendar_end_date: str = "2024-01-03",
@@ -346,21 +347,40 @@ def write_synthetic_interim_inputs(
         include_extra_daily_column=include_extra_daily_column,
         drop_daily_column=drop_daily_column,
     )
+    selected_asset_ids = tuple(asset_ids or (asset_id,))
+    selected_dates = dates or tuple(
+        str(value.date())
+        for value in pd.bdate_range(
+            start_date or "2014-01-02",
+            end_date or "2014-01-03",
+        )
+    )
     frames = {
-        market_bars_data_id: make_synthetic_market_bars_daily(
-            dates
-            or tuple(
-                str(value.date())
-                for value in pd.bdate_range(
-                    start_date or "2014-01-02",
-                    end_date or "2014-01-03",
+        market_bars_data_id: pd.concat(
+            tuple(
+                make_synthetic_market_bars_daily(
+                    selected_dates,
+                    asset_id=current_asset_id,
+                    market_type=market_type,
                 )
+                for current_asset_id in selected_asset_ids
             ),
-            asset_id=asset_id,
-            market_type=market_type,
+            ignore_index=True,
         ),
-        "stock_master": make_synthetic_a_share_stock_master(asset_id=asset_id),
-        "market_cap": make_synthetic_a_share_market_cap(asset_id=asset_id),
+        "stock_master": pd.concat(
+            tuple(
+                make_synthetic_a_share_stock_master(asset_id=current_asset_id)
+                for current_asset_id in selected_asset_ids
+            ),
+            ignore_index=True,
+        ),
+        "market_cap": pd.concat(
+            tuple(
+                make_synthetic_a_share_market_cap(asset_id=current_asset_id)
+                for current_asset_id in selected_asset_ids
+            ),
+            ignore_index=True,
+        ),
         "trading_calendar": make_synthetic_a_share_trading_calendar(
             start_date=calendar_start_date,
             end_date=calendar_end_date,

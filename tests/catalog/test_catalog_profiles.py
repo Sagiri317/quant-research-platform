@@ -37,9 +37,6 @@ def test_local_profile_returns_boundary_sealed_bundle() -> None:
     assert catalogs.processed is not None
     assert catalogs.research_datasets is not None
     assert catalogs.source_interim_catalogs["csmar"] is not None
-    assert not hasattr(catalogs, "data_products")
-    assert not hasattr(catalogs, "provider_bindings")
-    assert not hasattr(catalogs, "universes")
 
 
 def test_local_profile_market_catalogs_delegate_to_a_share_owner_factories() -> None:
@@ -82,7 +79,6 @@ def test_local_profile_processed_catalog_uses_kind_not_category() -> None:
     )
     assert kinds_by_id["price_volume"] is ProcessedDataKind.FACTOR
     assert kinds_by_id["forward_returns"] is ProcessedDataKind.LABEL
-    assert all(not hasattr(spec, "category") for spec in specs)
 
 
 def test_local_profile_internal_registries_are_platform_composed() -> None:
@@ -112,9 +108,6 @@ def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:
         "index_info",
         "trading_calendar",
     }
-    assert all(
-        not hasattr(spec, "market_id") for spec in source_catalogs["csmar"].list()
-    )
 
 
 def test_processed_catalog_owner_matches_profile() -> None:

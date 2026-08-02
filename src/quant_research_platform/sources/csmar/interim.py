@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Iterator
+import stat
+from array import array
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from itertools import groupby, islice
 from pathlib import Path
+from types import MappingProxyType
 
 import pandas as pd
+import pyarrow as pa
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
@@ -21,6 +25,7 @@ from quant_research_platform.contracts.validation import strict_string_series
 from quant_research_platform.runtime.resources import (
     active_runtime_resource_policy,
     current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.csmar.field_mappings import (
@@ -30,12 +35,23 @@ from quant_research_platform.sources.csmar.field_mappings import (
 from quant_research_platform.sources.csmar.fields import field_role
 from quant_research_platform.sources.csmar.ids import SOURCE_ID, market_bars_data_id
 from quant_research_platform.sources.csmar.raw_exports import (
-    dataset_files_by_id,
-    iter_private_export_chunks,
+    dataset_files_with_identity_by_id,
+    iter_private_export_chunks_with_policy,
 )
+from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
+from quant_research_platform.storage._dataset_paths import (
+    require_artifact_root,
+    require_unaliased_path,
+)
+from quant_research_platform.storage._dataset_physical import DatasetFileIdentity
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
-from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage._dataset_writing import (
+    DatasetWriteChunk,
+    write_dataset,
+)
+from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.storage.manifests import read_bounded_qrp_json
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
@@ -50,7 +66,6 @@ TIME_RANGE_FILTER_DATA_IDS = {MARKET_BARS_DATA_ID}
 END_ONLY_FILTER_DATA_IDS = {"market_cap"}
 START_END_FILTER_DATA_IDS = {"adjustment"}
 SOURCE_REFERENCE_DATA_IDS = {"stock_master", "index_info"}
-
 SOURCE_ASSET_TIME_COLUMNS: tuple[str, ...] = (
     "source_asset_id",
     "timestamp",
@@ -182,22 +197,118 @@ def default_override_payload() -> dict[str, dict[str, object]]:
     }
 
 
-def load_column_overrides(path: Path) -> dict[str, dict[str, object]]:
-    if not path.exists():
-        return default_override_payload()
-    return json.loads(path.read_text(encoding="utf-8"))
+def load_column_overrides(path: Path) -> Mapping[str, Mapping[str, object]]:
+    candidate = require_unaliased_path(
+        Path(path), error="csmar_column_overrides_identity_changed"
+    )
+    if not candidate.exists():
+        return _validated_column_overrides(default_override_payload())
+    try:
+        _raw, payload = read_bounded_qrp_json(candidate)
+    except ValueError as exc:
+        if str(exc) == "dataset_metadata_file_too_large":
+            raise ValueError("csmar_column_overrides_exceed_max_bytes") from exc
+        raise
+    return _validated_column_overrides(payload)
+
+
+def _validated_column_overrides(
+    payload: Mapping[str, object],
+) -> Mapping[str, Mapping[str, object]]:
+    if not isinstance(payload, Mapping):
+        raise ValueError("invalid_csmar_column_override")
+    payload_snapshot = _bounded_mapping_snapshot(
+        payload,
+        max_items=len(INTERIM_COLUMNS_BY_DATA_ID),
+    )
+    unknown = set(payload_snapshot).difference(INTERIM_COLUMNS_BY_DATA_ID)
+    if unknown:
+        raise ValueError("unknown_csmar_column_override_data_id")
+    result: dict[str, dict[str, object]] = {}
+    for data_id, raw_override in payload_snapshot.items():
+        if not isinstance(raw_override, Mapping):
+            raise ValueError("invalid_csmar_column_override")
+        override = _bounded_mapping_snapshot(raw_override, max_items=3)
+        if set(override).difference({"keep", "drop", "_available_optional_columns"}):
+            raise ValueError("invalid_csmar_column_override")
+        allowed = set(INTERIM_COLUMNS_BY_DATA_ID[data_id])
+        allowed.update(OPTIONAL_COLUMNS.get(data_id, {}))
+        allowed.update(AUTO_DROPPED_COLUMNS.get(data_id, {}))
+        normalized: dict[str, object] = {}
+        for key in ("keep", "drop"):
+            values = override.get(key, [])
+            if type(values) not in (list, tuple):
+                raise ValueError("invalid_csmar_column_override")
+            if len(values) > len(allowed):
+                raise ValueError("invalid_csmar_column_override")
+            value_snapshot = tuple(values)
+            if any(type(value) is not str for value in value_snapshot):
+                raise ValueError("invalid_csmar_column_override")
+            if len(value_snapshot) != len(set(value_snapshot)) or set(
+                value_snapshot
+            ).difference(allowed):
+                raise ValueError("invalid_csmar_column_override")
+            normalized[key] = value_snapshot
+        if set(normalized["keep"]).intersection(normalized["drop"]):
+            raise ValueError("conflicting_csmar_column_override")
+        if "_available_optional_columns" in override:
+            available_optional = override["_available_optional_columns"]
+            expected_optional = OPTIONAL_COLUMNS.get(data_id, {})
+            if (
+                not isinstance(available_optional, Mapping)
+                or _bounded_mapping_snapshot(
+                    available_optional,
+                    max_items=len(expected_optional),
+                )
+                != expected_optional
+            ):
+                raise ValueError("invalid_csmar_column_override")
+        normalized["_available_optional_columns"] = MappingProxyType(
+            dict(OPTIONAL_COLUMNS.get(data_id, {}))
+        )
+        result[data_id] = MappingProxyType(normalized)
+    return MappingProxyType(result)
+
+
+def _bounded_mapping_snapshot(
+    mapping: Mapping[str, object],
+    *,
+    max_items: int,
+) -> dict[str, object]:
+    items = tuple(islice(mapping.items(), max_items + 1))
+    if len(items) > max_items:
+        raise ValueError("invalid_csmar_column_override")
+    snapshot: dict[str, object] = {}
+    for key, value in items:
+        if type(key) is not str or key in snapshot:
+            raise ValueError("invalid_csmar_column_override")
+        snapshot[key] = value
+    return snapshot
 
 
 def apply_output_column_rules(
     frame: pd.DataFrame,
     data_id: str,
     *,
-    overrides: dict[str, dict[str, object]] | None = None,
+    overrides: Mapping[str, Mapping[str, object]] | None = None,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    return _apply_output_column_rules_validated(
+        frame,
+        data_id,
+        overrides=_validated_column_overrides({} if overrides is None else overrides),
+    )
+
+
+def _apply_output_column_rules_validated(
+    frame: pd.DataFrame,
+    data_id: str,
+    *,
+    overrides: Mapping[str, Mapping[str, object]],
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     base_keep = list(INTERIM_COLUMNS_BY_DATA_ID.get(data_id, tuple(frame.columns)))
-    override = (overrides or {}).get(data_id, {})
-    manual_keep = [str(column) for column in override.get("keep", [])]
-    manual_drop = [str(column) for column in override.get("drop", [])]
+    override = overrides.get(data_id, {})
+    manual_keep = list(override.get("keep", []))
+    manual_drop = list(override.get("drop", []))
 
     keep_order = list(dict.fromkeys([*base_keep, *manual_keep]))
     available_keep = [column for column in keep_order if column in frame.columns]
@@ -307,7 +418,7 @@ def normalize_raw_frame(
     if data_id == "trading_calendar":
         return _normalize_trading_calendar_frame(mapped)
     if data_id == MARKET_BARS_DATA_ID:
-        result = mapped.copy()
+        result = mapped
         result["trade_date"] = pd.to_datetime(result["trade_date"])
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
@@ -321,27 +432,27 @@ def normalize_raw_frame(
             index=result.index,
             dtype="float64",
         )
-        return result.sort_values(["source_asset_id", "timestamp"]).reset_index(
-            drop=True
-        )
+        result.sort_values(["source_asset_id", "timestamp"], inplace=True)
+        result.reset_index(drop=True, inplace=True)
+        return result
     if data_id == "adjustment":
-        result = mapped.copy()
+        result = mapped
         result["trade_date"] = pd.to_datetime(result["trade_date"])
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
-        return result.sort_values(["source_asset_id", "timestamp"]).reset_index(
-            drop=True
-        )
+        result.sort_values(["source_asset_id", "timestamp"], inplace=True)
+        result.reset_index(drop=True, inplace=True)
+        return result
     if data_id == "market_cap":
-        result = mapped.copy()
+        result = mapped
         result["share_change_date"] = pd.to_datetime(result["share_change_date"])
         result["timestamp"] = result["share_change_date"]
         result["source_asset_id"] = result["stock_code"]
-        return result.sort_values(["source_asset_id", "timestamp"]).reset_index(
-            drop=True
-        )
+        result.sort_values(["source_asset_id", "timestamp"], inplace=True)
+        result.reset_index(drop=True, inplace=True)
+        return result
     if data_id == "stock_master":
-        result = mapped.copy()
+        result = mapped
         for column in ("listing_date", "delisting_date", "status_change_date"):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], errors="coerce")
@@ -354,11 +465,11 @@ def normalize_raw_frame(
         if result["timestamp"].isna().any():
             raise ValueError("missing_stock_master_effective_timestamp")
         result["source_asset_id"] = result["stock_code"]
-        return result.sort_values(["source_asset_id", "timestamp"]).reset_index(
-            drop=True
-        )
+        result.sort_values(["source_asset_id", "timestamp"], inplace=True)
+        result.reset_index(drop=True, inplace=True)
+        return result
     if data_id == "index_info":
-        result = mapped.copy()
+        result = mapped
         if "index_class" not in result.columns and "index_category" in result.columns:
             result["index_class"] = result["index_category"]
         if "base_point" in result.columns:
@@ -371,9 +482,9 @@ def normalize_raw_frame(
         if result["timestamp"].isna().any():
             raise ValueError("missing_index_info_effective_timestamp")
         result["source_asset_id"] = result["index_code"]
-        return result.sort_values(["source_asset_id", "timestamp"]).reset_index(
-            drop=True
-        )
+        result.sort_values(["source_asset_id", "timestamp"], inplace=True)
+        result.reset_index(drop=True, inplace=True)
+        return result
     raise ValueError(f"unsupported_csmar_data_id: {data_id}")
 
 
@@ -396,53 +507,143 @@ def filter_by_source_date_range(
     if start_date is None and end_date is None:
         return frame
     column = _date_column(data_id)
-    result = frame.copy()
-    timestamps = pd.to_datetime(result[column], errors="coerce")
-    mask = pd.Series(True, index=result.index)
+    timestamps = pd.to_datetime(frame[column], errors="coerce")
+    mask = pd.Series(True, index=frame.index)
     if start_date is not None:
         mask &= timestamps >= pd.Timestamp(start_date)
     if end_date is not None:
         mask &= timestamps <= pd.Timestamp(end_date)
-    return result[mask].copy()
+    return frame[mask].copy()
 
 
 def iter_interim_frames(
     *,
     data_id: str,
-    input_files: list[Path],
+    input_files: Iterable[Path],
     start_date: str | None,
     end_date: str | None,
     overrides: dict[str, dict[str, object]] | None = None,
     chunksize: int = 500_000,
     pruning_reports: list[dict[str, object]] | None = None,
 ) -> Iterator[pd.DataFrame]:
-    bound_policy = current_runtime_resource_policy()
+    return _iter_interim_frames(
+        data_id=data_id,
+        input_files=input_files,
+        start_date=start_date,
+        end_date=end_date,
+        overrides=overrides,
+        chunksize=chunksize,
+        pruning_reports=pruning_reports,
+        publication=False,
+    )
 
-    def activate() -> Iterator[pd.DataFrame]:
+
+def _iter_interim_frames(
+    *,
+    data_id: str,
+    input_files: Iterable[Path | tuple[Path, DatasetFileIdentity]],
+    start_date: str | None,
+    end_date: str | None,
+    overrides: dict[str, dict[str, object]] | None,
+    chunksize: int,
+    pruning_reports: list[dict[str, object]] | None,
+    publication: bool,
+    scratch_parent: Path | None = None,
+) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+    bound_policy = current_runtime_resource_policy()
+    validated_overrides = _validated_column_overrides(
+        {} if overrides is None else overrides
+    )
+
+    def activate() -> Iterator[pd.DataFrame | DatasetWriteChunk]:
         policy = bound_policy or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
+            operation_reports: list[dict[str, object]] = []
             raw_dataset = _raw_dataset_for_interim(data_id)
-            frames = _iter_pruned_interim_frames(
-                data_id=data_id,
-                raw_dataset=raw_dataset,
-                input_files=input_files,
-                start_date=start_date,
-                end_date=end_date,
-                overrides=overrides,
-                chunksize=chunksize,
-                pruning_reports=pruning_reports,
-            )
-            if data_id in SOURCE_REFERENCE_DATA_IDS:
-                reference_frames = _iter_deduped_reference_frames(
-                    frames, data_id=data_id, pruning_reports=pruning_reports
+            inputs = iter(input_files)
+            with closing_dataset_iterator(inputs):
+                selected_scratch_parent = scratch_parent
+                prepared_inputs: Iterable[Path | tuple[Path, DatasetFileIdentity]] = (
+                    inputs
                 )
-                with closing_dataset_iterator(reference_frames):
-                    for frame in reference_frames:
-                        yield frame
-                return
-            with closing_dataset_iterator(frames):
-                for frame in frames:
-                    yield frame
+                if data_id in SOURCE_REFERENCE_DATA_IDS:
+                    try:
+                        first_input = next(inputs)
+                    except StopIteration:
+                        _append_reference_duplicate_summary(
+                            operation_reports,
+                            data_id,
+                            0,
+                        )
+                        first_input = None
+                    if first_input is not None:
+                        first_path = _input_file_path(first_input)
+                        if selected_scratch_parent is None:
+                            selected_scratch_parent = first_path.parent
+                            source_parent = require_unaliased_path(
+                                first_path.parent,
+                                error="csmar_reference_source_volume_mismatch",
+                            )
+                            source_metadata = source_parent.lstat()
+                            if not stat.S_ISDIR(source_metadata.st_mode):
+                                raise ValueError(
+                                    "csmar_reference_source_volume_mismatch"
+                                )
+                            source_device = source_metadata.st_dev
+                        else:
+                            source_device = None
+                        prepared_inputs = _iter_reference_inputs(
+                            first_input,
+                            inputs,
+                            source_device=source_device,
+                        )
+                if selected_scratch_parent is not None or data_id not in (
+                    SOURCE_REFERENCE_DATA_IDS
+                ):
+                    frames = _iter_pruned_interim_frames(
+                        data_id=data_id,
+                        raw_dataset=raw_dataset,
+                        input_files=prepared_inputs,
+                        start_date=start_date,
+                        end_date=end_date,
+                        overrides=validated_overrides,
+                        chunksize=chunksize,
+                        pruning_reports=operation_reports,
+                        publication=True,
+                    )
+                    if data_id in SOURCE_REFERENCE_DATA_IDS:
+                        assert selected_scratch_parent is not None
+                        reference_frames = _iter_deduped_reference_frames(
+                            frames,
+                            data_id=data_id,
+                            pruning_reports=operation_reports,
+                            publication=True,
+                            scratch_parent=selected_scratch_parent,
+                        )
+                        with closing_dataset_iterator(reference_frames):
+                            for item in reference_frames:
+                                yield (
+                                    item
+                                    if publication
+                                    else item.frame
+                                    if isinstance(item, DatasetWriteChunk)
+                                    else item
+                                )
+                                del item
+                    else:
+                        with closing_dataset_iterator(frames):
+                            for item in frames:
+                                yield (
+                                    item
+                                    if publication
+                                    else item.frame
+                                    if isinstance(item, DatasetWriteChunk)
+                                    else item
+                                )
+                                del item
+            if pruning_reports is not None:
+                for report in operation_reports:
+                    _merge_pruning_report(pruning_reports, report)
 
     return activate()
 
@@ -457,43 +658,83 @@ def materialize_interim_data(
     override_path: Path | None = None,
     chunksize: int = 500_000,
 ) -> InterimImportResult:
+    policy = current_runtime_resource_policy() or active_runtime_resource_policy()
+    with runtime_resource_policy_scope(policy):
+        return _materialize_interim_data(
+            layout=layout,
+            raw_root=raw_root,
+            data_ids=data_ids,
+            start_date=start_date,
+            end_date=end_date,
+            override_path=override_path,
+            chunksize=chunksize,
+        )
+
+
+def _materialize_interim_data(
+    *,
+    layout: StorageLayout,
+    raw_root: Path | None,
+    data_ids: tuple[str, ...],
+    start_date: str | None,
+    end_date: str | None,
+    override_path: Path | None,
+    chunksize: int,
+) -> InterimImportResult:
     catalog = interim_catalog()
     source_raw_root = raw_root or layout.raw_source_root(SourceId(SOURCE_ID))
     overrides = load_column_overrides(override_path) if override_path else None
     written: dict[str, Path] = {}
-    skipped: list[str] = []
+    skipped: set[str] = set()
     pruning_reports: list[dict[str, object]] = []
-    raw_files_by_data_id = dataset_files_by_id(source_raw_root)
-
+    requested_by_raw: dict[str, str] = {}
     for data_id in data_ids:
-        spec = catalog.get(data_id)
-        input_files = list(
-            raw_files_by_data_id.get(_raw_dataset_for_interim(data_id), ())
-        )
-        if not input_files:
-            skipped.append(data_id)
-            continue
-        artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
-        frames = iter_interim_frames(
-            data_id=data_id,
-            input_files=input_files,
-            start_date=start_date,
-            end_date=end_date,
-            overrides=overrides,
-            chunksize=chunksize,
-            pruning_reports=pruning_reports,
-        )
-        try:
-            first_frame = next(frames)
-        except StopIteration:
-            skipped.append(data_id)
-            continue
-        write_dataset(artifact_root, _iter_with_first(first_frame, frames), spec=spec)
-        written[data_id] = artifact_root
+        requested_by_raw[_raw_dataset_for_interim(data_id)] = data_id
+    pending = set(data_ids)
+    indexed_files = dataset_files_with_identity_by_id(source_raw_root)
+    with closing_dataset_iterator(indexed_files):
+        for raw_dataset, group in groupby(indexed_files, key=lambda item: item[0]):
+            data_id = requested_by_raw.get(raw_dataset)
+            if data_id is None:
+                continue
+            input_files = ((item[1], item[2]) for item in group)
+            pending.discard(data_id)
+            spec = catalog.get(data_id)
+            artifact_root = require_artifact_root(
+                layout.interim_data_root(spec.source_id, spec.data_id)
+            )
+            frames = _iter_interim_frames(
+                data_id=data_id,
+                input_files=input_files,
+                start_date=start_date,
+                end_date=end_date,
+                overrides=overrides,
+                chunksize=chunksize,
+                pruning_reports=pruning_reports,
+                publication=True,
+                scratch_parent=artifact_root.parent,
+            )
+            with closing_dataset_iterator(frames):
+                try:
+                    first_frame = next(frames)
+                except StopIteration:
+                    skipped.add(data_id)
+                    continue
+                write_frames = _iter_with_first(first_frame, frames)
+                del first_frame
+                write_dataset(
+                    artifact_root,
+                    write_frames,
+                    spec=spec,
+                    resource_policy=current_runtime_resource_policy(),
+                )
+                del write_frames
+            written[data_id] = artifact_root
+    skipped.update(pending)
 
     return InterimImportResult(
         artifact_roots=written,
-        skipped=tuple(skipped),
+        skipped=tuple(data_id for data_id in data_ids if data_id in skipped),
         pruning_report_text=render_column_pruning_report(pruning_reports),
     )
 
@@ -502,85 +743,406 @@ def _iter_pruned_interim_frames(
     *,
     data_id: str,
     raw_dataset: str,
-    input_files: list[Path],
+    input_files: Iterable[Path | tuple[Path, DatasetFileIdentity]],
     start_date: str | None,
     end_date: str | None,
-    overrides: dict[str, dict[str, object]] | None,
+    overrides: Mapping[str, Mapping[str, object]],
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
-) -> Iterator[pd.DataFrame]:
-    for input_file in sorted(input_files):
-        for chunk in iter_private_export_chunks(
-            input_file,
-            dataset=raw_dataset,
-            chunksize=chunksize,
-        ):
-            normalized = normalize_raw_frame(chunk, data_id)
-            normalized = _filter_normalized_frame(
-                normalized,
-                data_id=data_id,
-                start_date=start_date,
-                end_date=end_date,
+    publication: bool = False,
+) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+    local_reports: list[dict[str, object]] = []
+    primary_key = tuple(interim_catalog().get(data_id).primary_key)
+    previous_key: tuple[object, ...] | None = None
+    retained_previous_bytes = 0
+    retained_state = [0]
+    try:
+        for input in input_files:
+            if isinstance(input, tuple):
+                input_file, expected_identity = input
+            else:
+                input_file = input
+                expected_identity = None
+            chunks = iter(
+                iter_private_export_chunks_with_policy(
+                    input_file,
+                    dataset=raw_dataset,
+                    chunksize=chunksize,
+                    resource_policy=active_runtime_resource_policy(),
+                    expected_identity=expected_identity,
+                    retained_payload_bytes=retained_state,
+                )
             )
-            if normalized.empty:
-                continue
-            pruned, report = apply_output_column_rules(
-                normalized,
-                data_id,
-                overrides=overrides,
-            )
-            if pruning_reports is not None:
-                pruning_reports.append(report)
-            yield pruned
+            with closing_dataset_iterator(chunks):
+                while True:
+                    try:
+                        chunk = next(chunks)
+                    except StopIteration:
+                        break
+                    chunk_bytes = pandas_frame_payload_bytes(chunk)
+                    start = 0
+                    span = len(chunk)
+                    while start < len(chunk):
+                        stop = min(len(chunk), start + span)
+                        candidate = (
+                            chunk
+                            if start == 0 and stop == len(chunk)
+                            else chunk.iloc[start:stop]
+                        )
+                        upstream_retained_bytes = retained_previous_bytes + (
+                            0 if candidate is chunk else chunk_bytes
+                        )
+                        try:
+                            pruned, report = _transform_interim_chunk(
+                                candidate,
+                                data_id=data_id,
+                                start_date=start_date,
+                                end_date=end_date,
+                                overrides=overrides,
+                                retained_previous_bytes=upstream_retained_bytes,
+                            )
+                        except DatasetReadCapacityExceeded:
+                            del candidate
+                            if stop - start == 1:
+                                raise
+                            span = max(1, (stop - start) // 2)
+                            continue
+                        if pruned.empty:
+                            del pruned, report, candidate
+                            start = stop
+                            span = len(chunk) - start
+                            continue
+                        _merge_pruning_report(local_reports, report)
+                        first_key = tuple(pruned.iloc[0].loc[list(primary_key)])
+                        if previous_key is not None and first_key < previous_key:
+                            raise ValueError("csmar_source_order_regression")
+                        previous_key = tuple(pruned.iloc[-1].loc[list(primary_key)])
+                        del report, candidate
+                        retained_previous_bytes = pandas_frame_payload_bytes(pruned)
+                        retained_state[0] = retained_previous_bytes
+                        yield (
+                            DatasetWriteChunk(
+                                pruned,
+                                chunk_bytes,
+                            )
+                            if publication
+                            else pruned
+                        )
+                        del pruned
+                        start = stop
+                        span = len(chunk) - start
+                    del chunk
+        if pruning_reports is not None:
+            for report in local_reports:
+                _merge_pruning_report(pruning_reports, report)
+    finally:
+        retained_state[0] = 0
+
+
+def _transform_interim_chunk(
+    chunk: pd.DataFrame,
+    *,
+    data_id: str,
+    start_date: str | None,
+    end_date: str | None,
+    overrides: Mapping[str, Mapping[str, object]],
+    retained_previous_bytes: int,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    policy = active_runtime_resource_policy()
+    chunk_bytes = pandas_frame_payload_bytes(chunk)
+    normalization_preallocation_bytes = _normalization_preallocation_bytes(
+        chunk, data_id=data_id
+    )
+    _require_interim_transform_headroom(
+        retained_previous_bytes + chunk_bytes + normalization_preallocation_bytes,
+        policy.task_memory_budget_bytes,
+    )
+    normalized = normalize_raw_frame(chunk, data_id)
+    normalized_bytes = pandas_frame_payload_bytes(normalized)
+    filter_preallocation_bytes = _filter_preallocation_bytes(
+        normalized,
+        data_id=data_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    _require_interim_transform_headroom(
+        retained_previous_bytes + normalized_bytes + filter_preallocation_bytes,
+        policy.task_memory_budget_bytes,
+    )
+    filtered = _filter_normalized_frame(
+        normalized,
+        data_id=data_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    filtered_bytes = pandas_frame_payload_bytes(filtered)
+    _require_interim_transform_headroom(
+        retained_previous_bytes + normalized_bytes + filtered_bytes,
+        policy.task_memory_budget_bytes,
+    )
+    del normalized
+    if filtered.empty:
+        return filtered, {}
+    _require_interim_transform_headroom(
+        retained_previous_bytes + filtered_bytes + filtered_bytes,
+        policy.task_memory_budget_bytes,
+    )
+    pruned, report = _apply_output_column_rules_validated(
+        filtered,
+        data_id,
+        overrides=overrides,
+    )
+    _require_interim_transform_headroom(
+        retained_previous_bytes + filtered_bytes + pandas_frame_payload_bytes(pruned),
+        policy.task_memory_budget_bytes,
+    )
+    del filtered
+    return pruned, report
+
+
+def _require_interim_transform_headroom(required_bytes: int, budget_bytes: int) -> None:
+    if required_bytes > budget_bytes:
+        raise DatasetReadCapacityExceeded(
+            "csmar_interim_working_set_exceeds_task_memory_budget"
+        )
+
+
+def _normalization_preallocation_bytes(frame: pd.DataFrame, *, data_id: str) -> int:
+    """Bound the actual variable-width and ordering allocations of normalization."""
+
+    if frame.empty:
+        return 0
+    pointer_bytes = array("Q").itemsize
+    variable_width_bytes = pandas_frame_payload_bytes(frame)
+    primary_key_columns = len(interim_catalog().get(data_id).primary_key)
+    ordering_bytes = len(frame) * (primary_key_columns + 2) * pointer_bytes
+    return variable_width_bytes + ordering_bytes
+
+
+def _filter_preallocation_bytes(
+    frame: pd.DataFrame,
+    *,
+    data_id: str,
+    start_date: str | None,
+    end_date: str | None,
+) -> int:
+    if not (
+        (data_id in TIME_RANGE_FILTER_DATA_IDS and (start_date or end_date))
+        or (data_id in START_END_FILTER_DATA_IDS and (start_date or end_date))
+        or (data_id in END_ONLY_FILTER_DATA_IDS and end_date)
+    ):
+        return 0
+    return len(frame) * (array("Q").itemsize + 1) + pandas_frame_payload_bytes(frame)
+
+
+def _merge_pruning_report(
+    reports: list[dict[str, object]], report: dict[str, object]
+) -> None:
+    for current in reports:
+        if current.get("data_id") != report.get("data_id") or current.get(
+            "report_type"
+        ) != report.get("report_type"):
+            continue
+        for key, value in report.items():
+            if isinstance(value, list) and isinstance(current.get(key), list):
+                current[key] = list(dict.fromkeys([*current[key], *value]))
+            elif isinstance(value, dict) and isinstance(current.get(key), dict):
+                current[key] = {**current[key], **value}
+        return
+    reports.append(report)
+
+
+def _iter_with_first(
+    first_frame: pd.DataFrame | DatasetWriteChunk,
+    frames: Iterator[pd.DataFrame | DatasetWriteChunk],
+) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+    yield first_frame
+    del first_frame
+    yield from frames
 
 
 def _iter_deduped_reference_frames(
-    frames: Iterator[pd.DataFrame],
+    frames: Iterator[pd.DataFrame | DatasetWriteChunk],
     *,
     data_id: str,
     pruning_reports: list[dict[str, object]] | None,
-) -> Iterator[pd.DataFrame]:
+    publication: bool = False,
+    scratch_parent: Path,
+) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
     spec = interim_catalog().get(data_id)
-    primary_key = list(spec.primary_key)
-    seen_rows: dict[tuple[object, ...], tuple[object, ...]] = {}
+    primary_key = tuple(spec.primary_key)
     exact_duplicate_count = 0
-    try:
-        with closing_dataset_iterator(frames):
-            for frame in frames:
-                missing = [
-                    column for column in primary_key if column not in frame.columns
-                ]
-                if missing:
-                    raise ValueError(
-                        "missing_reference_primary_key_columns: " + ", ".join(missing)
+    completed = False
+    policy = active_runtime_resource_policy()
+    comparison_target = policy.payload_target_bytes
+    task_budget = policy.task_memory_budget_bytes
+    with (
+        closing_dataset_iterator(frames),
+        ExactPrimaryKeyIndex(
+            primary_key=primary_key,
+            timestamp_columns=tuple(
+                column for column in primary_key if column == "timestamp"
+            ),
+            scratch_parent=scratch_parent,
+        ) as index,
+    ):
+        for source_item in frames:
+            source_frame = (
+                source_item.frame
+                if isinstance(source_item, DatasetWriteChunk)
+                else source_item
+            )
+            upstream_retained_bytes = (
+                source_item.retained_payload_bytes
+                if isinstance(source_item, DatasetWriteChunk)
+                else 0
+            )
+            missing = [
+                column for column in primary_key if column not in source_frame.columns
+            ]
+            if missing:
+                raise ValueError(
+                    "missing_reference_primary_key_columns: " + ", ".join(missing)
+                )
+            value_columns = tuple(
+                sorted(
+                    column
+                    for column in source_frame.columns
+                    if column not in primary_key
+                )
+            )
+            source_frame_bytes = pandas_frame_payload_bytes(source_frame)
+            start = 0
+            span = len(source_frame)
+            while start < len(source_frame):
+                stop = min(len(source_frame), start + span)
+                frame = source_frame.iloc[start:stop]
+                slice_bytes = pandas_frame_payload_bytes(frame)
+                preflight_bytes = (
+                    upstream_retained_bytes
+                    + source_frame_bytes
+                    + index.retained_memory_bytes
+                    + 2 * slice_bytes
+                    + (stop - start) * array("Q").itemsize
+                )
+                if preflight_bytes > task_budget:
+                    if stop - start <= 1:
+                        raise ValueError(
+                            "csmar_reference_working_set_exceeds_task_memory_budget"
+                        )
+                    span = max(1, (stop - start) // 2)
+                    continue
+                table = pa.Table.from_pandas(frame, preserve_index=False)
+                retained_with_worst_output = (
+                    upstream_retained_bytes
+                    + source_frame_bytes
+                    + table.nbytes
+                    + index.retained_memory_bytes
+                    + slice_bytes
+                    + (stop - start) * array("Q").itemsize
+                )
+                if retained_with_worst_output > task_budget:
+                    if stop - start <= 1:
+                        raise ValueError(
+                            "csmar_reference_working_set_exceeds_task_memory_budget"
+                        )
+                    del table
+                    span = max(1, (stop - start) // 2)
+                    continue
+                try:
+                    keep_positions, duplicate_count = index.classify_comparison_table(
+                        table,
+                        namespace=data_id,
+                        value_columns=value_columns,
+                        payload_target_bytes=comparison_target,
                     )
-                keep_positions: list[int] = []
-                for position, row in enumerate(
-                    frame.itertuples(index=False, name=None)
-                ):
-                    columns = tuple(str(column) for column in frame.columns)
-                    values = dict(zip(columns, row, strict=True))
-                    key = tuple(values[column] for column in primary_key)
-                    payload = tuple(values[column] for column in columns)
-                    previous = seen_rows.get(key)
-                    if previous is None:
-                        seen_rows[key] = payload
-                        keep_positions.append(position)
-                        continue
-                    if previous != payload:
+                except ValueError as exc:
+                    if str(exc) == "conflicting_exact_primary_key_payload":
                         raise ValueError(
                             f"conflicting_reference_primary_key_duplicates: {data_id}"
-                        )
-                    exact_duplicate_count += 1
+                        ) from exc
+                    raise
+                finally:
+                    del table
+                exact_duplicate_count += duplicate_count
                 if keep_positions:
-                    yield frame.iloc[keep_positions].reset_index(drop=True)
-    finally:
-        if pruning_reports is not None:
-            _append_reference_duplicate_summary(
-                pruning_reports,
-                data_id,
-                exact_duplicate_count,
-            )
+                    if (
+                        upstream_retained_bytes
+                        + source_frame_bytes
+                        + index.retained_memory_bytes
+                        + keep_positions.retained_memory_bytes
+                        + slice_bytes
+                        > task_budget
+                    ):
+                        raise ValueError(
+                            "csmar_reference_working_set_exceeds_task_memory_budget"
+                        )
+                    output = frame.iloc[keep_positions.view].reset_index(drop=True)
+                    output_bytes = pandas_frame_payload_bytes(output)
+                    if (
+                        upstream_retained_bytes
+                        + source_frame_bytes
+                        + output_bytes
+                        + index.retained_memory_bytes
+                        + keep_positions.retained_memory_bytes
+                        > task_budget
+                    ):
+                        raise ValueError(
+                            "csmar_reference_working_set_exceeds_task_memory_budget"
+                        )
+                    del frame, keep_positions
+                    yield (
+                        DatasetWriteChunk(
+                            output,
+                            upstream_retained_bytes
+                            + source_frame_bytes
+                            + index.retained_memory_bytes,
+                        )
+                        if publication
+                        else output
+                    )
+                    del output
+                else:
+                    del frame, keep_positions
+                start = stop
+                span = len(source_frame) - start
+            del source_frame, source_item
+        completed = True
+    if completed and pruning_reports is not None:
+        _append_reference_duplicate_summary(
+            pruning_reports,
+            data_id,
+            exact_duplicate_count,
+        )
+
+
+def _input_file_path(
+    value: Path | tuple[Path, DatasetFileIdentity],
+) -> Path:
+    return Path(value[0] if isinstance(value, tuple) else value)
+
+
+def _iter_reference_inputs(
+    first: Path | tuple[Path, DatasetFileIdentity],
+    remaining: Iterator[Path | tuple[Path, DatasetFileIdentity]],
+    *,
+    source_device: int | None,
+) -> Iterator[Path | tuple[Path, DatasetFileIdentity]]:
+    yield first
+    for value in remaining:
+        parent = require_unaliased_path(
+            _input_file_path(value).parent,
+            error="csmar_reference_source_volume_mismatch",
+        )
+        try:
+            metadata = parent.lstat()
+        except OSError as exc:
+            raise ValueError("csmar_reference_source_volume_mismatch") from exc
+        if source_device is not None and (
+            not stat.S_ISDIR(metadata.st_mode) or metadata.st_dev != source_device
+        ):
+            raise ValueError("csmar_reference_source_volume_mismatch")
+        yield value
 
 
 def _append_reference_duplicate_summary(
@@ -660,7 +1222,7 @@ def _column_roles(
 
 
 def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame.copy()
+    result = frame
     result["calendar_date"] = pd.to_datetime(result["calendar_date"], errors="raise")
     result["source_market_type"] = pd.to_numeric(
         result["source_market_type"],
@@ -682,11 +1244,11 @@ def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
     duplicate = result.duplicated(["source_market_type", "calendar_date"], keep=False)
     if duplicate.any():
         raise ValueError("duplicate_trading_calendar_key")
-    result["is_trading_day"] = result["source_state"].eq("O")
+    result["is_trading_day"] = result["source_state"].eq("O").astype("bool")
     result["timestamp"] = result["calendar_date"]
     return (
         result[list(TRADING_CALENDAR_INTERIM_COLUMNS)]
-        .sort_values(["source_market_type", "calendar_date"])
+        .sort_values(["calendar_date", "source_market_type"])
         .reset_index(drop=True)
     )
 
@@ -736,14 +1298,6 @@ def _filter_normalized_frame(
             end_date=end_date,
         )
     return frame
-
-
-def _iter_with_first(
-    first_frame: pd.DataFrame,
-    frames: Iterator[pd.DataFrame],
-) -> Iterator[pd.DataFrame]:
-    yield first_frame
-    yield from frames
 
 
 __all__ = [

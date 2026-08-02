@@ -17,12 +17,6 @@ def init_governance_git_repo(repo: Path, files: Mapping[str, str]) -> str:
     return run_git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
-def add_governance_git_change(repo: Path, files: Mapping[str, str]) -> str:
-    _write_files(repo, files)
-    run_git(repo, "add", ".")
-    return run_git(repo, "status", "--short").stdout
-
-
 def run_governance_script(
     repo: Path,
     *args: str,

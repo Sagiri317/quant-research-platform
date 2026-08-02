@@ -14,6 +14,8 @@ from quant_research_platform.contracts.filtering import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.run_id import validate_run_id
+from quant_research_platform.contracts.signals import _cross_signal_id_column_overlaps
+from quant_research_platform.contracts.validation import _validate_column_tuple
 
 if TYPE_CHECKING:
     from quant_research_platform.contracts.signals import SignalSpec as _SignalSpec
@@ -183,30 +185,6 @@ def _validate_signal_label_separation(
     invalid = sorted(signal_names.intersection(label_columns))
     if invalid:
         raise ValueError("evaluation_signal_label_overlap: " + ", ".join(invalid))
-
-
-def _cross_signal_id_column_overlaps(signals: tuple[_SignalSpec, ...]) -> list[str]:
-    overlaps = {
-        signal.signal_id
-        for index, signal in enumerate(signals)
-        for other_index, other in enumerate(signals)
-        if index != other_index and signal.signal_id == other.source_column
-    }
-    return sorted(overlaps)
-
-
-def _validate_column_tuple(
-    columns: tuple[str, ...],
-    field_name: str,
-    *,
-    required: bool = True,
-) -> None:
-    if required and not columns:
-        raise ValueError(f"{field_name}_required")
-    if any(not isinstance(column, str) or not column for column in columns):
-        raise ValueError(f"{field_name}_must_be_non_empty_strings")
-    if len(set(columns)) != len(columns):
-        raise ValueError(f"{field_name}_must_not_contain_duplicates")
 
 
 __all__ = [

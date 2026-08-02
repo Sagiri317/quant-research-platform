@@ -211,13 +211,28 @@ def test_iter_grouped_timestamps_mapping_rejects_none_timestamp_values() -> None
         tuple(iter_grouped_timestamps(panel_keys))  # type: ignore[arg-type]
 
 
+def test_iter_grouped_timestamps_mapping_rejects_duplicate_panel_keys() -> None:
+    duplicate = pd.Timestamp("2026-07-06 00:00")
+
+    with pytest.raises(ValueError, match="duplicate_panel_keys"):
+        tuple(iter_grouped_timestamps({"asset": (duplicate, duplicate)}))
+
+
+def test_iter_grouped_timestamps_frame_rejects_duplicate_panel_keys() -> None:
+    duplicate = pd.Timestamp("2026-07-06 00:00")
+    panel_keys = pd.DataFrame(
+        {"asset_id": ["asset", "asset"], "timestamp": [duplicate, duplicate]}
+    )
+
+    with pytest.raises(ValueError, match="duplicate_panel_keys"):
+        tuple(iter_grouped_timestamps(panel_keys))
+
+
 def test_price_volume_windows_use_generic_grouped_timestamp_helper() -> None:
     panel_keys = pd.DataFrame(
         {
             "asset_id": ["asset_a", "asset_a", "asset_b"],
-            "timestamp": pd.to_datetime(
-                ["2024-01-02", "2024-01-05", "2024-01-03"]
-            ),
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-05", "2024-01-03"]),
         }
     )
 

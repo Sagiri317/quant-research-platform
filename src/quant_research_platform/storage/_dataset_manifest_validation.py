@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 from quant_research_platform.contracts._json import canonical_json_hash
-from quant_research_platform.storage._dataset_paths import (
-    relative_partition_label,
-)
 from quant_research_platform.storage._dataset_schema import (
     physical_schema_columns,
     validate_physical_schema_payload,
@@ -28,22 +24,6 @@ def manifest_has_runtime_metadata(manifest: Mapping[str, Any]) -> bool:
             "row_count",
         )
     )
-
-
-def validate_manifest_runtime_metadata(
-    manifest: Mapping[str, Any],
-    *,
-    data_root: Path,
-    paths: list[Path],
-) -> None:
-    manifest_file_count, _, partition_row_counts = (
-        validate_manifest_runtime_metadata_shape(manifest)
-    )
-    if manifest_file_count != len(paths):
-        raise ValueError("manifest_file_count_mismatch")
-    actual_partitions = {relative_partition_label(data_root, path) for path in paths}
-    if set(partition_row_counts) != actual_partitions:
-        raise ValueError("manifest_partition_row_counts_mismatch")
 
 
 def validate_manifest_runtime_metadata_shape(

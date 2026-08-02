@@ -11,7 +11,11 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.filtering import reject_filter_input_columns
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.contracts.signals import (
+    SignalSpec,
+    _cross_signal_id_column_overlaps,
+)
+from quant_research_platform.contracts.validation import _validate_column_tuple
 
 WEIGHT_METHODS = {
     "equal_weight_quantile",
@@ -176,8 +180,7 @@ class PortfolioDiagnosticsConfig:
         )
         if overlap:
             raise ValueError(
-                "diagnostic_exposure_columns_must_not_overlap: "
-                + ", ".join(overlap)
+                "diagnostic_exposure_columns_must_not_overlap: " + ", ".join(overlap)
             )
 
 
@@ -261,30 +264,6 @@ def _validate_nonnegative(value: float, name: str) -> None:
 def _validate_optional_column_name(value: str | None, name: str) -> None:
     if value is not None and (not isinstance(value, str) or not value):
         raise ValueError(f"{name} must be a non-empty string.")
-
-
-def _validate_column_tuple(
-    columns: tuple[str, ...],
-    field_name: str,
-    *,
-    required: bool = True,
-) -> None:
-    if required and not columns:
-        raise ValueError(f"{field_name}_required")
-    if any(not isinstance(column, str) or not column for column in columns):
-        raise ValueError(f"{field_name}_must_be_non_empty_strings")
-    if len(set(columns)) != len(columns):
-        raise ValueError(f"{field_name}_must_not_contain_duplicates")
-
-
-def _cross_signal_id_column_overlaps(signals: tuple[SignalSpec, ...]) -> list[str]:
-    overlaps = {
-        signal.signal_id
-        for index, signal in enumerate(signals)
-        for other_index, other in enumerate(signals)
-        if index != other_index and signal.signal_id == other.source_column
-    }
-    return sorted(overlaps)
 
 
 def normalize_rebalance_frequency(value: str | DataFrequency) -> str:

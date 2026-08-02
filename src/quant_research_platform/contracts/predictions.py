@@ -13,7 +13,6 @@ from quant_research_platform.contracts.run_id import validate_run_id
 
 PREDICTION_SCORE_COLUMN = "prediction_score"
 PREDICTION_PRIMARY_KEY = ("timestamp", "asset_id")
-PREDICTION_OUTPUT_COLUMNS = (*PREDICTION_PRIMARY_KEY, PREDICTION_SCORE_COLUMN)
 MODEL_SELECTION_METRIC_DIRECTIONS = {
     "validation_ic": "maximize",
     "validation_rankic": "maximize",
@@ -113,7 +112,6 @@ def _iso_date(value: str, field_name: str) -> date:
 
 
 __all__ = [
-    "PREDICTION_OUTPUT_COLUMNS",
     "PREDICTION_PRIMARY_KEY",
     "PREDICTION_SCORE_COLUMN",
     "MODEL_SELECTION_METRIC_DIRECTIONS",

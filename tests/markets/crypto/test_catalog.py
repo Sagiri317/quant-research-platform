@@ -19,7 +19,7 @@ from quant_research_platform.markets.implementations.crypto.research_scenarios i
     DEFAULT_SIGNAL_COLUMNS,
     build_evaluation_catalog,
 )
-from quant_research_platform.research.factors.microstructure import (
+from quant_research_platform.research.factors.microstructure.columns import (
     MICROSTRUCTURE_FACTOR_COLUMNS,
 )
 from quant_research_platform.research.labels.forward_returns import (

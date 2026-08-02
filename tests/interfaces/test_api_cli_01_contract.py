@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import inspect
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from typer.main import get_command
 from typer.testing import CliRunner
 
 import quant_research_platform.interfaces.api.app as api_app_module
@@ -19,8 +18,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
-from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.presets import (
     price_volume_factor_columns,
 )
 
@@ -51,25 +49,6 @@ FORBIDDEN_PUBLIC_MARKERS = (
     "row sample",
 )
 
-RETIRED_API_FRAGMENTS = (
-    "/api/0.1/catalog/data-products",
-    "/api/0.1/catalog/universes",
-    "/api/0.1/data-products/{data_product" + "_id}/interim-runs",
-    "/markets/{market_id}/processed-data",
-    "/workflows",
-    "/reports/{run_id}",
-)
-
-RETIRED_CLI_COMMANDS = (
-    ("catalog", "data-products"),
-    ("catalog", "universes"),
-    ("market", "build-processed", "--market", "a_share"),
-    ("research", "build-dataset"),
-    ("workflow", "run"),
-    ("report", "show"),
-)
-
-
 def test_api_01_routes_are_exact_public_surface() -> None:
     api = create_app()
     routes = {
@@ -81,7 +60,7 @@ def test_api_01_routes_are_exact_public_surface() -> None:
     assert routes == APPROVED_API_ROUTES
 
 
-def test_openapi_uses_approved_operation_ids_and_no_retired_operations() -> None:
+def test_openapi_uses_approved_operation_ids() -> None:
     schema = create_app().openapi()
     operation_ids = {
         operation["operationId"]
@@ -95,10 +74,6 @@ def test_openapi_uses_approved_operation_ids_and_no_retired_operations() -> None
         "list_catalog_labels",
         "describe_research_dataset_requirements",
     }
-
-    text = str(schema)
-    for fragment in RETIRED_API_FRAGMENTS:
-        assert fragment not in text
 
 
 def test_api_01_endpoints_respond_without_provider_source_markers() -> None:
@@ -116,8 +91,6 @@ def test_api_01_endpoints_respond_without_provider_source_markers() -> None:
     payloads = [response.json() for response in responses]
     assert {payload["api_version"] for payload in payloads} == {"0.1"}
     combined = "\n".join(str(payload) for payload in payloads)
-    assert "planned" not in combined.lower()
-    assert "parquet" not in combined.lower()
     _assert_public_text_has_no_provider_source_markers(combined)
 
     assert len(responses[0].json()["items"]) == len(price_volume_factor_columns())
@@ -128,22 +101,19 @@ def test_api_01_endpoints_respond_without_provider_source_markers() -> None:
         PRICE_VOLUME_PROCESSED_DATA_ID,
         FORWARD_RETURNS_PROCESSED_DATA_ID,
     ]
-    assert "price_volume" + "_56" not in combined
-
-
-def test_api_cli_adapters_do_not_scan_parquet_paths() -> None:
-    module_source = (
-        inspect.getsource(api_app_module)
-        + "\n"
-        + inspect.getsource(cli_commands_module)
-    ).lower()
-
-    for term in ("read_parquet", ".parquet", "glob(", "rglob(", "path("):
-        assert term not in module_source
 
 
 def test_cli_exposes_only_current_public_commands() -> None:
     runner = CliRunner()
+    command = get_command(app)
+
+    assert {
+        name: set(getattr(group, "commands", {}))
+        for name, group in command.commands.items()
+    } == {
+        "catalog": {"factors", "labels"},
+        "research-datasets": {"requirements"},
+    }
 
     commands = [
         ["catalog", "factors"],
@@ -160,11 +130,8 @@ def test_cli_exposes_only_current_public_commands() -> None:
         assert result.exit_code == 0
         _assert_public_text_has_no_provider_source_markers(result.output)
 
-    for command in RETIRED_CLI_COMMANDS:
-        assert runner.invoke(app, list(command)).exit_code != 0
 
-
-def test_cli_help_exposes_approved_groups_and_no_retired_commands() -> None:
+def test_cli_help_exposes_approved_groups() -> None:
     runner = CliRunner()
     top_help = runner.invoke(app, ["--help"])
     catalog_help = runner.invoke(app, ["catalog", "--help"])
@@ -182,10 +149,6 @@ def test_cli_help_exposes_approved_groups_and_no_retired_commands() -> None:
     assert "factors" in catalog_help.output
     assert "labels" in catalog_help.output
     assert "requirements" in research_datasets_help.output
-    assert "data-products" not in combined
-    assert "universes" not in combined
-    assert "run-interim" not in combined
-    assert "--run-id" not in combined
     _assert_public_text_has_no_provider_source_markers(combined)
 
 
@@ -209,40 +172,7 @@ def test_cli_commands_module_help_invokes_existing_app() -> None:
     assert result.returncode == 0
     assert "catalog" in result.stdout
     assert "research-datasets" in result.stdout
-    assert "run-interim" not in result.stdout
     _assert_public_text_has_no_provider_source_markers(result.stdout)
-
-
-def test_api_and_cli_naming_conventions_are_contractual() -> None:
-    schema = create_app().openapi()
-    resource_segment_re = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*s$")
-    snake_case_re = re.compile(r"^[a-z][a-z0-9_]*$")
-    exempt_segments = {"api", "0.1", "catalog"}
-
-    for path in schema["paths"]:
-        for segment in path.strip("/").split("/"):
-            if segment in exempt_segments:
-                continue
-            if segment.startswith("{") and segment.endswith("}"):
-                assert snake_case_re.fullmatch(segment.strip("{}"))
-                continue
-            assert resource_segment_re.fullmatch(segment)
-
-    requirements = services_module.describe_research_dataset_requirements(
-        "price_volume_forward_returns",
-        profile=research_profile(),
-    )
-    assert snake_case_re.fullmatch(requirements["dataset_id"])
-
-    help_text = CliRunner().invoke(
-        app,
-        ["research-datasets", "requirements", "--help"],
-    )
-    assert help_text.exit_code == 0
-    assert "research-datasets" in CliRunner().invoke(app, ["--help"]).output
-    assert "requirements" in help_text.output
-    assert "--dry_run" not in help_text.output
-    assert "--run_id" not in help_text.output
 
 
 def test_openapi_schema_does_not_expose_provider_markers() -> None:
@@ -432,24 +362,6 @@ def test_cli_error_output_is_sanitized() -> None:
     assert "C:" not in result.output
     assert "000001" not in result.output
     assert "csmar" not in result.output.lower()
-
-
-def test_cli_excludes_retired_public_commands() -> None:
-    runner = CliRunner()
-    retired = [
-        ["private", "--help"],
-        ["diagnostics", "--help"],
-        ["a-share", "--help"],
-        ["ml", "baseline", "train", "--help"],
-        ["evaluate" + "-parquet", "--help"],
-        ["factor" + "-rebuild", "--help"],
-        ["prediction" + "-handoff", "--help"],
-        ["compare", "--help"],
-        *[list(command[:2]) + ["--help"] for command in RETIRED_CLI_COMMANDS],
-    ]
-
-    for command in retired:
-        assert runner.invoke(app, command).exit_code != 0
 
 
 def _assert_public_text_has_no_provider_source_markers(text: str) -> None:

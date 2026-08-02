@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +23,7 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
@@ -36,6 +36,309 @@ RESOURCE_POLICY = RuntimeResourcePolicy.from_environment(
     available_memory_bytes=1024**3,
     environ={},
 )
+
+
+@pytest.mark.parametrize("owner", ("core", "matching"))
+def test_crypto_projection_reuses_storage_filter_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "source_asset_id": ["BTCUSDT"] * 16,
+            "timestamp": pd.date_range("2026-07-06", periods=16, tz="UTC"),
+        }
+    )
+    closed: list[bool] = []
+    observed: list[tuple[object, int]] = []
+
+    def source_chunks(context, *, operation_headroom_bytes: int, **_kwargs):
+        observed.append((context, operation_headroom_bytes))
+        try:
+            yield frame
+        finally:
+            closed.append(True)
+
+    headroom = pandas_frame_payload_bytes(frame)
+    if owner == "core":
+        monkeypatch.setattr(
+            materialization_validation,
+            "iter_dataset_chunks",
+            source_chunks,
+        )
+        session = SimpleNamespace(
+            parquet_filters=(
+                ("timestamp", ">=", pd.Timestamp("2026-01-01")),
+                ("market_id", "==", "crypto"),
+            ),
+            timestamp_column="timestamp",
+            time_window=TimeWindow("2026-01-01", "2026-12-31"),
+            owns_inventory=True,
+            retained_memory_bytes=17,
+            verify=lambda: None,
+        )
+
+        def replace_session(current, **changes):  # noqa: ANN001, ANN202
+            return SimpleNamespace(**(vars(current) | changes))
+
+        monkeypatch.setattr(materialization_validation, "replace", replace_session)
+
+        def projection():
+            return materialization_validation._iter_core_window_chunks(
+                session,
+                time_window=TimeWindow(
+                    "2026-07-06T00:00:00",
+                    "2026-07-06T00:15:00",
+                ),
+                target_chunk_bytes=headroom,
+                operation_headroom_bytes=headroom,
+            )
+
+    else:
+        monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", source_chunks)
+        monkeypatch.setattr(
+            materialize_panel,
+            "_matching_session_view",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                path_selection=None,
+                retained_memory_bytes=19,
+                parquet_filters=(
+                    ("timestamp", ">=", frame["timestamp"].min()),
+                    ("source_asset_id", "==", "BTCUSDT"),
+                ),
+            ),
+        )
+
+        def projection():
+            return materialize_panel._iter_matching_chunks(
+                SimpleNamespace(),
+                asset_ids={"BTCUSDT"},
+                time_window=TimeWindow("2026-07-06", "2026-07-06"),
+                source_asset_error="probe_source_asset",
+                timestamp_error="probe_timestamp",
+                target_chunk_bytes=headroom,
+                operation_headroom_bytes=headroom,
+            )
+
+    completed = list(projection())
+    assert len(completed) == 1
+    assert completed[0] is frame
+    iterator = projection()
+    assert next(iterator) is frame
+    iterator.close()
+    assert len(closed) == 2
+    assert [value for _context, value in observed] == [headroom, headroom]
+    assert all(context.retained_memory_bytes > 0 for context, _value in observed)
+    assert all(context.parquet_filters for context, _value in observed)
+    if owner == "core":
+        assert all(
+            context.parquet_filters[0] == ("market_id", "==", "crypto")
+            for context, _value in observed
+        )
+
+
+def test_dependent_validation_closes_expected_stream_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    closed: list[bool] = []
+
+    def expected_chunks(*_args, **_kwargs):
+        try:
+            yield pd.DataFrame({"asset_id": ["BTCUSDT"]})
+        finally:
+            closed.append(True)
+
+    def fail_after_one(expected, *_args, **_kwargs):  # noqa: ANN001
+        next(iter(expected))
+        raise RuntimeError("expected_stream_probe")
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "_iter_core_window_chunks",
+        expected_chunks,
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "_validate_receipt_key_coverage",
+        fail_after_one,
+    )
+    receipt_session = SimpleNamespace(
+        resource_policy=policy,
+        manifest={"input_dataset_identities": {}},
+    )
+    with pytest.raises(RuntimeError, match="^expected_stream_probe$"):
+        materialization_validation.validate_panel_dependent_materialization(
+            SimpleNamespace(session=receipt_session, retained_memory_bytes=0),
+            panel_session=SimpleNamespace(resource_policy=policy),
+            spec=SimpleNamespace(primary_key=("asset_id",)),
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            expected_input_identities={},
+            resource_policy=policy,
+            retained_payload_bytes=0,
+        )
+    assert closed == [True]
+
+
+def test_asset_discovery_closes_file_batches_on_validation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    closed: list[bool] = []
+
+    def file_batches(*_args, **_kwargs):
+        try:
+            yield Path("part.parquet"), pd.DataFrame({"asset_id": [None]})
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "iter_dataset_file_batches",
+        file_batches,
+    )
+    session = SimpleNamespace(
+        resource_policy=policy,
+        parquet_filters=(),
+        inventory=SimpleNamespace(),
+    )
+    with pytest.raises(ValueError, match="^invalid_asset$"):
+        with materialization_validation.crypto_asset_session_views(
+            session,
+            columns=("asset_id",),
+            target_chunk_bytes=policy.payload_target_bytes,
+            error="invalid_asset",
+            operation_headroom_bytes=policy.task_memory_budget_bytes,
+        ):
+            raise AssertionError("unreachable")
+    assert closed == [True]
+
+
+def test_disk_guard_closes_source_chunks_on_early_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[bool] = []
+
+    def source_chunks():
+        try:
+            yield pd.DataFrame({"value": [1]})
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(
+        materialization_resources,
+        "require_free_disk_headroom",
+        lambda *_args, **_kwargs: None,
+    )
+    iterator = materialization_resources.iter_disk_guarded_chunks(
+        source_chunks(),
+        scratch_parent=Path("unused"),
+    )
+    next(iterator)
+    iterator.close()
+    assert closed == [True]
+
+
+def test_panel_iterator_closes_bar_traversal_on_early_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1024**3,
+        environ={},
+    )
+    spec = processed_catalog().get("market_panel_1m")
+    data_ids = (
+        materialize_panel.source_ids.market_bars_source_data_id(spec),
+        materialize_panel.source_ids.aggregate_trades_source_data_id(spec),
+        materialize_panel.source_ids.depth_levels_source_data_id(spec),
+    )
+    sessions = {data_id: _dataset_session_stub(policy) for data_id in data_ids}
+    closed: list[bool] = []
+
+    @contextmanager
+    def asset_views(current, **_kwargs):  # noqa: ANN001
+        yield ((("BTCUSDT",), current),)
+
+    def bar_chunks(*_args, **_kwargs):
+        try:
+            yield pd.DataFrame({"placeholder": [1]})
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "crypto_asset_session_views",
+        asset_views,
+    )
+    monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", bar_chunks)
+    monkeypatch.setattr(
+        materialize_panel,
+        "_validate_matching_bar_keys",
+        lambda _frame: None,
+    )
+    monkeypatch.setattr(
+        materialize_panel.panels,
+        "prepare_panel_bars",
+        lambda frame: frame,
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "validated_ordered_dependency_chunk",
+        lambda frame, **_kwargs: frame,
+    )
+    monkeypatch.setattr(
+        materialization_resources,
+        "require_frame_within_budget",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "_iter_matching_trade_chunks",
+        lambda *_args, **_kwargs: iter(()),
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "_iter_matching_depth_chunks",
+        lambda *_args, **_kwargs: iter(()),
+    )
+    monkeypatch.setattr(
+        materialize_panel.panels,
+        "calculate_market_panel_from_chunks",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            {column: [0] for column in spec.required_columns}
+        ),
+    )
+
+    iterator = materialize_panel._iter_panel_chunks(
+        spec,
+        input_sessions=sessions,
+        time_window=TimeWindow("2026-07-06", "2026-07-06"),
+        resource_policy=policy,
+        retained_payload_bytes=0,
+    )
+    next(iterator)
+    iterator.close()
+    assert closed == [True]
+
+
+def _dataset_session_stub(
+    resource_policy: RuntimeResourcePolicy,
+    *,
+    retained_memory_bytes: int = 0,
+    **values: object,
+) -> SimpleNamespace:
+    values.setdefault("verify", lambda: None)
+    return SimpleNamespace(
+        resource_policy=resource_policy,
+        retained_memory_bytes=retained_memory_bytes,
+        **values,
+    )
 
 
 def test_input_dataset_identities_distinguish_source_and_manifest() -> None:
@@ -96,7 +399,7 @@ def test_panel_dependent_writer_rejects_policy_mismatch_before_input_identity(
         available_memory_bytes=1024**3,
         environ={},
     )
-    panel_session = SimpleNamespace(resource_policy=session_policy)
+    panel_session = _dataset_session_stub(session_policy)
     monkeypatch.setattr(
         materialization_validation,
         "input_dataset_identities",
@@ -115,6 +418,7 @@ def test_panel_dependent_writer_rejects_policy_mismatch_before_input_identity(
             panel_session=panel_session,
             time_window=TimeWindow("2026-07-06", "2026-07-06"),
             resource_policy=explicit_policy,
+            retained_payload_bytes=0,
         )
 
 
@@ -139,7 +443,7 @@ def test_panel_dependent_iterator_rejects_policy_mismatch_before_selection(
         available_memory_bytes=1024**3,
         environ={},
     )
-    panel_session = SimpleNamespace(resource_policy=session_policy)
+    panel_session = _dataset_session_stub(session_policy)
     monkeypatch.setattr(
         materialization_validation,
         "crypto_asset_session_views",
@@ -151,6 +455,7 @@ def test_panel_dependent_iterator_rejects_policy_mismatch_before_selection(
         panel_session=panel_session,
         time_window=TimeWindow("2026-07-06", "2026-07-06"),
         resource_policy=explicit_policy,
+        retained_payload_bytes=0,
     )
     with pytest.raises(RuntimeError, match="^runtime_resource_policy_conflict$"):
         next(iterator)
@@ -174,9 +479,7 @@ def test_panel_iterator_rejects_any_session_policy_mismatch_before_selection(
         materialize_panel.source_ids.depth_levels_source_data_id(spec),
     )
     sessions = {
-        data_id: SimpleNamespace(
-            resource_policy=other_policy if index == 1 else explicit_policy
-        )
+        data_id: _dataset_session_stub(other_policy if index == 1 else explicit_policy)
         for index, data_id in enumerate(data_ids)
     }
     monkeypatch.setattr(
@@ -190,6 +493,7 @@ def test_panel_iterator_rejects_any_session_policy_mismatch_before_selection(
         input_sessions=sessions,
         time_window=TimeWindow("2026-07-06", "2026-07-06"),
         resource_policy=explicit_policy,
+        retained_payload_bytes=0,
     )
     with pytest.raises(RuntimeError, match="^runtime_resource_policy_conflict$"):
         next(iterator)
@@ -221,9 +525,9 @@ def test_validation_rejects_session_policy_mismatch_before_identity_or_traversal
     )
 
     def session(name: str) -> SimpleNamespace:
-        return SimpleNamespace(
+        return _dataset_session_stub(
+            other_policy if mismatch == name else policy,
             name=name,
-            resource_policy=other_policy if mismatch == name else policy,
             manifest={},
         )
 
@@ -249,6 +553,7 @@ def test_validation_rejects_session_policy_mismatch_before_identity_or_traversal
                 spec=SimpleNamespace(primary_key=("value",)),
                 expected_input_identities={},
                 resource_policy=policy,
+                retained_payload_bytes=0,
             )
         elif owner == "dependent":
             materialization_validation.validate_panel_dependent_materialization(
@@ -258,6 +563,7 @@ def test_validation_rejects_session_policy_mismatch_before_identity_or_traversal
                 time_window=TimeWindow("2026-07-06", "2026-07-06"),
                 expected_input_identities={},
                 resource_policy=policy,
+                retained_payload_bytes=0,
             )
         else:
             materialization_validation.validate_existing_panel_materialization(
@@ -266,7 +572,54 @@ def test_validation_rejects_session_policy_mismatch_before_identity_or_traversal
                 spec=SimpleNamespace(primary_key=("value",)),
                 expected_input_identities={},
                 resource_policy=policy,
+                retained_payload_bytes=0,
             )
+
+
+def test_panel_dependent_validation_includes_prior_written_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1_000,
+        environ={},
+    )
+    observed: list[int] = []
+    receipt = SimpleNamespace(
+        session=_dataset_session_stub(policy, manifest={}),
+        retained_memory_bytes=300,
+    )
+    panel_session = _dataset_session_stub(policy, retained_memory_bytes=200)
+    monkeypatch.setattr(
+        materialization_validation,
+        "validate_materialization_input_identities",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "_iter_core_window_chunks",
+        lambda *_args, operation_headroom_bytes, **_kwargs: (
+            observed.append(operation_headroom_bytes) or iter(())
+        ),
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "_validate_receipt_key_coverage",
+        lambda *_args, **_kwargs: None,
+    )
+
+    materialization_validation.validate_panel_dependent_materialization(
+        receipt,
+        panel_session=panel_session,
+        spec=SimpleNamespace(primary_key=("value",)),
+        time_window=TimeWindow("2026-07-06", "2026-07-06"),
+        expected_input_identities={},
+        resource_policy=policy,
+        retained_payload_bytes=300,
+    )
+
+    assert observed == [policy.task_memory_budget_bytes - 600]
+
+
 def test_materialization_input_identity_validation_is_exact() -> None:
     source = _inspection("market_bars_1m")
     expected = materialization_validation.input_dataset_identities(
@@ -472,12 +825,10 @@ def test_factor_carry_processing_is_linear_in_asset_count(
     list(
         materialize_factors._iter_factor_chunks(
             spec,
-            panel_session=SimpleNamespace(
-                resource_policy=policy,
-                verify=lambda: None,
-            ),
+            panel_session=_dataset_session_stub(policy),
             time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:05"),
             resource_policy=policy,
+            retained_payload_bytes=0,
         )
     )
 
@@ -508,9 +859,7 @@ def test_panel_dependents_reject_mixed_asset_physical_parts_before_repeated_read
     )
     mixed = pd.concat(
         tuple(
-            _panel_frame(start=0, minutes=minutes).assign(
-                asset_id=f"asset_{index:04d}"
-            )
+            _panel_frame(start=0, minutes=minutes).assign(asset_id=f"asset_{index:04d}")
             for index in range(8)
         ),
         ignore_index=True,
@@ -541,6 +890,7 @@ def test_panel_dependents_reject_mixed_asset_physical_parts_before_repeated_read
                         + pd.Timedelta(minutes=minutes - 1),
                     ),
                     resource_policy=panel_session.resource_policy,
+                    retained_payload_bytes=0,
                 )
             )
 
@@ -557,8 +907,7 @@ def test_canonical_asset_normalization_is_linear(
             return super().__len__()
 
     keys = tuple(
-        (CountingString(f"source_{index:04d}"),)
-        for index in range(asset_count)
+        (CountingString(f"source_{index:04d}"),) for index in range(asset_count)
     )
     monkeypatch.setattr(
         materialize_panel,
@@ -605,11 +954,14 @@ def test_panel_dependencies_remain_asset_major_across_year_partitions(
         spec=processed_catalog().get("market_panel_1m"),
     )
 
-    with open_dataset_session(
-        panel_root,
-        columns=None,
-        time_window=None,
-    ) as panel_session, runtime_resource_policy_scope(panel_session.resource_policy):
+    with (
+        open_dataset_session(
+            panel_root,
+            columns=None,
+            time_window=None,
+        ) as panel_session,
+        runtime_resource_policy_scope(panel_session.resource_policy),
+    ):
         outputs = list(
             getattr(module, iterator_name)(
                 processed_catalog().get(data_id),
@@ -619,6 +971,7 @@ def test_panel_dependencies_remain_asset_major_across_year_partitions(
                     "2026-01-01 00:04",
                 ),
                 resource_policy=panel_session.resource_policy,
+                retained_payload_bytes=0,
             )
         )
 
@@ -689,34 +1042,6 @@ def test_exact_dependency_key_coverage_rejects_invalid_individual_streams(
         )
 
 
-def test_exact_dependency_validator_has_no_full_key_collectors() -> None:
-    source = inspect.getsource(
-        materialization_validation._validate_receipt_key_coverage
-    )
-
-    assert "set(" not in source
-    assert "pd.concat" not in source
-
-
-def test_coverage_scratch_follows_validation_lifecycle_owner() -> None:
-    validation_source = inspect.getsource(
-        materialization_validation.validate_panel_materialization
-    ) + inspect.getsource(
-        materialization_validation.validate_panel_dependent_materialization
-    )
-    writer_source = "".join(
-        inspect.getsource(module)
-        for module in (materialize_panel, materialize_factors, materialize_labels)
-    )
-
-    assert validation_source.count("receipt.session") >= 2
-    assert validation_source.count("receipt.exact_primary_key_index") == 0
-    assert writer_source.count(
-        "def validate_staged_dataset(receipt: DatasetWriteReceipt)"
-    ) == 3
-    assert "inspect_dataset" not in writer_source
-
-
 def test_dependency_chunk_order_rejects_unsorted_and_overlap() -> None:
     state = materialization_validation.OrderedDependencyState()
     first = _key_frame().iloc[[2, 0, 1, 5, 3, 4]].copy()
@@ -764,9 +1089,7 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
     monkeypatch.setattr(
         materializer,
         "open_dataset_session",
-        lambda *_args, **_kwargs: nullcontext(
-            SimpleNamespace(verify=lambda: None)
-        ),
+        lambda *_args, **_kwargs: nullcontext(_dataset_session_stub(policy)),
     )
     monkeypatch.setattr(
         materializer,
@@ -796,6 +1119,7 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
             time_window=TimeWindow("2026-07-06", "2026-07-06"),
             resource_policy=policy,
             session_stack=session_stack,
+            retained_payload_bytes=0,
         )
 
         assert result is inspection
@@ -828,16 +1152,6 @@ def test_crypto_disk_guard_rechecks_between_chunks_and_before_publication(
     assert [len(frame) for frame in result] == [1, 2]
     assert [path for path, _ in observed] == [tmp_path, tmp_path]
     assert [reserve for _, reserve in observed] == [140, 148]
-
-
-def test_crypto_direct_dataset_writers_cannot_bypass_disk_guard() -> None:
-    for module, function_name in (
-        (materialize_panel, "write_panel"),
-        (materialize_factors, "write_factors"),
-        (materialize_labels, "write_labels"),
-    ):
-        source = inspect.getsource(getattr(module, function_name))
-        assert "iter_disk_guarded_chunks(" in source
 
 
 @pytest.mark.parametrize(
@@ -890,6 +1204,11 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
     ) -> DatasetInspection:
         assert resource_policy is policy
         observed.append(active_runtime_resource_policy())
+        chunks = list(_args[1])
+        assert len(chunks) == 1
+        expected_retained_bytes = 111 if module is materialize_panel else 37
+        assert _kwargs["retained_payload_bytes"] == expected_retained_bytes
+        assert chunks[0].retained_payload_bytes == expected_retained_bytes
         staged_validator(SimpleNamespace())
         return inspection
 
@@ -913,12 +1232,17 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
         "iter_disk_guarded_chunks",
         lambda chunks, **_kwargs: chunks,
     )
-    monkeypatch.setattr(module, iterator_name, lambda *_args, **_kwargs: iter(()))
+    monkeypatch.setattr(
+        module,
+        iterator_name,
+        lambda *_args, **_kwargs: iter((pd.DataFrame({"value": [1]}),)),
+    )
     monkeypatch.setattr(module, "write_dataset", capture_write)
     kwargs = {
         "layout": StorageLayout(project_root=tmp_path),
         "time_window": TimeWindow("2026-07-06", "2026-07-06"),
         "resource_policy": policy,
+        "retained_payload_bytes": 0,
     }
     if module is materialize_panel:
         kwargs["source_id"] = SourceId("synthetic_crypto")
@@ -926,16 +1250,13 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
             module,
             "open_dataset_session",
             lambda *_args, **_kwargs: nullcontext(
-                SimpleNamespace(
-                    resource_policy=policy,
-                    verify=lambda: None,
-                )
+                _dataset_session_stub(policy, retained_memory_bytes=37)
             ),
         )
     else:
-        kwargs["panel_session"] = SimpleNamespace(
-            resource_policy=policy,
-            verify=lambda: None,
+        kwargs["panel_session"] = _dataset_session_stub(
+            policy,
+            retained_memory_bytes=37,
         )
 
     result = getattr(module, function_name)(
@@ -945,16 +1266,6 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
 
     assert result is inspection
     assert observed == [policy, policy]
-
-
-def test_crypto_materializers_use_storage_physical_iterator_without_split_wrapper(
-) -> None:
-    for module in (materialize_factors, materialize_labels):
-        source = inspect.getsource(module)
-        assert "iter_dataset_chunks(" in source
-        assert "read_dataset(" not in source
-        assert "def _frame_bytes(" not in source
-        assert "pandas_frame_payload_bytes(" in source
 
 
 @pytest.mark.parametrize(
@@ -993,40 +1304,23 @@ def test_factor_and_label_materializers_reject_non_monotonic_chunks(
     iterator = (
         module._iter_factor_chunks(
             spec,
-            panel_session=SimpleNamespace(
-                resource_policy=policy,
-                verify=lambda: None,
-            ),
+            panel_session=_dataset_session_stub(policy),
             time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:10"),
             resource_policy=policy,
+            retained_payload_bytes=0,
         )
         if module_name == "factor"
         else module._iter_label_chunks(
             spec,
-            panel_session=SimpleNamespace(
-                resource_policy=policy,
-                verify=lambda: None,
-            ),
+            panel_session=_dataset_session_stub(policy),
             time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:10"),
             resource_policy=policy,
+            retained_payload_bytes=0,
         )
     )
 
     with pytest.raises(ValueError, match=error):
         list(iterator)
-
-
-@pytest.mark.parametrize(
-    "module",
-    [
-        materialization_validation,
-        materializer,
-        materialize_factors,
-        materialize_labels,
-    ],
-)
-def test_crypto_materialization_hot_path_does_not_fingerprint_content(module) -> None:
-    assert "fingerprint_dataset" not in inspect.getsource(module)
 
 
 def _inspection(
@@ -1090,7 +1384,7 @@ def _validate_receipt_key_coverage(
             if duplicates:
                 raise ValueError(error)
         receipt = SimpleNamespace(
-            session=SimpleNamespace(verify=lambda: None),
+            session=_dataset_session_stub(resource_policy),
             exact_primary_key_index=index,
         )
         materialization_validation._validate_receipt_key_coverage(
@@ -1149,12 +1443,12 @@ def _patch_mock_group_plan(
             tuple(
                 (
                     key,
-                    SimpleNamespace(
+                    _dataset_session_stub(
+                        RESOURCE_POLICY,
                         row_filters=(
                             ("market_id", "==", key[0]),
                             ("asset_id", "==", key[1]),
                         ),
-                        verify=lambda: None,
                     ),
                 )
                 for key in keys

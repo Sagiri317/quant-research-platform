@@ -19,28 +19,6 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 
 
-def iter_time_sized_frames(
-    frame: pd.DataFrame,
-    *,
-    timestamp_column: str,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> Iterator[pd.DataFrame]:
-    """Yield timestamp-session chunks sized by the shared runtime policy."""
-
-    bound_policy = bind_runtime_resource_policy(resource_policy)
-
-    def activate() -> Iterator[pd.DataFrame]:
-        policy = bound_policy or active_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy):
-            yield from _iter_time_sized_frames_with_policy(
-                frame,
-                timestamp_column=timestamp_column,
-                resource_policy=policy,
-            )
-
-    return activate()
-
-
 def _iter_time_sized_frames_with_policy(
     frame: pd.DataFrame,
     *,
@@ -66,7 +44,10 @@ def _iter_time_sized_frames_with_policy(
         yield frame
         return
 
-    estimated_bytes = _estimated_bytes_per_session(frame, session_count=len(sessions))
+    estimated_bytes = max(
+        1,
+        ceil(pandas_frame_payload_bytes(frame) / max(1, len(sessions))),
+    )
     target = max(
         1,
         min(
@@ -136,9 +117,8 @@ def _iter_complete_time_sized_frames_with_policy(
             if first_empty is None:
                 first_empty = frame
             continue
-        current_timestamps = _validated_time_chunk_timestamps(
-            frame,
-            timestamp_column=timestamp_column,
+        current_timestamps = strict_timestamp_series(
+            frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
         )
         current_min = current_timestamps.min()
         current_max = current_timestamps.max()
@@ -183,21 +163,6 @@ def _iter_complete_time_sized_frames_with_policy(
     )
 
 
-def _estimated_bytes_per_session(frame: pd.DataFrame, *, session_count: int) -> int:
-    total = pandas_frame_payload_bytes(frame)
-    return max(1, ceil(total / max(1, session_count)))
-
-
-def _validated_time_chunk_timestamps(
-    frame: pd.DataFrame,
-    *,
-    timestamp_column: str,
-) -> pd.Series:
-    return strict_timestamp_series(
-        frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
-    )
-
-
 def _concat_time_boundary_frames(
     left: pd.DataFrame,
     right: pd.DataFrame,
@@ -209,10 +174,7 @@ def _concat_time_boundary_frames(
     if retained_payload_bytes > policy.task_memory_budget_bytes:
         raise ValueError("research_time_boundary_payloads_exceed_task_memory_budget")
     result = pd.concat([left, right], ignore_index=True)
-    if (
-        retained_payload_bytes + _frame_bytes(result)
-        > policy.task_memory_budget_bytes
-    ):
+    if retained_payload_bytes + _frame_bytes(result) > policy.task_memory_budget_bytes:
         raise ValueError("research_time_boundary_payloads_exceed_task_memory_budget")
     return result
 

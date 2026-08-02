@@ -66,7 +66,12 @@ def build_prediction_result_from_frames(
     return PredictionResult(
         spec=spec,
         output_chunks=output_frames,
-        model_metadata=_prediction_static_window_model_metadata(model_metadata, spec),
+        model_metadata={
+            **model_metadata,
+            "test_start": spec.test_start,
+            "test_end": spec.test_end,
+            "oos_start": spec.test_start,
+        },
         prediction_metadata_factory=lambda: build_state.prediction_metadata(
             spec=spec,
             input_columns=input_columns,
@@ -137,18 +142,6 @@ class _PredictionBuildState:
             "input_count": len(input_columns),
             "prediction_column": spec.prediction_column,
         }
-
-
-def _prediction_static_window_model_metadata(
-    model_metadata: dict[str, object],
-    spec: PredictionSpec,
-) -> dict[str, object]:
-    return {
-        **model_metadata,
-        "test_start": spec.test_start,
-        "test_end": spec.test_end,
-        "oos_start": spec.test_start,
-    }
 
 
 def _iter_prediction_output_frames(

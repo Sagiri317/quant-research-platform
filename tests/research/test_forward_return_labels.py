@@ -27,10 +27,7 @@ pytestmark = pytest.mark.guardrails
 def test_forward_return_label_column_uses_frequency_suffix_contract() -> None:
     assert forward_return_label_column(5, DataFrequency.DAILY) == "forward_return_5d"
     assert forward_return_label_column(5, DataFrequency.MINUTE) == "forward_return_5m"
-    assert (
-        forward_return_label_column(5, DataFrequency.TICK)
-        == "forward_return_5tick"
-    )
+    assert forward_return_label_column(5, DataFrequency.TICK) == "forward_return_5tick"
 
 
 @pytest.mark.parametrize("horizons", [(), [1], (True,), (0,), (1, 1)])
@@ -83,12 +80,8 @@ def test_forward_return_labels_group_sort_horizons_and_invalid_entry_price() -> 
     one_step_label = forward_return_label_column(1)
     assert pd.isna(asset_a.loc[0, one_step_label])
     assert pd.isna(asset_b.loc[0, one_step_label])
-    assert asset_a.loc[1, one_step_label] == pytest.approx(
-        expected_asset_a_second
-    )
-    assert asset_b.loc[1, one_step_label] == pytest.approx(
-        expected_asset_b_second
-    )
+    assert asset_a.loc[1, one_step_label] == pytest.approx(expected_asset_a_second)
+    assert asset_b.loc[1, one_step_label] == pytest.approx(expected_asset_b_second)
     label_columns = [forward_return_label_column(horizon) for horizon in horizons]
     assert not np.isinf(result.loc[:, label_columns].to_numpy(dtype="float64")).any()
 
@@ -107,10 +100,14 @@ def test_forward_return_labels_treat_non_finite_prices_as_invalid() -> None:
     panel.loc[panel["timestamp"].eq(ordered_dates[1]), "adj_open"] = np.inf
     panel.loc[panel["timestamp"].eq(ordered_dates[3]), "adj_open"] = np.inf
 
-    result = add_forward_return_labels(
-        panel.sample(frac=1.0, random_state=23),
-        horizons=(1,),
-    ).sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
+    result = (
+        add_forward_return_labels(
+            panel.sample(frac=1.0, random_state=23),
+            horizons=(1,),
+        )
+        .sort_values(["asset_id", "timestamp"])
+        .reset_index(drop=True)
+    )
 
     one_step_label = forward_return_label_column(1)
     assert pd.isna(result.loc[0, one_step_label])
@@ -202,9 +199,7 @@ def test_forward_return_labels_reject_invalid_asset_key(
     panel = pd.DataFrame(
         {
             "asset_id": [asset_id, "asset_a"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00", "2026-07-06 00:01"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:00", "2026-07-06 00:01"]),
             "close": [100.0, 101.0],
         }
     )
@@ -359,9 +354,7 @@ def test_label_catalog_horizons_mask_invalid_entry() -> None:
     ordered_dates = panel.sort_values("timestamp")["timestamp"].tolist()
     panel.loc[panel["timestamp"].eq(ordered_dates[1]), "adj_open"] = 0.0
 
-    horizons = tuple(
-        definition.horizon for definition in label_catalog().list()
-    )
+    horizons = tuple(definition.horizon for definition in label_catalog().list())
     result = add_forward_return_labels(
         panel.sample(frac=1.0, random_state=3),
         horizons=horizons,

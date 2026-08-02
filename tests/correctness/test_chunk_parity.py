@@ -6,10 +6,10 @@ import pytest
 import quant_research_platform.research.datasets.assembler as assembler_module
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.datasets import (
+from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
-    read_research_dataset,
 )
+from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -121,17 +121,23 @@ def test_research_assembly_session_chunks_equal_default_and_keep_nan_positions(
         ),
     )
 
-    default = read_research_dataset(
-        default_layout,
-        market_id=MarketId("a_share"),
-        dataset_id="demo",
-        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    default = pd.concat(
+        iter_research_dataset_chunks(
+            default_layout,
+            market_id=MarketId("a_share"),
+            dataset_id="demo",
+            time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        ),
+        ignore_index=True,
     ).sort_values(["market_id", "asset_id", "timestamp"])
-    tiny = read_research_dataset(
-        tiny_layout,
-        market_id=MarketId("a_share"),
-        dataset_id="demo",
-        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    tiny = pd.concat(
+        iter_research_dataset_chunks(
+            tiny_layout,
+            market_id=MarketId("a_share"),
+            dataset_id="demo",
+            time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        ),
+        ignore_index=True,
     ).sort_values(["market_id", "asset_id", "timestamp"])
 
     pd.testing.assert_frame_equal(
@@ -141,8 +147,7 @@ def test_research_assembly_session_chunks_equal_default_and_keep_nan_positions(
     assert default["mom_20d"].isna().tolist() == tiny["mom_20d"].isna().tolist()
     assert default.duplicated(["market_id", "asset_id", "timestamp"]).sum() == 0
     assert (
-        inspect_dataset(tiny_root).file_count
-        > inspect_dataset(default_root).file_count
+        inspect_dataset(tiny_root).file_count > inspect_dataset(default_root).file_count
     )
 
 
@@ -194,17 +199,23 @@ def test_research_feature_transform_session_chunks_equal_default(
         ),
     )
 
-    default = read_research_dataset(
-        default_layout,
-        market_id=MarketId("a_share"),
-        dataset_id="demo",
-        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    default = pd.concat(
+        iter_research_dataset_chunks(
+            default_layout,
+            market_id=MarketId("a_share"),
+            dataset_id="demo",
+            time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        ),
+        ignore_index=True,
     ).sort_values(["market_id", "asset_id", "timestamp"])
-    tiny = read_research_dataset(
-        tiny_layout,
-        market_id=MarketId("a_share"),
-        dataset_id="demo",
-        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    tiny = pd.concat(
+        iter_research_dataset_chunks(
+            tiny_layout,
+            market_id=MarketId("a_share"),
+            dataset_id="demo",
+            time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        ),
+        ignore_index=True,
     ).sort_values(["market_id", "asset_id", "timestamp"])
 
     pd.testing.assert_frame_equal(

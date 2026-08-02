@@ -7,6 +7,7 @@ import pytest
 
 import quant_research_platform.artifacts._parquet_writers as parquet_writers
 import quant_research_platform.artifacts._portfolio_outputs as portfolio_outputs
+import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.storage.layout import StorageLayout
 from tests.artifacts.output_edge_fixtures import (
     make_output_edge_portfolio_artifacts,
@@ -209,9 +210,7 @@ def test_prediction_writer_close_is_attempted_once(
         lambda *_args, **_kwargs: writer,
     )
     frames = (
-        pd.DataFrame(
-            {"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]}
-        )
+        pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]})
         for _ in range(2)
     )
 
@@ -294,12 +293,12 @@ def test_parquet_writers_close_once_without_replacing_body_primary(
     primary = primary_type("body_primary")
     close_failure = OSError("writer_close_secondary")
     row_artifacts = tuple(portfolio_outputs.PORTFOLIO_ARTIFACTS)[:3]
-    frame = pd.DataFrame(
-        {"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]}
+    frame = pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]})
+    first = (
+        frame
+        if owner == "prediction"
+        else {name: frame[["value"]] for name in row_artifacts}
     )
-    first = frame if owner == "prediction" else {
-        name: frame[["value"]] for name in row_artifacts
-    }
 
     class BodyPrimaryInput:
         yielded = False
@@ -425,8 +424,8 @@ def test_report_parquet_writer_cleans_temp_on_failure(
 ) -> None:
     frame = pd.DataFrame({"value": [1]})
 
-    def fail_to_parquet(self, path, **kwargs):  # noqa: ANN001
-        Path(path).write_text("temporary", encoding="utf-8")
+    def fail_to_parquet(self, sink, **kwargs):  # noqa: ANN001
+        sink.write(b"temporary")
         raise RuntimeError("write failed")
 
     monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_to_parquet)
@@ -436,16 +435,43 @@ def test_report_parquet_writer_cleans_temp_on_failure(
             frame,
             tmp_path / "report.parquet",
         )
-    assert not list(tmp_path.glob("*.tmp-*"))
+    assert not list(tmp_path.glob(".f-*"))
+
+
+def test_report_parquet_writer_uses_short_temp_for_long_final_component(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_path = tmp_path / ("p" * 230 + ".parquet")
+    publications: list[tuple[Path, Path]] = []
+
+    def publish(
+        source: Path,
+        target: Path,
+        *,
+        source_identity: object,
+    ) -> None:
+        publications.append((source, target))
+        scratch_owner.remove_owned_scratch(source, source_identity)
+
+    monkeypatch.setattr(parquet_writers, "publish_no_replace", publish)
+
+    parquet_writers.write_parquet(pd.DataFrame({"value": [1]}), final_path)
+
+    assert len(final_path.name) == 238
+    assert len(publications) == 1
+    assert publications[0][1] == final_path
+    assert len(publications[0][0].name) < 40
+    assert not list(tmp_path.glob(".f-*"))
 
 
 def test_report_parquet_writer_cleans_temp_on_control_flow_cancellation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    def cancel_to_parquet(self, path, **kwargs):  # noqa: ANN001
+    def cancel_to_parquet(self, sink, **kwargs):  # noqa: ANN001
         del self, kwargs
-        Path(path).write_text("temporary", encoding="utf-8")
+        sink.write(b"temporary")
         raise KeyboardInterrupt
 
     monkeypatch.setattr(pd.DataFrame, "to_parquet", cancel_to_parquet)
@@ -456,7 +482,7 @@ def test_report_parquet_writer_cleans_temp_on_control_flow_cancellation(
             tmp_path / "report.parquet",
         )
 
-    assert not list(tmp_path.glob("*.tmp-*"))
+    assert not list(tmp_path.glob(".f-*"))
 
 
 def test_report_parquet_writer_does_not_overwrite_unclaimed_temp_collision(
@@ -464,7 +490,7 @@ def test_report_parquet_writer_does_not_overwrite_unclaimed_temp_collision(
     tmp_path: Path,
 ) -> None:
     final_path = tmp_path / "report.parquet"
-    live_temp = final_path.with_name(f".report.parquet.tmp-{'c' * 12}")
+    live_temp = final_path.with_name(scratch_owner.owned_scratch_name(".f-", "c" * 12))
     live_temp.write_text("live\n", encoding="utf-8")
     monkeypatch.setattr(
         parquet_writers,
@@ -491,9 +517,7 @@ def test_artifact_parquet_cleanup_preserves_active_primary(
     monkeypatch.setattr(
         Path,
         "unlink",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("unlink_failed")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("unlink_failed")),
     )
 
     with pytest.raises(GeneratorExit):
@@ -504,36 +528,28 @@ def test_artifact_parquet_cleanup_preserves_active_primary(
 
 
 @pytest.mark.parametrize("writer_name", ("write_parquet", "write_parquet_chunks"))
-def test_parquet_cleanup_does_not_check_exists_before_guarded_unlink(
+def test_parquet_cleanup_uses_shared_owned_scratch_removal(
     writer_name: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     final_path = tmp_path / "output.parquet"
-    temp_path = final_path.with_name(f".{final_path.name}.tmp-{'c' * 12}")
+    temp_path = final_path.with_name(scratch_owner.owned_scratch_name(".f-", "c" * 12))
     events: list[str] = []
-    original_exists = Path.exists
-    original_unlink = Path.unlink
+    original_remove = scratch_owner.remove_owned_scratch
 
-    def exists(path: Path) -> bool:
+    def remove(path: Path, identity: object) -> None:
         if path == temp_path:
-            raise OSError("exists_secondary")
-        return original_exists(path)
-
-    def unlink(path: Path, *, missing_ok: bool = False) -> None:
-        if path == temp_path:
-            assert missing_ok is True
-            events.append("unlink")
-            raise OSError("unlink_secondary")
-        original_unlink(path, missing_ok=missing_ok)
+            events.append("remove")
+            raise OSError("remove_secondary")
+        original_remove(path, identity)
 
     monkeypatch.setattr(
         parquet_writers,
         "uuid4",
         lambda: type("Uuid", (), {"hex": "c" * 32})(),
     )
-    monkeypatch.setattr(Path, "exists", exists)
-    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(scratch_owner, "remove_owned_scratch", remove)
     if writer_name == "write_parquet":
         monkeypatch.setattr(
             pd.DataFrame,
@@ -567,4 +583,4 @@ def test_parquet_cleanup_does_not_check_exists_before_guarded_unlink(
     with pytest.raises(RuntimeError, match="body_primary"):
         operation()
 
-    assert events == ["unlink"]
+    assert events == ["remove"]

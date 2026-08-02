@@ -6,8 +6,10 @@ from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.datasets import validate_evaluation_input
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.datasets.validation import (
+    validate_evaluation_input,
+)
 from quant_research_platform.research.evaluations.engine import (
     EvaluationResult,
     evaluate_signal_frame_chunks,
@@ -49,7 +51,11 @@ def build_evaluation_result_from_research_dataset(
         ),
         spec,
         n_groups=spec.n_groups if n_groups is None else n_groups,
-        source_columns_by_kind=_signal_source_columns_by_kind(dataset_spec),
+        source_columns_by_kind={
+            "factor": tuple(dataset_spec.factor_columns),
+            "feature": tuple(dataset_spec.feature_columns),
+            "prediction": tuple(dataset_spec.context_columns),
+        },
     )
 
 
@@ -68,14 +74,6 @@ def _validated_evaluation_chunks(
             label_columns=label_columns,
         )
         yield chunk
-
-
-def _signal_source_columns_by_kind(dataset_spec) -> dict[str, tuple[str, ...]]:
-    return {
-        "factor": tuple(dataset_spec.factor_columns),
-        "feature": tuple(dataset_spec.feature_columns),
-        "prediction": tuple(dataset_spec.context_columns),
-    }
 
 
 __all__ = ["build_evaluation_result_from_research_dataset"]

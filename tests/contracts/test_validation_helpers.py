@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts import validation
+import quant_research_platform.contracts.validation as validation
 
 
 @pytest.mark.parametrize("value", [None, pd.NA, float("nan")])

@@ -9,12 +9,12 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.predictions.runner as prediction_runner
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.research.predictions import runner as prediction_runner
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
 )

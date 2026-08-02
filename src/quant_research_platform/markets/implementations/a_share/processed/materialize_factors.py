@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from pathlib import Path
+from collections.abc import Iterable, Sequence
 
 import pandas as pd
 
@@ -18,15 +17,25 @@ from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
-    materialization_io,
-    materialization_planning,
-    materialization_validation,
+    materialization_io as materialization_io,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_planning as materialization_planning,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_validation as materialization_validation,
 )
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
-from quant_research_platform.storage.datasets import DatasetInspection, inspect_dataset
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    pandas_frame_payload_bytes,
+)
+from quant_research_platform.storage._dataset_inspection import (
+    dataset_inspection_retained_memory_bytes,
+)
+from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -54,14 +63,13 @@ def write_factors(
     layout: StorageLayout,
     time_window: TimeWindow,
     policy: RuntimeResourcePolicy,
-    sessions: tuple[pd.Timestamp, ...],
+    sessions: pd.DatetimeIndex,
     written: dict[str, DatasetInspection],
-    panel_key_coverages: dict[
-        Path,
-        dict[object, tuple[pd.Timestamp, ...]],
-    ]
-    | None = None,
 ) -> DatasetInspection:
+    retained_written_bytes = sum(
+        dataset_inspection_retained_memory_bytes(inspection)
+        for inspection in written.values()
+    )
     catalog = processed_catalog()
     factor_catalog = factor_definitions.factor_catalog()
     definitions = select_factor_definitions_for_spec(spec, factor_catalog)
@@ -73,42 +81,25 @@ def write_factors(
     )
     panel_spec = catalog.get(contract.primary_input_data_id)
     panel_root = materialization_io.processed_root(layout, panel_spec)
-    available = inspect_dataset(panel_root)
     lookback_days = factor_calculations.factor_lookback_bars(definitions)
     panel_input_columns = factor_calculations.factor_panel_input_columns(definitions)
-    panel_key_coverage = materialization_planning.processed_panel_key_coverage(
-        panel_root,
-        cache=panel_key_coverages,
-        resource_policy=policy,
-    )
-    estimated = materialization_planning.estimate_factor_bytes_per_session(
-        sessions,
-        time_window=time_window,
-        panel_root=panel_root,
-        inspection=available,
-        lookback_days=lookback_days,
-        panel_input_columns=panel_input_columns,
-        required_columns=spec.required_columns,
-        definitions=definitions,
-        resource_policy=policy,
-    )
-    windows = materialization_planning.planned_session_windows(
-        sessions,
-        time_window=time_window,
-        policy=policy,
-        inspection=available,
-        estimated_bytes_per_session=estimated,
-        warmup_sessions=lookback_days,
-        reason="factor_warmup",
-    )
 
     def chunks() -> Iterable[pd.DataFrame]:
-        for window in windows:
+        def materialize(
+            asset_ids: tuple[object, ...],
+            current_sessions: Sequence[pd.Timestamp],
+            session_context: Sequence[pd.Timestamp],
+            retained_payload_bytes: int,
+            current_keys: pd.DataFrame,
+        ) -> pd.DataFrame:
+            del session_context
             read_window = factor_calculations.factor_read_window_for_panel(
-                panel_key_coverage,
+                current_keys,
                 definitions=definitions,
-                read_window=window.read,
-                core_sessions=window.core_sessions,
+                read_window=TimeWindow(
+                    current_sessions[0].date(), current_sessions[-1].date()
+                ),
+                core_sessions=current_sessions,
             )
             processed_inputs = materialization_io.read_processed_inputs_for_spec(
                 spec,
@@ -119,6 +110,10 @@ def write_factors(
                     contract.primary_input_data_id: panel_input_columns,
                 },
                 resource_policy=policy,
+                asset_ids=asset_ids,
+                retained_payload_bytes=(
+                    retained_payload_bytes + pandas_frame_payload_bytes(current_keys)
+                ),
             )
             materialization_validation.validate_processed_input_contract(
                 spec,
@@ -127,23 +122,54 @@ def write_factors(
                 processed_inputs=processed_inputs,
             )
             panel = processed_inputs[contract.primary_input_data_id]
-            factors = factor_calculations.calculate_factors_for_panel(
-                panel,
-                definitions=definitions,
-            )
-            output = materialization_planning.filter_output_sessions(
-                factors,
-                window.core_sessions,
-            )
-            selected = output.loc[:, list(spec.required_columns)].copy()
             materialization_planning.require_known_materialization_payload_bound(
-                frames=(panel, factors, output),
-                output=selected,
+                frames=(panel, current_keys),
+                output=None,
+                retained_payload_bytes=(
+                    retained_payload_bytes
+                    + materialization_planning.registered_output_buffer_bytes(
+                        spec,
+                        row_count=len(panel),
+                    )
+                ),
                 resource_policy=policy,
             )
-            del read_window, processed_inputs, panel, factors, output
-            yield selected
-            del selected
+            factors = factor_calculations.calculate_factors_for_panel(
+                panel, definitions=definitions
+            )
+            materialization_planning.require_known_materialization_payload_bound(
+                frames=(panel, factors, current_keys),
+                output=None,
+                retained_payload_bytes=(
+                    retained_payload_bytes + pandas_frame_payload_bytes(factors)
+                ),
+                resource_policy=policy,
+            )
+            selected = materialization_planning.filter_output_sessions(
+                factors,
+                current_sessions,
+                columns=spec.required_columns,
+                retained_frames=(panel, current_keys),
+                retained_payload_bytes=retained_payload_bytes,
+                resource_policy=policy,
+            )
+            materialization_planning.require_known_materialization_payload_bound(
+                frames=(panel, factors, current_keys),
+                output=selected,
+                retained_payload_bytes=retained_payload_bytes,
+                resource_policy=policy,
+            )
+            return selected
+
+        yield from materialization_planning.iter_active_materialization_batches(
+            panel_root,
+            time_window=time_window,
+            sessions=sessions,
+            resource_policy=policy,
+            valid_bar_offsets=(lookback_days, 0),
+            retained_payload_bytes=retained_written_bytes,
+            materialize=materialize,
+        )
 
     return materialization_io.write_and_inspect(
         spec,

@@ -8,9 +8,11 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     MARKET_ID,
     market_panel_data_id,
 )
-from quant_research_platform.research.factors.price_volume import (
-    PRICE_VOLUME_STANDARD_PRESET,
+from quant_research_platform.research.factors.price_volume.definitions import (
     price_volume_factor_definitions,
+)
+from quant_research_platform.research.factors.price_volume.presets import (
+    PRICE_VOLUME_STANDARD_PRESET,
 )
 
 

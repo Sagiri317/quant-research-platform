@@ -16,12 +16,14 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_fingerprinting import (
+    dataset_fingerprint_retained_memory_bytes,
     fingerprint_dataset_session,
 )
 from quant_research_platform.storage._dataset_key_tracking import (
     EXACT_KEY_SQLITE_PAGE_BYTES,
     ExactPrimaryKeyIndex,
 )
+from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
     iter_dataset_file_batches,
@@ -38,10 +40,22 @@ def compare_datasets(
     time_window: TimeWindow | None = None,
     resource_policy: RuntimeResourcePolicy | None,
 ) -> DatasetComparison:
-    left_path = Path(left_root)
-    right_path = Path(right_root)
+    try:
+        left_path = require_artifact_root(Path(left_root))
+    except ValueError:
+        return _comparison(
+            "INSPECTION_FAILED",
+            summary={"error": "dataset_inspection_failed"},
+        )
     if not left_path.exists():
         return _comparison("MISSING_LEFT")
+    try:
+        right_path = require_artifact_root(Path(right_root))
+    except ValueError:
+        return _comparison(
+            "INSPECTION_FAILED",
+            summary={"error": "dataset_inspection_failed"},
+        )
     if not right_path.exists():
         return _comparison("MISSING_RIGHT")
     issued_policy = resource_policy or active_runtime_resource_policy()
@@ -63,34 +77,56 @@ def _compare_datasets_under_policy(
     time_window: TimeWindow | None = None,
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetComparison:
-    left_path = Path(left_root)
-    right_path = Path(right_root)
-    if not left_path.exists():
-        return _comparison("MISSING_LEFT")
-    if not right_path.exists():
-        return _comparison("MISSING_RIGHT")
     try:
+        left_path = require_artifact_root(Path(left_root))
+        if not left_path.exists():
+            return _comparison("MISSING_LEFT")
+        right_path = require_artifact_root(Path(right_root))
+        if not right_path.exists():
+            return _comparison("MISSING_RIGHT")
         issued_policy = resource_policy
         with open_dataset_session(
             left_path,
             columns=columns,
             time_window=time_window,
             resource_policy=issued_policy,
+            retained_payload_bytes=0,
         ) as left_context:
             left = fingerprint_dataset_session(
                 left_context, resource_policy=issued_policy
             )
             left_identity = _session_identity_token(left_context)
+            left_retained_bytes = dataset_fingerprint_retained_memory_bytes(left) + len(
+                left_identity
+            )
+            if (
+                left_context.retained_memory_bytes + left_retained_bytes
+                > issued_policy.task_memory_budget_bytes
+            ):
+                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         with open_dataset_session(
             right_path,
             columns=columns,
             time_window=time_window,
             resource_policy=issued_policy,
+            retained_payload_bytes=left_retained_bytes,
         ) as right_context:
             right = fingerprint_dataset_session(
-                right_context, resource_policy=issued_policy
+                right_context,
+                resource_policy=issued_policy,
+                retained_payload_bytes=left_retained_bytes,
             )
             right_identity = _session_identity_token(right_context)
+            right_retained_bytes = dataset_fingerprint_retained_memory_bytes(
+                right
+            ) + len(right_identity)
+            if (
+                left_retained_bytes
+                + right_context.retained_memory_bytes
+                + right_retained_bytes
+                > issued_policy.task_memory_budget_bytes
+            ):
+                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
     except (OSError, ValueError, sqlite3.Error):
         return _comparison(
             "INSPECTION_FAILED",
@@ -122,6 +158,12 @@ def _compare_datasets_under_policy(
         "key_columns": {"left": left.key_columns, "right": right.key_columns},
         "content_hash": {"left": left.content_hash, "right": right.content_hash},
     }
+    comparison_retained_bytes = 2 * (left_retained_bytes + right_retained_bytes)
+    if comparison_retained_bytes > issued_policy.task_memory_budget_bytes:
+        return _comparison(
+            "INSPECTION_FAILED",
+            summary={"error": "dataset_inspection_failed"},
+        )
     if left.schema_hash != right.schema_hash or left.column_names != right.column_names:
         status = "SCHEMA_MISMATCH"
     elif left.row_count != right.row_count:
@@ -141,6 +183,7 @@ def _compare_datasets_under_policy(
                 primary_key=left.key_columns,
                 left_identity=left_identity,
                 right_identity=right_identity,
+                retained_payload_bytes=comparison_retained_bytes,
             )
         except (OSError, ValueError, sqlite3.Error):
             return _comparison(
@@ -162,6 +205,7 @@ def _exact_comparison_counts(
     primary_key: tuple[str, ...],
     left_identity: bytes,
     right_identity: bytes,
+    retained_payload_bytes: int,
 ) -> dict[str, int]:
     with ExactPrimaryKeyIndex(
         primary_key=primary_key,
@@ -177,6 +221,7 @@ def _exact_comparison_counts(
             index=index,
             namespace="left",
             expected_identity=left_identity,
+            retained_payload_bytes=retained_payload_bytes,
         )
         _index_dataset_rows(
             right_root,
@@ -186,6 +231,7 @@ def _exact_comparison_counts(
             index=index,
             namespace="right",
             expected_identity=right_identity,
+            retained_payload_bytes=retained_payload_bytes,
         )
         for root, expected_identity in (
             (left_root, left_identity),
@@ -196,6 +242,9 @@ def _exact_comparison_counts(
                 columns=columns,
                 time_window=time_window,
                 resource_policy=resource_policy,
+                retained_payload_bytes=(
+                    retained_payload_bytes + index.retained_memory_bytes
+                ),
             ) as context:
                 if _session_identity_token(context) != expected_identity:
                     raise ValueError("dataset_identity_changed_during_comparison")
@@ -219,12 +268,14 @@ def _index_dataset_rows(
     index: ExactPrimaryKeyIndex,
     namespace: str,
     expected_identity: bytes,
+    retained_payload_bytes: int,
 ) -> None:
     with open_dataset_session(
         root,
         columns=columns,
         time_window=time_window,
         resource_policy=resource_policy,
+        retained_payload_bytes=(retained_payload_bytes + index.retained_memory_bytes),
     ) as context:
         if _session_identity_token(context) != expected_identity:
             raise ValueError("dataset_identity_changed_during_comparison")
@@ -234,11 +285,9 @@ def _index_dataset_rows(
             if column not in index.primary_key
         )
         comparison_columns = (*index.primary_key, *value_columns)
-        headroom = (
-            resource_policy.task_memory_budget_bytes
-            - context.inventory.retained_memory_bytes
-            - index.retained_memory_bytes
-        )
+        retained_before_session = retained_payload_bytes + index.retained_memory_bytes
+        headroom = resource_policy.task_memory_budget_bytes
+        headroom -= retained_before_session + context.retained_memory_bytes
         if headroom <= 0:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         exact_payload_target = min(
@@ -246,7 +295,12 @@ def _index_dataset_rows(
             headroom // 3,
         )
         sqlite_binding_headroom = exact_payload_target
-        reader_headroom = headroom - exact_payload_target - sqlite_binding_headroom
+        reader_headroom = (
+            resource_policy.task_memory_budget_bytes
+            - retained_before_session
+            - exact_payload_target
+            - sqlite_binding_headroom
+        )
         if exact_payload_target <= 0 or reader_headroom <= 0:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         duplicates = 0
@@ -285,7 +339,9 @@ def _session_identity_token(context: DatasetSession) -> bytes:
         digest.update(value)
 
     update(context.spec_bytes)
+    update(context.spec_identity_bytes)
     update(context.manifest_bytes)
+    update(context.manifest_identity_bytes)
     for path in context.all_paths:
         metadata = context.metadata_for(path)
         identity = metadata.identity

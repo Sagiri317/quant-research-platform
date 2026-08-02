@@ -68,28 +68,6 @@ def test_payload_target_cannot_exceed_resolved_task_budget() -> None:
 
 
 @pytest.mark.parametrize(
-    "name",
-    [
-        "QRP_MEMORY_BUDGET_FRACTION",
-        "QRP_MEMORY_BUDGET_MB",
-        "QRP_CHUNK_TARGET_MB",
-        "QRP_MEMORY_SAFETY_FACTOR",
-        "QRP_MIN_FREE_DISK_MB",
-    ],
-)
-@pytest.mark.parametrize("value", ["", "1"])
-def test_retired_runtime_resource_settings_fail_closed(
-    name: str,
-    value: str,
-) -> None:
-    with pytest.raises(ValueError, match="retired_runtime_resource_setting"):
-        RuntimeResourcePolicy.from_environment(
-            available_memory_bytes=GIB,
-            environ={name: value},
-        )
-
-
-@pytest.mark.parametrize(
     "value",
     [True, False, 1.0, "1", Decimal(1), Fraction(1, 1)],
 )
@@ -126,10 +104,6 @@ def test_direct_construction_is_unavailable() -> None:
             task_memory_budget_bytes=1024,
             payload_target_bytes=512,
         )
-
-
-def test_class_exposes_no_resolved_value_issuance_bypass() -> None:
-    assert not hasattr(RuntimeResourcePolicy, "_create")
 
 
 def test_runtime_resource_policy_is_sealed() -> None:

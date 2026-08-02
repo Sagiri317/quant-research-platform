@@ -8,7 +8,7 @@ from quant_research_platform.markets.implementations.crypto.ids import MARKET_ID
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
 )
-from quant_research_platform.research.factors.microstructure import (
+from quant_research_platform.research.factors.microstructure.columns import (
     MICROSTRUCTURE_FACTOR_COLUMNS,
 )
 

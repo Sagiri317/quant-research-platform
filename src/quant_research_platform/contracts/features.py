@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from quant_research_platform.contracts.validation import _validate_column_tuple
+
 FEATURE_TRANSFORMS = {
     "cross_sectional_zscore",
     "cross_sectional_rank",
@@ -45,9 +47,7 @@ class FeatureTransformSpec:
             or self.fillna_policy not in FILLNA_POLICIES
         ):
             raise ValueError("unsupported_feature_transform_fillna_policy")
-        overlap = sorted(
-            set(self.source_columns).intersection(self.output_columns)
-        )
+        overlap = sorted(set(self.source_columns).intersection(self.output_columns))
         if overlap:
             raise ValueError(
                 "feature_transform_raw_factor_passthrough: " + ", ".join(overlap)
@@ -60,15 +60,6 @@ class FeatureTransformSpec:
             "winsorized_rank",
         }:
             object.__setattr__(self, "winsorize_quantiles", (0.01, 0.99))
-
-
-def _validate_column_tuple(columns: tuple[str, ...], field_name: str) -> None:
-    if not columns:
-        raise ValueError(f"{field_name}_required")
-    if any(not isinstance(column, str) or not column for column in columns):
-        raise ValueError(f"{field_name}_must_be_non_empty_strings")
-    if len(set(columns)) != len(columns):
-        raise ValueError(f"{field_name}_must_not_contain_duplicates")
 
 
 def validated_winsorize_quantiles(value: object) -> tuple[float, float]:

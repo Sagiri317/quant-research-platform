@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
@@ -13,49 +14,80 @@ from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    bind_runtime_resource_policy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._dataset_inspection import (
+    dataset_inspection_retained_memory_bytes,
+    inspect_dataset,
+)
+from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     closing_dataset_iterator,
     iter_dataset_chunks,
     materialize_dataset_session,
     open_dataset_session,
 )
+from quant_research_platform.storage._dataset_writing import (
+    DatasetWriteChunk,
+)
+from quant_research_platform.storage._dataset_writing import (
+    write_dataset as _write_dataset,
+)
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
-    inspect_dataset,
-    write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
 
+class MaterializationCapacityExceeded(ValueError):
+    """Typed owner-local signal for adaptive materialization capacity."""
+
+
 def write_and_inspect(
     spec: ProcessedDataSpec,
-    frame: pd.DataFrame | Iterable[pd.DataFrame],
+    frame: pd.DataFrame | Iterable[pd.DataFrame | DatasetWriteChunk],
     *,
     layout: StorageLayout,
     time_window: TimeWindow,
     written: dict[str, DatasetInspection],
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
+    retained_written_bytes = sum(
+        dataset_inspection_retained_memory_bytes(inspection)
+        for inspection in written.values()
+    )
     root = processed_root(layout, spec)
     if root.exists():
         raise ValueError("dataset_exists")
     output = _iter_disk_guarded_output_chunks(
-        iter_sorted_output_chunks(frame, spec),
+        iter_sorted_output_chunks(frame, spec, resource_policy=resource_policy),
         scratch_parent=root.parent,
     )
     with runtime_resource_policy_scope(resource_policy):
-        write_dataset(root, output, spec=spec)
-        inspection = inspect_dataset(root, time_window=time_window)
+        _write_dataset(
+            root,
+            output,
+            spec=spec,
+            resource_policy=resource_policy,
+            retained_payload_bytes=retained_written_bytes,
+        )
+        inspection = inspect_dataset(
+            root,
+            time_window=time_window,
+            resource_policy=resource_policy,
+            retained_payload_bytes=retained_written_bytes,
+        )
     written[spec.data_id] = inspection
     return inspection
 
 
 def processed_root(layout: StorageLayout, spec: ProcessedDataSpec) -> Path:
-    return layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    return require_artifact_root(
+        layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    )
 
 
 def read_processed_inputs_for_spec(
@@ -66,6 +98,7 @@ def read_processed_inputs_for_spec(
     time_window: TimeWindow | None = None,
     columns_by_data_id: dict[str, Sequence[str]] | None = None,
     retained_payload_bytes: int = 0,
+    asset_ids: tuple[object, ...] | None = None,
     resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
@@ -85,36 +118,111 @@ def read_processed_inputs_for_spec(
                     retained_payload_bytes
                     + sum(_frame_bytes(frame) for frame in inputs.values())
                 ),
+                asset_ids=asset_ids,
             )
     return inputs
 
 
 def iter_sorted_output_chunks(
-    frame: pd.DataFrame | Iterable[pd.DataFrame],
+    frame: pd.DataFrame | Iterable[pd.DataFrame | DatasetWriteChunk],
     spec: ProcessedDataSpec,
-) -> Iterable[pd.DataFrame]:
-    frames = iter((frame,)) if isinstance(frame, pd.DataFrame) else iter(frame)
-    with closing_dataset_iterator(frames):
-        for chunk in frames:
-            output = chunk.loc[:, list(spec.required_columns)]
-            if output.empty:
-                del output, chunk
-                continue
-            output = output.sort_values(list(spec.primary_key)).reset_index(drop=True)
-            del chunk
-            yield output
-            del output
+    *,
+    resource_policy: RuntimeResourcePolicy,
+) -> Iterable[pd.DataFrame | DatasetWriteChunk]:
+    bound_policy = bind_runtime_resource_policy(resource_policy)
+
+    def activate() -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+        assert bound_policy is not None
+        with runtime_resource_policy_scope(bound_policy):
+            frames = iter((frame,)) if isinstance(frame, pd.DataFrame) else iter(frame)
+            previous_last_key: tuple[object, ...] | None = None
+            with closing_dataset_iterator(frames):
+                while True:
+                    try:
+                        publication = next(frames)
+                    except StopIteration:
+                        break
+                    retained_payload_bytes = (
+                        publication.retained_payload_bytes
+                        if isinstance(publication, DatasetWriteChunk)
+                        else None
+                    )
+                    chunk = (
+                        publication.frame
+                        if isinstance(publication, DatasetWriteChunk)
+                        else publication
+                    )
+                    if tuple(chunk.columns) != spec.required_columns:
+                        raise ValueError("a_share_output_columns_mismatch")
+                    output = chunk
+                    if output.empty:
+                        del output, chunk, publication
+                        continue
+                    output_bytes = pandas_frame_payload_bytes(output)
+                    key_temporary_bytes = len(output) * (
+                        len(spec.primary_key) * np.dtype(object).itemsize
+                        + 2 * np.dtype(np.intp).itemsize
+                    )
+                    if output_bytes > bound_policy.payload_target_bytes:
+                        raise MaterializationCapacityExceeded(
+                            "a_share_indivisible_market_unit_exceeds_payload_target"
+                        )
+                    if (
+                        (retained_payload_bytes or 0)
+                        + output_bytes
+                        + key_temporary_bytes
+                        > bound_policy.task_memory_budget_bytes
+                    ):
+                        raise MaterializationCapacityExceeded(
+                            "a_share_known_payloads_exceed_task_memory_budget"
+                        )
+                    key_arrays = tuple(
+                        output[column].to_numpy(copy=False)
+                        for column in reversed(spec.primary_key)
+                    )
+                    try:
+                        order = np.lexsort(key_arrays)
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            "a_share_output_primary_key_order_regression"
+                        ) from None
+                    expected = np.arange(len(output), dtype=np.intp)
+                    if not np.array_equal(order, expected):
+                        raise ValueError("a_share_output_primary_key_order_regression")
+                    first_key = tuple(array[0] for array in reversed(key_arrays))
+                    try:
+                        cross_chunk_regression = previous_last_key is not None and bool(
+                            first_key < previous_last_key
+                        )
+                    except (TypeError, ValueError):
+                        cross_chunk_regression = True
+                    if cross_chunk_regression:
+                        raise ValueError("a_share_output_primary_key_order_regression")
+                    previous_last_key = tuple(
+                        array[-1] for array in reversed(key_arrays)
+                    )
+                    del expected, key_arrays, order
+                    del chunk
+                    yield (
+                        output
+                        if retained_payload_bytes is None
+                        else DatasetWriteChunk(output, retained_payload_bytes)
+                    )
+                    del output, publication
+
+    return activate()
 
 
 def _iter_disk_guarded_output_chunks(
-    chunks: Iterable[pd.DataFrame],
+    chunks: Iterable[pd.DataFrame | DatasetWriteChunk],
     *,
     scratch_parent: Path,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
     chunks = iter(chunks)
     with closing_dataset_iterator(chunks):
         for chunk in chunks:
-            chunk_bytes = pandas_frame_payload_bytes(chunk)
+            frame = chunk.frame if isinstance(chunk, DatasetWriteChunk) else chunk
+            chunk_bytes = pandas_frame_payload_bytes(frame)
             require_free_disk_headroom(
                 scratch_parent,
                 reserve_bytes=chunk_bytes,
@@ -131,6 +239,9 @@ def read_source_inputs_for_spec(
     source_id: SourceId,
     market_bars_data_id: str | None = None,
     columns_by_data_id: dict[str, Sequence[str]] | None = None,
+    asset_ids_by_data_id: dict[str, tuple[object, ...]] | None = None,
+    asset_columns_by_data_id: dict[str, str] | None = None,
+    retained_payload_bytes: int = 0,
     resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
@@ -149,6 +260,17 @@ def read_source_inputs_for_spec(
                 ),
                 retained_payload_bytes=sum(
                     _frame_bytes(frame) for frame in inputs.values()
+                )
+                + retained_payload_bytes,
+                asset_ids=(
+                    None
+                    if asset_ids_by_data_id is None
+                    else asset_ids_by_data_id.get(data_id)
+                ),
+                asset_column=(
+                    "asset_id"
+                    if asset_columns_by_data_id is None
+                    else asset_columns_by_data_id.get(data_id, "asset_id")
                 ),
             )
     return inputs
@@ -161,17 +283,23 @@ def read_materialized_dataset(
     time_window: TimeWindow | None = None,
     columns: Sequence[str] | None = None,
     retained_payload_bytes: int = 0,
+    asset_ids: tuple[object, ...] | None = None,
+    asset_column: str = "asset_id",
 ) -> pd.DataFrame:
     if retained_payload_bytes < 0:
         raise ValueError("invalid_a_share_retained_payload_bytes")
     available_bytes = resource_policy.task_memory_budget_bytes - retained_payload_bytes
     if available_bytes <= 0:
-        raise ValueError("a_share_known_payloads_exceed_task_memory_budget")
+        raise MaterializationCapacityExceeded(
+            "a_share_known_payloads_exceed_task_memory_budget"
+        )
     with open_dataset_session(
         root,
         columns=None if columns is None else tuple(columns),
         time_window=time_window,
         resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
+        row_filters=(() if asset_ids is None else ((asset_column, "in", asset_ids),)),
     ) as session:
         return materialize_dataset_session(
             session,
@@ -187,36 +315,58 @@ def iter_dataset_chunks_with_policy(
     time_window: TimeWindow | None = None,
     columns: Sequence[str] | None = None,
     target_chunk_bytes: int | None = None,
+    asset_ids: tuple[object, ...] | None = None,
+    asset_column: str = "asset_id",
+    retained_payload_bytes: int = 0,
     _retained_payload_bytes: list[int] | None = None,
 ) -> Iterator[pd.DataFrame]:
-    target_bytes = (
-        resource_policy.payload_target_bytes
-        if target_chunk_bytes is None
-        else target_chunk_bytes
-    )
-    if type(target_bytes) is not int or target_bytes <= 0:
-        raise ValueError("invalid_target_chunk_bytes")
-    if target_bytes > resource_policy.payload_target_bytes:
-        raise ValueError("a_share_indivisible_market_unit_exceeds_payload_target")
-    retained_payload_bytes = _retained_payload_bytes
+    bound_policy = bind_runtime_resource_policy(resource_policy)
+    if retained_payload_bytes < 0:
+        raise ValueError("invalid_a_share_retained_payload_bytes")
+    retained_batch_bytes = _retained_payload_bytes
 
     def observe_batch(batch, _frame: pd.DataFrame) -> None:  # noqa: ANN001
-        assert retained_payload_bytes is not None
-        retained_payload_bytes[0] = batch.get_total_buffer_size()
+        assert retained_batch_bytes is not None
+        retained_batch_bytes[0] = batch.get_total_buffer_size()
 
-    with open_dataset_session(
-        root,
-        columns=None if columns is None else tuple(columns),
-        time_window=time_window,
-        resource_policy=resource_policy,
-    ) as session:
-        yield from iter_dataset_chunks(
-            session,
-            target_chunk_bytes=target_bytes,
-            batch_observer=(
-                observe_batch if retained_payload_bytes is not None else None
-            ),
+    def activate() -> Iterator[pd.DataFrame]:
+        assert bound_policy is not None
+        target_bytes = (
+            bound_policy.payload_target_bytes
+            if target_chunk_bytes is None
+            else target_chunk_bytes
         )
+        if type(target_bytes) is not int or target_bytes <= 0:
+            raise ValueError("invalid_target_chunk_bytes")
+        if target_bytes > bound_policy.payload_target_bytes:
+            raise ValueError("a_share_indivisible_market_unit_exceeds_payload_target")
+        operation_headroom_bytes = (
+            bound_policy.task_memory_budget_bytes - retained_payload_bytes
+        )
+        if operation_headroom_bytes <= 0:
+            raise MaterializationCapacityExceeded(
+                "a_share_known_payloads_exceed_task_memory_budget"
+            )
+        with open_dataset_session(
+            root,
+            columns=None if columns is None else tuple(columns),
+            time_window=time_window,
+            resource_policy=bound_policy,
+            retained_payload_bytes=retained_payload_bytes,
+            row_filters=(
+                () if asset_ids is None else ((asset_column, "in", asset_ids),)
+            ),
+        ) as session:
+            yield from iter_dataset_chunks(
+                session,
+                target_chunk_bytes=target_bytes,
+                operation_headroom_bytes=operation_headroom_bytes,
+                batch_observer=(
+                    observe_batch if retained_batch_bytes is not None else None
+                ),
+            )
+
+    return activate()
 
 
 def _frame_bytes(frame: pd.DataFrame) -> int:

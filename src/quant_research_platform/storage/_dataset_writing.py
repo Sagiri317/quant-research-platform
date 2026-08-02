@@ -41,6 +41,7 @@ from quant_research_platform.storage._dataset_paths import (
     partition_frames,
     partition_part_path,
     relative_partition_label,
+    require_artifact_root,
     timestamp_primary_key_column_from_spec,
     validate_dataset_artifact_root,
 )
@@ -81,6 +82,26 @@ class DatasetWriteReceipt:
     session: DatasetSession
     exact_primary_key_index: ExactPrimaryKeyIndex
 
+    @property
+    def retained_memory_bytes(self) -> int:
+        return (
+            self.session.retained_memory_bytes
+            + self.exact_primary_key_index.retained_memory_bytes
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetWriteChunk:
+    frame: pd.DataFrame
+    retained_payload_bytes: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.retained_payload_bytes) is not int
+            or self.retained_payload_bytes < 0
+        ):
+            raise ValueError("invalid_dataset_retained_payload_bytes")
+
 
 @dataclass
 class _WriteStats:
@@ -97,6 +118,7 @@ class _WriteStats:
     schema_hash: str | None = None
     logical_dtypes: dict[str, Any] | None = None
     logical_dtype_hash: str | None = None
+    retained_payload_bytes: int = 0
     _schema: list[dict[str, Any]] | None = None
     _arrow_schema: pa.Schema | None = None
     _logical_dtype_plan: dict[str, Any] | None = None
@@ -354,17 +376,21 @@ class _WriteStats:
 
 def write_dataset(
     dataset_root: Path,
-    data: pd.DataFrame | Iterable[pd.DataFrame],
+    data: pd.DataFrame | Iterable[pd.DataFrame | DatasetWriteChunk],
     *,
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
     resource_policy: RuntimeResourcePolicy | None,
+    retained_payload_bytes: int = 0,
 ) -> DatasetInspection:
     final_root = Path(dataset_root)
     validate_dataset_spec(spec)
     validate_dataset_artifact_root(final_root, spec)
+    final_root = require_artifact_root(final_root)
     issued_policy = resource_policy or active_runtime_resource_policy()
+    if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
+        raise ValueError("invalid_dataset_retained_payload_bytes")
     with runtime_resource_policy_scope(issued_policy):
         return _write_dataset_under_policy(
             final_root,
@@ -373,17 +399,19 @@ def write_dataset(
             instance_metadata=instance_metadata,
             staged_validator=staged_validator,
             resource_policy=issued_policy,
+            retained_payload_bytes=retained_payload_bytes,
         )
 
 
 def _write_dataset_under_policy(
     final_root: Path,
-    data: pd.DataFrame | Iterable[pd.DataFrame],
+    data: pd.DataFrame | Iterable[pd.DataFrame | DatasetWriteChunk],
     *,
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None,
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
 ) -> DatasetInspection:
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     close = getattr(input_chunks, "close", None)
@@ -425,7 +453,7 @@ def _write_dataset_under_policy(
                 working_headroom = resource_policy.task_memory_budget_bytes - (
                     key_tracker.retained_memory_bytes + inventory.retained_memory_bytes
                 )
-                if working_headroom <= 0:
+                if working_headroom - retained_payload_bytes <= 0:
                     raise ValueError("dataset_working_set_exceeds_task_memory_budget")
                 accumulator = _write_contents(
                     input_chunks,
@@ -435,6 +463,7 @@ def _write_dataset_under_policy(
                     task_memory_budget_bytes=working_headroom,
                     key_tracker=key_tracker,
                     inventory=inventory,
+                    minimum_retained_payload_bytes=retained_payload_bytes,
                 )
                 write_internal_artifact_manifest(
                     temp_root / "spec.json",
@@ -459,6 +488,10 @@ def _write_dataset_under_policy(
                     columns=None,
                     time_window=None,
                     resource_policy=resource_policy,
+                    retained_payload_bytes=(
+                        key_tracker.retained_memory_bytes
+                        + accumulator.retained_payload_bytes
+                    ),
                 )
                 if staged_validator is not None:
                     staged_validator(
@@ -486,7 +519,7 @@ def _write_dataset_under_policy(
 
 
 def _write_contents(
-    chunks: Iterator[pd.DataFrame],
+    chunks: Iterator[pd.DataFrame | DatasetWriteChunk],
     root: Path,
     *,
     spec: DataSpec,
@@ -494,6 +527,7 @@ def _write_contents(
     task_memory_budget_bytes: int,
     key_tracker: ExactPrimaryKeyIndex,
     inventory: DatasetSessionInventory,
+    minimum_retained_payload_bytes: int,
 ) -> _WriteStats:
     timestamp_column = validate_dataset_spec(spec)
     accumulator = _WriteStats(
@@ -502,9 +536,31 @@ def _write_contents(
         key_tracker=key_tracker,
         inventory=inventory,
     )
+    accumulator.retained_payload_bytes = minimum_retained_payload_bytes
     part_indices: dict[str, int] = {}
     saw_empty_schema = False
-    for chunk in chunks:
+    last_chunk_headroom = task_memory_budget_bytes
+    while True:
+        try:
+            publication = next(chunks)
+        except StopIteration:
+            break
+        if isinstance(publication, DatasetWriteChunk):
+            chunk = publication.frame
+            accumulator.retained_payload_bytes = max(
+                minimum_retained_payload_bytes,
+                publication.retained_payload_bytes,
+            )
+            chunk_headroom = (
+                task_memory_budget_bytes - accumulator.retained_payload_bytes
+            )
+            if chunk_headroom <= 0:
+                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+        else:
+            chunk = publication
+            accumulator.retained_payload_bytes = minimum_retained_payload_bytes
+            chunk_headroom = task_memory_budget_bytes - minimum_retained_payload_bytes
+        last_chunk_headroom = chunk_headroom
         declared = accumulator.declared_frame(
             chunk,
             target_chunk_bytes=target_chunk_bytes,
@@ -513,7 +569,7 @@ def _write_contents(
             frame, logical_dtypes = accumulator.prepare_frame(declared)
             table = accumulator.table_for_frame(frame)
             _require_writer_headroom(
-                task_memory_budget_bytes,
+                chunk_headroom,
                 declared,
                 frame,
                 arrow_bytes=table.nbytes,
@@ -523,7 +579,7 @@ def _write_contents(
                 target_chunk_bytes=target_chunk_bytes,
             )
             saw_empty_schema = True
-            del table, frame, logical_dtypes, declared, chunk
+            del table, frame, logical_dtypes, declared, chunk, publication
             continue
         for bounded_frame in iter_bounded_frame_chunks(
             declared,
@@ -533,7 +589,7 @@ def _write_contents(
                 bounded_frame
             )
             _require_writer_headroom(
-                task_memory_budget_bytes,
+                chunk_headroom,
                 bounded_frame,
                 prepared_frame,
             )
@@ -548,7 +604,7 @@ def _write_contents(
                 ):
                     table = accumulator.table_for_frame(bounded_partition)
                     remaining_headroom = _require_writer_headroom(
-                        task_memory_budget_bytes,
+                        chunk_headroom,
                         bounded_frame,
                         prepared_frame,
                         bounded_partition,
@@ -581,7 +637,7 @@ def _write_contents(
                     del table, remaining_headroom, bounded_partition
                 del partition, partition_frame
             del prepared_frame, bounded_logical_dtypes, bounded_frame
-        del declared, chunk
+        del declared, chunk, publication
     if accumulator.row_count == 0 and not saw_empty_schema:
         raise ValueError("empty_dataset_schema_missing")
     if saw_empty_schema:
@@ -595,7 +651,7 @@ def _write_contents(
         assert accumulator._arrow_schema is not None
         empty_table = pa.Table.from_batches([], schema=accumulator._arrow_schema)
         remaining_headroom = _require_writer_headroom(
-            task_memory_budget_bytes,
+            last_chunk_headroom,
             arrow_bytes=empty_table.nbytes,
         )
         if remaining_headroom <= 0:

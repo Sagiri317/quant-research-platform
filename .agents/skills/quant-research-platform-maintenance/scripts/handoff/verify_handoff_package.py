@@ -27,9 +27,6 @@ from governance_contract import (  # noqa: E402
     source_tree_scan_groups,
 )
 from governance_contract import (  # noqa: E402
-    is_scanner_definition_line as is_shared_scanner_definition_line,
-)
-from governance_contract import (  # noqa: E402
     package_member_name_failures as shared_package_member_name_failures,
 )
 from handoff_contract import (  # noqa: E402
@@ -611,12 +608,7 @@ def _read_zip_member_streaming(
 
 
 def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
-    scan_text = "\n".join(
-        line
-        for line in text.splitlines()
-        if not is_scanner_definition_line(line, name=name)
-    )
-    shared_reason = unsafe_for_share_reason(scan_text)
+    shared_reason = unsafe_for_share_reason(text)
     if shared_reason in {"local_only_path", "local_path"}:
         return "local_absolute_path"
     if shared_reason == "credential":
@@ -639,7 +631,7 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
         return "local_run_path"
     if name.lower().endswith(".json"):
         try:
-            payload = parse_qrp_json_object(scan_text.encode("utf-8", errors="strict"))
+            payload = parse_qrp_json_object(text.encode("utf-8", errors="strict"))
         except (UnicodeEncodeError, ValueError):
             json_reason = "invalid_json"
         else:
@@ -658,23 +650,6 @@ def member_name_failures(name: str) -> list[str]:
         if part in parts or name.replace("\\", "/").startswith(f"{part}/"):
             failures.append(f"forbidden_path_segment: {part}")
     return failures
-
-
-def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
-    normalized_name = name.removeprefix("bundle/")
-    if name.endswith(
-        (
-            "governance_contract.py",
-            "handoff_contract.py",
-            "receipt_contract.py",
-            "share_safety.py",
-            "structure_audit.py",
-            "verify_handoff_package.py",
-            "verify_governance.py",
-        )
-    ):
-        return is_shared_scanner_definition_line(normalized_name, line)
-    return False
 
 
 def git_text(repo: Path, *args: str) -> str:

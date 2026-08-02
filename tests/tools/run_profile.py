@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
+import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from time import perf_counter
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPO_SRC = REPO_ROOT / "src"
@@ -18,6 +21,16 @@ if str(REPO_SRC) not in sys.path:
 
 from quant_research_platform.contracts._json import (  # noqa: E402
     render_qrp_json_object,
+)
+from quant_research_platform.storage._dataset_paths import (  # noqa: E402
+    require_unaliased_path,
+)
+from quant_research_platform.storage._scratch_ownership import (  # noqa: E402
+    cleanup_stale_owned_scratch,
+    create_owned_scratch,
+    owned_scratch_name,
+    remove_owned_scratch,
+    require_owned_scratch,
 )
 
 STATUS_PASS = "PASS"
@@ -75,7 +88,6 @@ PROFILES: dict[str, Profile] = {
         scopes=(
             "tests/contracts",
             "tests/tools/test_run_profile.py",
-            "tests/agents/test_agent_proposals.py",
             "tests/agents/handoff/test_check_receipt_contract.py",
             "tests/agents/handoff/test_package_smoke_receipt_contract.py",
             "tests/agents/handoff/test_hard_scan_receipt_contract.py",
@@ -83,7 +95,6 @@ PROFILES: dict[str, Profile] = {
             "tests/agents/handoff/test_replay_command_contract.py",
             "tests/agents/handoff/test_handoff_package_verifier.py",
             "tests/architecture/test_handoff_contract_single_source.py",
-            "tests/architecture/test_governance_scan_boundaries.py",
         ),
         marker=FAST_EXCLUDES,
     ),
@@ -125,7 +136,15 @@ PROFILES: dict[str, Profile] = {
     "all": Profile(
         name="all",
         scopes=("tests",),
-        pytest_options=("-o", "addopts=--import-mode=importlib"),
+        pytest_options=(
+            "-o",
+            "addopts=--import-mode=importlib --strict-markers",
+            "-p",
+            "pytest_cov.plugin",
+            "--cov=quant_research_platform",
+            "--cov-report=term-missing",
+            "--cov-fail-under=90",
+        ),
     ),
 }
 
@@ -141,6 +160,16 @@ def main(argv: list[str] | None = None) -> int:
         _print_profiles(stream=sys.stderr)
         return 2
 
+    pytest_args = list(args.pytest_args)
+    if pytest_args and pytest_args[0] == "--":
+        pytest_args = pytest_args[1:]
+    profile = PROFILES[args.profile]
+    try:
+        _require_canonical_all_profile(profile, tuple(pytest_args))
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
     repo_root = Path(args.repo_root).resolve()
     try:
         run_dir = _resolve_run_dir(
@@ -152,11 +181,8 @@ def main(argv: list[str] | None = None) -> int:
         print(str(error), file=sys.stderr)
         return 2
 
-    pytest_args = list(args.pytest_args)
-    if pytest_args and pytest_args[0] == "--":
-        pytest_args = pytest_args[1:]
     return run_profile(
-        PROFILES[args.profile],
+        profile,
         repo_root=repo_root,
         run_dir=run_dir,
         pytest_args=tuple(pytest_args),
@@ -170,9 +196,8 @@ def run_profile(
     run_dir: Path,
     pytest_args: tuple[str, ...] = (),
 ) -> int:
+    _require_canonical_all_profile(profile, pytest_args)
     run_dir.mkdir(parents=True, exist_ok=True)
-    pytest_basetemp = _pytest_basetemp(repo_root, run_dir, profile.name)
-    pytest_basetemp.mkdir(parents=True, exist_ok=True)
     stdout_path = run_dir / "stdout.log"
     stderr_path = run_dir / "stderr.log"
     summary_path = run_dir / "summary.json"
@@ -181,12 +206,13 @@ def run_profile(
         sys.executable,
         "-m",
         "pytest",
-        *profile.pytest_options,
-        *profile.scopes,
-        "-q",
-        "--basetemp",
-        _repo_relative(repo_root, pytest_basetemp),
     ]
+    if profile.name == "all" and any(
+        arg.partition("=")[0] in {"-n", "--numprocesses", "--dist"}
+        for arg in pytest_args
+    ):
+        command.extend(("-p", "xdist.plugin"))
+    command.extend((*profile.pytest_options, *profile.scopes, "-q"))
     if profile.marker is not None:
         command.extend(["-m", profile.marker])
     effective_pytest_args = _with_default_durations(pytest_args)
@@ -195,20 +221,26 @@ def run_profile(
     started_at = datetime.now(UTC)
     started = perf_counter()
     env = os.environ.copy()
-    env.pop(_retired_profile_runner_env_name(), None)
-    result = subprocess.run(
-        command,
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        shell=False,
-        env=env,
-    )
-    ended_at = datetime.now(UTC)
-    duration_seconds = perf_counter() - started
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("PYTEST_PLUGINS", None)
+    if profile.name == "all":
+        env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+        env["COVERAGE_FILE"] = str(run_dir / ".coverage")
+    with _pytest_basetemp() as pytest_basetemp:
+        command.extend(("--basetemp", str(pytest_basetemp)))
+        result = subprocess.run(
+            command,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            shell=False,
+            env=env,
+        )
+        ended_at = datetime.now(UTC)
+        duration_seconds = perf_counter() - started
+        stdout_path.write_text(result.stdout, encoding="utf-8")
+        stderr_path.write_text(result.stderr, encoding="utf-8")
 
-    stdout_path.write_text(result.stdout, encoding="utf-8")
-    stderr_path.write_text(result.stderr, encoding="utf-8")
     status = _status_from_return_code(result.returncode)
     summary = {
         "schema_id": "qrp-test-profile-run",
@@ -233,8 +265,8 @@ def run_profile(
         "run_dir": _repo_relative(repo_root, run_dir),
         "stdout_path": _repo_relative(repo_root, stdout_path),
         "stderr_path": _repo_relative(repo_root, stderr_path),
-        "tmp_path": _repo_relative(repo_root, pytest_basetemp),
-        "pytest_basetemp": _repo_relative(repo_root, pytest_basetemp),
+        "tmp_path": _review_safe_path(repo_root, pytest_basetemp),
+        "pytest_basetemp": _review_safe_path(repo_root, pytest_basetemp),
         "reserved_profile": profile.reserved,
     }
     rendered_summary = render_qrp_json_object(summary)
@@ -286,19 +318,92 @@ def _repo_relative(repo_root: Path, path: Path) -> str:
     return PurePosixPath(path.resolve().relative_to(repo_root)).as_posix()
 
 
-def _pytest_basetemp(repo_root: Path, run_dir: Path, profile_name: str) -> Path:
-    run_dir_key = _repo_relative(repo_root, run_dir)
-    digest = hashlib.sha256(run_dir_key.encode("utf-8")).hexdigest()[:12]
-    return repo_root / ".run" / "profile-tmp" / f"{profile_name}-{digest}" / "tmp"
+@contextmanager
+def _pytest_basetemp():
+    allocation_id = uuid4().hex[:12]
+    temp_root = require_unaliased_path(
+        Path(tempfile.gettempdir()),
+        error="pytest_temp_root_invalid",
+    )
+    temp_root_identity = temp_root.lstat()
+    cleanup_stale_owned_scratch(
+        temp_root,
+        parent_identity=temp_root_identity,
+        prefix=".p-",
+        directory=True,
+        onexc=_retry_readonly_rmtree_entry,
+    )
+    require_unaliased_path(temp_root, error="pytest_temp_root_invalid")
+    parent = temp_root / owned_scratch_name(".p-", allocation_id)
+    child = parent / "t"
+    parent_identity: os.stat_result | None = None
+    try:
+        parent_identity = create_owned_scratch(parent, mode=0o700)
+        require_owned_scratch(temp_root, temp_root_identity)
+        require_unaliased_path(temp_root, error="pytest_temp_root_invalid")
+        require_owned_scratch(parent, parent_identity)
+        yield child
+    finally:
+        primary = sys.exception()
+        try:
+            if parent_identity is not None:
+                remove_owned_scratch(
+                    parent,
+                    parent_identity,
+                    onexc=_retry_readonly_rmtree_entry,
+                )
+        except BaseException as cleanup_error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "pytest temp parent cleanup also failed: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
+
+
+def _retry_readonly_rmtree_entry(
+    operation: Callable[[str], object],
+    path: str,
+    error: BaseException,
+) -> None:
+    if not isinstance(error, PermissionError):
+        raise error
+    os.chmod(path, stat.S_IWRITE)
+    operation(path)
 
 
 def _with_default_durations(pytest_args: tuple[str, ...]) -> tuple[str, ...]:
     if any(
-        arg == "--durations" or arg.startswith("--durations=")
-        for arg in pytest_args
+        arg == "--durations" or arg.startswith("--durations=") for arg in pytest_args
     ):
         return pytest_args
     return (*pytest_args, "--durations=10")
+
+
+def _require_canonical_all_profile(
+    profile: Profile,
+    pytest_args: tuple[str, ...],
+) -> None:
+    if profile.name != "all":
+        return
+    if profile != PROFILES["all"]:
+        raise ValueError("all_profile_definition_invalid")
+    value_options = {"--durations", "-n", "--numprocesses", "--dist"}
+    index = 0
+    while index < len(pytest_args):
+        option, separator, value = pytest_args[index].partition("=")
+        if separator:
+            if option not in value_options or not value:
+                raise ValueError("all_profile_pytest_args_invalid")
+            index += 1
+            continue
+        if (
+            option not in value_options
+            or index + 1 == len(pytest_args)
+            or pytest_args[index + 1].startswith("-")
+        ):
+            raise ValueError("all_profile_pytest_args_invalid")
+        index += 2
 
 
 def _review_safe_command(repo_root: Path, command: list[str]) -> list[str]:
@@ -331,7 +436,7 @@ def _review_safe_path(repo_root: Path, path: Path) -> str:
     try:
         return _repo_relative(repo_root, path)
     except ValueError:
-        return path.name
+        return f"<external>/{path.name}"
 
 
 def _create_default_run_dir(repo_root: Path, profile_name: str) -> Path:
@@ -342,36 +447,6 @@ def _create_default_run_dir(repo_root: Path, profile_name: str) -> Path:
         tempfile.mkdtemp(
             prefix=f"{timestamp}-{profile_name}-",
             dir=parent,
-        )
-    )
-
-
-def _retired_profile_runner_env_name() -> str:
-    return "".join(
-        chr(code)
-        for code in (
-            81,
-            82,
-            80,
-            95,
-            77,
-            65,
-            78,
-            65,
-            71,
-            69,
-            68,
-            95,
-            82,
-            69,
-            80,
-            79,
-            95,
-            82,
-            79,
-            79,
-            84,
-            83,
         )
     )
 

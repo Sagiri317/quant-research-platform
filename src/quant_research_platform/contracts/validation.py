@@ -10,9 +10,18 @@ import numpy as np
 import pandas as pd
 
 
-def require_contract_version(value: str, *, expected: str = "0.1") -> None:
-    if value != expected:
-        raise ValueError("unsupported_contract_version")
+def _validate_column_tuple(
+    columns: tuple[str, ...],
+    field_name: str,
+    *,
+    required: bool = True,
+) -> None:
+    if required and not columns:
+        raise ValueError(f"{field_name}_required")
+    if any(not isinstance(column, str) or not column for column in columns):
+        raise ValueError(f"{field_name}_must_be_non_empty_strings")
+    if len(set(columns)) != len(columns):
+        raise ValueError(f"{field_name}_must_not_contain_duplicates")
 
 
 def strict_string_series(
@@ -277,7 +286,6 @@ def _null_mask(series: pd.Series) -> pd.Series:
 
 
 __all__ = [
-    "require_contract_version",
     "strict_bool_series",
     "strict_finite_numeric_series",
     "strict_hashable_key_series",

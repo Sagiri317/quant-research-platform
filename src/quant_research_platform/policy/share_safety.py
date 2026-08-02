@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import codecs
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -142,6 +143,66 @@ _ROW_SAMPLE_KEYS = {
     "row_sample",
     "row_samples",
 }
+MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS = 8 * 1024
+
+
+def evidence_text_stream_unsafe_reason(
+    chunks: Iterable[bytes | bytearray | memoryview],
+) -> str | None:
+    """Scan persisted UTF-8 evidence with bounded retained text state."""
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    pending = ""
+    seen_market_id = False
+    seen_asset_id = False
+
+    def scan_line(line: str) -> str | None:
+        nonlocal seen_asset_id, seen_market_id
+        reason = evidence_text_unsafe_reason(line)
+        if reason is not None:
+            return reason
+        has_market_id = re.search(r"\bmarket_id\s*=", line) is not None
+        has_asset_id = re.search(r"\basset_id\s*=", line) is not None
+        has_timestamp = re.search(r"\btimestamp\s*=", line) is not None
+        if (seen_market_id and has_asset_id) or (seen_asset_id and has_timestamp):
+            return "row_sample"
+        seen_market_id = seen_market_id or has_market_id
+        seen_asset_id = seen_asset_id or has_asset_id
+        return None
+
+    def consume(decoded: str) -> str | None:
+        nonlocal pending
+        if not decoded:
+            return None
+        parts = decoded.split("\n")
+        for index, part in enumerate(parts):
+            if len(pending) + len(part) > MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS:
+                return "evidence_capacity_exceeded"
+            if part:
+                pending += part
+            if index == len(parts) - 1:
+                continue
+            reason = scan_line(pending)
+            if reason is not None:
+                return reason
+            pending = ""
+        return None
+
+    for chunk in chunks:
+        if not isinstance(chunk, bytes | bytearray | memoryview):
+            raise TypeError("evidence_text_bytes_required")
+        view = memoryview(chunk)
+        for offset in range(0, len(view), MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS):
+            reason = consume(
+                decoder.decode(
+                    view[offset : offset + MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS],
+                    final=False,
+                )
+            )
+            if reason is not None:
+                return reason
+    reason = consume(decoder.decode(b"", final=True))
+    return reason if reason is not None else scan_line(pending)
 
 
 def _parts(path: Path) -> tuple[str, ...]:
@@ -362,7 +423,7 @@ def sanitize_shared_object(value: Any) -> Any:
     """Sanitize one object graph while rejecting ambiguous shared identity."""
 
     try:
-        sanitized, _source_token, _safe_token = _sanitize_shared_node(
+        sanitized, _source_identity, _safe_identity = _sanitize_shared_node(
             value,
             active=set(),
             depth=0,
@@ -384,11 +445,11 @@ def _sanitize_shared_node(
         sanitized = sanitize_shared_text(value)
         return sanitized, ("str", value), ("str", sanitized)
     if not isinstance(value, (Mapping, list, tuple, set, frozenset)):
-        token = _sanitize_scalar_token(value)
+        identity = _sanitize_scalar_identity(value)
         if unsafe_for_share_reason(value) is not None:
             sanitized = sanitize_shared_text(value)
-            return sanitized, token, ("str", sanitized)
-        return value, token, token
+            return sanitized, identity, ("str", sanitized)
+        return value, identity, identity
 
     object_id = id(value)
     if object_id in active:
@@ -418,22 +479,22 @@ def _sanitize_shared_mapping(
         safe_key = sanitize_shared_text(key)
         if safe_key in sanitized:
             raise ValueError("sanitize_key_collision")
-        safe_item, source_token, safe_token = _sanitize_shared_node(
+        safe_item, source_identity, safe_identity = _sanitize_shared_node(
             item,
             active=active,
             depth=depth + 1,
         )
         if key.lower() in _ROW_SAMPLE_KEYS and item:
             safe_item = "[row-sample]"
-            safe_token = ("str", safe_item)
+            safe_identity = ("str", safe_item)
         _reject_sanitized_value_collision(
             observed_safe_values,
-            source_token=source_token,
-            safe_token=safe_token,
+            source_identity=source_identity,
+            safe_identity=safe_identity,
         )
         sanitized[safe_key] = safe_item
-        source_items.append(("item", ("str", key), source_token))
-        safe_items.append(("item", ("str", safe_key), safe_token))
+        source_items.append(("item", ("str", key), source_identity))
+        safe_items.append(("item", ("str", safe_key), safe_identity))
     source_items.sort(key=lambda entry: entry[1])
     safe_items.sort(key=lambda entry: entry[1])
     return (
@@ -452,17 +513,17 @@ def _sanitize_shared_sequence(
     entries: list[tuple[Any, tuple[Any, ...], tuple[Any, ...]]] = []
     observed_safe_values: dict[tuple[Any, ...], tuple[Any, ...]] = {}
     for item in value:
-        safe_item, source_token, safe_token = _sanitize_shared_node(
+        safe_item, source_identity, safe_identity = _sanitize_shared_node(
             item,
             active=active,
             depth=depth + 1,
         )
         _reject_sanitized_value_collision(
             observed_safe_values,
-            source_token=source_token,
-            safe_token=safe_token,
+            source_identity=source_identity,
+            safe_identity=safe_identity,
         )
-        entries.append((safe_item, source_token, safe_token))
+        entries.append((safe_item, source_identity, safe_identity))
 
     if isinstance(value, (set, frozenset)):
         entries.sort(key=lambda entry: entry[2])
@@ -484,16 +545,16 @@ def _sanitize_shared_sequence(
 def _reject_sanitized_value_collision(
     observed: dict[tuple[Any, ...], tuple[Any, ...]],
     *,
-    source_token: tuple[Any, ...],
-    safe_token: tuple[Any, ...],
+    source_identity: tuple[Any, ...],
+    safe_identity: tuple[Any, ...],
 ) -> None:
-    previous = observed.get(safe_token)
-    if previous is not None and previous != source_token:
+    previous = observed.get(safe_identity)
+    if previous is not None and previous != source_identity:
         raise ValueError("sanitize_value_collision")
-    observed[safe_token] = source_token
+    observed[safe_identity] = source_identity
 
 
-def _sanitize_scalar_token(value: Any) -> tuple[Any, ...]:
+def _sanitize_scalar_identity(value: Any) -> tuple[Any, ...]:
     value_type = type(value)
     try:
         representation = repr(value)
@@ -570,10 +631,12 @@ def internal_artifact_metadata_unsafe_reason(
 __all__ = [
     "LOCAL_ONLY_DATA_LAYERS",
     "LOCAL_ONLY_ROOTS",
+    "MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS",
     "PACKAGE_FORBIDDEN_SUFFIXES",
     "contains_source_local_key",
     "evidence_json_value_unsafe_reason",
     "evidence_text_unsafe_reason",
+    "evidence_text_stream_unsafe_reason",
     "assert_internal_artifact_metadata_safe",
     "internal_artifact_metadata_unsafe_reason",
     "is_local_only_path",

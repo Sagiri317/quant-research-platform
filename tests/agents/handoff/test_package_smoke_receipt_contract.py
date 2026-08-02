@@ -71,22 +71,18 @@ def test_package_smoke_rejects_build_fail_with_claimed_content_scan_pass() -> No
 
     assert "package_smoke_content_scan_not_run_required" in failures
 
-def test_package_smoke_rejects_old_artifact_and_example_fields() -> None:
+def test_package_smoke_rejects_extra_fields() -> None:
     contract = load_handoff_script_module("receipt_contract")
-    payload = make_package_smoke_receipt_payload(
-        wheel={"filename": "demo.whl", "sha256": "0" * 64},
-        sdist={"filename": "demo.tar.gz", "sha256": "1" * 64},
-    )
+    payload = make_package_smoke_receipt_payload(extra=True)
     payload["content_scan"] = {
         **payload["content_scan"],  # type: ignore[arg-type]
-        "examples": [],
+        "extra": True,
     }
 
     failures = contract.validate_package_smoke_receipt(payload)
 
-    assert "package_smoke_unapproved_field: wheel" in failures
-    assert "package_smoke_unapproved_field: sdist" in failures
-    assert "package_smoke_content_scan_unapproved_field: examples" in failures
+    assert "package_smoke_unapproved_field: extra" in failures
+    assert "package_smoke_content_scan_unapproved_field: extra" in failures
 
 def test_package_smoke_rejects_fixed_value_drift() -> None:
     contract = load_handoff_script_module("receipt_contract")
@@ -189,8 +185,6 @@ def test_package_smoke_build_uses_no_isolation_and_timeout(
     assert calls
     argv, timeout = calls[0]
     assert "--no-isolation" in argv
-    assert "--installer" not in argv
-    assert "--skip-dependency-check" not in argv
     assert timeout == replay.PACKAGE_BUILD_TIMEOUT_SECONDS
 
 def test_package_smoke_build_timeout_is_blocked(

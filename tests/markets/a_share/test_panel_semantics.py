@@ -13,7 +13,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     EXECUTION_MASK_ID,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
-    annotations,
+    annotations as annotations,
 )
 from quant_research_platform.markets.implementations.a_share.processed.panels import (
     _asof_join_stock_master,
@@ -455,7 +455,9 @@ def test_compute_market_panel_fails_closed_on_missing_join_key_columns() -> None
 def test_compute_market_panel_fails_closed_on_missing_canonical_after_mapping(
     monkeypatch,
 ) -> None:
-    from quant_research_platform.markets.implementations.a_share.processed import panels
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        panels as panels,
+    )
 
     monkeypatch.setattr(
         panels,

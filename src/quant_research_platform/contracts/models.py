@@ -11,6 +11,7 @@ from quant_research_platform.contracts.filtering import (
     reject_filter_input_columns,
     validate_sample_filter_mode,
 )
+from quant_research_platform.contracts.validation import _validate_column_tuple
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -80,20 +81,6 @@ class ModelSpec:
     @property
     def input_columns(self) -> tuple[str, ...]:
         return (*self.input_factor_columns, *self.input_feature_columns)
-
-
-def _validate_column_tuple(
-    columns: tuple[str, ...],
-    field_name: str,
-    *,
-    required: bool = True,
-) -> None:
-    if required and not columns:
-        raise ValueError(f"{field_name}_required")
-    if any(not isinstance(column, str) or not column for column in columns):
-        raise ValueError(f"{field_name}_must_be_non_empty_strings")
-    if len(set(columns)) != len(columns):
-        raise ValueError(f"{field_name}_must_not_contain_duplicates")
 
 
 __all__ = ["ModelSpec"]

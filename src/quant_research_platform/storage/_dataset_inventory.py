@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
+import os
 import re
-import shutil
 import sqlite3
 import sys
-import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pyarrow as pa
 
 from quant_research_platform.runtime.resources import require_free_disk_headroom
 from quant_research_platform.storage._dataset_paths import (
     parse_year_partition_label,
-    path_is_filesystem_alias,
+    require_unaliased_path,
 )
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
@@ -24,8 +24,11 @@ from quant_research_platform.storage._dataset_physical import (
     dataset_file_identity,
 )
 from quant_research_platform.storage._scratch_ownership import (
-    owned_scratch_prefix,
-    scratch_owner_is_stale,
+    cleanup_stale_owned_scratch,
+    create_owned_scratch,
+    owned_scratch_name,
+    remove_owned_scratch,
+    require_owned_scratch,
 )
 
 _PREFIX = ".dataset-inventory-"
@@ -88,21 +91,46 @@ class DatasetSessionInventory:
             raise ValueError("dataset_inventory_budget_too_small")
         self.data_root = Path(data_root)
         self._scratch_parent = Path(scratch_parent)
+        require_unaliased_path(
+            self._scratch_parent, error="invalid_storage_scratch_path"
+        )
         self._scratch_parent.mkdir(parents=True, exist_ok=True)
+        require_unaliased_path(
+            self._scratch_parent, error="invalid_storage_scratch_path"
+        )
         require_free_disk_headroom(
             self._scratch_parent,
             reserve_bytes=_SQLITE_PAGE_BYTES,
         )
-        _cleanup_stale_inventory(self._scratch_parent)
-        self._temporary_directory = tempfile.TemporaryDirectory(
-            prefix=owned_scratch_prefix(_PREFIX), dir=self._scratch_parent
+        parent_identity = self._scratch_parent.lstat()
+        cleanup_stale_owned_scratch(
+            self._scratch_parent,
+            parent_identity=parent_identity,
+            prefix=_PREFIX,
+            directory=True,
         )
+        require_unaliased_path(
+            self._scratch_parent, error="invalid_storage_scratch_path"
+        )
+        temporary_directory = self._scratch_parent / owned_scratch_name(
+            _PREFIX, uuid4().hex[:12]
+        )
+        temporary_identity: os.stat_result | None = None
+        self._temporary_directory: Path | None = None
+        self._temporary_identity: os.stat_result | None = None
         self._connection: sqlite3.Connection | None = None
         connection: sqlite3.Connection | None = None
         try:
-            connection = sqlite3.connect(
-                Path(self._temporary_directory.name) / "inventory.sqlite3"
+            temporary_identity = create_owned_scratch(temporary_directory)
+            require_owned_scratch(self._scratch_parent, parent_identity)
+            self._temporary_directory = temporary_directory
+            self._temporary_identity = temporary_identity
+            require_unaliased_path(
+                temporary_directory,
+                error="invalid_storage_scratch_path",
             )
+            require_owned_scratch(temporary_directory, temporary_identity)
+            connection = sqlite3.connect(temporary_directory / "inventory.sqlite3")
             connection.execute(f"PRAGMA page_size={_SQLITE_PAGE_BYTES}")
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
@@ -141,11 +169,13 @@ class DatasetSessionInventory:
                     connection.close()
                 except BaseException:
                     pass
-            try:
-                self._temporary_directory.cleanup()
-            except BaseException:
-                pass
+            if temporary_identity is not None:
+                try:
+                    remove_owned_scratch(temporary_directory, temporary_identity)
+                except BaseException:
+                    pass
             self._temporary_directory = None
+            self._temporary_identity = None
             raise
 
     def __enter__(self) -> DatasetSessionInventory:
@@ -163,33 +193,35 @@ class DatasetSessionInventory:
     def __del__(self) -> None:
         try:
             self.close()
-        except (AttributeError, OSError, sqlite3.Error):
+        except (AttributeError, OSError, ValueError, sqlite3.Error):
             pass
 
     def close(self) -> None:
         connection = getattr(self, "_connection", None)
         temporary = getattr(self, "_temporary_directory", None)
+        temporary_identity = getattr(self, "_temporary_identity", None)
         self._connection = None
         self._temporary_directory = None
+        self._temporary_identity = None
         try:
             if connection is not None:
                 connection.close()
         except BaseException:
-            if temporary is not None:
+            if temporary is not None and temporary_identity is not None:
                 try:
-                    temporary.cleanup()
+                    remove_owned_scratch(temporary, temporary_identity)
                 except BaseException:
                     pass
             raise
         else:
-            if temporary is not None:
-                temporary.cleanup()
+            if temporary is not None and temporary_identity is not None:
+                remove_owned_scratch(temporary, temporary_identity)
 
     @property
     def scratch_path(self) -> Path:
         if self._temporary_directory is None:
             raise RuntimeError("dataset_inventory_closed")
-        return Path(self._temporary_directory.name)
+        return self._temporary_directory
 
     @property
     def retained_memory_bytes(self) -> int:
@@ -413,6 +445,7 @@ class DatasetSessionInventory:
             path_selection=path_selection,
         ):
             yield path
+
     def path_count(
         self,
         *,
@@ -492,6 +525,20 @@ class DatasetSessionInventory:
             null_columns=self._null_columns_for(relative),
         )
 
+    def schema_payload_bytes_for(self, path: Path) -> int:
+        relative = Path(path).relative_to(self.data_root).as_posix()
+        row = (
+            self._require_connection()
+            .execute(
+                "SELECT length(schema) FROM parts WHERE relative_path = ?",
+                (relative,),
+            )
+            .fetchone()
+        )
+        if row is None or row[0] is None:
+            raise ValueError("dataset_inventory_changed")
+        return int(row[0])
+
     def _replace_null_columns(
         self,
         connection: sqlite3.Connection,
@@ -525,24 +572,35 @@ class DatasetSessionInventory:
         )
         if partition_columns not in ((), ("year",)):
             raise ValueError("unsupported_partitioning")
-        if path_is_filesystem_alias(self.data_root):
-            raise ValueError("invalid_dataset_part_files")
+        require_unaliased_path(self.data_root, error="invalid_dataset_part_files")
         unpartitioned = any(
             path.suffix.casefold() == ".parquet" for path in self.data_root.iterdir()
         )
         partitioned = partition_columns == ("year",) and not unpartitioned
         if partitioned:
             for path in self.data_root.glob("year=*"):
+                require_unaliased_path(path, error="invalid_dataset_part_files")
                 if not path.is_dir():
                     continue
-                if _path_or_relative_component_is_alias(self.data_root, path):
-                    raise ValueError("invalid_dataset_part_files")
                 on_year(parse_year_partition_label(path.name), path.name)
-        for path in self.data_root.rglob("*"):
-            if path.suffix.casefold() != ".parquet":
-                continue
-            coordinates = self._validated_coordinates(path, partitioned=partitioned)
-            on_path(path, coordinates)
+
+        def fail_walk(error: OSError) -> None:
+            raise ValueError("invalid_dataset_part_files") from error
+
+        for parent, dirnames, filenames in self.data_root.walk(
+            follow_symlinks=False,
+            on_error=fail_walk,
+        ):
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = parent / name
+                if path.suffix.casefold() != ".parquet":
+                    continue
+                coordinates = self._validated_coordinates(
+                    path,
+                    partitioned=partitioned,
+                )
+                on_path(path, coordinates)
 
     def _validated_coordinates(
         self,
@@ -552,15 +610,8 @@ class DatasetSessionInventory:
     ) -> tuple[int, int, int]:
         candidate = Path(path)
         relative = candidate.relative_to(self.data_root)
-        if not candidate.is_file() or _path_or_relative_component_is_alias(
-            self.data_root, candidate
-        ):
-            raise ValueError("invalid_dataset_part_files")
-        try:
-            if not candidate.resolve().is_relative_to(self.data_root.resolve()):
-                raise ValueError("invalid_dataset_part_files")
-        except OSError as exc:
-            raise ValueError("invalid_dataset_part_files") from exc
+        require_unaliased_path(candidate, error="invalid_dataset_part_files")
+        dataset_file_identity(candidate)
         match = _PART_FILE_PATTERN.fullmatch(candidate.name)
         if match is None:
             raise ValueError("invalid_dataset_part_files")
@@ -578,7 +629,6 @@ class DatasetSessionInventory:
             )
         else:
             raise ValueError("invalid_dataset_part_files")
-        _physical_file_identity(candidate)
         return coordinates
 
     def _register_year(self, year: int, label: str) -> None:
@@ -670,32 +720,6 @@ def _identity_values(identity: DatasetFileIdentity) -> tuple[str, str, str, str]
     )
 
 
-def _path_or_relative_component_is_alias(root: Path, path: Path) -> bool:
-    candidate = Path(path)
-    try:
-        relative = candidate.relative_to(root)
-    except ValueError:
-        return True
-    current = Path(root)
-    if path_is_filesystem_alias(current):
-        return True
-    for part in relative.parts:
-        current /= part
-        if path_is_filesystem_alias(current):
-            return True
-    return False
-
-
-def _physical_file_identity(path: Path) -> tuple[int, int]:
-    try:
-        path_stat = Path(path).stat()
-    except OSError as exc:
-        raise ValueError("invalid_dataset_part_files") from exc
-    if int(path_stat.st_ino) <= 0 or int(path_stat.st_nlink) != 1:
-        raise ValueError("invalid_dataset_part_files")
-    return int(path_stat.st_dev), int(path_stat.st_ino)
-
-
 def _metadata_from_row(
     row: tuple[object, ...],
     *,
@@ -713,44 +737,3 @@ def _metadata_from_row(
         file_size_bytes=int(row[6]),
         logical_dtype_payload=bytes(row[7]),
     )
-
-
-def _cleanup_stale_inventory(parent: Path) -> None:
-    first_failure: BaseException | None = None
-    try:
-        candidates = iter(parent.glob(f"{_PREFIX}*"))
-    except BaseException as exc:
-        first_failure = exc
-        candidates = iter(())
-    while True:
-        try:
-            scratch = next(candidates)
-        except StopIteration:
-            break
-        except BaseException as exc:
-            if first_failure is None:
-                first_failure = exc
-            continue
-        try:
-            is_directory = scratch.is_dir()
-        except BaseException as exc:
-            if first_failure is None:
-                first_failure = exc
-            continue
-        if not is_directory:
-            continue
-        try:
-            is_stale = scratch_owner_is_stale(scratch, prefix=_PREFIX)
-        except BaseException as exc:
-            if first_failure is None:
-                first_failure = exc
-            continue
-        if not is_stale:
-            continue
-        try:
-            shutil.rmtree(scratch)
-        except BaseException as exc:
-            if first_failure is None:
-                first_failure = exc
-    if first_failure is not None:
-        raise first_failure

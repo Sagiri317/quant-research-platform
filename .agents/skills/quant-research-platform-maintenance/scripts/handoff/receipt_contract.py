@@ -19,8 +19,9 @@ try:
         FieldSpec,
         ProofClass,
         aggregate_handoff_status,
-        allowed_keys,
+        exact_keys,
         replay_command_spec,
+        sha,
     )
 except ModuleNotFoundError:  # pragma: no cover - package import fallback.
     from .handoff_contract import (
@@ -31,8 +32,9 @@ except ModuleNotFoundError:  # pragma: no cover - package import fallback.
         FieldSpec,
         ProofClass,
         aggregate_handoff_status,
-        allowed_keys,
+        exact_keys,
         replay_command_spec,
+        sha,
     )
 
 
@@ -136,7 +138,7 @@ COUNT_FIELDS = frozenset(
         "collected",
     }
 )
-REQUIRED_CHECK_IDS = ("profile-smoke", "code-map")
+REQUIRED_CHECK_IDS = ("profile-smoke",)
 FAILURE_CLASSES = frozenset(
     {
         "pytest_failed",
@@ -254,11 +256,7 @@ def validate_package_smoke_receipt(payload: Mapping[str, object]) -> list[str]:
                 failures.append("package_smoke_content_scan_run_required")
         else:
             expected_scanned_artifact_kinds = []
-            if (
-                scan_status != "NOT_RUN"
-                or count != 0
-                or scanned_artifact_kinds != []
-            ):
+            if scan_status != "NOT_RUN" or count != 0 or scanned_artifact_kinds != []:
                 failures.append("package_smoke_content_scan_not_run_required")
         if scanned_artifact_kinds != expected_scanned_artifact_kinds:
             failures.append("package_smoke_scanned_artifact_kinds_invalid")
@@ -433,10 +431,7 @@ def validate_check_receipt_row(
         if (
             type(timeout_seconds) not in (int, float)
             or timeout_seconds <= 0
-            or (
-                type(timeout_seconds) is float
-                and not math.isfinite(timeout_seconds)
-            )
+            or (type(timeout_seconds) is float and not math.isfinite(timeout_seconds))
         ):
             failures.append(f"check_receipt_timeout_seconds_invalid: {index}")
     elif timeout_seconds is not None:
@@ -444,8 +439,6 @@ def validate_check_receipt_row(
     counts = row.get("counts")
     if command_id == "profile-smoke" and status in {"PASS", "FAIL"}:
         failures.extend(validate_pytest_counts(counts, status=status, index=index))
-    elif command_id == "code-map" and counts is not None:
-        failures.append(f"check_receipt_counts_invalid: {index}")
     elif command_id == "profile-smoke" and counts is not None:
         failures.append(f"check_receipt_counts_invalid: {index}")
     return failures
@@ -597,37 +590,6 @@ def forbidden_receipt_field_failures(
                 forbidden_receipt_field_failures(name, value, f"{prefix}.{index}")
             )
     return failures
-
-
-def exact_keys(
-    payload: Mapping[str, object],
-    specs: Mapping[str, FieldSpec],
-    prefix: str,
-) -> list[str]:
-    allowed = allowed_keys(specs)
-    if ":" in prefix:
-        label, _, index = prefix.partition(":")
-        failures = [
-            f"{label}_missing: {index}:{key}" for key in sorted(allowed - set(payload))
-        ]
-        failures.extend(
-            f"{label}_unapproved_field: {index}:{key}"
-            for key in sorted(set(payload) - allowed)
-        )
-        return failures
-    failures = [f"{prefix}_missing: {key}" for key in sorted(allowed - set(payload))]
-    failures.extend(
-        f"{prefix}_unapproved_field: {key}" for key in sorted(set(payload) - allowed)
-    )
-    return failures
-
-
-def sha(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(char in "0123456789abcdef" for char in value)
-    )
 
 
 def _append_step_status(

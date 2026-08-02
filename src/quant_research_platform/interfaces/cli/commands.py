@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import typer
 
 from quant_research_platform.interfaces import services
@@ -23,17 +21,6 @@ app.add_typer(research_datasets_app, name="research-datasets")
 
 def _echo_safe(value: object, *, err: bool = False) -> None:
     typer.echo(sanitize_shared_text(value), err=err)
-
-
-def _run_cli(operation: Callable[[], object]) -> None:
-    try:
-        _echo_safe(operation())
-    except (KeyError, ValueError) as exc:
-        _echo_safe(str(exc), err=True)
-        raise typer.Exit(code=2) from exc
-    except Exception as exc:
-        _echo_safe("internal_error", err=True)
-        raise typer.Exit(code=2) from exc
 
 
 @catalog_app.command("factors")
@@ -66,12 +53,18 @@ def research_dataset_requirements(
 ) -> None:
     """Describe public research dataset requirements."""
 
-    _run_cli(
-        lambda: services.describe_research_dataset_requirements(
+    try:
+        result = services.describe_research_dataset_requirements(
             dataset_id,
             research_profile(),
         )
-    )
+    except (KeyError, ValueError) as exc:
+        _echo_safe(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _echo_safe("internal_error", err=True)
+        raise typer.Exit(code=2) from exc
+    _echo_safe(result)
 
 
 def main() -> None:

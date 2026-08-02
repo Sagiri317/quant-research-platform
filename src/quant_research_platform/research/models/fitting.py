@@ -8,15 +8,13 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+import quant_research_platform.research.models.dependencies as dependencies
+import quant_research_platform.research.models.feature_importance as feature_importance
+import quant_research_platform.research.models.validation_split as validation_split
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
-from quant_research_platform.research.models import (
-    dependencies,
-    feature_importance,
-    validation_split,
-)
 
 
 @dataclass(frozen=True)
@@ -193,9 +191,9 @@ def fit_linear_coefficients(
         )
         filter_columns_used = list(metadata["filter_columns_used"])
         filter_definition = str(metadata["filter_definition"])
-        usable = filtered.dropna(
-            subset=[*spec.input_columns, spec.label_column]
-        ).loc[:, list(fit_columns)]
+        usable = filtered.dropna(subset=[*spec.input_columns, spec.label_column]).loc[
+            :, list(fit_columns)
+        ]
         if first_usable is None:
             first_usable = usable
         elif not first_usable.empty:
@@ -208,15 +206,9 @@ def fit_linear_coefficients(
         chunk_start = date_string(usable_timestamps.min())
         chunk_end = date_string(usable_timestamps.max())
         train_start = (
-            chunk_start
-            if train_start is None
-            else min(train_start, chunk_start)
+            chunk_start if train_start is None else min(train_start, chunk_start)
         )
-        train_end = (
-            chunk_end
-            if train_end is None
-            else max(train_end, chunk_end)
-        )
+        train_end = chunk_end if train_end is None else max(train_end, chunk_end)
         chunk_design = linear_design_matrix(usable, spec)
         if r_factor is None or qt_y is None:
             stacked_design = chunk_design

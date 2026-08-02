@@ -31,7 +31,7 @@ def _cors_origins_from_env() -> list[str]:
 
 
 def create_app() -> FastAPI:
-    """Create the QRP 0.1 API app without legacy endpoint compatibility."""
+    """Create the QRP 0.1 API app."""
 
     app = FastAPI(
         title="Quant Research Platform",

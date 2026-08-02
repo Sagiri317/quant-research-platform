@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import os
-import stat
-import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.contracts._json import (
-    bounded_rendered_qrp_json_object_size,
+    bounded_qrp_json_object_snapshot,
     parse_qrp_json_object,
     render_qrp_json_object,
 )
@@ -24,10 +21,23 @@ from quant_research_platform.policy.share_safety import (
     sanitize_shared_object,
 )
 from quant_research_platform.runtime.logical_paths import logical_path
+from quant_research_platform.storage._dataset_paths import (
+    require_artifact_root,
+    require_unaliased_path,
+)
+from quant_research_platform.storage._dataset_physical import (
+    DatasetFileIdentity,
+    dataset_file_identity,
+    dataset_file_identity_from_stat,
+)
 from quant_research_platform.storage._dataset_schema import (
     validate_dataset_manifest_consumable,
     validate_dataset_manifest_payload,
     validate_dataset_spec_payload,
+)
+from quant_research_platform.storage._scratch_ownership import (
+    remove_owned_scratch,
+    require_owned_scratch,
 )
 from quant_research_platform.storage.atomic import atomic_write_text
 
@@ -35,46 +45,38 @@ _DATASET_LOGICAL_PATH_MARKERS = ("data",)
 _MAX_QRP_JSON_BYTES = 1024 * 1024
 
 
-def read_bounded_qrp_json(path: Path) -> tuple[bytes, dict[str, Any]]:
-    candidate = Path(path)
-    try:
-        path_stat = candidate.lstat()
-    except OSError as exc:
-        raise ValueError("dataset_metadata_file_invalid") from exc
-    if (
-        not stat.S_ISREG(path_stat.st_mode)
-        or int(path_stat.st_nlink) != 1
-        or candidate.is_symlink()
-        or (hasattr(candidate, "is_junction") and candidate.is_junction())
-        or path_stat.st_size > _MAX_QRP_JSON_BYTES
-    ):
-        error = (
-            "dataset_metadata_file_too_large"
-            if path_stat.st_size > _MAX_QRP_JSON_BYTES
-            else "dataset_metadata_file_invalid"
-        )
-        raise ValueError(error)
-    identity = (
-        int(path_stat.st_dev),
-        int(path_stat.st_ino),
-        int(path_stat.st_size),
-        int(path_stat.st_mtime_ns),
+def read_bounded_qrp_json(
+    path: Path,
+    *,
+    expected_identity: DatasetFileIdentity | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    candidate = require_unaliased_path(
+        Path(path), error="dataset_metadata_file_invalid"
     )
     try:
-        with _open_file_preserving_primary(candidate, "rb") as handle:
-            before = os.fstat(handle.fileno())
+        identity = dataset_file_identity(candidate)
+    except (OSError, ValueError) as exc:
+        raise ValueError("dataset_metadata_file_invalid") from exc
+    if expected_identity is not None and identity != expected_identity:
+        raise ValueError("dataset_metadata_file_identity_changed")
+    if identity.size > _MAX_QRP_JSON_BYTES:
+        raise ValueError("dataset_metadata_file_too_large")
+    try:
+        handle = candidate.open("rb")
+        with scratch_owner.handle_preserving_primary(handle):
+            before = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+            if before != identity:
+                raise ValueError("dataset_metadata_file_identity_changed")
             raw = handle.read(_MAX_QRP_JSON_BYTES + 1)
-            after = os.fstat(handle.fileno())
-        current = candidate.stat()
+            after = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+        current = dataset_file_identity(candidate)
     except OSError as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
+    except ValueError as exc:
+        raise ValueError("dataset_metadata_file_identity_changed") from exc
     if len(raw) > _MAX_QRP_JSON_BYTES:
         raise ValueError("dataset_metadata_file_too_large")
-    observed = tuple(
-        (int(item.st_dev), int(item.st_ino), int(item.st_size), int(item.st_mtime_ns))
-        for item in (before, after, current)
-    )
-    if any(item != identity for item in observed):
+    if before != identity or after != identity or current != identity:
         raise ValueError("dataset_metadata_file_identity_changed")
     return raw, parse_qrp_json_object(raw)
 
@@ -96,9 +98,11 @@ def read_qrp_json(
 
 
 def read_dataset_manifest_evidence(dataset_root: Path) -> dict[str, Any]:
-    root = Path(dataset_root)
+    root = require_artifact_root(Path(dataset_root))
     spec_path = root / "spec.json"
     manifest_path = root / "_manifest" / "manifest.json"
+    require_unaliased_path(spec_path, error="dataset_metadata_file_invalid")
+    require_unaliased_path(manifest_path, error="dataset_metadata_file_invalid")
     if not spec_path.is_file() or not manifest_path.is_file():
         raise FileNotFoundError("dataset_manifest_evidence_missing")
     spec = read_qrp_json(
@@ -117,8 +121,9 @@ def read_dataset_manifest_evidence(dataset_root: Path) -> dict[str, Any]:
 
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
-    _require_schema_id(payload)
-    text = _bounded_qrp_json_text(sanitize_shared_object(payload))
+    snapshot = _bounded_qrp_json_snapshot(sanitize_shared_object(payload))
+    _require_schema_id(snapshot)
+    text = render_qrp_json_object(snapshot) + "\n"
     return atomic_write_text(path, text, encoding="utf-8")
 
 
@@ -130,39 +135,57 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     and row-sample payloads that do not belong in schema metadata.
     """
 
-    _require_schema_id(payload)
-    assert_internal_artifact_metadata_safe(payload)
-    text = _bounded_qrp_json_text(payload)
+    snapshot = _bounded_qrp_json_snapshot(payload)
+    _require_schema_id(snapshot)
+    assert_internal_artifact_metadata_safe(snapshot)
+    text = render_qrp_json_object(snapshot) + "\n"
     return atomic_write_text(path, text, encoding="utf-8")
 
 
 def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
     """Atomically replace a QRP-owned JSON object after share-safety validation."""
 
-    _require_schema_id(payload)
-    unsafe = evidence_json_value_unsafe_reason(payload)
+    snapshot = _bounded_qrp_json_snapshot(payload)
+    _require_schema_id(snapshot)
+    unsafe = evidence_json_value_unsafe_reason(snapshot)
     if unsafe is not None:
         raise ValueError(f"unsafe_qrp_json: {unsafe}")
     final_path = Path(path)
-    text = _bounded_qrp_json_text(payload)
+    text = render_qrp_json_object(snapshot) + "\n"
+    require_unaliased_path(final_path.parent, error="invalid_storage_write_path")
     final_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = final_path.with_name(f".tmp-{uuid4().hex[:12]}")
-    claimed_temp = False
+    parent_identity = final_path.parent.lstat()
+    require_unaliased_path(final_path, error="invalid_storage_write_path")
+    scratch_owner.cleanup_stale_owned_scratch(
+        final_path.parent,
+        parent_identity=parent_identity,
+        prefix=".f-",
+        directory=False,
+    )
+    temp_path = final_path.with_name(
+        scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])
+    )
+    require_unaliased_path(temp_path, error="invalid_storage_write_path")
+    claimed_temp: os.stat_result | None = None
     try:
-        with _open_file_preserving_primary(
+        handle, claimed_temp = scratch_owner.open_owned_scratch_file(
             temp_path,
-            "x",
             encoding="utf-8",
-        ) as handle:
-            claimed_temp = True
+        )
+        with scratch_owner.handle_preserving_primary(handle):
+            require_owned_scratch(final_path.parent, parent_identity)
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        require_unaliased_path(temp_path, error="invalid_storage_write_path")
+        require_owned_scratch(temp_path, claimed_temp)
+        require_unaliased_path(final_path, error="invalid_storage_write_path")
         temp_path.replace(final_path)
     except BaseException:
-        if claimed_temp:
+        if claimed_temp is not None:
             try:
-                temp_path.unlink(missing_ok=True)
+                require_unaliased_path(temp_path, error="invalid_storage_write_path")
+                remove_owned_scratch(temp_path, claimed_temp)
             except BaseException:
                 pass
         raise
@@ -268,25 +291,6 @@ def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-@contextmanager
-def _open_file_preserving_primary(
-    path: Path,
-    *args: Any,
-    **kwargs: Any,
-) -> Iterator[Any]:
-    handle = path.open(*args, **kwargs)
-    try:
-        yield handle
-    finally:
-        if sys.exception() is None:
-            handle.close()
-        else:
-            try:
-                handle.close()
-            except BaseException:
-                pass
-
-
 def _require_schema_id(payload: object) -> None:
     if not isinstance(payload, dict):
         raise ValueError("manifest_json_identity_invalid")
@@ -295,13 +299,11 @@ def _require_schema_id(payload: object) -> None:
         raise ValueError("manifest_json_identity_invalid")
 
 
-def _bounded_qrp_json_text(payload: dict[str, Any]) -> str:
-    bounded_rendered_qrp_json_object_size(
+def _bounded_qrp_json_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    return bounded_qrp_json_object_snapshot(
         payload,
-        lazy_arrays={},
         max_bytes=_MAX_QRP_JSON_BYTES - 1,
     )
-    return render_qrp_json_object(payload) + "\n"
 
 
 __all__ = [

@@ -27,26 +27,17 @@ def test_csmar_source_interim_catalog_graph_closes_without_provider_binding() ->
     assert source.implementation_package == "quant_research_platform.sources.csmar"
     assert source.visibility.value == "internal_private"
     assert not source.public_identifier
-    assert not hasattr(source, "interim_spec_ids")
     assert tuple(spec.data_id for spec in catalog.list()) == (
         EXPECTED_CSMAR_INTERIM_DATA_IDS
     )
     assert {str(spec.source_id) for spec in catalog.list()} == {"csmar"}
 
 
-def test_csmar_source_interim_specs_have_source_not_market_identity() -> None:
-    for spec in research_profile().source_interim_catalogs["csmar"].list():
-        assert hasattr(spec, "data_id")
-        assert hasattr(spec, "source_id")
-        assert not hasattr(spec, "market_id")
-        assert not hasattr(spec, "interim_data_id")
-
-
-def test_csmar_catalog_rejects_retired_interim_data_id() -> None:
+def test_csmar_catalog_rejects_unknown_data_id() -> None:
     catalog = research_profile().source_interim_catalogs["csmar"]
 
     with pytest.raises(KeyError, match="unknown_interim_data_spec"):
-        catalog.get("_".join(("csmar", "daily", "market", "interim")))
+        catalog.get("unknown")
 
 
 def test_csmar_catalog_exposes_current_source_owned_data_ids() -> None:
@@ -56,4 +47,3 @@ def test_csmar_catalog_exposes_current_source_owned_data_ids() -> None:
     }
 
     assert csmar_catalog_ids == set(EXPECTED_CSMAR_INTERIM_DATA_IDS)
-    assert "index_market" not in csmar_catalog_ids

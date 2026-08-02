@@ -26,6 +26,7 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
+    dataset_partition_state_reserve_bytes,
     iter_dataset_file_batches,
     open_dataset_session,
     read_columns_for_time_window,
@@ -46,6 +47,7 @@ def fingerprint_dataset(
         columns=columns,
         time_window=time_window,
         resource_policy=resource_policy,
+        retained_payload_bytes=0,
     ) as context:
         return fingerprint_dataset_session(
             context,
@@ -57,15 +59,24 @@ def fingerprint_dataset_session(
     context: DatasetSession,
     *,
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int = 0,
 ) -> DatasetFingerprint:
     if context.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
+        if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
+            raise ValueError("invalid_dataset_fingerprint_retained_payload_bytes")
         payload_target_bytes = resource_policy.payload_target_bytes
-        operation_headroom_bytes = (
-            resource_policy.task_memory_budget_bytes
-            - context.inventory.retained_memory_bytes
-        )
+        if (
+            retained_payload_bytes + context.retained_memory_bytes
+            >= resource_policy.task_memory_budget_bytes
+        ):
+            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+        partition_state_bytes = dataset_partition_state_reserve_bytes(context)
+        operation_headroom_bytes = resource_policy.task_memory_budget_bytes
+        operation_headroom_bytes -= retained_payload_bytes
+        operation_headroom_bytes -= context.retained_memory_bytes
+        operation_headroom_bytes -= partition_state_bytes
         if operation_headroom_bytes <= 0:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         key_columns = tuple(str(column) for column in context.spec["primary_key"])
@@ -76,6 +87,19 @@ def fingerprint_dataset_session(
             time_window=context.time_window,
         )
         output_columns = tuple(context.logical_columns)
+        local_state_bytes = struct.calcsize("P") * (
+            len(key_columns) + len(hash_columns) + len(hash_physical_columns)
+        )
+        local_state_bytes += sum(
+            len(column.encode("utf-8"))
+            for column in (*key_columns, *hash_columns, *hash_physical_columns)
+        )
+        operation_headroom_bytes -= local_state_bytes
+        if operation_headroom_bytes <= 0:
+            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+        reader_upstream_headroom_bytes = (
+            operation_headroom_bytes + context.retained_memory_bytes
+        )
         projected_schema_hash = canonical_json_hash(
             physical_schema_from_schema(
                 pa.schema(
@@ -105,7 +129,7 @@ def fingerprint_dataset_session(
             context,
             columns=hash_physical_columns,
             target_chunk_bytes=payload_target_bytes,
-            operation_headroom_bytes=operation_headroom_bytes,
+            operation_headroom_bytes=reader_upstream_headroom_bytes,
             batch_observer=observe_batch,
         ):
             if accepted_arrow_bytes is None or accepted_arrow_schema is None:
@@ -129,9 +153,7 @@ def fingerprint_dataset_session(
                 primary_key=key_columns,
             ):
                 chunk_sum = (chunk_sum + int(hashes.sum(dtype=np.uint64))) % 2**64
-                chunk_xor ^= int(
-                    np.bitwise_xor.reduce(hashes, initial=np.uint64(0))
-                )
+                chunk_xor ^= int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0)))
                 del hashes
             partition = relative_partition_label(context.data_root, path)
             row_count += int(len(chunk))
@@ -154,6 +176,24 @@ def fingerprint_dataset_session(
                 "hash_columns": list(hash_columns),
             }
         )
+        projected_result_bytes = _fingerprint_retained_memory_bytes(
+            schema_hash=projected_schema_hash,
+            content_hash=content_hash,
+            key_columns=key_columns,
+            column_names=output_columns,
+            partition_hashes=(
+                (partition, content_hash) for partition in sorted(partition_rows)
+            ),
+        )
+        if (
+            retained_payload_bytes
+            + context.retained_memory_bytes
+            + partition_state_bytes
+            + local_state_bytes
+            + projected_result_bytes
+            > resource_policy.task_memory_budget_bytes
+        ):
+            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         partition_fingerprints = tuple(
             {
                 "partition": partition,
@@ -169,7 +209,7 @@ def fingerprint_dataset_session(
             }
             for partition in sorted(partition_rows)
         )
-        return DatasetFingerprint(
+        result = DatasetFingerprint(
             schema_hash=projected_schema_hash,
             row_count=row_count,
             key_columns=key_columns,
@@ -178,6 +218,53 @@ def fingerprint_dataset_session(
             file_count=file_count,
             column_names=output_columns,
         )
+        if (
+            retained_payload_bytes
+            + context.retained_memory_bytes
+            + dataset_fingerprint_retained_memory_bytes(result)
+            > resource_policy.task_memory_budget_bytes
+        ):
+            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+        return result
+
+
+def dataset_fingerprint_retained_memory_bytes(value: DatasetFingerprint) -> int:
+    return _fingerprint_retained_memory_bytes(
+        schema_hash=value.schema_hash,
+        content_hash=value.content_hash,
+        key_columns=value.key_columns,
+        column_names=value.column_names,
+        partition_hashes=(
+            (str(partition["partition"]), str(partition["content_hash"]))
+            for partition in value.partition_fingerprints
+        ),
+    )
+
+
+def _fingerprint_retained_memory_bytes(
+    *,
+    schema_hash: str,
+    content_hash: str,
+    key_columns: tuple[str, ...],
+    column_names: tuple[str, ...],
+    partition_hashes: Iterator[tuple[str, str]],
+) -> int:
+    pointer_bytes = struct.calcsize("P")
+    retained = pointer_bytes * (len(key_columns) + len(column_names))
+    retained += sum(
+        len(text.encode("utf-8"))
+        for text in (
+            schema_hash,
+            content_hash,
+            *key_columns,
+            *column_names,
+        )
+    )
+    for partition, partition_hash in partition_hashes:
+        retained += 7 * pointer_bytes + 16
+        retained += len(partition.encode("utf-8"))
+        retained += len(partition_hash.encode("utf-8"))
+    return retained
 
 
 def _iter_fingerprint_hashes(

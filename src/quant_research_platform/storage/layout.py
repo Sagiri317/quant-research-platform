@@ -37,18 +37,6 @@ class StorageLayout:
         return self.project_root / "data/research" / str(market_id) / data_id
 
 
-def layout_from_processed_market_root(processed_root: Path) -> StorageLayout:
-    """Resolve ``data/processed/<market>`` back to a project storage layout."""
-
-    root = Path(processed_root)
-    parts = root.parts
-    if len(parts) < 3 or parts[-3:-1] != ("data", "processed"):
-        raise ValueError("processed_root_must_be_data_processed_market")
-    project_root = Path(*parts[:-3]) if len(parts) > 3 else Path(".")
-    return StorageLayout(project_root=project_root)
-
-
 __all__ = [
     "StorageLayout",
-    "layout_from_processed_market_root",
 ]

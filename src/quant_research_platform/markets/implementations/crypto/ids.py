@@ -12,10 +12,6 @@ MICROSTRUCTURE_FORWARD_RETURNS_DATASET_ID = "microstructure_forward_returns"
 _SUPPORTED_QUOTE_ASSETS = ("USDT", "USDC", "FDUSD", "BTC", "ETH")
 
 
-def market_panel_data_id() -> str:
-    return MARKET_PANEL_DATA_ID
-
-
 def canonical_crypto_asset_id(source_asset_id: str) -> str:
     if not isinstance(source_asset_id, str):
         raise ValueError("unsupported_crypto_source_asset_id")
@@ -37,5 +33,4 @@ __all__ = [
     "MARKET_PANEL_DATA_ID",
     "MICROSTRUCTURE_FORWARD_RETURNS_DATASET_ID",
     "MICROSTRUCTURE_PROCESSED_DATA_ID",
-    "market_panel_data_id",
 ]

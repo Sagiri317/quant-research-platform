@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import io
+import os
+import sys
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
+from quant_research_platform.artifacts._output_bundle_validation import (
+    validate_output_bundle,
+)
 from quant_research_platform.contracts._json import (
+    bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
-    parse_qrp_json_object,
 )
 from quant_research_platform.policy.check_status import require_status
 from quant_research_platform.policy.share_safety import (
     contains_source_local_key,
     evidence_json_value_unsafe_reason,
-    evidence_text_unsafe_reason,
+    evidence_text_stream_unsafe_reason,
 )
 from quant_research_platform.runtime.logical_paths import (
     RUN_RESULT_DATASET_LAYERS,
@@ -23,11 +30,24 @@ from quant_research_platform.runtime.logical_paths import (
     dataset_layer_from_path,
     logical_path,
 )
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
+from quant_research_platform.storage._dataset_inspection import (
+    dataset_inspection_retained_memory_bytes,
+    inspect_dataset,
+)
+from quant_research_platform.storage._dataset_physical import (
+    DatasetFileIdentity,
+    dataset_file_identity,
+    dataset_file_identity_from_stat,
+)
 from quant_research_platform.storage._dataset_schema import (
     validate_dataset_manifest_consumable,
     validate_dataset_primary_key_null_summary,
 )
-from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 
 _LAYER_SUMMARY_KEYS = frozenset(
@@ -52,18 +72,46 @@ def build_validation_summary(
     run_id: str,
     dataset_roots: tuple[Path, ...],
     layer_summaries: tuple[dict[str, object], ...],
-    generated_text_paths: tuple[Path, ...],
+    validated_output_members: tuple[tuple[Path, DatasetFileIdentity], ...],
+    output_bundle_expectations: tuple[tuple[Path, str, str, str], ...],
+) -> dict[str, Any]:
+    resource_policy = active_runtime_resource_policy()
+    with runtime_resource_policy_scope(resource_policy):
+        return _build_validation_summary(
+            run_id=run_id,
+            dataset_roots=dataset_roots,
+            layer_summaries=layer_summaries,
+            validated_output_members=validated_output_members,
+            output_bundle_expectations=output_bundle_expectations,
+            resource_policy=resource_policy,
+        )
+
+
+def _build_validation_summary(
+    *,
+    run_id: str,
+    dataset_roots: tuple[Path, ...],
+    layer_summaries: tuple[dict[str, object], ...],
+    validated_output_members: tuple[tuple[Path, DatasetFileIdentity], ...],
+    output_bundle_expectations: tuple[tuple[Path, str, str, str], ...],
+    resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
     if not dataset_roots:
         raise ValueError("validation_summary_dataset_roots_required")
     if not layer_summaries:
         raise ValueError("validation_summary_layer_summaries_required")
-    if not generated_text_paths:
+    if not validated_output_members:
         raise ValueError("validation_summary_generated_evidence_required")
+    if not output_bundle_expectations:
+        raise ValueError("validation_summary_output_bundle_expectations_required")
     if len(set(dataset_roots)) != len(dataset_roots) or len(
-        set(generated_text_paths)
-    ) != len(generated_text_paths):
+        {path for path, _identity in validated_output_members}
+    ) != len(validated_output_members):
         raise ValueError("validation_summary_declaration_duplicate")
+    if len({root for root, *_rest in output_bundle_expectations}) != len(
+        output_bundle_expectations
+    ):
+        raise ValueError("validation_summary_output_bundle_declaration_duplicate")
     dataset_failures: list[str] = []
     null_failures: list[str] = []
     duplicate_failures: list[str] = []
@@ -77,6 +125,8 @@ def build_validation_summary(
     observed_layer_datasets: dict[str, list[dict[str, object]]] = {}
     observed_layer_missing: dict[str, list[str]] = {}
     observed_layer_invalid: dict[str, list[str]] = {}
+    dataset_inspections = []
+    retained_inspection_bytes = 0
     for root in dataset_roots:
         logical_layer = dataset_layer_from_path(root)
         if logical_layer not in RUN_RESULT_DATASET_LAYERS:
@@ -88,15 +138,13 @@ def build_validation_summary(
             root / "_manifest" / "manifest.json",
             markers=RUN_RESULT_LOGICAL_PATH_MARKERS,
         )
-        inspection_failed = False
-        manifest_summary_mismatch = False
         try:
-            inspection = inspect_dataset(root)
-        except (OSError, ValueError) as exc:
-            manifest_summary_mismatch = (
-                type(exc) is ValueError
-                and str(exc) == "dataset_manifest_summary_mismatch"
+            inspection = inspect_dataset(
+                root,
+                resource_policy=resource_policy,
+                retained_payload_bytes=retained_inspection_bytes,
             )
+        except (OSError, ValueError):
             try:
                 manifest = read_dataset_manifest_evidence(root)
             except FileNotFoundError:
@@ -106,23 +154,25 @@ def build_validation_summary(
                 invalid_dataset_manifests.append(manifest_logical_path)
                 observed_layer_invalid[logical_layer].append(manifest_logical_path)
             else:
-                inspection_failed = True
-            if not inspection_failed:
-                continue
-        else:
-            manifest = inspection.manifest
-        if not manifest:
-            invalid_dataset_manifests.append(manifest_logical_path)
-            observed_layer_invalid[logical_layer].append(manifest_logical_path)
+                if manifest:
+                    raise ValueError(
+                        "validation_summary_dataset_inspection_failed"
+                    ) from None
+                invalid_dataset_manifests.append(manifest_logical_path)
+                observed_layer_invalid[logical_layer].append(manifest_logical_path)
             continue
+        else:
+            dataset_inspections.append((root, inspection))
+            retained_inspection_bytes += dataset_inspection_retained_memory_bytes(
+                inspection
+            )
+            manifest = inspection.manifest
         data_id = manifest["data_id"]
         try:
             validate_dataset_manifest_consumable(manifest)
             manifest_consumable = True
         except ValueError:
             manifest_consumable = False
-        if inspection_failed and not manifest_summary_mismatch:
-            raise ValueError("validation_summary_dataset_inspection_failed") from None
         if require_status(manifest.get("validation_status")) != "PASS":
             dataset_failures.append(data_id)
         # This existing failure class covers an invalid required PK-null fact;
@@ -158,7 +208,7 @@ def build_validation_summary(
                 },
             }
         )
-        if dataset_layer_from_path(root) in {
+        if logical_layer in {
             "processed",
             "research",
         } and contains_source_local_key(manifest):
@@ -192,7 +242,10 @@ def build_validation_summary(
     ):
         raise ValueError("validation_summary_declaration_mismatch")
 
-    safety = _share_safety_scan(generated_text_paths)
+    safety = _share_safety_scan(
+        validated_output_members,
+        output_bundle_expectations=output_bundle_expectations,
+    )
     failure_codes: list[str] = []
     if missing_dataset_manifests:
         failure_codes.append("dataset_manifest_missing")
@@ -212,7 +265,7 @@ def build_validation_summary(
         failure_codes.append("layer_validation_failed")
     if safety["status"] != "PASS":
         failure_codes.append("share_safety_scan_failed")
-    return {
+    summary = {
         "run_id": run_id,
         "status": "PASS" if not failure_codes else "FAIL",
         "failure_codes": failure_codes,
@@ -241,57 +294,236 @@ def build_validation_summary(
         "share_safety_scan": safety,
         "created_at": _utc_now(),
     }
+    retained_summary_bytes = bounded_rendered_qrp_json_object_size(
+        summary,
+        lazy_arrays={},
+        max_bytes=(
+            resource_policy.task_memory_budget_bytes - retained_inspection_bytes
+        ),
+    )
+    for root, initial_inspection in dataset_inspections:
+        try:
+            final_inspection = inspect_dataset(
+                root,
+                resource_policy=resource_policy,
+                retained_payload_bytes=(
+                    retained_inspection_bytes + retained_summary_bytes
+                ),
+            )
+        except (OSError, ValueError):
+            raise ValueError("validation_summary_dataset_identity_changed") from None
+        if final_inspection != initial_inspection:
+            raise ValueError("validation_summary_dataset_identity_changed")
+        del final_inspection
+    return summary
 
 
-def _share_safety_scan(paths: tuple[Path, ...]) -> dict[str, object]:
-    failures: list[dict[str, str]] = []
-    existing_count = 0
+def _share_safety_scan(
+    members: tuple[tuple[Path, DatasetFileIdentity], ...],
+    *,
+    output_bundle_expectations: tuple[tuple[Path, str, str, str], ...],
+) -> dict[str, object]:
+    final_members, failures, existing_count, missing_count = _validated_output_snapshot(
+        members, output_bundle_expectations
+    )
+    scanned_members = tuple(
+        member for member in final_members if member[0].suffix.casefold() != ".parquet"
+    )
     requested_paths = [
-        logical_path(path, markers=RUN_RESULT_LOGICAL_PATH_MARKERS) for path in paths
+        logical_path(path, markers=RUN_RESULT_LOGICAL_PATH_MARKERS)
+        for path, _identity in scanned_members
     ]
     if len(requested_paths) != len(set(requested_paths)):
         raise ValueError("validation_summary_evidence_path_duplicate")
-    for path, requested_path in zip(paths, requested_paths, strict=True):
-        reason: str | None = None
-        if not path.is_file():
-            reason = "missing_or_non_file"
-        else:
-            existing_count += 1
-            try:
-                raw = path.read_bytes()
-            except OSError:
-                reason = "unreadable"
-            else:
-                if path.suffix.casefold() == ".json":
-                    try:
-                        payload = parse_qrp_json_object(raw)
-                    except ValueError:
-                        reason = "invalid_json"
-                    else:
-                        reason = evidence_json_value_unsafe_reason(payload)
-                else:
-                    try:
-                        text = raw.decode("utf-8", errors="strict")
-                    except UnicodeDecodeError:
-                        reason = "invalid_utf8"
-                    else:
-                        reason = evidence_text_unsafe_reason(text)
-        if reason is not None:
-            failures.append(
-                {
-                    "path": requested_path,
-                    "reason": reason,
-                }
-            )
     return {
         "status": "PASS" if not failures else "FAIL",
         "failures": failures,
         "checked_count": existing_count,
-        "requested_count": len(paths),
+        "requested_count": len(scanned_members),
         "existing_scanned_count": existing_count,
-        "missing_count": len(paths) - existing_count,
+        "missing_count": missing_count,
         "requested_paths": requested_paths,
     }
+
+
+def _validated_output_snapshot(
+    expected_members: tuple[tuple[Path, DatasetFileIdentity], ...],
+    expectations: tuple[tuple[Path, str, str, str], ...],
+) -> tuple[
+    tuple[tuple[Path, DatasetFileIdentity], ...],
+    list[dict[str, str]],
+    int,
+    int,
+]:
+    observed_all: list[tuple[Path, DatasetFileIdentity]] = []
+    failures: list[dict[str, str]] = []
+    existing_count = 0
+    missing_count = 0
+    for (
+        root,
+        expected_run_id,
+        expected_output_id,
+        expected_definition_id,
+    ) in expectations:
+        expected = tuple(
+            member for member in expected_members if member[0].parent == root
+        )
+        manifest_path = root / "manifest.json"
+        tentative_observed: tuple[tuple[Path, DatasetFileIdentity], ...] = ()
+        tentative_failures: list[dict[str, str]] = []
+        tentative_existing_count = 0
+
+        def observe_admitted_bundle(
+            payload: dict[str, object],
+            observed: tuple[tuple[Path, DatasetFileIdentity], ...],
+            expected_definition_id: str = expected_definition_id,
+            expected: tuple[tuple[Path, DatasetFileIdentity], ...] = expected,
+            manifest_path: Path = manifest_path,
+            tentative_failures: list[dict[str, str]] = tentative_failures,
+        ) -> None:
+            nonlocal tentative_existing_count, tentative_observed
+            if payload["output_definition_id"] != expected_definition_id:
+                raise ValueError("output_manifest_definition_id_invalid")
+            if observed != expected:
+                raise ValueError("output_bundle_identity_changed")
+
+            manifest_reason = evidence_json_value_unsafe_reason(payload)
+            if manifest_reason is not None:
+                tentative_failures.append(
+                    {
+                        "path": logical_path(
+                            manifest_path,
+                            markers=RUN_RESULT_LOGICAL_PATH_MARKERS,
+                        ),
+                        "reason": manifest_reason,
+                    }
+                )
+            scanned = tuple(
+                member
+                for member in observed
+                if member[0].suffix.casefold() != ".parquet"
+            )
+            for path, identity in scanned:
+                if path == manifest_path:
+                    continue
+                try:
+                    reason = _scan_validated_text_evidence(path, identity)
+                except UnicodeDecodeError:
+                    reason = "invalid_utf8"
+                except (OSError, ValueError):
+                    reason = "identity_changed_or_unreadable"
+                if reason is not None:
+                    tentative_failures.append(
+                        {
+                            "path": logical_path(
+                                path,
+                                markers=RUN_RESULT_LOGICAL_PATH_MARKERS,
+                            ),
+                            "reason": reason,
+                        }
+                    )
+            tentative_observed = observed
+            tentative_existing_count = len(scanned)
+
+        try:
+            validate_output_bundle(
+                root,
+                expected_run_id=expected_run_id,
+                expected_output_id=expected_output_id,
+                observer=observe_admitted_bundle,
+            )
+        except (OSError, ValueError):
+            failures.append(
+                {
+                    "path": logical_path(
+                        manifest_path, markers=RUN_RESULT_LOGICAL_PATH_MARKERS
+                    ),
+                    "reason": "identity_changed_or_unreadable",
+                }
+            )
+            observed_all.extend(expected)
+            missing_count += sum(
+                path.suffix.casefold() != ".parquet" for path, _identity in expected
+            )
+            continue
+        failures.extend(tentative_failures)
+        observed_all.extend(tentative_observed)
+        existing_count += tentative_existing_count
+    return tuple(observed_all), failures, existing_count, missing_count
+
+
+def _scan_validated_text_evidence(
+    path: Path,
+    expected_identity: DatasetFileIdentity,
+) -> str | None:
+    if dataset_file_identity(path) != expected_identity:
+        raise ValueError("validation_summary_evidence_identity_changed")
+    try:
+        with _opened_evidence(path, expected_identity) as handle:
+            try:
+                reason = evidence_text_stream_unsafe_reason(
+                    _iter_exact_evidence_chunks(handle, expected_identity.size)
+                )
+            finally:
+                primary = sys.exception()
+                try:
+                    if (
+                        dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+                        != expected_identity
+                    ):
+                        raise ValueError("validation_summary_evidence_identity_changed")
+                except BaseException:
+                    if primary is None:
+                        raise
+    finally:
+        primary = sys.exception()
+        try:
+            if dataset_file_identity(path) != expected_identity:
+                raise ValueError("validation_summary_evidence_identity_changed")
+        except BaseException:
+            if primary is None:
+                raise
+    return reason
+
+
+def _iter_exact_evidence_chunks(
+    handle: BinaryIO,
+    expected_size: int,
+) -> Iterator[memoryview]:
+    buffer = bytearray(min(expected_size, io.DEFAULT_BUFFER_SIZE))
+    offset = 0
+    while offset < expected_size:
+        target = memoryview(buffer)[: min(len(buffer), expected_size - offset)]
+        count = handle.readinto(target)
+        if count is None or count <= 0 or count > len(target):
+            raise ValueError("validation_summary_evidence_identity_changed")
+        offset += count
+        yield target[:count]
+    if handle.read(1):
+        raise ValueError("validation_summary_evidence_identity_changed")
+
+
+@contextmanager
+def _opened_evidence(
+    path: Path,
+    expected_identity: DatasetFileIdentity,
+) -> Iterator[BinaryIO]:
+    handle = path.open("rb")
+    try:
+        if (
+            dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+            != expected_identity
+        ):
+            raise ValueError("validation_summary_evidence_identity_changed")
+        yield handle
+    finally:
+        if sys.exception() is None:
+            handle.close()
+        else:
+            try:
+                handle.close()
+            except BaseException:
+                pass
 
 
 def _validate_layer_summary_graph(

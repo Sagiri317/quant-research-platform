@@ -12,6 +12,17 @@ SignalDirection = Literal["higher_is_better", "lower_is_better"]
 SignalTransform = Literal["identity", "rank", "zscore"]
 
 
+def _cross_signal_id_column_overlaps(signals: tuple[SignalSpec, ...]) -> list[str]:
+    return sorted(
+        {
+            signal.signal_id
+            for index, signal in enumerate(signals)
+            for other_index, other in enumerate(signals)
+            if index != other_index and signal.signal_id == other.source_column
+        }
+    )
+
+
 @dataclass(frozen=True, kw_only=True)
 class SignalSpec:
     signal_id: str

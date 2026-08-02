@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import inspect
 import math
 import warnings
 import weakref
@@ -359,9 +358,7 @@ def test_crossed_or_invalid_quote_sets_quote_observed_false() -> None:
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58", "2026-07-06 00:00:58"]),
             "side": ["bid", "ask"],
             "level": [1, 1],
             "price": [100.2, 100.0],
@@ -380,9 +377,7 @@ def test_quote_after_close_not_used() -> None:
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:01:00", "2026-07-06 00:01:00"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:01:00", "2026-07-06 00:01:00"]),
             "side": ["bid", "ask"],
             "level": [1, 1],
             "price": [100.0, 100.2],
@@ -489,15 +484,8 @@ def test_depth_reducer_merges_snapshot_across_chunks() -> None:
     assert quotes.loc[0, "bid_depth"] == 2.5
     assert quotes.loc[0, "ask_depth"] == 2.0
 
-
     assert len(reducer._candidates) == 1
     assert sum(len(levels) for levels in reducer._current_levels.values()) == 0
-    for dead_property in (
-        "candidate_count",
-        "current_level_count",
-        "retained_snapshot_count",
-    ):
-        assert not hasattr(reducer, dead_property)
 
 
 def test_depth_reducer_rejects_out_of_order_across_chunks() -> None:
@@ -568,16 +556,6 @@ def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
     assert sum(len(levels) for levels in reducer._current_levels.values()) == 0
 
 
-def test_old_depth_full_window_helpers_are_absent() -> None:
-    source = inspect.getsource(panels)
-
-    assert "def compute_market_panel(" not in source
-    assert "_accumulate_depth_snapshot_state" not in source
-    assert "_quote_snapshots_from_state" not in source
-    assert "_accumulate_trade_aggregate_state" not in source
-    assert "_trade_aggregates_from_state" not in source
-
-
 def test_trade_aggregate_state_reduces_dense_chunks_incrementally() -> None:
     module = _panel_input_reducers_module()
     trade_count = 2_000
@@ -615,7 +593,6 @@ def test_trade_aggregate_state_reduces_dense_chunks_incrementally() -> None:
     assert aggregates["quantity_sum"].tolist() == [2_000.0]
     assert aggregates["covered_trade_count"].tolist() == [2_000]
     assert aggregates["trade_flow_observed"].tolist() == [True]
-    assert not hasattr(reducer, "aggregate_count")
 
 
 def test_trade_reducer_checks_range_continuity_across_chunks() -> None:
@@ -670,12 +647,6 @@ def test_trade_reducer_checks_range_continuity_across_bar_reducers() -> None:
         second.add_chunk(trades.iloc[1:].copy())
 
 
-def test_quote_matching_has_no_per_bar_dataframe_scan() -> None:
-    source = inspect.getsource(panels)
-    assert ".iterrows(" not in source
-    assert "merge_asof(" in source
-
-
 @pytest.mark.parametrize(
     ("column", "value", "error"),
     [
@@ -717,9 +688,7 @@ def test_bar_close_crossing_future_minute_fails_before_quote_matching() -> None:
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:01:30", "2026-07-06 00:01:30"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:01:30", "2026-07-06 00:01:30"]),
             "side": ["bid", "ask"],
             "level": [1, 1],
             "price": [100.0, 100.2],
@@ -746,9 +715,7 @@ def test_stale_quote_sets_quote_observed_false() -> None:
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00:10", "2026-07-06 00:00:10"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:10", "2026-07-06 00:00:10"]),
             "side": ["bid", "ask"],
             "level": [1, 1],
             "price": [100.0, 100.2],
@@ -805,9 +772,7 @@ def test_zero_quantity_quote_is_not_observed() -> None:
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58", "2026-07-06 00:00:58"]),
             "side": ["bid", "ask"],
             "level": [1, 1],
             "price": [100.0, 100.2],
@@ -826,9 +791,7 @@ def test_invalid_depth_inputs_fail_closed() -> None:
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58", "2026-07-06 00:00:58"]),
             "side": ["bid", "bid"],
             "level": [1, 1],
             "price": [100.0, 99.9],
@@ -950,9 +913,7 @@ def test_invalid_depth_price_quantity_fail_closed(
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58", "2026-07-06 00:00:58"]),
             "side": ["bid", "ask"],
             "level": [1, 1],
             "price": [100.0, 100.2],
@@ -989,9 +950,7 @@ def test_invalid_depth_side_values_fail_closed(side: object) -> None:
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58", "2026-07-06 00:00:58"]),
             "side": [side, "ask"],
             "level": [1, 1],
             "price": [100.0, 100.2],
@@ -1008,9 +967,7 @@ def test_valid_depth_side_values_still_pass() -> None:
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58", "2026-07-06 00:00:58"]),
             "side": ["bid", "ask"],
             "level": [1, 1],
             "price": [100.0, 100.2],
@@ -1064,15 +1021,11 @@ def test_auxiliary_source_market_type_must_be_spot(frame_name: str) -> None:
         first_trade_ids=(1,),
         last_trade_ids=(1,),
     )
-    trades["source_market_type"] = (
-        "futures" if frame_name == "trades" else "spot"
-    )
+    trades["source_market_type"] = "futures" if frame_name == "trades" else "spot"
     depth = pd.DataFrame(
         {
             "source_asset_id": ["BTCUSDT", "BTCUSDT"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 00:00:58", "2026-07-06 00:00:58"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-06 00:00:58", "2026-07-06 00:00:58"]),
             "side": ["bid", "ask"],
             "level": [1, 1],
             "price": [100.0, 100.2],
@@ -1214,10 +1167,14 @@ def _depth_levels_frame() -> pd.DataFrame:
 
 
 def _ordered_depth_levels_frame() -> pd.DataFrame:
-    return _depth_levels_frame().sort_values(
-        ["source_asset_id", "timestamp", "side", "level"],
-        kind="mergesort",
-    ).reset_index(drop=True)
+    return (
+        _depth_levels_frame()
+        .sort_values(
+            ["source_asset_id", "timestamp", "side", "level"],
+            kind="mergesort",
+        )
+        .reset_index(drop=True)
+    )
 
 
 def _panel_input_reducers_module():

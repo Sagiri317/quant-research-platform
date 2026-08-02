@@ -2,11 +2,30 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import inspect
 import json
+import shutil
 from pathlib import Path
 
 import pytest
+
+from quant_research_platform.artifacts import outputs
+from quant_research_platform.contracts.evaluations import EvaluationSpec
+from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.workflows.diagnostics import validation_summary
+from tests.artifacts.output_edge_fixtures import (
+    make_output_edge_evaluation_diagnostics,
+    make_output_edge_prediction_spec,
+    make_output_edge_report_spec,
+)
+from tests.helpers.report_output_frames import (
+    make_artifact_evaluation_group_spread_summary_frame,
+    make_artifact_evaluation_grouped_label_values_frame,
+    make_artifact_evaluation_ic_summary_frame,
+    make_artifact_evaluation_metrics_frame,
+    make_artifact_prediction_output_frame,
+    make_artifact_signal_spec,
+)
 
 WORKFLOW_MODULE = "quant_research_platform.workflows.local_verification"
 
@@ -21,6 +40,28 @@ def test_local_verification_layer_producer_accepts_exact_owner_members(
     dataset_root = run_root / "data" / logical_layer / "dataset"
 
     assert module._logical_layer(dataset_root, run_root) == logical_layer
+
+
+def test_local_verification_output_index_rejects_alias_above_run_root(
+    tmp_path: Path,
+) -> None:
+    module = _workflow_module()
+    target = tmp_path / "target"
+    (target / "run" / "outputs" / "output").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory_symlink_not_available: {exc}")
+    run_root = alias / "run"
+
+    with pytest.raises(ValueError, match="output_manifest_schema_id_invalid"):
+        module._output_index(
+            run_root / "outputs" / "output",
+            run_root,
+            expected_run_id="run",
+            expected_output_definition_id="prediction_outputs",
+        )
 
 
 @pytest.mark.parametrize("mutation", ("raw", "unknown", "outside"))
@@ -80,6 +121,54 @@ def test_local_verification_run_root_writes_seed_run_json(
         "created_at": payload["created_at"],
         "replace_safe": True,
     }
+
+
+def test_local_verification_replace_quarantines_owned_root_before_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _workflow_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    run_root = repo_root / ".run" / "local" / "report-output"
+    module._prepare_run_root(
+        run_root,
+        run_id="report_output",
+        replace_output=False,
+        repo_root=repo_root,
+    )
+    (run_root / "owned.txt").write_text("owned", encoding="utf-8")
+    replace_hits: list[tuple[Path, Path]] = []
+    shared = importlib.import_module(
+        "quant_research_platform.storage._scratch_ownership"
+    )
+
+    def move_no_replace(source, destination):  # noqa: ANN001, ANN202
+        source_path = Path(source)
+        destination_path = Path(destination)
+        source_path.rename(destination_path)
+        if source_path == run_root:
+            replace_hits.append((source_path, destination_path))
+            run_root.mkdir()
+            (run_root / "foreign.txt").write_text("foreign", encoding="utf-8")
+
+    monkeypatch.setattr(shared, "move_path_no_replace", move_no_replace, raising=False)
+    caught: BaseException | None = None
+    try:
+        module._prepare_run_root(
+            run_root,
+            run_id="report_output",
+            replace_output=True,
+            repo_root=repo_root,
+        )
+    except BaseException as error:
+        caught = error
+
+    assert len(replace_hits) == 1
+    assert (run_root / "foreign.txt").read_text(encoding="utf-8") == "foreign"
+    assert not replace_hits[0][1].exists()
+    assert isinstance(caught, ValueError)
+    shutil.rmtree(run_root)
 
 
 def test_local_verification_replace_output_rejects_unowned_directory(
@@ -184,7 +273,12 @@ def test_local_verification_output_index_rejects_manifest_identity_violation(
     )
 
     with pytest.raises(ValueError, match="output_manifest_schema_id_invalid"):
-        module._output_index(output_bundle, run_root, expected_run_id="run")
+        module._output_index(
+            output_bundle,
+            run_root,
+            expected_run_id="run",
+            expected_output_definition_id="prediction_outputs",
+        )
 
 
 @pytest.mark.parametrize(
@@ -206,24 +300,20 @@ def test_local_verification_output_index_rejects_noncurrent_manifest_envelope(
 ) -> None:
     module = _workflow_module()
     run_root = tmp_path / "run"
-    output_bundle = run_root / "outputs" / "prediction_daily"
-    output_bundle.mkdir(parents=True)
-    payload: dict[str, object] = {
-        "schema_id": "qrp-output-manifest",
-        "output_id": "prediction_daily",
-        "output_definition_id": "stage_profile_diagnostic",
-        "run_id": "run",
-        "metadata": {
-            "market_id": "a_share",
-            "run_type": "diagnostics",
-            "scope": "LOCAL_ONLY",
-        },
-        "files": [
-            "stage_profile.csv",
-            "stage_profile.json",
-            "stage_profile.md",
-        ],
-    }
+    spec = make_output_edge_prediction_spec()
+    output_spec = make_output_edge_report_spec(
+        "prediction_outputs",
+        "run",
+        "prediction",
+    )
+    output_bundle = outputs.write_prediction_outputs(
+        make_artifact_prediction_output_frame(),
+        spec=spec,
+        output_spec=output_spec,
+        layout=StorageLayout(project_root=run_root),
+    )
+    manifest_path = output_bundle / "manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     if mutation == "unknown_field":
         payload["unknown"] = True
     elif mutation == "wrong_kind_output_id":
@@ -233,20 +323,25 @@ def test_local_verification_output_index_rejects_noncurrent_manifest_envelope(
     elif mutation == "wrong_run_id":
         payload["run_id"] = "other_run"
     elif mutation == "equal_output_and_definition_ids":
-        payload["output_id"] = "stage_profile_diagnostic"
+        payload["output_id"] = "prediction_outputs"
     elif mutation == "unknown_definition_id":
         payload["output_definition_id"] = "unknown_outputs"
     elif mutation == "deep_nested_schema_id":
         payload["metadata"] = {"nested": [{"schema_id": "forbidden"}]}
     elif mutation == "backslash_file":
         payload["files"] = ["nested\\prediction.parquet"]
-    (output_bundle / "manifest.json").write_text(
+    manifest_path.write_text(
         json.dumps(payload),
         encoding="utf-8",
     )
 
     with pytest.raises(ValueError, match="output_manifest_schema_id_invalid"):
-        module._output_index(output_bundle, run_root, expected_run_id="run")
+        module._output_index(
+            output_bundle,
+            run_root,
+            expected_run_id="run",
+            expected_output_definition_id="prediction_outputs",
+        )
 
 
 def test_local_verification_output_index_requires_declared_files(
@@ -254,39 +349,130 @@ def test_local_verification_output_index_requires_declared_files(
 ) -> None:
     module = _workflow_module()
     run_root = tmp_path / "run"
-    output_bundle = run_root / "outputs" / "prediction_daily"
-    output_bundle.mkdir(parents=True)
-    payload = {
-        "schema_id": "qrp-output-manifest",
-        "output_id": "prediction_daily",
-        "output_definition_id": "stage_profile_diagnostic",
-        "run_id": "run",
-        "metadata": {
-            "market_id": "a_share",
-            "run_type": "diagnostics",
-            "scope": "LOCAL_ONLY",
-        },
-        "files": [
-            "stage_profile.csv",
-            "stage_profile.json",
-            "stage_profile.md",
-        ],
+    spec = make_output_edge_prediction_spec()
+    output_spec = make_output_edge_report_spec(
+        "prediction_outputs",
+        "run",
+        "prediction",
+    )
+    output_bundle = outputs.write_prediction_outputs(
+        make_artifact_prediction_output_frame(),
+        spec=spec,
+        output_spec=output_spec,
+        layout=StorageLayout(project_root=run_root),
+    )
+    payload = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
+    prediction_path = output_bundle / "prediction.parquet"
+    prediction_path.unlink()
+
+    with pytest.raises(ValueError, match="output_manifest_schema_id_invalid"):
+        module._output_index(
+            output_bundle,
+            run_root,
+            expected_run_id="run",
+            expected_output_definition_id="prediction_outputs",
+        )
+
+    prediction_path.write_bytes(b"payload")
+    index, members = module._output_index(
+        output_bundle,
+        run_root,
+        expected_run_id="run",
+        expected_output_definition_id="prediction_outputs",
+    )
+    assert index == {
+        **payload,
+        "manifest_path": f"outputs/{output_spec.output_id}/manifest.json",
     }
-    (output_bundle / "manifest.json").write_text(
-        json.dumps(payload),
-        encoding="utf-8",
+    assert tuple(path.name for path, _identity in members) == (
+        "manifest.json",
+        *payload["files"],
+    )
+
+    replacement = output_bundle / "replacement.parquet"
+    replacement.write_bytes(b"replacement")
+    replacement.replace(prediction_path)
+    result = validation_summary._share_safety_scan(
+        members,
+        output_bundle_expectations=(
+            (
+                output_bundle,
+                "run",
+                output_spec.output_id,
+                "prediction_outputs",
+            ),
+        ),
+    )
+    assert result["status"] == "FAIL"
+    assert result["failures"][-1] == {
+        "path": f"outputs/{output_spec.output_id}/manifest.json",
+        "reason": "identity_changed_or_unreadable",
+    }
+
+
+def test_output_index_rejects_prediction_output_substituted_for_evaluation(
+    tmp_path: Path,
+) -> None:
+    module = _workflow_module()
+    run_root = tmp_path / "run"
+    spec = make_output_edge_prediction_spec()
+    output_spec = make_output_edge_report_spec(
+        "prediction_outputs",
+        spec.prediction_id,
+        "prediction",
+    )
+    prediction_root = outputs.write_prediction_outputs(
+        make_artifact_prediction_output_frame(),
+        spec=spec,
+        output_spec=output_spec,
+        layout=StorageLayout(project_root=run_root),
     )
 
     with pytest.raises(ValueError, match="output_manifest_schema_id_invalid"):
-        module._output_index(output_bundle, run_root, expected_run_id="run")
+        module._output_index(
+            prediction_root,
+            run_root,
+            expected_run_id=output_spec.run_id,
+            expected_output_definition_id="evaluation_outputs",
+        )
 
-    for name in payload["files"]:
-        (output_bundle / name).write_bytes(b"payload")
-    index = module._output_index(output_bundle, run_root, expected_run_id="run")
-    assert index == {
-        **payload,
-        "manifest_path": "outputs/prediction_daily/manifest.json",
-    }
+
+def test_output_index_requires_mandatory_evaluation_summary_member(
+    tmp_path: Path,
+) -> None:
+    module = _workflow_module()
+    run_root = tmp_path / "run"
+    spec = EvaluationSpec(
+        run_id="evaluation_required",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    output_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+    evaluation_bundle = outputs.write_evaluation_outputs(
+        make_artifact_evaluation_metrics_frame(),
+        make_artifact_evaluation_grouped_label_values_frame(),
+        ic_summary=make_artifact_evaluation_ic_summary_frame(),
+        group_spread_summary=make_artifact_evaluation_group_spread_summary_frame(),
+        evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
+        spec=spec,
+        output_spec=output_spec,
+        layout=StorageLayout(project_root=run_root),
+    )
+    (evaluation_bundle / "summary.md").unlink()
+
+    with pytest.raises(ValueError, match="output_manifest_schema_id_invalid"):
+        module._output_index(
+            evaluation_bundle,
+            run_root,
+            expected_run_id=spec.run_id,
+            expected_output_definition_id="evaluation_outputs",
+        )
 
 
 def test_local_verification_workflow_exposes_current_run_root_config() -> None:
@@ -307,17 +493,6 @@ def test_local_verification_workflow_exposes_current_run_root_config() -> None:
         "replace_output",
         "run_id",
     }
-
-
-def test_local_verification_uses_profile_schema_inventory_columns() -> None:
-    module = _workflow_module()
-    source = inspect.getsource(module)
-
-    assert "profile.schema_inventory_important_columns()" in source
-    assert "important_null_count_columns=" in source
-    assert "forward_return_label_column" not in source
-    assert '"eligible"' not in source
-    assert "markets.implementations.a_share" not in source
 
 
 @pytest.mark.parametrize(

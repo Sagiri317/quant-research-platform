@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.storage import datasets
 from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
@@ -18,30 +16,6 @@ from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_processed_dataset_spec,
 )
-
-
-def test_storage_public_surface_keeps_physical_execution_knobs_internal() -> None:
-    forbidden = {
-        "partition_filter",
-        "_partition_filter",
-        "year_filter",
-        "_year_filter",
-        "force",
-        "overwrite",
-        "dependency_policy",
-        "_dataset_planning_metadata",
-    }
-    public_functions = (
-        datasets.write_dataset,
-        datasets.read_dataset,
-        datasets.inspect_dataset,
-        datasets.fingerprint_dataset,
-        datasets.compare_datasets,
-    )
-
-    for function in public_functions:
-        assert forbidden.isdisjoint(inspect.signature(function).parameters)
-    assert not hasattr(datasets, "_dataset_planning_metadata")
 
 
 def test_storage_duplicate_primary_key_fails_closed(tmp_path: Path) -> None:

@@ -12,7 +12,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import quant_research_platform.contracts as contracts
 from quant_research_platform.contracts._json import (
     bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
@@ -114,8 +113,6 @@ def test_strict_parser_rejects_invalid_utf8_and_non_object_top_level() -> None:
         parse_qrp_json_object(b"[]")
     with pytest.raises(ValueError, match="qrp_json_invalid"):
         parse_qrp_json_object(b'{"schema_id":')
-    with pytest.raises(ValueError, match="qrp_json_retired_identity_key"):
-        parse_qrp_json_object(b'{"schema_id":"x","nested":{"schema_version":"0.1"}}')
 
 
 def test_strict_writer_is_deterministic_and_rejects_non_json_values() -> None:
@@ -129,8 +126,6 @@ def test_strict_writer_is_deterministic_and_rejects_non_json_values() -> None:
         render_qrp_json_object({"schema_id": "x", 1: "value"})
     with pytest.raises(ValueError, match="qrp_json_unsupported_value"):
         render_qrp_json_object({"schema_id": "x", "value": (1, 2)})
-    with pytest.raises(ValueError, match="qrp_json_retired_identity_key"):
-        render_qrp_json_object({"schema_id": "x", "contract_version": "0.1"})
 
 
 def test_typed_canonical_identity_keeps_types_distinct() -> None:
@@ -524,13 +519,6 @@ def test_typed_canonical_identity_rejects_nat_sentinel(value: object) -> None:
 
 def test_typed_canonical_identity_does_not_normalize_unicode() -> None:
     assert canonical_json_hash("\u00e9") != canonical_json_hash("e\u0301")
-
-
-def test_internal_codec_has_no_package_root_export_and_no_import_cycle() -> None:
-    assert not hasattr(contracts, "canonical_json_hash")
-    assert not hasattr(contracts, "parse_qrp_json_object")
-    assert importlib.import_module("quant_research_platform.policy.identifiers")
-    assert importlib.import_module("quant_research_platform.contracts._json")
 
 
 def test_strict_json_rejects_huge_integers_with_stable_errors() -> None:

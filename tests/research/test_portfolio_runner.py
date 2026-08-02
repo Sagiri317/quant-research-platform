@@ -6,13 +6,13 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+import quant_research_platform.research.portfolios.runner as portfolio_runner
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnosticsConfig,
     PortfolioSpec,
 )
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.research.portfolios import runner as portfolio_runner
 from tests.helpers import frequency_ids
 
 

@@ -18,17 +18,6 @@ import pandas as pd
 MIB = 1024 * 1024
 _TASK_MEMORY_CEILING_NUMERATOR = 4
 _TASK_MEMORY_CEILING_DENOMINATOR = 5
-_RETIRED_RESOURCE_SETTINGS = frozenset(
-    {
-        "QRP_MEMORY_BUDGET_FRACTION",
-        "QRP_MEMORY_BUDGET_MB",
-        "QRP_CHUNK_TARGET_MB",
-        "QRP_MEMORY_SAFETY_FACTOR",
-        "QRP_MIN_FREE_DISK_MB",
-    }
-)
-
-
 @dataclass(frozen=True, init=False, eq=False)
 class RuntimeResourcePolicy:
     """Factory-issued immutable resource snapshot for one runtime task."""
@@ -98,8 +87,6 @@ def _build_policy_factory():
         environ: Mapping[str, str] | None = None,
     ) -> RuntimeResourcePolicy:
         env = os.environ if environ is None else environ
-        if any(name in env for name in _RETIRED_RESOURCE_SETTINGS):
-            raise ValueError("retired_runtime_resource_setting")
         available = (
             _available_memory_bytes()
             if available_memory_bytes is None

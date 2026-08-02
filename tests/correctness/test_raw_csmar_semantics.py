@@ -2,11 +2,28 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from quant_research_platform.sources.csmar import interim, raw_exports, raw_schemas
+
+
+def _collect_raw_export(
+    path: Path,
+    dataset: str,
+    *,
+    chunksize: int = 1024,
+) -> pd.DataFrame:
+    chunks = list(
+        raw_exports.iter_private_export_chunks(
+            path,
+            dataset=dataset,
+            chunksize=chunksize,
+        )
+    )
+    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
 
 
 def test_raw_export_discovery_contract_keeps_csv_only(
@@ -29,7 +46,7 @@ def test_raw_export_discovery_contract_keeps_csv_only(
     txt_description.write_text("Clddt\tcalendar date\n", encoding="utf-8")
 
     assert raw_exports.SUPPORTED_RAW_EXPORT_SUFFIXES == {".csv"}
-    assert raw_exports.iter_raw_export_files(tmp_path) == [csv_export]
+    assert list(raw_exports.iter_raw_export_files(tmp_path)) == [csv_export]
     assert raw_schemas.expected_metadata_sidecar_path(
         csv_export
     ) == csv_export.with_suffix(
@@ -50,9 +67,9 @@ def test_dirty_index_info_csv_audit_counts_and_semantics(tmp_path: Path) -> None
         "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
         "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
         "000985,benchmark,2014-01-02,2013-12-31,-9666,all shares,"
-        "1,2,3,4,5,\"formula, English comma, 中文标点\"\n"
+        '1,2,3,4,5,"formula, English comma, 中文标点"\n'
         "000300,large,2014-01-03,2013-12-31,1000,blue chips,"
-        ",4,7,5,9,\"formula with embedded line\nbreak and \"\"quotes\"\"\"\n"
+        ',4,7,5,9,"formula with embedded line\nbreak and ""quotes"""\n'
         "000905,mid,2014-01-06,2013-12-31,500,text continues\n"
         "over physical line,1,2,3,4,5,formula after merge\n"
         "000999,bad-enum,2014-01-07,2013-12-31,600,scope,8,9,10,6,10,formula\n",
@@ -60,7 +77,7 @@ def test_dirty_index_info_csv_audit_counts_and_semantics(tmp_path: Path) -> None
     )
 
     audit = _audit_index_info_csv(index_path)
-    raw = raw_exports.read_private_export_file(index_path, "index_info")
+    raw = _collect_raw_export(index_path, "index_info")
     normalized = interim.normalize_raw_frame(raw, "index_info")
     pruned, _ = interim.apply_output_column_rules(normalized, "index_info")
 
@@ -109,7 +126,126 @@ def test_ambiguous_index_info_long_row_fails_closed(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
-        raw_exports.read_private_export_file(index_path, "index_info")
+        _collect_raw_export(index_path, "index_info")
+
+
+def test_index_info_parser_streams_bounded_chunks_without_a_full_frame_surface(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "index_info.csv"
+    rows = [
+        {
+            "Indexcd": f"00030{position}",
+            "Idxinfo01": f"index-{position}",
+            "Idxinfo11": "2014-01-02",
+            "Idxinfo02": "2013-12-31",
+            "Idxinfo03": "1000",
+            "Idxinfo04": "scope",
+            "Idxinfo05": "1",
+            "Idxinfo06": "2",
+            "Idxinfo07": "3",
+            "Idxinfo08": "4",
+            "Idxinfo09": "5",
+            "Idxinfo10": 'formula, with "quotes"',
+        }
+        for position in range(3)
+    ]
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+    chunks = list(
+        raw_exports.iter_private_export_chunks(
+            path,
+            dataset="index_info",
+            chunksize=1,
+        )
+    )
+
+    assert [len(chunk) for chunk in chunks] == [1, 1, 1]
+    assert pd.concat(chunks, ignore_index=True)["Indexcd"].tolist() == [
+        "000300",
+        "000301",
+        "000302",
+    ]
+
+
+def test_read_export_header_preserves_keyboard_interrupt_over_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = KeyboardInterrupt("header_interrupted")
+    close_calls = 0
+
+    class FailingHandle:
+        def fileno(self):
+            return 7
+
+        def read(self, _limit: int = -1):
+            raise primary
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+            return False
+
+        def close(self):
+            nonlocal close_calls
+            close_calls += 1
+            raise OSError("header_close_failed")
+
+    class ExportPath:
+        suffix = ".csv"
+
+        def open(self, *_args, **_kwargs):
+            return FailingHandle()
+
+    monkeypatch.setattr(raw_schemas, "Path", lambda _path: ExportPath())
+    identity = raw_schemas.DatasetFileIdentity(1, 2, 3, 4)
+    monkeypatch.setattr(raw_schemas, "dataset_file_identity", lambda _path: identity)
+    monkeypatch.setattr(
+        raw_schemas.os,
+        "fstat",
+        lambda _fileno: SimpleNamespace(
+            st_dev=1,
+            st_ino=2,
+            st_size=3,
+            st_mtime_ns=4,
+        ),
+    )
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        raw_schemas.read_export_header("export.csv")
+
+    assert raised.value is primary
+    assert close_calls == 1
+
+
+@pytest.mark.parametrize("text_width", (1, 16_384))
+def test_non_index_raw_iteration_calibrates_from_a_single_first_row(
+    tmp_path: Path,
+    text_width: int,
+) -> None:
+    path = tmp_path / "calendar.csv"
+    pd.DataFrame(
+        {
+            "Markettype": ["4"] * 5,
+            "Clddt": pd.date_range("2020-01-01", periods=5).astype(str),
+            "Daywk": ["3"] * 5,
+            "State": ["x" * text_width] * 5,
+        }
+    ).to_csv(path, index=False)
+
+    chunks = list(
+        raw_exports.iter_private_export_chunks(
+            path,
+            dataset="trading_calendar",
+            chunksize=4,
+        )
+    )
+
+    assert len(chunks[0]) == 1
+    assert all(0 < len(chunk) <= 4 for chunk in chunks)
+    assert sum(map(len, chunks)) == 5
 
 
 def _audit_index_info_csv(path: Path) -> dict[str, object]:
@@ -118,8 +254,8 @@ def _audit_index_info_csv(path: Path) -> dict[str, object]:
         reader = csv.reader(handle)
         header = next(reader)
         rows = list(reader)
-    logical_rows = _logical_index_info_rows(rows, len(header))
-    raw = raw_exports.read_private_export_file(path, "index_info")
+    logical_rows = [row for _, row, _ in raw_exports.iter_index_info_rows(path)]
+    raw = _collect_raw_export(path, "index_info")
     enum_specs = {
         "Idxinfo05": frozenset({"1", "2", "3", "4"}),
         "Idxinfo06": frozenset({"1", "2", "3", "4"}),
@@ -150,37 +286,3 @@ def _audit_index_info_csv(path: Path) -> dict[str, object]:
         "final_rows": len(raw),
         "out_of_enum_counts": out_of_enum_counts,
     }
-
-
-def _logical_index_info_rows(
-    rows: list[list[str]],
-    column_count: int,
-) -> list[list[str]]:
-    result: list[list[str]] = []
-    pending: list[str] | None = None
-    for row_number, row in enumerate(rows, start=2):
-        if pending is not None:
-            pending = raw_exports._merge_index_info_continuation(
-                pending,
-                row,
-                column_count,
-            )
-            if len(pending) >= column_count:
-                result.append(
-                    raw_exports._normalize_index_info_row(
-                        pending,
-                        column_count,
-                        row_number,
-                    )
-                )
-                pending = None
-            continue
-        if len(row) < column_count:
-            pending = list(row)
-            continue
-        result.append(
-            raw_exports._normalize_index_info_row(row, column_count, row_number)
-        )
-    if pending is not None:
-        raise AssertionError("synthetic_pending_index_info_row")
-    return result

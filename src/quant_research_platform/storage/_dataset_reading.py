@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import struct
 import sys
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -47,11 +48,14 @@ from quant_research_platform.storage._dataset_paths import (
     parse_year_partition_label,
     relative_partition_label,
     require_artifact_root,
+    require_unaliased_path,
     timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
     DatasetPartMetadata,
+    PreparedMembershipValues,
+    dataset_file_identity,
     inspect_dataset_part,
     iter_dataset_part_batches,
 )
@@ -69,6 +73,7 @@ from quant_research_platform.storage._dataset_schema import (
 from quant_research_platform.storage._dataset_types import (
     DatasetReadMode,
 )
+from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
 
 
@@ -77,7 +82,9 @@ class DatasetSession:
     root: Path
     data_root: Path
     spec_bytes: bytes
+    spec_identity_bytes: bytes
     manifest_bytes: bytes
+    manifest_identity_bytes: bytes
     inventory: DatasetSessionInventory
     logical_columns: tuple[str, ...]
     physical_columns: tuple[str, ...]
@@ -89,7 +96,24 @@ class DatasetSession:
     parquet_filters: tuple[tuple[str, str, Any], ...] | None
     resource_policy: RuntimeResourcePolicy
     owns_inventory: bool
+    plan_base_retained_bytes: int
+    prepared_filter_bytes: int = 0
     path_selection: int | None = None
+
+    @property
+    def retained_memory_bytes(self) -> int:
+        return _dataset_session_retained_memory_bytes(
+            inventory_retained_bytes=self.inventory.retained_memory_bytes,
+            spec_bytes=self.spec_bytes,
+            spec_identity_bytes=self.spec_identity_bytes,
+            manifest_bytes=self.manifest_bytes,
+            manifest_identity_bytes=self.manifest_identity_bytes,
+            logical_dtype_bytes=self.logical_dtype_bytes,
+            plan_base_retained_bytes=self.plan_base_retained_bytes,
+            time_window=self.time_window,
+            parquet_filters=self.parquet_filters,
+            prepared_filter_bytes=self.prepared_filter_bytes,
+        )
 
     @property
     def all_paths(self) -> DatasetInventoryPaths:
@@ -144,11 +168,25 @@ class DatasetSession:
             pass
 
     def verify(self) -> None:
-        spec_bytes, _ = read_bounded_qrp_json(self.root / "spec.json")
+        spec_identity = dataset_file_identity(self.root / "spec.json")
+        if _dataset_file_identity_bytes(spec_identity) != self.spec_identity_bytes:
+            raise ValueError("dataset_spec_identity_changed")
+        spec_bytes, _ = read_bounded_qrp_json(
+            self.root / "spec.json", expected_identity=spec_identity
+        )
         if spec_bytes != self.spec_bytes:
             raise ValueError("dataset_spec_identity_changed")
-        manifest_bytes, _ = read_bounded_qrp_json(
+        manifest_identity = dataset_file_identity(
             self.root / "_manifest" / "manifest.json"
+        )
+        if (
+            _dataset_file_identity_bytes(manifest_identity)
+            != self.manifest_identity_bytes
+        ):
+            raise ValueError("dataset_manifest_identity_changed")
+        manifest_bytes, _ = read_bounded_qrp_json(
+            self.root / "_manifest" / "manifest.json",
+            expected_identity=manifest_identity,
         )
         if manifest_bytes != self.manifest_bytes:
             raise ValueError("dataset_manifest_identity_changed")
@@ -175,6 +213,7 @@ def read_dataset(
                         columns=columns,
                         time_window=time_window,
                         resource_policy=bound_policy,
+                        retained_payload_bytes=0,
                     ) as context:
                         yield from iter_dataset_chunks(
                             context,
@@ -188,6 +227,7 @@ def read_dataset(
                 columns=columns,
                 time_window=time_window,
                 resource_policy=bound_policy,
+                retained_payload_bytes=0,
             ) as context:
                 yield from iter_dataset_chunks(
                     context,
@@ -202,6 +242,7 @@ def read_dataset(
         columns=columns,
         time_window=time_window,
         resource_policy=resource_policy,
+        retained_payload_bytes=0,
     ) as context:
         return materialize_dataset_session(
             context,
@@ -240,15 +281,18 @@ def _materialize_dataset_session(
         if materialized_budget_bytes is None
         else materialized_budget_bytes
     )
-    materialized_budget -= context.inventory.retained_memory_bytes
+    operation_headroom = materialized_budget
+    materialized_budget -= context.retained_memory_bytes
     if materialized_budget <= 0:
-        raise ValueError("dataset_materialized_result_exceeds_target_bytes")
+        raise DatasetReadCapacityExceeded(
+            "dataset_materialized_result_exceeds_target_bytes"
+        )
     dtype_plan = _materialized_dtype_plan(context)
     scan_target_bytes = min(target_bytes, materialized_budget)
     row_count, string_bytes, object_bytes = _scan_materialized_shape(
         context,
         target_chunk_bytes=scan_target_bytes,
-        operation_headroom_bytes=materialized_budget,
+        operation_headroom_bytes=operation_headroom,
         string_columns=tuple(
             name for name, (kind, _) in dtype_plan.items() if kind == "string"
         ),
@@ -265,10 +309,14 @@ def _materialize_dataset_session(
         + object_bytes
     )
     if required_payload_bytes > materialized_budget:
-        raise ValueError("dataset_materialized_result_exceeds_target_bytes")
+        raise DatasetReadCapacityExceeded(
+            "dataset_materialized_result_exceeds_target_bytes"
+        )
     remaining_headroom = materialized_budget - required_payload_bytes
     if remaining_headroom <= 0:
-        raise ValueError("dataset_materialized_result_exceeds_target_bytes")
+        raise DatasetReadCapacityExceeded(
+            "dataset_materialized_result_exceeds_target_bytes"
+        )
     second_pass_target_bytes = min(target_bytes, remaining_headroom)
     buffers = _allocate_materialized_buffers(
         dtype_plan,
@@ -280,7 +328,7 @@ def _materialize_dataset_session(
         buffers=buffers,
         row_count=row_count,
         target_chunk_bytes=second_pass_target_bytes,
-        operation_headroom_bytes=remaining_headroom,
+        operation_headroom_bytes=operation_headroom - required_payload_bytes,
     )
     return _materialized_frame(buffers)
 
@@ -647,35 +695,88 @@ def open_dataset_session(
     row_filters: tuple[tuple[str, str, Any], ...] = (),
     require_consumable: bool = True,
     resource_policy: RuntimeResourcePolicy | None = None,
+    retained_payload_bytes: int = 0,
 ) -> Iterator[DatasetSession]:
     root = require_artifact_root(Path(dataset_root))
     spec_path = root / "spec.json"
     data_root = root / "data"
     manifest_path = root / "_manifest" / "manifest.json"
+    require_unaliased_path(spec_path, error="dataset_metadata_file_invalid")
+    require_unaliased_path(data_root, error="invalid_dataset_part_files")
+    require_unaliased_path(manifest_path, error="dataset_metadata_file_invalid")
     if not spec_path.is_file():
         raise ValueError("dataset_spec_missing")
     if not data_root.is_dir():
         raise ValueError("dataset_data_dir_missing")
-    spec_bytes, spec_payload = read_bounded_qrp_json(spec_path)
-    if spec_payload.get("schema_id") != "qrp-dataset-spec":
-        raise ValueError("dataset_spec_schema_id_invalid")
-    validate_dataset_spec_payload(spec_payload)
     if not manifest_path.is_file():
         raise ValueError("dataset_manifest_missing")
-    manifest_bytes, manifest = read_bounded_qrp_json(manifest_path)
-    if manifest.get("schema_id") != "qrp-dataset-manifest":
-        raise ValueError("dataset_manifest_schema_id_invalid")
-    validate_dataset_manifest_payload(manifest, spec=spec_payload)
-    if require_consumable:
-        validate_dataset_manifest_consumable(manifest)
-    if not manifest_has_runtime_metadata(manifest):
-        raise ValueError("manifest_runtime_metadata_missing")
+    try:
+        spec_identity = dataset_file_identity(spec_path)
+        manifest_identity = dataset_file_identity(manifest_path)
+    except (OSError, ValueError) as exc:
+        raise ValueError("dataset_metadata_file_invalid") from exc
     issued_policy = resource_policy or active_runtime_resource_policy()
+    if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
+        raise ValueError("invalid_dataset_session_retained_payload_bytes")
     with runtime_resource_policy_scope(issued_policy):
+        try:
+            spec_stat_span_bytes = spec_identity.size
+            manifest_stat_span_bytes = manifest_identity.size
+        except OSError as exc:
+            raise ValueError("dataset_metadata_file_invalid") from exc
+        spec_identity_bytes = _dataset_file_identity_bytes(spec_identity)
+        manifest_identity_bytes = _dataset_file_identity_bytes(manifest_identity)
+        metadata_identity_span_bytes = len(spec_identity_bytes) + len(
+            manifest_identity_bytes
+        )
+        _require_dataset_session_headroom(
+            resource_policy=issued_policy,
+            retained_payload_bytes=retained_payload_bytes,
+            inventory_retained_bytes=0,
+            spec_span_bytes=spec_stat_span_bytes,
+            manifest_span_bytes=manifest_stat_span_bytes,
+            metadata_identity_span_bytes=metadata_identity_span_bytes,
+        )
+        spec_bytes, spec_payload = read_bounded_qrp_json(
+            spec_path, expected_identity=spec_identity
+        )
+        if len(spec_bytes) != spec_stat_span_bytes:
+            raise ValueError("dataset_metadata_file_identity_changed")
+        if spec_payload.get("schema_id") != "qrp-dataset-spec":
+            raise ValueError("dataset_spec_schema_id_invalid")
+        validate_dataset_spec_payload(spec_payload)
+        _require_dataset_session_headroom(
+            resource_policy=issued_policy,
+            retained_payload_bytes=retained_payload_bytes,
+            inventory_retained_bytes=0,
+            spec_span_bytes=len(spec_bytes),
+            manifest_span_bytes=manifest_stat_span_bytes,
+            metadata_identity_span_bytes=metadata_identity_span_bytes,
+        )
+        manifest_bytes, manifest = read_bounded_qrp_json(
+            manifest_path, expected_identity=manifest_identity
+        )
+        if len(manifest_bytes) != manifest_stat_span_bytes:
+            raise ValueError("dataset_metadata_file_identity_changed")
+        if manifest.get("schema_id") != "qrp-dataset-manifest":
+            raise ValueError("dataset_manifest_schema_id_invalid")
+        validate_dataset_manifest_payload(manifest, spec=spec_payload)
+        if require_consumable:
+            validate_dataset_manifest_consumable(manifest)
+        if not manifest_has_runtime_metadata(manifest):
+            raise ValueError("manifest_runtime_metadata_missing")
+        acquisition_budget_bytes = _require_dataset_session_headroom(
+            resource_policy=issued_policy,
+            retained_payload_bytes=retained_payload_bytes,
+            inventory_retained_bytes=0,
+            spec_span_bytes=len(spec_bytes),
+            manifest_span_bytes=len(manifest_bytes),
+            metadata_identity_span_bytes=metadata_identity_span_bytes,
+        )
         inventory = DatasetSessionInventory(
             data_root=data_root,
             scratch_parent=root.parent,
-            task_memory_budget_bytes=issued_policy.task_memory_budget_bytes,
+            task_memory_budget_bytes=acquisition_budget_bytes,
         )
         try:
             inventory.discover(spec_payload)
@@ -690,17 +791,30 @@ def open_dataset_session(
                     inspect_dataset_part(path),
                     selected=selected,
                 )
+            _require_dataset_session_headroom(
+                resource_policy=issued_policy,
+                retained_payload_bytes=retained_payload_bytes,
+                inventory_retained_bytes=inventory.retained_memory_bytes,
+                spec_span_bytes=len(spec_bytes),
+                manifest_span_bytes=len(manifest_bytes),
+                metadata_identity_span_bytes=metadata_identity_span_bytes,
+            )
             session = _build_dataset_session(
                 root=root,
                 data_root=data_root,
                 spec_bytes=spec_bytes,
+                spec_identity_bytes=spec_identity_bytes,
+                spec_payload=spec_payload,
                 manifest_bytes=manifest_bytes,
+                manifest_identity_bytes=manifest_identity_bytes,
+                manifest=manifest,
                 inventory=inventory,
                 columns=columns,
                 time_window=time_window,
                 row_filters=row_filters,
                 require_consumable=require_consumable,
                 resource_policy=issued_policy,
+                retained_payload_bytes=retained_payload_bytes,
                 owns_inventory=True,
             )
         except BaseException:
@@ -720,25 +834,89 @@ def dataset_session_from_inventory(
     columns: tuple[str, ...] | list[str] | None,
     time_window: TimeWindow | None,
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
 ) -> DatasetSession:
     """Freeze a writer receipt without reopening already observed Parquet parts."""
 
+    if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
+        raise ValueError("invalid_dataset_session_retained_payload_bytes")
+    _require_dataset_session_headroom(
+        resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
+        inventory_retained_bytes=inventory.retained_memory_bytes,
+        spec_span_bytes=0,
+        manifest_span_bytes=0,
+    )
     root = require_artifact_root(Path(dataset_root))
     data_root = root / "data"
-    spec_bytes, spec_payload = read_bounded_qrp_json(root / "spec.json")
-    manifest_bytes, _ = read_bounded_qrp_json(root / "_manifest" / "manifest.json")
+    spec_path = root / "spec.json"
+    manifest_path = root / "_manifest" / "manifest.json"
+    require_unaliased_path(data_root, error="invalid_dataset_part_files")
+    require_unaliased_path(spec_path, error="dataset_metadata_file_invalid")
+    require_unaliased_path(manifest_path, error="dataset_metadata_file_invalid")
+    try:
+        spec_identity = dataset_file_identity(spec_path)
+        manifest_identity = dataset_file_identity(manifest_path)
+        spec_stat_span_bytes = spec_identity.size
+        manifest_stat_span_bytes = manifest_identity.size
+    except (OSError, ValueError) as exc:
+        raise ValueError("dataset_metadata_file_invalid") from exc
+    spec_identity_bytes = _dataset_file_identity_bytes(spec_identity)
+    manifest_identity_bytes = _dataset_file_identity_bytes(manifest_identity)
+    metadata_identity_span_bytes = len(spec_identity_bytes) + len(
+        manifest_identity_bytes
+    )
+    _require_dataset_session_headroom(
+        resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
+        inventory_retained_bytes=inventory.retained_memory_bytes,
+        spec_span_bytes=spec_stat_span_bytes,
+        manifest_span_bytes=manifest_stat_span_bytes,
+        metadata_identity_span_bytes=metadata_identity_span_bytes,
+    )
+    spec_bytes, spec_payload = read_bounded_qrp_json(
+        spec_path, expected_identity=spec_identity
+    )
+    if len(spec_bytes) != spec_stat_span_bytes:
+        raise ValueError("dataset_metadata_file_identity_changed")
+    _require_dataset_session_headroom(
+        resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
+        inventory_retained_bytes=inventory.retained_memory_bytes,
+        spec_span_bytes=len(spec_bytes),
+        manifest_span_bytes=manifest_stat_span_bytes,
+        metadata_identity_span_bytes=metadata_identity_span_bytes,
+    )
+    manifest_bytes, manifest = read_bounded_qrp_json(
+        manifest_path, expected_identity=manifest_identity
+    )
+    if len(manifest_bytes) != manifest_stat_span_bytes:
+        raise ValueError("dataset_metadata_file_identity_changed")
+    _require_dataset_session_headroom(
+        resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
+        inventory_retained_bytes=inventory.retained_memory_bytes,
+        spec_span_bytes=len(spec_bytes),
+        manifest_span_bytes=len(manifest_bytes),
+        metadata_identity_span_bytes=metadata_identity_span_bytes,
+    )
     inventory.verify_filesystem(spec_payload)
     return _build_dataset_session(
         root=root,
         data_root=data_root,
         spec_bytes=spec_bytes,
+        spec_identity_bytes=spec_identity_bytes,
+        spec_payload=spec_payload,
         manifest_bytes=manifest_bytes,
+        manifest_identity_bytes=manifest_identity_bytes,
+        manifest=manifest,
         inventory=inventory,
         columns=columns,
         time_window=time_window,
         row_filters=(),
         require_consumable=True,
         resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
         owns_inventory=False,
     )
 
@@ -748,20 +926,23 @@ def _build_dataset_session(
     root: Path,
     data_root: Path,
     spec_bytes: bytes,
+    spec_identity_bytes: bytes,
+    spec_payload: dict[str, Any],
     manifest_bytes: bytes,
+    manifest_identity_bytes: bytes,
+    manifest: dict[str, Any],
     inventory: DatasetSessionInventory,
     columns: tuple[str, ...] | list[str] | None,
     time_window: TimeWindow | None,
     row_filters: tuple[tuple[str, str, Any], ...],
     require_consumable: bool,
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
     owns_inventory: bool,
 ) -> DatasetSession:
-    spec_payload = parse_qrp_json_object(spec_bytes)
     if spec_payload.get("schema_id") != "qrp-dataset-spec":
         raise ValueError("dataset_spec_schema_id_invalid")
     validate_dataset_spec_payload(spec_payload)
-    manifest = parse_qrp_json_object(manifest_bytes)
     if manifest.get("schema_id") != "qrp-dataset-manifest":
         raise ValueError("dataset_manifest_schema_id_invalid")
     validate_dataset_manifest_payload(manifest, spec=spec_payload)
@@ -816,6 +997,18 @@ def _build_dataset_session(
         raise ValueError("manifest_file_size_bytes_mismatch")
     if manifest["logical_dtypes"] != logical_dtypes:
         raise ValueError("manifest_logical_dtypes_mismatch")
+    logical_dtype_bytes = logical_dtype_metadata_bytes(logical_dtypes)
+    _require_dataset_session_headroom(
+        resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
+        inventory_retained_bytes=inventory.retained_memory_bytes,
+        spec_span_bytes=len(spec_bytes),
+        manifest_span_bytes=len(manifest_bytes),
+        metadata_identity_span_bytes=(
+            len(spec_identity_bytes) + len(manifest_identity_bytes)
+        ),
+        logical_dtype_span_bytes=len(logical_dtype_bytes),
+    )
     if tuple(str(column) for column in manifest["columns"]) != schema_columns:
         raise ValueError("manifest_columns_mismatch")
     if manifest["physical_schema"] != schema:
@@ -833,6 +1026,18 @@ def _build_dataset_session(
         spec=spec_payload,
         time_window=time_window,
     )
+    physical_columns = tuple(
+        dict.fromkeys((*physical_columns, *(column for column, _, _ in row_filters)))
+    )
+    plan_base_retained_bytes = _dataset_session_plan_base_retained_memory_bytes(
+        root=root,
+        data_root=data_root,
+        logical_columns=logical_columns,
+        physical_columns=physical_columns,
+        timestamp_column=timestamp_column,
+        schema_hash=schema_hash,
+        arrow_schema_span_bytes=inventory.schema_payload_bytes_for(first_path),
+    )
     physical_filters = (
         parquet_filters_for_time_window(
             timestamp_column=timestamp_column,
@@ -840,31 +1045,53 @@ def _build_dataset_session(
         )
         or []
     )
+    prepared_filter_bytes = 0
     for column, operator, value in row_filters:
         if column not in schema_columns:
             raise ValueError("dataset_filter_column_not_found")
-        if operator != "==":
+        if operator not in {"==", "in"}:
             raise ValueError("unsupported_dataset_physical_filter")
+        field = first_metadata.schema.field(column)
+        if operator == "in":
+            if type(value) is not tuple or not value:
+                raise ValueError("invalid_dataset_physical_filter_value")
+            validated_value = _prepare_in_filter(
+                field,
+                value,
+                resource_policy=resource_policy,
+                retained_filter_bytes=(
+                    retained_payload_bytes
+                    + _dataset_session_retained_memory_bytes(
+                        inventory_retained_bytes=inventory.retained_memory_bytes,
+                        spec_bytes=spec_bytes,
+                        spec_identity_bytes=spec_identity_bytes,
+                        manifest_bytes=manifest_bytes,
+                        manifest_identity_bytes=manifest_identity_bytes,
+                        logical_dtype_bytes=logical_dtype_bytes,
+                        plan_base_retained_bytes=plan_base_retained_bytes,
+                        time_window=time_window,
+                        parquet_filters=tuple(physical_filters) or None,
+                        prepared_filter_bytes=prepared_filter_bytes,
+                    )
+                ),
+            )
+            prepared_filter_bytes += validated_value.retained_memory_bytes
+        else:
+            validated_value = _validated_physical_filter_value(field, value)
         physical_filters.append(
             (
                 column,
                 operator,
-                _validated_physical_filter_value(
-                    first_metadata.schema.field(column),
-                    value,
-                ),
+                validated_value,
             )
         )
-    physical_columns = tuple(
-        dict.fromkeys(
-            (*physical_columns, *(column for column, _, _ in physical_filters))
-        )
-    )
     session = DatasetSession(
         root=root,
         data_root=data_root,
         spec_bytes=spec_bytes,
+        spec_identity_bytes=spec_identity_bytes,
         manifest_bytes=manifest_bytes,
+        manifest_identity_bytes=manifest_identity_bytes,
         inventory=inventory,
         logical_columns=logical_columns,
         physical_columns=physical_columns,
@@ -872,7 +1099,7 @@ def _build_dataset_session(
         time_window=time_window,
         schema_hash=schema_hash,
         arrow_schema=first_metadata.schema,
-        logical_dtype_bytes=logical_dtype_metadata_bytes(logical_dtypes),
+        logical_dtype_bytes=logical_dtype_bytes,
         parquet_filters=tuple(
             (column, operator, _freeze_filter_value(value))
             for column, operator, value in physical_filters
@@ -880,9 +1107,155 @@ def _build_dataset_session(
         or None,
         resource_policy=resource_policy,
         owns_inventory=owns_inventory,
+        plan_base_retained_bytes=plan_base_retained_bytes,
+        prepared_filter_bytes=prepared_filter_bytes,
+    )
+    _require_dataset_session_headroom(
+        resource_policy=resource_policy,
+        retained_payload_bytes=retained_payload_bytes,
+        inventory_retained_bytes=0,
+        spec_span_bytes=session.retained_memory_bytes,
+        manifest_span_bytes=0,
     )
     session.verify()
     return session
+
+
+def _dataset_session_retained_memory_bytes(
+    *,
+    inventory_retained_bytes: int,
+    spec_bytes: bytes,
+    spec_identity_bytes: bytes,
+    manifest_bytes: bytes,
+    manifest_identity_bytes: bytes,
+    logical_dtype_bytes: bytes,
+    plan_base_retained_bytes: int = 0,
+    time_window: TimeWindow | None = None,
+    parquet_filters: tuple[tuple[str, str, Any], ...] | None = None,
+    prepared_filter_bytes: int = 0,
+) -> int:
+    return (
+        inventory_retained_bytes
+        + len(spec_bytes)
+        + len(spec_identity_bytes)
+        + len(manifest_bytes)
+        + len(manifest_identity_bytes)
+        + len(logical_dtype_bytes)
+        + plan_base_retained_bytes
+        + _dataset_session_view_retained_memory_bytes(
+            time_window=time_window,
+            parquet_filters=parquet_filters,
+        )
+        + prepared_filter_bytes
+    )
+
+
+def _dataset_session_plan_base_retained_memory_bytes(
+    *,
+    root: Path,
+    data_root: Path,
+    logical_columns: tuple[str, ...],
+    physical_columns: tuple[str, ...],
+    timestamp_column: str | None,
+    schema_hash: str,
+    arrow_schema_span_bytes: int,
+) -> int:
+    pointer_bytes = struct.calcsize("P")
+    strings = (
+        str(root),
+        str(data_root),
+        *logical_columns,
+        *physical_columns,
+        schema_hash,
+        *((timestamp_column,) if timestamp_column is not None else ()),
+    )
+    return (
+        len(DatasetSession.__slots__) * pointer_bytes
+        + (len(logical_columns) + len(physical_columns)) * pointer_bytes
+        + sum(_utf8_payload_length(value) for value in strings)
+        + arrow_schema_span_bytes
+    )
+
+
+def _dataset_session_view_retained_memory_bytes(
+    *,
+    time_window: TimeWindow | None,
+    parquet_filters: tuple[tuple[str, str, Any], ...] | None,
+) -> int:
+    pointer_bytes = struct.calcsize("P")
+    retained = 0
+    if time_window is not None:
+        retained += 2 * pointer_bytes
+        retained += _utf8_payload_length(time_window.start.isoformat())
+        retained += _utf8_payload_length(time_window.end.isoformat())
+    for column, operator, value in parquet_filters or ():
+        retained += 3 * pointer_bytes
+        retained += _utf8_payload_length(column) + _utf8_payload_length(operator)
+        if isinstance(value, PreparedMembershipValues):
+            continue
+        if type(value) is str:
+            retained += _utf8_payload_length(value)
+        elif type(value) is bytes:
+            retained += len(value)
+        elif isinstance(value, date | datetime | time):
+            retained += _utf8_payload_length(value.isoformat())
+        elif isinstance(value, Decimal):
+            retained += _utf8_payload_length(str(value))
+        else:
+            retained += 8
+    return retained
+
+
+def dataset_partition_state_reserve_bytes(context: DatasetSession) -> int:
+    """Reserve compact counters for every selected physical partition."""
+
+    pointer_bytes = struct.calcsize("P")
+    retained = 0
+    previous: str | None = None
+    for path in context.read_paths:
+        partition = relative_partition_label(context.data_root, path)
+        if partition == previous:
+            continue
+        previous = partition
+        retained += _utf8_payload_length(partition) + 12 * pointer_bytes + 32
+    return retained
+
+
+def _dataset_file_identity_bytes(identity: DatasetFileIdentity) -> bytes:
+    return b"\0".join(
+        str(value).encode("ascii")
+        for value in (
+            identity.device,
+            identity.inode,
+            identity.size,
+            identity.modified_ns,
+        )
+    )
+
+
+def _require_dataset_session_headroom(
+    *,
+    resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
+    inventory_retained_bytes: int,
+    spec_span_bytes: int,
+    manifest_span_bytes: int,
+    metadata_identity_span_bytes: int = 0,
+    logical_dtype_span_bytes: int = 0,
+) -> int:
+    remaining = resource_policy.task_memory_budget_bytes - retained_payload_bytes
+    remaining -= (
+        inventory_retained_bytes
+        + spec_span_bytes
+        + manifest_span_bytes
+        + metadata_identity_span_bytes
+        + logical_dtype_span_bytes
+    )
+    if remaining <= 0:
+        raise DatasetReadCapacityExceeded(
+            "dataset_session_acquisition_exceeds_task_memory_budget"
+        )
+    return remaining
 
 
 def iter_dataset_chunks(
@@ -966,6 +1339,7 @@ def iter_declared_parquet_member_batches(
         Path(path),
         expected_identity=expected_identity,
         target_chunk_bytes=target_bytes,
+        operation_headroom_bytes=operation_headroom_bytes,
         columns=columns,
         parquet_filters=parquet_filters,
         metadata_observer=metadata_observer,
@@ -1012,15 +1386,16 @@ def _iter_dataset_file_batches(
     """Yield deterministic file batches after Arrow-level bounded conversion."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    if operation_headroom_bytes is None:
-        operation_headroom = (
-            context.resource_policy.task_memory_budget_bytes
-            - context.inventory.retained_memory_bytes
+    upstream_headroom = (
+        context.resource_policy.task_memory_budget_bytes
+        if operation_headroom_bytes is None
+        else _validated_target_chunk_bytes(operation_headroom_bytes)
+    )
+    operation_headroom = upstream_headroom - context.retained_memory_bytes
+    if operation_headroom <= 0:
+        raise DatasetReadCapacityExceeded(
+            "dataset_working_set_exceeds_task_memory_budget"
         )
-        if operation_headroom <= 0:
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-    else:
-        operation_headroom = _validated_target_chunk_bytes(operation_headroom_bytes)
     dtype_overrides = pandas_dtype_overrides_from_logical_payload(
         context.logical_dtypes,
         columns=columns,
@@ -1098,6 +1473,10 @@ def _validated_target_chunk_bytes(value: int) -> int:
 
 
 def _freeze_filter_value(value: Any) -> Any:
+    if isinstance(value, PreparedMembershipValues):
+        return value
+    if isinstance(value, tuple):
+        return tuple(_freeze_filter_value(item) for item in value)
     if isinstance(
         value,
         (
@@ -1119,6 +1498,176 @@ def _freeze_filter_value(value: Any) -> Any:
     raise ValueError("invalid_dataset_physical_filter_value")
 
 
+def _utf8_payload_length(value: str) -> int:
+    """Return the UTF-8 payload width without allocating an encoded copy."""
+
+    payload_bytes = 0
+    for character in value:
+        codepoint = ord(character)
+        if codepoint <= 0x7F:
+            payload_bytes += 1
+        elif codepoint <= 0x7FF:
+            payload_bytes += 2
+        elif 0xD800 <= codepoint <= 0xDFFF:
+            raise ValueError("invalid_dataset_physical_filter_value")
+        elif codepoint <= 0xFFFF:
+            payload_bytes += 3
+        else:
+            payload_bytes += 4
+    return payload_bytes
+
+
+def _prepare_in_filter(
+    field: pa.Field,
+    values: tuple[Any, ...],
+    *,
+    resource_policy: RuntimeResourcePolicy,
+    retained_filter_bytes: int,
+) -> PreparedMembershipValues:
+    data_type = field.type
+    is_string = pa.types.is_string(data_type) or pa.types.is_large_string(data_type)
+    is_binary = pa.types.is_binary(data_type) or pa.types.is_large_binary(data_type)
+    max_scalar_bytes = 0
+    pointer_bytes = struct.calcsize("P")
+    sort_state_bytes = len(values) * pointer_bytes
+    timsort_scratch_bytes = (len(values) // 2) * pointer_bytes
+    input_state_bytes = len(values) * pointer_bytes
+    if is_string or is_binary:
+        offset_bytes = (
+            8
+            if pa.types.is_large_string(data_type)
+            or pa.types.is_large_binary(data_type)
+            else 4
+        )
+        for value in values:
+            if is_string and type(value) is not str:
+                raise ValueError("invalid_dataset_physical_filter_value")
+            if is_binary and type(value) is not bytes:
+                raise ValueError("invalid_dataset_physical_filter_value")
+            if is_binary:
+                encoded_bytes = len(value)
+            else:
+                encoded_bytes = _utf8_payload_length(value)
+            input_state_bytes += encoded_bytes
+            max_scalar_bytes = max(max_scalar_bytes, offset_bytes + encoded_bytes)
+    else:
+        supported_fixed_width = (
+            pa.types.is_boolean(data_type)
+            or pa.types.is_integer(data_type)
+            or pa.types.is_floating(data_type)
+            or pa.types.is_decimal(data_type)
+            or pa.types.is_timestamp(data_type)
+            or pa.types.is_date(data_type)
+            or pa.types.is_time32(data_type)
+            or pa.types.is_time64(data_type)
+            or pa.types.is_duration(data_type)
+            or pa.types.is_fixed_size_binary(data_type)
+        )
+        if not supported_fixed_width:
+            raise ValueError("invalid_dataset_physical_filter_value")
+        if pa.types.is_boolean(data_type):
+            scalar_width_bytes = 0
+        elif pa.types.is_fixed_size_binary(data_type):
+            scalar_width_bytes = data_type.byte_width
+        else:
+            scalar_width_bytes = data_type.bit_width // 8
+        for item in values:
+            _validated_physical_filter_value(field, item)
+        if pa.types.is_boolean(data_type):
+            max_scalar_bytes = 1
+        elif pa.types.is_fixed_size_binary(data_type):
+            max_scalar_bytes = data_type.byte_width
+        else:
+            max_scalar_bytes = max(1, data_type.bit_width // 8)
+    if max_scalar_bytes > resource_policy.payload_target_bytes:
+        raise DatasetReadCapacityExceeded("dataset_filter_values_exceed_payload_target")
+    _require_filter_preparation_overlap(
+        preflight_bytes=0,
+        input_state_bytes=input_state_bytes,
+        sort_state_bytes=sort_state_bytes,
+        timsort_scratch_bytes=timsort_scratch_bytes,
+        resource_policy=resource_policy,
+        retained_filter_bytes=retained_filter_bytes,
+    )
+    sorted_values = sorted(values)
+    if sorted_values:
+        write_position = 1
+        for read_position in range(1, len(sorted_values)):
+            value = sorted_values[read_position]
+            if value != sorted_values[write_position - 1]:
+                sorted_values[write_position] = value
+                write_position += 1
+        del sorted_values[write_position:]
+    if is_string or is_binary:
+        compact_payload_bytes = offset_bytes * len(sorted_values)
+        compact_payload_bytes += sum(
+            len(value) if is_binary else _utf8_payload_length(value)
+            for value in sorted_values
+        )
+    elif pa.types.is_boolean(data_type):
+        compact_payload_bytes = (len(sorted_values) + 7) // 8
+    else:
+        compact_payload_bytes = len(sorted_values) * scalar_width_bytes
+    if compact_payload_bytes > resource_policy.payload_target_bytes:
+        raise DatasetReadCapacityExceeded("dataset_filter_values_exceed_payload_target")
+    if (
+        retained_filter_bytes
+        + input_state_bytes
+        + len(sorted_values) * pointer_bytes
+        + compact_payload_bytes
+        > resource_policy.task_memory_budget_bytes
+    ):
+        raise DatasetReadCapacityExceeded(
+            "dataset_filter_values_exceed_task_memory_budget"
+        )
+    try:
+        acquired = pa.array(sorted_values, type=data_type)
+    except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
+        raise ValueError("invalid_dataset_physical_filter_value") from None
+    if acquired.nbytes > resource_policy.payload_target_bytes:
+        raise DatasetReadCapacityExceeded("dataset_filter_values_exceed_payload_target")
+    if (
+        retained_filter_bytes + acquired.nbytes
+        > resource_policy.task_memory_budget_bytes
+    ):
+        raise DatasetReadCapacityExceeded(
+            "dataset_filter_values_exceed_task_memory_budget"
+        )
+    if (
+        retained_filter_bytes
+        + input_state_bytes
+        + len(sorted_values) * pointer_bytes
+        + acquired.nbytes
+        > resource_policy.task_memory_budget_bytes
+    ):
+        raise DatasetReadCapacityExceeded(
+            "dataset_filter_values_exceed_task_memory_budget"
+        )
+    return PreparedMembershipValues(acquired, max_scalar_bytes, acquired.nbytes)
+
+
+def _require_filter_preparation_overlap(
+    *,
+    preflight_bytes: int,
+    input_state_bytes: int,
+    sort_state_bytes: int,
+    timsort_scratch_bytes: int,
+    resource_policy: RuntimeResourcePolicy,
+    retained_filter_bytes: int,
+) -> None:
+    if (
+        retained_filter_bytes
+        + input_state_bytes
+        + preflight_bytes
+        + sort_state_bytes
+        + timsort_scratch_bytes
+        > resource_policy.task_memory_budget_bytes
+    ):
+        raise DatasetReadCapacityExceeded(
+            "dataset_filter_values_exceed_task_memory_budget"
+        )
+
+
 def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:
     frozen = _freeze_filter_value(value)
     data_type = field.type
@@ -1136,12 +1685,18 @@ def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:
         valid = type(frozen) is Decimal
     elif pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
         valid = type(frozen) is str
-    elif pa.types.is_binary(data_type) or pa.types.is_large_binary(data_type):
+    elif (
+        pa.types.is_binary(data_type)
+        or pa.types.is_large_binary(data_type)
+        or pa.types.is_fixed_size_binary(data_type)
+    ):
         valid = type(frozen) is bytes
     elif pa.types.is_timestamp(data_type):
         valid = type(frozen) in (pd.Timestamp, datetime)
     elif pa.types.is_date(data_type):
         valid = type(frozen) is date
+    elif pa.types.is_time32(data_type) or pa.types.is_time64(data_type):
+        valid = type(frozen) is time
     elif pa.types.is_duration(data_type):
         valid = type(frozen) in (pd.Timedelta, timedelta)
     else:
@@ -1183,7 +1738,7 @@ def _empty_frame(
         + (pandas_frame_payload_bytes(output) if output is not frame else 0)
         > target_chunk_bytes
     ):
-        raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+        raise DatasetReadCapacityExceeded("dataset_row_exceeds_target_chunk_bytes")
     return output
 
 
@@ -1208,7 +1763,9 @@ def _arrow_batch_to_bounded_pandas(
         - batch.get_total_buffer_size()
     )
     if conversion_budget is not None and conversion_budget <= 0:
-        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+        raise DatasetReadCapacityExceeded(
+            "dataset_working_set_exceeds_task_memory_budget"
+        )
     rows_per_slice = 1
     calibrated = False
     start = 0
@@ -1222,7 +1779,9 @@ def _arrow_batch_to_bounded_pandas(
             else conversion_budget - previous_output_bytes[0]
         )
         if current_pandas_budget <= 0:
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+            raise DatasetReadCapacityExceeded(
+                "dataset_working_set_exceeds_task_memory_budget"
+            )
         slice_budget = min(pandas_budget, current_pandas_budget)
         stop = min(batch.num_rows, start + rows_per_slice)
         arrow_slice = batch.slice(start, stop - start)
@@ -1233,8 +1792,12 @@ def _arrow_batch_to_bounded_pandas(
         ):
             if len(frame) == 1:
                 if frame_bytes > pandas_budget:
-                    raise ValueError("dataset_row_exceeds_target_chunk_bytes")
-                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+                    raise DatasetReadCapacityExceeded(
+                        "dataset_row_exceeds_target_chunk_bytes"
+                    )
+                raise DatasetReadCapacityExceeded(
+                    "dataset_working_set_exceeds_task_memory_budget"
+                )
             rows_per_slice = max(1, rows_per_slice // 2)
             del frame
             continue
@@ -1273,8 +1836,12 @@ def _arrow_batch_to_bounded_pandas(
         ):
             if len(frame) == 1:
                 if output_bytes > pandas_budget:
-                    raise ValueError("dataset_row_exceeds_target_chunk_bytes")
-                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+                    raise DatasetReadCapacityExceeded(
+                        "dataset_row_exceeds_target_chunk_bytes"
+                    )
+                raise DatasetReadCapacityExceeded(
+                    "dataset_working_set_exceeds_task_memory_budget"
+                )
             rows_per_slice = max(1, rows_per_slice // 2)
             del output, frame
             continue
@@ -1313,7 +1880,9 @@ def _arrow_batch_to_bounded_pandas(
             else conversion_budget - previous_output_bytes[0]
         )
         if next_slice_budget <= 0:
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+            raise DatasetReadCapacityExceeded(
+                "dataset_working_set_exceeds_task_memory_budget"
+            )
         rows_per_slice = max(
             1,
             min(
@@ -1349,7 +1918,9 @@ def iter_bounded_frame_chunks(
         candidate_bytes = pandas_frame_payload_bytes(candidate)
         if candidate_bytes > target_chunk_bytes:
             if len(candidate) == 1:
-                raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+                raise DatasetReadCapacityExceeded(
+                    "dataset_row_exceeds_target_chunk_bytes"
+                )
             rows_per_chunk = max(1, rows_per_chunk // 2)
             continue
         yield candidate

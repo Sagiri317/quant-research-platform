@@ -1,94 +1,83 @@
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
-from tests.architecture.governance_scan_helpers import (
-    APPROVED_WRITER_MODULES,
-    FORBIDDEN_WRITER_METHODS,
-    RUN_OUTPUT_ARTIFACTS,
-    RUNTIME_PROFILING,
-    class_field_names,
-    function_arg_names,
-    is_approved_writer_path,
-    is_open_call,
-    is_open_write_call,
-    is_write_mode,
-    iter_governance_python_files,
-    open_mode,
+import pytest
+
+from tests.helpers.maintenance_script_loader import load_maintenance_script_module
+
+governance_contract = load_maintenance_script_module("governance_contract")
+
+
+def test_live_source_has_no_direct_writer_owner_bypass() -> None:
+    assert governance_contract._writer_boundary_violations(Path(".")) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "line", "target"),
+    (
+        ("open('output', 'w')\n", 1, "builtins.open"),
+        (
+            "from pathlib import Path\nPath('output').write_text('x')\n",
+            2,
+            "pathlib.Path().write_text",
+        ),
+        (
+            "from pyarrow import parquet as pq\npq.write_table(None, 'output')\n",
+            2,
+            "pyarrow.parquet.write_table",
+        ),
+        (
+            "import zipfile as archive\narchive.ZipFile('output', 'w')\n",
+            2,
+            "zipfile.ZipFile",
+        ),
+    ),
 )
-from tests.architecture.topology_helpers import call_name
+def test_statically_explicit_physical_writes_require_a_writer_owner(
+    source: str,
+    line: int,
+    target: str,
+) -> None:
+    path = Path("src/quant_research_platform/contracts/example.py")
+
+    assert governance_contract._writer_boundary_violations(
+        Path("."),
+        {path: source},
+    ) == [
+        f"{path}:{line}: direct writer outside owner: {target}"
+    ]
 
 
-def test_business_logic_does_not_bypass_persistent_writers() -> None:
-    hits: list[str] = []
-    for path in iter_governance_python_files():
-        if is_approved_writer_path(path):
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except SyntaxError as exc:
-            hits.append(f"{path}:{exc.lineno}: syntax_error: {exc.msg}")
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            called_name = call_name(node.func)
-            if called_name in FORBIDDEN_WRITER_METHODS:
-                hits.append(f"{path}:{node.lineno}: {called_name}")
-                continue
-            if is_open_write_call(node):
-                hits.append(f"{path}:{node.lineno}: open(...).write")
-                continue
-            if is_open_call(node.func):
-                mode = open_mode(node)
-                if mode is None:
-                    hits.append(f"{path}:{node.lineno}: open with dynamic mode")
-                elif is_write_mode(mode):
-                    hits.append(f"{path}:{node.lineno}: open mode={mode!r}")
+def test_writer_gate_allows_owner_writes_and_unproven_dynamic_calls() -> None:
+    owner = Path("src/quant_research_platform/storage/example.py")
+    ordinary = Path("src/quant_research_platform/contracts/example.py")
 
-    assert hits == []
+    assert governance_contract._writer_boundary_violations(
+        Path("."),
+        {
+            owner: "import pathlib\npathlib.Path('output').write_text('x')\n",
+            ordinary: (
+                "from pathlib import Path\n"
+                "def use(Path, open, value):\n"
+                "    Path('domain').write_text('domain value')\n"
+                "    open('domain', 'w')\n"
+                "    value.write_text('domain value')\n"
+                "    return getattr(value, 'write_text')('domain value')\n"
+            ),
+        },
+    ) == []
 
-def test_retired_handoff_receipt_writers_are_not_approved_writer_modules() -> None:
-    retired = {
-        Path(
-            ".agents/skills/quant-research-platform-maintenance/scripts/"
-            "verify_governance.py"
-        ),
-        Path(
-            ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-            "run_" + "package_" + "smoke.py"
-        ),
-        Path(
-            ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-            "collect_handoff_receipts.py"
-        ),
-        Path(
-            ".agents/skills/quant-research-platform-maintenance/scripts/"
-            "run_check.py"
-        ),
-        Path(
-            ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-            "proof_contract.py"
-        ),
-    }
 
-    assert APPROVED_WRITER_MODULES.isdisjoint(retired)
-
-def test_direct_write_gate_detects_chained_open_write() -> None:
-    tree = ast.parse("open('artifact.txt', 'w').write('unsafe')\n")
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-
-    assert any(is_open_write_call(call) for call in calls)
-
-def test_approved_writer_signatures_do_not_accept_arbitrary_physical_roots() -> None:
-    writer_arg_sets = (
-        function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_stage_profile_outputs"),
-        function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_prediction_outputs"),
-        function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_evaluation_outputs"),
+def test_read_only_file_calls_are_not_writer_bypasses() -> None:
+    path = Path("src/quant_research_platform/contracts/example.py")
+    source = (
+        "import zipfile\n"
+        "open('input', 'r')\n"
+        "zipfile.ZipFile('input')\n"
     )
 
-    assert "output_dir" not in class_field_names(RUNTIME_PROFILING, "ProfileConfig")
-    for arg_names in writer_arg_sets:
-        assert "".join(("output_", "root")) not in arg_names
-        assert "output_dir" not in arg_names
+    assert governance_contract._writer_boundary_violations(
+        Path("."),
+        {path: source},
+    ) == []

@@ -10,7 +10,6 @@ from quant_research_platform.workflows.local_verification_layout import (
     LocalVerificationLayout,
 )
 from tests.workflows.local_verification_fixtures import (
-    LEGACY_RSS_PEAK_FIELD,
     fake_evaluation_result,
     fake_portfolio_result,
     fake_prediction_result,
@@ -38,7 +37,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     evaluation_run_ids: list[str] = []
     prediction_ids: list[str] = []
     portfolio_ids: list[str] = []
-    original_write_summary = module.write_run_summary_markdown
+    original_write_summary = module.write_markdown_evidence
     original_replace_json = module.replace_qrp_json
 
     def track_summary_publish(path, text):
@@ -52,7 +51,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
             publish_order.append("completed_run")
         return original_replace_json(path, payload)
 
-    monkeypatch.setattr(module, "write_run_summary_markdown", track_summary_publish)
+    monkeypatch.setattr(module, "write_markdown_evidence", track_summary_publish)
     monkeypatch.setattr(module, "replace_qrp_json", track_run_publish)
 
     def assemble_dataset(**kwargs):
@@ -196,7 +195,6 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     )
     assert "validation_summary" in timing_steps
     assert "rss_start_end_max_mb" in validation_record
-    assert LEGACY_RSS_PEAK_FIELD not in validation_record
     assert {path.name for path in run_root.iterdir()} == {
         "data",
         "logs",

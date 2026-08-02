@@ -4,11 +4,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.compute.backends import (
-    DATAFRAME_BACKEND,
-    SUPPORTED_BACKENDS,
-    TENSOR_BACKEND,
-)
 from quant_research_platform.compute.dataframe.cross_section import (
     compute_ic_and_grouped_label_values,
     summarize_group_spread,
@@ -19,12 +14,6 @@ from quant_research_platform.compute.panels import (
     validate_compute_panel,
 )
 from tests.helpers.compute_inputs import make_perfect_cross_section_compute_panel
-
-
-def test_backend_constants_import_from_backend_owner() -> None:
-    assert DATAFRAME_BACKEND == "dataframe"
-    assert TENSOR_BACKEND == "tensor"
-    assert SUPPORTED_BACKENDS == {DATAFRAME_BACKEND, TENSOR_BACKEND}
 
 
 def test_validate_compute_panel_normalizes_and_sorts_valid_panel() -> None:
@@ -290,6 +279,4 @@ def test_summarize_group_spread_uses_dataframe_aggregation(monkeypatch) -> None:
 
     summary = summarize_group_spread(grouped_label_values)
 
-    assert summary.iloc[0]["top_bottom_label_value_spread_mean"] == pytest.approx(
-        0.015
-    )
+    assert summary.iloc[0]["top_bottom_label_value_spread_mean"] == pytest.approx(0.015)

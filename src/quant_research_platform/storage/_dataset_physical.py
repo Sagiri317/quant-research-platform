@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
+import stat
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -14,6 +16,9 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from quant_research_platform.storage._dataset_paths import require_unaliased_path
+from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
+
 
 @dataclass(frozen=True, slots=True)
 class DatasetFileIdentity:
@@ -21,6 +26,15 @@ class DatasetFileIdentity:
     inode: int
     size: int
     modified_ns: int
+
+
+def dataset_file_identity_from_stat(value: os.stat_result) -> DatasetFileIdentity:
+    return DatasetFileIdentity(
+        device=int(value.st_dev),
+        inode=int(value.st_ino),
+        size=int(value.st_size),
+        modified_ns=int(value.st_mtime_ns),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,8 +47,40 @@ class DatasetPartMetadata:
     logical_dtype_payload: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedMembershipValues:
+    values: pa.Array
+    max_scalar_bytes: int
+    retained_memory_bytes: int
+
+
 def dataset_file_identity(path: Path) -> DatasetFileIdentity:
-    return _identity_from_stat(Path(path).stat())
+    candidate = require_unaliased_path(
+        Path(path),
+        error="invalid_dataset_part_files",
+    )
+    try:
+        before = candidate.lstat()
+    except OSError as exc:
+        raise ValueError("invalid_dataset_part_files") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or int(before.st_ino) <= 0
+        or int(before.st_nlink) != 1
+    ):
+        raise ValueError("invalid_dataset_part_files")
+    identity = dataset_file_identity_from_stat(before)
+    try:
+        after = candidate.lstat()
+    except OSError as exc:
+        raise ValueError("invalid_dataset_part_files") from exc
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or int(after.st_nlink) != 1
+        or dataset_file_identity_from_stat(after) != identity
+    ):
+        raise ValueError("invalid_dataset_part_files")
+    return identity
 
 
 def inspect_dataset_part(
@@ -52,6 +98,7 @@ def iter_dataset_part_batches(
     *,
     expected_identity: DatasetFileIdentity | None,
     target_chunk_bytes: int,
+    operation_headroom_bytes: int | None = None,
     columns: tuple[str, ...] | None = None,
     parquet_filters: list[tuple[str, str, Any]] | None = None,
     row_groups: tuple[int, ...] | None = None,
@@ -60,10 +107,20 @@ def iter_dataset_part_batches(
 ) -> Iterator[pa.RecordBatch]:
     """Decode one part once while binding metadata and bytes to one handle."""
 
-    if isinstance(target_chunk_bytes, bool) or not isinstance(
-        target_chunk_bytes, int
-    ) or target_chunk_bytes <= 0:
+    if (
+        isinstance(target_chunk_bytes, bool)
+        or not isinstance(target_chunk_bytes, int)
+        or target_chunk_bytes <= 0
+    ):
         raise ValueError("invalid_target_chunk_bytes")
+    if parquet_filters and operation_headroom_bytes is None:
+        raise DatasetReadCapacityExceeded("dataset_filter_operation_headroom_required")
+    if source_batch_rows is not None and (
+        isinstance(source_batch_rows, bool)
+        or not isinstance(source_batch_rows, int)
+        or source_batch_rows <= 0
+    ):
+        raise ValueError("invalid_source_batch_rows")
     with _opened_parquet(path, expected_identity=expected_identity) as opened:
         parquet_file, identity = opened
         metadata = _part_metadata(
@@ -83,10 +140,29 @@ def iter_dataset_part_batches(
             if row_groups is None
             else list(row_groups)
         )
-        batch_rows = source_batch_rows or _target_batch_rows(
+        admitted_batch_rows = _target_batch_rows(
             parquet_file,
             columns=selected_columns,
             target_chunk_bytes=target_chunk_bytes,
+            operation_headroom_bytes=(
+                operation_headroom_bytes if parquet_filters else None
+            ),
+            membership=any(
+                operator == "in" for _, operator, _ in parquet_filters or ()
+            ),
+            membership_max_scalar_bytes=max(
+                (
+                    _membership_max_scalar_bytes(value)
+                    for _, operator, value in parquet_filters or ()
+                    if operator == "in"
+                ),
+                default=0,
+            ),
+        )
+        batch_rows = (
+            admitted_batch_rows
+            if source_batch_rows is None
+            else min(source_batch_rows, admitted_batch_rows)
         )
         for raw_batch in parquet_file.iter_batches(
             batch_size=batch_rows,
@@ -94,11 +170,17 @@ def iter_dataset_part_batches(
             columns=list(selected_columns),
             use_threads=False,
         ):
-            filtered = _filter_arrow_batch(raw_batch, parquet_filters)
+            filtered = _filter_arrow_batch(
+                raw_batch,
+                parquet_filters,
+                operation_headroom_bytes=operation_headroom_bytes,
+            )
+            del raw_batch
             yield from _bounded_arrow_batches(
                 filtered,
                 target_chunk_bytes=target_chunk_bytes,
             )
+            del filtered
 
 
 @contextmanager
@@ -108,10 +190,13 @@ def _opened_parquet(
     expected_identity: DatasetFileIdentity | None,
 ) -> Iterator[tuple[pq.ParquetFile, DatasetFileIdentity]]:
     resolved = Path(path)
+    path_identity = dataset_file_identity(resolved)
+    if expected_identity is not None and path_identity != expected_identity:
+        raise ValueError("dataset_file_identity_changed")
     handle = resolved.open("rb")
     try:
-        before = _identity_from_stat(os.fstat(handle.fileno()))
-        if expected_identity is not None and before != expected_identity:
+        before = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+        if before != path_identity or dataset_file_identity(resolved) != before:
             raise ValueError("dataset_file_identity_changed")
         parquet_file = pq.ParquetFile(handle)
         try:
@@ -128,7 +213,7 @@ def _opened_parquet(
                     pass
             else:
                 try:
-                    after = _identity_from_stat(os.fstat(handle.fileno()))
+                    after = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
                 except BaseException:
                     try:
                         parquet_file.close()
@@ -136,14 +221,20 @@ def _opened_parquet(
                         pass
                     raise
                 parquet_file.close()
-                if after != before:
+                if after != before or dataset_file_identity(resolved) != before:
                     raise ValueError("dataset_file_identity_changed")
     finally:
         if sys.exception() is None:
             handle.close()
+            if dataset_file_identity(resolved) != path_identity:
+                raise ValueError("dataset_file_identity_changed")
         else:
             try:
                 handle.close()
+            except BaseException:
+                pass
+            try:
+                dataset_file_identity(resolved)
             except BaseException:
                 pass
 
@@ -171,20 +262,14 @@ def _part_metadata(
     )
 
 
-def _identity_from_stat(value: os.stat_result) -> DatasetFileIdentity:
-    return DatasetFileIdentity(
-        device=int(value.st_dev),
-        inode=int(value.st_ino),
-        size=int(value.st_size),
-        modified_ns=int(value.st_mtime_ns),
-    )
-
-
 def _target_batch_rows(
     parquet_file: pq.ParquetFile,
     *,
     columns: tuple[str, ...],
     target_chunk_bytes: int,
+    operation_headroom_bytes: int | None = None,
+    membership: bool = False,
+    membership_max_scalar_bytes: int = 0,
 ) -> int:
     positions = _projected_parquet_leaf_positions(parquet_file, columns)
     maximum_row_bytes = 1
@@ -198,10 +283,33 @@ def _target_batch_rows(
         )
         maximum_row_bytes = max(
             maximum_row_bytes,
-            (projected_bytes + int(row_group.num_rows) - 1)
-            // int(row_group.num_rows),
+            (projected_bytes + int(row_group.num_rows) - 1) // int(row_group.num_rows),
         )
-    return max(1, target_chunk_bytes // maximum_row_bytes)
+    target_rows = max(1, target_chunk_bytes // maximum_row_bytes)
+    if operation_headroom_bytes is None:
+        return target_rows
+    low = 1
+    high = target_rows
+    admitted = 0
+    while low <= high:
+        candidate = (low + high) // 2
+        source_batch_bytes = candidate * maximum_row_bytes
+        required_bytes = _filter_working_set_bytes(
+            source_batch_bytes=source_batch_bytes,
+            row_count=candidate,
+            membership=membership,
+            membership_max_scalar_bytes=membership_max_scalar_bytes,
+        )
+        if required_bytes <= operation_headroom_bytes:
+            admitted = candidate
+            low = candidate + 1
+        else:
+            high = candidate - 1
+    if admitted == 0:
+        raise DatasetReadCapacityExceeded(
+            "dataset_filter_working_set_exceeds_task_memory_budget"
+        )
+    return admitted
 
 
 def _projected_parquet_leaf_positions(
@@ -305,6 +413,19 @@ def _row_group_may_match(
             return minimum < value
         if operator == "==":
             return minimum <= value <= maximum
+        if operator == "in":
+            if not isinstance(value, PreparedMembershipValues):
+                raise ValueError("invalid_dataset_physical_filter_value")
+            values = value.values
+            low = 0
+            high = len(values)
+            while low < high:
+                middle = (low + high) // 2
+                if values[middle].as_py() < minimum:
+                    low = middle + 1
+                else:
+                    high = middle
+            return low < len(values) and values[low].as_py() <= maximum
     except (TypeError, ValueError):
         return True
     raise ValueError("unsupported_dataset_physical_filter")
@@ -313,8 +434,11 @@ def _row_group_may_match(
 def _filter_arrow_batch(
     batch: pa.RecordBatch,
     filters: list[tuple[str, str, Any]] | None,
+    *,
+    operation_headroom_bytes: int | None = None,
 ) -> pa.RecordBatch:
-    mask: pa.Array | None = None
+    if filters and operation_headroom_bytes is None:
+        raise DatasetReadCapacityExceeded("dataset_filter_operation_headroom_required")
     operations = {
         ">=": pc.greater_equal,
         ">": pc.greater,
@@ -323,12 +447,113 @@ def _filter_arrow_batch(
         "==": pc.equal,
     }
     for column, operator, value in filters or ():
-        operation = operations.get(operator)
-        if operation is None:
+        if operator == "in":
+            if not isinstance(value, PreparedMembershipValues):
+                raise ValueError("invalid_dataset_physical_filter_value")
+        elif operator not in operations:
             raise ValueError("unsupported_dataset_physical_filter")
-        condition = operation(batch.column(batch.schema.get_field_index(column)), value)
-        mask = condition if mask is None else pc.and_kleene(mask, condition)
-    return batch if mask is None else batch.filter(mask)
+        _require_filter_batch_capacity(
+            batch,
+            operation_headroom_bytes=operation_headroom_bytes,
+            membership=operator == "in",
+            membership_max_scalar_bytes=(
+                _membership_max_scalar_bytes(value) if operator == "in" else 0
+            ),
+        )
+        if operator == "in":
+            column_values = batch.column(batch.schema.get_field_index(column))
+            values = value.values
+            if len(values) == 0:
+                return batch.slice(0, 0)
+            row_count = batch.num_rows
+            low = pa.repeat(pa.scalar(0, type=pa.int32()), row_count)
+            high = pa.repeat(pa.scalar(len(values), type=pa.int32()), row_count)
+            maximum_index = pa.scalar(len(values) - 1, type=pa.int32())
+            one = pa.scalar(1, type=pa.int32())
+            for _ in range(math.ceil(math.log2(len(values) + 1))):
+                middle = pc.shift_right(pc.add(low, high), 1)
+                candidate_positions = pc.min_element_wise(middle, maximum_index)
+                candidates = pc.take(values, candidate_positions)
+                at_or_below = pc.less_equal(column_values, candidates)
+                next_high = pc.if_else(at_or_below, middle, high)
+                next_low = pc.if_else(at_or_below, low, pc.add(middle, one))
+                del low, high, middle, candidate_positions, candidates, at_or_below
+                low, high = next_low, next_high
+            candidate_positions = pc.min_element_wise(low, maximum_index)
+            candidates = pc.take(values, candidate_positions)
+            condition = pc.and_kleene(
+                pc.less(low, pa.scalar(len(values), type=pa.int32())),
+                pc.equal(column_values, candidates),
+            )
+            del column_values, values, low, high, candidate_positions, candidates
+            filtered = batch.filter(condition)
+            del batch, condition
+            batch = filtered
+            del filtered
+            continue
+        condition = operations[operator](
+            batch.column(batch.schema.get_field_index(column)), value
+        )
+        filtered = batch.filter(condition)
+        del batch, condition
+        batch = filtered
+        del filtered
+    return batch
+
+
+def _require_filter_batch_capacity(
+    batch: pa.RecordBatch,
+    *,
+    operation_headroom_bytes: int | None,
+    membership: bool,
+    membership_max_scalar_bytes: int = 0,
+) -> None:
+    if operation_headroom_bytes is None:
+        return
+    required_bytes = _filter_working_set_bytes(
+        source_batch_bytes=batch.get_total_buffer_size(),
+        row_count=batch.num_rows,
+        membership=membership,
+        membership_max_scalar_bytes=membership_max_scalar_bytes,
+    )
+    if required_bytes > operation_headroom_bytes:
+        raise DatasetReadCapacityExceeded(
+            "dataset_filter_working_set_exceeds_task_memory_budget"
+        )
+
+
+def _filter_working_set_bytes(
+    *,
+    source_batch_bytes: int,
+    row_count: int,
+    membership: bool,
+    membership_max_scalar_bytes: int = 0,
+) -> int:
+    boolean_buffer_bytes = 2 * ((row_count + 7) // 8)
+    if membership:
+        integer_array_bytes = row_count * 4
+        candidate_array_bytes = row_count * membership_max_scalar_bytes
+        search_index_state_bytes = 8 * integer_array_bytes
+        search_condition_state_bytes = 4 * boolean_buffer_bytes
+        condition_state_bytes = (
+            search_index_state_bytes
+            + candidate_array_bytes
+            + search_condition_state_bytes
+        )
+    else:
+        condition_state_bytes = boolean_buffer_bytes
+    filtered_output_bytes = source_batch_bytes
+    publication_state_bytes = boolean_buffer_bytes + filtered_output_bytes
+    return source_batch_bytes + max(
+        condition_state_bytes,
+        publication_state_bytes,
+    )
+
+
+def _membership_max_scalar_bytes(value: PreparedMembershipValues) -> int:
+    if not isinstance(value, PreparedMembershipValues):
+        raise TypeError("prepared_membership_values_required")
+    return value.max_scalar_bytes
 
 
 def _bounded_arrow_batches(
@@ -345,7 +570,7 @@ def _bounded_arrow_batches(
             yield candidate
             continue
         if candidate.num_rows == 1:
-            raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+            raise DatasetReadCapacityExceeded("dataset_row_exceeds_target_chunk_bytes")
         left_rows = candidate.num_rows // 2
         pending.append(candidate.slice(left_rows))
         pending.append(candidate.slice(0, left_rows))

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import inspect
 import json
+import os
+import subprocess
 from copy import deepcopy
 from pathlib import Path
 
@@ -25,6 +26,90 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.workflows.diagnostics import schema_inventory
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or not hasattr(Path, "is_junction"),
+    reason="Windows junction capability required",
+)
+def test_schema_inventory_does_not_descend_nested_junction(tmp_path: Path) -> None:
+    layer_root = tmp_path / "data" / "processed"
+    layer_root.mkdir(parents=True)
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "spec.json").write_text("{}", encoding="utf-8")
+    junction = layer_root / "nested"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip("junction_not_available")
+
+    assert tuple(schema_inventory._iter_dataset_artifact_roots(tmp_path)) == ()
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or not hasattr(Path, "is_junction"),
+    reason="Windows junction capability required",
+)
+def test_schema_inventory_rejects_junction_project_root(tmp_path: Path) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    root = tmp_path / "project"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(root), str(external)],
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip("junction_not_available")
+
+    with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
+        tuple(schema_inventory._iter_dataset_artifact_roots(root))
+
+
+def test_schema_inventory_rejects_aliased_data_ancestor(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    external = tmp_path / "external"
+    (external / "processed").mkdir(parents=True)
+    try:
+        (root / "data").symlink_to(external, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory_symlink_not_available: {exc}")
+
+    with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
+        tuple(schema_inventory._iter_dataset_artifact_roots(root))
+
+
+def test_schema_inventory_rejects_alias_above_supplied_root(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    (target / "project" / "data" / "processed").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory_symlink_not_available: {exc}")
+
+    with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
+        tuple(schema_inventory._iter_dataset_artifact_roots(alias / "project"))
+
+
+def test_schema_inventory_rejects_spec_symlink(tmp_path: Path) -> None:
+    layer_root = tmp_path / "data" / "processed"
+    artifact_root = layer_root / "artifact"
+    artifact_root.mkdir(parents=True)
+    external = tmp_path / "spec.json"
+    external.write_text("{}", encoding="utf-8")
+    try:
+        (artifact_root / "spec.json").symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlink_not_available: {exc}")
+
+    with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
+        tuple(schema_inventory._iter_dataset_artifact_roots(tmp_path))
 
 
 def test_schema_inventory_uses_storage_exact_duplicate_fact(
@@ -74,14 +159,45 @@ def test_schema_inventory_uses_storage_exact_duplicate_fact(
     assert payload["datasets"][0]["duplicate_primary_key_count"] == 0
 
 
-def test_schema_inventory_uses_policy_bound_physical_batches() -> None:
-    source = inspect.getsource(schema_inventory._aggregate_dataset_stats)
+def test_schema_inventory_closes_chunks_on_retained_consumer_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame({"timestamp": pd.to_datetime(["2026-01-01"])})
+    closed: list[bool] = []
 
-    assert "DatasetReadMode.CHUNKED" not in source
-    assert "target_chunk_bytes=resource_policy.payload_target_bytes" in source
-    assert "ExactPrimaryKeyIndex" not in source
-    assert "sqlite_cache_bytes" not in source
-    assert "duplicate_primary_key_count = exact_duplicate_count" in source
+    def chunks():
+        try:
+            yield frame
+        finally:
+            closed.append(True)
+
+    def fail_in_consumer(*_args, **_kwargs):
+        raise KeyError("hostile_consumer_error")
+
+    monkeypatch.setattr(
+        schema_inventory,
+        "iter_dataset_chunks",
+        lambda *_a, **_k: chunks(),
+    )
+    monkeypatch.setattr(schema_inventory.pd, "to_datetime", fail_in_consumer)
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={},
+    )
+
+    with pytest.raises(KeyError) as retained:
+        schema_inventory._aggregate_dataset_stats(
+            object(),
+            ("timestamp",),
+            (),
+            important_null_count_columns=frozenset(),
+            exact_duplicate_count=0,
+            resource_policy=policy,
+            retained_payload_bytes=0,
+        )
+
+    assert retained.value.__traceback__ is not None
+    assert closed == [True]
 
 
 def test_schema_inventory_captures_one_policy_for_all_datasets(
@@ -94,6 +210,7 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
     )
     captures = {"count": 0}
     observed_policies: list[RuntimeResourcePolicy] = []
+    observed_retained_bytes: list[int] = []
 
     def capture_policy() -> RuntimeResourcePolicy:
         captures["count"] += 1
@@ -105,10 +222,12 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
         *,
         important_null_count_columns: frozenset[str],
         resource_policy: RuntimeResourcePolicy,
+        retained_payload_bytes: int,
     ) -> dict[str, object]:
         assert important_null_count_columns == frozenset()
         assert active_runtime_resource_policy() is resource_policy
         observed_policies.append(resource_policy)
+        observed_retained_bytes.append(retained_payload_bytes)
         return {"logical_relative_root": artifact_root.name}
 
     monkeypatch.setattr(
@@ -127,20 +246,46 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
 
     assert captures["count"] == 1
     assert observed_policies == [policy, policy]
+    assert observed_retained_bytes[0] == 0
+    assert observed_retained_bytes[1] > 0
     assert [item["logical_relative_root"] for item in payload["datasets"]] == [
         "dataset-a",
         "dataset-b",
     ]
 
 
-def test_schema_inventory_reuses_session_duplicate_count() -> None:
-    source = inspect.getsource(schema_inventory._inventory_item) + inspect.getsource(
-        schema_inventory._inventory_item_from_session
+def test_schema_inventory_rejects_accumulated_items_over_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=1_000,
+        environ={},
+    )
+    monkeypatch.setattr(
+        schema_inventory,
+        "active_runtime_resource_policy",
+        lambda: policy,
+    )
+    monkeypatch.setattr(
+        schema_inventory,
+        "_iter_dataset_artifact_roots",
+        lambda _root: (tmp_path / "dataset-a", tmp_path / "dataset-b"),
+    )
+    monkeypatch.setattr(
+        schema_inventory,
+        "_inventory_item",
+        lambda _project_root, artifact_root, **_kwargs: {
+            "logical_relative_root": artifact_root.name,
+            "payload": "x" * 500,
+        },
     )
 
-    assert "inspect_dataset_session(" in source
-    assert 'inspection.manifest["duplicate_primary_key_count"]' in source
-    assert "ExactPrimaryKeyIndex" not in source
+    with pytest.raises(
+        ValueError,
+        match="schema_inventory_payload_exceeds_task_memory_budget",
+    ):
+        schema_inventory.build_schema_inventory_payload(tmp_path)
 
 
 def test_schema_inventory_rejects_replacement_between_open_and_stats(
@@ -209,7 +354,7 @@ def test_schema_inventory_rejects_replacement_between_open_and_stats(
 
     with pytest.raises(
         ValueError,
-        match="dataset_manifest_identity_changed",
+        match="dataset_(spec|manifest)_identity_changed",
     ):
         schema_inventory.build_schema_inventory_payload(tmp_path)
 

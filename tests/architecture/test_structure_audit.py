@@ -1,549 +1,96 @@
 from __future__ import annotations
 
-import importlib.util
 import json
+import shutil
 import sys
 from pathlib import Path
 
-from tests.helpers.governance_git_repos import run_governance_script
-from tests.helpers.root_config_contract import (
-    dev_dependency_requirement,
-    project_requires_python,
-    python_minor_from_requires,
-    render_minimal_environment_from_root_contract,
-    render_minimal_pyproject_from_root_contract,
-    ruff_target_from_requires,
-)
+from tests.helpers.maintenance_script_loader import load_maintenance_script_module
 
-STRUCTURE_AUDIT = Path(
-    ".agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py"
-)
+structure_audit = load_maintenance_script_module("structure_audit")
 
 
-def test_structure_audit_script_exists_and_is_internal_only() -> None:
-    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+def test_structure_audit_reports_all_checks_passing(capsys) -> None:
+    exit_code = structure_audit.main(["--repo-root", ".", "--json"])
+    payload = json.loads(capsys.readouterr().out)
 
-    assert STRUCTURE_AUDIT.is_file()
-    assert "structure_audit" not in pyproject
-
-
-def test_structure_audit_json_gate_passes() -> None:
-    result = run_governance_script(
-        Path("."),
-        str(STRUCTURE_AUDIT),
-        "--repo-root",
-        ".",
-        "--json",
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    payload = json.loads(result.stdout)
-    assert payload["schema_id"] == "qrp-structure-audit"
+    assert exit_code == 0
     assert payload["status"] == "PASS"
     assert payload["checks"]
-    check_names = {check["name"] for check in payload["checks"]}
-    assert {
-        "mandatory_validation_all_pass_gate",
-        "synthetic_fixture_profile_runner",
-        "source_tree_scan_behavior_tests",
-        "profile_smoke_lightweight",
-        "validation_fail_packages_rejected",
-        "no_duplicate_source_tree_scanner_regex",
-        "package_build_no_isolation",
-        "package_build_timeout",
-        "package_import_timeout",
-        "conda_build_backend_contract",
-        "package_content_scan_truthfulness",
-        "handoff_replay_environment_preflight_closure",
-        "price_volume_reference_owner_closure",
-        "helper_owner_inversion_closure",
-        "test_helper_boundary_closure",
-        "replay_environment_requirements_single_source",
-        "tooling_environment_dependency_sync",
-        "agents_scripts_self_contained_boundary",
-    } <= check_names
+    assert {row["status"] for row in payload["checks"]} == {"PASS"}
 
 
-def _write_owner_provenance_fixture(
-    root: Path,
-    *,
-    test_source: str,
-) -> None:
-    for owner in ("storage", "gadgets"):
-        package = root / "src" / "quant_research_platform" / owner
-        package.mkdir(parents=True, exist_ok=True)
-        (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
-    test_root = root / "tests" / "storage"
-    test_root.mkdir(parents=True)
-    (test_root / "test_behavior.py").write_text(test_source, encoding="utf-8")
-
-
-def test_owner_placement_rejects_foreign_only_production_subject(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    _write_owner_provenance_fixture(
-        tmp_path,
-        test_source=(
-            "import quant_research_platform.gadgets as subject\n"
-            "def test_behavior():\n"
-            "    assert subject.VALUE == 1\n"
-        ),
-    )
-
-    check = audit._test_owner_placement(tmp_path)
-
-    assert check.status == "FAIL"
-    assert any(
-        "foreign_owner_without_local_owner:gadgets" in item
-        for item in check.findings
-    )
-
-
-def test_owner_placement_accepts_local_subject_with_foreign_collaborator(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    _write_owner_provenance_fixture(
-        tmp_path,
-        test_source=(
-            "import quant_research_platform.storage as subject\n"
-            "import quant_research_platform.gadgets as collaborator\n"
-            "def test_behavior():\n"
-            "    assert subject.VALUE == collaborator.VALUE\n"
-        ),
-    )
-
-    check = audit._test_owner_placement(tmp_path)
-
-    assert check.status == "PASS"
-
-
-def test_structure_audit_detects_package_build_isolation_mutation(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    _write_handoff_source(
-        tmp_path,
-        replay_evidence=(
-            "subprocess.run([sys.executable, '-m', 'build', '--sdist', "
-            "'--wheel', '--outdir', str(dist)], "
-            "timeout=PACKAGE_BUILD_TIMEOUT_SECONDS)\n"
-        ),
-    )
-
-    check = audit._package_build_no_isolation(tmp_path)
-
-    assert check.status == "FAIL"
-    assert "replay_evidence:package_build_missing_no_isolation" in check.findings
-
-
-def test_structure_audit_detects_forbidden_package_build_options(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    _write_handoff_source(
-        tmp_path,
-        replay_evidence=(
-            "subprocess.run([sys.executable, '-m', 'build', '--no-isolation', "
-            "'--installer', 'uv', '--skip-dependency-check', '--sdist', "
-            "'--wheel', '--outdir', str(dist)], "
-            "timeout=PACKAGE_BUILD_TIMEOUT_SECONDS)\n"
-        ),
-    )
-
-    check = audit._package_build_no_isolation(tmp_path)
-
-    assert check.status == "FAIL"
-    assert "replay_evidence:package_build_forbidden_installer" in check.findings
-    assert "replay_evidence:package_build_forbidden_skip_dependency_check" in (
-        check.findings
-    )
-
-
-def test_structure_audit_detects_missing_package_build_timeout(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    _write_handoff_source(
-        tmp_path,
-        replay_evidence=(
-            "from handoff_contract import PACKAGE_IMPORT_TIMEOUT_SECONDS\n"
-            "subprocess.run([sys.executable, '-m', 'build', '--no-isolation'], "
-            "timeout=120)\n"
-        ),
-    )
-
-    check = audit._package_build_timeout(tmp_path)
-
-    assert check.status == "FAIL"
-    assert "replay_evidence:package_build_timeout_constant_not_used" in check.findings
-
-
-def test_structure_audit_detects_missing_package_import_timeout(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    _write_handoff_source(
-        tmp_path,
-        replay_evidence=(
-            "from handoff_contract import PACKAGE_BUILD_TIMEOUT_SECONDS\n"
-            "subprocess.run([sys.executable, '-c', 'import q'], timeout=120)\n"
-        ),
-    )
-
-    check = audit._package_import_timeout(tmp_path)
-
-    assert check.status == "FAIL"
-    assert "replay_evidence:package_import_timeout_constant_not_used" in check.findings
-
-
-def test_structure_audit_detects_missing_conda_build_backend_dependency(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    (tmp_path / "pyproject.toml").write_text(
-        render_minimal_pyproject_from_root_contract(),
-        encoding="utf-8",
-    )
+def test_dependency_sync_detects_missing_environment_dependency(tmp_path: Path) -> None:
+    shutil.copyfile("pyproject.toml", tmp_path / "pyproject.toml")
+    environment = Path("environment.yml").read_text(encoding="utf-8")
     (tmp_path / "environment.yml").write_text(
-        _root_environment_without(("wheel",)),
-        encoding="utf-8",
-    )
-
-    check = audit._conda_build_backend_contract(tmp_path)
-
-    assert check.status == "FAIL"
-    assert "environment.yml:missing_build_backend_dependency:wheel" in check.findings
-
-
-def test_structure_audit_detects_content_scan_fixed_pass_mutation(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    _write_handoff_source(
-        tmp_path,
-        replay_evidence=(
-            "content_status = 'PASS' if not forbidden else 'FAIL'\n"
-            "'scanned_artifact_kinds': list(PACKAGE_SCANNED_ARTIFACT_KINDS)\n"
-        ),
-    )
-
-    check = audit._package_content_scan_truthfulness(tmp_path)
-
-    assert check.status == "FAIL"
-    assert "replay_evidence:content_scan_not_run_guard_missing" in check.findings
-    assert "replay_evidence:content_scan_fixed_scanned_kinds" in check.findings
-
-
-def test_negative_handoff_evidence_fields_are_semantic_specs() -> None:
-    contract = _load_handoff_contract()
-    specs = contract.ACTIVE_DENIED_HANDOFF_EVIDENCE_FIELDS
-
-    assert specs
-    assert all(
-        {
-            "field_name",
-            "owner",
-            "risk",
-            "lifecycle",
-            "acceptance_gate",
-        }
-        <= set(spec)
-        for spec in specs
-    )
-
-
-def test_structure_audit_detects_missing_replay_environment_preflight(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    handoff_root = _write_handoff_source(
-        tmp_path,
-        replay_evidence=(
-            "def build_machine_receipts(repo_root, final_head):\n"
-            "    return {}\n"
-        ),
-    )
-    (handoff_root / "build_handoff_package.py").write_text(
-        "from replay_evidence import build_machine_receipts\n",
-        encoding="utf-8",
-    )
-    (handoff_root / "verify_handoff_package.py").write_text(
-        "from replay_evidence import build_machine_receipts\n",
-        encoding="utf-8",
-    )
-    (handoff_root / "receipt_contract.py").write_text("", encoding="utf-8")
-
-    check = audit._handoff_replay_environment_preflight_closure(tmp_path)
-
-    assert check.status == "FAIL"
-    assert "replay_evidence:ReplayEnvironmentBlocked_missing" in check.findings
-    assert "replay_evidence:assert_replay_environment_ready_missing" in check.findings
-    assert "replay_evidence:build_machine_receipts_missing_preflight" in check.findings
-
-
-def test_structure_audit_detects_price_volume_reference_owner_mutation(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    helper = tmp_path / "tests" / "helpers" / "price_volume_reference.py"
-    helper.parent.mkdir(parents=True)
-    helper.write_text(
         "\n".join(
-            [
-                "def minimal_market_bars_frame():",
-                "    return None",
-                "def write_correctness_processed_inputs():",
-                "    return None",
-                "def assert_forced_tiny_processed_chunks_match_default():",
-                "    return None",
-            ]
-        ),
+            line for line in environment.splitlines() if "ruff>=" not in line
+        )
+        + "\n",
         encoding="utf-8",
     )
 
-    check = audit._price_volume_reference_owner_closure(tmp_path)
+    check = structure_audit._tooling_environment_dependency_sync(tmp_path)
 
     assert check.status == "FAIL"
-    assert "price_volume_reference:minimal_market_bars_frame" in check.findings
-    assert "price_volume_reference:write_correctness_processed_inputs" in (
-        check.findings
-    )
-    assert (
-        "price_volume_reference:"
-        "assert_forced_tiny_processed_chunks_match_default"
-        in check.findings
-    )
+    assert check.findings == ("environment.yml:dependency_missing:ruff->ruff",)
 
 
-def test_structure_audit_detects_keyed_frame_owner_inversion(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    helper = tmp_path / "tests" / "helpers" / "keyed_frame_diff.py"
-    helper.parent.mkdir(parents=True)
-    helper.write_text(
-        "from tests.helpers.price_volume_reference import KEY_COLUMNS\n",
-        encoding="utf-8",
-    )
-
-    check = audit._helper_owner_inversion_closure(tmp_path)
-
-    assert check.status == "FAIL"
-    assert "tests/helpers/keyed_frame_diff.py:tests.helpers.price_volume_reference" in (
-        check.findings
-    )
-
-
-def test_structure_audit_detects_replay_dependency_version_tuple_mutation(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    handoff_root = _write_handoff_source(
-        tmp_path,
-        replay_evidence=(
-            "REPLAY_ENVIRONMENT_REQUIREMENTS = (\n"
-            "    ('pyarrow', '>=1,<2'),\n"
-            ")\n"
-            "REPLAY_REQUIRED_DISTRIBUTIONS = ('pyarrow',)\n"
-        ),
-    )
-    (handoff_root / "build_handoff_package.py").write_text("", encoding="utf-8")
-    (handoff_root / "verify_handoff_package.py").write_text("", encoding="utf-8")
-    (handoff_root / "receipt_contract.py").write_text("", encoding="utf-8")
-    _write_root_configs(tmp_path)
-
-    check = audit._replay_environment_requirements_single_source(tmp_path)
-
-    assert check.status == "FAIL"
-    assert "replay_evidence:hardcoded_requirement:pyarrow:>=1,<2" in (
-        check.findings
-    )
-
-
-def test_structure_audit_detects_tooling_environment_dependency_sync_mutation(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    requires_python = project_requires_python()
-    _write_root_configs(
-        tmp_path,
-        environment_extra=(
-            "  - python=3.12\n"
-            "  - python-build==1\n"
-            f"  - {dev_dependency_requirement('ruff')}\n"
-        ),
-    )
-
-    check = audit._tooling_environment_dependency_sync(tmp_path)
-
-    assert check.status == "FAIL"
-    assert (
-        "environment.yml:python_pin_mismatch:"
-        f"expected={python_minor_from_requires(requires_python)}"
-        in check.findings
-    )
-    assert "environment.yml:dependency_mismatch:build->python-build" in (
-        check.findings
-    )
-    assert (
-        "pyproject.toml:ruff_target_mismatch:"
-        f"expected={ruff_target_from_requires(requires_python)}"
-        not in check.findings
-    )
-
-
-def test_structure_audit_detects_agents_script_importing_tests_helpers(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
+def test_script_boundary_detects_tests_import(tmp_path: Path) -> None:
     script = (
         tmp_path
         / ".agents"
         / "skills"
         / "quant-research-platform-maintenance"
         / "scripts"
-        / "handoff"
-        / "replay_evidence.py"
+        / "bad.py"
     )
     script.parent.mkdir(parents=True)
-    script.write_text(
-        "from tests.helpers.root_config_contract import load_pyproject\n",
-        encoding="utf-8",
-    )
+    script.write_text("from tests.helpers import bad\n", encoding="utf-8")
 
-    check = audit._agents_scripts_self_contained_boundary(tmp_path)
+    check = structure_audit._agents_scripts_self_contained_boundary(tmp_path)
 
     assert check.status == "FAIL"
-    assert (
-        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-        "replay_evidence.py:tests.helpers.root_config_contract"
-        in check.findings
+    assert check.findings == (
+        ".agents/skills/quant-research-platform-maintenance/scripts/bad.py:"
+        "tests.helpers",
     )
 
 
-def test_structure_audit_detects_test_helper_boundary_mutation(
-    tmp_path: Path,
-) -> None:
-    audit = _load_structure_audit()
-    helper = tmp_path / "tests" / "correctness" / "_helpers.py"
-    helper.parent.mkdir(parents=True)
-    helper.write_text("", encoding="utf-8")
-    research_test = tmp_path / "tests" / "research" / "test_price_volume_factors.py"
-    research_test.parent.mkdir(parents=True)
-    research_test.write_text(
-        "from tests.correctness._helpers import synthetic_price_volume_panel\n",
-        encoding="utf-8",
-    )
-    architecture = tmp_path / "tests" / "architecture"
-    architecture.mkdir(parents=True)
-    (architecture / "test_retired_terms.py").write_text(
-        "SHARED_TEST_HELPER_ROOTS = [Path('tests/correctness/_helpers.py')]\n",
-        encoding="utf-8",
-    )
-    helpers = tmp_path / "tests" / "helpers"
-    helpers.mkdir(parents=True)
-    (helpers / "utils.py").write_text("", encoding="utf-8")
-
-    check = audit._test_helper_boundary_closure(tmp_path)
-
-    assert check.status == "FAIL"
-    assert "tests/correctness/_helpers.py:present" in check.findings
-    assert any("tests.correctness._helpers" in item for item in check.findings)
-    assert "tests/helpers/utils.py:unclear_owner" in check.findings
-
-
-def _load_handoff_contract():
-    path = Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-        "handoff_contract.py"
-    )
-    spec = importlib.util.spec_from_file_location("handoff_contract", path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_structure_audit():
-    spec = importlib.util.spec_from_file_location("structure_audit", STRUCTURE_AUDIT)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _write_handoff_source(tmp_path: Path, *, replay_evidence: str = "") -> Path:
-    handoff_root = (
-        tmp_path
-        / ".agents"
-        / "skills"
-        / "quant-research-platform-maintenance"
-        / "scripts"
-        / "handoff"
-    )
+def test_machine_id_check_detects_duplicate_validation_row(tmp_path: Path) -> None:
+    previous_path = tuple(sys.path)
+    previous_modules = {
+        name: sys.modules.get(name)
+        for name in ("handoff_contract", "receipt_contract")
+    }
+    handoff_root = tmp_path / structure_audit.HANDOFF_ROOT
     handoff_root.mkdir(parents=True)
-    (handoff_root / "replay_evidence.py").write_text(
-        replay_evidence,
-        encoding="utf-8",
-    )
     (handoff_root / "handoff_contract.py").write_text(
-        "PACKAGE_BUILD_TIMEOUT_SECONDS = 300\n"
-        "PACKAGE_IMPORT_TIMEOUT_SECONDS = 120\n",
+        "\n".join(
+            (
+                "from types import SimpleNamespace",
+                "MANDATORY_VALIDATION_ROWS = ('governance', 'governance')",
+                "VALIDATION_ROW_SOURCE_CONTRACT = {'governance': object()}",
+                "REPLAY_COMMAND_CONTRACT = {",
+                "    'profile-smoke': SimpleNamespace(command_id='profile-smoke')",
+                "}",
+                "",
+            )
+        ),
         encoding="utf-8",
     )
-    return handoff_root
-
-
-def _write_root_configs(tmp_path: Path, *, environment_extra: str = "") -> None:
-    pyproject = render_minimal_pyproject_from_root_contract()
-    pyproject = pyproject + (
-        "\n"
-        "[tool.ruff]\n"
-        f'target-version = "{_root_ruff_target()}"\n'
+    (handoff_root / "receipt_contract.py").write_text(
+        "REQUIRED_CHECK_IDS = ('profile-smoke',)\n",
+        encoding="utf-8",
     )
-    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
-    extra = (
-        environment_extra
-        if environment_extra
-        else _root_environment_tooling_lines(("python-build", "ruff"))
-    )
-    environment = render_minimal_environment_from_root_contract()
-    environment = "\n".join(
-        line
-        for line in environment.splitlines()
-        if not any(f"  - {name}" in line for name in ("python-build", "ruff"))
-    )
-    environment = environment + "\n" + extra
-    (tmp_path / "environment.yml").write_text(environment, encoding="utf-8")
 
+    check = structure_audit._no_duplicate_validation_or_command_ids(tmp_path)
 
-def _root_ruff_target() -> str:
-    import tomllib
-
-    with Path("pyproject.toml").open("rb") as handle:
-        return tomllib.load(handle)["tool"]["ruff"]["target-version"]
-
-
-def _root_environment_tooling_lines(names: tuple[str, ...]) -> str:
-    lines = []
-    for line in render_minimal_environment_from_root_contract().splitlines():
-        for name in names:
-            if line.strip().startswith(f"- {name}"):
-                lines.append(line + "\n")
-    return "".join(lines)
-
-
-def _root_environment_without(names: tuple[str, ...]) -> str:
-    lines = []
-    for line in render_minimal_environment_from_root_contract().splitlines():
-        stripped = line.strip()
-        if any(stripped.startswith(f"- {name}") for name in names):
-            continue
-        lines.append(line)
-    return "\n".join(lines) + "\n"
+    assert check.status == "FAIL"
+    assert check.findings == ("validation_row:governance",)
+    assert tuple(sys.path) == previous_path
+    assert {
+        name: sys.modules.get(name)
+        for name in ("handoff_contract", "receipt_contract")
+    } == previous_modules

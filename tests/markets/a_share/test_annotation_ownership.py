@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import inspect
-from pathlib import Path
-
 import pandas as pd
 import pytest
 
 from quant_research_platform.markets.implementations.a_share.processed import (
-    annotations,
-    panels,
+    annotations as annotations,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    panels as panels,
 )
 from tests.helpers import frequency_ids
 from tests.helpers.synthetic_a_share import (
@@ -17,28 +16,6 @@ from tests.helpers.synthetic_a_share import (
     make_synthetic_a_share_trading_calendar,
     make_synthetic_market_bars_daily,
 )
-
-
-def test_panel_module_has_no_annotation_rule_helpers() -> None:
-    source = (
-        Path("src/quant_research_platform/markets/implementations/a_share")
-        / "processed/panels.py"
-    ).read_text(encoding="utf-8")
-    forbidden = (
-        "_add_one_word_limit_masks",
-        "_shifted_bool_mask",
-        "_bool_like_column",
-        "one_word_limit",
-        "can_enter",
-        "can_exit",
-        "eligible_base",
-        "eligible_after_listing_age",
-        "eligible_liquidity",
-        "next_bar_is_trading",
-        "next_bar_limit_status",
-    )
-
-    assert [token for token in forbidden if token in source] == []
 
 
 def test_market_panel_daily_schema_excludes_derived_annotation_masks() -> None:
@@ -286,24 +263,6 @@ def test_annotations_treat_null_limit_status_as_no_one_word_limit_signal() -> No
 
     assert result["can_enter"].tolist() == [True, True, False]
     assert result["can_exit"].tolist() == [True, True, False]
-
-
-def test_label_calculation_source_does_not_recompute_a_share_trading_rules() -> None:
-    from quant_research_platform.markets.implementations.a_share.labels import (
-        calculations,
-    )
-
-    source = inspect.getsource(calculations)
-    forbidden = (
-        "is_st",
-        "is_pt",
-        "is_trading",
-        "limit_status",
-        "eligible",
-        "can_enter",
-        "can_exit",
-    )
-    assert [token for token in forbidden if token in source] == []
 
 
 def _annotation_panel_frame() -> pd.DataFrame:

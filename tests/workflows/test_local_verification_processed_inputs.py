@@ -12,7 +12,7 @@ from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.research.datasets import read_research_dataset
+from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import local_verification as module
@@ -145,7 +145,7 @@ def test_local_verification_workflow_fails_when_dataset_manifest_is_missing(
     ({}, {"source_asset_id": 0}),
     ids=("empty", "composite-key-member-omitted"),
 )
-def test_local_verification_workflow_fails_when_primary_key_null_facts_are_missing(
+def test_local_verification_rejects_persisted_primary_key_null_summary_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     null_count_summary: dict[str, int],
@@ -183,55 +183,27 @@ def test_local_verification_workflow_fails_when_primary_key_null_facts_are_missi
         )
 
     run_root = repo_run_root(tmp_path, monkeypatch, ".run", "pk-null-facts")
-    result = run_local_verification(
-        make_local_verification_config(
-            run_root=run_root,
-            start_date="2014-01-01",
-            end_date="2016-12-31",
-            profile=profile_with_materializers(
-                stub_interim_importer(on_artifact=remove_primary_key_null_facts),
-                empty_processed_inputs,
-            ),
+    with pytest.raises(
+        ValueError,
+        match="^validation_summary_dataset_inspection_failed$",
+    ):
+        run_local_verification(
+            make_local_verification_config(
+                run_root=run_root,
+                start_date="2014-01-01",
+                end_date="2016-12-31",
+                profile=profile_with_materializers(
+                    stub_interim_importer(on_artifact=remove_primary_key_null_facts),
+                    empty_processed_inputs,
+                ),
+            )
         )
-    )
-    run_payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
-    validation = run_payload["checks"]["validation"]
+    seed_payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
 
-    assert result.status == "FAIL"
-    assert validation["status"] == "FAIL"
-    assert validation["failure_codes"] == [
-        "dataset_validation_failed",
-        "primary_key_nulls",
-        "layer_validation_failed",
-    ]
-    assert run_payload["checks"]["schema_inventory"] == {
-        "schema_id": "qrp-schema-inventory-summary",
-        "status": "FAIL",
-        "failure_codes": validation["failure_codes"],
-        "dataset_count": 2,
-        "total_row_count": 2,
-    }
-    assert validation["primary_key_null_failures"] == [
-        frequency_ids.MARKET_BARS_DATA_ID
-    ]
-    assert validation["dataset_manifest_completeness"]["missing"] == []
-    assert run_payload["status"]["validation"] == "FAIL"
-    assert run_payload["status"]["smoke"] == "FAIL"
-    assert run_payload["status"]["overall"] == "FAIL"
-    assert run_payload["data"]["run_validation_status"] == "FAIL"
-    assert run_payload["data"]["failed_layers"] == ["interim"]
-    interim_layer = next(
-        layer
-        for layer in run_payload["data"]["layers"]
-        if layer["logical_layer"] == "interim"
-    )
-    assert interim_layer["missing_dataset_manifests"] == []
-    assert interim_layer["failed_dataset_validations"] == [
-        frequency_ids.MARKET_BARS_DATA_ID
-    ]
-    summary_md = (run_root / "summary.md").read_text(encoding="utf-8")
-    assert "- overall: `FAIL`" in summary_md
-    assert "- validation: `FAIL`" in summary_md
+    assert "completed_at" not in seed_payload
+    assert "status" not in seed_payload
+    assert "checks" not in seed_payload
+    assert not (run_root / "summary.md").exists()
 
 
 def test_local_verification_workflow_runs_real_tiny_research_stack(
@@ -283,11 +255,14 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
     evaluation_root = reports_root / "signal_forward_return_20d"
     portfolio_root = reports_root / "signal_forward_return_20d_portfolio"
     metrics = pd.read_parquet(evaluation_root / "metrics.parquet")
-    research = read_research_dataset(
-        StorageLayout(project_root=run_root),
-        market_id=MarketId("a_share"),
-        dataset_id="price_volume_forward_returns",
-        time_window=TimeWindow("2014-01-02", "2015-01-05"),
+    research = pd.concat(
+        iter_research_dataset_chunks(
+            StorageLayout(project_root=run_root),
+            market_id=MarketId("a_share"),
+            dataset_id="price_volume_forward_returns",
+            time_window=TimeWindow("2014-01-02", "2015-01-05"),
+        ),
+        ignore_index=True,
     )
 
     assert result.status == "NOT_RUN"

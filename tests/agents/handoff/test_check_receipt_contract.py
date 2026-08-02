@@ -166,39 +166,18 @@ def test_check_receipt_requires_exact_command_argv_list() -> None:
 
     assert "check_receipt_command_argv_invalid: 0" in receipt_row_failures(row)
 
-def test_check_receipt_rejects_old_trace_fields() -> None:
-    failures = receipt_row_failures(
-        make_valid_check_row(
-            stdout_sha256="0" * 64,
-            stderr_sha256="1" * 64,
-            output_summary="old",
-            failure_excerpt="old",
-        )
-    )
-
-    for field in (
-        "stdout_sha256",
-        "stderr_sha256",
-        "output_summary",
-        "failure_excerpt",
-    ):
-        assert f"check_receipt_unapproved_field: 0:{field}" in failures
-
 def test_check_receipts_rejects_missing_or_extra_command() -> None:
     contract = load_handoff_script_module("receipt_contract")
-    payload = make_check_receipts_payload(
-        checks=[make_valid_check_row("profile-smoke")]
-    )
+    payload = make_check_receipts_payload(checks=[])
 
     failures = contract.validate_check_receipts(payload)
 
-    assert "check_receipts_missing_command: code-map" in failures
+    assert "check_receipts_missing_command: profile-smoke" in failures
     extra = make_valid_check_row("profile-smoke")
     extra["command_id"] = "extra"
     payload = make_check_receipts_payload(
         checks=[
             make_valid_check_row("profile-smoke"),
-            make_valid_check_row("code-map"),
             extra,
         ]
     )

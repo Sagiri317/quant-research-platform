@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from importlib import import_module
 
 import pandas as pd
@@ -20,8 +19,7 @@ from tests.helpers import frequency_ids
 
 def test_factor_definitions_expose_unified_catalog_only() -> None:
     module = import_module(
-        "quant_research_platform.markets.implementations.a_share."
-        "factors.definitions"
+        "quant_research_platform.markets.implementations.a_share.factors.definitions"
     )
 
     assert set(module.__all__) == {
@@ -29,10 +27,7 @@ def test_factor_definitions_expose_unified_catalog_only() -> None:
         "factor_catalog",
     }
     assert module.factor_definitions()
-    assert (
-        module.factor_catalog().list()
-        == module.factor_definitions()
-    )
+    assert module.factor_catalog().list() == module.factor_definitions()
 
 
 def test_price_volume_factor_dispatch_is_definition_driven() -> None:
@@ -130,8 +125,7 @@ def test_factor_input_columns_are_validated_before_dispatch() -> None:
 
 def test_label_definitions_expose_unified_catalog_only() -> None:
     module = import_module(
-        "quant_research_platform.markets.implementations.a_share."
-        "labels.definitions"
+        "quant_research_platform.markets.implementations.a_share.labels.definitions"
     )
 
     assert set(module.__all__) == {
@@ -150,22 +144,17 @@ def test_label_definitions_expose_unified_catalog_only() -> None:
     )
     assert module.label_definitions()
     assert module.label_catalog().list() == module.label_definitions()
-    assert {
-        definition.family for definition in module.label_definitions()
-    } == {"forward_return"}
+    assert {definition.family for definition in module.label_definitions()} == {
+        "forward_return"
+    }
     definition = module.label_definitions()[0]
-    assert (
-        definition.label_timing
-        == "next_valid_bar_open_to_horizon_valid_bar_open"
-    )
+    assert definition.label_timing == "next_valid_bar_open_to_horizon_valid_bar_open"
     assert definition.entry_rule == "next_asset_valid_bar_open"
     assert definition.exit_rule == "horizon_asset_valid_bar_open"
 
 
 def test_forward_return_label_dispatch_is_definition_driven() -> None:
-    definitions = (
-        _label_definition("forward_return_2d", horizon=2, lookahead=3),
-    )
+    definitions = (_label_definition("forward_return_2d", horizon=2, lookahead=3),)
 
     result = label_calculations.calculate_labels_for_panel(
         _label_panel(),
@@ -242,14 +231,6 @@ def test_label_input_columns_are_validated_before_dispatch() -> None:
                 ),
             ),
         )
-
-
-def test_label_core_does_not_import_a_share_annotations() -> None:
-    from quant_research_platform.research.labels import forward_returns
-
-    source = inspect.getsource(forward_returns)
-    assert "a_share" not in source
-    assert "derive_annotations" not in source
 
 
 def _factor_definition(

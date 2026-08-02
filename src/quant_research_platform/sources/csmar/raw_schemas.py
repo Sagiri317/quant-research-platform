@@ -2,16 +2,40 @@
 
 from __future__ import annotations
 
+import codecs
+import io
+import os
 import re
+import struct
+import sys
+import tempfile
+from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
-import pandas as pd
-
 from quant_research_platform.contracts.data import DataFrequency
+from quant_research_platform.runtime.resources import (
+    MIB,
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+    bind_runtime_resource_policy,
+    require_free_disk_headroom,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.csmar.ids import market_bars_data_id
+from quant_research_platform.storage._dataset_paths import require_unaliased_path
+from quant_research_platform.storage._dataset_physical import (
+    DatasetFileIdentity,
+    dataset_file_identity,
+    dataset_file_identity_from_stat,
+)
+from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
+MAX_LOGICAL_RECORD_BYTES = MIB
+LOGICAL_RECORD_LIMIT_ERROR = "csmar_logical_record_exceeds_source_limit"
 
 
 @dataclass(frozen=True)
@@ -222,16 +246,699 @@ def _infer_dataset_from_header(columns: tuple[str, ...]) -> str:
     return matches[0]
 
 
-def read_export_header(path: str | Path) -> tuple[str, ...]:
+def require_raw_resource_policy(
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> RuntimeResourcePolicy:
+    policy = resource_policy or active_runtime_resource_policy()
+    return policy
+
+
+def logical_record_limit_bytes(policy: RuntimeResourcePolicy) -> int:
+    """Return the source-local limit for one indivisible CSV record."""
+
+    return min(policy.payload_target_bytes, MAX_LOGICAL_RECORD_BYTES)
+
+
+@cache
+def _legal_provider_field_count_bound() -> int:
+    """Return the largest current legal provider header width."""
+
+    from quant_research_platform.sources.csmar.field_mappings import (
+        COLUMN_ALIASES,
+        COLUMN_MAPPINGS,
+    )
+
+    return max(
+        len(mapping)
+        + sum(len(values) for values in COLUMN_ALIASES.get(dataset, {}).values())
+        for dataset, mapping in COLUMN_MAPPINGS.items()
+    )
+
+
+class BoundedCsvRecord:
+    """One validated CSV record backed by the owner's reusable private spool."""
+
+    def __init__(
+        self,
+        owner: _BoundedCsvRecords,
+        *,
+        generation: int,
+        field_count: int,
+        source_bytes: int,
+        canonical_bytes: int,
+        decoded_fields: list[str] | None = None,
+        largest_field_bytes: int = 0,
+    ) -> None:
+        self._owner = owner
+        self._generation = generation
+        self.field_count = field_count
+        self.source_bytes = source_bytes
+        self.canonical_bytes = canonical_bytes
+        self._decoded_fields = decoded_fields
+        self._largest_field_bytes = largest_field_bytes
+
+    def iter_fields(self) -> Iterator[str]:
+        self._require_live()
+        if self._decoded_fields is not None:
+            yield from self._decoded_fields
+            return
+        spool = self._owner._spool
+        if spool is None:
+            raise RuntimeError("csmar_csv_record_expired")
+        spool.seek(0)
+        for _ in range(self.field_count):
+            encoded_length = spool.read(4)
+            if len(encoded_length) != 4:
+                raise ValueError("malformed_csmar_csv_row")
+            length = struct.unpack(">I", encoded_length)[0]
+            self._require_materialization_capacity(
+                current_encoded_field_bytes=length,
+                total_decoded_output_bytes=length,
+                decoded_list_slot_bytes=0,
+            )
+            payload = spool.read(length)
+            if len(payload) != length:
+                raise ValueError("malformed_csmar_csv_row")
+            try:
+                yield payload.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError("malformed_csmar_csv_row") from exc
+
+    def materialize(
+        self,
+        *,
+        max_fields: int | None = None,
+        field_count_error: str = "malformed_csmar_csv_row",
+    ) -> list[str]:
+        if max_fields is not None and self.field_count > max_fields:
+            raise ValueError(field_count_error)
+        if self._decoded_fields is not None:
+            original_decoded_list_slot_bytes = self.field_count * struct.calcsize("P")
+            copied_decoded_list_slot_bytes = self.field_count * struct.calcsize("P")
+            self._require_materialization_capacity(
+                current_encoded_field_bytes=0,
+                total_decoded_output_bytes=self.canonical_bytes,
+                decoded_list_slot_bytes=(
+                    original_decoded_list_slot_bytes + copied_decoded_list_slot_bytes
+                ),
+            )
+            return self._decoded_fields.copy()
+        self._require_materialization_capacity(
+            current_encoded_field_bytes=self._largest_field_bytes,
+            total_decoded_output_bytes=self.canonical_bytes,
+            decoded_list_slot_bytes=self.field_count * struct.calcsize("P"),
+        )
+        return list(self.iter_fields())
+
+    def _require_materialization_capacity(
+        self,
+        *,
+        current_encoded_field_bytes: int,
+        total_decoded_output_bytes: int,
+        decoded_list_slot_bytes: int,
+    ) -> None:
+        owner = self._owner
+        materialization_control_span_bytes = (
+            getattr(owner, "_source_buffer_span_bytes", 0)
+            + len(getattr(owner, "_buffer", b""))
+            + getattr(owner, "_spool_buffer_span_bytes", 0)
+        )
+        if (
+            owner._retained_payload_bytes[0]
+            + materialization_control_span_bytes
+            + current_encoded_field_bytes
+            + total_decoded_output_bytes
+            + decoded_list_slot_bytes
+            > owner._task_memory_budget_bytes
+        ):
+            raise DatasetReadCapacityExceeded(
+                "csmar_raw_working_set_exceeds_task_memory_budget"
+            )
+
+    def _require_live(self) -> None:
+        if self._owner.generation != self._generation:
+            raise RuntimeError("csmar_csv_record_expired")
+
+
+class _BoundedCsvRecords:
+    """Parse the supported CSV grammar without whole decoded-line ownership."""
+
+    _START_FIELD = 0
+    _IN_UNQUOTED = 1
+    _IN_QUOTED = 2
+    _AFTER_QUOTE = 3
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        limit_bytes: int,
+        resource_policy: RuntimeResourcePolicy,
+        retained_payload_bytes: list[int],
+        expected_identity: DatasetFileIdentity | None = None,
+    ) -> None:
+        try:
+            path_identity = dataset_file_identity(path)
+        except (OSError, ValueError) as exc:
+            raise ValueError("csmar_raw_export_identity_changed") from exc
+        if expected_identity is not None and path_identity != expected_identity:
+            raise ValueError("csmar_raw_export_identity_changed")
+        handle = path.open("rb")
+        try:
+            fileno = getattr(handle, "fileno", None)
+            identity = (
+                None
+                if fileno is None
+                else dataset_file_identity_from_stat(os.fstat(fileno()))
+            )
+            if identity is not None and identity != path_identity:
+                raise ValueError("csmar_raw_export_identity_changed")
+            try:
+                if dataset_file_identity(path) != path_identity:
+                    raise ValueError("csmar_raw_export_identity_changed")
+            except (OSError, ValueError) as exc:
+                raise ValueError("csmar_raw_export_identity_changed") from exc
+            self._handle = handle
+            self._identity = identity
+            self._path_identity = path_identity
+            self._spool: object | None = None
+            self._path = path
+            self._limit_bytes = limit_bytes
+            self._task_memory_budget_bytes = resource_policy.task_memory_budget_bytes
+            read_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
+            validation_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
+            field_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
+            self._source_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
+            self._owner_read_result_span_bytes = io.DEFAULT_BUFFER_SIZE
+            self._spool_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
+            self._validation_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
+            self._validation_input_copy_span_bytes = io.DEFAULT_BUFFER_SIZE
+            self._validation_decoded_output_span_bytes = io.DEFAULT_BUFFER_SIZE
+            self._field_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
+            self._slow_control_span_bytes = (
+                self._source_buffer_span_bytes
+                + self._owner_read_result_span_bytes
+                + self._spool_buffer_span_bytes
+                + self._validation_buffer_span_bytes
+                + self._validation_input_copy_span_bytes
+                + self._validation_decoded_output_span_bytes
+                + self._field_buffer_span_bytes
+            )
+            self._fast_control_span_bytes = (
+                read_buffer_span_bytes
+                + validation_buffer_span_bytes
+                + field_buffer_span_bytes
+            )
+            self._retained_payload_bytes = retained_payload_bytes
+            self._buffer = b""
+            self._buffer_position = 0
+            self._pushback: deque[int] = deque()
+            self._first_record = True
+            self.generation = 0
+        except BaseException:
+            try:
+                handle.close()
+            except BaseException:
+                pass
+            raise
+
+    def __iter__(self) -> _BoundedCsvRecords:
+        return self
+
+    def __next__(self) -> BoundedCsvRecord:
+        self.generation += 1
+        try:
+            fast_fields = self._try_fast_fields()
+            if fast_fields is not None:
+                fields, source_bytes, canonical_bytes = fast_fields
+                return BoundedCsvRecord(
+                    self,
+                    generation=self.generation,
+                    field_count=len(fields),
+                    source_bytes=source_bytes,
+                    canonical_bytes=canonical_bytes,
+                    decoded_fields=fields,
+                )
+            self._ensure_spool()
+            self._spool.seek(0)
+            self._spool.truncate(0)
+            return self._parse_record()
+        except UnicodeDecodeError as exc:
+            raise ValueError("malformed_csmar_csv_row") from exc
+
+    def next_materialized(
+        self,
+        *,
+        max_fields: int,
+        field_count_error: str = "malformed_csmar_csv_row",
+    ) -> tuple[list[str], int]:
+        self.generation += 1
+        try:
+            fast_fields = self._try_fast_fields()
+            if fast_fields is not None:
+                fields, source_bytes, _canonical_bytes = fast_fields
+                if len(fields) > max_fields:
+                    raise ValueError(field_count_error)
+                return fields, source_bytes
+            self._ensure_spool()
+            self._spool.seek(0)
+            self._spool.truncate(0)
+            record = self._parse_record()
+            return (
+                record.materialize(
+                    max_fields=max_fields,
+                    field_count_error=field_count_error,
+                ),
+                record.source_bytes,
+            )
+        except UnicodeDecodeError as exc:
+            raise ValueError("malformed_csmar_csv_row") from exc
+
+    def _ensure_spool(self) -> None:
+        if self._spool is not None:
+            return
+        self._require_capacity(self._slow_control_span_bytes)
+        scratch_parent = getattr(self._path, "parent", None)
+        if scratch_parent is None:
+            self._handle.read(1)
+            raise ValueError("csmar_raw_scratch_parent_unavailable")
+        scratch_parent = require_unaliased_path(
+            Path(scratch_parent), error="csmar_raw_scratch_parent_invalid"
+        )
+        require_free_disk_headroom(
+            scratch_parent,
+            reserve_bytes=self._limit_bytes + 4 * (self._limit_bytes + 1),
+        )
+        require_unaliased_path(scratch_parent, error="csmar_raw_scratch_parent_invalid")
+        self._spool = tempfile.TemporaryFile(
+            mode="w+b",
+            dir=scratch_parent,
+        )
+
+    def _try_fast_fields(self) -> tuple[list[str], int, int] | None:
+        """Parse common unquoted legal-width rows without per-byte dispatch."""
+
+        if (
+            self._pushback
+            or self._buffer_position != len(self._buffer)
+            or not isinstance(self._handle, io.BufferedReader)
+        ):
+            return None
+        available = (
+            self._task_memory_budget_bytes
+            - self._retained_payload_bytes[0]
+            - self._fast_control_span_bytes
+        )
+        if available <= self._limit_bytes:
+            return None
+        line = self._handle.readline(self._limit_bytes + 1)
+        if not line:
+            raise StopIteration
+        source_bytes = len(line)
+        if source_bytes > self._limit_bytes:
+            raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
+        comma_count = line.count(b",")
+        if b'"' in line or comma_count + 1 > _legal_provider_field_count_bound():
+            self._handle.seek(self._handle.tell() - source_bytes)
+            return None
+        content_end = source_bytes
+        legal_cr_position: int | None = None
+        if source_bytes >= 2 and line[-2] == 13 and line[-1] == 10:
+            content_end -= 2
+            legal_cr_position = content_end
+        elif source_bytes and line[-1] in (10, 13):
+            content_end -= 1
+            if line[-1] == 13:
+                legal_cr_position = content_end
+        first_cr = line.find(b"\r")
+        if first_cr != -1:
+            if first_cr != legal_cr_position or line.find(b"\r", first_cr + 1) != -1:
+                self._handle.seek(self._handle.tell() - source_bytes)
+                return None
+        content_start = 0
+        if self._first_record and content_end >= 3 and line.startswith(b"\xef\xbb\xbf"):
+            content_start = 3
+        content_bytes = content_end - content_start
+        field_count = 0 if content_bytes == 0 else comma_count + 1
+        canonical_bytes = content_bytes - max(0, field_count - 1)
+        source_line_span_bytes = source_bytes
+        content_span_bytes = (
+            content_bytes if content_start != 0 or content_end != source_bytes else 0
+        )
+        decoded_record_source_span_bytes = content_bytes
+        decoded_fields_source_span_bytes = canonical_bytes
+        decoded_list_slot_span_bytes = field_count * struct.calcsize("P")
+        if (
+            self._retained_payload_bytes[0]
+            + source_line_span_bytes
+            + content_span_bytes
+            + decoded_record_source_span_bytes
+            + decoded_fields_source_span_bytes
+            + decoded_list_slot_span_bytes
+            + self._fast_control_span_bytes
+            > self._task_memory_budget_bytes
+        ):
+            raise DatasetReadCapacityExceeded(
+                "csmar_raw_working_set_exceeds_task_memory_budget"
+            )
+        self._first_record = False
+        content = line[content_start:content_end]
+        try:
+            decoded = content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("malformed_csmar_csv_row") from exc
+        fields = [] if not decoded else decoded.split(",")
+        return fields, source_bytes, canonical_bytes
+
+    def _parse_record(self) -> BoundedCsvRecord:
+        state = self._START_FIELD
+        record_bytes = 0
+        canonical_bytes = 0
+        field_count = 0
+        field_prefix = 0
+        field_bytes = 0
+        largest_field_bytes = 0
+        record_has_content = False
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        validation = bytearray()
+        field_buffer = bytearray()
+
+        def validate(byte: int, *, final: bool = False) -> None:
+            validation.append(byte)
+            if len(validation) == io.DEFAULT_BUFFER_SIZE or final:
+                self._require_capacity(self._slow_control_span_bytes)
+                decoder.decode(bytes(validation), final=final)
+                validation.clear()
+
+        def consume(byte: int) -> None:
+            nonlocal record_bytes
+            record_bytes += 1
+            if record_bytes > self._limit_bytes:
+                raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
+            validate(byte)
+
+        def write_field(byte: int) -> None:
+            nonlocal field_bytes, canonical_bytes
+            field_buffer.append(byte)
+            if len(field_buffer) == io.DEFAULT_BUFFER_SIZE:
+                self._require_capacity(self._slow_control_span_bytes)
+                self._spool.write(field_buffer)
+                field_buffer.clear()
+            field_bytes += 1
+            canonical_bytes += 1
+
+        def finish_field() -> None:
+            nonlocal field_count, field_prefix, field_bytes, largest_field_bytes
+            if field_buffer:
+                self._require_capacity(self._slow_control_span_bytes)
+                self._spool.write(field_buffer)
+                field_buffer.clear()
+            end = self._spool.tell()
+            self._spool.seek(field_prefix)
+            self._require_capacity(self._slow_control_span_bytes)
+            self._spool.write(struct.pack(">I", field_bytes))
+            self._spool.seek(end)
+            field_count += 1
+            largest_field_bytes = max(largest_field_bytes, field_bytes)
+            field_prefix = end
+            self._spool.write(b"\0\0\0\0")
+            field_bytes = 0
+
+        self._spool.write(b"\0\0\0\0")
+        if self._first_record:
+            self._first_record = False
+            prefix = [self._take_byte() for _ in range(3)]
+            present = [byte for byte in prefix if byte is not None]
+            if bytes(present) == b"\xef\xbb\xbf":
+                for byte in present:
+                    consume(byte)
+            else:
+                self._pushback.extendleft(reversed(present))
+
+        while True:
+            byte = self._take_byte()
+            if byte is None:
+                if not record_has_content:
+                    self._spool.seek(0)
+                    self._spool.truncate(0)
+                    if record_bytes:
+                        decoder.decode(bytes(validation), final=True)
+                    raise StopIteration
+                if state == self._IN_QUOTED:
+                    raise ValueError("malformed_csmar_csv_row")
+                finish_field()
+                decoder.decode(bytes(validation), final=True)
+                break
+
+            if state == self._IN_QUOTED:
+                consume(byte)
+                if byte == 34:
+                    state = self._AFTER_QUOTE
+                else:
+                    write_field(byte)
+                continue
+
+            if state == self._AFTER_QUOTE:
+                consume(byte)
+                if byte == 34:
+                    write_field(byte)
+                    state = self._IN_QUOTED
+                    continue
+                if byte == 44:
+                    finish_field()
+                    state = self._START_FIELD
+                    record_has_content = True
+                    continue
+                if byte in (10, 13):
+                    if byte == 13:
+                        following = self._take_byte()
+                        if following == 10:
+                            consume(following)
+                        elif following is not None:
+                            self._pushback.appendleft(following)
+                    finish_field()
+                    decoder.decode(bytes(validation), final=True)
+                    break
+                raise ValueError("malformed_csmar_csv_row")
+
+            if byte in (10, 13):
+                consume(byte)
+                if byte == 13:
+                    following = self._take_byte()
+                    if following == 10:
+                        consume(following)
+                    elif following is not None:
+                        self._pushback.appendleft(following)
+                if record_has_content:
+                    finish_field()
+                else:
+                    self._spool.seek(0)
+                    self._spool.truncate(0)
+                decoder.decode(bytes(validation), final=True)
+                break
+
+            consume(byte)
+            record_has_content = True
+            if state == self._START_FIELD and byte == 34:
+                state = self._IN_QUOTED
+            elif byte == 44:
+                finish_field()
+                state = self._START_FIELD
+            else:
+                write_field(byte)
+                state = self._IN_UNQUOTED
+
+        self._spool.flush()
+        decoded_field_input_span_bytes = largest_field_bytes
+        decoded_field_output_source_span_bytes = largest_field_bytes
+        self._require_capacity(
+            self._slow_control_span_bytes,
+            decoded_field_input_span_bytes,
+            decoded_field_output_source_span_bytes,
+        )
+        return BoundedCsvRecord(
+            self,
+            generation=self.generation,
+            field_count=field_count,
+            source_bytes=record_bytes,
+            canonical_bytes=canonical_bytes,
+            largest_field_bytes=largest_field_bytes,
+        )
+
+    def _take_byte(self) -> int | None:
+        if self._pushback:
+            return self._pushback.popleft()
+        if self._buffer_position == len(self._buffer):
+            self._require_capacity(self._slow_control_span_bytes)
+            available = (
+                self._task_memory_budget_bytes
+                - self._retained_payload_bytes[0]
+                - self._slow_control_span_bytes
+            )
+            if available <= 0:
+                raise DatasetReadCapacityExceeded(
+                    "csmar_raw_working_set_exceeds_task_memory_budget"
+                )
+            self._buffer = self._handle.read(min(io.DEFAULT_BUFFER_SIZE, available))
+            self._buffer_position = 0
+            if not self._buffer:
+                return None
+        byte = self._buffer[self._buffer_position]
+        self._buffer_position += 1
+        return byte
+
+    def _require_capacity(self, *span_bytes: int) -> None:
+        if (
+            self._retained_payload_bytes[0] + sum(span_bytes)
+            > self._task_memory_budget_bytes
+        ):
+            raise DatasetReadCapacityExceeded(
+                "csmar_raw_working_set_exceeds_task_memory_budget"
+            )
+
+    def close(self) -> None:
+        failure: BaseException | None = None
+        try:
+            if self._identity is not None:
+                after = dataset_file_identity_from_stat(os.fstat(self._handle.fileno()))
+                if after != self._identity:
+                    raise ValueError("csmar_raw_export_identity_changed")
+        except BaseException as exc:
+            failure = exc
+        try:
+            self._handle.close()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+        try:
+            if dataset_file_identity(self._path) != self._path_identity:
+                raise ValueError("csmar_raw_export_identity_changed")
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+        if self._spool is not None:
+            try:
+                self._spool.close()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure
+
+
+def iter_export_csv_records(
+    path: str | Path,
+    *,
+    resource_policy: RuntimeResourcePolicy,
+    expected_identity: DatasetFileIdentity | None = None,
+    retained_payload_bytes: list[int] | None = None,
+    materialize_records: bool = True,
+    first_record_field_count_error: str = "malformed_csmar_csv_row",
+) -> Iterator[tuple[list[str] | BoundedCsvRecord, int]]:
+    bound_policy = bind_runtime_resource_policy(resource_policy)
+
+    def activate() -> Iterator[tuple[list[str] | BoundedCsvRecord, int]]:
+        assert bound_policy is not None
+        records: _BoundedCsvRecords | None = None
+        with runtime_resource_policy_scope(bound_policy):
+            try:
+                records = _BoundedCsvRecords(
+                    Path(path),
+                    limit_bytes=logical_record_limit_bytes(bound_policy),
+                    resource_policy=bound_policy,
+                    retained_payload_bytes=(
+                        retained_payload_bytes
+                        if retained_payload_bytes is not None
+                        else [0]
+                    ),
+                    expected_identity=expected_identity,
+                )
+                if materialize_records:
+                    legal_field_count = _legal_provider_field_count_bound()
+                    first_record = True
+                    while True:
+                        try:
+                            yield records.next_materialized(
+                                max_fields=legal_field_count,
+                                field_count_error=(
+                                    first_record_field_count_error
+                                    if first_record
+                                    else "malformed_csmar_csv_row"
+                                ),
+                            )
+                            first_record = False
+                        except StopIteration:
+                            break
+                else:
+                    for record in records:
+                        yield record, record.source_bytes
+                        del record
+            finally:
+                primary = sys.exception()
+                if records is not None:
+                    try:
+                        records.close()
+                    except BaseException:
+                        if primary is None:
+                            raise
+
+    return activate()
+
+
+def read_export_header(
+    path: str | Path,
+    *,
+    resource_policy: RuntimeResourcePolicy | None = None,
+    expected_identity: DatasetFileIdentity | None = None,
+    retained_payload_bytes: list[int] | None = None,
+) -> tuple[str, ...]:
     """Read the header row from a supported CSV raw export."""
 
+    policy = require_raw_resource_policy(resource_policy)
     export_path = Path(path)
     suffix = export_path.suffix.lower()
-    if suffix == ".csv":
-        frame = pd.read_csv(export_path, nrows=0)
-    else:
+    if suffix != ".csv":
         raise ValueError(f"Unsupported CSMAR export extension: {suffix}")
-    return tuple(str(column) for column in frame.columns)
+    with runtime_resource_policy_scope(policy):
+        rows = iter_export_csv_records(
+            export_path,
+            resource_policy=policy,
+            expected_identity=expected_identity,
+            retained_payload_bytes=retained_payload_bytes,
+            materialize_records=False,
+        )
+        try:
+            record = next(rows, None)
+            columns = (
+                tuple(materialize_header_record(record[0]))
+                if record is not None
+                else ()
+            )
+            if not columns:
+                raise ValueError("malformed_csmar_csv_row")
+        finally:
+            primary = sys.exception()
+            try:
+                rows.close()
+            except BaseException:
+                if primary is None:
+                    raise
+    if len(columns) != len(set(columns)):
+        raise ValueError("duplicate_csmar_provider_column")
+    return tuple(str(column) for column in columns)
+
+
+def materialize_header_record(record: BoundedCsvRecord) -> list[str]:
+    """Materialize a legal header while preserving duplicate-header errors."""
+
+    legal_bound = _legal_provider_field_count_bound()
+    if record.field_count <= legal_bound:
+        columns = record.materialize(max_fields=legal_bound)
+        if len(columns) != len(set(columns)):
+            raise ValueError("duplicate_csmar_provider_column")
+        return columns
+
+    raise ValueError("csmar_raw_export_schema_invalid")
 
 
 def expected_metadata_sidecar_path(path: str | Path) -> Path:
@@ -241,36 +948,80 @@ def expected_metadata_sidecar_path(path: str | Path) -> Path:
     return export_path.with_suffix(".metadata.json")
 
 
-def inspect_raw_export_file(path: str | Path) -> RawExportInspection:
+def inspect_raw_export_file(
+    path: str | Path,
+    *,
+    resource_policy: RuntimeResourcePolicy | None = None,
+    expected_identity: DatasetFileIdentity | None = None,
+) -> RawExportInspection:
     """Inspect the file name, header, and metadata sidecar without full data reads."""
 
+    policy = require_raw_resource_policy(resource_policy)
     export_path = Path(path)
+    export_identity = raw_export_file_identity(export_path)
+    if expected_identity is not None and export_identity != expected_identity:
+        raise ValueError("csmar_raw_export_identity_changed")
     try:
         metadata = parse_raw_filename(export_path)
         dataset = metadata.dataset
     except ValueError:
         if export_path.suffix.lower() != ".csv":
             dataset = infer_dataset_from_native_export(export_path)
-            columns = read_export_header(export_path)
+            columns = read_export_header(
+                export_path,
+                resource_policy=policy,
+                expected_identity=export_identity,
+            )
         else:
-            columns = read_export_header(export_path)
+            columns = read_export_header(
+                export_path,
+                resource_policy=policy,
+                expected_identity=export_identity,
+            )
             try:
                 dataset = infer_dataset_from_native_export(export_path)
             except ValueError:
                 dataset = _infer_dataset_from_header(columns)
     else:
-        columns = read_export_header(export_path)
+        columns = read_export_header(
+            export_path,
+            resource_policy=policy,
+            expected_identity=export_identity,
+        )
     contract = RAW_TABLE_CONTRACTS[dataset]
     from quant_research_platform.sources.csmar.field_mappings import (
         missing_raw_column_names,
+        validate_raw_column_names,
     )
 
+    validate_raw_column_names(columns, dataset)
     missing = missing_raw_column_names(columns, dataset)
+    metadata_path = require_unaliased_path(
+        expected_metadata_sidecar_path(export_path),
+        error="csmar_raw_export_identity_changed",
+    )
+    metadata_identity = (
+        raw_export_file_identity(metadata_path) if metadata_path.exists() else None
+    )
+    if raw_export_file_identity(export_path) != export_identity:
+        raise ValueError("csmar_raw_export_identity_changed")
+    if metadata_identity is None:
+        if metadata_path.exists():
+            raise ValueError("csmar_raw_export_identity_changed")
+    elif raw_export_file_identity(metadata_path) != metadata_identity:
+        raise ValueError("csmar_raw_export_identity_changed")
     return RawExportInspection(
         path=export_path,
         dataset=dataset,
         table_code=contract.table_code,
         columns=columns,
         missing_required_columns=missing,
-        has_metadata=expected_metadata_sidecar_path(export_path).exists(),
+        has_metadata=metadata_identity is not None,
     )
+
+
+def raw_export_file_identity(path: Path) -> DatasetFileIdentity:
+    try:
+        return dataset_file_identity(path)
+    except (OSError, ValueError) as exc:
+        raise ValueError("csmar_raw_export_identity_changed") from exc

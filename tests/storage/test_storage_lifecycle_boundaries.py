@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,9 +15,11 @@ import quant_research_platform.storage._dataset_comparison as comparison
 import quant_research_platform.storage._dataset_fingerprinting as fingerprinting
 import quant_research_platform.storage._dataset_inspection as inspection
 import quant_research_platform.storage._dataset_key_tracking as key_owner
+import quant_research_platform.storage._dataset_paths as dataset_paths
 import quant_research_platform.storage._dataset_physical as physical
 import quant_research_platform.storage._dataset_reading as dataset_reading
 import quant_research_platform.storage._dataset_writing as dataset_writing
+from quant_research_platform.artifacts import _parquet_writers as parquet_writers
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
@@ -22,6 +28,7 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage import (
     _dataset_inventory as inventory_owner,
 )
+from quant_research_platform.storage import _scratch_ownership as scratch_owner
 from quant_research_platform.storage import (
     atomic,
     manifests,
@@ -44,12 +51,2625 @@ _STALE_SWEEP_FAILURE_TYPES = (
     SystemExit,
 )
 
+_NAMESPACE_PRIMARY_TYPES = (OSError, KeyboardInterrupt)
+
+
+def test_owned_file_stale_sweep_attempts_all_and_preserves_first_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prefix = ".f-"
+    stale_first = tmp_path / scratch_owner.owned_scratch_name(prefix, "first")
+    stale_second = tmp_path / scratch_owner.owned_scratch_name(prefix, "second")
+    live = tmp_path / scratch_owner.owned_scratch_name(prefix, "live")
+    malformed = tmp_path / f"{prefix}malformed"
+    wrong_kind = tmp_path / scratch_owner.owned_scratch_name(prefix, "directory")
+    for path in (stale_first, stale_second, live, malformed):
+        path.write_bytes(b"owned")
+    wrong_kind.mkdir()
+    primary = OSError("first_cleanup_failure")
+    real_remove = scratch_owner.remove_owned_scratch
+    remove_hits: list[Path] = []
+
+    def remove(path: Path, identity: os.stat_result, **kwargs) -> None:  # noqa: ANN003
+        remove_hits.append(path)
+        if path == stale_first:
+            raise primary
+        real_remove(path, identity, **kwargs)
+
+    monkeypatch.setattr(
+        scratch_owner,
+        "scratch_owner_is_stale",
+        lambda path, *, prefix: Path(path) in {stale_first, stale_second},
+    )
+    monkeypatch.setattr(scratch_owner, "remove_owned_scratch", remove)
+
+    with pytest.raises(OSError) as caught:
+        scratch_owner.cleanup_stale_owned_scratch(
+            tmp_path,
+            parent_identity=tmp_path.lstat(),
+            prefix=prefix,
+            directory=False,
+        )
+
+    assert caught.value is primary
+    assert remove_hits == [stale_first, stale_second]
+    assert stale_first.is_file()
+    assert not stale_second.exists()
+    assert live.is_file()
+    assert malformed.is_file()
+    assert wrong_kind.is_dir()
+
+
+@pytest.mark.parametrize("primary_type", _NAMESPACE_PRIMARY_TYPES)
+def test_owned_stale_sweep_preserves_remove_primary_when_parent_probe_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    primary_type: type[BaseException],
+) -> None:
+    prefix = ".f-"
+    candidate = tmp_path / scratch_owner.owned_scratch_name(prefix, "candidate")
+    candidate.write_bytes(b"owned")
+    primary = primary_type("remove_primary")
+    real_matches = scratch_owner.scratch_identity_matches
+    removal_started = False
+    post_remove_probe_hits = 0
+
+    def remove(*_args, **_kwargs) -> None:
+        nonlocal removal_started
+        removal_started = True
+        raise primary
+
+    def match_parent(*args, **kwargs) -> bool:  # noqa: ANN002, ANN003
+        nonlocal post_remove_probe_hits
+        if removal_started:
+            post_remove_probe_hits += 1
+            raise ValueError("parent_probe_secondary")
+        return real_matches(*args, **kwargs)
+
+    monkeypatch.setattr(
+        scratch_owner,
+        "scratch_owner_is_stale",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        scratch_owner,
+        "remove_owned_scratch",
+        remove,
+    )
+    monkeypatch.setattr(
+        scratch_owner,
+        "scratch_identity_matches",
+        match_parent,
+    )
+
+    caught: BaseException | None = None
+    try:
+        scratch_owner.cleanup_stale_owned_scratch(
+            tmp_path,
+            parent_identity=tmp_path.lstat(),
+            prefix=prefix,
+            directory=False,
+        )
+    except BaseException as error:
+        caught = error
+
+    assert caught is primary
+    assert post_remove_probe_hits == 1
+
+
+def test_owned_file_stale_sweep_captures_identity_before_liveness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prefix = ".f-"
+    candidate = tmp_path / scratch_owner.owned_scratch_name(prefix, "candidate")
+    candidate.write_bytes(b"owned")
+    liveness_hits = 0
+
+    def replace_during_liveness(path: Path, *, prefix: str) -> bool:
+        nonlocal liveness_hits
+        del prefix
+        liveness_hits += 1
+        Path(path).unlink()
+        Path(path).write_bytes(b"foreign")
+        return True
+
+    monkeypatch.setattr(
+        scratch_owner,
+        "scratch_owner_is_stale",
+        replace_during_liveness,
+    )
+
+    with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
+        scratch_owner.cleanup_stale_owned_scratch(
+            tmp_path,
+            parent_identity=tmp_path.lstat(),
+            prefix=prefix,
+            directory=False,
+        )
+
+    assert liveness_hits == 1
+    assert candidate.read_bytes() == b"foreign"
+
+
+def test_owned_stale_sweep_binds_caller_parent_and_checks_each_delete_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    parent_identity = parent.lstat()
+    displaced = tmp_path / "displaced"
+    parent.rename(displaced)
+    parent.mkdir()
+    candidate = parent / scratch_owner.owned_scratch_name(".f-", "replacement")
+    candidate.write_bytes(b"foreign")
+    checks: list[Path] = []
+    real_require = scratch_owner.require_owned_scratch
+
+    def require(path: Path, identity: os.stat_result) -> None:
+        checks.append(Path(path))
+        real_require(path, identity)
+
+    monkeypatch.setattr(scratch_owner, "require_owned_scratch", require)
+    monkeypatch.setattr(
+        scratch_owner,
+        "scratch_owner_is_stale",
+        lambda *_args, **_kwargs: True,
+    )
+    with pytest.raises(ValueError, match="^storage_scratch_identity_changed$"):
+        scratch_owner.cleanup_stale_owned_scratch(
+            parent,
+            parent_identity=parent_identity,
+            prefix=".f-",
+            directory=False,
+        )
+
+    assert checks == [parent]
+    assert candidate.read_bytes() == b"foreign"
+
+
+def test_owned_file_stale_sweep_recovers_hard_kill_abandon(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env.update(PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1")
+    env["PYTHONPATH"] = str(Path.cwd() / "src")
+    result = subprocess.run(
+        (
+            sys.executable,
+            "-B",
+            "-c",
+            (
+                "import os,sys; from pathlib import Path; "
+                "from quant_research_platform.storage._scratch_ownership "
+                "import open_owned_scratch_file,owned_scratch_name; "
+                "p=Path(sys.argv[1])/owned_scratch_name('.f-','abandon'); "
+                "h,_=open_owned_scratch_file(p); h.write(b'owned'); "
+                "h.flush(); os._exit(0)"
+            ),
+            str(tmp_path),
+        ),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert len(tuple(tmp_path.glob(".f-*"))) == 1
+
+    scratch_owner.cleanup_stale_owned_scratch(
+        tmp_path,
+        parent_identity=tmp_path.lstat(),
+        prefix=".f-",
+        directory=False,
+    )
+
+    assert not tuple(tmp_path.glob(".f-*"))
+
+
+def test_shared_path_move_is_fail_if_destination_exists(tmp_path: Path) -> None:
+    shared = __import__(
+        "quant_research_platform.storage._scratch_ownership", fromlist=["*"]
+    )
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.write_text("source", encoding="utf-8")
+    destination.write_text("destination", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        shared.move_path_no_replace(source, destination)
+
+    assert source.read_text(encoding="utf-8") == "source"
+    assert destination.read_text(encoding="utf-8") == "destination"
+
+
+@pytest.mark.parametrize("owner_name", ("manifest-replace",))
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_file_cleanup_uses_shared_quarantine_before_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+) -> None:
+    module = _file_creator_module(owner_name)
+    shared = __import__(
+        "quant_research_platform.storage._scratch_ownership", fromlist=["*"]
+    )
+    primary = primary_type(f"{owner_name}_handoff")
+    opened: list[Path] = []
+    move_hits: list[tuple[Path, Path]] = []
+    real_open = os.open
+
+    def track_open(path, *args, **kwargs):  # noqa: ANN001, ANN202
+        descriptor = real_open(path, *args, **kwargs)
+        opened.append(Path(path))
+        return descriptor
+
+    def fail_fdopen(*_args, **_kwargs):  # noqa: ANN202
+        raise primary
+
+    def move_no_replace(source, destination):  # noqa: ANN001, ANN202
+        source_path = Path(source)
+        destination_path = Path(destination)
+        source_path.rename(destination_path)
+        move_hits.append((source_path, destination_path))
+        source_path.write_bytes(b"foreign")
+
+    monkeypatch.setattr(module.os, "open", track_open)
+    monkeypatch.setattr(module.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(shared, "move_path_no_replace", move_no_replace, raising=False)
+
+    with pytest.raises(primary_type) as caught:
+        _run_file_creator(owner_name, tmp_path)
+
+    assert caught.value is primary
+    assert len(opened) == 1
+    assert len(move_hits) == 1
+    assert move_hits[0][0] == opened[0]
+    assert opened[0].read_bytes() == b"foreign"
+    assert not move_hits[0][1].exists()
+
+
+@pytest.mark.parametrize(
+    "owner_kind",
+    ("atomic-file", "atomic-directory", "key-scratch", "inventory-scratch"),
+)
+def test_creator_rechecks_parent_reference_before_payload_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_kind: str,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    original_parent = tmp_path / "original-parent"
+    injection_hits: list[Path] = []
+    payload_hits: list[str] = []
+    real_mkdir = os.mkdir
+    real_open = os.open
+
+    def replace_parent_once() -> None:
+        if injection_hits:
+            return
+        parent.rename(original_parent)
+        parent.mkdir()
+        injection_hits.append(parent)
+
+    if owner_kind == "atomic-file":
+        real_open_exclusive = scratch_owner.open_owned_scratch_file
+
+        class HandleProbe:
+            def __init__(self, handle) -> None:  # noqa: ANN001
+                self.handle = handle
+
+            def write(self, value):  # noqa: ANN001, ANN202
+                payload_hits.append("write")
+                return self.handle.write(value)
+
+            def __getattr__(self, name: str):  # noqa: ANN204
+                return getattr(self.handle, name)
+
+        def open_candidate(path, *args, **kwargs):  # noqa: ANN001, ANN202
+            if Path(path).parent == parent:
+                replace_parent_once()
+            return real_open(path, *args, **kwargs)
+
+        def open_exclusive(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            handle, identity = real_open_exclusive(*args, **kwargs)
+            return HandleProbe(handle), identity
+
+        monkeypatch.setattr(atomic.os, "open", open_candidate)
+        monkeypatch.setattr(
+            scratch_owner,
+            "open_owned_scratch_file",
+            open_exclusive,
+        )
+        operation = lambda: atomic.atomic_write_text(  # noqa: E731
+            parent / "value.txt", "payload"
+        )
+    elif owner_kind == "atomic-directory":
+
+        def mkdir_candidate(path, *args, **kwargs):  # noqa: ANN001, ANN202
+            candidate = Path(path)
+            if candidate.parent == parent and candidate != parent:
+                replace_parent_once()
+            return real_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(atomic.os, "mkdir", mkdir_candidate)
+        operation = lambda: atomic.atomic_write_directory(  # noqa: E731
+            parent / "tree", lambda _root: payload_hits.append("writer")
+        )
+    else:
+        owner_module = key_owner if owner_kind == "key-scratch" else inventory_owner
+
+        def mkdir_candidate(path, *args, **kwargs):  # noqa: ANN001, ANN202
+            candidate = Path(path)
+            if candidate.parent == parent and candidate != parent:
+                replace_parent_once()
+            return real_mkdir(path, *args, **kwargs)
+
+        def connect(*_args, **_kwargs):  # noqa: ANN202
+            payload_hits.append("sqlite-connect")
+            raise RuntimeError("payload_use_hit")
+
+        monkeypatch.setattr(owner_module.os, "mkdir", mkdir_candidate)
+        monkeypatch.setattr(owner_module.sqlite3, "connect", connect)
+        if owner_kind == "key-scratch":
+            operation = lambda: key_owner.ExactPrimaryKeyIndex(  # noqa: E731
+                primary_key=("value",),
+                timestamp_columns=(),
+                scratch_parent=parent,
+            ).__enter__()
+        else:
+            operation = lambda: inventory_owner.DatasetSessionInventory(  # noqa: E731
+                data_root=tmp_path / "data",
+                scratch_parent=parent,
+                task_memory_budget_bytes=1024,
+            )
+
+    caught: BaseException | None = None
+    try:
+        operation()
+    except BaseException as error:
+        caught = error
+
+    assert len(injection_hits) == 1
+    assert payload_hits == []
+    assert isinstance(caught, ValueError)
+    assert not tuple(original_parent.iterdir())
+    survivors = tuple(parent.iterdir())
+    if owner_kind == "atomic-file":
+        assert survivors == ()
+    else:
+        assert len(survivors) == 1
+        assert survivors[0].is_dir()
+
+
+@pytest.mark.parametrize(
+    ("owner_module", "prefix", "open_owner"),
+    (
+        (
+            key_owner,
+            ".k-",
+            lambda scratch, root: key_owner.ExactPrimaryKeyIndex(
+                primary_key=("value",),
+                timestamp_columns=(),
+                scratch_parent=scratch,
+            ).__enter__(),
+        ),
+        (
+            inventory_owner,
+            ".dataset-inventory-",
+            lambda scratch, root: inventory_owner.DatasetSessionInventory(
+                data_root=root / "data",
+                scratch_parent=scratch,
+                task_memory_budget_bytes=1024,
+            ),
+        ),
+    ),
+    ids=("exact-primary-key-index", "dataset-session-inventory"),
+)
+def test_sqlite_owner_binds_operation_parent_before_stale_sweep(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_module: object,
+    prefix: str,
+    open_owner,
+) -> None:
+    parent = tmp_path / "scratch"
+    parent.mkdir()
+    displaced = tmp_path / "displaced"
+    cleanup_name = "cleanup_stale_owned_scratch"
+    real_cleanup = getattr(owner_module, cleanup_name)
+    candidate: Path | None = None
+    connect_hits = 0
+
+    def replace_then_cleanup(root: Path, **kwargs) -> None:  # noqa: ANN003
+        nonlocal candidate
+        Path(root).rename(displaced)
+        Path(root).mkdir()
+        candidate = Path(root) / f"{prefix}qzzzzzz-replacement"
+        candidate.mkdir()
+        return real_cleanup(root, **kwargs)
+
+    def connect(*_args, **_kwargs):  # noqa: ANN202
+        nonlocal connect_hits
+        connect_hits += 1
+        raise AssertionError("sqlite connect must not run")
+
+    monkeypatch.setattr(owner_module, cleanup_name, replace_then_cleanup)
+    monkeypatch.setitem(
+        real_cleanup.__globals__,
+        "scratch_owner_is_stale",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(owner_module.sqlite3, "connect", connect)
+
+    with pytest.raises(ValueError, match="^storage_scratch_identity_changed$"):
+        open_owner(parent, tmp_path)
+
+    assert connect_hits == 0
+    assert candidate is not None and candidate.is_dir()
+
+
+def test_write_and_scratch_owners_reject_aliased_parent_before_access(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory_symlink_not_available: {exc}")
+
+    operations = (
+        lambda: atomic.atomic_write_text(alias / "text.txt", "payload"),
+        lambda: atomic.atomic_write_csv(
+            pd.DataFrame({"value": [1]}), alias / "frame.csv", index=False
+        ),
+        lambda: atomic.atomic_write_directory(alias / "tree", lambda _root: None),
+        lambda: manifests.replace_qrp_json(
+            alias / "manifest.json", {"schema_id": "qrp-test"}
+        ),
+        lambda: key_owner.ExactPrimaryKeyIndex(
+            primary_key=("value",),
+            timestamp_columns=(),
+            scratch_parent=alias,
+        ).__enter__(),
+        lambda: inventory_owner.DatasetSessionInventory(
+            data_root=tmp_path / "data",
+            scratch_parent=alias,
+            task_memory_budget_bytes=1024,
+        ),
+    )
+
+    for operation in operations:
+        with pytest.raises(ValueError):
+            operation()
+    assert not tuple(target.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("owner_module", "open_owner"),
+    (
+        (
+            key_owner,
+            lambda scratch: key_owner.ExactPrimaryKeyIndex(
+                primary_key=("value",),
+                timestamp_columns=(),
+                scratch_parent=scratch,
+            ).__enter__(),
+        ),
+        (
+            inventory_owner,
+            lambda scratch: inventory_owner.DatasetSessionInventory(
+                data_root=scratch.parent / "data",
+                scratch_parent=scratch,
+                task_memory_budget_bytes=1024,
+            ),
+        ),
+    ),
+    ids=["exact-primary-key-index", "dataset-session-inventory"],
+)
+def test_scratch_owner_cleans_retained_temp_after_post_create_gate_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_module: object,
+    open_owner,
+) -> None:
+    scratch = tmp_path / "scratch"
+    created: list[Path] = []
+    gate_failure = KeyboardInterrupt("post_create_gate")
+
+    post_create_calls = 0
+    real_gate = owner_module.require_unaliased_path
+
+    def gate(path: Path, *, error: str) -> Path:
+        nonlocal post_create_calls
+        candidate = Path(path)
+        if candidate.parent == scratch and candidate.name.startswith("."):
+            if not created:
+                created.append(candidate)
+            post_create_calls += 1
+            if post_create_calls == 1:
+                raise gate_failure
+        return real_gate(candidate, error=error)
+
+    monkeypatch.setattr(owner_module, "require_unaliased_path", gate)
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        open_owner(scratch)
+
+    assert caught.value is gate_failure
+    assert len(created) == 1
+    assert not created[0].exists()
+
+
+@pytest.mark.parametrize(
+    ("owner_module", "open_owner"),
+    (
+        (
+            key_owner,
+            lambda scratch: key_owner.ExactPrimaryKeyIndex(
+                primary_key=("value",),
+                timestamp_columns=(),
+                scratch_parent=scratch,
+            ).__enter__(),
+        ),
+        (
+            inventory_owner,
+            lambda scratch: inventory_owner.DatasetSessionInventory(
+                data_root=scratch.parent / "data",
+                scratch_parent=scratch,
+                task_memory_budget_bytes=1024,
+            ),
+        ),
+    ),
+    ids=("exact-primary-key-index", "dataset-session-inventory"),
+)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_scratch_owner_cleans_when_database_constructor_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_module: object,
+    open_owner,
+    primary_type: type[BaseException],
+) -> None:
+    scratch = tmp_path / "scratch"
+    primary = primary_type("constructor_primary")
+    created: list[Path] = []
+    real_create = owner_module.create_owned_scratch
+
+    def record_create(path: Path) -> os.stat_result:
+        identity = real_create(path)
+        created.append(path)
+        return identity
+
+    monkeypatch.setattr(owner_module, "create_owned_scratch", record_create)
+
+    def fail_connect(*_args, **_kwargs):
+        raise primary
+
+    monkeypatch.setattr(owner_module.sqlite3, "connect", fail_connect)
+
+    with pytest.raises(primary_type) as caught:
+        open_owner(scratch)
+
+    assert caught.value is primary
+    assert len(created) == 1
+    assert not created[0].exists()
+
+
+def _run_file_creator(owner_name: str, tmp_path: Path) -> object:
+    if owner_name == "atomic-text":
+        return atomic.atomic_write_text(tmp_path / "value.txt", "value")
+    if owner_name == "atomic-csv":
+        return atomic.atomic_write_csv(
+            pd.DataFrame({"value": [1]}), tmp_path / "value.csv", index=False
+        )
+    if owner_name in {"atomic-directory", "atomic-target-marker"}:
+        return atomic.atomic_write_directory(tmp_path / "tree", lambda _root: None)
+    if owner_name == "manifest-replace":
+        return manifests.replace_qrp_json(
+            tmp_path / "manifest.json", {"schema_id": "qrp-test"}
+        )
+    if owner_name == "chunked-parquet":
+        return parquet_writers.write_parquet_chunks(
+            (),
+            tmp_path / "prediction.parquet",
+            required=("timestamp",),
+            key_columns=("timestamp",),
+            compression="zstd",
+        )
+    return parquet_writers.write_parquet(
+        pd.DataFrame({"value": [1]}), tmp_path / "value.parquet"
+    )
+
+
+def _file_creator_module(owner_name: str):  # noqa: ANN202
+    del owner_name
+    return scratch_owner
+
+
+def _file_writer_module(owner_name: str):  # noqa: ANN202
+    if owner_name in {"atomic-text", "atomic-csv", "atomic-target-marker"}:
+        return atomic
+    if owner_name == "manifest-replace":
+        return manifests
+    return parquet_writers
+
+
+@pytest.mark.parametrize(
+    "owner_name",
+    (
+        "atomic-text",
+        "manifest-replace",
+        "single-parquet",
+    ),
+)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_file_writer_parent_identity_primary_survives_handle_close_secondary(
+    owner_name: str,
+    primary_type: type[BaseException],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _file_creator_module(owner_name)
+    writer_module = _file_writer_module(owner_name)
+    primary = primary_type("parent_identity_primary")
+    secondary = RuntimeError("handle_close_secondary")
+    identity_hits: list[tuple[Path, os.stat_result]] = []
+
+    class Handle:
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise secondary
+
+    handle = Handle()
+
+    def fail_parent_identity(path: Path, identity: os.stat_result) -> None:
+        identity_hits.append((path, identity))
+        raise primary
+
+    monkeypatch.setattr(
+        module,
+        "open_owned_scratch_file",
+        lambda *_args, **_kwargs: (handle, None),
+    )
+    monkeypatch.setattr(
+        writer_module,
+        "require_owned_scratch",
+        fail_parent_identity,
+    )
+
+    caught: BaseException | None = None
+    try:
+        _run_file_creator(owner_name, tmp_path)
+    except BaseException as exc:
+        caught = exc
+
+    assert caught is primary
+    assert len(identity_hits) == 1
+    assert identity_hits[0][0] == tmp_path
+    assert handle.close_calls == 1
+
+
+def _file_creator_cleanup(owner_name: str):  # noqa: ANN202
+    del owner_name
+    return scratch_owner, "remove_owned_scratch"
+
+
+_FILE_CREATOR_NAMES = ("atomic-text",)
+
+
+@pytest.mark.parametrize("owner_name", _FILE_CREATOR_NAMES)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+@pytest.mark.parametrize("wrapper_closes_descriptor", (False, True))
+def test_file_creator_owns_descriptor_when_fdopen_handoff_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+    wrapper_closes_descriptor: bool,
+) -> None:
+    module = _file_creator_module(owner_name)
+    primary = primary_type(f"{owner_name}_fdopen_handoff")
+    real_close = os.close
+    real_fstat = os.fstat
+    descriptors: list[int] = []
+
+    def fail_fdopen(descriptor: int, *_args, **_kwargs):  # noqa: ANN202
+        descriptors.append(descriptor)
+        if wrapper_closes_descriptor:
+            real_close(descriptor)
+        raise primary
+
+    monkeypatch.setattr(module.os, "fdopen", fail_fdopen)
+    caught: BaseException | None = None
+    try:
+        _run_file_creator(owner_name, tmp_path)
+    except BaseException as exc:
+        caught = exc
+
+    assert len(descriptors) == 1
+    descriptor = descriptors[0]
+    try:
+        real_fstat(descriptor)
+    except OSError:
+        descriptor_closed = True
+    else:
+        descriptor_closed = False
+        real_close(descriptor)
+    actual = {
+        "primary": caught is primary,
+        "descriptor_closed": descriptor_closed,
+        "survivors": tuple(tmp_path.iterdir()),
+    }
+    expected = {
+        "primary": True,
+        "descriptor_closed": True,
+        "survivors": (),
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize("owner_name", _FILE_CREATOR_NAMES)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_file_creator_fdopen_handoff_preserves_foreign_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+) -> None:
+    module, cleanup_name = _file_creator_cleanup(owner_name)
+    primary = primary_type(f"{owner_name}_fdopen_handoff")
+    real_open = os.open
+    real_close = os.close
+    real_cleanup = getattr(module, cleanup_name)
+    opened_paths: list[Path] = []
+    cleanup_identities: list[os.stat_result] = []
+
+    def record_open(path, flags, *args, **kwargs):  # noqa: ANN001, ANN202
+        descriptor = real_open(path, flags, *args, **kwargs)
+        opened_paths.append(Path(path))
+        return descriptor
+
+    def replace_then_fail(descriptor: int, *_args, **_kwargs):  # noqa: ANN202
+        assert len(opened_paths) == 1
+        real_close(descriptor)
+        path = opened_paths[0]
+        path.unlink()
+        replacement = real_open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            os.write(replacement, b"foreign")
+        finally:
+            real_close(replacement)
+        raise primary
+
+    def record_cleanup(path: Path, identity: os.stat_result) -> None:
+        if path == opened_paths[0]:
+            cleanup_identities.append(identity)
+        real_cleanup(path, identity)
+
+    monkeypatch.setattr(module.os, "open", record_open)
+    monkeypatch.setattr(module.os, "fdopen", replace_then_fail)
+    monkeypatch.setattr(module, cleanup_name, record_cleanup)
+    caught: BaseException | None = None
+    try:
+        _run_file_creator(owner_name, tmp_path)
+    except BaseException as exc:
+        caught = exc
+
+    assert len(opened_paths) == 1
+    actual = {
+        "primary": caught is primary,
+        "cleanup_hits": len(cleanup_identities),
+        "replacement": opened_paths[0].read_bytes(),
+    }
+    expected = {
+        "primary": True,
+        "cleanup_hits": 1,
+        "replacement": b"foreign",
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize("owner_name", _FILE_CREATOR_NAMES)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_file_creator_fdopen_handoff_preserves_primary_over_cleanup_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+) -> None:
+    module, cleanup_name = _file_creator_cleanup(owner_name)
+    primary = primary_type(f"{owner_name}_fdopen_handoff")
+    real_open = os.open
+    real_close = os.close
+    real_fstat = os.fstat
+    real_cleanup = getattr(module, cleanup_name)
+    descriptors: list[int] = []
+    opened_paths: list[Path] = []
+    close_hits = 0
+    cleanup_hits = 0
+
+    def record_open(path, flags, *args, **kwargs):  # noqa: ANN001, ANN202
+        descriptor = real_open(path, flags, *args, **kwargs)
+        opened_paths.append(Path(path))
+        return descriptor
+
+    def fail_fdopen(descriptor: int, *_args, **_kwargs):  # noqa: ANN202
+        descriptors.append(descriptor)
+        raise primary
+
+    def fail_close(descriptor: int) -> None:
+        nonlocal close_hits
+        close_hits += 1
+        real_close(descriptor)
+        raise OSError("descriptor_close_secondary")
+
+    def fail_cleanup(path: Path, identity: os.stat_result) -> None:
+        nonlocal cleanup_hits
+        if path == opened_paths[0]:
+            cleanup_hits += 1
+            raise OSError("path_cleanup_secondary")
+        real_cleanup(path, identity)
+
+    monkeypatch.setattr(module.os, "open", record_open)
+    monkeypatch.setattr(module.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(module.os, "close", fail_close)
+    monkeypatch.setattr(module, cleanup_name, fail_cleanup)
+    caught: BaseException | None = None
+    try:
+        _run_file_creator(owner_name, tmp_path)
+    except BaseException as exc:
+        caught = exc
+
+    assert len(descriptors) == 1
+    try:
+        real_fstat(descriptors[0])
+    except OSError:
+        descriptor_closed = True
+    else:
+        descriptor_closed = False
+        real_close(descriptors[0])
+    actual = {
+        "primary": caught is primary,
+        "descriptor_closed": descriptor_closed,
+        "close_hits": close_hits,
+        "cleanup_hits": cleanup_hits,
+    }
+    expected = {
+        "primary": True,
+        "descriptor_closed": True,
+        "close_hits": 1,
+        "cleanup_hits": 1,
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize("owner_name", _FILE_CREATOR_NAMES)
+def test_file_creator_preserves_os_open_collision_before_fdopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+) -> None:
+    module = _file_creator_module(owner_name)
+    real_open = os.open
+    real_close = os.close
+    open_hits = 0
+    fdopen_hits = 0
+    collisions: list[Path] = []
+
+    def collide(path, _flags, *_args, **_kwargs):  # noqa: ANN001, ANN202
+        nonlocal open_hits
+        open_hits += 1
+        collision = Path(path)
+        descriptor = real_open(collision, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            os.write(descriptor, b"foreign")
+        finally:
+            real_close(descriptor)
+        collisions.append(collision)
+        raise FileExistsError(collision)
+
+    def unexpected_fdopen(*_args, **_kwargs):  # noqa: ANN202
+        nonlocal fdopen_hits
+        fdopen_hits += 1
+        raise AssertionError("fdopen_after_open_collision")
+
+    monkeypatch.setattr(module.os, "open", collide)
+    monkeypatch.setattr(module.os, "fdopen", unexpected_fdopen)
+    with pytest.raises(FileExistsError):
+        _run_file_creator(owner_name, tmp_path)
+
+    assert len(collisions) == 1
+    actual = {
+        "open_hits": open_hits,
+        "fdopen_hits": fdopen_hits,
+        "collision": collisions[0].read_bytes(),
+    }
+    expected = {
+        "open_hits": 1,
+        "fdopen_hits": 0,
+        "collision": b"foreign",
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "owner_name",
+    _FILE_CREATOR_NAMES,
+)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_file_creator_cleans_when_identity_capture_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+) -> None:
+    primary = primary_type(f"{owner_name}_identity_capture")
+    real_fstat = os.fstat
+    calls = 0
+    hits = 0
+
+    def interrupt_fstat(descriptor: int) -> os.stat_result:
+        nonlocal calls, hits
+        metadata = real_fstat(descriptor)
+        calls += 1
+        if calls == 1:
+            hits += 1
+            raise primary
+        return metadata
+
+    monkeypatch.setattr(os, "fstat", interrupt_fstat)
+
+    with pytest.raises(primary_type) as caught:
+        _run_file_creator(owner_name, tmp_path)
+
+    assert calls == 2
+    assert hits == 1
+    assert caught.value is primary
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+@pytest.mark.parametrize(
+    "owner_name",
+    ("atomic-text", "manifest-replace", "single-parquet"),
+)
+@pytest.mark.parametrize("primary_type", _NAMESPACE_PRIMARY_TYPES)
+def test_file_creator_unknown_identity_is_recovered_by_later_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+) -> None:
+    module = _file_creator_module(owner_name)
+    primary = primary_type(f"{owner_name}_identity_capture")
+    real_open = os.open
+    real_close = os.close
+    real_fstat = os.fstat
+    descriptors: list[int] = []
+    opened_paths: list[Path] = []
+    fstat_hits = 0
+    close_hits = 0
+
+    def record_open(path, flags, *args, **kwargs):  # noqa: ANN001, ANN202
+        descriptor = real_open(path, flags, *args, **kwargs)
+        descriptors.append(descriptor)
+        opened_paths.append(Path(path))
+        return descriptor
+
+    def fail_fstat(_descriptor: int) -> os.stat_result:
+        nonlocal fstat_hits
+        fstat_hits += 1
+        raise primary
+
+    def record_close(descriptor: int) -> None:
+        nonlocal close_hits
+        close_hits += 1
+        real_close(descriptor)
+
+    monkeypatch.setattr(module.os, "open", record_open)
+    monkeypatch.setattr(module.os, "fstat", fail_fstat)
+    monkeypatch.setattr(module.os, "close", record_close)
+    caught: BaseException | None = None
+    try:
+        _run_file_creator(owner_name, tmp_path)
+    except BaseException as exc:
+        caught = exc
+
+    assert len(descriptors) == 1
+    descriptor = descriptors[0]
+    try:
+        real_fstat(descriptor)
+    except OSError:
+        descriptor_closed = True
+    else:
+        descriptor_closed = False
+        real_close(descriptor)
+    path_survived_without_identity = opened_paths[0].exists()
+    orphan = opened_paths[0]
+    monkeypatch.setattr(module.os, "fstat", real_fstat)
+    monkeypatch.setattr(
+        scratch_owner,
+        "scratch_owner_is_stale",
+        lambda path, *, prefix: Path(path) == orphan,
+    )
+    _run_file_creator(owner_name, tmp_path)
+    actual = {
+        "primary": caught is primary,
+        "fstat_hits": fstat_hits,
+        "close_hits": close_hits,
+        "descriptor_closed": descriptor_closed,
+        "path_survived_without_identity": path_survived_without_identity,
+        "later_operation_removed_orphan": not orphan.exists(),
+    }
+    expected = {
+        "primary": True,
+        "fstat_hits": 2,
+        "close_hits": 1,
+        "descriptor_closed": True,
+        "path_survived_without_identity": True,
+        "later_operation_removed_orphan": True,
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize("owner_name", _FILE_CREATOR_NAMES)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_file_creator_preserves_primary_when_descriptor_recheck_fstat_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+) -> None:
+    module, cleanup_name = _file_creator_cleanup(owner_name)
+    primary = primary_type(f"{owner_name}_wrapper_primary")
+    real_open = os.open
+    real_close = os.close
+    real_fstat = os.fstat
+    real_cleanup = getattr(module, cleanup_name)
+    descriptors: list[int] = []
+    opened_paths: list[Path] = []
+    fstat_hits = 0
+    close_hits = 0
+    cleanup_hits = 0
+
+    def record_open(path, flags, *args, **kwargs):  # noqa: ANN001, ANN202
+        descriptor = real_open(path, flags, *args, **kwargs)
+        descriptors.append(descriptor)
+        opened_paths.append(Path(path))
+        return descriptor
+
+    def fail_second_fstat(descriptor: int) -> os.stat_result:
+        nonlocal fstat_hits
+        fstat_hits += 1
+        if fstat_hits == 2:
+            raise OSError("descriptor_recheck_secondary")
+        return real_fstat(descriptor)
+
+    def fail_fdopen(*_args, **_kwargs):  # noqa: ANN202
+        raise primary
+
+    def record_close(descriptor: int) -> None:
+        nonlocal close_hits
+        close_hits += 1
+        real_close(descriptor)
+
+    def record_cleanup(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal cleanup_hits
+        cleanup_hits += 1
+        return real_cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", record_open)
+    monkeypatch.setattr(module.os, "fstat", fail_second_fstat)
+    monkeypatch.setattr(module.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(module.os, "close", record_close)
+    monkeypatch.setattr(module, cleanup_name, record_cleanup)
+    caught: BaseException | None = None
+    try:
+        _run_file_creator(owner_name, tmp_path)
+    except BaseException as exc:
+        caught = exc
+
+    descriptor = descriptors[0]
+    descriptor_open = True
+    try:
+        real_fstat(descriptor)
+    except OSError:
+        descriptor_open = False
+    if descriptor_open:
+        real_close(descriptor)
+    if opened_paths[0].exists():
+        opened_paths[0].unlink()
+    actual = {
+        "primary": caught is primary,
+        "fstat_hits": fstat_hits,
+        "close_hits": close_hits,
+        "cleanup_hits": cleanup_hits,
+        "descriptor_safely_retained": descriptor_open,
+    }
+    expected = {
+        "primary": True,
+        "fstat_hits": 2,
+        "close_hits": 0,
+        "cleanup_hits": 1,
+        "descriptor_safely_retained": True,
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize("owner_name", _FILE_CREATOR_NAMES)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_file_creator_preserves_primary_when_descriptor_samestat_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+) -> None:
+    module, cleanup_name = _file_creator_cleanup(owner_name)
+    primary = primary_type(f"{owner_name}_wrapper_primary")
+    secondary = OSError("descriptor_samestat_secondary")
+    real_open = os.open
+    real_close = os.close
+    real_fstat = os.fstat
+    real_samestat = os.path.samestat
+    real_cleanup = getattr(module, cleanup_name)
+    descriptors: list[int] = []
+    opened_paths: list[Path] = []
+    samestat_hits = 0
+    close_hits = 0
+    cleanup_hits = 0
+    wrapper_failed = False
+
+    def record_open(path, flags, *args, **kwargs):  # noqa: ANN001, ANN202
+        descriptor = real_open(path, flags, *args, **kwargs)
+        descriptors.append(descriptor)
+        opened_paths.append(Path(path))
+        return descriptor
+
+    def fail_fdopen(*_args, **_kwargs):  # noqa: ANN202
+        nonlocal wrapper_failed
+        wrapper_failed = True
+        raise primary
+
+    def fail_first_samestat(left, right):  # noqa: ANN001, ANN202
+        nonlocal samestat_hits
+        if not wrapper_failed:
+            return real_samestat(left, right)
+        samestat_hits += 1
+        if samestat_hits == 1:
+            raise secondary
+        return real_samestat(left, right)
+
+    def record_close(descriptor: int) -> None:
+        nonlocal close_hits
+        close_hits += 1
+        real_close(descriptor)
+
+    def record_cleanup(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal cleanup_hits
+        cleanup_hits += 1
+        return real_cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", record_open)
+    monkeypatch.setattr(module.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(module.os.path, "samestat", fail_first_samestat)
+    monkeypatch.setattr(module.os, "close", record_close)
+    monkeypatch.setattr(module, cleanup_name, record_cleanup)
+    caught: BaseException | None = None
+    try:
+        _run_file_creator(owner_name, tmp_path)
+    except BaseException as exc:
+        caught = exc
+
+    descriptor = descriptors[0]
+    descriptor_open = True
+    try:
+        real_fstat(descriptor)
+    except OSError:
+        descriptor_open = False
+    if descriptor_open:
+        real_close(descriptor)
+    if opened_paths[0].exists():
+        opened_paths[0].unlink()
+    actual = {
+        "primary": caught is primary,
+        "secondary_replaced_primary": caught is secondary,
+        "samestat_hits": samestat_hits,
+        "close_hits": close_hits,
+        "cleanup_hits": cleanup_hits,
+        "descriptor_safely_retained": descriptor_open,
+    }
+    expected = {
+        "primary": True,
+        "secondary_replaced_primary": False,
+        "samestat_hits": 6 if owner_name == "atomic-target-marker" else 3,
+        "close_hits": 0,
+        "cleanup_hits": 1,
+        "descriptor_safely_retained": True,
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize("owner_name", _FILE_CREATOR_NAMES)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_file_creator_does_not_close_reused_foreign_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+) -> None:
+    module = _file_creator_module(owner_name)
+    primary = primary_type(f"{owner_name}_wrapper_primary")
+    real_open = os.open
+    real_close = os.close
+    real_fstat = os.fstat
+    descriptors: list[int] = []
+    opened_paths: list[Path] = []
+    close_hits = 0
+    foreign_path = tmp_path / "foreign.bin"
+
+    def record_open(path, flags, *args, **kwargs):  # noqa: ANN001, ANN202
+        descriptor = real_open(path, flags, *args, **kwargs)
+        descriptors.append(descriptor)
+        opened_paths.append(Path(path))
+        return descriptor
+
+    def reuse_then_fail(descriptor: int, *_args, **_kwargs):  # noqa: ANN202
+        real_close(descriptor)
+        foreign_descriptor = real_open(
+            foreign_path,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL,
+        )
+        if foreign_descriptor != descriptor:
+            os.dup2(foreign_descriptor, descriptor)
+            real_close(foreign_descriptor)
+        os.write(descriptor, b"foreign")
+        raise primary
+
+    def record_close(descriptor: int) -> None:
+        nonlocal close_hits
+        close_hits += 1
+        real_close(descriptor)
+
+    monkeypatch.setattr(module.os, "open", record_open)
+    monkeypatch.setattr(module.os, "fdopen", reuse_then_fail)
+    monkeypatch.setattr(module.os, "close", record_close)
+    caught: BaseException | None = None
+    try:
+        _run_file_creator(owner_name, tmp_path)
+    except BaseException as exc:
+        caught = exc
+
+    descriptor = descriptors[0]
+    descriptor_open = True
+    try:
+        real_fstat(descriptor)
+    except OSError:
+        descriptor_open = False
+    if descriptor_open:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        foreign_payload = os.read(descriptor, len(b"foreign"))
+        real_close(descriptor)
+    else:
+        foreign_payload = b""
+    actual = {
+        "primary": caught is primary,
+        "helper_close_hits": close_hits,
+        "foreign_descriptor_open": descriptor_open,
+        "foreign_payload": foreign_payload,
+        "own_path_removed": not opened_paths[0].exists(),
+    }
+    expected = {
+        "primary": True,
+        "helper_close_hits": 0,
+        "foreign_descriptor_open": True,
+        "foreign_payload": b"foreign",
+        "own_path_removed": True,
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize("owner_name", _FILE_CREATOR_NAMES)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+@pytest.mark.parametrize("close_timing", ("before", "after"))
+def test_file_creator_does_not_retry_ambiguous_descriptor_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+    close_timing: str,
+) -> None:
+    module, cleanup_name = _file_creator_cleanup(owner_name)
+    primary = primary_type(f"{owner_name}_wrapper_primary")
+    real_open = os.open
+    real_close = os.close
+    real_fstat = os.fstat
+    real_cleanup = getattr(module, cleanup_name)
+    descriptors: list[int] = []
+    opened_paths: list[Path] = []
+    close_hits = 0
+    cleanup_hits = 0
+
+    def record_open(path, flags, *args, **kwargs):  # noqa: ANN001, ANN202
+        descriptor = real_open(path, flags, *args, **kwargs)
+        descriptors.append(descriptor)
+        opened_paths.append(Path(path))
+        return descriptor
+
+    def fail_fdopen(*_args, **_kwargs):  # noqa: ANN202
+        raise primary
+
+    def fail_close(descriptor: int) -> None:
+        nonlocal close_hits
+        close_hits += 1
+        if close_timing == "after":
+            real_close(descriptor)
+        raise OSError(f"descriptor_close_{close_timing}")
+
+    def cleanup(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal cleanup_hits
+        cleanup_hits += 1
+        if close_timing == "before":
+            raise OSError("path_cleanup_blocked_with_open_descriptor")
+        return real_cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", record_open)
+    monkeypatch.setattr(module.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(module.os, "close", fail_close)
+    monkeypatch.setattr(module, cleanup_name, cleanup)
+    caught: BaseException | None = None
+    try:
+        _run_file_creator(owner_name, tmp_path)
+    except BaseException as exc:
+        caught = exc
+
+    descriptor = descriptors[0]
+    descriptor_open = True
+    try:
+        real_fstat(descriptor)
+    except OSError:
+        descriptor_open = False
+    path_survived = opened_paths[0].exists()
+    if descriptor_open:
+        real_close(descriptor)
+    if path_survived:
+        opened_paths[0].unlink()
+    actual = {
+        "primary": caught is primary,
+        "close_hits": close_hits,
+        "cleanup_hits": cleanup_hits,
+        "descriptor_safely_retained": descriptor_open,
+        "path_safely_retained": path_survived,
+    }
+    expected = {
+        "primary": True,
+        "close_hits": 1,
+        "cleanup_hits": 1,
+        "descriptor_safely_retained": close_timing == "before",
+        "path_safely_retained": close_timing == "before",
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize("owner_name", _FILE_CREATOR_NAMES)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_file_creator_owns_handle_return_before_descriptor_state_updates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException],
+) -> None:
+    module = _file_creator_module(owner_name)
+    helper = module.open_owned_scratch_file
+    primary = primary_type(f"{owner_name}_post_handoff")
+    real_open = os.open
+    real_fdopen = os.fdopen
+    real_fstat = os.fstat
+    descriptors: list[int] = []
+    opened_paths: list[Path] = []
+    handles: list[object] = []
+    handoff_returned = False
+    trace_hits = 0
+
+    def record_open(path, flags, *args, **kwargs):  # noqa: ANN001, ANN202
+        descriptor = real_open(path, flags, *args, **kwargs)
+        descriptors.append(descriptor)
+        opened_paths.append(Path(path))
+        return descriptor
+
+    def record_fdopen(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal handoff_returned
+        handle = real_fdopen(*args, **kwargs)
+        handles.append(handle)
+        handoff_returned = True
+        return handle
+
+    def trace(frame, event, _arg):  # noqa: ANN001, ANN202
+        nonlocal trace_hits
+        if event == "line" and frame.f_code is helper.__code__ and handoff_returned:
+            trace_hits += 1
+            raise primary
+        return trace
+
+    monkeypatch.setattr(module.os, "open", record_open)
+    monkeypatch.setattr(module.os, "fdopen", record_fdopen)
+    previous_trace = sys.gettrace()
+    sys.settrace(trace)
+    caught: BaseException | None = None
+    try:
+        _run_file_creator(owner_name, tmp_path)
+    except BaseException as exc:
+        caught = exc
+    finally:
+        sys.settrace(previous_trace)
+    assert sys.gettrace() is previous_trace
+
+    descriptor = descriptors[0]
+    try:
+        real_fstat(descriptor)
+    except OSError:
+        descriptor_closed = True
+    else:
+        descriptor_closed = False
+        os.close(descriptor)
+    actual = {
+        "primary": caught is primary,
+        "trace_hits": trace_hits,
+        "handle_closed": len(handles) == 1 and handles[0].closed,
+        "descriptor_closed": descriptor_closed,
+        "own_path_removed": not opened_paths[0].exists(),
+    }
+    expected = {
+        "primary": True,
+        "trace_hits": 1,
+        "handle_closed": True,
+        "descriptor_closed": True,
+        "own_path_removed": True,
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "owner_name",
+    (
+        "atomic-text",
+        "manifest-replace",
+        "single-parquet",
+    ),
+)
+@pytest.mark.parametrize(
+    "primary_type",
+    (None, RuntimeError, KeyboardInterrupt),
+    ids=("identity-error", "exception", "keyboard-interrupt"),
+)
+def test_file_creator_does_not_delete_post_claim_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str,
+    primary_type: type[BaseException] | None,
+) -> None:
+    primary = primary_type("post_claim_primary") if primary_type is not None else None
+    replacements: list[Path] = []
+    hits = 0
+
+    def replace_file(path: Path) -> None:
+        path.unlink()
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            os.write(descriptor, b"foreign")
+        finally:
+            os.close(descriptor)
+        replacements.append(path)
+
+    if owner_name in {"atomic-text", "atomic-csv", "atomic-target-marker"}:
+        owner_module = atomic
+        helper_name = "require_owned_scratch"
+    elif owner_name == "manifest-replace":
+        owner_module = manifests
+        helper_name = "require_owned_scratch"
+    else:
+        owner_module = parquet_writers
+        helper_name = "require_owned_scratch"
+    real_require = getattr(owner_module, helper_name)
+
+    def replace_before_check(path: Path, identity: os.stat_result) -> None:
+        nonlocal hits
+        if Path(path) == tmp_path:
+            return real_require(path, identity)
+        if owner_name == "atomic-target-marker" and path.suffix != ".target":
+            return real_require(path, identity)
+        if hits:
+            return real_require(path, identity)
+        hits += 1
+        replace_file(path)
+        if primary is not None:
+            raise primary
+        return real_require(path, identity)
+
+    monkeypatch.setattr(owner_module, helper_name, replace_before_check)
+
+    def operation() -> object:
+        if owner_name == "chunked-parquet":
+            return parquet_writers.write_parquet_chunks(
+                (
+                    pd.DataFrame(
+                        {
+                            "timestamp": [pd.Timestamp("2024-01-02", tz="UTC")],
+                        }
+                    ),
+                ),
+                tmp_path / "prediction.parquet",
+                required=("timestamp",),
+                key_columns=("timestamp",),
+                compression="zstd",
+            )
+        return _run_file_creator(owner_name, tmp_path)
+
+    expected_type = primary_type or ValueError
+    with pytest.raises(expected_type) as caught:
+        operation()
+
+    assert hits == 1
+    if primary is not None:
+        assert caught.value is primary
+    assert len(replacements) == 1
+    assert replacements[0].read_bytes() == b"foreign"
+
+
+@pytest.mark.parametrize(
+    ("owner_module", "owner_type", "open_owner"),
+    (
+        (
+            key_owner,
+            key_owner.ExactPrimaryKeyIndex,
+            lambda scratch: key_owner.ExactPrimaryKeyIndex(
+                primary_key=("value",),
+                timestamp_columns=(),
+                scratch_parent=scratch,
+            ).__enter__(),
+        ),
+        (
+            inventory_owner,
+            inventory_owner.DatasetSessionInventory,
+            lambda scratch: inventory_owner.DatasetSessionInventory(
+                data_root=scratch.parent / "data",
+                scratch_parent=scratch,
+                task_memory_budget_bytes=1024,
+            ),
+        ),
+    ),
+    ids=("exact-primary-key-index", "dataset-session-inventory"),
+)
+def test_scratch_creator_is_cleanup_owned_before_instance_assignment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_module: object,
+    owner_type: type,
+    open_owner,
+) -> None:
+    primary = SystemExit(9)
+    created: list[Path] = []
+    real_create = owner_module.create_owned_scratch
+
+    def record_create(path: Path) -> os.stat_result:
+        identity = real_create(path)
+        created.append(path)
+        return identity
+
+    real_setattr = owner_type.__setattr__
+
+    def interrupt_assignment(self, name: str, value: object) -> None:
+        real_setattr(self, name, value)
+        if name == "_temporary_directory" and value is not None:
+            raise primary
+
+    monkeypatch.setattr(owner_module, "create_owned_scratch", record_create)
+    monkeypatch.setattr(owner_type, "__setattr__", interrupt_assignment)
+
+    with pytest.raises(SystemExit) as caught:
+        open_owner(tmp_path / "scratch")
+
+    assert caught.value is primary
+    assert len(created) == 1
+    assert not created[0].exists()
+
+
+@pytest.mark.parametrize(
+    "open_owner",
+    (
+        lambda scratch: key_owner.ExactPrimaryKeyIndex(
+            primary_key=("value",),
+            timestamp_columns=(),
+            scratch_parent=scratch,
+        ).__enter__(),
+        lambda scratch: inventory_owner.DatasetSessionInventory(
+            data_root=scratch.parent / "data",
+            scratch_parent=scratch,
+            task_memory_budget_bytes=1024,
+        ),
+    ),
+    ids=("exact-primary-key-index", "dataset-session-inventory"),
+)
+def test_scratch_owner_does_not_delete_post_claim_replacement(
+    tmp_path: Path,
+    open_owner,
+) -> None:
+    owner = open_owner(tmp_path / "scratch")
+    scratch_path = (
+        owner.scratch_path
+        if hasattr(owner, "scratch_path")
+        else owner.database_path.parent
+    )
+    connection = owner._connection
+    assert connection is not None
+    connection.close()
+    owner._connection = None
+    shutil.rmtree(scratch_path)
+    scratch_path.mkdir()
+    (scratch_path / "foreign.txt").write_text("foreign", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
+        owner.close()
+
+    assert (scratch_path / "foreign.txt").read_text(encoding="utf-8") == "foreign"
+
+
+def test_shared_scratch_removal_restores_replacement_moved_before_quarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "owned"
+    path.mkdir()
+    identity = path.lstat()
+    real_move = scratch_owner.move_path_no_replace
+    move_hits: list[tuple[Path, Path]] = []
+
+    def replace_then_move(source: Path, target: Path) -> None:
+        move_hits.append((source, target))
+        if len(move_hits) == 1:
+            shutil.rmtree(source)
+            source.mkdir()
+            (source / "foreign.txt").write_text("foreign", encoding="utf-8")
+        real_move(source, target)
+
+    monkeypatch.setattr(scratch_owner, "move_path_no_replace", replace_then_move)
+
+    with pytest.raises(ValueError, match="^storage_scratch_identity_changed$"):
+        scratch_owner.remove_owned_scratch(path, identity)
+
+    quarantines = tuple(tmp_path.glob(".*.cleanup-*"))
+    assert {
+        "move_hits": len(move_hits),
+        "restored": (path / "foreign.txt").read_text(encoding="utf-8"),
+        "quarantines": quarantines,
+    } == {"move_hits": 2, "restored": "foreign", "quarantines": ()}
+
+
+def test_shared_scratch_removal_preserves_both_paths_when_restore_collides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "owned"
+    path.mkdir()
+    identity = path.lstat()
+    real_move = scratch_owner.move_path_no_replace
+    move_hits = 0
+
+    def replace_then_collide(source: Path, target: Path) -> None:
+        nonlocal move_hits
+        move_hits += 1
+        if move_hits == 1:
+            shutil.rmtree(source)
+            source.mkdir()
+            (source / "foreign.txt").write_text("foreign", encoding="utf-8")
+            real_move(source, target)
+            return
+        source.parent.joinpath("owned").mkdir()
+        source.parent.joinpath("owned", "winner.txt").write_text(
+            "winner", encoding="utf-8"
+        )
+        real_move(source, target)
+
+    monkeypatch.setattr(scratch_owner, "move_path_no_replace", replace_then_collide)
+
+    with pytest.raises(ValueError) as caught:
+        scratch_owner.remove_owned_scratch(path, identity)
+
+    quarantines = tuple(tmp_path.glob(".*.cleanup-*"))
+    assert {
+        "move_hits": move_hits,
+        "winner": (path / "winner.txt").read_text(encoding="utf-8"),
+        "quarantine_count": len(quarantines),
+        "foreign": (quarantines[0] / "foreign.txt").read_text(encoding="utf-8"),
+        "notes": caught.value.__notes__,
+    } == {
+        "move_hits": 2,
+        "winner": "winner",
+        "quarantine_count": 1,
+        "foreign": "foreign",
+        "notes": ["scratch restore also failed: FileExistsError"],
+    }
+    assert caught.value.args == ("storage_scratch_identity_changed",)
+
+
+@pytest.mark.parametrize("kind", ("file", "directory"))
+@pytest.mark.parametrize(
+    ("primary_type", "expects_error"),
+    (
+        (OSError, False),
+        (PermissionError, False),
+        (RuntimeError, True),
+        (KeyboardInterrupt, True),
+        (SystemExit, True),
+        (GeneratorExit, True),
+        (MemoryError, True),
+    ),
+)
+def test_shared_scratch_removal_reconciles_post_commit_move_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    primary_type: type[BaseException],
+    expects_error: bool,
+) -> None:
+    path = tmp_path / "owned"
+    if kind == "directory":
+        path.mkdir()
+        (path / "payload").write_text("owned", encoding="utf-8")
+    else:
+        path.write_text("owned", encoding="utf-8")
+    identity = path.lstat()
+    primary = primary_type("post_commit")
+    real_move = scratch_owner.move_path_no_replace
+
+    def commit_then_raise(source: Path, target: Path) -> None:
+        real_move(source, target)
+        raise primary
+
+    monkeypatch.setattr(scratch_owner, "move_path_no_replace", commit_then_raise)
+    caught: BaseException | None = None
+    try:
+        scratch_owner.remove_owned_scratch(path, identity)
+    except BaseException as error:
+        caught = error
+
+    assert {
+        "caught": caught,
+        "original_exists": path.exists(),
+        "quarantines": tuple(tmp_path.glob(".*.cleanup-*")),
+    } == {
+        "caught": primary if expects_error else None,
+        "original_exists": False,
+        "quarantines": (),
+    }
+
+
+@pytest.mark.parametrize(
+    "primary_type",
+    (
+        OSError,
+        PermissionError,
+        RuntimeError,
+        KeyboardInterrupt,
+        SystemExit,
+        GeneratorExit,
+        MemoryError,
+    ),
+)
+def test_shared_scratch_removal_preserves_pre_commit_move_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    primary_type: type[BaseException],
+) -> None:
+    path = tmp_path / "owned"
+    path.write_text("owned", encoding="utf-8")
+    identity = path.lstat()
+    primary = primary_type("pre_commit")
+    move_hits = 0
+
+    def fail_move(_source: Path, _target: Path) -> None:
+        nonlocal move_hits
+        move_hits += 1
+        raise primary
+
+    monkeypatch.setattr(scratch_owner, "move_path_no_replace", fail_move)
+
+    with pytest.raises(primary_type) as caught:
+        scratch_owner.remove_owned_scratch(path, identity)
+
+    assert {
+        "caught": caught.value,
+        "move_hits": move_hits,
+        "source_exact": os.path.samestat(path.lstat(), identity),
+        "quarantines": tuple(tmp_path.glob(".*.cleanup-*")),
+        "notes": getattr(caught.value, "__notes__", []),
+    } == {
+        "caught": primary,
+        "move_hits": 1,
+        "source_exact": True,
+        "quarantines": (),
+        "notes": [],
+    }
+
+
+def test_shared_scratch_removal_fails_closed_after_successful_move_noop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "owned"
+    path.write_text("owned", encoding="utf-8")
+    identity = path.lstat()
+    quarantine: Path | None = None
+    move_hits = 0
+
+    def hardlink_noop(source: Path, target: Path) -> None:
+        nonlocal move_hits, quarantine
+        move_hits += 1
+        quarantine = target
+        os.link(source, target)
+
+    monkeypatch.setattr(scratch_owner, "move_path_no_replace", hardlink_noop)
+
+    with pytest.raises(ValueError, match="storage_scratch_identity_changed") as caught:
+        scratch_owner.remove_owned_scratch(path, identity)
+
+    assert quarantine is not None
+    assert {
+        "source_exact": os.path.samestat(path.lstat(), identity),
+        "quarantine_exact": os.path.samestat(quarantine.lstat(), identity),
+        "payloads": (path.read_text(), quarantine.read_text()),
+        "move_hits": move_hits,
+        "notes": getattr(caught.value, "__notes__", []),
+    } == {
+        "source_exact": True,
+        "quarantine_exact": True,
+        "payloads": ("owned", "owned"),
+        "move_hits": 1,
+        "notes": [],
+    }
+
+
+@pytest.mark.parametrize("kind", ("file", "directory"))
+@pytest.mark.parametrize("probe_primary_type", _NAMESPACE_PRIMARY_TYPES)
+def test_shared_scratch_noop_preserves_quarantine_probe_primary_when_source_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    probe_primary_type: type[BaseException],
+) -> None:
+    path = tmp_path / "owned"
+    if kind == "directory":
+        path.mkdir()
+        (path / "payload").write_text("owned", encoding="utf-8")
+    else:
+        path.write_text("owned", encoding="utf-8")
+    identity = path.lstat()
+    probe_primary = probe_primary_type("quarantine_probe_primary")
+    real_matches = scratch_owner.scratch_identity_matches
+    probe_order: list[Path] = []
+    quarantine: Path | None = None
+
+    def no_op(_source: Path, target: Path) -> None:
+        nonlocal quarantine
+        quarantine = target
+
+    def fail_quarantine_probe(candidate: Path, claimed: os.stat_result) -> bool:
+        probe_order.append(candidate)
+        if candidate == quarantine:
+            raise probe_primary
+        return real_matches(candidate, claimed)
+
+    monkeypatch.setattr(scratch_owner, "move_path_no_replace", no_op)
+    monkeypatch.setattr(
+        scratch_owner, "scratch_identity_matches", fail_quarantine_probe
+    )
+
+    with pytest.raises(probe_primary_type) as caught:
+        scratch_owner.remove_owned_scratch(path, identity)
+
+    assert quarantine is not None
+    assert {
+        "caught": caught.value,
+        "probe_order": probe_order,
+        "source_exact": os.path.samestat(path.lstat(), identity),
+        "quarantine_exists": quarantine.exists(),
+        "notes": getattr(caught.value, "__notes__", []),
+    } == {
+        "caught": probe_primary,
+        "probe_order": [quarantine, path],
+        "source_exact": True,
+        "quarantine_exists": False,
+        "notes": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "move_primary_type",
+    (None, OSError, RuntimeError),
+    ids=("no-move-primary", "ordinary-move-primary", "non-os-move-primary"),
+)
+@pytest.mark.parametrize(
+    "cleanup_fails", (False, True), ids=("cleanup", "cleanup-fails")
+)
+def test_shared_scratch_source_probe_failure_cleans_confirmed_quarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    move_primary_type: type[BaseException] | None,
+    cleanup_fails: bool,
+) -> None:
+    path = tmp_path / "owned"
+    path.write_text("owned", encoding="utf-8")
+    identity = path.lstat()
+    move_primary = (
+        move_primary_type("move_primary") if move_primary_type is not None else None
+    )
+    source_probe_primary = RuntimeError("source_probe_primary")
+    real_move = scratch_owner.move_path_no_replace
+    real_matches = scratch_owner.scratch_identity_matches
+    real_unlink = Path.unlink
+    quarantine: Path | None = None
+    cleanup_hits = 0
+
+    def commit_then_maybe_raise(source: Path, target: Path) -> None:
+        nonlocal quarantine
+        quarantine = target
+        real_move(source, target)
+        if move_primary is not None:
+            raise move_primary
+
+    def fail_source_probe(candidate: Path, claimed: os.stat_result) -> bool:
+        if candidate == path and quarantine is not None:
+            raise source_probe_primary
+        return real_matches(candidate, claimed)
+
+    def cleanup(candidate: Path, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        nonlocal cleanup_hits
+        if quarantine is not None and candidate == quarantine:
+            cleanup_hits += 1
+            if cleanup_fails:
+                raise PermissionError("cleanup_secondary")
+        real_unlink(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(scratch_owner, "move_path_no_replace", commit_then_maybe_raise)
+    monkeypatch.setattr(scratch_owner, "scratch_identity_matches", fail_source_probe)
+    monkeypatch.setattr(Path, "unlink", cleanup)
+
+    expected_primary = move_primary or source_probe_primary
+    caught: BaseException | None = None
+    try:
+        scratch_owner.remove_owned_scratch(path, identity)
+    except BaseException as error:
+        caught = error
+
+    assert quarantine is not None
+    assert {
+        "caught": caught,
+        "cleanup_hits": cleanup_hits,
+        "source_exists": path.exists(),
+        "quarantine_survived": quarantine.exists(),
+        "notes": getattr(expected_primary, "__notes__", []),
+    } == {
+        "caught": expected_primary,
+        "cleanup_hits": 1,
+        "source_exists": False,
+        "quarantine_survived": cleanup_fails,
+        "notes": [],
+    }
+
+
+def test_shared_scratch_post_commit_primary_survives_cleanup_secondary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "owned"
+    path.write_text("owned", encoding="utf-8")
+    identity = path.lstat()
+    primary = KeyboardInterrupt("post_commit")
+    real_move = scratch_owner.move_path_no_replace
+    real_unlink = Path.unlink
+    cleanup_hits = 0
+
+    def commit_then_interrupt(source: Path, target: Path) -> None:
+        real_move(source, target)
+        raise primary
+
+    def fail_quarantine_unlink(candidate: Path, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        nonlocal cleanup_hits
+        if ".cleanup-" in candidate.name:
+            cleanup_hits += 1
+            raise OSError("cleanup_failed")
+        real_unlink(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(scratch_owner, "move_path_no_replace", commit_then_interrupt)
+    monkeypatch.setattr(Path, "unlink", fail_quarantine_unlink)
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        scratch_owner.remove_owned_scratch(path, identity)
+
+    assert {
+        "caught": caught.value,
+        "cleanup_hits": cleanup_hits,
+        "quarantine_count": len(tuple(tmp_path.glob(".*.cleanup-*"))),
+    } == {"caught": primary, "cleanup_hits": 1, "quarantine_count": 1}
+
+
+def test_shared_scratch_restore_reconciles_committed_interrupt_without_false_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "owned"
+    path.write_text("owned", encoding="utf-8")
+    identity = path.lstat()
+    primary = RuntimeError("verification_failed")
+    real_move = scratch_owner.move_path_no_replace
+    real_require = scratch_owner.require_owned_scratch
+
+    def fail_quarantine(candidate: Path, claimed: os.stat_result) -> None:
+        if ".cleanup-" in Path(candidate).name:
+            raise primary
+        real_require(candidate, claimed)
+
+    def interrupt_after_restore(source: Path, target: Path) -> None:
+        real_move(source, target)
+        if target == path:
+            raise KeyboardInterrupt("post_commit_restore")
+
+    monkeypatch.setattr(scratch_owner, "require_owned_scratch", fail_quarantine)
+    monkeypatch.setattr(scratch_owner, "move_path_no_replace", interrupt_after_restore)
+
+    with pytest.raises(RuntimeError) as caught:
+        scratch_owner.remove_owned_scratch(path, identity)
+
+    assert {
+        "caught": caught.value,
+        "notes": getattr(caught.value, "__notes__", []),
+        "payload": path.read_text(encoding="utf-8"),
+        "quarantines": tuple(tmp_path.glob(".*.cleanup-*")),
+    } == {
+        "caught": primary,
+        "notes": [],
+        "payload": "owned",
+        "quarantines": (),
+    }
+
+
+def _directory_not_empty_error() -> OSError:
+    error = OSError("directory_not_empty")
+    error.winerror = 145
+    return error
+
+
+@pytest.mark.parametrize(
+    ("absolute_path", "expected"),
+    (
+        ("C:" + r"\scratch\owned", "\\\\?\\" + "C:" + r"\scratch\owned"),
+        (r"\\server\share\owned", r"\\?\UNC\server\share\owned"),
+        ("\\\\?\\" + "C:" + r"\scratch\owned", "\\\\?\\" + "C:" + r"\scratch\owned"),
+        (r"\\?\UNC\server\share\owned", r"\\?\UNC\server\share\owned"),
+    ),
+    ids=("drive", "unc", "extended-drive", "extended-unc"),
+)
+def test_windows_directory_not_empty_cleanup_uses_one_extended_path_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    absolute_path: str,
+    expected: str,
+) -> None:
+    path = tmp_path / "owned"
+    path.mkdir()
+    identity = path.lstat()
+
+    def onexc(*_args: object) -> None:
+        pass
+
+    real_rmtree = scratch_owner.shutil.rmtree
+    calls: list[tuple[object, object]] = []
+
+    def rmtree(candidate, *, onexc=None) -> None:  # noqa: ANN001
+        calls.append((candidate, onexc))
+        if len(calls) == 1:
+            raise _directory_not_empty_error()
+
+    monkeypatch.setattr(scratch_owner.os.path, "abspath", lambda _path: absolute_path)
+    monkeypatch.setattr(scratch_owner.shutil, "rmtree", rmtree)
+    try:
+        scratch_owner.remove_owned_scratch(path, identity, onexc=onexc)
+    finally:
+        quarantines = tuple(tmp_path.glob(".*.cleanup-*"))
+        for quarantine in quarantines:
+            real_rmtree(quarantine)
+
+    assert len(calls) == 2
+    assert Path(calls[0][0]).name.startswith(".owned.cleanup-")
+    assert calls[1][0] == expected
+    assert calls[0][1] is onexc
+    assert calls[1][1] is onexc
+
+
+def test_windows_extended_path_cleanup_propagates_fallback_failure_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "owned"
+    path.mkdir()
+    identity = path.lstat()
+    secondary = KeyboardInterrupt("extended_cleanup_failed")
+    real_rmtree = scratch_owner.shutil.rmtree
+    calls = 0
+
+    def rmtree(_candidate, *, onexc=None) -> None:  # noqa: ANN001, ARG001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _directory_not_empty_error()
+        raise secondary
+
+    monkeypatch.setattr(scratch_owner.shutil, "rmtree", rmtree)
+    caught: BaseException | None = None
+    try:
+        scratch_owner.remove_owned_scratch(path, identity)
+    except BaseException as error:
+        caught = error
+    finally:
+        for quarantine in tmp_path.glob(".*.cleanup-*"):
+            real_rmtree(quarantine)
+
+    assert caught is secondary
+    assert calls == 2
+
+
+def test_windows_extended_path_cleanup_rechecks_root_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "owned"
+    path.mkdir()
+    identity = path.lstat()
+    real_rmtree = scratch_owner.shutil.rmtree
+    calls = 0
+    replacement: Path | None = None
+
+    def replace_before_fallback(candidate, *, onexc=None) -> None:  # noqa: ANN001, ARG001
+        nonlocal calls, replacement
+        calls += 1
+        replacement = Path(candidate)
+        real_rmtree(replacement)
+        replacement.mkdir()
+        (replacement / "foreign.txt").write_text("foreign", encoding="utf-8")
+        raise _directory_not_empty_error()
+
+    monkeypatch.setattr(scratch_owner.shutil, "rmtree", replace_before_fallback)
+
+    with pytest.raises(ValueError, match="^storage_scratch_identity_changed$"):
+        scratch_owner.remove_owned_scratch(path, identity)
+
+    assert calls == 1
+    assert replacement is not None
+    assert (replacement / "foreign.txt").read_text(encoding="utf-8") == "foreign"
+    real_rmtree(replacement)
+
+
+def test_non_directory_not_empty_cleanup_error_is_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "owned"
+    path.mkdir()
+    identity = path.lstat()
+    primary = OSError("ordinary_cleanup_error")
+    real_rmtree = scratch_owner.shutil.rmtree
+    calls = 0
+
+    def fail(_candidate, *, onexc=None) -> None:  # noqa: ANN001, ARG001
+        nonlocal calls
+        calls += 1
+        raise primary
+
+    monkeypatch.setattr(scratch_owner.shutil, "rmtree", fail)
+    try:
+        with pytest.raises(OSError) as caught:
+            scratch_owner.remove_owned_scratch(path, identity)
+    finally:
+        for quarantine in tmp_path.glob(".*.cleanup-*"):
+            real_rmtree(quarantine)
+
+    assert caught.value is primary
+    assert calls == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only fallback boundary")
+def test_posix_directory_not_empty_cleanup_error_is_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "owned"
+    path.mkdir()
+    identity = path.lstat()
+    primary = _directory_not_empty_error()
+    real_rmtree = scratch_owner.shutil.rmtree
+    calls = 0
+
+    def fail(_candidate, *, onexc=None) -> None:  # noqa: ANN001, ARG001
+        nonlocal calls
+        calls += 1
+        raise primary
+
+    monkeypatch.setattr(scratch_owner.shutil, "rmtree", fail)
+    try:
+        with pytest.raises(OSError) as caught:
+            scratch_owner.remove_owned_scratch(path, identity)
+    finally:
+        for quarantine in tmp_path.glob(".*.cleanup-*"):
+            real_rmtree(quarantine)
+
+    assert caught.value is primary
+    assert calls == 1
+
+
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+def test_sqlite_owner_preserves_body_primary_over_extended_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    primary_type: type[BaseException],
+) -> None:
+    owner = inventory_owner.DatasetSessionInventory(
+        data_root=tmp_path / "data",
+        scratch_parent=tmp_path / "scratch",
+        task_memory_budget_bytes=1024,
+    )
+    primary = primary_type("body_primary")
+    real_rmtree = scratch_owner.shutil.rmtree
+    calls = 0
+
+    def fail(_candidate, *, onexc=None) -> None:  # noqa: ANN001, ARG001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _directory_not_empty_error()
+        raise OSError("extended_cleanup_secondary")
+
+    monkeypatch.setattr(scratch_owner.shutil, "rmtree", fail)
+    try:
+        with pytest.raises(primary_type) as caught:
+            with owner:
+                raise primary
+    finally:
+        for quarantine in (tmp_path / "scratch").glob(".*.cleanup-*"):
+            real_rmtree(quarantine)
+
+    assert caught.value is primary
+    assert calls == 2
+
+
+@pytest.mark.parametrize("verification_stage", ("identity", "metadata"))
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
+@pytest.mark.parametrize(
+    "restore_collision", (False, True), ids=("restore", "collision")
+)
+def test_shared_scratch_removal_restores_before_delete_on_verification_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verification_stage: str,
+    primary_type: type[BaseException],
+    restore_collision: bool,
+) -> None:
+    path = tmp_path / "owned"
+    path.mkdir()
+    (path / "owned.txt").write_text("owned", encoding="utf-8")
+    identity = path.lstat()
+    primary = primary_type("verification_failed")
+    real_move = scratch_owner.move_path_no_replace
+    real_require = scratch_owner.require_owned_scratch
+    real_lstat = Path.lstat
+    quarantine_lstat_hits = 0
+    restore_hits = 0
+
+    def fail_identity(candidate: Path, claimed: os.stat_result) -> None:
+        if verification_stage == "identity" and ".cleanup-" in Path(candidate).name:
+            raise primary
+        real_require(candidate, claimed)
+
+    def fail_metadata(candidate: Path, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal quarantine_lstat_hits
+        if verification_stage == "metadata" and ".cleanup-" in candidate.name:
+            quarantine_lstat_hits += 1
+            if quarantine_lstat_hits == 2:
+                raise primary
+        return real_lstat(candidate, *args, **kwargs)
+
+    def restore_or_collide(source: Path, target: Path) -> None:
+        nonlocal restore_hits
+        if ".cleanup-" in Path(source).name and Path(target) == path:
+            restore_hits += 1
+            if restore_collision:
+                path.mkdir()
+                (path / "winner.txt").write_text("winner", encoding="utf-8")
+        real_move(source, target)
+
+    monkeypatch.setattr(scratch_owner, "require_owned_scratch", fail_identity)
+    monkeypatch.setattr(Path, "lstat", fail_metadata)
+    monkeypatch.setattr(scratch_owner, "move_path_no_replace", restore_or_collide)
+
+    caught: BaseException | None = None
+    try:
+        scratch_owner.remove_owned_scratch(path, identity)
+    except BaseException as error:
+        caught = error
+
+    assert caught is primary
+    assert restore_hits == 1
+    quarantines = tuple(tmp_path.glob(".*.cleanup-*"))
+    if restore_collision:
+        assert (path / "winner.txt").read_text(encoding="utf-8") == "winner"
+        assert len(quarantines) == 1
+        assert (quarantines[0] / "owned.txt").read_text(encoding="utf-8") == "owned"
+        assert caught.__notes__ == ["scratch restore also failed: FileExistsError"]
+    else:
+        assert (path / "owned.txt").read_text(encoding="utf-8") == "owned"
+        assert quarantines == ()
+
+
+@pytest.mark.parametrize("foreign_kind", ("file", "link"))
+def test_scratch_create_rejects_observable_foreign_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    foreign_kind: str,
+) -> None:
+    path = tmp_path / "scratch"
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "foreign.txt").write_text("foreign", encoding="utf-8")
+    real_mkdir = os.mkdir
+    mkdir_hits = 0
+
+    def replace_after_mkdir(candidate, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        nonlocal mkdir_hits
+        result = real_mkdir(candidate, *args, **kwargs)
+        if Path(candidate) != path:
+            return result
+        mkdir_hits += 1
+        shutil.rmtree(path)
+        if foreign_kind == "file":
+            path.write_bytes(b"foreign")
+            return result
+        try:
+            path.symlink_to(external, target_is_directory=True)
+        except OSError as exc:
+            if os.name != "nt" or not hasattr(Path, "is_junction"):
+                pytest.skip(f"directory_reparse_not_available: {exc}")
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(path), str(external)],
+                capture_output=True,
+                text=True,
+            )
+            if created.returncode != 0:
+                pytest.skip("directory_reparse_not_available")
+        return result
+
+    monkeypatch.setattr(os, "mkdir", replace_after_mkdir)
+    caught: BaseException | None = None
+    try:
+        scratch_owner.create_owned_scratch(path)
+    except BaseException as exc:  # pragma: no branch - asserted below
+        caught = exc
+
+    foreign_preserved = (
+        path.read_bytes() == b"foreign"
+        if foreign_kind == "file" and path.is_file()
+        else (path / "foreign.txt").read_text(encoding="utf-8") == "foreign"
+        if path.exists()
+        else False
+    )
+    actual = {
+        "mkdir_hits": mkdir_hits,
+        "error": None if caught is None else f"{type(caught).__name__}:{caught}",
+        "foreign_preserved": foreign_preserved,
+    }
+    expected = {
+        "mkdir_hits": 1,
+        "error": "ValueError:storage_scratch_identity_changed",
+        "foreign_preserved": True,
+    }
+    assert actual == expected
+
+
+def test_scratch_create_rejects_parent_replacement_without_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    path = parent / "scratch"
+    displaced = tmp_path / "displaced-parent"
+    real_mkdir = os.mkdir
+    mkdir_hits = 0
+
+    def replace_parent_after_mkdir(candidate, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        nonlocal mkdir_hits
+        result = real_mkdir(candidate, *args, **kwargs)
+        if Path(candidate) != path:
+            return result
+        mkdir_hits += 1
+        parent.rename(displaced)
+        real_mkdir(parent)
+        real_mkdir(path)
+        (path / "foreign.txt").write_text("foreign", encoding="utf-8")
+        (displaced / "scratch" / "owned.txt").write_text("owned", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(os, "mkdir", replace_parent_after_mkdir)
+    caught: BaseException | None = None
+    try:
+        scratch_owner.create_owned_scratch(path)
+    except BaseException as exc:  # pragma: no branch - asserted below
+        caught = exc
+
+    actual = {
+        "mkdir_hits": mkdir_hits,
+        "error": None if caught is None else f"{type(caught).__name__}:{caught}",
+        "foreign_preserved": (path / "foreign.txt").is_file(),
+        "owned_survivor_preserved": (displaced / "scratch" / "owned.txt").is_file(),
+    }
+    expected = {
+        "mkdir_hits": 1,
+        "error": "ValueError:storage_scratch_parent_identity_changed",
+        "foreign_preserved": True,
+        "owned_survivor_preserved": True,
+    }
+    assert actual == expected
+
+
+@pytest.mark.parametrize("caller", ("atomic", "key-index", "inventory"))
+def test_directory_callers_stop_before_foreign_file_side_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: str,
+) -> None:
+    scratch_parent = tmp_path / "scratch"
+    scratch_parent.mkdir()
+    final_root = scratch_parent / "result"
+    displaced = tmp_path / "displaced"
+    created_paths: list[Path] = []
+    side_effect_hits: list[Path] = []
+
+    def replace_after_create(real_create, candidate: Path):  # noqa: ANN001, ANN202
+        identity = real_create(candidate)
+        created_paths.append(Path(candidate))
+        scratch_parent.rename(displaced)
+        scratch_parent.mkdir()
+        Path(candidate).mkdir()
+        (Path(candidate) / "foreign.txt").write_text("foreign", encoding="utf-8")
+        return identity
+
+    def connect(path, *_args, **_kwargs):  # noqa: ANN001, ANN202
+        side_effect_hits.append(Path(path))
+        raise RuntimeError("caller_side_effect_reached")
+
+    if caller == "key-index":
+        real_create = key_owner.create_owned_scratch
+        monkeypatch.setattr(
+            key_owner,
+            "create_owned_scratch",
+            lambda path: replace_after_create(real_create, path),
+        )
+        monkeypatch.setattr(key_owner.sqlite3, "connect", connect)
+        operation = lambda: key_owner.ExactPrimaryKeyIndex(  # noqa: E731
+            primary_key=("value",),
+            timestamp_columns=(),
+            scratch_parent=scratch_parent,
+        ).__enter__()
+    elif caller == "inventory":
+        real_create = inventory_owner.create_owned_scratch
+        monkeypatch.setattr(
+            inventory_owner,
+            "create_owned_scratch",
+            lambda path: replace_after_create(real_create, path),
+        )
+        monkeypatch.setattr(inventory_owner.sqlite3, "connect", connect)
+        operation = lambda: inventory_owner.DatasetSessionInventory(  # noqa: E731
+            data_root=tmp_path / "data",
+            scratch_parent=scratch_parent,
+            task_memory_budget_bytes=1024,
+        )
+    else:
+        real_create = atomic.create_owned_scratch
+        monkeypatch.setattr(
+            atomic,
+            "create_owned_scratch",
+            lambda path: replace_after_create(real_create, path),
+        )
+        operation = lambda: atomic.atomic_write_directory(  # noqa: E731
+            final_root,
+            lambda path: side_effect_hits.append(path),
+        )
+
+    caught: BaseException | None = None
+    try:
+        operation()
+    except BaseException as exc:  # pragma: no branch - asserted below
+        caught = exc
+
+    actual = {
+        "create_hits": len(created_paths),
+        "side_effect_hits": len(side_effect_hits),
+        "error": None if caught is None else f"{type(caught).__name__}:{caught}",
+        "foreign_preserved": len(created_paths) == 1
+        and (created_paths[0] / "foreign.txt").read_text(encoding="utf-8") == "foreign",
+    }
+    expected = {
+        "create_hits": 1,
+        "side_effect_hits": 0,
+        "error": "ValueError:storage_scratch_identity_changed",
+        "foreign_preserved": True,
+    }
+    assert actual == expected
+
 
 def _policy(megabytes: int) -> RuntimeResourcePolicy:
     return RuntimeResourcePolicy.from_environment(
         available_memory_bytes=16 * 1024 * 1024,
         environ={"QRP_TASK_MEMORY_BUDGET_MB": str(megabytes)},
     )
+
+
+def test_unaliased_path_checks_lexical_component_before_parent_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    alias = tmp_path / "alias"
+    visited: list[Path] = []
+
+    def is_alias(path: Path) -> bool:
+        visited.append(path)
+        return path == alias
+
+    monkeypatch.setattr(dataset_paths, "path_is_filesystem_alias", is_alias)
+
+    with pytest.raises(ValueError, match="invalid_path"):
+        dataset_paths.require_unaliased_path(
+            alias / ".." / "artifact",
+            error="invalid_path",
+        )
+
+    assert alias in visited
+
+
+def test_bounded_json_rejects_same_inode_hardlink_replacement_after_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "manifest.json"
+    moved = tmp_path / "moved.json"
+    path.write_text('{"schema_id":"test"}', encoding="utf-8")
+    preserve_primary = manifests.scratch_owner.handle_preserving_primary
+
+    @contextmanager
+    def replace_after_read(handle):  # noqa: ANN001, ANN202
+        with preserve_primary(handle) as opened:
+            yield opened
+        path.rename(moved)
+        try:
+            os.link(moved, path)
+        except OSError as exc:
+            pytest.skip(f"hardlink_not_available: {exc}")
+
+    monkeypatch.setattr(
+        manifests.scratch_owner,
+        "handle_preserving_primary",
+        replace_after_read,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_metadata_file_identity_changed",
+    ):
+        manifests.read_bounded_qrp_json(path)
 
 
 def test_chunked_read_rejects_different_explicit_policy_at_creation(
@@ -386,12 +3006,25 @@ def _patch_open_session_metadata_preflight(
     spec = {"schema_id": "qrp-dataset-spec"}
     manifest = {"schema_id": "qrp-dataset-manifest"}
     monkeypatch.setattr(dataset_reading, "require_artifact_root", Path)
+    monkeypatch.setattr(
+        dataset_reading,
+        "require_unaliased_path",
+        lambda path, **_kwargs: Path(path),
+    )
     monkeypatch.setattr(Path, "is_file", lambda _self: True)
     monkeypatch.setattr(Path, "is_dir", lambda _self: True)
     monkeypatch.setattr(
         dataset_reading,
+        "dataset_file_identity",
+        lambda _path: physical.DatasetFileIdentity(1, 2, 2, 3),
+    )
+    monkeypatch.setattr(
+        dataset_reading,
         "read_bounded_qrp_json",
-        lambda path: (b"{}", spec if Path(path).name == "spec.json" else manifest),
+        lambda path, **_kwargs: (
+            b"{}",
+            spec if Path(path).name == "spec.json" else manifest,
+        ),
     )
     monkeypatch.setattr(
         dataset_reading,
@@ -610,6 +3243,11 @@ def test_opened_parquet_close_preserves_generator_exit(
     )()
     monkeypatch.setattr(Path, "open", lambda *_a, **_k: Handle())
     monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
+    monkeypatch.setattr(
+        physical,
+        "dataset_file_identity",
+        lambda _path: physical.dataset_file_identity_from_stat(metadata),
+    )
     monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle: Parquet())
 
     with pytest.raises(GeneratorExit):
@@ -695,6 +3333,11 @@ def test_opened_parquet_raw_handle_close_preserves_active_primary(
     metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=3, st_mtime_ns=4)
     monkeypatch.setattr(Path, "open", lambda *_a, **_k: Handle())
     monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
+    monkeypatch.setattr(
+        physical,
+        "dataset_file_identity",
+        lambda _path: physical.dataset_file_identity_from_stat(metadata),
+    )
     monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle: Parquet())
 
     with pytest.raises(primary_type) as raised:
@@ -727,6 +3370,11 @@ def test_opened_parquet_raw_handle_close_propagates_without_primary(
     metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=3, st_mtime_ns=4)
     monkeypatch.setattr(Path, "open", lambda *_a, **_k: Handle())
     monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
+    monkeypatch.setattr(
+        physical,
+        "dataset_file_identity",
+        lambda _path: physical.dataset_file_identity_from_stat(metadata),
+    )
     monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle: Parquet())
 
     with pytest.raises(OSError, match="raw_close_failed"):
@@ -745,8 +3393,8 @@ def test_atomic_directory_cleanup_preserves_active_primary(
 ) -> None:
     monkeypatch.setattr(
         atomic,
-        "_remove_path",
-        lambda _path: (_ for _ in ()).throw(RuntimeError("cleanup_failed")),
+        "remove_owned_scratch",
+        lambda _path, _identity: (_ for _ in ()).throw(RuntimeError("cleanup_failed")),
     )
 
     def writer(_path: Path) -> None:
@@ -765,20 +3413,11 @@ def test_atomic_directory_attempts_all_cleanup_and_preserves_body_primary(
     primary = primary_type("body_primary")
     events: list[str] = []
 
-    def remove_path(_path: Path) -> None:
-        events.append("stage")
-        raise OSError("stage_cleanup_secondary")
+    def remove_claimed(path: Path, _identity: os.stat_result) -> None:
+        events.append("marker" if path.name.endswith(".target") else "stage")
+        raise OSError("cleanup_secondary")
 
-    original_unlink = Path.unlink
-
-    def unlink(path: Path, *, missing_ok: bool = False) -> None:
-        if path.name.endswith(".target"):
-            events.append("marker")
-            raise OSError("marker_cleanup_secondary")
-        original_unlink(path, missing_ok=missing_ok)
-
-    monkeypatch.setattr(atomic, "_remove_path", remove_path)
-    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(atomic, "remove_owned_scratch", remove_claimed)
 
     with pytest.raises(primary_type) as raised:
         atomic.atomic_write_directory(
@@ -804,18 +3443,19 @@ def test_atomic_stale_marker_cleanup_failure_propagates_without_primary(
         stage.mkdir()
     marker.write_text(atomic._atomic_target_identity(final_root), encoding="utf-8")
     monkeypatch.setattr(atomic, "scratch_owner_is_stale", lambda *_a, **_k: True)
-    original_unlink = Path.unlink
+    real_remove = atomic.remove_owned_scratch
 
-    def unlink(path: Path, *, missing_ok: bool = False) -> None:
+    def remove_owned(path: Path, identity: os.stat_result) -> None:
         if path == marker:
             raise OSError("marker_cleanup_failed")
-        original_unlink(path, missing_ok=missing_ok)
+        real_remove(path, identity)
 
-    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(atomic, "remove_owned_scratch", remove_owned)
 
     with pytest.raises(OSError, match="marker_cleanup_failed"):
         atomic._cleanup_stale_atomic_directories(
             final_root,
+            parent_identity=final_root.parent.lstat(),
             prefix=prefix,
             target_identity=atomic._atomic_target_identity(final_root),
         )
@@ -861,14 +3501,20 @@ def test_atomic_stale_sweep_attempts_independent_cleanup_and_preserves_first_fai
         if path == first_orphan:
             raise OSError("later_cleanup_failure")
 
+    def remove_owned(path: Path, _identity: os.stat_result, **_kwargs: object) -> None:
+        if path.name.endswith(".target"):
+            remove_marker(path)
+        else:
+            remove_path(path)
+
     monkeypatch.setattr(Path, "glob", glob)
     monkeypatch.setattr(atomic, "scratch_owner_is_stale", lambda *_a, **_k: True)
-    monkeypatch.setattr(atomic, "_remove_path", remove_path)
-    monkeypatch.setattr(atomic, "_remove_atomic_target_marker", remove_marker)
+    monkeypatch.setattr(atomic, "remove_owned_scratch", remove_owned)
 
     with pytest.raises(primary_type) as raised:
         atomic._cleanup_stale_atomic_directories(
             final_root,
+            parent_identity=final_root.parent.lstat(),
             prefix=prefix,
             target_identity=atomic._atomic_target_identity(final_root),
         )
@@ -888,7 +3534,7 @@ def test_atomic_stale_sweep_attempts_independent_cleanup_and_preserves_first_fai
 @pytest.mark.parametrize("primary_type", _STALE_SWEEP_FAILURE_TYPES)
 @pytest.mark.parametrize(
     "later_failure_site",
-    ("glob", "is_dir", "ownership", "iterdir", "is_file", "exists"),
+    ("ownership", "iterdir", "exists"),
 )
 def test_atomic_stale_sweep_preserves_first_failure_across_later_probes(
     primary_type: type[BaseException],
@@ -910,21 +3556,24 @@ def test_atomic_stale_sweep_preserves_first_failure_across_later_probes(
     later_failure = RuntimeError("later_probe_failure")
     removed_stages: list[Path] = []
     removed_markers: list[Path] = []
+    for stage in (first_stage, probe_stage, later_stage):
+        stage.mkdir()
+    for marker in (
+        first_marker,
+        probe_marker,
+        later_marker,
+        probe_orphan,
+        later_orphan,
+    ):
+        marker.write_text(atomic._atomic_target_identity(final_root), encoding="utf-8")
 
     def glob(_path: Path, pattern: str):
         if pattern == f"{prefix}*":
-            if later_failure_site == "glob":
-                return _FailureBetweenValues(first_stage, later_failure, later_stage)
             return iter((first_stage, probe_stage, later_stage))
         assert pattern == f"{prefix}*.target"
         if later_failure_site == "exists":
             return iter((probe_orphan, later_orphan))
         return iter(())
-
-    def is_dir(path: Path) -> bool:
-        if later_failure_site == "is_dir" and path == probe_stage:
-            raise later_failure
-        return path in {first_stage, probe_stage, later_stage}
 
     def is_stale(path: Path, *, prefix: str) -> bool:
         assert prefix
@@ -936,11 +3585,6 @@ def test_atomic_stale_sweep_preserves_first_failure_across_later_probes(
         if later_failure_site == "iterdir" and path == probe_stage:
             raise later_failure
         return iter(())
-
-    def is_file(path: Path) -> bool:
-        if later_failure_site == "is_file" and path == probe_marker:
-            raise later_failure
-        return path in {first_marker, probe_marker, later_marker}
 
     def exists(path: Path) -> bool:
         if later_failure_site == "exists" and path == probe_orphan:
@@ -955,10 +3599,14 @@ def test_atomic_stale_sweep_preserves_first_failure_across_later_probes(
     def remove_marker(path: Path) -> None:
         removed_markers.append(path)
 
+    def remove_owned(path: Path, _identity: os.stat_result) -> None:
+        if path.name.endswith(".target"):
+            remove_marker(path)
+        else:
+            remove_path(path)
+
     monkeypatch.setattr(Path, "glob", glob)
-    monkeypatch.setattr(Path, "is_dir", is_dir)
     monkeypatch.setattr(Path, "iterdir", iterdir)
-    monkeypatch.setattr(Path, "is_file", is_file)
     monkeypatch.setattr(Path, "exists", exists)
     monkeypatch.setattr(atomic, "scratch_owner_is_stale", is_stale)
     monkeypatch.setattr(
@@ -966,35 +3614,28 @@ def test_atomic_stale_sweep_preserves_first_failure_across_later_probes(
         "_read_atomic_target_marker",
         lambda _path: atomic._atomic_target_identity(final_root),
     )
-    monkeypatch.setattr(atomic, "_remove_path", remove_path)
-    monkeypatch.setattr(atomic, "_remove_atomic_target_marker", remove_marker)
+    monkeypatch.setattr(atomic, "remove_owned_scratch", remove_owned)
 
     with pytest.raises(primary_type) as raised:
         atomic._cleanup_stale_atomic_directories(
             final_root,
+            parent_identity=final_root.parent.lstat(),
             prefix=prefix,
             target_identity=atomic._atomic_target_identity(final_root),
         )
 
     assert raised.value is primary
     assert later_stage in removed_stages
-    if later_failure_site not in {"glob", "exists"}:
+    if later_failure_site != "exists":
         assert probe_stage not in removed_stages
     if later_failure_site == "exists":
         assert later_orphan in removed_markers
 
 
 @pytest.mark.parametrize("primary_type", _STALE_SWEEP_FAILURE_TYPES)
-@pytest.mark.parametrize(
-    ("owner", "prefix"),
-    (
-        (inventory_owner._cleanup_stale_inventory, ".dataset-inventory-"),
-        (key_owner._cleanup_stale_key_scratch, ".k-"),
-    ),
-)
-@pytest.mark.parametrize("later_failure_site", ("glob", "is_dir", "ownership"))
+@pytest.mark.parametrize("prefix", (".dataset-inventory-", ".k-"))
+@pytest.mark.parametrize("later_failure_site", ("glob", "lstat", "ownership"))
 def test_sqlite_stale_sweep_attempts_later_owned_candidates_after_failure(
-    owner,
     prefix: str,
     later_failure_site: str,
     primary_type: type[BaseException],
@@ -1007,6 +3648,9 @@ def test_sqlite_stale_sweep_attempts_later_owned_candidates_after_failure(
     primary = primary_type("first_failure")
     later_failure = RuntimeError("later_probe_failure")
     removed: list[Path] = []
+    real_lstat = Path.lstat
+    for scratch in (first, probe, later):
+        scratch.mkdir()
 
     def glob(_path: Path, pattern: str):
         assert pattern == f"{prefix}*"
@@ -1014,10 +3658,10 @@ def test_sqlite_stale_sweep_attempts_later_owned_candidates_after_failure(
             return _FailureBetweenValues(first, later_failure, later)
         return iter((first, probe, later))
 
-    def is_dir(path: Path) -> bool:
-        if later_failure_site == "is_dir" and path == probe:
+    def lstat(path: Path) -> os.stat_result:
+        if later_failure_site == "lstat" and path == probe:
             raise later_failure
-        return True
+        return real_lstat(path)
 
     def is_stale(path: Path, *, prefix: str) -> bool:
         assert prefix
@@ -1025,26 +3669,129 @@ def test_sqlite_stale_sweep_attempts_later_owned_candidates_after_failure(
             raise later_failure
         return True
 
-    def rmtree(path: Path) -> None:
+    def remove_owned(path: Path, _identity: os.stat_result, **_kwargs: object) -> None:
         removed.append(path)
         if path == first:
             raise primary
 
-    module = (
-        inventory_owner
-        if owner is inventory_owner._cleanup_stale_inventory
-        else key_owner
-    )
     monkeypatch.setattr(Path, "glob", glob)
-    monkeypatch.setattr(Path, "is_dir", is_dir)
-    monkeypatch.setattr(module, "scratch_owner_is_stale", is_stale)
-    monkeypatch.setattr(module.shutil, "rmtree", rmtree)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(scratch_owner, "scratch_owner_is_stale", is_stale)
+    monkeypatch.setattr(scratch_owner, "remove_owned_scratch", remove_owned)
 
     with pytest.raises(primary_type) as raised:
-        owner(tmp_path)
+        scratch_owner.cleanup_stale_owned_scratch(
+            tmp_path,
+            parent_identity=tmp_path.lstat(),
+            prefix=prefix,
+            directory=True,
+        )
 
     assert raised.value is primary
     assert removed == [first, later]
+
+
+def test_atomic_stale_stage_uses_identity_captured_before_stale_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_root = tmp_path / "result"
+    prefix = atomic._atomic_directory_scratch_prefix(final_root)
+    stage = final_root.with_name(f"{prefix}stale")
+    stage.mkdir()
+    stale_hits: list[Path] = []
+
+    def replace_during_stale_probe(path: Path, *, prefix: str) -> bool:
+        assert prefix
+        stale_hits.append(path)
+        shutil.rmtree(path)
+        path.mkdir()
+        return True
+
+    monkeypatch.setattr(atomic, "scratch_owner_is_stale", replace_during_stale_probe)
+
+    with pytest.raises(ValueError, match="^storage_scratch_identity_changed$"):
+        atomic._cleanup_stale_atomic_directories(
+            final_root,
+            parent_identity=final_root.parent.lstat(),
+            prefix=prefix,
+            target_identity=atomic._atomic_target_identity(final_root),
+        )
+
+    assert {"stale_hits": stale_hits, "replacement_survived": stage.is_dir()} == {
+        "stale_hits": [stage],
+        "replacement_survived": True,
+    }
+
+
+def test_atomic_stale_marker_uses_one_captured_identity_for_read_and_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_root = tmp_path / "result"
+    prefix = atomic._atomic_directory_scratch_prefix(final_root)
+    stage = final_root.with_name(f"{prefix}stale")
+    marker = Path(f"{stage}.target")
+    target_identity = atomic._atomic_target_identity(final_root)
+    marker.write_text(target_identity, encoding="utf-8")
+    read_hits: list[Path] = []
+
+    def replace_during_read(path: Path) -> str:
+        read_hits.append(path)
+        path.unlink()
+        path.write_text(target_identity, encoding="utf-8")
+        return target_identity
+
+    monkeypatch.setattr(atomic, "scratch_owner_is_stale", lambda *_a, **_k: True)
+    monkeypatch.setattr(atomic, "_read_atomic_target_marker", replace_during_read)
+
+    with pytest.raises(ValueError, match="^storage_scratch_identity_changed$"):
+        atomic._cleanup_stale_atomic_directories(
+            final_root,
+            parent_identity=final_root.parent.lstat(),
+            prefix=prefix,
+            target_identity=target_identity,
+        )
+
+    assert {"read_hits": read_hits, "replacement_survived": marker.is_file()} == {
+        "read_hits": [marker],
+        "replacement_survived": True,
+    }
+
+
+@pytest.mark.parametrize("prefix", (".dataset-inventory-", ".k-"))
+def test_sqlite_stale_sweep_uses_identity_captured_before_stale_probe(
+    prefix: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scratch = tmp_path / f"{prefix}stale"
+    scratch.mkdir()
+    stale_hits: list[Path] = []
+
+    def replace_during_stale_probe(path: Path, *, prefix: str) -> bool:
+        assert prefix
+        stale_hits.append(path)
+        shutil.rmtree(path)
+        path.mkdir()
+        return True
+
+    monkeypatch.setattr(
+        scratch_owner, "scratch_owner_is_stale", replace_during_stale_probe
+    )
+
+    with pytest.raises(ValueError, match="^storage_scratch_identity_changed$"):
+        scratch_owner.cleanup_stale_owned_scratch(
+            tmp_path,
+            parent_identity=tmp_path.lstat(),
+            prefix=prefix,
+            directory=True,
+        )
+
+    assert {"stale_hits": stale_hits, "replacement_survived": scratch.is_dir()} == {
+        "stale_hits": [scratch],
+        "replacement_survived": True,
+    }
 
 
 @pytest.mark.parametrize("failure_type", _STALE_SWEEP_FAILURE_TYPES)
@@ -1061,38 +3808,51 @@ def test_atomic_stale_marker_probe_failure_propagates_after_attempting_later_sta
     later_marker = Path(f"{later}.target")
     failure = failure_type("marker_probe_failure")
     removed: list[Path] = []
+    for stage in (unverified, later):
+        stage.mkdir()
+    for marker in (unverified_marker, later_marker):
+        marker.write_text(atomic._atomic_target_identity(final_root), encoding="utf-8")
 
     def glob(_path: Path, pattern: str):
         if pattern == f"{prefix}*":
             return iter((unverified, later))
         return iter(())
 
-    def is_file(path: Path) -> bool:
+    real_lstat = Path.lstat
+
+    def lstat(path: Path) -> os.stat_result:
         if path == unverified_marker:
             raise failure
-        return path == later_marker
+        return real_lstat(path)
+
+    def remove_owned(path: Path, _identity: os.stat_result) -> None:
+        if not path.name.endswith(".target"):
+            removed.append(path)
 
     monkeypatch.setattr(Path, "glob", glob)
-    monkeypatch.setattr(Path, "is_dir", lambda _path: True)
     monkeypatch.setattr(Path, "iterdir", lambda _path: iter(()))
-    monkeypatch.setattr(Path, "is_file", is_file)
+    monkeypatch.setattr(Path, "lstat", lstat)
     monkeypatch.setattr(atomic, "scratch_owner_is_stale", lambda *_a, **_k: True)
     monkeypatch.setattr(
         atomic,
         "_read_atomic_target_marker",
         lambda _path: atomic._atomic_target_identity(final_root),
     )
-    monkeypatch.setattr(atomic, "_remove_path", removed.append)
-    monkeypatch.setattr(atomic, "_remove_atomic_target_marker", lambda _path: None)
+    monkeypatch.setattr(atomic, "remove_owned_scratch", remove_owned)
 
-    with pytest.raises(failure_type) as raised:
+    expected_type = ValueError if failure_type is OSError else failure_type
+    with pytest.raises(expected_type) as raised:
         atomic._cleanup_stale_atomic_directories(
             final_root,
+            parent_identity=final_root.parent.lstat(),
             prefix=prefix,
             target_identity=atomic._atomic_target_identity(final_root),
         )
 
-    assert raised.value is failure
+    if failure_type is OSError:
+        assert raised.value.__cause__ is failure
+    else:
+        assert raised.value is failure
     assert removed == [later]
 
 
@@ -1116,6 +3876,10 @@ def test_atomic_stale_marker_read_failure_preserves_first_and_attempts_later_sta
     marker_failure = marker_failure_type("marker_read_failure")
     attempts: list[Path] = []
     stages = (first, unverified, later) if earlier_failure else (unverified, later)
+    for stage in (first, unverified, later):
+        stage.mkdir()
+    for marker in (first_marker, unverified_marker, later_marker):
+        marker.write_text(atomic._atomic_target_identity(final_root), encoding="utf-8")
 
     def glob(_path: Path, pattern: str):
         if pattern == f"{prefix}*":
@@ -1133,20 +3897,22 @@ def test_atomic_stale_marker_read_failure_preserves_first_and_attempts_later_sta
         if earlier_failure and path == first:
             raise primary
 
+    def remove_owned(path: Path, _identity: os.stat_result) -> None:
+        if not path.name.endswith(".target"):
+            remove_path(path)
+
     monkeypatch.setattr(Path, "glob", glob)
-    monkeypatch.setattr(Path, "is_dir", lambda _path: True)
     monkeypatch.setattr(Path, "iterdir", lambda _path: iter(()))
-    monkeypatch.setattr(Path, "is_file", lambda _path: True)
     monkeypatch.setattr(atomic, "scratch_owner_is_stale", lambda *_a, **_k: True)
     monkeypatch.setattr(atomic, "_read_atomic_target_marker", read_marker)
-    monkeypatch.setattr(atomic, "_remove_path", remove_path)
-    monkeypatch.setattr(atomic, "_remove_atomic_target_marker", lambda _path: None)
+    monkeypatch.setattr(atomic, "remove_owned_scratch", remove_owned)
 
     expected = primary if earlier_failure else marker_failure
     observed: BaseException | None = None
     try:
         atomic._cleanup_stale_atomic_directories(
             final_root,
+            parent_identity=final_root.parent.lstat(),
             prefix=prefix,
             target_identity=atomic._atomic_target_identity(final_root),
         )
@@ -1159,15 +3925,8 @@ def test_atomic_stale_marker_read_failure_preserves_first_and_attempts_later_sta
 
 
 @pytest.mark.parametrize("failure_type", _STALE_SWEEP_FAILURE_TYPES)
-@pytest.mark.parametrize(
-    ("owner", "prefix"),
-    (
-        (inventory_owner._cleanup_stale_inventory, ".dataset-inventory-"),
-        (key_owner._cleanup_stale_key_scratch, ".k-"),
-    ),
-)
+@pytest.mark.parametrize("prefix", (".dataset-inventory-", ".k-"))
 def test_sqlite_stale_ownership_probe_failure_propagates_after_later_cleanup(
-    owner,
     prefix: str,
     failure_type: type[BaseException],
     tmp_path: Path,
@@ -1177,6 +3936,8 @@ def test_sqlite_stale_ownership_probe_failure_propagates_after_later_cleanup(
     later = tmp_path / f"{prefix}later"
     failure = failure_type("ownership_probe_failure")
     removed: list[Path] = []
+    for scratch in (unverified, later):
+        scratch.mkdir()
 
     def is_stale(path: Path, *, prefix: str) -> bool:
         assert prefix
@@ -1184,68 +3945,24 @@ def test_sqlite_stale_ownership_probe_failure_propagates_after_later_cleanup(
             raise failure
         return True
 
-    module = (
-        inventory_owner
-        if owner is inventory_owner._cleanup_stale_inventory
-        else key_owner
-    )
     monkeypatch.setattr(Path, "glob", lambda *_a, **_k: iter((unverified, later)))
-    monkeypatch.setattr(Path, "is_dir", lambda _path: True)
-    monkeypatch.setattr(module, "scratch_owner_is_stale", is_stale)
-    monkeypatch.setattr(module.shutil, "rmtree", removed.append)
+    monkeypatch.setattr(scratch_owner, "scratch_owner_is_stale", is_stale)
+    monkeypatch.setattr(
+        scratch_owner,
+        "remove_owned_scratch",
+        lambda path, _identity, **_kwargs: removed.append(path),
+    )
 
     with pytest.raises(failure_type) as raised:
-        owner(tmp_path)
+        scratch_owner.cleanup_stale_owned_scratch(
+            tmp_path,
+            parent_identity=tmp_path.lstat(),
+            prefix=prefix,
+            directory=True,
+        )
 
     assert raised.value is failure
     assert removed == [later]
-
-
-def test_manifest_replace_does_not_check_exists_before_guarded_unlink(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    final_path = tmp_path / "manifest.json"
-    temp_path = final_path.with_name(f".tmp-{'c' * 12}")
-    events: list[str] = []
-
-    class Handle:
-        def __enter__(self) -> Handle:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-        def write(self, _text: str) -> int:
-            raise RuntimeError("body_primary")
-
-    original_exists = Path.exists
-
-    def exists(path: Path) -> bool:
-        if path == temp_path:
-            raise OSError("exists_secondary")
-        return original_exists(path)
-
-    def unlink(path: Path, *, missing_ok: bool = False) -> None:
-        if path == temp_path:
-            assert missing_ok is True
-            events.append("unlink")
-            raise OSError("unlink_secondary")
-        raise AssertionError(f"unexpected_unlink: {path}")
-
-    monkeypatch.setattr(
-        manifests,
-        "uuid4",
-        lambda: type("Uuid", (), {"hex": "c" * 32})(),
-    )
-    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: Handle())
-    monkeypatch.setattr(Path, "exists", exists)
-    monkeypatch.setattr(Path, "unlink", unlink)
-
-    with pytest.raises(RuntimeError, match="body_primary"):
-        manifests.replace_qrp_json(final_path, {"schema_id": "qrp-test"})
-
-    assert events == ["unlink"]
 
 
 @pytest.mark.parametrize("primary_type", _PRIMARY_EXCEPTION_TYPES)
@@ -1277,9 +3994,12 @@ def test_manifest_replace_preserves_body_primary_over_handle_close(
 ) -> None:
     primary = primary_type("body_primary")
     monkeypatch.setattr(
-        Path,
-        "open",
-        lambda *_args, **_kwargs: _BodyAndCloseFailingHandle(primary),
+        scratch_owner,
+        "open_owned_scratch_file",
+        lambda *_args, **_kwargs: (
+            _BodyAndCloseFailingHandle(primary),
+            SimpleNamespace(st_dev=1, st_ino=2),
+        ),
     )
 
     with pytest.raises(primary_type, match="body_primary"):
@@ -1304,22 +4024,35 @@ def test_atomic_file_handles_preserve_body_primary_over_close(
     if operation_name == "marker-read":
         marker.write_text("target", encoding="utf-8")
     primary = primary_type("body_primary")
-    monkeypatch.setattr(
-        Path,
-        "open",
-        lambda *_args, **_kwargs: _BodyAndCloseFailingHandle(primary),
-    )
+    if operation_name == "marker-read":
+        monkeypatch.setattr(
+            Path,
+            "open",
+            lambda *_args, **_kwargs: _BodyAndCloseFailingHandle(primary),
+        )
+    else:
+        monkeypatch.setattr(
+            scratch_owner,
+            "open_owned_scratch_file",
+            lambda *_args, **_kwargs: (
+                _BodyAndCloseFailingHandle(primary),
+                SimpleNamespace(st_dev=1, st_ino=2),
+            ),
+        )
 
     if operation_name == "text-write":
+
         def operation() -> object:
             return atomic.atomic_write_text(tmp_path / "output.txt", "value")
     elif operation_name == "marker-write":
+
         def operation() -> object:
             return atomic.atomic_write_directory(
                 tmp_path / "output",
                 lambda _path: None,
             )
     else:
+
         def operation() -> object:
             return atomic._read_atomic_target_marker(marker)
 
@@ -1363,6 +4096,304 @@ def test_compare_expected_storage_validation_still_maps(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid_dataset")),
     )
 
-    assert comparison.compare_datasets(
-        left, right, resource_policy=policy
-    ).status == "INSPECTION_FAILED"
+    assert (
+        comparison.compare_datasets(left, right, resource_policy=policy).status
+        == "INSPECTION_FAILED"
+    )
+
+
+def test_artifact_root_alias_is_rejected_by_unique_root_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path("dataset")
+    absolute_root = Path.cwd() / root
+    monkeypatch.setattr(
+        dataset_paths,
+        "path_is_filesystem_alias",
+        lambda candidate: candidate == absolute_root,
+    )
+
+    with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
+        dataset_paths.require_artifact_root(root)
+
+
+@pytest.mark.parametrize("position", ("root", "immediate", "deep"))
+@pytest.mark.parametrize("alias_kind", ("symlink", "junction"))
+def test_artifact_root_rejects_exact_or_ancestor_alias(
+    tmp_path: Path,
+    position: str,
+    alias_kind: str,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    if alias_kind == "symlink":
+        try:
+            alias.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink_not_available: {exc}")
+    else:
+        if os.name != "nt" or not hasattr(Path, "is_junction"):
+            pytest.skip("junction_capability_required")
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            pytest.skip("junction_not_available")
+    root = (
+        alias
+        if position == "root"
+        else alias / "artifact"
+        if position == "immediate"
+        else alias / "nested" / "artifact"
+    )
+
+    with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
+        dataset_paths.require_artifact_root(root)
+
+
+def test_artifact_root_ordinary_chain_preserves_candidate_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path("relative") / "dataset"
+    monkeypatch.setattr(
+        dataset_paths,
+        "path_is_filesystem_alias",
+        lambda _candidate: False,
+    )
+
+    assert dataset_paths.require_artifact_root(root) == root
+
+
+def test_dataset_file_identity_rejects_hardlink(tmp_path: Path) -> None:
+    source = tmp_path / "source.bin"
+    alias = tmp_path / "alias.bin"
+    source.write_bytes(b"payload")
+    try:
+        os.link(source, alias)
+    except OSError as exc:
+        pytest.skip(f"hardlink_not_available: {exc}")
+
+    with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
+        physical.dataset_file_identity(alias)
+
+
+def test_dataset_file_identity_rejects_ancestor_alias(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "part.bin").write_bytes(b"payload")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory_symlink_not_available: {exc}")
+
+    with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
+        physical.dataset_file_identity(alias / "part.bin")
+
+
+def test_bounded_metadata_reader_rejects_ancestor_alias(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "manifest.json").write_text('{"schema_id":"test"}', encoding="utf-8")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory_symlink_not_available: {exc}")
+
+    with pytest.raises(ValueError, match="^dataset_metadata_file_invalid$"):
+        manifests.read_bounded_qrp_json(alias / "manifest.json")
+
+
+def test_write_dataset_requires_artifact_root_before_writer_or_data_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy(1)
+    monkeypatch.setattr(dataset_writing, "validate_dataset_spec", lambda _spec: None)
+    monkeypatch.setattr(
+        dataset_writing,
+        "validate_dataset_artifact_root",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        dataset_writing,
+        "require_artifact_root",
+        lambda _root: (_ for _ in ()).throw(ValueError("invalid_dataset_part_files")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dataset_writing,
+        "_write_dataset_under_policy",
+        lambda *_args, **_kwargs: pytest.fail("writer_before_artifact_root_gate"),
+    )
+
+    with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
+        dataset_writing.write_dataset(
+            Path("dataset"),
+            (_ for _ in ()),
+            spec=object(),  # type: ignore[arg-type]
+            resource_policy=policy,
+        )
+
+
+def test_compare_rechecks_artifact_roots_before_each_exists_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left = Path("left")
+    right = Path("right")
+    validations = {left: 0, right: 0}
+    probes = {left: 0, right: 0}
+    original_exists = Path.exists
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=16 * 1024 * 1024,
+        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+    )
+
+    def require_root(path: Path) -> Path:
+        candidate = Path(path)
+        validations[candidate] += 1
+        return candidate
+
+    def exists(path: Path) -> bool:
+        candidate = Path(path)
+        if candidate not in probes:
+            return original_exists(path)
+        probes[candidate] += 1
+        assert validations[candidate] == probes[candidate]
+        return True
+
+    monkeypatch.setattr(
+        comparison,
+        "require_artifact_root",
+        require_root,
+        raising=False,
+    )
+    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(
+        comparison,
+        "open_dataset_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid_dataset")),
+    )
+
+    result = comparison.compare_datasets(left, right, resource_policy=policy)
+
+    assert result.status == "INSPECTION_FAILED"
+    assert validations == {left: 2, right: 2}
+    assert probes == {left: 2, right: 2}
+
+
+def test_compare_maps_aliased_root_before_exists_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left = Path("left")
+    right = Path("right")
+    original_exists = Path.exists
+
+    def reject_alias(path: Path) -> Path:
+        if Path(path) == left:
+            raise ValueError("invalid_dataset_part_files")
+        return Path(path)
+
+    monkeypatch.setattr(
+        comparison,
+        "require_artifact_root",
+        reject_alias,
+        raising=False,
+    )
+
+    def exists(path: Path) -> bool:
+        if Path(path) in (left, right):
+            raise AssertionError("dataset_exists_before_artifact_root_alias_gate")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", exists)
+
+    result = comparison.compare_datasets(left, right, resource_policy=None)
+
+    assert result.status == "INSPECTION_FAILED"
+    assert result.summary == {"error": "dataset_inspection_failed"}
+
+
+@pytest.mark.parametrize("alias_side", ("left", "right"))
+def test_compare_maps_ancestor_alias_before_public_exists_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    alias_side: str,
+) -> None:
+    left = Path("left-parent") / "left"
+    right = Path("right-parent") / "right"
+    aliased_parent = Path.cwd() / (left if alias_side == "left" else right).parent
+
+    monkeypatch.setattr(
+        dataset_paths,
+        "path_is_filesystem_alias",
+        lambda candidate: candidate == aliased_parent,
+    )
+    original_exists = Path.exists
+
+    def exists(path: Path) -> bool:
+        candidate = Path(path)
+        if candidate == (left if alias_side == "left" else right):
+            raise AssertionError("dataset_exists_before_ancestor_alias_gate")
+        if candidate in (left, right):
+            return True
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", exists)
+
+    result = comparison.compare_datasets(left, right, resource_policy=None)
+
+    assert result.status == "INSPECTION_FAILED"
+    assert result.summary == {"error": "dataset_inspection_failed"}
+
+
+@pytest.mark.parametrize("alias_side", ("left", "right"))
+def test_compare_internal_recheck_blocks_new_ancestor_alias_before_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    alias_side: str,
+) -> None:
+    left = Path("left-parent") / "left"
+    right = Path("right-parent") / "right"
+    target = left if alias_side == "left" else right
+    aliased_parent = Path.cwd() / target.parent
+    gate_count = 0
+    probe_count = {left: 0, right: 0}
+    original_require = comparison.require_artifact_root
+    original_exists = Path.exists
+
+    def require_root(path: Path) -> Path:
+        nonlocal gate_count
+        gate_count += 1
+        return original_require(path)
+
+    def is_alias(candidate: Path) -> bool:
+        internal_gate = gate_count >= (3 if alias_side == "left" else 4)
+        return internal_gate and candidate == aliased_parent
+
+    def exists(path: Path) -> bool:
+        candidate = Path(path)
+        if candidate not in probe_count:
+            return original_exists(path)
+        probe_count[candidate] += 1
+        if candidate == target:
+            assert probe_count[candidate] == 1
+        return True
+
+    monkeypatch.setattr(comparison, "require_artifact_root", require_root)
+    monkeypatch.setattr(dataset_paths, "path_is_filesystem_alias", is_alias)
+    monkeypatch.setattr(Path, "exists", exists)
+
+    result = comparison.compare_datasets(
+        left,
+        right,
+        resource_policy=RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=16 * 1024 * 1024,
+            environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        ),
+    )
+
+    assert result.status == "INSPECTION_FAILED"
+    assert probe_count[target] == 1

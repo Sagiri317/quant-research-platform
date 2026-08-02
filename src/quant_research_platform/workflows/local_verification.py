@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import shutil
+import os
+import stat
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -13,7 +14,7 @@ from quant_research_platform.artifacts._output_bundle_validation import (
 )
 from quant_research_platform.artifacts.evidence import (
     write_json_evidence,
-    write_run_summary_markdown,
+    write_markdown_evidence,
 )
 from quant_research_platform.artifacts.outputs import (
     write_evaluation_outputs,
@@ -38,7 +39,7 @@ from quant_research_platform.profiles.research import ResearchProfile
 from quant_research_platform.reports.verification_summary import (
     render_run_summary_markdown,
 )
-from quant_research_platform.research.datasets import (
+from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
 )
 from quant_research_platform.research.evaluations.runner import (
@@ -61,6 +62,9 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._dataset_paths import require_unaliased_path
+from quant_research_platform.storage._dataset_physical import DatasetFileIdentity
+from quant_research_platform.storage._scratch_ownership import remove_owned_scratch
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     build_layer_summary,
@@ -125,7 +129,11 @@ def run_local_verification(
     if start > end:
         raise ValueError("start_date_after_end_date")
     effective_windows = _resolve_effective_windows(config)
-    run_root = Path(config.run_root).resolve(strict=False)
+    configured_run_root = require_unaliased_path(
+        Path(config.run_root),
+        error="local_verification_run_root_invalid",
+    )
+    run_root = configured_run_root.resolve(strict=False)
     run_id = resolve_local_verification_run_id(config.run_id, run_root)
     resource_policy = RuntimeResourcePolicy.from_environment()
     require_free_disk_headroom(
@@ -181,17 +189,17 @@ def _run_local_verification_with_policy(
     source_id = config.profile.source_id
     with recorder.record("interim_generation", logical_layer="interim"):
         interim_result = config.profile.materialize_interim_data(
-            storage_layout,
-            Path("data") / "raw" / str(source_id),
-            config.start_date,
-            config.end_date,
+            layout=storage_layout,
+            raw_root=Path("data") / "raw" / str(source_id),
+            start_date=config.start_date,
+            end_date=config.end_date,
         )
     with recorder.record("processed_generation", logical_layer="processed") as record:
         processed_result = config.profile.materialize_processed_data(
-            storage_layout,
-            source_id,
-            time_window,
-            frozenset(
+            layout=storage_layout,
+            source_id=source_id,
+            time_window=time_window,
+            kinds=frozenset(
                 {
                     ProcessedDataKind.PANEL,
                     ProcessedDataKind.ANNOTATION,
@@ -237,7 +245,7 @@ def _run_local_verification_with_policy(
         )
     with recorder.record("prediction_generation"):
         prediction_roots_list: list[Path] = []
-        for prediction_spec in _optional_prediction_specs(prediction_catalog):
+        for prediction_spec in prediction_catalog.list():
             prediction_result = build_prediction_result_from_research_dataset(
                 layout=storage_layout,
                 dataset_catalog=catalogs.research_datasets,
@@ -296,13 +304,26 @@ def _run_local_verification_with_policy(
         research_roots=(Path(research_root),),
     )
     output_bundles = (
-        Path(evaluation_root),
-        *(Path(prediction_root) for prediction_root in prediction_roots),
-        *(Path(portfolio_root) for portfolio_root in portfolio_roots),
+        (Path(evaluation_root), "evaluation_outputs"),
+        *(
+            (Path(prediction_root), "prediction_outputs")
+            for prediction_root in prediction_roots
+        ),
+        *(
+            (Path(portfolio_root), "portfolio_outputs")
+            for portfolio_root in portfolio_roots
+        ),
     )
-    output_indexes = tuple(
-        _output_index(root, run_root, expected_run_id=run_id) for root in output_bundles
+    validated_outputs = tuple(
+        _output_index(
+            root,
+            run_root,
+            expected_run_id=run_id,
+            expected_output_definition_id=expected_definition,
+        )
+        for root, expected_definition in output_bundles
     )
+    output_indexes = tuple(index for index, _members in validated_outputs)
     layer_summaries = _build_layer_summaries(
         layout=layout,
         dataset_roots=dataset_roots,
@@ -312,9 +333,15 @@ def _run_local_verification_with_policy(
             run_id=run_id,
             dataset_roots=dataset_roots,
             layer_summaries=layer_summaries,
-            generated_text_paths=_generated_text_paths(
-                output_bundles,
-                output_indexes=output_indexes,
+            validated_output_members=_validated_output_members(validated_outputs),
+            output_bundle_expectations=tuple(
+                (
+                    members[0][0].parent,
+                    str(index["run_id"]),
+                    str(index["output_id"]),
+                    str(index["output_definition_id"]),
+                )
+                for index, members in validated_outputs
             ),
         )
         dataset_count = sum(int(item["dataset_count"]) for item in layer_summaries)
@@ -404,7 +431,7 @@ def _run_local_verification_with_policy(
     }
     summary_markdown = render_run_summary_markdown(run_payload)
     _require_output_disk_headroom(resource_policy, run_root)
-    write_run_summary_markdown(layout.summary_md_path, summary_markdown)
+    write_markdown_evidence(layout.summary_md_path, summary_markdown)
     replace_qrp_json(layout.run_json_path, run_payload)
     return LocalVerificationRunResult(
         status=status_payload["overall"],
@@ -479,10 +506,6 @@ def _only_evaluation_run_id(profile: ResearchProfile) -> str:
     return specs[0].run_id
 
 
-def _optional_prediction_specs(prediction_catalog) -> tuple[object, ...]:
-    return prediction_catalog.list()
-
-
 def _optional_portfolio_ids(portfolio_catalog) -> tuple[str, ...]:
     specs = portfolio_catalog.list()
     if not specs:
@@ -534,7 +557,9 @@ def _prepare_run_root(
     replace_output: bool,
     repo_root: Path | None = None,
 ) -> None:
-    run_root = Path(path)
+    run_root = require_unaliased_path(
+        Path(path), error="local_verification_run_root_invalid"
+    )
     reason = local_run_root_reason(
         run_root,
         _resolve_local_output_repo_root(run_root, repo_root),
@@ -542,12 +567,26 @@ def _prepare_run_root(
     if reason is not None:
         raise ValueError(reason)
     if run_root.exists():
+        metadata = run_root.lstat()
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("local_verification_run_root_invalid")
+        identity = metadata
         entries = tuple(run_root.iterdir())
         if entries and not replace_output:
             raise ValueError("run_root_already_exists")
         if entries:
-            _assert_owned_local_verification_run_root(run_root)
-            shutil.rmtree(run_root)
+            _read_run_json(run_root)
+            require_unaliased_path(
+                run_root, error="local_verification_run_root_invalid"
+            )
+            current = run_root.lstat()
+            if not stat.S_ISDIR(current.st_mode) or not os.path.samestat(
+                current, identity
+            ):
+                raise ValueError("local_verification_run_root_invalid")
+            remove_owned_scratch(run_root, identity)
+            if run_root.exists():
+                raise ValueError("local_verification_run_root_invalid")
             run_root.mkdir(parents=True, exist_ok=False)
     else:
         run_root.mkdir(parents=True, exist_ok=False)
@@ -645,7 +684,10 @@ def _write_seed_run_json(run_root: Path, *, run_id: str) -> Path:
 
 
 def _read_run_json(run_root: Path) -> dict[str, Any]:
-    path = _run_json_path(run_root)
+    path = require_unaliased_path(
+        _run_json_path(run_root),
+        error="run_root_not_owned_by_local_verification_workflow",
+    )
     if not path.is_file():
         raise ValueError("run_root_not_owned_by_local_verification_workflow")
     try:
@@ -679,10 +721,6 @@ def _read_run_json(run_root: Path) -> dict[str, Any]:
     return payload
 
 
-def _assert_owned_local_verification_run_root(run_root: Path) -> None:
-    _read_run_json(run_root)
-
-
 def _create_layout_directories(layout: LocalVerificationLayout) -> None:
     for root in (
         layout.interim_root,
@@ -712,10 +750,16 @@ def _dataset_roots(
 
 def _logical_layer(dataset_root: Path, run_root: Path) -> str:
     try:
-        relative_root = (
-            Path(dataset_root)
-            .resolve(strict=False)
-            .relative_to(Path(run_root).resolve(strict=False))
+        lexical_dataset_root = require_unaliased_path(
+            Path(dataset_root),
+            error="local_verification_dataset_layer_invalid",
+        )
+        lexical_run_root = require_unaliased_path(
+            Path(run_root),
+            error="local_verification_dataset_layer_invalid",
+        )
+        relative_root = lexical_dataset_root.resolve(strict=False).relative_to(
+            lexical_run_root.resolve(strict=False)
         )
     except ValueError:
         raise ValueError("local_verification_dataset_layer_invalid") from None
@@ -752,17 +796,29 @@ def _output_index(
     run_root: Path,
     *,
     expected_run_id: str,
-) -> dict[str, Any]:
+    expected_output_definition_id: str,
+) -> tuple[
+    dict[str, Any],
+    tuple[tuple[Path, DatasetFileIdentity], ...],
+]:
     try:
-        resolved_run_root = Path(run_root).resolve(strict=False)
-        resolved_output_bundle = Path(output_bundle).resolve(strict=True)
+        lexical_run_root = require_unaliased_path(
+            Path(run_root), error="output_manifest_schema_id_invalid"
+        )
+        lexical_output_bundle = require_unaliased_path(
+            Path(output_bundle), error="output_manifest_schema_id_invalid"
+        )
+        payload, members = validate_output_bundle(
+            lexical_output_bundle,
+            expected_run_id=expected_run_id,
+            expected_output_id=lexical_output_bundle.name,
+        )
+        if payload["output_definition_id"] != expected_output_definition_id:
+            raise ValueError("output_manifest_definition_id_invalid")
+        resolved_run_root = lexical_run_root.resolve(strict=False)
+        resolved_output_bundle = lexical_output_bundle.resolve(strict=True)
         if not resolved_output_bundle.is_relative_to(resolved_run_root):
             raise ValueError("output_manifest_schema_id_invalid")
-        payload, _declared_paths = validate_output_bundle(
-            resolved_output_bundle,
-            expected_run_id=expected_run_id,
-            expected_output_id=resolved_output_bundle.name,
-        )
     except (KeyError, OSError, TypeError, ValueError):
         raise ValueError("output_manifest_schema_id_invalid") from None
     manifest_path = resolved_output_bundle / "manifest.json"
@@ -773,33 +829,37 @@ def _output_index(
         raise ValueError("output_manifest_schema_id_invalid") from None
     if manifest_relative_path != f"outputs/{output_id}/manifest.json":
         raise ValueError("output_manifest_schema_id_invalid")
-    return {
-        **payload,
-        "manifest_path": manifest_relative_path,
-    }
+    return (
+        {
+            **payload,
+            "manifest_path": manifest_relative_path,
+        },
+        members,
+    )
 
 
-def _generated_text_paths(
-    output_bundles: tuple[Path, ...],
-    *,
-    output_indexes: tuple[dict[str, Any], ...],
-) -> tuple[Path, ...]:
-    if len(output_bundles) != len(output_indexes):
-        raise ValueError("output_evidence_declaration_mismatch")
-    paths: list[Path] = []
-    for root, index in zip(output_bundles, output_indexes, strict=True):
-        files = index["files"]
-        if type(files) is not list:
-            raise ValueError("output_evidence_declaration_mismatch")
-        paths.append(Path(root) / "manifest.json")
-        paths.extend(
-            Path(root) / name
-            for name in files
-            if Path(name).suffix.casefold() != ".parquet"
-        )
-    if not paths:
+def _validated_output_members(
+    validated_outputs: tuple[
+        tuple[
+            dict[str, Any],
+            tuple[tuple[Path, DatasetFileIdentity], ...],
+        ],
+        ...,
+    ],
+) -> tuple[tuple[Path, DatasetFileIdentity], ...]:
+    members = tuple(
+        member
+        for _index, output_members in validated_outputs
+        for member in output_members
+    )
+    if not members:
         raise ValueError("output_evidence_declaration_empty")
-    return tuple(paths)
+    if any(
+        path.suffix.casefold() == ".json" and path.name != "manifest.json"
+        for path, _identity in members
+    ):
+        raise ValueError("validation_summary_output_member_invalid")
+    return members
 
 
 def _utc_now() -> str:

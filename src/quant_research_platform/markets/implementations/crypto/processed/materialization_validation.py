@@ -32,6 +32,7 @@ from quant_research_platform.storage._dataset_reading import (
     filter_frame_by_time_window,
     iter_dataset_chunks,
     iter_dataset_file_batches,
+    parquet_filters_for_time_window,
 )
 from quant_research_platform.storage._dataset_schema import dataset_identity_payload
 from quant_research_platform.storage._dataset_writing import DatasetWriteReceipt
@@ -54,11 +55,14 @@ def crypto_asset_session_views(
     target_chunk_bytes: int,
     error: str,
     key_error: str | None = None,
+    operation_headroom_bytes: int,
 ) -> Iterator[tuple[tuple[tuple[str, ...], DatasetSession], ...]]:
     if not columns:
         raise ValueError(error)
     with runtime_resource_policy_scope(session.resource_policy):
         selections: dict[tuple[str, ...], int] = {}
+        if operation_headroom_bytes <= 0:
+            raise ValueError("crypto_asset_session_views_exceed_task_memory_budget")
         current_path: Path | None = None
         current_key: tuple[str, ...] | None = None
         discovery_columns = tuple(
@@ -83,24 +87,30 @@ def crypto_asset_session_views(
             session.inventory.select_path(selection, current_path)
 
         try:
-            for path, frame in iter_dataset_file_batches(
-                session,
-                columns=discovery_columns,
-                target_chunk_bytes=target_chunk_bytes,
-            ):
-                for row in frame.loc[:, list(columns)].itertuples(
-                    index=False,
-                    name=None,
-                ):
-                    if any(not isinstance(value, str) or not value for value in row):
-                        raise ValueError(error if key_error is None else key_error)
-                    key = tuple(row)
-                    if path != current_path:
-                        select_current_path()
-                        current_path = path
-                        current_key = key
-                    elif current_key != key:
-                        raise ValueError(error)
+            with closing_dataset_iterator(
+                iter_dataset_file_batches(
+                    session,
+                    columns=discovery_columns,
+                    target_chunk_bytes=target_chunk_bytes,
+                    operation_headroom_bytes=operation_headroom_bytes,
+                )
+            ) as file_batches:
+                for path, frame in file_batches:
+                    for row in frame.loc[:, list(columns)].itertuples(
+                        index=False,
+                        name=None,
+                    ):
+                        if any(
+                            not isinstance(value, str) or not value for value in row
+                        ):
+                            raise ValueError(error if key_error is None else key_error)
+                        key = tuple(row)
+                        if path != current_path:
+                            select_current_path()
+                            current_path = path
+                            current_key = key
+                        elif current_key != key:
+                            raise ValueError(error)
             select_current_path()
             if not selections:
                 raise ValueError(error if key_error is None else key_error)
@@ -188,6 +198,7 @@ def validate_panel_materialization(
     spec: ProcessedDataSpec,
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
 ) -> None:
     if (
         receipt.session.resource_policy is not resource_policy
@@ -201,11 +212,16 @@ def validate_panel_materialization(
             error="crypto_panel_input_dataset_identity_mismatch",
         )
         chunk_target_bytes = resource_policy.payload_target_bytes
+        retained_receipt_bytes = receipt.retained_memory_bytes + retained_payload_bytes
         with (
             closing_dataset_iterator(
                 iter_dataset_chunks(
                     bar_session,
                     target_chunk_bytes=chunk_target_bytes,
+                    operation_headroom_bytes=(
+                        resource_policy.task_memory_budget_bytes
+                        - retained_receipt_bytes
+                    ),
                 )
             ) as bar_chunks,
             closing_dataset_iterator(
@@ -232,6 +248,7 @@ def validate_panel_dependent_materialization(
     time_window: TimeWindow,
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
 ) -> None:
     if (
         receipt.session.resource_policy is not resource_policy
@@ -245,17 +262,24 @@ def validate_panel_dependent_materialization(
             error="crypto_processed_input_dataset_identity_mismatch",
         )
         chunk_target_bytes = resource_policy.payload_target_bytes
-        _validate_receipt_key_coverage(
+        retained_receipt_bytes = receipt.retained_memory_bytes + retained_payload_bytes
+        with closing_dataset_iterator(
             _iter_core_window_chunks(
                 panel_session,
                 time_window=time_window,
                 target_chunk_bytes=chunk_target_bytes,
-            ),
-            receipt,
-            primary_key=spec.primary_key,
-            error="invalid_crypto_processed_key_coverage",
-            resource_policy=resource_policy,
-        )
+                operation_headroom_bytes=(
+                    resource_policy.task_memory_budget_bytes - retained_receipt_bytes
+                ),
+            )
+        ) as expected_chunks:
+            _validate_receipt_key_coverage(
+                expected_chunks,
+                receipt,
+                primary_key=spec.primary_key,
+                error="invalid_crypto_processed_key_coverage",
+                resource_policy=resource_policy,
+            )
 
 
 def _validate_receipt_key_coverage(
@@ -298,6 +322,7 @@ def validate_existing_panel_materialization(
     spec: ProcessedDataSpec,
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
 ) -> None:
     if (
         panel_session.resource_policy is not resource_policy
@@ -311,11 +336,22 @@ def validate_existing_panel_materialization(
             error="crypto_panel_input_dataset_identity_mismatch",
         )
         chunk_target_bytes = resource_policy.payload_target_bytes
+        bar_upstream_headroom = (
+            resource_policy.task_memory_budget_bytes
+            - panel_session.retained_memory_bytes
+            - retained_payload_bytes
+        )
+        panel_upstream_headroom = (
+            resource_policy.task_memory_budget_bytes
+            - bar_session.retained_memory_bytes
+            - retained_payload_bytes
+        )
         with (
             closing_dataset_iterator(
                 iter_dataset_chunks(
                     bar_session,
                     target_chunk_bytes=chunk_target_bytes,
+                    operation_headroom_bytes=bar_upstream_headroom,
                 )
             ) as bar_chunks,
             closing_dataset_iterator(
@@ -328,6 +364,7 @@ def validate_existing_panel_materialization(
                 iter_dataset_chunks(
                     panel_session,
                     target_chunk_bytes=chunk_target_bytes,
+                    operation_headroom_bytes=panel_upstream_headroom,
                 )
             ) as actual_chunks,
         ):
@@ -344,14 +381,36 @@ def _iter_core_window_chunks(
     *,
     time_window: TimeWindow,
     target_chunk_bytes: int,
+    operation_headroom_bytes: int,
 ) -> Iterator[pd.DataFrame]:
-    for frame in iter_dataset_chunks(
+    filters = tuple(
+        item
+        for item in session.parquet_filters or ()
+        if item[0] != session.timestamp_column
+    ) + tuple(
+        parquet_filters_for_time_window(
+            timestamp_column=session.timestamp_column,
+            time_window=time_window,
+        )
+        or ()
+    )
+    view = replace(
         session,
-        target_chunk_bytes=target_chunk_bytes,
-    ):
-        if frame.empty:
-            continue
-        yield frame.loc[core_time_window_mask(frame, time_window)].copy()
+        time_window=time_window,
+        parquet_filters=filters or None,
+        owns_inventory=False,
+    )
+    view.verify()
+    with closing_dataset_iterator(
+        iter_dataset_chunks(
+            view,
+            target_chunk_bytes=target_chunk_bytes,
+            operation_headroom_bytes=operation_headroom_bytes,
+        )
+    ) as frames:
+        for frame in frames:
+            if not frame.empty:
+                yield frame
 
 
 def _validate_ordered_key_stream_coverage(

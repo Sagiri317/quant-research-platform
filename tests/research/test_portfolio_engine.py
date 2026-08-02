@@ -6,7 +6,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import quant_research_platform.research.portfolios as portfolios_package
 import quant_research_platform.research.portfolios.runner as portfolio_runner
 from quant_research_platform.artifacts.outputs import write_portfolio_outputs
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
@@ -19,9 +18,11 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.portfolios import (
-    build_portfolio_result_from_research_dataset,
+from quant_research_platform.research.portfolios.engine import (
     construct_portfolio_positions,
+)
+from quant_research_platform.research.portfolios.runner import (
+    build_portfolio_result_from_research_dataset,
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -31,21 +32,6 @@ from tests.helpers.research_specs import (
     make_research_dataset_catalog,
     make_signal_spec,
 )
-
-
-def test_research_portfolio_package_exports_final_names() -> None:
-    assert not hasattr(portfolios_package, "construct_portfolio_frame")
-    for name in (
-        "construct_portfolio_positions",
-        "compute_portfolio_turnover",
-        "compute_portfolio_costs",
-        "compute_portfolio_returns",
-        "compute_cumulative_returns",
-        "compute_drawdowns",
-        "compute_performance_summary",
-        "compute_exposure_summary",
-    ):
-        assert hasattr(portfolios_package, name)
 
 
 def test_portfolio_engine_produces_required_signal_artifacts() -> None:

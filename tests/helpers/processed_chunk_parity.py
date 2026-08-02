@@ -5,7 +5,7 @@ import pandas as pd
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
-    materializer,
+    materializer as materializer,
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import read_dataset
@@ -18,12 +18,12 @@ from tests.helpers.synthetic_a_share import (
 )
 
 
-def tiny_processed_chunk_bytes(data_id: str) -> int:
+def supported_tiny_chunk_available_memory_bytes(data_id: str) -> int:
     return {
-        frequency_ids.MARKET_PANEL_DATA_ID: 512 * 1024,
-        "execution": 512 * 1024,
-        "price_volume": 512 * 1024,
-        "forward_returns": 512 * 1024,
+        frequency_ids.MARKET_PANEL_DATA_ID: 16 * 1024 * 1024,
+        "execution": 16 * 1024 * 1024,
+        "price_volume": 16 * 1024 * 1024,
+        "forward_returns": 16 * 1024 * 1024,
     }[data_id]
 
 
@@ -34,22 +34,26 @@ def assert_forced_tiny_processed_chunks_match_default(
     kind: str,
     end_date: str,
     time_window: TimeWindow,
+    asset_count: int = 1,
 ) -> None:
-    tiny_chunk_bytes = tiny_processed_chunk_bytes(data_id)
+    available_memory_bytes = supported_tiny_chunk_available_memory_bytes(data_id)
     default_layout = StorageLayout(project_root=tmp_path / "default")
     tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
     source_id = SourceId("csmar")
+    asset_ids = tuple(f"{position:06d}" for position in range(1, asset_count + 1))
     write_synthetic_interim_inputs(
         default_layout,
         source_id,
         end_date=end_date,
         calendar_end_date=end_date,
+        asset_ids=asset_ids,
     )
     write_synthetic_interim_inputs(
         tiny_layout,
         source_id,
         end_date=end_date,
         calendar_end_date=end_date,
+        asset_ids=asset_ids,
     )
 
     materializer.materialize_processed_data(
@@ -64,8 +68,11 @@ def assert_forced_tiny_processed_chunks_match_default(
         time_window=time_window,
         data_ids=(data_id,),
         resource_policy=RuntimeResourcePolicy.from_environment(
-            available_memory_bytes=tiny_chunk_bytes,
-            environ={},
+            available_memory_bytes=available_memory_bytes,
+            environ={
+                "QRP_TASK_MEMORY_BUDGET_MB": "5",
+                "QRP_PAYLOAD_TARGET_MB": "1",
+            },
         ),
     )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from importlib import import_module
 
-from quant_research_platform.research.models import algorithm_facts
+import quant_research_platform.research.models.algorithm_facts as algorithm_facts
 
 
 def model_dependency_status(algorithm: str) -> dict[str, str]:

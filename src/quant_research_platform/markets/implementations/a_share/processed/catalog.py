@@ -32,7 +32,7 @@ from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
-    source_ids,
+    source_ids as source_ids,
 )
 
 PANEL_COLUMNS: tuple[str, ...] = (

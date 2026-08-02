@@ -26,7 +26,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
 from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.columns import (
     price_volume_window_column,
 )
 
@@ -35,9 +35,7 @@ RESEARCH_DATASET_MOMENTUM_COLUMN = price_volume_window_column(
     20,
     DataFrequency.DAILY,
 )
-RESEARCH_DATASET_MOMENTUM_FEATURE_COLUMN = (
-    f"{RESEARCH_DATASET_MOMENTUM_COLUMN}_zscore"
-)
+RESEARCH_DATASET_MOMENTUM_FEATURE_COLUMN = f"{RESEARCH_DATASET_MOMENTUM_COLUMN}_zscore"
 RESEARCH_DATASET_FILTER_COLUMNS: tuple[str, ...] = (
     "eligible",
     "can_enter",

@@ -8,13 +8,13 @@ from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
-    materializer,
+    materializer as materializer,
 )
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.research.datasets import (
+from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
-    read_research_dataset,
 )
+from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.sources.csmar.interim import (
     interim_catalog,
     materialize_interim_data,
@@ -88,11 +88,14 @@ def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> N
         tmp_path / "data/processed/a_share/label/forward_returns",
         time_window=time_window,
     )
-    research = read_research_dataset(
-        layout,
-        market_id=MarketId("a_share"),
-        dataset_id="price_volume_forward_returns",
-        time_window=time_window,
+    research = pd.concat(
+        iter_research_dataset_chunks(
+            layout,
+            market_id=MarketId("a_share"),
+            dataset_id="price_volume_forward_returns",
+            time_window=time_window,
+        ),
+        ignore_index=True,
     )
 
     assert set(panel["asset_id"].unique()) == {"000001", "000002"}

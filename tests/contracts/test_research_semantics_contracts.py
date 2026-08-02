@@ -19,7 +19,7 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.contracts.portfolios import PortfolioSpec, WeightConfig
+from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from tests.helpers import frequency_ids
 
@@ -42,9 +42,8 @@ def test_data_frequency_vocabulary_is_current_and_exact() -> None:
         "1m",
         "tick",
     )
-    for retired_value in ("daily", "minute", "1min"):
-        with pytest.raises(ValueError, match="^invalid_data_frequency:"):
-            normalize_data_frequency(retired_value)
+    with pytest.raises(ValueError, match="^invalid_data_frequency:"):
+        normalize_data_frequency("unknown")
 
 
 def test_research_dataset_splits_factor_and_feature_columns_without_alias() -> None:
@@ -80,8 +79,6 @@ def test_research_dataset_splits_factor_and_feature_columns_without_alias() -> N
 
     assert spec.factor_columns == ("mom_20d",)
     assert spec.feature_columns == ("mom_20d_zscore",)
-    assert "factor_columns" in ResearchDatasetSpec.__dataclass_fields__
-    assert "feature_columns" in ResearchDatasetSpec.__dataclass_fields__
 
     with pytest.raises(ValueError, match="feature_columns_without_transform"):
         ResearchDatasetSpec(
@@ -363,7 +360,6 @@ def test_model_spec_uses_algorithm_and_explicit_factor_feature_inputs() -> None:
 
     assert spec.model_algorithm == "linear_regression"
     assert spec.input_columns == ("mom_20d", "mom_20d_zscore")
-    assert not hasattr(spec, "feature_columns")
 
     with pytest.raises(ValueError, match="model_input_columns_required"):
         ModelSpec(
@@ -401,17 +397,6 @@ def test_evaluation_and_portfolio_specs_are_signal_owned() -> None:
 
     assert evaluation.signals == (signal,)
     assert portfolio.signals == (signal,)
-    assert not hasattr(evaluation, "feature_columns")
-    assert not hasattr(portfolio, "prediction_id")
-
-    with pytest.raises(TypeError):
-        EvaluationSpec(
-            run_id="bad_eval",
-            market_id=MarketId("a_share"),
-            research_dataset_id="a_share_research",
-            feature_columns=("prediction_score",),
-            label_columns=("forward_return_20d",),
-        )
 
 
 def test_signal_contracts_reject_filter_and_label_collisions() -> None:
@@ -570,21 +555,13 @@ def test_portfolio_signal_contract_rejects_duplicate_and_reserved_names() -> Non
         )
 
 
-def test_compute_panel_spec_uses_signal_columns_without_feature_alias() -> None:
+def test_compute_panel_spec_requires_signal_columns() -> None:
     spec = ComputePanelSpec(signal_columns=("prediction_score",), label_column="label")
 
     assert spec.signal_columns == ("prediction_score",)
-    assert "feature_columns" not in ComputePanelSpec.model_fields
 
     with pytest.raises(ValidationError, match="signal_columns"):
         ComputePanelSpec(signal_columns=(), label_column="label")
-
-
-def test_weight_config_is_portfolio_contract_without_direction() -> None:
-    config = WeightConfig(method="rank_weighted_quantile")
-
-    assert config.method == "rank_weighted_quantile"
-    assert not hasattr(config, "direction")
 
 
 def _complete_research_dataset_spec() -> ResearchDatasetSpec:

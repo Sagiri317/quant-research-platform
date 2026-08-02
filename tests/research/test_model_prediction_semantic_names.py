@@ -4,14 +4,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.models.fitting as model_fitting
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.research.models.supervised import (
-    build_estimator_from_model_spec,
-    fit_model_result,
+from quant_research_platform.research.models.algorithm_facts import (
     model_algorithm_ids,
     model_smoke_hyperparameters,
-    predict_model_frame,
+)
+from quant_research_platform.research.models.prediction import predict_model_frame
+from quant_research_platform.research.models.supervised import (
+    build_estimator_from_model_spec,
 )
 from quant_research_platform.research.predictions.outputs import (
     validate_prediction_outputs,
@@ -60,7 +62,9 @@ def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
     )
 
     estimator = build_estimator_from_model_spec(spec)
-    result = fit_model_result(frame, spec)
+    result = model_fitting.fit_model_result_from_frames(
+        (frame,), spec, estimator=build_estimator_from_model_spec(spec)
+    )
     predictions = predict_model_frame(frame, spec, result)
 
     assert estimator is not None
@@ -89,7 +93,9 @@ def test_training_controls_leave_future_rows_out_of_fit_metadata() -> None:
         purge_gap_steps=1,
     )
 
-    result = fit_model_result(frame, spec)
+    result = model_fitting.fit_model_result_from_frames(
+        (frame,), spec, estimator=build_estimator_from_model_spec(spec)
+    )
 
     assert pd.Timestamp(result.metadata["train_end"]) < frame["timestamp"].max()
     assert result.metadata["test_start"] is None
@@ -114,7 +120,11 @@ def test_prediction_output_helpers_do_not_export_bundle_semantics() -> None:
         label_column="label",
         max_train_rows=len(frame),
     )
-    fit = fit_model_result(frame.loc[frame["timestamp"] <= "2024-01-02"], model_spec)
+    fit = model_fitting.fit_model_result_from_frames(
+        (frame.loc[frame["timestamp"] <= "2024-01-02"],),
+        model_spec,
+        estimator=build_estimator_from_model_spec(model_spec),
+    )
 
     prediction = prediction_frame_from_artifact(
         frame,

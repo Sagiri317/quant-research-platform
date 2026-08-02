@@ -10,7 +10,9 @@ import pytest
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.datasets import assemble_research_dataset
+from quant_research_platform.research.datasets.assembler import (
+    assemble_research_dataset,
+)
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
@@ -139,9 +141,7 @@ def test_research_dataset_columns_extend_without_assembler_change(
 def test_dummy_market_assembles_without_a_share_import(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_dummy_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        make_dummy_research_dataset_spec()
-    )
+    dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
     write_dummy_processed_inputs(layout, processed_catalog)
 
     assemble_research_dataset(
@@ -161,9 +161,7 @@ def test_missing_join_key_fails_closed(tmp_path: Path) -> None:
     processed_catalog = make_dummy_processed_catalog(
         missing_factor_key=True,
     )
-    dataset_catalog = make_research_dataset_catalog(
-        make_dummy_research_dataset_spec()
-    )
+    dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
     write_dummy_processed_inputs(layout, processed_catalog, drop_factor_key="asset_id")
 
     with pytest.raises(
@@ -227,9 +225,7 @@ def test_research_dataset_role_separation_is_enforced(
 def test_output_row_order_is_stable_sort_by_primary_key(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_dummy_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        make_dummy_research_dataset_spec()
-    )
+    dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
     write_dummy_processed_inputs(layout, processed_catalog, reverse_base=True)
 
     assemble_research_dataset(
@@ -253,9 +249,7 @@ def test_output_row_order_is_stable_sort_by_primary_key(tmp_path: Path) -> None:
 def test_research_dataset_fails_closed_on_empty_base_sessions(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_dummy_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        make_dummy_research_dataset_spec()
-    )
+    dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
     write_dummy_processed_inputs(layout, processed_catalog)
 
     with pytest.raises(ValueError, match="no_research_dataset_sessions"):
@@ -281,9 +275,7 @@ def test_strict_research_input_missing_base_key_fails_in_assembler(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_dummy_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        make_dummy_research_dataset_spec()
-    )
+    dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
     write_dummy_processed_inputs(layout, processed_catalog, truncate_factors=True)
 
     with pytest.raises(ValueError, match="missing_research_input_keys: factors: 1"):
@@ -368,9 +360,7 @@ def test_strict_research_input_value_nan_does_not_count_as_missing_key(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_dummy_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        make_dummy_research_dataset_spec()
-    )
+    dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
     write_dummy_processed_inputs(layout, processed_catalog, factor_values=[1.0, None])
 
     assemble_research_dataset(

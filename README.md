@@ -31,11 +31,11 @@ data/        本地数据占位说明，不提交私有数据
 - `policy/`：共享安全规则、ID 安全判断和 PASS/FAIL/NOT_RUN/BLOCKED 状态聚合。
 - `contracts/`：结构合同、枚举、ID、时间窗口和基础校验，不保存共享安全规则事实。
 - `catalog/`：generic registry class。
-- `profiles/`：API、CLI、agent 和 workflow 共用组合根，组装 catalog/source/market/materializer。
+- `profiles/`：API、CLI 和 workflow 共用组合根，组装 catalog/source/market/materializer。
 - `research/`：通用研究计算，只构建 result，不写文件，不依赖具体市场实现或 sources。
-- `compute/`：dataframe/tensor、portfolio math 和 performance 数值核心。
+- `compute/`：DataFrame portfolio math 和 performance 数值核心。
 - `storage/`：只负责 dataset IO 与 data/raw、data/interim、data/processed、data/research layout。
-- `runtime/`：resources、logging、workflow records 和 execution metrics payload，不写报告内容。
+- `runtime/`：resources、logical paths 和 execution metrics payload，不写报告内容。
 - `reports/`：只 build/render evidence/report 内容，不写文件。
 - `artifacts/`：只负责写入 LOCAL_ONLY outputs 和 REVIEW_SAFE evidence。
 - `workflows/`：只编排 research -> reports -> artifacts。
@@ -117,7 +117,6 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 ```bash
 git diff --check
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 

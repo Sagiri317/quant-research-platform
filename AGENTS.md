@@ -30,18 +30,17 @@ git branch -a
 2. live git baseline 与当前仓库文件
 3. 本文件
 4. `.agents/skills/quant-research-platform-maintenance/SKILL.md`
-5. `.agents/briefs/repo-map.md` 和 `.agents/briefs/user-principles.md`
-6. `.agents/skills/quant-research-platform-maintenance/references/**`
-7. `docs/**` 的当前合同文档
+5. `.agents/skills/quant-research-platform-maintenance/references/**`
+6. `docs/**` 的当前合同文档
 如果文档和代码、tests、contracts、schemas、runtime behavior 冲突，以可执行合同和当前仓库状态为准；停止并报告冲突，不要用叙事文档覆盖现场事实。
 
 ## 4. `.agents` 与 `.run`
 
 `.agents/skills/quant-research-platform-maintenance/scripts/` 是 tracked governance tooling。handoff builder、verifier、governance check 等工具必须从这里读取。
 
-`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、current-contract-only 扫描规则、版本面规则、negative-test allowlist、source-tree scan allowlist、共享安全路径规则和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
+`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、source-tree sensitive-text 精确例外、layer/writer owner 规则和 package safety 路径。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
 
-`.agents` handoff verifier 必须校验正式 handoff 的 REVIEW_SAFE evidence 完整性，并拒绝 status-only 摘要。handoff package layout、sidecar shape、task metadata shape 和 validation summary 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有；receipt schema、receipt invariant 和 receipt 聚合由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有；governance scan、source-tree scan、共享安全路径和 status token 规则由 `governance_contract.py` 拥有。handoff 使用 compact replayable receipts：machine validation 只来自 REVIEW_SAFE replay-backed receipts；private/local 检查不得支撑 machine validation `PASS`，无法公开复验时在 reviewer evidence 或 final report 中诚实记录 `NOT_RUN` 或 `BLOCKED`。当前 validation 状态由 builder 从 receipts 派生为 `handoff_evidence/validation-summary.json`。Codex 不应手写 handoff evidence，也不应把 raw grep output、完整 pytest log、完整 stdout/stderr、wheel、sdist、完整 subagent transcript 或本地临时安装目录打入 handoff。
+`.agents` handoff verifier 必须校验正式 handoff 的 REVIEW_SAFE evidence 完整性，并拒绝 status-only 摘要。handoff package layout、sidecar shape、task metadata shape 和 validation summary 合同由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_contract.py` 拥有；receipt schema、receipt invariant 和 receipt 聚合由 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/receipt_contract.py` 拥有；governance/source-tree scan 和共享 safety 路径由 `governance_contract.py` 拥有。handoff 使用 compact replayable receipts：machine validation 只来自 REVIEW_SAFE replay-backed receipts；private/local 检查不得支撑 machine validation `PASS`，无法公开复验时在 reviewer evidence 或 final report 中诚实记录 `NOT_RUN` 或 `BLOCKED`。当前 validation 状态由 builder 从 receipts 派生为 `handoff_evidence/validation-summary.json`。Codex 不应手写 handoff evidence，也不应把 raw grep output、完整 pytest log、完整 stdout/stderr、wheel、sdist、完整 subagent transcript 或本地临时安装目录打入 handoff。
 
 package smoke 使用 conda-managed non-isolated build：`python -m build --no-isolation --sdist --wheel --outdir <dist>`；构建后端依赖由 `environment.yml` 显式提供。package smoke 由 wheel 解压后的 `PYTHONPATH` import smoke 定义。`profile_smoke` validation row 的 replay command 是正式 profile runner 的 `profile-smoke` profile。
 
@@ -68,9 +67,9 @@ pytest PASS、governance PASS、handoff verifier PASS、share-safety PASS、sour
 
 `policy/` 只负责共享安全规则、ID 安全判断和 PASS/FAIL/NOT_RUN/BLOCKED 状态聚合，不 import QRP 业务层。`contracts/` 只定义结构合同、枚举、ID、时间窗口和基础校验，不保存共享安全规则事实。`catalog/` 只负责 generic registry class。
 
-`profiles/` 是 API、CLI、agent 和 workflow 共用的组合根，可以组装 catalog、source、market implementation 和 materializer。`research/` 是通用研究计算层，只构建 result，不写文件，不依赖具体市场实现或 sources。`compute/` 是 dataframe/tensor、portfolio math 和 performance 数值核心。`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data/raw、data/interim、data/processed、data/research layout，不定义 run outputs、reports 或 review-safe file writers。
+`profiles/` 是 API、CLI 和 workflow 共用的组合根，可以组装 catalog、source、market implementation 和 materializer。`research/` 是通用研究计算层，只构建 result，不写文件，不依赖具体市场实现或 sources。`compute/` 是 DataFrame portfolio math 和 performance 数值核心。`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data/raw、data/interim、data/processed、data/research layout，不定义 run outputs、reports 或 review-safe file writers。
 
-`runtime/` 只提供 resources、logging、workflow records 和 execution metrics payload，不写报告内容。`reports/` 只 build/render evidence/report 内容，不写文件，不重算研究逻辑。`artifacts/` 只负责把 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 写成文件。`workflows/` 只编排 research -> reports -> artifacts，不定义 policy regex，不直接写底层文件。`interfaces/` 只提供已批准的 API、CLI 和 service adapter。`agents/` 负责 agent-assisted research helpers，必须遵守 owner-layer、share-safety 和 public-surface gates。`.agents/` 只承载治理、handoff 和 prompt tooling。
+`runtime/` 只提供 resources、logical paths 和 execution metrics payload，不写报告内容。`reports/` 只 build/render evidence/report 内容，不写文件，不重算研究逻辑。`artifacts/` 只负责把 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 写成文件。`workflows/` 只编排 research -> reports -> artifacts，不定义 policy regex，不直接写底层文件。`interfaces/` 只提供已批准的 API、CLI 和 service adapter。`.agents/` 只承载治理、handoff 和 prompt tooling。
 
 ## 7. current-contract-only
 
@@ -78,11 +77,7 @@ QRP 采用 current-contract-only。普通 tests 只保护当前合同；边界�
 
 新实现应替代被替换实现，不应并行保留两个语义相同的入口。确需并行时，必须说明语义差异、生命周期、owner layer 和未来收敛方式。
 
-Current-contract path rules are owned by `governance_contract.py` and enforced by `verify_governance`.
-
-版本面和命名规则由 `governance_contract.py`、owner-layer negative tests 和治理 gate 控制。QRP-owned generated JSON 顶层身份只使用 `schema_id`；Python internal model version 字段不能作为 generated JSON identity。
-
-内部接口、owner-local 命名、parallel implementation 和 valuable deferred feature 的具体规则由 references、`governance_contract.py` 和 owner-layer gates 执行；顶层文件只保留边界原则，不复制细则。
+Current contract 由 public machine contract、owner 行为测试和依赖方向 gate 保护；普通名称、目录位置、历史词汇或实现形状不作为独立失败条件。QRP-owned generated JSON 顶层身份只使用 `schema_id`；Python internal model version 字段不能作为 generated JSON identity。
 
 ## 8. private safety
 
@@ -102,7 +97,6 @@ Current-contract path rules are owned by `governance_contract.py` and enforced b
 git diff --check
 conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/structure_audit.py --repo-root . --json
 conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
-conda run -n <environment.yml name> python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 conda run -n <environment.yml name> python tests/tools/run_profile.py --profile fast --run-dir .run/<purpose>/fast
 ```
 

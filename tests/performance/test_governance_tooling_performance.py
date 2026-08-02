@@ -48,18 +48,6 @@ def test_verify_governance_active_docs_runtime_evidence(record_property) -> None
     assert '"status": "PASS"' in result.stdout
 
 
-def test_verify_code_map_flow_runtime_evidence(record_property) -> None:
-    result = _run_tool(
-        "python",
-        ".agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py",
-        "--repo-root",
-        ".",
-    )
-
-    _record_runtime(record_property, "verify_code_map_flow", result)
-    assert result.stdout
-
-
 def test_source_tree_scan_runtime_evidence(record_property) -> None:
     governance_contract_path = (
         ".agents/skills/quant-research-platform-maintenance/scripts/"

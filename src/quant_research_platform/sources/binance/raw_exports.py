@@ -52,7 +52,7 @@ def iter_raw_envelopes(path: Path) -> Iterator[dict[str, Any]]:
                     continue
                 yielded = True
                 yield _validate_envelope(
-                    _loads_object(line, raw_path, line_number=line_number)
+                    _loads_json(line, raw_path, line_number=line_number)
                 )
         if not yielded:
             raise ValueError("empty_binance_raw_file")
@@ -76,10 +76,6 @@ def _raw_kind_files(root: Path, raw_kind: str) -> tuple[Path, ...]:
     for pattern in patterns:
         files.extend(base.glob(pattern))
     return tuple(path for path in files if path.is_file())
-
-
-def _loads_object(text: str, path: Path, *, line_number: int) -> Any:
-    return _loads_json(text, path, line_number=line_number)
 
 
 def _loads_json(text: str, path: Path, *, line_number: int | None = None) -> Any:

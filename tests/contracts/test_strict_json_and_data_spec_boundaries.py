@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import pickle
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
@@ -13,13 +12,6 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain, DataSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage import manifests
-
-
-def test_canonical_auxiliary_accounting_is_named_as_scheduling_heuristic() -> None:
-    source = inspect.getsource(json_owner.CanonicalIdentityWriter)
-
-    assert "scheduling_heuristic" in source
-    assert "_auxiliary_bytes" not in source
 
 
 def test_time_window_invalid_string_raises_stable_error() -> None:
@@ -52,6 +44,28 @@ def test_bounded_json_rejects_before_native_payload_copy(
             lazy_arrays={},
             max_bytes=64,
         )
+
+
+def test_bounded_json_snapshot_rechecks_mutation_after_initial_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {"schema_id": "x", "value": "safe"}
+    original = json_owner._require_bounded_json_preflight
+
+    def mutate_after_admission(value, *, max_bytes):  # noqa: ANN001, ANN202
+        size = original(value, max_bytes=max_bytes)
+        if value is payload:
+            payload["value"] = "x" * 1024
+        return size
+
+    monkeypatch.setattr(
+        json_owner,
+        "_require_bounded_json_preflight",
+        mutate_after_admission,
+    )
+
+    with pytest.raises(ValueError, match="^qrp_json_render_exceeds_max_bytes$"):
+        json_owner.bounded_qrp_json_object_snapshot(payload, max_bytes=64)
 
 
 def test_bounded_json_counts_exact_escaped_chunks_before_native_payload_copy(
@@ -119,6 +133,111 @@ def test_bounded_json_exact_pretty_max_boundary_matches_renderer() -> None:
             lazy_arrays={},
             max_bytes=exact_size - 1,
         )
+
+
+def test_bounded_json_exact_native_object_never_copies_or_encodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _deep_pretty_payload()
+    exact_size = len(json_owner.render_qrp_json_object(payload).encode())
+    monkeypatch.setattr(
+        json_owner,
+        "_json_native_object",
+        lambda _value: (_ for _ in ()).throw(
+            AssertionError("exact_native_payload_was_copied")
+        ),
+    )
+    monkeypatch.setattr(
+        json_owner.json,
+        "JSONEncoder",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("exact_native_payload_was_encoded_twice")
+        ),
+    )
+
+    assert (
+        json_owner.bounded_rendered_qrp_json_object_size(
+            payload,
+            lazy_arrays={},
+            max_bytes=exact_size,
+        )
+        == exact_size
+    )
+
+
+def test_bounded_json_lazy_mapping_matches_canonical_renderer() -> None:
+    expected = {
+        "fields_raw": ["A", "B"],
+        "fields_zh": {"A": "甲", "B": "乙"},
+        "schema_id": "x",
+    }
+
+    observed = json_owner.bounded_rendered_qrp_json_object_size(
+        {"fields_raw": [], "fields_zh": {}, "schema_id": "x"},
+        lazy_arrays={
+            ("fields_raw",): iter(("A", "B")),
+        },
+        lazy_mappings={
+            ("fields_zh",): iter((("A", "甲"), ("B", "乙"))),
+        },
+        max_bytes=1024,
+    )
+
+    assert observed == len(json_owner.render_qrp_json_object(expected).encode())
+
+
+@pytest.mark.parametrize(
+    "items",
+    (
+        (("B", "乙"), ("A", "甲")),
+        (("A", "甲"), ("A", "乙")),
+    ),
+    ids=("out-of-order", "duplicate"),
+)
+def test_bounded_json_lazy_mapping_requires_strict_canonical_order(
+    items: tuple[tuple[str, str], ...],
+) -> None:
+    with pytest.raises(ValueError, match="^qrp_json_lazy_mapping_order_invalid$"):
+        json_owner.bounded_rendered_qrp_json_object_size(
+            {"fields_zh": {}, "schema_id": "x"},
+            lazy_arrays={},
+            lazy_mappings={("fields_zh",): iter(items)},
+            max_bytes=1024,
+        )
+
+
+def test_bounded_json_lazy_mapping_rejects_invalid_path() -> None:
+    with pytest.raises(ValueError, match="^qrp_json_lazy_mapping_path_invalid$"):
+        json_owner.bounded_rendered_qrp_json_object_size(
+            {"fields_zh": [], "schema_id": "x"},
+            lazy_arrays={},
+            lazy_mappings={("fields_zh",): iter((("A", "甲"),))},
+            max_bytes=1024,
+        )
+
+
+def test_bounded_json_lazy_mapping_closes_source_on_size_failure() -> None:
+    events: list[str] = []
+
+    class Source:
+        def __iter__(self) -> Source:
+            return self
+
+        def __next__(self) -> tuple[str, object]:
+            return "A", "x" * 128
+
+        def close(self) -> None:
+            events.append("close")
+
+    with pytest.raises(ValueError, match="^qrp_json_render_exceeds_max_bytes$"):
+        json_owner.bounded_rendered_qrp_json_object_size(
+            {"fields_zh": {}, "schema_id": "x"},
+            lazy_arrays={},
+            lazy_mappings={("fields_zh",): Source()},
+            max_bytes=100,
+        )
+
+    assert events == ["close"]
 
 
 def test_bounded_json_preflights_each_lazy_item_before_native_copy(

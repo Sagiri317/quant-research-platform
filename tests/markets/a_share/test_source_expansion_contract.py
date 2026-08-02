@@ -1,26 +1,22 @@
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
-    materializer,
+    materializer as materializer,
+)
+from quant_research_platform.markets.implementations.a_share.validation import (
+    strict_values,
 )
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
 from tests.helpers.synthetic_a_share import write_synthetic_interim_inputs
-
-
-def test_materializer_uses_source_id_parameter_not_csmar_constant() -> None:
-    source = inspect.getsource(materializer)
-
-    assert "SOURCE_ID" not in source
-    assert 'SourceId("csmar")' not in source
 
 
 @pytest.mark.parametrize(
@@ -133,18 +129,25 @@ def test_missing_required_source_column_fails_closed_with_data_id_and_column(
         )
 
 
-def test_normalized_market_bars_daily_contract_excludes_annotation_masks() -> None:
-    from quant_research_platform.markets.implementations.a_share.validation import (
-        internal_tables,
-    )
+def test_a_share_source_asset_ids_preserve_exact_stock_and_text_semantics() -> None:
+    stock = pd.Series(["1", " 000002 "], index=[7, 9])
 
-    forbidden = {
-        "eligible_base",
-        "eligible",
-        "can_enter",
-        "can_exit",
-        "next_bar_is_trading",
-        "next_bar_limit_status",
-    }
+    normalized = strict_values.strict_stock_code_series(stock, error="invalid_stock")
 
-    assert forbidden.isdisjoint(internal_tables.MARKET_BARS_REQUIRED_COLUMNS)
+    assert normalized.tolist() == ["000001", "000002"]
+    assert normalized.index.tolist() == [7, 9]
+    assert strict_values.strict_source_asset_id_series(
+        pd.Series(["index_a"]),
+        asset_namespace="index",
+        error="invalid_asset",
+    ).tolist() == ["index_a"]
+
+
+@pytest.mark.parametrize("value", (1, "not-a-code", "-1", "1234567"))
+def test_a_share_stock_code_contract_rejects_coercion_and_out_of_range(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_stock"):
+        strict_values.strict_stock_code_series(
+            pd.Series([value]), error="invalid_stock"
+        )

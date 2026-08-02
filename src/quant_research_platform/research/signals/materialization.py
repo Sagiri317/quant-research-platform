@@ -9,21 +9,6 @@ import pandas as pd
 from quant_research_platform.contracts.signals import SignalSpec
 
 
-def materialize_signal_frame(
-    frame: pd.DataFrame,
-    signals: tuple[SignalSpec, ...],
-    *,
-    timestamp_column: str = "timestamp",
-    source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
-) -> pd.DataFrame:
-    return normalize_signal_frame(
-        frame,
-        signals,
-        timestamp_column=timestamp_column,
-        source_columns_by_kind=source_columns_by_kind,
-    )
-
-
 def normalize_signal_frame(
     frame: pd.DataFrame,
     signals: tuple[SignalSpec, ...],
@@ -86,6 +71,3 @@ def _normalize_signal_values(
     elif signal.direction != "higher_is_better":
         raise ValueError(f"unsupported_signal_direction: {signal.direction}")
     return values
-
-
-__all__ = ["materialize_signal_frame", "normalize_signal_frame"]

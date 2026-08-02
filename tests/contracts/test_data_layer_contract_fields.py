@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import fields
-
 import pytest
 
 from quant_research_platform.catalog.fields import platform_entity_time_key
@@ -42,9 +40,6 @@ def test_processed_data_spec_declares_direct_input_dependencies() -> None:
         partition_columns=("year",),
     )
 
-    field_names = {field.name for field in fields(ProcessedDataSpec)}
-    assert "source_input_data_ids" in field_names
-    assert "processed_input_data_ids" in field_names
     assert spec.source_input_data_ids == (
         frequency_ids.MARKET_BARS_DATA_ID,
         "stock_master",
@@ -54,7 +49,7 @@ def test_processed_data_spec_declares_direct_input_dependencies() -> None:
     assert spec.processed_input_data_ids == ()
 
 
-def test_label_definition_declares_family_and_input_columns_only() -> None:
+def test_label_definition_serializes_family_and_input_columns() -> None:
     label = LabelDefinition(
         label_id="forward_return_20d",
         market_id=MarketId("a_share"),
@@ -76,8 +71,6 @@ def test_label_definition_declares_family_and_input_columns_only() -> None:
         "timestamp",
         "adj_open",
     ]
-    assert "required_input_data_id" not in manifest
-    assert not hasattr(label, "required_input_data_id")
 
 
 @pytest.mark.parametrize(
@@ -167,6 +160,4 @@ def test_research_dataset_spec_requires_explicit_base_input() -> None:
         partition_columns=("year",),
     )
 
-    field_names = {field.name for field in fields(ResearchDatasetSpec)}
-    assert "base_input_data_id" in field_names
     assert spec.base_input_data_id == "base"

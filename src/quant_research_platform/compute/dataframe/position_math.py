@@ -159,8 +159,6 @@ def _leg_weights(
     weight_config: WeightConfig,
     sign: float,
 ) -> tuple[dict[str, float], str]:
-    if len(asset_values) == 0:
-        return {}, ""
     fallback_reason = ""
     if weight_config.method == "equal_weight_quantile":
         raw = np.ones(len(asset_values), dtype="float64")
@@ -179,14 +177,8 @@ def _leg_weights(
         )
     elif weight_config.method == "signal_abs_weighted_quantile":
         raw = np.abs(signal_values)
-    elif weight_config.method == "inverse_vol_scaled_quantile":
-        if risk_values is None:
-            raise ValueError("risk_column is required for inverse_vol_scaled_quantile.")
-        if (risk_values <= 0).any():
-            raise ValueError("risk_column values must be positive.")
-        raw = np.abs(signal_values) / risk_values
     else:
-        raise ValueError(f"unsupported weight method {weight_config.method!r}.")
+        raw = np.abs(signal_values) / risk_values
 
     raw = np.asarray(raw, dtype="float64")
     raw_sum = float(raw.sum())

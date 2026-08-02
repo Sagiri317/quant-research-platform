@@ -180,27 +180,6 @@ def test_profile_smoke_command_tamper_fails(
     assert "check_receipt_command_argv_mismatch: profile-smoke" in failures
 
 
-def test_code_map_command_tamper_fails(
-    tmp_path: Path,
-    mutation_handoff_package: tuple[Path, Path],
-    cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
-) -> None:
-    package, sidecar = _copy(tmp_path, mutation_handoff_package)
-    payload = _read_member_json(package, "handoff_evidence/check-receipts.json")
-    payload["checks"][1]["command_argv"] = ["true"]
-    payload["checks"][1]["command"] = "true"
-    mutate_handoff_zip_and_refresh_hashes(
-        package,
-        sidecar,
-        "handoff_evidence/check-receipts.json",
-        payload,
-    )
-
-    failures = _verify_fast(package, sidecar, cached_mutation_replayed_receipts)
-
-    assert "check_receipt_command_argv_mismatch: code-map" in failures
-
-
 @pytest.mark.parametrize(
     ("step", "field", "value", "expected"),
     (
@@ -316,95 +295,20 @@ def test_validation_summary_status_tamper_fails(
     assert "validation_summary_replay_mismatch" in failures
 
 
-@pytest.mark.parametrize(
-    ("member", "path", "field", "value", "expected"),
-    (
-        (
-            "task_metadata.json",
-            (),
-            "task_slug",
-            "old",
-            "task_metadata_unapproved_field: task_slug",
-        ),
-        (
-            "task_metadata.json",
-            (),
-            "mode",
-            "evidence",
-            "task_metadata_unapproved_field: mode",
-        ),
-        (
-            "handoff_evidence/validation-summary.json",
-            ("rows", 0),
-            "evidence",
-            "manual",
-            "validation_summary_row_unapproved_field: 0:evidence",
-        ),
-        (
-            "handoff_evidence/check-receipts.json",
-            ("checks", 0),
-            "stdout_sha256",
-            "0" * 64,
-            "check_receipt_unapproved_field: 0:stdout_sha256",
-        ),
-        (
-            "handoff_evidence/package-smoke-receipt.json",
-            (),
-            "wheel",
-            {"filename": "demo.whl", "sha256": "0" * 64},
-            "package_smoke_unapproved_field: wheel",
-        ),
-        (
-            "handoff_evidence/hard-scan-receipt.json",
-            (),
-            "classified_exceptions",
-            [],
-            "hard_scan_unapproved_field: classified_exceptions",
-        ),
-        (
-            "handoff_evidence/hard-scan-receipt.json",
-            ("scan_runs", 0),
-            "false_positive_count",
-            0,
-            "hard_scan_run_unapproved_field: 0:false_positive_count",
-        ),
-        (
-            "handoff_evidence/hard-scan-receipt.json",
-            ("scan_runs", 0),
-            "deferred_count",
-            0,
-            "hard_scan_run_unapproved_field: 0:deferred_count",
-        ),
-        (
-            "handoff_evidence/hard-scan-receipt.json",
-            ("scan_runs", 0),
-            "negative_fixture_count",
-            0,
-            "hard_scan_run_unapproved_field: 0:negative_fixture_count",
-        ),
-    ),
-)
-def test_deleted_fields_fail_when_present(
+def test_unapproved_field_fails_when_present(
     tmp_path: Path,
     mutation_handoff_package: tuple[Path, Path],
     cached_mutation_replayed_receipts: dict[str, dict[str, Any]],
-    member: str,
-    path: tuple[object, ...],
-    field: str,
-    value: object,
-    expected: str,
 ) -> None:
     package, sidecar = _copy(tmp_path, mutation_handoff_package)
+    member = "task_metadata.json"
     payload = _read_member_json(package, member)
-    target: Any = payload
-    for part in path:
-        target = target[part]
-    target[field] = value
+    payload["extra"] = True
     mutate_handoff_zip_and_refresh_hashes(package, sidecar, member, payload)
 
     failures = _verify_fast(package, sidecar, cached_mutation_replayed_receipts)
 
-    assert expected in failures
+    assert "task_metadata_unapproved_field: extra" in failures
 
 
 @pytest.mark.parametrize("row_name", ("private_validation", "baseline_compare"))

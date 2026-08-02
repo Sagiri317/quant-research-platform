@@ -5,7 +5,7 @@
 ## 1. 通用流程
 
 1. 运行 live git baseline。
-2. 读取 `AGENTS.md`、`repo-map.md`、`user-principles.md`。
+2. 读取 `AGENTS.md`。
 3. 判断任务 owner layer。
 4. 只读取相关 references 和 docs。
 5. 生成 plan，列出 allowed scope 和 scope boundary。
@@ -35,7 +35,7 @@ business-runtime    src 中 factor/model/evaluate/portfolio/storage 等业务逻
 
 ### governance-script-fix
 
-修 `verify_governance.py`、`verify_code_map_flow.py`、handoff scripts 或相关 tests。必须在真实仓库运行验证。
+修 `verify_governance.py`、source-tree scan、handoff scripts 或相关 tests。必须在真实仓库运行验证。
 
 ### handoff-package
 

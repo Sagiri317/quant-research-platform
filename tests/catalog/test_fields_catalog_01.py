@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-import quant_research_platform.contracts.data as data_contracts
 from quant_research_platform.catalog.fields import (
     canonical_field_names,
     platform_field_catalog,
     platform_interim_column_names,
 )
 from quant_research_platform.contracts.columns import ColumnRole, FieldSpec, LogicalType
-
-
-def test_contracts_do_not_define_concrete_canonical_fields() -> None:
-    assert not hasattr(data_contracts, "CANONICAL_INTERIM_COLUMNS")
-    assert not hasattr(data_contracts, "CANONICAL_ENTITY_TIME_KEY")
 
 
 def test_catalog_fields_owns_platform_canonical_fields_only() -> None:

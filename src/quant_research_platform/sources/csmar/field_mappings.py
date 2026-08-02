@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from numbers import Integral, Real
+from types import MappingProxyType
 
 import pandas as pd
 
@@ -60,8 +62,6 @@ COLUMN_MAPPINGS = {
     "adjustment": {
         "Symbol": "stock_code",
         "TradingDate": "trade_date",
-        "Stkcd": "stock_code",
-        "Trddt": "trade_date",
         "FwardFactor": "forward_adjust_factor",
         "BwardFactor": "backward_adjust_factor",
         "CumulateFwardFactor": "cum_forward_adjust_factor",
@@ -195,6 +195,46 @@ FIELD_DESCRIPTIONS = {
 }
 
 
+def _validate_mapping_facts(
+    mappings: Mapping[str, Mapping[str, str]],
+    aliases_by_dataset: Mapping[str, Mapping[str, tuple[str, ...]]],
+) -> None:
+    for dataset, mapping in mappings.items():
+        aliases = aliases_by_dataset.get(dataset, {})
+        if len(mapping.values()) != len(set(mapping.values())):
+            raise ValueError("invalid_csmar_column_mapping_facts")
+        alias_owners: dict[str, str] = {}
+        for primary, provider_aliases in aliases.items():
+            if primary not in mapping:
+                raise ValueError("invalid_csmar_column_mapping_facts")
+            for alias in provider_aliases:
+                if alias in mapping or alias in alias_owners:
+                    raise ValueError("invalid_csmar_column_mapping_facts")
+                alias_owners[alias] = primary
+    if set(aliases_by_dataset).difference(mappings):
+        raise ValueError("invalid_csmar_column_mapping_facts")
+
+
+_validate_mapping_facts(COLUMN_MAPPINGS, COLUMN_ALIASES)
+COLUMN_MAPPINGS = MappingProxyType(
+    {name: MappingProxyType(dict(values)) for name, values in COLUMN_MAPPINGS.items()}
+)
+COLUMN_ALIASES = MappingProxyType(
+    {
+        name: MappingProxyType(
+            {column: tuple(aliases) for column, aliases in values.items()}
+        )
+        for name, values in COLUMN_ALIASES.items()
+    }
+)
+FIELD_DESCRIPTIONS = MappingProxyType(
+    {
+        name: MappingProxyType(dict(values))
+        for name, values in FIELD_DESCRIPTIONS.items()
+    }
+)
+
+
 def missing_raw_columns(frame: pd.DataFrame, dataset: str) -> list[str]:
     """Return provider columns missing from a mappable raw export frame."""
 
@@ -216,13 +256,28 @@ def missing_raw_column_names(columns: tuple[str, ...], dataset: str) -> list[str
     return missing
 
 
-def column_mapping(dataset: str) -> dict[str, str]:
+def validate_raw_column_names(columns: tuple[str, ...], dataset: str) -> None:
+    """Reject provider fields outside the current registered mapping contract."""
+
+    mapping = COLUMN_MAPPINGS[dataset]
+    aliases = COLUMN_ALIASES.get(dataset, {})
+    legal = set(mapping)
+    legal.update(alias for values in aliases.values() for alias in values)
+    if set(columns).difference(legal):
+        raise ValueError("csmar_raw_export_schema_invalid")
+    available = set(columns)
+    for primary, provider_aliases in aliases.items():
+        if sum(column in available for column in (primary, *provider_aliases)) > 1:
+            raise ValueError("csmar_raw_export_schema_invalid")
+
+
+def column_mapping(dataset: str) -> Mapping[str, str]:
     """Return raw-provider to source-local normalized column mappings."""
 
     return COLUMN_MAPPINGS[dataset]
 
 
-def field_descriptions(dataset: str) -> dict[str, str]:
+def field_descriptions(dataset: str) -> Mapping[str, str]:
     """Return provider field descriptions for private metadata sidecars."""
 
     return FIELD_DESCRIPTIONS.get(dataset, {})
@@ -231,17 +286,27 @@ def field_descriptions(dataset: str) -> dict[str, str]:
 def map_columns(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
     """Rename raw provider columns to source-local normalized aliases."""
 
+    columns = tuple(str(column) for column in frame.columns)
+    if len(columns) != len(set(columns)):
+        raise ValueError("duplicate_csmar_provider_column")
     mapping = column_mapping(dataset)
+    aliases = COLUMN_ALIASES.get(dataset, {})
+    available = set(columns)
+    for primary, alias_columns in aliases.items():
+        present = tuple(
+            column for column in (primary, *alias_columns) if column in available
+        )
+        if len(present) > 1:
+            raise ValueError("ambiguous_csmar_column_mapping")
     missing = missing_raw_columns(frame, dataset)
     if missing:
         raise ValueError(f"{dataset} raw export is missing CSMAR columns: {missing}")
-    aliases = COLUMN_ALIASES.get(dataset, {})
     alias_mapping = {
         alias: mapping[column]
         for column, alias_columns in aliases.items()
         for alias in alias_columns
     }
-    return frame.rename(columns={**alias_mapping, **mapping}).copy()
+    return frame.rename(columns={**alias_mapping, **mapping})
 
 
 _STOCK_CODE_PATTERN = re.compile(r"^[0-9]+(?:\.0)?$")
@@ -302,6 +367,7 @@ __all__ = [
     "field_descriptions",
     "map_columns",
     "missing_raw_column_names",
+    "validate_raw_column_names",
     "missing_raw_columns",
     "normalize_provider_stock_code_series",
     "normalize_stock_code",

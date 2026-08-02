@@ -57,10 +57,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-ref", required=True)
     args = parser.parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
+    out_dir = Path(args.out_dir)
+    if not out_dir.is_absolute():
+        out_dir = repo_root / out_dir
     try:
         result = build_handoff_package(
             repo_root=repo_root,
-            out_dir=resolve_path(repo_root, args.out_dir),
+            out_dir=out_dir,
             task_name=args.task_name,
             base_ref=args.base_ref,
         )
@@ -78,11 +81,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if result["ok"] else 1
 
 
-def resolve_path(repo_root: Path, value: str) -> Path:
-    path = Path(value)
-    return path if path.is_absolute() else repo_root / path
-
-
 def build_handoff_package(
     *,
     repo_root: Path,
@@ -90,7 +88,7 @@ def build_handoff_package(
     task_name: str,
     base_ref: str,
 ) -> dict[str, object]:
-    branch = current_branch(repo_root)
+    branch = git_text(repo_root, "rev-parse", "--abbrev-ref", "HEAD").strip()
     assert_worktree_clean(repo_root)
     final_head = git_text(repo_root, "rev-parse", "HEAD").strip()
     base = git_text(repo_root, "merge-base", "HEAD", base_ref).strip()
@@ -109,7 +107,13 @@ def build_handoff_package(
         bundle_path = root / FINAL_BRANCH_BUNDLE_ENTRY
         clone_dir = root / "clone"
         write_bundle(repo_root, bundle_path, branch)
-        clone_bundle(bundle_path, clone_dir, branch)
+        subprocess.run(
+            ["git", "clone", "--branch", branch, str(bundle_path), str(clone_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
         clone_head = git_text(clone_dir, "rev-parse", "HEAD").strip()
         if clone_head != final_head:
             raise SystemExit("bundle_clone_head_mismatch")
@@ -170,7 +174,13 @@ def build_once(
         write_text(
             stage_root / VALIDATION_SUMMARY_ENTRY, stable_json(validation_summary)
         )
-        payload_paths = staged_paths(stage_root)
+        payload_paths = tuple(
+            sorted(
+                path.relative_to(stage_root).as_posix()
+                for path in stage_root.rglob("*")
+                if path.is_file() and path.name != ARTIFACT_MANIFEST_ENTRY
+            )
+        )
         manifest = {
             "schema_id": "qrp-handoff-artifact-manifest",
             "entries": artifact_entries(stage_root, payload_paths),
@@ -232,24 +242,10 @@ def write_bundle(repo_root: Path, bundle_path: Path, branch: str) -> None:
     )
 
 
-def clone_bundle(bundle_path: Path, clone_dir: Path, branch: str) -> None:
-    subprocess.run(
-        ["git", "clone", "--branch", branch, str(bundle_path), str(clone_dir)],
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-
-
 def assert_worktree_clean(repo_root: Path) -> None:
     status = git_text(repo_root, "status", "--porcelain").strip()
     if status:
         raise SystemExit("worktree_not_clean")
-
-
-def current_branch(repo_root: Path) -> str:
-    return git_text(repo_root, "rev-parse", "--abbrev-ref", "HEAD").strip()
 
 
 def safe_task_filename(task_name: str) -> str:
@@ -271,16 +267,6 @@ def artifact_entries(root: Path, paths: Iterable[str]) -> list[dict[str, object]
             }
         )
     return entries
-
-
-def staged_paths(root: Path) -> tuple[str, ...]:
-    return tuple(
-        sorted(
-            path.relative_to(root).as_posix()
-            for path in root.rglob("*")
-            if path.is_file() and path.name != ARTIFACT_MANIFEST_ENTRY
-        )
-    )
 
 
 def write_zip(zip_path: Path, root: Path, paths: Iterable[str]) -> None:

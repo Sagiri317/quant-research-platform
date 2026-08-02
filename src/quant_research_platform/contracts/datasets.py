@@ -10,6 +10,7 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.validation import _validate_column_tuple
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -28,9 +29,7 @@ class ResearchDatasetSpec(DataSpec):
 
     def __post_init__(self) -> None:
         if type(self.column_roles) not in (dict, MappingProxyType) or any(
-            type(column) is not str
-            or not column
-            or type(role) is not ColumnRole
+            type(column) is not str or not column or type(role) is not ColumnRole
             for column, role in self.column_roles.items()
         ):
             raise ValueError("invalid_research_column_roles")
@@ -76,8 +75,7 @@ class ResearchDatasetSpec(DataSpec):
         )
         if factor_feature_overlap:
             raise ValueError(
-                "research_factor_feature_overlap: "
-                + ", ".join(factor_feature_overlap)
+                "research_factor_feature_overlap: " + ", ".join(factor_feature_overlap)
             )
         for field_name, columns in (
             ("factor_columns", self.factor_columns),
@@ -147,20 +145,6 @@ class ResearchDatasetSpec(DataSpec):
             "key_coverage",
             MappingProxyType(normalized_key_coverage),
         )
-
-
-def _validate_column_tuple(
-    columns: tuple[str, ...],
-    field_name: str,
-    *,
-    required: bool = True,
-) -> None:
-    if required and not columns:
-        raise ValueError(f"{field_name}_required")
-    if any(not isinstance(column, str) or not column for column in columns):
-        raise ValueError(f"{field_name}_must_be_non_empty_strings")
-    if len(set(columns)) != len(columns):
-        raise ValueError(f"{field_name}_must_not_contain_duplicates")
 
 
 def _validate_semantic_column_membership(
@@ -235,5 +219,6 @@ def _validate_feature_transforms(
             "feature_transform_output_not_in_feature_columns: "
             + ", ".join(undeclared_outputs)
         )
+
 
 __all__ = ["ResearchDatasetSpec"]

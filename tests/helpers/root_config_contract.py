@@ -13,10 +13,6 @@ def load_pyproject(repo_root: Path = PROJECT_ROOT) -> dict[str, Any]:
         return tomllib.load(handle)
 
 
-def read_environment_yml(repo_root: Path = PROJECT_ROOT) -> str:
-    return (repo_root / "environment.yml").read_text(encoding="utf-8")
-
-
 def project_requires_python(repo_root: Path = PROJECT_ROOT) -> str:
     return str(load_pyproject(repo_root)["project"]["requires-python"])
 
@@ -24,16 +20,6 @@ def project_requires_python(repo_root: Path = PROJECT_ROOT) -> str:
 def python_minor_from_requires(spec: str) -> str:
     match = re.search(r">=\s*(\d+\.\d+)", spec)
     return match.group(1) if match else ""
-
-
-def ruff_target_from_requires(spec: str) -> str:
-    minor = python_minor_from_requires(spec)
-    return "py" + minor.replace(".", "") if minor else ""
-
-
-def conda_python_pin_from_requires(spec: str) -> str:
-    minor = python_minor_from_requires(spec)
-    return f"python={minor}" if minor else ""
 
 
 def dependency_constraint(spec: str) -> str:
@@ -99,32 +85,8 @@ def render_minimal_pyproject_from_root_contract(
     return "\n".join(lines) + "\n"
 
 
-def render_minimal_environment_from_root_contract(
-    repo_root: Path = PROJECT_ROOT,
-) -> str:
-    requires_python = project_requires_python(repo_root)
-    entries = [
-        conda_python_pin_from_requires(requires_python),
-        _conda_spec_for("build", dev_dependency_requirement("build", repo_root)),
-        build_system_requirement("setuptools", repo_root),
-        build_system_requirement("wheel", repo_root),
-        project_dependency_requirement("pyarrow", repo_root),
-        dev_dependency_requirement("pytest", repo_root),
-        dev_dependency_requirement("pytest-xdist", repo_root),
-        dev_dependency_requirement("ruff", repo_root),
-    ]
-    rendered_entries = "".join(f"  - {entry}\n" for entry in entries)
-    return "name: demo\ndependencies:\n" + rendered_entries
-
-
 def _dependency_specs(items: list[str]) -> dict[str, str]:
     return {re.split(r"[<>=!~; ]", item, maxsplit=1)[0]: item for item in items}
-
-
-def _conda_spec_for(pyproject_name: str, spec: str) -> str:
-    if pyproject_name == "build":
-        return "python-build" + spec[len("build") :]
-    return spec
 
 
 def _toml_inline_array(items: list[str]) -> str:

@@ -8,7 +8,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     market_context_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
-    annotations,
+    annotations as annotations,
 )
 
 

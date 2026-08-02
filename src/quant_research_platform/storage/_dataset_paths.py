@@ -91,7 +91,9 @@ def partition_part_path(root: Path, partition: str, part_index: int) -> Path:
 def validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
     if not is_local_only_path(root):
         raise ValueError("outside_local_only_boundary")
-    path_parts = _path_parts(root)
+    path_parts = tuple(
+        part for part in PurePosixPath(root.as_posix()).parts if part != "/"
+    )
     if isinstance(spec, InterimDataSpec):
         if (
             _unique_matching_suffix(
@@ -129,11 +131,29 @@ def require_artifact_root(root: Path) -> Path:
     candidate = Path(root)
     if candidate.name == "data":
         raise ValueError("dataset_root_must_be_artifact_root")
+    return require_unaliased_path(candidate, error="invalid_dataset_part_files")
+
+
+def require_unaliased_path(path: Path, *, error: str) -> Path:
+    candidate = Path(path)
+    current = Path(candidate.anchor) if candidate.is_absolute() else Path.cwd()
+    parts = candidate.parts[1:] if candidate.anchor else candidate.parts
+    try:
+        for component in (*reversed(current.parents), current):
+            if path_is_filesystem_alias(component):
+                raise ValueError(error)
+        for part in parts:
+            if part == ".":
+                continue
+            if part == "..":
+                current = current.parent
+                continue
+            current /= part
+            if path_is_filesystem_alias(current):
+                raise ValueError(error)
+    except OSError as exc:
+        raise ValueError(error) from exc
     return candidate
-
-
-def _path_parts(path: Path) -> tuple[str, ...]:
-    return tuple(part for part in PurePosixPath(path.as_posix()).parts if part != "/")
 
 
 def _unique_matching_suffix(

@@ -4,11 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from typing import NewType
-
-Timestamp = NewType("Timestamp", datetime)
-SessionDate = NewType("SessionDate", date)
-AvailableAt = NewType("AvailableAt", datetime)
 
 
 @dataclass(frozen=True)
@@ -90,10 +85,7 @@ def _normalize_datetime(value: datetime) -> datetime:
 
 
 __all__ = [
-    "AvailableAt",
-    "SessionDate",
     "TimeWindow",
-    "Timestamp",
     "is_intraday_time_window",
     "require_date_window",
     "time_window_date_bounds",

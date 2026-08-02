@@ -6,6 +6,7 @@ import tomllib
 from pathlib import Path
 
 import pandas as pd
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from quant_research_platform.interfaces.private_cli import app as private_app
@@ -280,8 +281,17 @@ def test_qrp_private_schema_inventory_sanitizes_unexpected_failures(
     assert not output.exists()
 
 
-def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
+def test_qrp_private_help_exposes_approved_private_commands() -> None:
     runner = CliRunner()
+    command = get_command(private_app)
+
+    assert {
+        name: set(getattr(child, "commands", {}))
+        for name, child in command.commands.items()
+    } == {
+        "local-verification": {"run"},
+        "schema-inventory": set(),
+    }
 
     root_help = runner.invoke(private_app, ["--help"])
     schema_inventory_help = runner.invoke(
@@ -297,7 +307,6 @@ def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
     assert "Private local verification harness commands." in root_help.output
     assert "schema-inventory" in root_help.output
     assert "local-verification" in root_help.output
-    assert "private-rebuild" not in root_help.output
     assert schema_inventory_help.exit_code == 0
     assert "private local verification harness" in schema_inventory_help.output
     assert "sealed dataset" in schema_inventory_help.output
@@ -306,7 +315,6 @@ def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
     assert "data/research" in schema_inventory_help.output
     assert "--project-root" in schema_inventory_help.output
     assert "--output" in schema_inventory_help.output
-    assert "--overwrite" not in schema_inventory_help.output
     assert local_verification_run_help.exit_code == 0
     assert "private local verification harness" in local_verification_run_help.output
     assert "--run-root" in local_verification_run_help.output

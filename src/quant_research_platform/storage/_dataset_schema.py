@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any
 
@@ -175,16 +175,8 @@ def merge_dataset_instance_metadata(
             raise ValueError(f"unsupported_dataset_instance_metadata_key: {key}")
         if key == "input_dataset_identities":
             metadata[key] = _validate_input_dataset_identities_metadata(value)
-    _require_json_serializable(metadata)
     result.update(metadata)
     return result
-
-
-def _require_json_serializable(value: Mapping[str, Any]) -> None:
-    try:
-        render_qrp_json_object(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("dataset_instance_metadata_not_json_serializable") from exc
 
 
 def _validate_input_dataset_identities_metadata(value: Any) -> dict[str, Any]:
@@ -351,8 +343,6 @@ def _validate_dataset_spec_variant(spec: DataSpec) -> None:
             allow_empty=True,
         )
         return
-    if type(spec) is not ResearchDatasetSpec:
-        raise ValueError("dataset_spec_type_invalid")
     _require_runtime_string(spec.market_id, "dataset_market_id_invalid")
     input_data_ids = _require_runtime_string_tuple(
         spec.input_data_ids,
@@ -589,8 +579,6 @@ def require_frame_logical_dtype_metadata_within_target(
         descriptor: Mapping[str, Any],
     ) -> Iterable[Mapping[str, Any]]:
         dtype = frame[str(descriptor["name"])].dtype
-        if not isinstance(dtype, pd.CategoricalDtype):
-            raise ValueError("dataset_logical_dtypes_invalid")
         return (
             _typed_category_value_payload(value) for value in dtype.categories
         )
@@ -926,7 +914,7 @@ def _typed_category_value(value: Mapping[str, Any]) -> object:
     if kind == "decimal" and type(payload) is str:
         try:
             result = Decimal(payload)
-        except ValueError as exc:
+        except (ValueError, InvalidOperation) as exc:
             raise ValueError("dataset_logical_dtypes_invalid") from exc
         if result.is_finite():
             return result
@@ -1307,7 +1295,9 @@ def validate_dataset_manifest_payload(
         "partition_count",
         "duplicate_primary_key_count",
     ):
-        _require_nonnegative_int(manifest.get(key), f"manifest_{key}_invalid")
+        value = manifest.get(key)
+        if not _is_exact_int(value) or value < 0:
+            raise ValueError(f"manifest_{key}_invalid")
     columns = _require_string_list(
         manifest.get("columns"), "manifest_columns_invalid", allow_empty=False
     )
@@ -1701,12 +1691,6 @@ def _require_string_list(
         or any(not isinstance(item, str) or not item for item in value)
         or len(value) != len(set(value))
     ):
-        raise ValueError(error)
-    return value
-
-
-def _require_nonnegative_int(value: object, error: str) -> int:
-    if not _is_exact_int(value) or value < 0:
         raise ValueError(error)
     return value
 

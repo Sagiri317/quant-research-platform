@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import replace
@@ -32,6 +33,7 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
     closing_dataset_iterator,
@@ -43,6 +45,7 @@ from quant_research_platform.storage._dataset_reading import (
 )
 from quant_research_platform.storage._dataset_schema import dataset_identity_payload
 from quant_research_platform.storage._dataset_writing import (
+    DatasetWriteChunk,
     DatasetWriteReceipt,
     write_dataset,
 )
@@ -121,7 +124,9 @@ def _assemble_research_dataset_from_sessions(
         dataset_spec=spec,
         sessions=input_sessions,
     )
-    artifact_root = layout.research_dataset_root(spec.market_id, spec.data_id)
+    artifact_root = require_artifact_root(
+        layout.research_dataset_root(spec.market_id, spec.data_id)
+    )
     chunks = _iter_disk_guarded_output_chunks(
         _iter_joined_processed_chunks(
             dataset_spec=spec,
@@ -144,17 +149,21 @@ def _assemble_research_dataset_from_sessions(
         instance_metadata={"input_dataset_identities": input_identities},
         staged_validator=verify_input_sessions,
         resource_policy=policy,
+        retained_payload_bytes=sum(
+            session.retained_memory_bytes for session in input_sessions.values()
+        ),
     )
     return artifact_root
 
 
 def _iter_disk_guarded_output_chunks(
-    chunks: Iterable[pd.DataFrame],
+    chunks: Iterable[pd.DataFrame | DatasetWriteChunk],
     *,
     scratch_parent: Path,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
     for chunk in chunks:
-        chunk_bytes = pandas_frame_payload_bytes(chunk)
+        frame = chunk.frame if isinstance(chunk, DatasetWriteChunk) else chunk
+        chunk_bytes = pandas_frame_payload_bytes(frame)
         require_free_disk_headroom(
             scratch_parent,
             reserve_bytes=chunk_bytes,
@@ -169,7 +178,7 @@ def _iter_joined_processed_chunks(
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[DatasetWriteChunk]:
     policy = resource_policy
     base_data_id = _base_input_data_id(dataset_spec)
     time_keys = _time_keys_from_base_input(
@@ -177,6 +186,11 @@ def _iter_joined_processed_chunks(
         primary_key=dataset_spec.primary_key,
         time_window=time_window,
         resource_policy=policy,
+        retained_payload_bytes=sum(
+            session.retained_memory_bytes
+            for data_id, session in sessions.items()
+            if data_id != base_data_id
+        ),
     )
     if not time_keys:
         raise ValueError("no_research_dataset_sessions")
@@ -213,16 +227,18 @@ def _iter_joined_processed_chunks(
             resource_policy=policy,
         )
         validate_research_dataset(chunk, dataset_spec)
-        output = (
-            chunk.loc[:, list(_ordered_output_columns(dataset_spec))]
-            .sort_values(list(dataset_spec.primary_key))
-            .reset_index(drop=True)
+        output = chunk.sort_values(
+            list(dataset_spec.primary_key),
+            ignore_index=True,
         )
         _require_research_final_write_payload(
             output,
             resource_policy=policy,
         )
-        yield output
+        yield DatasetWriteChunk(
+            output,
+            sum(session.retained_memory_bytes for session in sessions.values()),
+        )
 
 
 def _join_processed_inputs(
@@ -240,6 +256,9 @@ def _join_processed_inputs(
     )
     assembled: pd.DataFrame | None = None
     base_keys: pd.DataFrame | None = None
+    retained_session_bytes = sum(
+        session.retained_memory_bytes for session in sessions.values()
+    )
     for input_data_id in ordered_input_ids:
         processed_spec = processed_catalog.get(input_data_id)
         input_frame = _read_processed_input(
@@ -249,27 +268,35 @@ def _join_processed_inputs(
             existing_columns=tuple(assembled.columns) if assembled is not None else (),
             time_window=time_window,
             resource_policy=resource_policy,
+            retained_payload_bytes=(
+                retained_session_bytes
+                - sessions[input_data_id].retained_memory_bytes
+                + (0 if assembled is None else _frame_bytes(assembled))
+                + (0 if base_keys is None else _frame_bytes(base_keys))
+            ),
         )
         if assembled is None:
             _require_research_known_join_payload_bound(
-                retained_payload_bytes=0,
+                retained_payload_bytes=retained_session_bytes,
                 input_bytes=_frame_bytes(input_frame),
                 base_key_bytes=_frame_bytes(
                     input_frame.loc[:, list(dataset_spec.primary_key)]
                 ),
+                output_bytes=0,
                 resource_policy=resource_policy,
             )
             assembled = input_frame
             base_keys = input_frame.loc[:, list(dataset_spec.primary_key)].copy()
             continue
         assert base_keys is not None
-        retained_payload_bytes = _frame_bytes(assembled)
+        retained_payload_bytes = retained_session_bytes + _frame_bytes(assembled)
         input_bytes = _frame_bytes(input_frame)
         base_key_bytes = _frame_bytes(base_keys)
         _require_research_known_join_payload_bound(
             retained_payload_bytes=retained_payload_bytes,
             input_bytes=input_bytes,
             base_key_bytes=base_key_bytes,
+            output_bytes=_frame_bytes(assembled) + input_bytes,
             resource_policy=resource_policy,
         )
         _validate_input_key_coverage(
@@ -287,11 +314,31 @@ def _join_processed_inputs(
     if assembled is None:
         raise ValueError("empty_research_dataset_inputs")
     del base_keys
-    if _frame_bytes(assembled) > resource_policy.task_memory_budget_bytes:
+    assembled_bytes = _frame_bytes(assembled)
+    transformed_output_bytes = assembled_bytes + (
+        len(assembled)
+        * 8
+        * sum(
+            len(transform.output_columns)
+            for transform in dataset_spec.feature_transforms
+        )
+    )
+    if (
+        retained_session_bytes
+        + assembled_bytes
+        + min(2, len(dataset_spec.feature_transforms)) * transformed_output_bytes
+        > resource_policy.task_memory_budget_bytes
+    ):
         raise ValueError("research_known_join_payloads_exceed_task_memory_budget")
     assembled = _apply_feature_transforms(assembled, dataset_spec)
-    if _frame_bytes(assembled) > resource_policy.task_memory_budget_bytes:
-        raise ValueError("research_known_join_payloads_exceed_task_memory_budget")
+    assembled_bytes = _frame_bytes(assembled)
+    _require_research_known_join_payload_bound(
+        retained_payload_bytes=retained_session_bytes,
+        input_bytes=assembled_bytes,
+        base_key_bytes=0,
+        output_bytes=assembled_bytes,
+        resource_policy=resource_policy,
+    )
     return assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
 
 
@@ -300,9 +347,12 @@ def _require_research_known_join_payload_bound(
     retained_payload_bytes: int,
     input_bytes: int,
     base_key_bytes: int,
+    output_bytes: int,
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
-    known_payload_bytes = retained_payload_bytes + input_bytes + base_key_bytes
+    known_payload_bytes = (
+        retained_payload_bytes + input_bytes + base_key_bytes + output_bytes
+    )
     if known_payload_bytes > resource_policy.task_memory_budget_bytes:
         raise ValueError("research_known_join_payloads_exceed_task_memory_budget")
 
@@ -326,6 +376,7 @@ def _time_keys_from_base_input(
     primary_key: tuple[str, ...],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
 ) -> tuple[pd.Timestamp, ...]:
     session = _research_session_view(
         base_session,
@@ -339,6 +390,9 @@ def _time_keys_from_base_input(
             iter_dataset_chunks(
                 session,
                 target_chunk_bytes=resource_policy.payload_target_bytes,
+                operation_headroom_bytes=(
+                    resource_policy.task_memory_budget_bytes - retained_payload_bytes
+                ),
             )
         ) as chunks:
             for chunk in chunks:
@@ -350,12 +404,7 @@ def _time_keys_from_base_input(
                         continue
                     timestamps.add(timestamp)
     finally:
-        if (
-            session.path_selection is not None
-            and session.path_selection != base_session.path_selection
-        ):
-            base_session.inventory.release_path_selection(session.path_selection)
-        session.close()
+        _close_research_view_preserving_primary(session, base_session)
     return tuple(sorted(timestamps))
 
 
@@ -447,6 +496,7 @@ def _read_processed_input(
     existing_columns: tuple[str, ...],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
+    retained_payload_bytes: int,
 ) -> pd.DataFrame:
     columns = _processed_input_columns(
         dataset_spec,
@@ -464,15 +514,12 @@ def _read_processed_input(
         return materialize_dataset_session(
             view,
             target_chunk_bytes=resource_policy.payload_target_bytes,
-            materialized_budget_bytes=resource_policy.task_memory_budget_bytes,
+            materialized_budget_bytes=(
+                resource_policy.task_memory_budget_bytes - retained_payload_bytes
+            ),
         )
     finally:
-        if (
-            view.path_selection is not None
-            and view.path_selection != session.path_selection
-        ):
-            session.inventory.release_path_selection(view.path_selection)
-        view.close()
+        _close_research_view_preserving_primary(view, session)
 
 
 def _processed_input_columns(
@@ -495,6 +542,30 @@ def _processed_input_columns(
             continue
         columns.append(column)
     return tuple(columns)
+
+
+def _close_research_view_preserving_primary(
+    view: DatasetSession,
+    base_session: DatasetSession,
+) -> None:
+    primary = sys.exception()
+    first_failure: BaseException | None = None
+    if (
+        view.path_selection is not None
+        and view.path_selection != base_session.path_selection
+    ):
+        try:
+            base_session.inventory.release_path_selection(view.path_selection)
+        except BaseException as exc:
+            if primary is None:
+                first_failure = exc
+    try:
+        view.close()
+    except BaseException as exc:
+        if primary is None and first_failure is None:
+            first_failure = exc
+    if first_failure is not None:
+        raise first_failure
 
 
 def _validate_research_input_specs(
@@ -714,6 +785,9 @@ def _open_input_dataset_sessions(
                     columns=columns,
                     time_window=time_window,
                     resource_policy=resource_policy,
+                    retained_payload_bytes=sum(
+                        retained.retained_memory_bytes for retained in sessions.values()
+                    ),
                 ),
             )
         except ValueError as exc:
@@ -772,7 +846,10 @@ def _research_session_view(
             owns_inventory=False,
         )
     except BaseException:
-        session.inventory.release_path_selection(path_selection)
+        try:
+            session.inventory.release_path_selection(path_selection)
+        except BaseException:
+            pass
         raise
 
 

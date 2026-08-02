@@ -71,6 +71,8 @@ def iter_grouped_timestamps(
         keys[timestamp_column] = strict_timestamp_series(
             keys[timestamp_column], error="invalid_grouped_timestamp_values"
         )
+        if keys.duplicated([*group_columns, timestamp_column]).any():
+            raise ValueError("duplicate_panel_keys")
         if keys.empty:
             return
         keys = keys.sort_values([*group_columns, timestamp_column], kind="mergesort")
@@ -78,12 +80,14 @@ def iter_grouped_timestamps(
             yield group[timestamp_column].reset_index(drop=True)
         return
     for key, timestamps in panel_keys.items():
-        _validate_mapping_group_key(key)
+        _strict_group_key_value(key)
         if timestamps is None:
             raise ValueError("invalid_grouped_timestamp_values")
         dates = strict_timestamp_series(
             pd.Series(tuple(timestamps)), error="invalid_grouped_timestamp_values"
         )
+        if dates.duplicated().any():
+            raise ValueError("duplicate_panel_keys")
         dates = dates.sort_values(kind="mergesort").reset_index(drop=True)
         if not dates.empty:
             yield dates
@@ -104,10 +108,6 @@ def _validate_group_key_frame(
     for column in group_columns:
         for value in frame[column].tolist():
             _strict_group_key_value(value)
-
-
-def _validate_mapping_group_key(key: object) -> None:
-    _strict_group_key_value(key)
 
 
 def _strict_group_key_value(value: object) -> None:

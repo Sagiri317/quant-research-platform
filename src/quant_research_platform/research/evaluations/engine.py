@@ -25,7 +25,7 @@ from quant_research_platform.research.evaluations.diagnostics import (
     summarize_period_ic,
 )
 from quant_research_platform.research.signals.materialization import (
-    materialize_signal_frame,
+    normalize_signal_frame,
 )
 
 
@@ -37,21 +37,6 @@ class EvaluationResult:
     ic_summary: pd.DataFrame
     group_spread_summary: pd.DataFrame
     diagnostics: EvaluationDiagnostics
-
-
-def evaluate_signal_frame(
-    frame: pd.DataFrame,
-    spec: EvaluationSpec,
-    *,
-    n_groups: int | None = None,
-) -> EvaluationResult:
-    asset_column = "asset_id" if "asset_id" in frame else "asset"
-    return evaluate_signal_frame_chunks(
-        (frame,),
-        spec,
-        n_groups=spec.n_groups if n_groups is None else n_groups,
-        asset_column=asset_column,
-    )
 
 
 def evaluate_signal_frame_chunks(
@@ -212,7 +197,7 @@ def _iter_evaluation_work_frames(
             :,
             [column for column in work_columns if column in frame.columns],
         ].pipe(
-            materialize_signal_frame,
+            normalize_signal_frame,
             signals=spec.signals,
             timestamp_column="timestamp",
             source_columns_by_kind=source_columns_by_kind,
@@ -226,4 +211,4 @@ def _concat_parts(parts: list[pd.DataFrame]) -> pd.DataFrame:
     return pd.concat(non_empty, ignore_index=True)
 
 
-__all__ = ["EvaluationResult", "evaluate_signal_frame"]
+__all__ = ["EvaluationResult", "evaluate_signal_frame_chunks"]

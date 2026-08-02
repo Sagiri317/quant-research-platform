@@ -6,7 +6,7 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.columns import (
     price_volume_window_column,
 )
 from quant_research_platform.research.labels.forward_returns import (
@@ -48,17 +48,6 @@ def make_report_signal_spec() -> SignalSpec:
         signal_id=REPORT_SIGNAL_COLUMN,
         source_column=REPORT_SIGNAL_COLUMN,
         source_kind="factor",
-    )
-
-
-def make_stage_profile_report_spec() -> OutputSpec:
-    return OutputSpec(
-        output_id="stage_profile",
-        output_definition_id="stage_profile_diagnostic",
-        run_id="run",
-        market_id=MarketId("a_share"),
-        run_type="diagnostics",
-        scope=OutputScope.LOCAL_ONLY,
     )
 
 
@@ -113,8 +102,7 @@ def _evaluation_metrics_frame_from_values(values: dict[str, object]) -> pd.DataF
     )
 
 
-def make_report_evaluation_grouped_label_values_frame(
-) -> pd.DataFrame:
+def make_report_evaluation_grouped_label_values_frame() -> pd.DataFrame:
     return _evaluation_grouped_label_values_frame_from_values(
         _reports_evaluation_values()
     )
@@ -168,8 +156,7 @@ def _evaluation_ic_summary_frame_from_values(values: dict[str, object]) -> pd.Da
     )
 
 
-def make_report_evaluation_group_spread_summary_frame(
-) -> pd.DataFrame:
+def make_report_evaluation_group_spread_summary_frame() -> pd.DataFrame:
     return _evaluation_group_spread_summary_frame_from_values(
         _reports_evaluation_values()
     )

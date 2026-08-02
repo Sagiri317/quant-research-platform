@@ -10,7 +10,9 @@ from quant_research_platform.contracts.evaluations import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.research.evaluations.engine import evaluate_signal_frame
+from quant_research_platform.research.evaluations.engine import (
+    evaluate_signal_frame_chunks,
+)
 from tests.helpers.research_specs import (
     make_signal_spec,
 )
@@ -57,11 +59,10 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         filter_mode="unfiltered",
     )
 
-    eligible = evaluate_signal_frame(frame, eligible_spec, n_groups=2)
-    tradable = evaluate_signal_frame(frame, tradable_spec, n_groups=2)
-    unfiltered = evaluate_signal_frame(frame, unfiltered_spec, n_groups=2)
+    eligible = evaluate_signal_frame_chunks((frame,), eligible_spec, n_groups=2)
+    tradable = evaluate_signal_frame_chunks((frame,), tradable_spec, n_groups=2)
+    unfiltered = evaluate_signal_frame_chunks((frame,), unfiltered_spec, n_groups=2)
 
-    assert not hasattr(eligible, "metadata")
     assert eligible.diagnostics.filter_mode == "eligible"
     assert eligible.diagnostics.filter_columns_used == ("eligible",)
     assert eligible.diagnostics.filter_definition == "eligible == True"
@@ -139,7 +140,7 @@ def test_evaluation_all_nan_signal_label_reports_empty_diagnostics() -> None:
         filter_mode="unfiltered",
     )
 
-    result = evaluate_signal_frame(frame, spec, n_groups=2)
+    result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
 
     assert result.metrics["n_obs"].tolist() == [0]
     assert result.metrics["ic"].isna().all()
@@ -175,9 +176,9 @@ def test_evaluation_group_spread_is_deterministic_for_shuffled_assets() -> None:
         label_columns=("label",),
     )
 
-    baseline = evaluate_signal_frame(frame, spec, n_groups=3)
-    shuffled = evaluate_signal_frame(
-        frame.sample(frac=1.0, random_state=31).reset_index(drop=True),
+    baseline = evaluate_signal_frame_chunks((frame,), spec, n_groups=3)
+    shuffled = evaluate_signal_frame_chunks(
+        (frame.sample(frac=1.0, random_state=31).reset_index(drop=True),),
         spec,
         n_groups=3,
     )
@@ -241,7 +242,7 @@ def test_evaluation_normalizes_lower_rank_signal_before_compute_output() -> None
         label_columns=("label",),
     )
 
-    result = evaluate_signal_frame(frame, spec, n_groups=2)
+    result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
 
     assert result.metrics.loc[0, "signal"] == "risk_signal"
     assert result.metrics.loc[0, "ic"] == pytest.approx(1.0)
@@ -280,7 +281,7 @@ def test_evaluation_computes_multiple_signals_in_one_run() -> None:
         label_columns=("label",),
     )
 
-    result = evaluate_signal_frame(frame, spec, n_groups=2)
+    result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
 
     assert set(result.metrics["signal"]) == {"factor_signal", "reverse_signal"}
     assert set(result.ic_summary["signal"]) == {"factor_signal", "reverse_signal"}
@@ -317,7 +318,7 @@ def test_evaluation_computes_signal_by_label_cross_product() -> None:
         label_columns=("label", "label_alt"),
     )
 
-    result = evaluate_signal_frame(frame, spec, n_groups=2)
+    result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
 
     assert set(result.metrics["signal"]) == {"factor_signal", "reverse_signal"}
     assert set(result.metrics["label"]) == {"label", "label_alt"}
@@ -450,4 +451,4 @@ def test_evaluation_filter_columns_fail_closed(
     match: str,
 ) -> None:
     with pytest.raises(ValueError, match=match):
-        evaluate_signal_frame(frame, spec)
+        evaluate_signal_frame_chunks((frame,), spec)

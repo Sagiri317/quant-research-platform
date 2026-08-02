@@ -126,16 +126,6 @@ def test_replay_environment_preflight_does_not_read_environment_yml(
     assert replay.collect_replay_environment_failures(tmp_path) == ()
 
 
-def test_replay_environment_preflight_uses_metadata_not_heavy_imports() -> None:
-    replay = load_handoff_script_module("replay_evidence")
-    source = Path(replay.__file__).read_text(encoding="utf-8")
-
-    assert "import importlib.metadata" in source
-    assert "import pyarrow" not in source
-    assert "import build" not in source
-    assert "import pytest" not in source
-
-
 def test_build_machine_receipts_preflights_before_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

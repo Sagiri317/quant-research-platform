@@ -6,9 +6,13 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.research.factors.microstructure import (
-    MICROSTRUCTURE_FACTOR_COLUMNS,
+from quant_research_platform.research.factors.microstructure.calculations import (
     calculate_microstructure_factors,
+)
+from quant_research_platform.research.factors.microstructure.columns import (
+    MICROSTRUCTURE_FACTOR_COLUMNS,
+)
+from quant_research_platform.research.factors.microstructure.definitions import (
     microstructure_factor_definitions,
 )
 
@@ -63,8 +67,9 @@ def test_microstructure_factor_calculation_outputs_approved_columns() -> None:
     assert math.isnan(second["flow_imbalance_5m"])
 
 
-def test_microstructure_factor_calculation_handles_missing_and_zero_denominators(
-) -> None:
+def test_microstructure_factor_calculation_handles_missing_and_zero_denominators() -> (
+    None
+):
     frame = pd.DataFrame(
         {
             "market_id": ["crypto", "crypto"],
@@ -147,8 +152,9 @@ def test_microstructure_rolling_contract_fails_closed(kwargs, error) -> None:
         calculate_microstructure_factors(_microstructure_frame(), **kwargs)
 
 
-def test_microstructure_requires_explicit_trade_flow_observed_column_when_named(
-) -> None:
+def test_microstructure_requires_explicit_trade_flow_observed_column_when_named() -> (
+    None
+):
     frame = _microstructure_frame().drop(columns=["trade_flow_observed"])
 
     with pytest.raises(ValueError, match="missing_trade_flow_observed_column"):

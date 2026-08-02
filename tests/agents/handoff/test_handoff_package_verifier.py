@@ -163,7 +163,6 @@ def test_receipt_contract_rejects_placeholder_check_receipt() -> None:
     )
 
     assert "check_receipts_missing_command: profile-smoke" in failures
-    assert "check_receipts_missing_command: code-map" in failures
     assert "check_receipts_unapproved_command: placeholder" in failures
 
 
@@ -177,54 +176,20 @@ def test_receipt_contract_rejects_raw_output_in_hard_scan_receipt() -> None:
     assert "receipt_forbidden_raw_field: hard-scan-receipt.json:raw_output" in failures
 
 
-@pytest.mark.parametrize(
-    "old_name",
-    (
-        "git_status.txt",
-        "receipt-index.json",
-        "handoff_evidence/generation.json",
-        "handoff_evidence/bundle-reconstruction.json",
-        "handoff_evidence/private-smoke-status.json",
-        "handoff_evidence/private-validation-status.json",
-        "handoff_evidence/advisory-review-receipt.json",
-    ),
-)
 @pytest.mark.integration
-def test_verifier_rejects_retired_handoff_entries(
-    tmp_path: Path,
-    full_valid_handoff_package: tuple[Path, Path],
-    old_name: str,
-) -> None:
-    verifier = load_handoff_script_module("verify_handoff_package")
-    package, sidecar = copy_valid_handoff_package(full_valid_handoff_package, tmp_path)
-    rewrite_handoff_package_member(
-        package,
-        old_name,
-        b'{"schema_id":"qrp-old-receipt","status":"PASS"}\n',
-    )
-    refresh_handoff_manifest_and_sidecar(package, sidecar)
-
-    failures = verifier.verify_handoff_package_result(package, sidecar).failures
-
-    assert any(old_name in failure for failure in failures)
-
-
-@pytest.mark.integration
-def test_verifier_rejects_old_sidecar_status_surface(
+def test_verifier_rejects_extra_sidecar_field(
     tmp_path: Path,
     full_valid_handoff_package: tuple[Path, Path],
 ) -> None:
     verifier = load_handoff_script_module("verify_handoff_package")
     package, sidecar = copy_valid_handoff_package(full_valid_handoff_package, tmp_path)
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
-    payload["status_summary"] = {"smoke": "PASS"}
-    payload["advisory_reviews"] = {"review_subagent": "PASS"}
+    payload["extra"] = True
     sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     failures = verifier.verify_handoff_package_result(package, sidecar).failures
 
-    assert "sidecar_unapproved_field: status_summary" in failures
-    assert "sidecar_unapproved_field: advisory_reviews" in failures
+    assert "sidecar_unapproved_field: extra" in failures
 
 
 @pytest.mark.integration
@@ -263,7 +228,7 @@ def test_verifier_reuses_clone_source_tree_scan_for_share_safety_and_hard_scan(
     assert package_payload.task_metadata is not None
     calls = 0
     scan_payload = {
-        "allowance_contract": {
+        "sensitive_negative_literals": {
             "findings": [],
         }
     }

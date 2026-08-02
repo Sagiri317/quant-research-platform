@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import quant_research_platform.research.datasets.assembler as assembler
 import quant_research_platform.runtime.resources as resources_owner
 import quant_research_platform.storage._dataset_reading as dataset_reading
 from quant_research_platform.markets.implementations.a_share.processed import (
@@ -18,7 +19,6 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.markets.implementations.crypto.processed import (
     materializer as crypto_materializer,
 )
-from quant_research_platform.research.datasets import assembler
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,

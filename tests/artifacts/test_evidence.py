@@ -25,33 +25,9 @@ def test_json_evidence_requires_schema_id(tmp_path: Path) -> None:
         write_json_evidence(tmp_path / "evidence.json", {"status": "PASS"})
 
 
-@pytest.mark.parametrize(
-    "payload,reason",
-    [
-        (
+def test_json_evidence_rejects_versioned_schema_id(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="evidence_json_identity_invalid"):
+        write_json_evidence(
+            tmp_path / "evidence.json",
             {"schema_id": "qrp-test/0.1", "status": "PASS"},
-            "evidence_json_identity_invalid",
-        ),
-        (
-            {
-                "schema_id": "qrp-test",
-                "details": {"schema_version": "0.1"},
-            },
-            "qrp_json_retired_identity_key",
-        ),
-        (
-            {
-                "schema_id": "qrp-test",
-                "details": {"contract_version": "0.1"},
-            },
-            "qrp_json_retired_identity_key",
-        ),
-    ],
-)
-def test_json_evidence_rejects_retired_identity_fields(
-    tmp_path: Path,
-    payload: dict[str, object],
-    reason: str,
-) -> None:
-    with pytest.raises(ValueError, match=reason):
-        write_json_evidence(tmp_path / "evidence.json", payload)
+        )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from bisect import bisect_left, bisect_right
 
 import pandas as pd
 
@@ -23,15 +23,29 @@ from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
-    materialization_io,
-    materialization_planning,
-    materialization_validation,
-    materialize_factors,
-    materialize_labels,
+    materialization_io as materialization_io,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_planning as materialization_planning,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_validation as materialization_validation,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialize_factors as materialize_factors,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialize_labels as materialize_labels,
+)
+from quant_research_platform.markets.session_windows import (
+    require_non_negative_session_offset,
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
+)
+from quant_research_platform.storage._dataset_inspection import (
+    dataset_inspection_retained_memory_bytes,
 )
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
@@ -44,11 +58,10 @@ def ensure_processed_dependencies(
     source_id: SourceId,
     time_window: TimeWindow,
     policy: RuntimeResourcePolicy,
-    sessions: tuple[pd.Timestamp, ...],
+    sessions: pd.DatetimeIndex,
     written: dict[str, DatasetInspection],
     processed_catalog: ProcessedDataCatalog,
     dependency_windows: dict[str, TimeWindow],
-    panel_key_coverages: dict[Path, dict[object, tuple[pd.Timestamp, ...]]],
     materialize_one,
 ) -> None:
     dependency_window = _processed_dependency_time_window(
@@ -74,6 +87,10 @@ def ensure_processed_dependencies(
                     required_window,
                     sessions=sessions,
                     resource_policy=policy,
+                    retained_payload_bytes=sum(
+                        dataset_inspection_retained_memory_bytes(inspection)
+                        for inspection in written.values()
+                    ),
                 )
                 continue
             materialize_one(
@@ -86,7 +103,6 @@ def ensure_processed_dependencies(
                 written=written,
                 requested=False,
                 dependency_windows=dependency_windows,
-                panel_key_coverages=panel_key_coverages,
             )
 
 
@@ -96,7 +112,7 @@ def planned_processed_dependency_windows(
     layout: StorageLayout,
     source_id: SourceId,
     time_window: TimeWindow,
-    sessions: tuple[pd.Timestamp, ...],
+    sessions: pd.DatetimeIndex,
 ) -> dict[str, TimeWindow]:
     windows: dict[str, TimeWindow] = {}
     for spec in targets:
@@ -132,13 +148,14 @@ def merge_time_windows(left: TimeWindow, right: TimeWindow) -> TimeWindow:
     require_date_window(right, context="a_share_dependency_window")
     return TimeWindow(min(left.start, right.start), max(left.end, right.end))
 
+
 def _processed_dependency_time_window(
     spec: ProcessedDataSpec,
     *,
     layout: StorageLayout,
     source_id: SourceId,
     time_window: TimeWindow,
-    sessions: tuple[pd.Timestamp, ...],
+    sessions: pd.DatetimeIndex,
 ) -> TimeWindow:
     if spec.kind not in {ProcessedDataKind.FACTOR, ProcessedDataKind.LABEL}:
         return time_window
@@ -190,35 +207,36 @@ def _processed_dependency_session_offsets(
 
 def _session_offset_time_window(
     *,
-    sessions: tuple[pd.Timestamp, ...],
+    sessions: pd.DatetimeIndex,
     time_window: TimeWindow,
     lookback_sessions: int,
     lookahead_sessions: int,
 ) -> TimeWindow:
     require_date_window(time_window, context="a_share_dependency_session_offset")
-    if not sessions or (lookback_sessions <= 0 and lookahead_sessions <= 0):
-        return time_window
-    normalized_sessions = tuple(
-        pd.Timestamp(session).normalize() for session in sessions
+    require_non_negative_session_offset(
+        lookback_sessions, error="invalid_a_share_session_offset"
     )
+    require_non_negative_session_offset(
+        lookahead_sessions, error="invalid_a_share_session_offset"
+    )
+    if len(sessions) == 0 or (lookback_sessions <= 0 and lookahead_sessions <= 0):
+        return time_window
     start = pd.Timestamp(time_window.start).normalize()
     end = pd.Timestamp(time_window.end).normalize()
-    core_positions = [
-        position
-        for position, session in enumerate(normalized_sessions)
-        if start <= session <= end
-    ]
-    if not core_positions:
+    first = bisect_left(sessions, start)
+    stop = bisect_right(sessions, end)
+    if first == stop:
         return time_window
-    start_position = max(0, core_positions[0] - max(0, int(lookback_sessions)))
+    start_position = max(0, first - lookback_sessions)
     end_position = min(
-        len(normalized_sessions) - 1,
-        core_positions[-1] + max(0, int(lookahead_sessions)),
+        len(sessions) - 1,
+        stop - 1 + lookahead_sessions,
     )
     return TimeWindow(
-        normalized_sessions[start_position].date(),
-        normalized_sessions[end_position].date(),
+        sessions[start_position].date(),
+        sessions[end_position].date(),
     )
+
 
 __all__ = [
     "ensure_processed_dependencies",

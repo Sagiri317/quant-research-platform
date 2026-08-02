@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.research.factors.price_volume import (
+from quant_research_platform.research.factors.price_volume.columns import (
     price_volume_window_column,
 )
 from tests.helpers.panel_keys import DEFAULT_PANEL_KEY_COLUMNS
@@ -215,11 +215,15 @@ def reference_price_volume_factors(
             return_mean = returns.groupby(group_keys, sort=False).transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).mean()
             )
-            abs_return_mean = returns.abs().groupby(group_keys, sort=False).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            abs_return_mean = (
+                returns.abs()
+                .groupby(group_keys, sort=False)
+                .transform(
+                    lambda series, w=window: series.rolling(w, min_periods=w).mean()
+                )
             )
-            result[column] = (
-                return_mean.abs() / referencevalid_denominator(abs_return_mean)
+            result[column] = return_mean.abs() / referencevalid_denominator(
+                abs_return_mean
             )
         elif f"signed_amount_flow_{window}d" == column:
             signed_amount = np.sign(returns) * amount
@@ -249,9 +253,7 @@ def reference_price_volume_factors(
     amplitude = (
         pd.to_numeric(result["high"], errors="coerce")
         - pd.to_numeric(result["low"], errors="coerce")
-    ) / referencevalid_denominator(
-        pd.to_numeric(result["prev_close"], errors="coerce")
-    )
+    ) / referencevalid_denominator(pd.to_numeric(result["prev_close"], errors="coerce"))
     amplitude = referencefinite_or_nan(amplitude)
     intraday_range = (
         pd.to_numeric(result["high"], errors="coerce")
@@ -292,20 +294,6 @@ def reference_price_volume_factors(
             np.nan,
         )
     return result.loc[:, [*KEY_COLUMNS, *requested]]
-
-
-def pandas_rolling_by_asset(
-    values: pd.Series,
-    group_keys: pd.Series,
-    window: int,
-    method: str,
-) -> pd.Series:
-    return values.groupby(group_keys, sort=False).transform(
-        lambda series, w=window, name=method: getattr(
-            series.rolling(w, min_periods=w),
-            name,
-        )()
-    )
 
 
 def pandas_window_moment_by_asset(

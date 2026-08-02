@@ -14,7 +14,7 @@ class RankEnsemblePredictor:
     coefficient_count: int = 1
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
-        return _rank_ensemble_scores(frame, self.columns)
+        return _rank_frame_columns(frame, self.columns).mean(axis=1)
 
 
 @dataclass(frozen=True)
@@ -61,11 +61,6 @@ class ICWeightedRankEnsemble:
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         ranks = _rank_frame_columns(frame, self.columns)
         return ranks @ self.weights
-
-
-def _rank_ensemble_scores(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:
-    ranks = _rank_frame_columns(frame, columns)
-    return ranks.mean(axis=1)
 
 
 def _rank_frame_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:

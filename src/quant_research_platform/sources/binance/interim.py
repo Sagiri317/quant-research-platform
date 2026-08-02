@@ -383,7 +383,10 @@ def _normalize_depth(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
     normalized: list[dict[str, Any]] = []
     for envelope in rows:
         payload = envelope["payload"]
-        timestamp = _timestamp_iso(envelope["captured_at"])
+        timestamp = strict_iso_timestamp(
+            envelope["captured_at"],
+            error="invalid_binance_raw_envelope_captured_at",
+        ).tz_localize(None)
         symbol = strict_symbol(envelope["symbol"])
         for side, raw_levels in (
             ("ask", payload.get("asks", ())),
@@ -483,13 +486,6 @@ def _timestamp_ms(value: object) -> pd.Timestamp:
     return strict_millisecond_timestamp(
         value,
         error="invalid_binance_millisecond_timestamp",
-    ).tz_localize(None)
-
-
-def _timestamp_iso(value: object) -> pd.Timestamp:
-    return strict_iso_timestamp(
-        value,
-        error="invalid_binance_raw_envelope_captured_at",
     ).tz_localize(None)
 
 

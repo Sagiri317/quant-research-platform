@@ -32,10 +32,6 @@ def strict_source_asset_id_series(
     return strict_string_series(values, error=error)
 
 
-def strict_index_code_series(values: pd.Series, *, error: str) -> pd.Series:
-    return strict_string_series(values, error=error)
-
-
 def strict_trading_bool_series(values: pd.Series, *, error: str) -> pd.Series:
     return strict_bool_series(values, error=error)
 
@@ -67,8 +63,6 @@ def _strict_stock_code_value(value: object, *, error: str) -> str:
 
 
 def _format_stock_code(value: int, *, error: str) -> str:
-    if value < 0:
-        raise ValueError(error)
     text = str(value)
     if len(text) > 6:
         raise ValueError(error)
@@ -76,7 +70,6 @@ def _format_stock_code(value: int, *, error: str) -> str:
 
 
 __all__ = [
-    "strict_index_code_series",
     "strict_market_type_series",
     "strict_numeric_value_series",
     "strict_source_asset_id_series",

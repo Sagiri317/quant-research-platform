@@ -12,7 +12,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
 )
-from quant_research_platform.research.factors.microstructure import (
+from quant_research_platform.research.factors.microstructure.columns import (
     MICROSTRUCTURE_FACTOR_COLUMNS,
 )
 
@@ -26,7 +26,11 @@ def build_signal_specs() -> tuple[SignalSpec, ...]:
             signal_id=column,
             source_kind="factor",
             source_column=column,
-            direction=_signal_direction(column),
+            direction=(
+                "lower_is_better"
+                if column in {"spread", "relative_spread"}
+                else "higher_is_better"
+            ),
         )
         for column in DEFAULT_SIGNAL_COLUMNS
     )
@@ -55,12 +59,6 @@ def build_evaluation_catalog(
     for spec in build_evaluation_specs(signals=signals):
         catalog.register(spec)
     return catalog
-
-
-def _signal_direction(column: str) -> str:
-    if column in {"spread", "relative_spread"}:
-        return "lower_is_better"
-    return "higher_is_better"
 
 
 __all__ = [
