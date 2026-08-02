@@ -162,6 +162,128 @@ def test_status_aggregation_rejects_pass_with_not_run_child() -> None:
     assert aggregate_check_status(["PASS", "NOT_RUN"]) == "FAIL"
 
 
+def test_physical_writes_require_storage_or_artifacts_owner() -> None:
+    violations = _physical_writer_violations(
+        {
+            SOURCE_ROOT / "contracts" / "bad.py": "\n".join(
+                (
+                    "import builtins",
+                    "from pathlib import Path",
+                    "from pyarrow import parquet as pq",
+                    "from zipfile import ZipFile",
+                    "import shutil",
+                    "builtins.open('output', 'w')",
+                    "open('output', 'a')",
+                    "Path('output').open('x')",
+                    "Path('output').write_text('x')",
+                    "Path('output').write_bytes(b'x')",
+                    "pq.write_table(None, 'output')",
+                    "frame.to_parquet('output')",
+                    "pq.ParquetWriter('output')",
+                    "ZipFile('output', 'w')",
+                    "shutil.copyfile('input', 'output')",
+                    "open('input', 'rb')",
+                    "Path('input').open('r')",
+                )
+            ),
+            SOURCE_ROOT / "storage" / "allowed.py": "open('output', 'w')\n",
+        }
+    )
+
+    assert [target for _path, _line, target in violations] == [
+        "open",
+        "open",
+        "open",
+        "write_text",
+        "write_bytes",
+        "write_table",
+        "to_parquet",
+        "ParquetWriter",
+        "ZipFile",
+        "copyfile",
+    ]
+
+
+def test_live_source_physical_writes_stay_in_writer_owners() -> None:
+    sources = {
+        path: path.read_text(encoding="utf-8")
+        for path in SOURCE_ROOT.rglob("*.py")
+    }
+
+    assert _physical_writer_violations(sources) == []
+
+
+def _physical_writer_violations(
+    sources: dict[Path, str],
+) -> list[tuple[str, int, str]]:
+    owner_roots = (SOURCE_ROOT / "storage", SOURCE_ROOT / "artifacts")
+    always_writes = {
+        "ParquetWriter",
+        "copyfile",
+        "write_bytes",
+        "write_table",
+        "write_text",
+    }
+    violations: list[tuple[str, int, str]] = []
+    for path, source in sorted(sources.items()):
+        if any(path == root or path.is_relative_to(root) for root in owner_roots):
+            continue
+        tree = ast.parse(source, filename=path.as_posix())
+        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+            target = (
+                call.func.id
+                if isinstance(call.func, ast.Name)
+                else call.func.attr
+                if isinstance(call.func, ast.Attribute)
+                else None
+            )
+            writes = target in always_writes
+            if target == "to_parquet":
+                writes = bool(call.args) or any(
+                    keyword.arg == "path"
+                    and not (
+                        isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value is None
+                    )
+                    for keyword in call.keywords
+                )
+            elif target == "open":
+                position = (
+                    1
+                    if isinstance(call.func, ast.Name)
+                    or (
+                        isinstance(call.func, ast.Attribute)
+                        and isinstance(call.func.value, ast.Name)
+                        and call.func.value.id == "builtins"
+                    )
+                    else 0
+                )
+                writes = _static_write_mode(call, position)
+            elif target == "ZipFile":
+                writes = _static_write_mode(call, 1)
+            if writes:
+                violations.append((path.as_posix(), call.lineno, str(target)))
+    return violations
+
+
+def _static_write_mode(call: ast.Call, position: int) -> bool:
+    mode: ast.AST | None = call.args[position] if len(call.args) > position else None
+    if mode is None:
+        mode = next(
+            (
+                keyword.value
+                for keyword in call.keywords
+                if keyword.arg == "mode"
+            ),
+            None,
+        )
+    return (
+        isinstance(mode, ast.Constant)
+        and isinstance(mode.value, str)
+        and any(flag in mode.value for flag in "wax+")
+    )
+
+
 def _active_module_names() -> tuple[str, ...]:
     names: list[str] = []
     for path in sorted(SOURCE_ROOT.rglob("*.py")):

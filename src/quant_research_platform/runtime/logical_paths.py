@@ -9,13 +9,11 @@ DEFAULT_GENERATED_MARKERS: tuple[str, ...] = (
     "data",
     "outputs",
     "logs",
-    "handoff_evidence",
 )
 RUN_RESULT_LOGICAL_PATH_MARKERS: tuple[str, ...] = (
     "data",
     "outputs",
     "logs",
-    "handoff_evidence",
 )
 RUN_RESULT_DATASET_LAYERS = frozenset({"interim", "processed", "research"})
 

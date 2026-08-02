@@ -501,7 +501,6 @@ def test_local_verification_workflow_exposes_current_run_root_config() -> None:
         Path("data") / "team" / "qrp" / ".run" / "s1",
         Path("outputs") / "team" / "qrp" / ".run" / "s2",
         Path("logs") / "team" / "qrp" / ".run" / "s3",
-        Path("handoff_evidence") / "team" / "qrp" / ".run" / "s4",
         Path(".run") / "pytest" / "tmp" / "all" / "s5",
     ),
 )

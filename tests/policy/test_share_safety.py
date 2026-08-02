@@ -7,7 +7,6 @@ from quant_research_platform.policy.share_safety import (
     local_run_root_reason,
     sanitize_shared_text,
     unsafe_for_share_reason,
-    zip_member_unsafe_reason,
 )
 
 
@@ -18,19 +17,8 @@ def test_share_safety_rejects_local_path_and_sanitizes_it() -> None:
     assert "C:/Users" not in sanitize_shared_text(text)
 
 
-def test_share_safety_rejects_forbidden_zip_member() -> None:
-    assert zip_member_unsafe_reason("data/raw/source/file.parquet") == "local_only_path"
-    assert zip_member_unsafe_reason("outputs/prediction_daily/result.parquet") == (
-        "local_only_path"
-    )
-
-
 def test_share_safety_does_not_treat_output_identifier_as_path() -> None:
     assert unsafe_identifier_reason("prediction_outputs") is None
-
-
-def test_share_safety_allows_review_safe_handoff_evidence_name() -> None:
-    assert zip_member_unsafe_reason("handoff_evidence/validation-summary.json") is None
 
 
 def test_local_run_root_accepts_explicit_locations(tmp_path: Path) -> None:

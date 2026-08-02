@@ -68,6 +68,5 @@ def test_generated_markers_only_include_current_run_tree() -> None:
         "data",
         "outputs",
         "logs",
-        "handoff_evidence",
     )
     assert RUN_RESULT_LOGICAL_PATH_MARKERS == DEFAULT_GENERATED_MARKERS

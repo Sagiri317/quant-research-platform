@@ -27,18 +27,6 @@ LOCAL_ONLY_DATA_LAYERS: tuple[str, ...] = (
     "research",
     "reference_docs",
 )
-PACKAGE_FORBIDDEN_SUFFIXES = (
-    ".arrow",
-    ".csv",
-    ".db",
-    ".feather",
-    ".orc",
-    ".parquet",
-    ".pickle",
-    ".pkl",
-    ".sqlite",
-    ".sqlite3",
-)
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
 _UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")
 _POSIX_LOCAL_PATH_RE = re.compile(
@@ -363,35 +351,6 @@ def contains_source_local_key(value: object) -> bool:
     return isinstance(value, str) and value in SOURCE_LOCAL_KEYS
 
 
-def zip_member_unsafe_reason(name: object) -> str | None:
-    """Return why a zip member is unsafe for handoff sharing, if applicable."""
-
-    value = str(name).replace("\\", "/").lstrip("/")
-    if not value or ".." in PurePosixPath(value).parts:
-        return "invalid_path"
-    if _REPO_LOCAL_ONLY_PATH_RE.search(value):
-        return "local_only_path"
-    shared_reason = unsafe_for_share_reason(value)
-    if shared_reason in {
-        "local_only_path",
-        "local_path",
-        "provider_source_marker",
-        "credential",
-        "stock_code_sample",
-        "row_sample",
-        "raw_export_filename",
-        "source_local_key",
-        "runtime_payload",
-        "local_run_path",
-        "traceback",
-    }:
-        return shared_reason
-    suffix = PurePosixPath(value.lower()).suffix
-    if suffix in PACKAGE_FORBIDDEN_SUFFIXES:
-        return "blocked_extension"
-    return None
-
-
 def sanitize_shared_text(text: object) -> str:
     """Return share-safe text for API, CLI, manifest, and report summaries."""
 
@@ -632,7 +591,6 @@ __all__ = [
     "LOCAL_ONLY_DATA_LAYERS",
     "LOCAL_ONLY_ROOTS",
     "MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS",
-    "PACKAGE_FORBIDDEN_SUFFIXES",
     "contains_source_local_key",
     "evidence_json_value_unsafe_reason",
     "evidence_text_unsafe_reason",
@@ -644,5 +602,4 @@ __all__ = [
     "sanitize_shared_object",
     "sanitize_shared_text",
     "unsafe_for_share_reason",
-    "zip_member_unsafe_reason",
 ]
