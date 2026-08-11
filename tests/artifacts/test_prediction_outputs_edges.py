@@ -300,6 +300,9 @@ def test_prediction_output_nested_schema_identity_never_publishes_bundle(
     )
     frame = make_artifact_prediction_output_frame()
     frame.attrs["model_metadata"]["hyperparameters"]["schema_id"] = "forbidden"
+    frame.attrs["model_metadata"]["resolved_hyperparameters"]["schema_id"] = (
+        "forbidden"
+    )
     layout = StorageLayout(project_root=tmp_path)
 
     with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):

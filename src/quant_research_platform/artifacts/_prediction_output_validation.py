@@ -20,6 +20,9 @@ from quant_research_platform.contracts.predictions import (
     PredictionSpec,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.research.models.algorithm_facts import (
+    model_default_hyperparameters,
+)
 
 _MODEL_METADATA_BASE_KEYS = frozenset(
     {
@@ -42,6 +45,7 @@ _MODEL_METADATA_BASE_KEYS = frozenset(
         "input_count",
         "label_column",
         "hyperparameters",
+        "resolved_hyperparameters",
         "random_seed",
         "max_train_rows",
         "purge_gap_steps",
@@ -186,19 +190,35 @@ def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obje
         )
     if metadata["random_seed"] is not None and type(metadata["random_seed"]) is not int:
         raise ValueError("invalid_model_metadata")
-    if type(metadata["hyperparameters"]) is not dict:
+    if type(metadata["hyperparameters"]) is not dict or type(
+        metadata["resolved_hyperparameters"]
+    ) is not dict:
         raise ValueError("invalid_model_metadata")
     try:
-        render_qrp_json_object({"hyperparameters": metadata["hyperparameters"]})
+        render_qrp_json_object(
+            {
+                "hyperparameters": metadata["hyperparameters"],
+                "resolved_hyperparameters": metadata["resolved_hyperparameters"],
+            }
+        )
     except ValueError as exc:
         raise ValueError("invalid_model_metadata") from exc
+    model_algorithm = require_metadata_string(
+        metadata, "model_algorithm", "invalid_model_metadata"
+    )
+    resolved_hyperparameters = model_default_hyperparameters(model_algorithm)
+    resolved_hyperparameters.update(metadata["hyperparameters"])
+    if metadata["resolved_hyperparameters"] != resolved_hyperparameters:
+        raise ValueError("invalid_model_metadata")
     dependency_status = metadata["dependency_status"]
     if (
         type(dependency_status) is not dict
-        or set(dependency_status) != {"status", "package"}
+        or set(dependency_status) != {"status", "package", "version"}
         or dependency_status["status"] != "available"
         or type(dependency_status["package"]) is not str
         or not dependency_status["package"]
+        or type(dependency_status["version"]) is not str
+        or not dependency_status["version"]
     ):
         raise ValueError("invalid_model_metadata")
     if "feature_importance" in metadata:
@@ -227,7 +247,6 @@ def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obje
         or coefficient_count < 1
     ):
         raise ValueError("invalid_model_metadata")
-    require_metadata_string(metadata, "model_algorithm", "invalid_model_metadata")
     require_metadata_string(metadata, "sample_filter_mode", "invalid_model_metadata")
     require_metadata_string(metadata, "filter_definition", "invalid_model_metadata")
     require_metadata_string(metadata, "label_column", "invalid_model_metadata")

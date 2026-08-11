@@ -258,6 +258,11 @@ def stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
         "write_portfolio_outputs",
         write_stub,
     )
+    monkeypatch.setattr(
+        module,
+        "_read_prediction_output_bundle",
+        lambda *_args, **_kwargs: ({"metadata": {}}, pd.DataFrame()),
+    )
 
 
 def _stub_output_metadata(

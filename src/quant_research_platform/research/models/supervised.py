@@ -12,6 +12,12 @@ def build_estimator_from_model_spec(spec: ModelSpec) -> object:
     dependencies.require_model_dependency(facts.algorithm)
     if facts.estimator_factory is None:
         raise ValueError("unsupported_model_algorithm")
-    params = dict(facts.default_hyperparameters)
+    return facts.estimator_factory(spec, resolved_model_hyperparameters(spec))
+
+
+def resolved_model_hyperparameters(spec: ModelSpec) -> dict[str, object]:
+    params = dict(
+        algorithm_facts.algorithm_facts(spec.model_algorithm).default_hyperparameters
+    )
     params.update(spec.hyperparameters)
-    return facts.estimator_factory(spec, params)
+    return params

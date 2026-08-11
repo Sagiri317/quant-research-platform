@@ -111,6 +111,11 @@ def test_local_verification_publishes_completed_run_only_after_summary(
         prediction_spec.prediction_id for prediction_spec in smoke_prediction_specs()
     ]
     expected_prediction_count = len(expected_prediction_ids)
+    representative_prediction_id = next(
+        prediction_id
+        for prediction_id in expected_prediction_ids
+        if prediction_id.startswith("linear_regression_")
+    )
     run_root = repo_run_root(tmp_path, monkeypatch, ".run", "s1")
     config = make_local_verification_config(
         run_root=run_root,
@@ -136,11 +141,15 @@ def test_local_verification_publishes_completed_run_only_after_summary(
         "evaluation",
         *(["prediction"] * expected_prediction_count),
         "portfolio",
+        "portfolio",
     ]
-    assert run_years == [(2014,)] * (expected_prediction_count + 2)
+    assert run_years == [(2014,)] * (expected_prediction_count + 3)
     assert evaluation_run_ids == ["signal_forward_return_20d"]
     assert prediction_ids == expected_prediction_ids
-    assert portfolio_ids == ["signal_forward_return_20d_portfolio"]
+    assert portfolio_ids == [
+        f"{representative_prediction_id}_portfolio",
+        "signal_forward_return_20d_portfolio",
+    ]
     assert result.status == "NOT_RUN"
     assert publish_order == ["summary", "completed_run"]
     assert result.run_id == "s1"
@@ -180,7 +189,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     assert actual_layers == expected_layers
     assert "evidence" not in actual_layers
     assert represented_manifests == expected_manifests
-    assert len(run_payload["outputs"]) == expected_prediction_count + 2
+    assert len(run_payload["outputs"]) == expected_prediction_count + 3
     assert all(
         output["schema_id"] == "qrp-output-manifest"
         for output in run_payload["outputs"]

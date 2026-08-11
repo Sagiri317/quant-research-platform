@@ -102,6 +102,39 @@ def test_training_controls_leave_future_rows_out_of_fit_metadata() -> None:
     assert result.metadata["test_end"] is None
 
 
+def test_model_metadata_records_resolved_parameters_and_backend_version() -> None:
+    frame = _model_frame()
+    spec = ModelSpec(
+        model_id="ridge_regression_demo",
+        model_algorithm="ridge_regression",
+        input_factor_columns=("factor",),
+        input_feature_columns=("feature",),
+        label_column="label",
+        hyperparameters={"alpha": 7.0},
+        random_seed=11,
+        max_train_rows=len(frame),
+        purge_gap_steps=1,
+    )
+
+    result = model_fitting.fit_model_result_from_frames(
+        (frame,),
+        spec,
+        estimator=build_estimator_from_model_spec(spec),
+    )
+
+    assert result.metadata["hyperparameters"] == {"alpha": 7.0}
+    assert result.metadata["resolved_hyperparameters"] == {"alpha": 7.0}
+    assert result.metadata["random_seed"] == 11
+    assert result.metadata["purge_gap_steps"] == 1
+    assert result.metadata["train_start"] == "2024-01-02"
+    assert result.metadata["train_end"] == "2024-01-03"
+    assert result.metadata["dependency_status"] == {
+        "status": "available",
+        "package": "sklearn",
+        "version": pytest.importorskip("sklearn").__version__,
+    }
+
+
 def test_prediction_output_helpers_do_not_export_bundle_semantics() -> None:
     frame = _model_frame()
     spec = PredictionSpec(

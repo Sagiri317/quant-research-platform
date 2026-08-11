@@ -98,5 +98,5 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
 
     assert result.status == "NOT_RUN"
     assert capture_calls == 1
-    assert snapshots == [policy] * (5 + expected_prediction_count)
+    assert snapshots == [policy] * (6 + expected_prediction_count)
     assert run_config["runtime_resource_policy"] == policy.to_payload()

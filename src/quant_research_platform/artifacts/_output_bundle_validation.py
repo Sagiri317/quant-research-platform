@@ -8,6 +8,8 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+import pandas as pd
+
 from quant_research_platform.artifacts._output_manifest import (
     validate_output_manifest_business_envelope,
 )
@@ -110,6 +112,35 @@ def validate_output_bundle(
             if primary is None:
                 raise
     return manifest, admitted_identities
+
+
+def _read_prediction_output_bundle(
+    root: Path,
+    *,
+    expected_output_id: str,
+) -> tuple[dict[str, object], pd.DataFrame]:
+    frames: list[pd.DataFrame] = []
+
+    def read_prediction(
+        manifest: dict[str, object],
+        members: tuple[tuple[Path, DatasetFileIdentity], ...],
+    ) -> None:
+        if manifest["output_definition_id"] != "prediction_outputs":
+            raise ValueError("prediction_output_definition_mismatch")
+        prediction_path = next(
+            path for path, _identity in members if path.name == "prediction.parquet"
+        )
+        try:
+            frames.append(pd.read_parquet(prediction_path))
+        except Exception as exc:
+            raise ValueError("prediction_output_unreadable") from exc
+
+    manifest, _members = validate_output_bundle(
+        root,
+        expected_output_id=expected_output_id,
+        observer=read_prediction,
+    )
+    return manifest, frames[0]
 
 
 def _require_exact_member_set(root: Path, expected_names: tuple[str, ...]) -> None:

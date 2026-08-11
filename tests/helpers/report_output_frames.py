@@ -227,10 +227,15 @@ def _reports_model_metadata() -> dict[str, object]:
         "input_count": 1,
         "label_column": REPORT_LABEL_COLUMN,
         "hyperparameters": {},
+        "resolved_hyperparameters": {},
         "random_seed": None,
         "max_train_rows": None,
         "purge_gap_steps": 0,
-        "dependency_status": {"status": "available", "package": "sklearn"},
+        "dependency_status": {
+            "status": "available",
+            "package": "sklearn",
+            "version": "test",
+        },
         "coefficient_count": 2,
         "feature_importance": {REPORT_SIGNAL_COLUMN: 1.0},
     }
@@ -279,10 +284,15 @@ def _artifacts_model_metadata() -> dict[str, object]:
         "input_count": 2,
         "label_column": "label",
         "hyperparameters": {},
+        "resolved_hyperparameters": {},
         "random_seed": None,
         "max_train_rows": None,
         "purge_gap_steps": 0,
-        "dependency_status": {"status": "available", "package": "sklearn"},
+        "dependency_status": {
+            "status": "available",
+            "package": "sklearn",
+            "version": "test",
+        },
         "coefficient_count": 3,
         "feature_importance": {"factor": 0.1, "feature": 0.2},
     }

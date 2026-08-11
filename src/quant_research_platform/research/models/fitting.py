@@ -10,6 +10,7 @@ import pandas as pd
 
 import quant_research_platform.research.models.dependencies as dependencies
 import quant_research_platform.research.models.feature_importance as feature_importance
+import quant_research_platform.research.models.supervised as supervised
 import quant_research_platform.research.models.validation_split as validation_split
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import ModelSpec
@@ -121,6 +122,7 @@ def model_metadata(
         "input_count": len(spec.input_columns),
         "label_column": spec.label_column,
         "hyperparameters": dict(spec.hyperparameters),
+        "resolved_hyperparameters": supervised.resolved_model_hyperparameters(spec),
         "random_seed": spec.random_seed,
         "max_train_rows": spec.max_train_rows,
         "purge_gap_steps": spec.purge_gap_steps,

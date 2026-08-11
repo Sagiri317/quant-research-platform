@@ -137,7 +137,8 @@ class CostConfig:
         _validate_nonnegative(self.slippage_bps, "slippage_bps")
         if self.spread_bps is not None:
             _validate_nonnegative(self.spread_bps, "spread_bps")
-        _validate_optional_column_name(self.impact_model, "impact_model")
+        if self.impact_model is not None:
+            raise ValueError("unsupported_portfolio_impact_model")
 
 
 @dataclass(frozen=True)

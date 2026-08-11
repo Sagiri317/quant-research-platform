@@ -127,6 +127,41 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
     ]
 
 
+def test_a_share_scenario_has_distinct_default_and_smoke_model_parameters() -> None:
+    default = research_scenarios.build_model_specs(
+        model_algorithm_ids=("random_forest_regressor",),
+    )[0]
+    smoke = research_scenarios.build_model_specs(
+        model_algorithm_ids=("random_forest_regressor",),
+        hyperparameter_preset="smoke",
+    )[0]
+
+    assert dict(default.hyperparameters) == {"n_estimators": 20, "n_jobs": 1}
+    assert dict(smoke.hyperparameters) == {
+        "n_estimators": 5,
+        "max_depth": 3,
+        "n_jobs": 1,
+    }
+
+
+def test_a_share_scenario_adds_prediction_portfolio_and_keeps_factor() -> None:
+    prediction_id = "linear_regression_mom_20d_prediction_2015"
+
+    portfolios = research_scenarios.build_portfolio_specs(
+        prediction_id=prediction_id,
+    )
+
+    assert [spec.portfolio_id for spec in portfolios] == [
+        "signal_forward_return_20d_portfolio",
+        f"{prediction_id}_portfolio",
+    ]
+    assert portfolios[0].signals == research_scenarios.build_signal_specs()
+    assert [
+        (signal.signal_id, signal.source_column, signal.source_kind)
+        for signal in portfolios[1].signals
+    ] == [(prediction_id, "prediction_score", "prediction")]
+
+
 def test_catalog_profile_source_interim_catalog_requires_single_source(
     monkeypatch,
 ) -> None:

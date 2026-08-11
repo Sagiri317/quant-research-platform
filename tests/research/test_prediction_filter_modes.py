@@ -231,10 +231,15 @@ def _prediction_model_metadata() -> dict[str, object]:
         "input_count": 1,
         "label_column": "label",
         "hyperparameters": {},
+        "resolved_hyperparameters": {},
         "random_seed": None,
         "max_train_rows": None,
         "purge_gap_steps": 0,
-        "dependency_status": {"status": "available", "package": "sklearn"},
+        "dependency_status": {
+            "status": "available",
+            "package": "sklearn",
+            "version": "test",
+        },
         "coefficient_count": 2,
         "feature_importance": {"factor": 0.1},
     }

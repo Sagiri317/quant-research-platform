@@ -451,9 +451,11 @@ def test_local_verification_workflow_resolves_independent_windows(
         "evaluation",
         *(["prediction"] * expected_prediction_count),
         "portfolio",
+        "portfolio",
     ]
-    assert len(disk_checks) == 4 + expected_prediction_count
+    assert len(disk_checks) == 5 + expected_prediction_count
     assert captured_evaluation_windows == [
+        ("2015-01-01", "2018-12-31"),
         ("2015-01-01", "2018-12-31"),
         ("2015-01-01", "2018-12-31"),
     ]

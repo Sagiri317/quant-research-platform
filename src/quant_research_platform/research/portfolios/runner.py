@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
@@ -15,11 +16,13 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
     POSITION_COLUMNS,
     RETURNS_COLUMNS,
 )
+from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.portfolios.engine import (
     compute_cumulative_returns,
     compute_performance_summary,
@@ -43,29 +46,68 @@ def build_portfolio_result_from_research_dataset(
     portfolio_catalog: PortfolioCatalog,
     portfolio_id: str,
     time_window: TimeWindow | None = None,
+    prediction_frame: pd.DataFrame | None = None,
+    prediction_metadata: Mapping[str, object] | None = None,
 ) -> PortfolioResult:
     spec = portfolio_catalog.get(portfolio_id)
     dataset_spec = dataset_catalog.get(spec.research_dataset_id)
-    read_columns = _portfolio_read_columns(spec)
+    prediction_signals = tuple(
+        signal for signal in spec.signals if signal.source_kind == "prediction"
+    )
+    prediction_input_columns: tuple[str, ...] = ()
+    prediction_filter_columns: tuple[str, ...] = ()
+    prediction_input = None
+    if prediction_signals:
+        if len(prediction_signals) != 1:
+            raise ValueError("multiple_prediction_signals_unsupported")
+        if prediction_frame is None or prediction_metadata is None:
+            raise ValueError("persisted_prediction_input_required")
+        prediction_input = _validated_prediction_input(
+            prediction_frame,
+            prediction_metadata,
+            signal=prediction_signals[0],
+            research_dataset_id=dataset_spec.data_id,
+            time_window=time_window,
+        )
+        prediction_input_columns = prediction_input[2]
+        prediction_filter_columns = required_filter_columns(prediction_input[3])
+    elif prediction_frame is not None or prediction_metadata is not None:
+        raise ValueError("unexpected_persisted_prediction_input")
+    read_columns = _portfolio_read_columns(
+        spec,
+        prediction_input_columns=prediction_input_columns,
+        prediction_filter_columns=prediction_filter_columns,
+    )
     source_columns_by_kind = {
         "factor": tuple(dataset_spec.factor_columns),
         "feature": tuple(dataset_spec.feature_columns),
-        "prediction": tuple(dataset_spec.context_columns),
+        "prediction": tuple(signal.source_column for signal in prediction_signals),
     }
     summary_state: dict[str, object] = {
         "return_records": [],
         "exposure_periods": {},
         "concentration_periods": {},
     }
+    input_chunks = _portfolio_input_chunks(
+        layout=layout,
+        market_id=dataset_spec.market_id,
+        dataset_id=dataset_spec.data_id,
+        time_window=time_window,
+        columns=read_columns,
+    )
+    if prediction_input is not None:
+        input_chunks = _iter_prediction_joined_chunks(
+            input_chunks,
+            prediction_frame=prediction_input[0],
+            primary_key=prediction_input[1],
+            input_columns=prediction_input[2],
+            sample_filter_mode=prediction_input[3],
+            test_start=prediction_input[4],
+            test_end=prediction_input[5],
+        )
     output_chunks = _observe_portfolio_summary_chunks(
         _iter_portfolio_output_chunks(
-            _portfolio_input_chunks(
-                layout=layout,
-                market_id=dataset_spec.market_id,
-                dataset_id=dataset_spec.data_id,
-                time_window=time_window,
-                columns=read_columns,
-            ),
+            input_chunks,
             spec,
             source_columns_by_kind=source_columns_by_kind,
         ),
@@ -78,7 +120,12 @@ def build_portfolio_result_from_research_dataset(
     )
 
 
-def _portfolio_read_columns(spec: PortfolioSpec) -> tuple[str, ...]:
+def _portfolio_read_columns(
+    spec: PortfolioSpec,
+    *,
+    prediction_input_columns: tuple[str, ...] = (),
+    prediction_filter_columns: tuple[str, ...] = (),
+) -> tuple[str, ...]:
     optional_columns = (
         spec.weight_config.risk_column,
         spec.tradability_config.eligibility_column,
@@ -95,12 +142,150 @@ def _portfolio_read_columns(spec: PortfolioSpec) -> tuple[str, ...]:
                 "market_id",
                 "asset_id",
                 "timestamp",
-                *(signal.source_column for signal in spec.signals),
+                *(
+                    signal.source_column
+                    for signal in spec.signals
+                    if signal.source_kind != "prediction"
+                ),
                 spec.return_source_column,
+                *prediction_input_columns,
+                *prediction_filter_columns,
                 *(column for column in optional_columns if column is not None),
             )
         )
     )
+
+
+def _validated_prediction_input(
+    frame: pd.DataFrame,
+    metadata: Mapping[str, object],
+    *,
+    signal,
+    research_dataset_id: str,
+    time_window: TimeWindow | None,
+) -> tuple[
+    pd.DataFrame,
+    tuple[str, ...],
+    tuple[str, ...],
+    str,
+    str,
+    str | None,
+]:
+    model_metadata = metadata.get("model_metadata")
+    primary_key_value = metadata.get("primary_key")
+    if (
+        metadata.get("prediction_id") != signal.signal_id
+        or metadata.get("research_dataset_id") != research_dataset_id
+        or metadata.get("prediction_column") != signal.source_column
+        or type(model_metadata) is not dict
+        or type(primary_key_value) is not list
+        or not primary_key_value
+        or any(type(column) is not str or not column for column in primary_key_value)
+    ):
+        raise ValueError("persisted_prediction_metadata_mismatch")
+    input_columns_value = model_metadata.get("input_columns")
+    sample_filter_mode = metadata.get("sample_filter_mode")
+    test_start = metadata.get("test_start")
+    test_end = metadata.get("test_end")
+    if (
+        type(input_columns_value) is not list
+        or not input_columns_value
+        or any(type(column) is not str or not column for column in input_columns_value)
+        or type(sample_filter_mode) is not str
+        or not sample_filter_mode
+        or type(test_start) is not str
+        or not test_start
+        or (test_end is not None and (type(test_end) is not str or not test_end))
+    ):
+        raise ValueError("persisted_prediction_metadata_mismatch")
+    primary_key = tuple(primary_key_value)
+    input_columns = tuple(input_columns_value)
+    expected_columns = (*primary_key, signal.source_column)
+    if tuple(frame.columns) != expected_columns:
+        raise ValueError("persisted_prediction_columns_mismatch")
+    result = frame.copy()
+    if result.loc[:, list(primary_key)].isna().any(axis=None):
+        raise ValueError("persisted_prediction_key_null")
+    result["timestamp"] = strict_timestamp_series(
+        result["timestamp"], error="invalid_persisted_prediction_timestamp"
+    )
+    if result.duplicated(list(primary_key)).any():
+        raise ValueError("duplicate_persisted_prediction_keys")
+    timestamps = result["timestamp"]
+    if bool((timestamps < pd.Timestamp(test_start)).any()) or (
+        test_end is not None and bool((timestamps > pd.Timestamp(test_end)).any())
+    ):
+        raise ValueError("persisted_prediction_window_mismatch")
+    values = pd.to_numeric(result[signal.source_column], errors="coerce")
+    if not np.isfinite(values.to_numpy(dtype="float64", copy=False)).all():
+        raise ValueError("persisted_prediction_values_invalid")
+    result[signal.source_column] = values
+    if time_window is not None:
+        in_window = timestamps.between(
+            pd.Timestamp(time_window.start),
+            pd.Timestamp(time_window.end),
+        )
+        result = result.loc[in_window].reset_index(drop=True)
+    return (
+        result,
+        primary_key,
+        input_columns,
+        sample_filter_mode,
+        test_start,
+        test_end,
+    )
+
+
+def _iter_prediction_joined_chunks(
+    chunks,
+    *,
+    prediction_frame: pd.DataFrame,
+    primary_key: tuple[str, ...],
+    input_columns: tuple[str, ...],
+    sample_filter_mode: str,
+    test_start: str,
+    test_end: str | None,
+):
+    prediction_index = pd.MultiIndex.from_frame(
+        prediction_frame.loc[:, list(primary_key)]
+    )
+    matched = np.zeros(len(prediction_frame), dtype=bool)
+    missing_required = False
+    for chunk in chunks:
+        eligible, _metadata = apply_filter_mode(
+            chunk,
+            mode=sample_filter_mode,
+            metadata_key="sample_filter_mode",
+        )
+        eligible = eligible.dropna(subset=list(input_columns))
+        timestamps = strict_timestamp_series(
+            eligible["timestamp"], error="invalid_portfolio_timestamp_values"
+        )
+        required_mask = timestamps >= pd.Timestamp(test_start)
+        if test_end is not None:
+            required_mask &= timestamps <= pd.Timestamp(test_end)
+        required_index = pd.MultiIndex.from_frame(
+            eligible.loc[required_mask, list(primary_key)]
+        )
+        positions = prediction_index.get_indexer(required_index)
+        missing_required |= bool((positions < 0).any())
+        matched[positions[positions >= 0]] = True
+        try:
+            yield chunk.merge(
+                prediction_frame,
+                on=list(primary_key),
+                how="left",
+                validate="one_to_one",
+            )
+        except pd.errors.MergeError as exc:
+            raise ValueError("persisted_prediction_join_key_invalid") from exc
+    unexpected = bool((~matched).any())
+    if missing_required and unexpected:
+        raise ValueError("misaligned_persisted_prediction_keys")
+    if missing_required:
+        raise ValueError("missing_required_prediction_keys")
+    if unexpected:
+        raise ValueError("misaligned_persisted_prediction_keys")
 
 
 def _portfolio_input_chunks(

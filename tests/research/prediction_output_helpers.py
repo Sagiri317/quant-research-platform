@@ -153,10 +153,15 @@ def synthetic_prediction_model_metadata(
         "input_count": len(input_columns),
         "label_column": "label",
         "hyperparameters": {},
+        "resolved_hyperparameters": {},
         "random_seed": None,
         "max_train_rows": 1,
         "purge_gap_steps": 0,
-        "dependency_status": {"status": "available", "package": "synthetic_test"},
+        "dependency_status": {
+            "status": "available",
+            "package": "synthetic_test",
+            "version": "1",
+        },
         "coefficient_count": len(input_columns) + 1,
         "feature_importance": {column: 1.0 for column in input_columns},
     }

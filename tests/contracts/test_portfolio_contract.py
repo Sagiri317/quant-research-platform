@@ -7,6 +7,7 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS,
     PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS,
     PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS,
+    CostConfig,
     PortfolioDiagnosticsConfig,
     PortfolioSpec,
 )
@@ -79,3 +80,8 @@ def test_portfolio_spec_carries_diagnostics_config() -> None:
 
     assert spec.diagnostics_config.capacity_amount_column == "amount"
     assert spec.diagnostics_config.categorical_exposure_columns == ("industry",)
+
+
+def test_cost_config_rejects_unimplemented_impact_models() -> None:
+    with pytest.raises(ValueError, match="unsupported_portfolio_impact_model"):
+        CostConfig(impact_model="square_root")

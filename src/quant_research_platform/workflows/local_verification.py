@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from quant_research_platform.artifacts._output_bundle_validation import (
+    _read_prediction_output_bundle,
     validate_output_bundle,
 )
 from quant_research_platform.artifacts.evidence import (
@@ -185,9 +186,20 @@ def _run_local_verification_with_policy(
         train_end=effective_windows["prediction_train_end"],
         test_start=effective_windows["prediction_test_start"],
     )
+    prediction_specs = prediction_catalog.list()
+    representative_prediction_ids = tuple(
+        spec.prediction_id
+        for spec in prediction_specs
+        if catalogs.models.get(spec.model_id).model_algorithm == "linear_regression"
+    )
+    if prediction_specs and len(representative_prediction_ids) != 1:
+        raise ValueError("representative_prediction_required")
     portfolio_catalog = config.profile.build_portfolio_catalog(
         rebalance_frequency=config.portfolio_frequency,
         execution_lag_steps=config.portfolio_execution_lag_steps,
+        prediction_id=(
+            representative_prediction_ids[0] if representative_prediction_ids else None
+        ),
     )
     source_id = config.profile.source_id
     with recorder.record("interim_generation", logical_layer="interim"):
@@ -247,8 +259,8 @@ def _run_local_verification_with_policy(
             layout=storage_layout,
         )
     with recorder.record("prediction_generation"):
-        prediction_roots_list: list[Path] = []
-        for prediction_spec in prediction_catalog.list():
+        prediction_roots_by_id: dict[str, Path] = {}
+        for prediction_spec in prediction_specs:
             prediction_result = build_prediction_result_from_research_dataset(
                 layout=storage_layout,
                 dataset_catalog=catalogs.research_datasets,
@@ -261,7 +273,7 @@ def _run_local_verification_with_policy(
                 prediction_test_end=effective_windows["prediction_test_end"],
             )
             _require_output_disk_headroom(resource_policy, run_root)
-            prediction_roots_list.append(
+            prediction_roots_by_id[prediction_spec.prediction_id] = (
                 _write_prediction_result(
                     prediction_result,
                     layout=storage_layout,
@@ -271,16 +283,41 @@ def _run_local_verification_with_policy(
                     ).market_id,
                 )
             )
-        prediction_roots = tuple(prediction_roots_list)
+        prediction_roots = tuple(prediction_roots_by_id.values())
     with recorder.record("portfolio_generation"):
         portfolio_roots_list: list[Path] = []
         for portfolio_id in _optional_portfolio_ids(portfolio_catalog):
+            portfolio_spec = portfolio_catalog.get(portfolio_id)
+            prediction_signals = tuple(
+                signal
+                for signal in portfolio_spec.signals
+                if signal.source_kind == "prediction"
+            )
+            prediction_frame = None
+            prediction_metadata = None
+            if prediction_signals:
+                if len(prediction_signals) != 1:
+                    raise ValueError("multiple_prediction_signals_unsupported")
+                prediction_id = prediction_signals[0].signal_id
+                try:
+                    prediction_root = prediction_roots_by_id[prediction_id]
+                except KeyError as exc:
+                    raise ValueError("persisted_prediction_output_missing") from exc
+                prediction_manifest, prediction_frame = (
+                    _read_prediction_output_bundle(
+                        prediction_root,
+                        expected_output_id=prediction_id,
+                    )
+                )
+                prediction_metadata = prediction_manifest["metadata"]
             portfolio_result = build_portfolio_result_from_research_dataset(
                 layout=storage_layout,
                 dataset_catalog=catalogs.research_datasets,
                 portfolio_catalog=portfolio_catalog,
                 portfolio_id=portfolio_id,
                 time_window=evaluation_time_window,
+                prediction_frame=prediction_frame,
+                prediction_metadata=prediction_metadata,
             )
             _require_output_disk_headroom(resource_policy, run_root)
             portfolio_roots_list.append(
@@ -510,12 +547,7 @@ def _only_evaluation_run_id(profile: ResearchProfile) -> str:
 
 
 def _optional_portfolio_ids(portfolio_catalog) -> tuple[str, ...]:
-    specs = portfolio_catalog.list()
-    if not specs:
-        return ()
-    if len(specs) != 1:
-        raise ValueError("ambiguous_portfolio")
-    return (specs[0].portfolio_id,)
+    return tuple(spec.portfolio_id for spec in portfolio_catalog.list())
 
 
 def resolve_local_verification_run_id(

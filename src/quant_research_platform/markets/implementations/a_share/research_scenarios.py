@@ -19,11 +19,17 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnosticsConfig,
     PortfolioSpec,
 )
-from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.predictions import (
+    PREDICTION_SCORE_COLUMN,
+    PredictionSpec,
+)
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.markets.implementations.a_share.ids import (
     MARKET_ID,
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+)
+from quant_research_platform.markets.implementations.a_share.labels import (
+    definitions as label_definitions,
 )
 from quant_research_platform.research.factors.price_volume.columns import (
     price_volume_window_column,
@@ -34,6 +40,7 @@ from quant_research_platform.research.labels.forward_returns import (
 from quant_research_platform.research.models.algorithm_facts import (
     algorithm_facts,
     model_algorithm_ids,
+    model_default_hyperparameters,
     model_smoke_hyperparameters,
 )
 
@@ -61,7 +68,7 @@ class _ScenarioDefaults:
     rebalance_frequency: str = field(
         default_factory=lambda: data_frequency_slug(DataFrequency.DAILY)
     )
-    execution_lag_steps: int = 1
+    execution_lag_steps: int = 0
     test_end: str | None = None
     signal_columns: tuple[str, ...] = (
         DEFAULT_MOMENTUM_COLUMN,
@@ -120,13 +127,16 @@ def build_model_specs(
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     max_train_rows: int | None = DEFAULT_MAX_TRAIN_ROWS,
     random_seed: int | None = DEFAULT_MODEL_RANDOM_SEED,
-    hyperparameter_preset: str = "smoke",
+    hyperparameter_preset: str = "default",
 ) -> tuple[ModelSpec, ...]:
+    if hyperparameter_preset not in {"default", "smoke"}:
+        raise ValueError("unsupported_hyperparameter_preset")
+    purge_gap_steps = label_definitions.label_catalog().get(
+        return_source_column
+    ).lookahead
     specs: list[ModelSpec] = []
     for model_algorithm in sorted(model_algorithm_ids):
         facts = algorithm_facts(model_algorithm)
-        if hyperparameter_preset != "smoke":
-            raise ValueError("unsupported_hyperparameter_preset")
         single_factor = facts.input_kind == "single_factor_input"
         specs.append(
             ModelSpec(
@@ -141,8 +151,13 @@ def build_model_specs(
                     () if single_factor else SCENARIO_DEFAULTS.model_feature_inputs
                 ),
                 label_column=return_source_column,
-                hyperparameters=model_smoke_hyperparameters(model_algorithm),
+                hyperparameters=(
+                    model_smoke_hyperparameters(model_algorithm)
+                    if hyperparameter_preset == "smoke"
+                    else model_default_hyperparameters(model_algorithm)
+                ),
                 random_seed=random_seed,
+                purge_gap_steps=purge_gap_steps,
                 max_train_rows=max_train_rows,
             )
         )
@@ -195,8 +210,9 @@ def build_portfolio_specs(
     execution_lag_steps: int = SCENARIO_DEFAULTS.execution_lag_steps,
     signals: tuple[SignalSpec, ...] | None = None,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
+    prediction_id: str | None = None,
 ) -> tuple[PortfolioSpec, ...]:
-    return (
+    specs = [
         PortfolioSpec(
             portfolio_id=f"signal_{return_source_column}_portfolio",
             market_id=MARKET_ID,
@@ -207,7 +223,27 @@ def build_portfolio_specs(
             execution_lag_steps=execution_lag_steps,
             diagnostics_config=DEFAULT_PORTFOLIO_DIAGNOSTICS_CONFIG,
         ),
-    )
+    ]
+    if prediction_id is not None:
+        specs.append(
+            PortfolioSpec(
+                portfolio_id=f"{prediction_id}_portfolio",
+                market_id=MARKET_ID,
+                research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+                signals=(
+                    SignalSpec(
+                        signal_id=prediction_id,
+                        source_kind="prediction",
+                        source_column=PREDICTION_SCORE_COLUMN,
+                    ),
+                ),
+                return_source_column=return_source_column,
+                rebalance_frequency=rebalance_frequency,
+                execution_lag_steps=execution_lag_steps,
+                diagnostics_config=DEFAULT_PORTFOLIO_DIAGNOSTICS_CONFIG,
+            )
+        )
+    return tuple(specs)
 
 
 def build_model_catalog(
@@ -216,7 +252,7 @@ def build_model_catalog(
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     max_train_rows: int | None = DEFAULT_MAX_TRAIN_ROWS,
     random_seed: int | None = DEFAULT_MODEL_RANDOM_SEED,
-    hyperparameter_preset: str = "smoke",
+    hyperparameter_preset: str = "default",
 ) -> ModelCatalog:
     catalog = ModelCatalog()
     for spec in build_model_specs(
@@ -270,6 +306,7 @@ def build_portfolio_catalog(
     execution_lag_steps: int = SCENARIO_DEFAULTS.execution_lag_steps,
     signals: tuple[SignalSpec, ...] | None = None,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
+    prediction_id: str | None = None,
 ) -> PortfolioCatalog:
     catalog = PortfolioCatalog()
     for spec in build_portfolio_specs(
@@ -277,6 +314,7 @@ def build_portfolio_catalog(
         return_source_column=return_source_column,
         rebalance_frequency=rebalance_frequency,
         execution_lag_steps=execution_lag_steps,
+        prediction_id=prediction_id,
     ):
         catalog.register(spec)
     return catalog
