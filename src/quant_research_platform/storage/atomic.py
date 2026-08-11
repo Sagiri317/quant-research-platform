@@ -139,7 +139,7 @@ def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
     )
     reject_if_exists(final_root)
     temp_root = final_root.with_name(
-        owned_scratch_name(scratch_prefix, uuid4().hex[:12])
+        owned_scratch_name(scratch_prefix, uuid4().hex[:8])
     )
     target_marker = _atomic_target_marker(temp_root)
     claimed_temp: os.stat_result | None = None
@@ -326,7 +326,7 @@ def _atomic_directory_scratch_prefix(final_root: Path) -> str:
     target_digest = hashlib.sha256(
         os.path.normcase(final_root.name).encode("utf-8")
     ).hexdigest()[:8]
-    return f".atomic-{target_digest}-"
+    return f".a-{target_digest}-"
 
 
 def _atomic_target_identity(final_root: Path) -> str:
@@ -358,7 +358,7 @@ def _read_atomic_target_marker(path: Path) -> str:
 
 
 def _temp_sibling(path: Path) -> Path:
-    return path.with_name(owned_scratch_name(".f-", uuid4().hex[:12]))
+    return path.with_name(owned_scratch_name(".f-", uuid4().hex[:8]))
 
 
 def _remove_claimed_path(

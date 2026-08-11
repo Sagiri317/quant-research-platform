@@ -8,7 +8,6 @@ from quant_research_platform.workflows import local_verification as module
 from quant_research_platform.workflows.local_verification import run_local_verification
 from tests.workflows.local_verification_fixtures import (
     GIB,
-    MIB,
     fake_evaluation_result,
     fake_portfolio_result,
     fake_prediction_result,
@@ -28,18 +27,17 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
     monkeypatch,
 ) -> None:
     snapshots: list[RuntimeResourcePolicy] = []
-    from_environment_calls = 0
-    policy = RuntimeResourcePolicy.from_environment(
+    capture_calls = 0
+    explicit_cap = 5 * GIB
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=10 * GIB,
-        environ={
-            "QRP_TASK_MEMORY_BUDGET_MB": str(5 * GIB // MIB),
-            "QRP_PAYLOAD_TARGET_MB": "128",
-        },
+        explicit_cap_bytes=explicit_cap,
     )
 
-    def fake_from_environment() -> RuntimeResourcePolicy:
-        nonlocal from_environment_calls
-        from_environment_calls += 1
+    def fake_capture(*, explicit_cap_bytes=None) -> RuntimeResourcePolicy:  # noqa: ANN001
+        nonlocal capture_calls
+        assert explicit_cap_bytes == explicit_cap
+        capture_calls += 1
         return policy
 
     def capture_policy() -> None:
@@ -51,8 +49,8 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
 
     monkeypatch.setattr(
         resource_module.RuntimeResourcePolicy,
-        "from_environment",
-        staticmethod(fake_from_environment),
+        "capture",
+        staticmethod(fake_capture),
     )
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
     stub_output_writers(monkeypatch)
@@ -88,15 +86,16 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
         make_local_verification_config(
             run_root=run_root,
             start_date="2014-01-01",
-            end_date="2016-12-31",
-            profile=profile,
-        )
+                end_date="2016-12-31",
+                profile=profile,
+                explicit_memory_cap_bytes=explicit_cap,
+            )
     )
     run_config = json.loads((run_root / "run.json").read_text(encoding="utf-8"))[
         "config"
     ]
 
     assert result.status == "NOT_RUN"
-    assert from_environment_calls == 1
+    assert capture_calls == 1
     assert snapshots == [policy] * (5 + expected_prediction_count)
     assert run_config["runtime_resource_policy"] == policy.to_payload()

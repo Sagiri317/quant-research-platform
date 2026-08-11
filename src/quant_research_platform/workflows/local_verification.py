@@ -99,6 +99,7 @@ class LocalVerificationRunConfig:
     prediction_test_end: str | None = None
     replace_output: bool = False
     run_id: str | None = None
+    explicit_memory_cap_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -135,7 +136,9 @@ def run_local_verification(
     )
     run_root = configured_run_root.resolve(strict=False)
     run_id = resolve_local_verification_run_id(config.run_id, run_root)
-    resource_policy = RuntimeResourcePolicy.from_environment()
+    resource_policy = RuntimeResourcePolicy.capture(
+        explicit_cap_bytes=config.explicit_memory_cap_bytes
+    )
     require_free_disk_headroom(
         run_root,
         reserve_bytes=resource_policy.payload_target_bytes * 2,

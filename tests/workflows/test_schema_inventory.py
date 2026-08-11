@@ -180,9 +180,8 @@ def test_schema_inventory_closes_chunks_on_retained_consumer_error(
         lambda *_a, **_k: chunks(),
     )
     monkeypatch.setattr(schema_inventory.pd, "to_datetime", fail_in_consumer)
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={},
     )
 
     with pytest.raises(KeyError) as retained:
@@ -204,9 +203,8 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={},
     )
     captures = {"count": 0}
     observed_policies: list[RuntimeResourcePolicy] = []
@@ -258,9 +256,8 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
     monkeypatch.setattr(
         schema_inventory,

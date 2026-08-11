@@ -31,9 +31,9 @@ from quant_research_platform.storage._scratch_ownership import (
     require_owned_scratch,
 )
 
-_PREFIX = ".dataset-inventory-"
+_PREFIX = ".i-"
 _PART_FILE_PATTERN = re.compile(r"^part-(\d+)\.parquet$")
-_SQLITE_PAGE_BYTES = 1024
+DATASET_INVENTORY_RESERVE_BYTES = 1024
 
 
 class DatasetInventoryPaths:
@@ -86,7 +86,7 @@ class DatasetSessionInventory:
     ) -> None:
         if (
             type(task_memory_budget_bytes) is not int
-            or task_memory_budget_bytes < _SQLITE_PAGE_BYTES
+            or task_memory_budget_bytes < DATASET_INVENTORY_RESERVE_BYTES
         ):
             raise ValueError("dataset_inventory_budget_too_small")
         self.data_root = Path(data_root)
@@ -100,7 +100,7 @@ class DatasetSessionInventory:
         )
         require_free_disk_headroom(
             self._scratch_parent,
-            reserve_bytes=_SQLITE_PAGE_BYTES,
+            reserve_bytes=DATASET_INVENTORY_RESERVE_BYTES,
         )
         parent_identity = self._scratch_parent.lstat()
         cleanup_stale_owned_scratch(
@@ -113,7 +113,7 @@ class DatasetSessionInventory:
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
         temporary_directory = self._scratch_parent / owned_scratch_name(
-            _PREFIX, uuid4().hex[:12]
+            _PREFIX, uuid4().hex[:8]
         )
         temporary_identity: os.stat_result | None = None
         self._temporary_directory: Path | None = None
@@ -130,12 +130,14 @@ class DatasetSessionInventory:
                 error="invalid_storage_scratch_path",
             )
             require_owned_scratch(temporary_directory, temporary_identity)
-            connection = sqlite3.connect(temporary_directory / "inventory.sqlite3")
-            connection.execute(f"PRAGMA page_size={_SQLITE_PAGE_BYTES}")
+            connection = sqlite3.connect(temporary_directory / "i.db")
+            connection.execute(f"PRAGMA page_size={DATASET_INVENTORY_RESERVE_BYTES}")
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA temp_store=MEMORY")
-            connection.execute(f"PRAGMA cache_size=-{_SQLITE_PAGE_BYTES // 1024}")
+            connection.execute(
+                f"PRAGMA cache_size=-{DATASET_INVENTORY_RESERVE_BYTES // 1024}"
+            )
             connection.execute(
                 "CREATE TABLE year_labels (year INTEGER PRIMARY KEY, "
                 "label TEXT UNIQUE NOT NULL)"
@@ -227,7 +229,7 @@ class DatasetSessionInventory:
     def retained_memory_bytes(self) -> int:
         """Return the exact Storage-controlled SQLite cache reserve."""
 
-        return _SQLITE_PAGE_BYTES
+        return DATASET_INVENTORY_RESERVE_BYTES
 
     def discover(self, spec: Mapping[str, Any]) -> None:
         """Stream the physical tree into the sole exact inventory owner."""

@@ -67,12 +67,9 @@ def assert_forced_tiny_processed_chunks_match_default(
         source_id=source_id,
         time_window=time_window,
         data_ids=(data_id,),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=available_memory_bytes,
-            environ={
-                "QRP_TASK_MEMORY_BUDGET_MB": "5",
-                "QRP_PAYLOAD_TARGET_MB": "1",
-            },
+            explicit_cap_bytes=5 * 1024 * 1024,
         ),
     )
 

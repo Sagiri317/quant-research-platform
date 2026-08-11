@@ -29,7 +29,10 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage._dataset_inspection import (
     inspection_from_persisted_session,
 )
-from quant_research_platform.storage._dataset_inventory import DatasetSessionInventory
+from quant_research_platform.storage._dataset_inventory import (
+    DATASET_INVENTORY_RESERVE_BYTES,
+    DatasetSessionInventory,
+)
 from quant_research_platform.storage._dataset_key_tracking import (
     EXACT_KEY_SQLITE_PAGE_BYTES,
     ExactPrimaryKeyIndex,
@@ -438,6 +441,10 @@ def _write_dataset_under_policy(
                 if spec.column_roles.get(column) is ColumnRole.TIMESTAMP
             )
             with (
+                resource_policy.reserve(
+                    "storage.dataset.write.indexes",
+                    EXACT_KEY_SQLITE_PAGE_BYTES + DATASET_INVENTORY_RESERVE_BYTES,
+                ),
                 ExactPrimaryKeyIndex(
                     primary_key=spec.primary_key,
                     timestamp_columns=timestamp_columns,

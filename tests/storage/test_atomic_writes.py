@@ -721,7 +721,7 @@ def test_atomic_write_directory_does_not_clean_unclaimed_collision(
 ) -> None:
     final_root = tmp_path / "bundle"
     scratch_prefix = atomic._atomic_directory_scratch_prefix(final_root)
-    live_temp = final_root.with_name(owned_scratch_name(scratch_prefix, "c" * 12))
+    live_temp = final_root.with_name(owned_scratch_name(scratch_prefix, "c" * 8))
     live_temp.mkdir()
     (live_temp / "live.txt").write_text("live\n", encoding="utf-8")
     monkeypatch.setattr(atomic, "uuid4", lambda: _FixedUuid())
@@ -857,7 +857,7 @@ def test_atomic_directory_marker_cleanup_failure_propagates_after_publication(
         )
 
     assert (final_root / "done.txt").read_text(encoding="utf-8") == "ok\n"
-    assert list(tmp_path.glob(".atomic-*.target"))
+    assert list(tmp_path.glob(".a-*.target"))
 
 
 def test_atomic_write_text_creates_nested_temp_parent(tmp_path: Path) -> None:
@@ -895,7 +895,7 @@ def test_atomic_file_writers_do_not_overwrite_unclaimed_collision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     final_path = tmp_path / "output.txt"
-    live_temp = final_path.with_name(owned_scratch_name(".f-", "c" * 12))
+    live_temp = final_path.with_name(owned_scratch_name(".f-", "c" * 8))
     live_temp.write_text("live\n", encoding="utf-8")
     monkeypatch.setattr(atomic, "uuid4", lambda: _FixedUuid())
 

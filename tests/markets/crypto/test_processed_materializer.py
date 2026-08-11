@@ -100,9 +100,8 @@ def test_crypto_writer_requires_artifact_root_before_scratch_or_source(
     writer_name: str,
     data_id: str,
 ) -> None:  # noqa: ANN001
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     monkeypatch.setattr(
         module,
@@ -128,9 +127,8 @@ def test_crypto_writer_requires_artifact_root_before_scratch_or_source(
 def test_existing_panel_validation_keeps_policy_active_across_both_iterators(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     observed: list[tuple[str, int, bool]] = []
     bar_session = SimpleNamespace(
@@ -219,9 +217,8 @@ def test_existing_panel_validation_retires_policy_after_every_primary(
     primary_type: type[BaseException],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     primary = primary_type("validation_primary")
     session = SimpleNamespace(resource_policy=policy, manifest={})
@@ -347,9 +344,8 @@ def test_crypto_processed_materializer_uses_policy_bounded_physical_reads(
     layout = StorageLayout(project_root=tmp_path)
     materialize_interim_data(layout=layout, row_batch_size=2)
     calls: list[tuple[str, str, int]] = []
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=128 * 1024,
-        environ={},
     )
 
     def spy(module_name: str, module):
@@ -1387,9 +1383,8 @@ def test_asset_views_preserve_primary_and_attempt_all_selection_release(
     primary_type: type[BaseException],
     failure_site: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     primary = primary_type("selection_primary")
 
@@ -1455,9 +1450,8 @@ def test_asset_views_preserve_primary_and_attempt_all_selection_release(
 def test_asset_views_propagate_first_release_failure_after_attempting_all(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     first_failure = OSError("release_1")
 
@@ -1622,9 +1616,8 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
             ((("crypto", "btc_usdt"), session),)
         ),
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
 
     with runtime_resource_policy_scope(policy):
@@ -1696,9 +1689,8 @@ def test_crypto_panel_matching_rejects_invalid_timestamps(
                     "2026-07-06T00:00:00",
                     "2026-07-06T00:00:00",
                 ),
-                resource_policy=RuntimeResourcePolicy.from_environment(
+                resource_policy=RuntimeResourcePolicy.capture(
                     available_memory_bytes=1024**3,
-                    environ={},
                 ),
                 retained_payload_bytes=0,
             )
@@ -1738,9 +1730,8 @@ def test_crypto_panel_matching_rejects_invalid_source_asset_id(
             layout=layout,
             source_id=SourceId("synthetic_crypto"),
             time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-            resource_policy=RuntimeResourcePolicy.from_environment(
+            resource_policy=RuntimeResourcePolicy.capture(
                 available_memory_bytes=1024**3,
-                environ={},
             ),
             retained_payload_bytes=0,
         )
@@ -1771,9 +1762,8 @@ def test_crypto_panel_matching_rejects_missing_source_asset_id_column(
             layout=layout,
             source_id=SourceId("synthetic_crypto"),
             time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-            resource_policy=RuntimeResourcePolicy.from_environment(
+            resource_policy=RuntimeResourcePolicy.capture(
                 available_memory_bytes=1024**3,
-                environ={},
             ),
             retained_payload_bytes=0,
         )
@@ -1791,9 +1781,8 @@ def test_crypto_panel_matching_accepts_valid_source_asset_id(
         layout=layout,
         source_id=SourceId("synthetic_crypto"),
         time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=1024**3,
-            environ={},
         ),
         retained_payload_bytes=0,
     )
@@ -1846,9 +1835,8 @@ def test_crypto_panel_validation_failure_never_publishes_final_dataset(
                 "2026-07-06T00:00:00",
                 "2026-07-06T00:00:00",
             ),
-            resource_policy=RuntimeResourcePolicy.from_environment(
+            resource_policy=RuntimeResourcePolicy.capture(
                 available_memory_bytes=1024**3,
-                environ={},
             ),
             retained_payload_bytes=0,
         )
@@ -1934,9 +1922,8 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
         layout=layout,
         source_id=SourceId("binance"),
         time_window=TimeWindow("2026-07-06", "2026-07-06"),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=64 * 1024,
-            environ={},
         ),
         retained_payload_bytes=0,
     )
@@ -1991,9 +1978,8 @@ def test_crypto_panel_materializer_validates_complete_trades_across_chunks(
         layout=layout,
         source_id=SourceId("synthetic_crypto"),
         time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=1024**3,
-            environ={},
         ),
         retained_payload_bytes=0,
     )
@@ -2039,9 +2025,8 @@ def test_crypto_panel_materializer_rejects_incomplete_trade_range_across_chunks(
                 "2026-07-06T00:00:00",
                 "2026-07-06T00:00:00",
             ),
-            resource_policy=RuntimeResourcePolicy.from_environment(
+            resource_policy=RuntimeResourcePolicy.capture(
                 available_memory_bytes=1024**3,
-                environ={},
             ),
             retained_payload_bytes=0,
         )
@@ -2082,9 +2067,8 @@ def test_crypto_panel_materializer_merges_depth_snapshot_across_storage_chunks(
         layout=layout,
         source_id=SourceId("synthetic_crypto"),
         time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=1024**3,
-            environ={},
         ),
         retained_payload_bytes=0,
     )
@@ -2137,9 +2121,8 @@ def test_crypto_panel_bar_contract_fails_before_auxiliary_reads(
             layout=StorageLayout(project_root=tmp_path),
             source_id=SourceId("synthetic_crypto"),
             time_window=TimeWindow("2026-07-06T00:00:00", "2026-07-06T00:00:00"),
-            resource_policy=RuntimeResourcePolicy.from_environment(
+            resource_policy=RuntimeResourcePolicy.capture(
                 available_memory_bytes=1024**3,
-                environ={},
             ),
             retained_payload_bytes=0,
         )
@@ -2152,16 +2135,14 @@ def test_crypto_panel_small_and_large_resource_windows_match(tmp_path: Path) -> 
     for name, policy in (
         (
             "large",
-            RuntimeResourcePolicy.from_environment(
+            RuntimeResourcePolicy.capture(
                 available_memory_bytes=1024**3,
-                environ={},
             ),
         ),
         (
             "small",
-            RuntimeResourcePolicy.from_environment(
+            RuntimeResourcePolicy.capture(
                 available_memory_bytes=64 * 1024,
-                environ={},
             ),
         ),
     ):
@@ -2410,9 +2391,8 @@ def _panel_test_sessions(
     spec,
     time_window: TimeWindow,
 ):  # noqa: ANN202
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     with ExitStack() as stack:
         sessions = {
@@ -2642,9 +2622,8 @@ def test_panel_writer_acquires_inputs_with_cumulative_live_session_bytes(
     layout = StorageLayout(project_root=tmp_path)
     source_id = SourceId("synthetic_crypto")
     _write_synthetic_crypto_interim(layout, source_id, minutes=3)
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     real_open = materialize_panel.open_dataset_session
     real_write = materialize_panel.write_dataset
@@ -2703,9 +2682,8 @@ def test_existing_panel_dependency_acquires_panel_after_all_live_inputs(
     layout = StorageLayout(project_root=tmp_path)
     source_id = SourceId("synthetic_crypto")
     _write_existing_panel_dependency(layout, source_id, _panel_frame(minutes=3))
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     real_open = materializer.open_dataset_session
     live_sessions: list[object] = []
@@ -3156,9 +3134,8 @@ def test_panel_writer_rejects_source_replacement_after_identity_capture(
             layout=layout,
             source_id=source_id,
             time_window=TimeWindow("2026-07-06", "2026-07-06"),
-            resource_policy=RuntimeResourcePolicy.from_environment(
+            resource_policy=RuntimeResourcePolicy.capture(
                 available_memory_bytes=1024**3,
-                environ={},
             ),
             retained_payload_bytes=0,
         )
@@ -3220,9 +3197,8 @@ def test_panel_writer_rejects_auxiliary_replacement_during_staged_validation(
             layout=layout,
             source_id=source_id,
             time_window=TimeWindow("2026-07-06", "2026-07-06"),
-            resource_policy=RuntimeResourcePolicy.from_environment(
+            resource_policy=RuntimeResourcePolicy.capture(
                 available_memory_bytes=1024**3,
-                environ={},
             ),
             retained_payload_bytes=0,
         )

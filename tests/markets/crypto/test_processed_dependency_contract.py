@@ -32,9 +32,8 @@ from quant_research_platform.storage._dataset_types import DatasetInspection
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
-RESOURCE_POLICY = RuntimeResourcePolicy.from_environment(
+RESOURCE_POLICY = RuntimeResourcePolicy.capture(
     available_memory_bytes=1024**3,
-    environ={},
 )
 
 
@@ -140,9 +139,8 @@ def test_crypto_projection_reuses_storage_filter_admission(
 def test_dependent_validation_closes_expected_stream_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     closed: list[bool] = []
 
@@ -186,9 +184,8 @@ def test_dependent_validation_closes_expected_stream_on_failure(
 def test_asset_discovery_closes_file_batches_on_validation_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     closed: list[bool] = []
 
@@ -248,9 +245,8 @@ def test_disk_guard_closes_source_chunks_on_early_close(
 def test_panel_iterator_closes_bar_traversal_on_early_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     spec = processed_catalog().get("market_panel_1m")
     data_ids = (
@@ -391,13 +387,11 @@ def test_panel_dependent_writer_rejects_policy_mismatch_before_input_identity(
     writer_name: str,
     data_id: str,
 ) -> None:
-    session_policy = RuntimeResourcePolicy.from_environment(
+    session_policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
-    explicit_policy = RuntimeResourcePolicy.from_environment(
+    explicit_policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     panel_session = _dataset_session_stub(session_policy)
     monkeypatch.setattr(
@@ -435,13 +429,11 @@ def test_panel_dependent_iterator_rejects_policy_mismatch_before_selection(
     iterator_name: str,
     data_id: str,
 ) -> None:
-    session_policy = RuntimeResourcePolicy.from_environment(
+    session_policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
-    explicit_policy = RuntimeResourcePolicy.from_environment(
+    explicit_policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     panel_session = _dataset_session_stub(session_policy)
     monkeypatch.setattr(
@@ -465,13 +457,11 @@ def test_panel_iterator_rejects_any_session_policy_mismatch_before_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = processed_catalog().get("market_panel_1m")
-    explicit_policy = RuntimeResourcePolicy.from_environment(
+    explicit_policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
-    other_policy = RuntimeResourcePolicy.from_environment(
+    other_policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     data_ids = (
         materialize_panel.source_ids.market_bars_source_data_id(spec),
@@ -515,13 +505,11 @@ def test_validation_rejects_session_policy_mismatch_before_identity_or_traversal
     owner: str,
     mismatch: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
-    other_policy = RuntimeResourcePolicy.from_environment(
+    other_policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
 
     def session(name: str) -> SimpleNamespace:
@@ -579,9 +567,8 @@ def test_validation_rejects_session_policy_mismatch_before_identity_or_traversal
 def test_panel_dependent_validation_includes_prior_written_baseline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
     observed: list[int] = []
     receipt = SimpleNamespace(
@@ -817,9 +804,8 @@ def test_factor_carry_processing_is_linear_in_asset_count(
         record_rows,
     )
     spec = processed_catalog().get("microstructure")
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
 
     list(
@@ -1080,9 +1066,8 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4096,
-        environ={},
     )
     inspection = _inspection("market_panel_1m")
     observed: list[RuntimeResourcePolicy] = []
@@ -1185,9 +1170,8 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
     iterator_name: str,
     data_id: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={},
     )
     inspection = _inspection(data_id)
     observed: list[RuntimeResourcePolicy] = []
@@ -1297,9 +1281,8 @@ def test_factor_and_label_materializers_reject_non_monotonic_chunks(
         lambda *_args, **_kwargs: iter((first, second)),
     )
     _patch_mock_group_plan(monkeypatch, (("crypto", "btc_usdt"),))
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     iterator = (
         module._iter_factor_chunks(

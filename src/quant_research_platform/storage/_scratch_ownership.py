@@ -11,7 +11,6 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import psutil
 
@@ -98,127 +97,11 @@ def remove_owned_scratch(
         return
     if not os.path.samestat(identity, current):
         raise ValueError("storage_scratch_identity_changed")
-    quarantine = path.with_name(f".{path.name}.cleanup-{uuid4().hex[:12]}")
-    move_error: BaseException | None = None
-    try:
-        move_path_no_replace(path, quarantine)
-    except BaseException as error:
-        move_error = error
-
-    quarantine_exact = False
-    quarantine_probe_error: BaseException | None = None
-    try:
-        quarantine_exact = scratch_identity_matches(quarantine, identity)
-    except BaseException as error:
-        quarantine_probe_error = error
-
-    source_exact = False
-    source_probe_error: BaseException | None = None
-    try:
-        source_exact = scratch_identity_matches(path, identity)
-    except BaseException as error:
-        source_probe_error = error
-
-    committed = (
-        quarantine_probe_error is None
-        and source_probe_error is None
-        and quarantine_exact
-        and not source_exact
-    )
-    cleanup_primary: BaseException | None = None
-    if quarantine_exact and source_probe_error is not None:
-        cleanup_primary = move_error or source_probe_error
-    elif committed and move_error is not None and not isinstance(move_error, OSError):
-        cleanup_primary = move_error
-
-    verification_error: BaseException | None = None
-    if committed or (quarantine_exact and source_probe_error is not None):
-        try:
-            require_owned_scratch(quarantine, identity)
-            metadata = quarantine.lstat()
-        except BaseException as error:
-            if cleanup_primary is not None:
-                raise cleanup_primary from None
-            verification_error = error
-        else:
-            try:
-                if stat.S_ISDIR(metadata.st_mode):
-                    try:
-                        shutil.rmtree(quarantine, onexc=onexc)
-                    except OSError as error:
-                        if os.name != "nt" or error.winerror != 145:
-                            raise
-                        require_owned_scratch(quarantine, identity)
-                        shutil.rmtree(_windows_extended_path(quarantine), onexc=onexc)
-                else:
-                    quarantine.unlink()
-            except BaseException:
-                if cleanup_primary is not None:
-                    raise cleanup_primary from None
-                raise
-            if cleanup_primary is not None:
-                raise cleanup_primary
-            return
-
-    if verification_error is None:
-        if source_probe_error is not None:
-            raise move_error or quarantine_probe_error or source_probe_error
-        if source_exact:
-            if move_error is not None:
-                raise move_error
-            if quarantine_probe_error is not None:
-                raise quarantine_probe_error
-            raise ValueError("storage_scratch_identity_changed")
-        namespace_primary = (
-            move_error
-            or quarantine_probe_error
-            or ValueError("storage_scratch_identity_changed")
-        )
+    if stat.S_ISDIR(current.st_mode):
+        target: str | Path = _windows_extended_path(path) if os.name == "nt" else path
+        shutil.rmtree(target, onexc=onexc)
     else:
-        namespace_primary = verification_error
-    try:
-        restore_identity = quarantine.lstat()
-    except FileNotFoundError:
-        raise namespace_primary from None
-    except BaseException:
-        raise namespace_primary from None
-
-    restore_error: BaseException | None = None
-    try:
-        move_path_no_replace(quarantine, path)
-    except BaseException as error:
-        restore_error = error
-    restored_path_exact = False
-    restored_quarantine_exact = False
-    restored_path_probe_error: BaseException | None = None
-    restored_quarantine_probe_error: BaseException | None = None
-    try:
-        restored_path_exact = scratch_identity_matches(path, restore_identity)
-    except BaseException as error:
-        restored_path_probe_error = error
-    try:
-        restored_quarantine_exact = scratch_identity_matches(
-            quarantine, restore_identity
-        )
-    except BaseException as error:
-        restored_quarantine_probe_error = error
-    restored = (
-        restored_path_probe_error is None
-        and restored_quarantine_probe_error is None
-        and restored_path_exact
-        and not restored_quarantine_exact
-    )
-    if not restored:
-        restore_failure = (
-            restore_error
-            or restored_path_probe_error
-            or restored_quarantine_probe_error
-            or ValueError("storage_scratch_identity_changed")
-        )
-        namespace_primary.add_note(
-            f"scratch restore also failed: {type(restore_failure).__name__}"
-        )
-    raise namespace_primary
+        path.unlink()
 
 
 def create_owned_scratch(path: Path, *, mode: int = 0o777) -> os.stat_result:

@@ -87,9 +87,9 @@ from tests.research.prediction_output_helpers import (
 def test_research_dataset_chunk_wrapper_captures_outer_at_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     observed: list[RuntimeResourcePolicy] = []
 
@@ -119,9 +119,9 @@ def test_research_dataset_chunk_wrapper_captures_outer_at_creation(
 def test_research_dataset_chunk_wrapper_rejects_delayed_consumption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     monkeypatch.setattr(
         dataset_reading,
@@ -291,9 +291,8 @@ def test_research_time_key_scan_uses_payload_target(
 ) -> None:
     observed_targets: list[int] = []
     timestamps = pd.date_range("2026-01-01", periods=20, freq="min")
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024,
-        environ={},
     )
     session = SimpleNamespace(path_selection=None, close=lambda: None)
     monkeypatch.setattr(
@@ -334,9 +333,8 @@ def test_research_time_key_scan_uses_payload_target(
 def test_research_time_key_scan_preserves_single_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=320,
-        environ={},
     )
     session = SimpleNamespace(path_selection=None, close=lambda: None)
     monkeypatch.setattr(
@@ -369,9 +367,8 @@ def test_research_time_key_scan_closes_iterator_before_view_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024,
-        environ={},
     )
 
     class Inventory:
@@ -429,9 +426,8 @@ def test_research_view_cleanup_preserves_active_primary(
     primary_type: type[BaseException],
 ) -> None:
     primary = primary_type("body_primary")
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024,
-        environ={},
     )
     window = TimeWindow("2026-01-01", "2026-01-01")
 
@@ -569,9 +565,8 @@ def test_research_processed_input_uses_task_budget_for_materialization(
     processed_catalog = make_demo_processed_catalog()
     dataset_spec = make_research_dataset_catalog().get("demo")
     processed_spec = processed_catalog.get("demo_factors")
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=12 * 1024,
-        environ={},
     )
     observed: dict[str, object] = {}
     columns = assembler_module._processed_input_columns(
@@ -615,9 +610,8 @@ def test_research_processed_input_uses_task_budget_for_materialization(
 
 
 def test_research_join_rejects_known_payloads_over_task_budget() -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_024,
-        environ={},
     )
 
     with pytest.raises(
@@ -634,9 +628,8 @@ def test_research_join_rejects_known_payloads_over_task_budget() -> None:
 
 
 def test_research_join_bound_includes_retained_base_keys() -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
 
     with pytest.raises(
@@ -655,9 +648,8 @@ def test_research_join_bound_includes_retained_base_keys() -> None:
 def test_research_join_bound_keeps_live_session_state_after_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
     frame = pd.DataFrame({"id": [1]})
     monkeypatch.setattr(
@@ -698,9 +690,8 @@ def test_research_join_bound_keeps_live_session_state_after_read(
 def test_research_join_preflights_merged_output_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
     base = pd.DataFrame({"id": [1], "left": [1]})
     right = pd.DataFrame({"id": [1], "right": [1]})
@@ -744,9 +735,8 @@ def test_research_join_preflights_merged_output_allocation(
 def test_research_join_preflights_feature_transform_output_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
     frame = pd.DataFrame({"id": [1], "value": [1.0]})
     monkeypatch.setattr(
@@ -789,9 +779,8 @@ def test_research_join_preflights_feature_transform_output_allocation(
 def test_research_join_preflights_real_transform_payload_before_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=50_000,
-        environ={},
     )
     frame = pd.DataFrame({"id": range(1_000), "value": [1.0] * 1_000})
     monkeypatch.setattr(
@@ -829,9 +818,8 @@ def test_research_join_preflights_real_transform_payload_before_allocation(
 def test_research_join_preflights_final_projection_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=37_500,
-        environ={},
     )
     frame = pd.DataFrame({"id": range(1_000), "value": [1.0] * 1_000})
     monkeypatch.setattr(
@@ -898,9 +886,8 @@ def test_research_join_preflights_final_projection_allocation(
 
 
 def test_research_final_write_rejects_output_over_payload_target() -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
     output = pd.DataFrame({"value": ["x" * 2_000]})
 
@@ -1129,12 +1116,15 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setenv("QRP_TASK_MEMORY_BUDGET_MB", "1")
-    monkeypatch.setenv("QRP_PAYLOAD_TARGET_MB", "1")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
         lambda **_kwargs: 600_000,
+    )
+    tiny_policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=2 * 1024**2,
+        rss_bytes=0,
+        explicit_cap_bytes=1024**2,
     )
     tiny_root = assemble_research_dataset(
         layout=tiny_layout,
@@ -1142,6 +1132,7 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        resource_policy=tiny_policy,
     )
 
     default = pd.concat(
@@ -1189,9 +1180,8 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
         processed_spec,
         existing_columns=(),
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     with assembler_module.open_dataset_session(
         layout.processed_data_root(
@@ -1311,9 +1301,8 @@ def test_research_sizing_probe_materializes_one_session_at_a_time(
         time_keys=sessions,
         time_window=TimeWindow("2026-01-01", "2026-01-20"),
         base_data_id="base",
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=1024**3,
-            environ={},
         ),
     )
 
@@ -1877,12 +1866,15 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setenv("QRP_TASK_MEMORY_BUDGET_MB", "1")
-    monkeypatch.setenv("QRP_PAYLOAD_TARGET_MB", "1")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
         lambda **_kwargs: 600_000,
+    )
+    assembly_policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=2 * 1024**2,
+        rss_bytes=0,
+        explicit_cap_bytes=1024**2,
     )
     assemble_research_dataset(
         layout=layout,
@@ -1890,9 +1882,8 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        resource_policy=assembly_policy,
     )
-    monkeypatch.setenv("QRP_TASK_MEMORY_BUDGET_MB", "1")
-    monkeypatch.setenv("QRP_PAYLOAD_TARGET_MB", "1")
     model_catalog = ModelCatalog()
     model_catalog.register(
         ModelSpec(
@@ -1963,13 +1954,19 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         wrapped_write,
     )
 
-    result = build_prediction_result_from_research_dataset(
-        layout=layout,
-        dataset_catalog=dataset_catalog,
-        model_catalog=model_catalog,
-        prediction_catalog=prediction_catalog,
-        prediction_id="pred_demo",
+    prediction_policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=2 * 1024**2,
+        rss_bytes=0,
+        explicit_cap_bytes=1024**2,
     )
+    with runtime_resource_policy_scope(prediction_policy):
+        result = build_prediction_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            model_catalog=model_catalog,
+            prediction_catalog=prediction_catalog,
+            prediction_id="pred_demo",
+        )
     output_bundle = _write_prediction_result(layout, result)
 
     assert (output_bundle / "prediction.parquet").is_file()
@@ -2054,12 +2051,15 @@ def test_evaluation_runner_streams_research_chunks(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setenv("QRP_TASK_MEMORY_BUDGET_MB", "1")
-    monkeypatch.setenv("QRP_PAYLOAD_TARGET_MB", "1")
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
         lambda **_kwargs: 600_000,
+    )
+    assembly_policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=2 * 1024**2,
+        rss_bytes=0,
+        explicit_cap_bytes=1024**2,
     )
     assemble_research_dataset(
         layout=layout,
@@ -2067,6 +2067,7 @@ def test_evaluation_runner_streams_research_chunks(
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        resource_policy=assembly_policy,
     )
     evaluation_catalog = EvaluationCatalog()
     evaluation_catalog.register(
@@ -2092,12 +2093,18 @@ def test_evaluation_runner_streams_research_chunks(
         wrapped_iter,
     )
 
-    result = build_evaluation_result_from_research_dataset(
-        layout=layout,
-        dataset_catalog=dataset_catalog,
-        evaluation_catalog=evaluation_catalog,
-        run_id="eval_demo",
+    evaluation_policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=2 * 1024**2,
+        rss_bytes=0,
+        explicit_cap_bytes=1024**2,
     )
+    with runtime_resource_policy_scope(evaluation_policy):
+        result = build_evaluation_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            evaluation_catalog=evaluation_catalog,
+            run_id="eval_demo",
+        )
     output_bundle = _write_evaluation_result(layout, result)
 
     assert (output_bundle / "metrics.parquet").is_file()

@@ -74,12 +74,9 @@ MARKET_CONTEXT_DATA_ID = market_context_data_id()
 
 
 def _publication_policy() -> RuntimeResourcePolicy:
-    return RuntimeResourcePolicy.from_environment(
+    return RuntimeResourcePolicy.capture(
         available_memory_bytes=2 * 1024**3,
-        environ={
-            "QRP_TASK_MEMORY_BUDGET_MB": "1024",
-            "QRP_PAYLOAD_TARGET_MB": "256",
-        },
+        explicit_cap_bytes=1024 * 1024 * 1024,
     )
 
 
@@ -121,12 +118,9 @@ def test_a_share_output_publication_rejects_near_headroom_before_sort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4 * 1024**2,
-        environ={
-            "QRP_TASK_MEMORY_BUDGET_MB": "1",
-            "QRP_PAYLOAD_TARGET_MB": "1",
-        },
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     frame = pd.DataFrame(
         {
@@ -215,12 +209,9 @@ def test_sorted_output_chunks_reject_different_creation_and_activation_policies(
     None
 ):
     policy = _publication_policy()
-    creation_other_policy = RuntimeResourcePolicy.from_environment(
+    creation_other_policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=2 * 1024**3,
-        environ={
-            "QRP_TASK_MEMORY_BUDGET_MB": "512",
-            "QRP_PAYLOAD_TARGET_MB": "128",
-        },
+        explicit_cap_bytes=512 * 1024 * 1024,
     )
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
     source_pulls = 0
@@ -240,12 +231,9 @@ def test_sorted_output_chunks_reject_different_creation_and_activation_policies(
     wrapped = materialization_io.iter_sorted_output_chunks(
         Source(), spec, resource_policy=policy
     )
-    activation_other_policy = RuntimeResourcePolicy.from_environment(
+    activation_other_policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=2 * 1024**3,
-        environ={
-            "QRP_TASK_MEMORY_BUDGET_MB": "512",
-            "QRP_PAYLOAD_TARGET_MB": "128",
-        },
+        explicit_cap_bytes=512 * 1024 * 1024,
     )
     with runtime_resource_policy_scope(activation_other_policy):
         with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
@@ -420,9 +408,8 @@ def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
             scratch_parent=tmp_path,
         )
     else:
-        policy = RuntimeResourcePolicy.from_environment(
+        policy = RuntimeResourcePolicy.capture(
             available_memory_bytes=16 * 1024 * 1024,
-            environ={},
         )
 
         class Session:
@@ -551,9 +538,8 @@ def test_a_share_io_wrapper_cleanup_lifecycle(
             scratch_parent=tmp_path,
         )
     else:
-        policy = RuntimeResourcePolicy.from_environment(
+        policy = RuntimeResourcePolicy.capture(
             available_memory_bytes=16 * 1024 * 1024,
-            environ={},
         )
 
         class Session:
@@ -619,9 +605,8 @@ def test_write_and_inspect_activates_explicit_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={},
     )
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
     inspection = object()
@@ -766,12 +751,9 @@ def test_panel_materializer_does_not_preload_full_market_bars(
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
         data_ids=(MARKET_PANEL_DATA_ID,),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=16 * 1024 * 1024,
-            environ={
-                "QRP_TASK_MEMORY_BUDGET_MB": "5",
-                "QRP_PAYLOAD_TARGET_MB": "1",
-            },
+            explicit_cap_bytes=5 * 1024 * 1024,
         ),
     )
 

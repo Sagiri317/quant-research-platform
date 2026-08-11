@@ -84,9 +84,8 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         "compute_ic_and_grouped_label_values",
         wrapped_compute,
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
     with runtime_resource_policy_scope(policy):
         result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
@@ -331,9 +330,8 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
         signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=500,
-        environ={},
     )
 
     with pytest.raises(
@@ -409,9 +407,8 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=800,
-        environ={},
     )
     with runtime_resource_policy_scope(policy):
         result = model_fitting.fit_model_result_from_frames(
@@ -471,9 +468,8 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
         "apply_filter_mode",
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
     with runtime_resource_policy_scope(policy):
         result = prediction_frame_from_artifact(

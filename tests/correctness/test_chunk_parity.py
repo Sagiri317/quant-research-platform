@@ -115,9 +115,8 @@ def test_research_assembly_session_chunks_equal_default_and_keep_nan_positions(
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=100_000,
-            environ={},
         ),
     )
 
@@ -193,9 +192,8 @@ def test_research_feature_transform_session_chunks_equal_default(
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=100_000,
-            environ={},
         ),
     )
 

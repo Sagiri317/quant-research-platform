@@ -12,36 +12,30 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
 )
 
-MIB = 1024 * 1024
 
-
-def test_internal_factory_still_enforces_discovery_inputs_and_ceiling() -> None:
-    policy = resources._runtime_resource_policy_factory(
-        available_memory_bytes=10 * 1024 * MIB,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "16384"},
-    )
-
-    assert policy.task_memory_budget_bytes == 8 * 1024 * MIB
-    assert policy.payload_target_bytes == 8 * 1024 * MIB
-
-
-def test_available_memory_discovery_failure_is_not_replaced_by_fallback(
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("owner", "error"),
+    [
+        ("_available_memory_bytes", "runtime_available_memory_discovery_failed"),
+        ("_process_rss_bytes", "runtime_rss_discovery_failed"),
+    ],
+)
+def test_capture_fails_closed_when_required_probe_fails(
+    owner: str,
+    error: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail_discovery() -> int:
-        raise RuntimeError("runtime_available_memory_discovery_failed")
+    def fail() -> int:
+        raise RuntimeError(error)
 
-    monkeypatch.setattr(resources, "_available_memory_bytes", fail_discovery)
+    monkeypatch.setattr(resources, owner, fail)
 
-    with pytest.raises(
-        RuntimeError,
-        match="runtime_available_memory_discovery_failed",
-    ):
-        RuntimeResourcePolicy.from_environment(environ={})
+    with pytest.raises(RuntimeError, match=error):
+        RuntimeResourcePolicy.capture()
 
 
 def test_disk_headroom_is_independent_of_memory_policy(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     monkeypatch.setattr(

@@ -88,7 +88,7 @@ class ExactPrimaryKeyIndex:
     def database_path(self) -> Path:
         if self._temporary_directory is None:
             raise RuntimeError("exact_primary_key_index_not_open")
-        return self._temporary_directory / "k.sqlite3"
+        return self._temporary_directory / "k.db"
 
     @property
     def primary_key(self) -> tuple[str, ...]:
@@ -125,7 +125,7 @@ class ExactPrimaryKeyIndex:
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
         temporary_directory = self._scratch_parent / owned_scratch_name(
-            ".k-", uuid4().hex[:12]
+            ".k-", uuid4().hex[:8]
         )
         temporary_identity: os.stat_result | None = None
         connection: sqlite3.Connection | None = None

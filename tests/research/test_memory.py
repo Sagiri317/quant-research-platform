@@ -4,7 +4,6 @@ import gc
 import sys
 import warnings
 from contextlib import contextmanager
-from contextvars import copy_context
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -36,9 +35,9 @@ def _single_time_frame() -> pd.DataFrame:
 def test_lazy_memory_factory_binds_outer_for_active_consumption(
     explicit_mode: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     frame = _single_time_frame()
     with runtime_resource_policy_scope(policy):
@@ -54,9 +53,9 @@ def test_lazy_memory_factory_binds_outer_for_active_consumption(
 def test_lazy_memory_factory_rejects_delayed_consumption_after_outer_exit(
     explicit_mode: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     frame = _single_time_frame()
     with runtime_resource_policy_scope(policy):
@@ -71,13 +70,13 @@ def test_lazy_memory_factory_rejects_delayed_consumption_after_outer_exit(
 
 
 def test_lazy_memory_factory_rejects_different_explicit_policy_at_creation() -> None:
-    active = RuntimeResourcePolicy.from_environment(
+    active = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
-    different = RuntimeResourcePolicy.from_environment(
+    different = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "2"},
+        explicit_cap_bytes=2 * 1024 * 1024,
     )
     frame = _single_time_frame()
     with runtime_resource_policy_scope(active):
@@ -93,13 +92,13 @@ def test_lazy_memory_factory_rejects_different_explicit_policy_at_creation() -> 
 def test_complete_memory_factory_closes_once_on_creation_policy_conflict(
     close_fails: bool,
 ) -> None:
-    active = RuntimeResourcePolicy.from_environment(
+    active = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
-    different = RuntimeResourcePolicy.from_environment(
+    different = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "2"},
+        explicit_cap_bytes=2 * 1024 * 1024,
     )
     close_calls = 0
 
@@ -188,9 +187,8 @@ def test_complete_time_sized_frames_rejects_single_timestamp_over_budget() -> No
             "value": ["x" * 20] * 400,
         }
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
 
     with pytest.raises(
@@ -215,9 +213,8 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
             "value": ["x" * 20] * 200,
         }
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1_000,
-        environ={},
     )
 
     def reject_concat(*_args, **_kwargs):  # noqa: ANN002, ANN003
@@ -236,51 +233,13 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
         )
 
 
-@pytest.mark.parametrize("close_fails", (False, True))
-def test_complete_frames_own_copied_retired_context_input_before_capture(
-    close_fails: bool,
-) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
-    )
-    close_calls = 0
-
-    class Frames:
-        def __iter__(self) -> Frames:
-            return self
-
-        def __next__(self) -> pd.DataFrame:
-            pytest.fail("frames consumed after retired policy capture")
-
-        def close(self) -> None:
-            nonlocal close_calls
-            close_calls += 1
-            if close_fails:
-                raise OSError("close_secondary")
-
-    frames = Frames()
-    with runtime_resource_policy_scope(policy):
-        copied = copy_context()
-
-    with pytest.raises(RuntimeError) as raised:
-        copied.run(
-            iter_complete_time_sized_frames,
-            frames,
-            timestamp_column="timestamp",
-        )
-
-    assert str(raised.value) == "runtime_resource_policy_retired"
-    assert close_calls == 1
-
-
 @pytest.mark.parametrize("exit_kind", ("normal", "body_error", "consumer_close"))
 def test_complete_frames_transfer_captured_input_to_lazy_activation(
     exit_kind: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     close_calls = 0
 
@@ -341,9 +300,9 @@ def test_unactivated_complete_frames_close_once_without_unraisable(
     termination: str,
     close_fails: bool,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     next_calls = 0
     close_calls = 0
@@ -399,9 +358,9 @@ def test_unactivated_complete_frames_close_once_without_unraisable(
 def test_complete_time_frames_close_upstream_inside_policy_scope(
     primary_type: type[BaseException],
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     primary = primary_type("upstream_primary")
     closed_under: list[RuntimeResourcePolicy | None] = []
@@ -443,9 +402,9 @@ def test_complete_time_frames_close_once_when_policy_entry_fails(
     close_fails: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     close_calls = 0
 

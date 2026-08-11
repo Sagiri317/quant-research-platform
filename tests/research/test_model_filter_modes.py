@@ -669,9 +669,8 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design() -> None:
 
     assert result.coefficients.tolist() == pytest.approx(expected.tolist())
 
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4_000,
-        environ={},
     )
     with runtime_resource_policy_scope(policy):
         tiny_result = model_fitting.fit_model_result_from_frames(

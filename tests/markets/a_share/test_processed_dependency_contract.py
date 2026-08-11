@@ -182,9 +182,8 @@ def test_panel_materializer_skips_market_bars_source_preload(
         layout=layout,
         source_id=source_id,
         market_bars_data_id=source_ids.market_bars_source_data_id(spec),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=1024**3,
-            environ={},
         ),
     )
 
@@ -203,9 +202,8 @@ def test_source_input_physical_reads_use_owner_resource_policy(
         kind=ProcessedDataKind.PANEL,
         source_input_data_ids=(MARKET_BARS_DATA_ID, "trading_calendar"),
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=32 * 1024,
-        environ={},
     )
     observed_targets: list[int] = []
 
@@ -248,9 +246,8 @@ def test_source_input_physical_reads_use_owner_resource_policy(
 def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=10 * 1024**2,
-        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
     )
     observed: list[tuple[int, int]] = []
     opened_retained: list[int] = []
@@ -297,13 +294,13 @@ def test_dataset_read_scope_remains_active_through_session_exit(
     operation: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
-    competing = RuntimeResourcePolicy.from_environment(
+    competing = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
 
     class Session:
@@ -355,9 +352,9 @@ def test_dataset_read_does_not_construct_session_when_policy_entry_fails(
     operation: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024 * 1024,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     primary = RuntimeError("runtime_resource_policy_concurrent_root")
 
@@ -392,9 +389,8 @@ def test_dataset_read_does_not_construct_session_when_policy_entry_fails(
 
 
 def test_materialized_read_rejects_exhausted_retained_state_before_decoder() -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=10 * 1024**2,
-        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
     )
 
     with pytest.raises(
@@ -412,9 +408,8 @@ def test_materialized_read_rejects_negative_retained_state() -> None:
     with pytest.raises(ValueError, match="invalid_a_share_retained_payload_bytes"):
         materialization_io.read_materialized_dataset(
             Path("dataset"),
-            resource_policy=RuntimeResourcePolicy.from_environment(
+            resource_policy=RuntimeResourcePolicy.capture(
                 available_memory_bytes=1024**3,
-                environ={},
             ),
             retained_payload_bytes=-1,
         )
@@ -423,9 +418,9 @@ def test_materialized_read_rejects_negative_retained_state() -> None:
 def test_chunk_reader_rejects_exhausted_retained_state_before_session_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     opened = False
 
@@ -453,8 +448,8 @@ def test_chunk_reader_rejects_exhausted_retained_state_before_session_open(
 def test_chunk_reader_passes_caller_retained_state_to_session_acquisition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=16 * 1024**2, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=16 * 1024**2,
     )
     observed: list[int] = []
 
@@ -483,9 +478,8 @@ def test_chunk_reader_passes_caller_retained_state_to_session_acquisition(
 def test_chunk_target_rejection_happens_before_dataset_session_acquisition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
     )
     acquisitions = 0
 
@@ -514,13 +508,13 @@ def test_chunk_target_rejection_happens_before_dataset_session_acquisition(
 def test_lazy_a_share_factories_bind_active_policy_at_creation(
     operation: str,
 ) -> None:
-    active = RuntimeResourcePolicy.from_environment(
+    active = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
-    explicit = RuntimeResourcePolicy.from_environment(
+    explicit = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
 
     with runtime_resource_policy_scope(active):
@@ -601,9 +595,8 @@ def test_invalid_chunk_target_rejection_happens_before_dataset_session_acquisiti
     monkeypatch: pytest.MonkeyPatch,
     target_chunk_bytes: object,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={"QRP_PAYLOAD_TARGET_MB": "4"},
     )
     acquisitions = 0
 
@@ -626,9 +619,8 @@ def test_invalid_chunk_target_rejection_happens_before_dataset_session_acquisiti
 
 
 def test_a_share_indivisible_output_rejects_payload_over_target() -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=100,
-        environ={},
     )
     output = pd.DataFrame({"value": ["x" * 256]})
 
@@ -678,9 +670,8 @@ def test_materializer_reads_processed_inputs_from_spec_processed_input_data_ids(
         target,
         layout=layout,
         processed_catalog=_catalog(panel_spec, target),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=1024**3,
-            environ={},
         ),
     )
 
@@ -974,9 +965,8 @@ def test_write_paths_read_processed_inputs_via_helper(
         "label_read_window_for_panel",
         fake_label_read_window_for_panel,
     )
-    resource_policy = RuntimeResourcePolicy.from_environment(
+    resource_policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
 
     with runtime_resource_policy_scope(resource_policy):
@@ -1053,12 +1043,9 @@ def test_write_paths_reserve_registered_output_before_transform(
     spec = spec_by_kind[writer_kind]
     window = TimeWindow("2024-01-02", "2024-01-02")
     sessions = pd.DatetimeIndex(["2024-01-02"])
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4 * 1024**2,
-        environ={
-            "QRP_TASK_MEMORY_BUDGET_MB": "1",
-            "QRP_PAYLOAD_TARGET_MB": "1",
-        },
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     current_keys = _key_frame()
     panel = _panel_frame_for_write_path()
@@ -1258,8 +1245,8 @@ def test_materialized_dataset_asset_filter_is_forwarded_outside_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: list[dict[str, object]] = []
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024**3, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=1024**3,
     )
 
     class Session:
@@ -1338,11 +1325,11 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
         "iter_dataset_chunks_with_policy",
         lambda *args, **kwargs: observed.append(kwargs) or chunks,
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "5"},
+        explicit_cap_bytes=5 * 1024 * 1024,
     )
-    assert policy.payload_target_bytes == policy.task_memory_budget_bytes
+    assert policy.payload_target_bytes == 1024**2
 
     result = materialization_planning.available_trading_sessions(
         SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
@@ -1364,6 +1351,7 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
     )
     transform_row_bytes = 2 * np.dtype(np.bool_).itemsize + np.dtype(np.int64).itemsize
     target_bytes = min(
+        policy.payload_target_bytes,
         retained_bytes + (10**9 + 5) // 6,
         (policy.task_memory_budget_bytes - retained_bytes)
         * fixed_row_bytes
@@ -1401,12 +1389,9 @@ def test_available_trading_sessions_small_fit_reaches_exact_working_set_check(
         )
 
     monkeypatch.setattr(materialization_io, "iter_dataset_chunks_with_policy", read)
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024**2,
-        environ={
-            "QRP_TASK_MEMORY_BUDGET_MB": "4",
-            "QRP_PAYLOAD_TARGET_MB": "4",
-        },
+        explicit_cap_bytes=4 * 1024 * 1024,
     )
 
     monkeypatch.setattr(
@@ -1461,8 +1446,8 @@ def test_available_trading_sessions_retains_only_selected_boundary_state(
         "iter_dataset_chunks_with_policy",
         lambda *_args, **_kwargs: chunks(),
     )
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024**3, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=1024**3,
     )
 
     result = materialization_planning.available_trading_sessions(
@@ -1484,12 +1469,9 @@ def test_dataset_coverage_reader_accounts_compact_retained_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = pd.date_range("2024-01-01", periods=3, freq="D")
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024**2,
-        environ={
-            "QRP_TASK_MEMORY_BUDGET_MB": "4",
-            "QRP_PAYLOAD_TARGET_MB": "4",
-        },
+        explicit_cap_bytes=4 * 1024 * 1024,
     )
     observed: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -1517,7 +1499,10 @@ def test_dataset_coverage_reader_accounts_compact_retained_state(
             "columns": ["timestamp"],
             "time_window": TimeWindow("2024-01-01", "2024-01-03"),
             "resource_policy": policy,
-            "target_chunk_bytes": policy.task_memory_budget_bytes - retained_bytes,
+            "target_chunk_bytes": min(
+                policy.payload_target_bytes,
+                policy.task_memory_budget_bytes - retained_bytes,
+            ),
             "retained_payload_bytes": retained_bytes,
         }
     ]
@@ -1526,9 +1511,9 @@ def test_dataset_coverage_reader_accounts_compact_retained_state(
 def test_dataset_coverage_preflights_int64_normalization_before_transform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "4", "QRP_PAYLOAD_TARGET_MB": "1"},
+        explicit_cap_bytes=4 * 1024 * 1024,
     )
     chunk = pd.DataFrame({"timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"])})
     retained_state_bytes = 17
@@ -1580,9 +1565,9 @@ def test_dataset_coverage_preflights_int64_normalization_before_transform(
 
 def test_adaptive_materialization_publication_carries_upstream_retained_bytes() -> None:
     frame = pd.DataFrame({"asset_id": ["a"], "timestamp": [pd.Timestamp("2024-01-02")]})
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1", "QRP_PAYLOAD_TARGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     with runtime_resource_policy_scope(policy):
         publications = list(
@@ -1601,9 +1586,9 @@ def test_adaptive_materialization_publication_carries_upstream_retained_bytes() 
 
 
 def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1", "QRP_PAYLOAD_TARGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
 
     class SliceRejectingTuple(tuple):
@@ -1634,9 +1619,9 @@ def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
 
 
 def test_adaptive_tuple_slice_is_released_before_next_slice_allocation() -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=8 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "2", "QRP_PAYLOAD_TARGET_MB": "1"},
+        explicit_cap_bytes=2 * 1024 * 1024,
     )
     previous_slice: list[weakref.ReferenceType[object] | None] = [None]
 
@@ -1688,9 +1673,9 @@ def test_sorted_publication_reserves_upstream_before_key_temporaries(
         kind=ProcessedDataKind.PANEL,
         columns=(*platform_entity_time_key(), "payload"),
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1", "QRP_PAYLOAD_TARGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     frame = pd.DataFrame(
         {
@@ -1727,9 +1712,8 @@ def test_sorted_publication_reserves_upstream_before_key_temporaries(
 def test_active_materialization_rejects_missing_outer_policy_before_bounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     bounds_hits: list[Sequence[pd.Timestamp]] = []
     sessions = (pd.Timestamp("2024-01-02"),)
@@ -1761,9 +1745,8 @@ def test_active_materialization_outer_scope_owns_factory_snapshot_and_primary(
     monkeypatch: pytest.MonkeyPatch,
     primary_type: type[BaseException],
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     sessions = pd.date_range("2024-01-02", periods=2)
     original = tuple(sessions)
@@ -1819,9 +1802,8 @@ def test_active_materialization_callback_receives_full_owned_session_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     sessions = pd.date_range("2024-01-01", periods=4)
     original = tuple(sessions)
@@ -1864,9 +1846,8 @@ def test_active_materialization_never_consumed_factory_abandons_without_resource
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     source_hits: list[str] = []
     monkeypatch.setattr(
@@ -1904,8 +1885,8 @@ def test_active_materialization_owner_deduplicates_splits_and_closes(
     closed: list[bool] = []
     attempts: list[tuple[tuple[object, ...], int]] = []
     sessions = tuple(pd.to_datetime(["2024-01-02", "2024-01-03"]))
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024**3, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=1024**3,
     )
 
     def source():
@@ -2005,9 +1986,8 @@ def test_active_materialization_owns_stable_target_sessions_across_capacity_spli
         sessions = IndexedSessions(list(original))
     target = original if window_kind == "full" else original[1:3]
     window = TimeWindow(target[0].date(), target[-1].date())
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     first_attempt = True
 
@@ -2087,9 +2067,8 @@ def test_active_materialization_rejects_hostile_datetime_index_subclass(
             self.__dict__["_hostile_data"] = value
 
     sessions = AliasingDatetimeIndex(pd.date_range("2024-01-01", periods=2))
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     monkeypatch.setattr(
         materialization_io,
@@ -2130,9 +2109,8 @@ def test_active_materialization_admits_source_and_snapshot_overlap_before_copy(
         if container_kind == "datetime_index"
         else IndexedSessions(values)
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     source_bytes = (
         sessions.nbytes
@@ -2197,9 +2175,8 @@ def test_active_materialization_owner_preserves_indexed_target_session_view(
     source_opened: list[bool] = []
     callback_sessions: list[Sequence[pd.Timestamp]] = []
     sessions = IndexedSessions(tuple(pd.date_range("2024-01-01", periods=4)))
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
 
     def source():
@@ -2264,9 +2241,9 @@ def test_active_materialization_admits_sessions_before_slice_index_or_source(
                 raise AssertionError("session_slice_before_capacity_gate")
             return pd.Timestamp("2024-01-01") + pd.Timedelta(seconds=key)
 
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     monkeypatch.setattr(
         materialization_planning,
@@ -2296,9 +2273,8 @@ def test_active_materialization_admits_sessions_before_slice_index_or_source(
 def test_active_materialization_requires_artifact_root_before_index_or_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     monkeypatch.setattr(
         materialization_planning,
@@ -2353,9 +2329,9 @@ def test_active_materialization_owner_splits_real_storage_capacity(
         ),
         spec=spec,
     )
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=16 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     attempts: list[tuple[object, ...]] = []
 
@@ -2400,8 +2376,8 @@ def test_active_materialization_owner_preserves_primary_base_exception(
     error_type: type[BaseException],
 ) -> None:
     closed: list[bool] = []
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024**3, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=1024**3,
     )
 
     def source():
@@ -2433,8 +2409,8 @@ def test_active_materialization_owner_closes_source_on_early_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     closed: list[bool] = []
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024**3, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=1024**3,
     )
 
     def source():
@@ -2467,9 +2443,8 @@ def test_active_materialization_owner_closes_source_on_early_close(
 def test_active_materialization_scope_covers_indexes_source_materialize_and_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     observed: list[tuple[str, RuntimeResourcePolicy | None]] = []
 
@@ -2527,8 +2502,8 @@ def test_active_materialization_scope_covers_indexes_source_materialize_and_clos
 def test_active_materialization_owner_surfaces_close_failure_after_exhaustion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024**3, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=1024**3,
     )
 
     def source():
@@ -2561,8 +2536,8 @@ def test_valid_bar_owner_reads_with_retained_state_and_closes(
 ) -> None:
     closed: list[bool] = []
     retained: list[int] = []
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024**3, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=1024**3,
     )
 
     def source():
@@ -2648,9 +2623,8 @@ def test_valid_bar_index_streams_exact_rows_without_column_validation_copies(
     materialization_planning._build_valid_bar_key_index(
         Path("panel"),
         index=Index(),  # type: ignore[arg-type]
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=1024**3,
-            environ={},
         ),
     )
 
@@ -2663,9 +2637,9 @@ def test_valid_bar_index_streams_exact_rows_without_column_validation_copies(
 def test_active_asset_discovery_admits_before_validation_or_arrow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     monkeypatch.setattr(
         materialization_io,
@@ -2711,9 +2685,8 @@ def test_active_asset_discovery_admits_before_validation_or_arrow(
 
 
 def test_valid_bar_boundary_requires_strictly_ordered_assets() -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
 
     with materialization_planning.ExactPrimaryKeyIndex(
@@ -2736,9 +2709,9 @@ def test_valid_bar_boundary_requires_strictly_ordered_assets() -> None:
 def test_valid_bar_boundary_admits_state_before_array_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=4 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "1"},
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
     monkeypatch.setattr(
         materialization_planning.np,
@@ -2764,9 +2737,8 @@ def test_valid_bar_boundary_admits_state_before_array_allocation(
 def test_valid_bar_output_capacity_is_checked_before_dataframe_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
 
     class Index:
@@ -2835,8 +2807,8 @@ def test_valid_bar_output_capacity_is_checked_before_dataframe_construction(
 def test_valid_bar_index_builds_once_across_adaptive_asset_splits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024**3, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=1024**3,
     )
     reads: list[tuple[str, ...]] = []
 
@@ -2885,8 +2857,8 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
     build_fails: bool,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024**3, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=1024**3,
     )
     active_indexes: list[materialization_planning.ExactPrimaryKeyIndex] = []
     build_observations: list[tuple[int, int, int]] = []
@@ -2968,9 +2940,8 @@ def test_active_materialization_indexes_use_dataset_sibling_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "processed" / "panel"
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     observed: list[Path] = []
 
@@ -3020,8 +2991,8 @@ def test_active_materialization_indexes_use_dataset_sibling_parent(
 def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
-        available_memory_bytes=1024**3, environ={}
+    policy = RuntimeResourcePolicy.capture(
+        available_memory_bytes=1024**3,
     )
     retained: list[object] = []
     closed: list[str] = []
@@ -3127,9 +3098,8 @@ def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
         target,
         layout=layout,
         processed_catalog=_catalog(panel_spec, execution_spec, target),
-        resource_policy=RuntimeResourcePolicy.from_environment(
+        resource_policy=RuntimeResourcePolicy.capture(
             available_memory_bytes=1024**3,
-            environ={},
         ),
     )
 
@@ -3161,9 +3131,8 @@ def test_source_input_root_keeps_one_policy_active_for_all_children(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     spec = _processed_spec(
         "target",
@@ -3202,9 +3171,8 @@ def test_source_input_root_retires_policy_after_every_primary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     primary = primary_type("source_child_primary")
     spec = _processed_spec(
@@ -3242,9 +3210,8 @@ def test_dependency_root_keeps_one_policy_active_for_all_children(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     left = _processed_spec("left", kind=ProcessedDataKind.ANNOTATION)
     right = _processed_spec("right", kind=ProcessedDataKind.ANNOTATION)
@@ -3301,9 +3268,8 @@ def test_dependency_root_retires_policy_after_every_primary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=1024**3,
-        environ={},
     )
     primary = primary_type("dependency_child_primary")
     dependency = _processed_spec("left", kind=ProcessedDataKind.ANNOTATION)
@@ -3445,9 +3411,9 @@ def test_sorted_output_releases_previous_publication_before_upstream_next(
         assert first_reference() is None
         yield second
 
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=64 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "32"},
+        explicit_cap_bytes=32 * 1024 * 1024,
     )
     output = iter(
         materialization_io.iter_sorted_output_chunks(
@@ -3538,9 +3504,9 @@ def test_a_share_session_offset_entrants_require_exact_non_negative_int_before_i
     entrant: str,
     value: object,
 ) -> None:
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=64 * 1024**2,
-        environ={"QRP_TASK_MEMORY_BUDGET_MB": "32"},
+        explicit_cap_bytes=32 * 1024 * 1024,
     )
     sessions = pd.date_range("2024-01-02", periods=2)
     io_hits: list[str] = []

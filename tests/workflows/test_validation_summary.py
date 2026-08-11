@@ -312,9 +312,8 @@ def test_validated_text_scan_accepts_payload_at_exact_runtime_target(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "summary.md"
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=2 * MIB,
-        environ={},
     )
     line_pairs, remainder = divmod(policy.payload_target_bytes, 2)
     path.write_bytes((b"x\n" * line_pairs) + (b"x" * remainder))
@@ -329,9 +328,8 @@ def test_validated_text_scan_accepts_many_short_lines_over_runtime_soft_target(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "summary.md"
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=2 * MIB,
-        environ={},
     )
     path.write_bytes(b"x\n" * (policy.payload_target_bytes + 1))
 
@@ -1028,9 +1026,8 @@ def test_validation_summary_reports_all_observed_dataset_failure_classes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dataset_root = _valid_dataset(tmp_path, "observed_failures")
-    policy = RuntimeResourcePolicy.from_environment(
+    policy = RuntimeResourcePolicy.capture(
         available_memory_bytes=64 * MIB,
-        environ={},
     )
     inspection = validation_summary.inspect_dataset(
         dataset_root,
