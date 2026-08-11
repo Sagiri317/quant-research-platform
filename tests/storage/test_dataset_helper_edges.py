@@ -260,7 +260,7 @@ def test_exact_key_classifier_gates_disk_overlap_before_exact_mutation(
         nonlocal calls
         assert reserve_bytes > 0
         calls += 1
-        if calls == 4:
+        if calls == 3:
             raise OSError("disk_headroom_exhausted")
 
     monkeypatch.setattr(key_tracking, "require_free_disk_headroom", gate)
@@ -1142,7 +1142,7 @@ def test_nested_primary_key_nonfinite_rejects_but_nested_value_allows(
         )
 
 
-def test_exact_key_index_disk_gates_initial_page_and_each_row(
+def test_exact_key_index_disk_gates_initial_page_and_bounded_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1166,7 +1166,7 @@ def test_exact_key_index_disk_gates_initial_page_and_each_row(
         )
 
     assert reserves[0] == key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES
-    assert len(reserves) == 3
+    assert len(reserves) == 2
     assert all(reserve > 0 for reserve in reserves)
 
 

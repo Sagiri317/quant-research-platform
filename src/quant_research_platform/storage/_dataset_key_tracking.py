@@ -31,6 +31,7 @@ from quant_research_platform.storage._scratch_ownership import (
 )
 
 _MAX_SQLITE_CACHE_BYTES = 8 * 1024 * 1024
+_DISK_RESERVE_BATCH_BYTES = 1024**2
 EXACT_KEY_SQLITE_PAGE_BYTES = 1024
 
 
@@ -643,6 +644,7 @@ class ExactPrimaryKeyIndex:
         self,
         rows: Iterable[tuple[str, bytes | bytearray, bytes | bytearray | None]],
     ) -> Iterator[tuple[str, bytes | bytearray, bytes | bytearray | None]]:
+        admitted_bytes = 0
         for namespace, payload, value in rows:
             reserve_bytes = (
                 27
@@ -650,10 +652,13 @@ class ExactPrimaryKeyIndex:
                 + len(payload)
                 + (0 if value is None else len(value))
             )
-            require_free_disk_headroom(
-                self._scratch_parent,
-                reserve_bytes=reserve_bytes,
-            )
+            if reserve_bytes > admitted_bytes:
+                admitted_bytes = max(_DISK_RESERVE_BATCH_BYTES, reserve_bytes)
+                require_free_disk_headroom(
+                    self._scratch_parent,
+                    reserve_bytes=admitted_bytes,
+                )
+            admitted_bytes -= reserve_bytes
             yield namespace, payload, value
 
 

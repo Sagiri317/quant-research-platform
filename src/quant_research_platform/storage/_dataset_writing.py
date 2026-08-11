@@ -79,6 +79,7 @@ from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 
 _PARQUET_WRITE_FIXED_RESERVE_BYTES = 1024**2
+_TIMESTAMP_PREPARATION_BYTES_PER_ROW = 256
 _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES = (
     _PARQUET_WRITE_FIXED_RESERVE_BYTES
     + EXACT_KEY_SQLITE_PAGE_BYTES
@@ -551,6 +552,10 @@ def _write_contents(
     minimum_retained_payload_bytes: int,
 ) -> _WriteStats:
     timestamp_column = validate_dataset_spec(spec)
+    timestamp_key_count = sum(
+        spec.column_roles.get(column) is ColumnRole.TIMESTAMP
+        for column in spec.primary_key
+    )
     accumulator = _WriteStats(
         spec=spec,
         data_root=root,
@@ -621,7 +626,12 @@ def _write_contents(
             _require_writer_headroom(
                 chunk_headroom,
                 retained_bytes=declared_bytes,
-                allocation_bytes=2 * bounded_frame_bytes,
+                allocation_bytes=(
+                    2 * bounded_frame_bytes
+                    + len(bounded_frame)
+                    * timestamp_key_count
+                    * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
+                ),
             )
             prepared_frame, bounded_logical_dtypes = accumulator.prepare_frame(
                 bounded_frame

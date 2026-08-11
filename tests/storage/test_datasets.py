@@ -8566,6 +8566,66 @@ def test_writer_rejects_before_pandas_conversion_overlap(
     assert conversions == 0
 
 
+def test_writer_rejects_timestamp_prepare_before_large_temporary_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(
+                "2014-01-01",
+                periods=200_000,
+                freq="min",
+            )
+        }
+    )
+    target_chunk_bytes = 1024**2
+    bounded = next(
+        dataset_reading.iter_bounded_frame_chunks(
+            frame,
+            target_chunk_bytes=target_chunk_bytes,
+        )
+    )
+    current_threshold = pandas_frame_payload_bytes(frame) + 2 * (
+        pandas_frame_payload_bytes(bounded)
+    )
+    policy = _writer_test_policy(working_headroom_bytes=current_threshold)
+    assert policy.payload_target_bytes == target_chunk_bytes
+    spec = replace(
+        make_processed_dataset_spec("writer_timestamp_admission"),
+        column_roles={"timestamp": ColumnRole.TIMESTAMP},
+        primary_key=("timestamp",),
+    )
+    conversions = 0
+
+    def forbid_timestamp_conversion(*_args, **_kwargs):
+        nonlocal conversions
+        conversions += 1
+        raise AssertionError("timestamp_conversion_started_before_admission")
+
+    monkeypatch.setattr(
+        dataset_writing,
+        "strict_timestamp_series",
+        forbid_timestamp_conversion,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_working_set_exceeds_task_memory_budget",
+    ):
+        dataset_writing.write_dataset(
+            make_dataset_artifact_root(
+                tmp_path,
+                "writer_timestamp_admission",
+            ),
+            frame,
+            spec=spec,
+            resource_policy=policy,
+        )
+
+    assert conversions == 0
+
+
 def test_writer_rejects_before_native_parquet_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
