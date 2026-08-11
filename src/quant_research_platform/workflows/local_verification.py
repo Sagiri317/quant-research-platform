@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from quant_research_platform.artifacts._output_bundle_validation import (
     _read_prediction_output_bundle,
@@ -65,7 +66,12 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import DatasetFileIdentity
-from quant_research_platform.storage._scratch_ownership import remove_owned_scratch
+from quant_research_platform.storage._scratch_ownership import (
+    move_path_no_replace,
+    owned_scratch_name,
+    remove_owned_scratch,
+    require_owned_scratch,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     build_layer_summary,
@@ -144,23 +150,53 @@ def run_local_verification(
         run_root,
         reserve_bytes=resource_policy.payload_target_bytes * 2,
     )
-    _prepare_run_root(
+    replaced_identity = _replacement_target_identity(
         run_root,
-        run_id=run_id,
         replace_output=config.replace_output,
     )
-    layout = LocalVerificationLayout.from_run_root(run_root)
-    _create_layout_directories(layout)
-
-    with runtime_resource_policy_scope(resource_policy):
-        return _run_local_verification_with_policy(
-            config=config,
-            effective_windows=effective_windows,
-            run_root=run_root,
+    staged_root = run_root.with_name(owned_scratch_name(".lv-", uuid4().hex[:8]))
+    staged_identity: os.stat_result | None = None
+    try:
+        _prepare_run_root(
+            staged_root,
             run_id=run_id,
-            layout=layout,
-            resource_policy=resource_policy,
         )
+        staged_identity = staged_root.lstat()
+        layout = LocalVerificationLayout.from_run_root(staged_root)
+        _create_layout_directories(layout)
+        with runtime_resource_policy_scope(resource_policy):
+            result = _run_local_verification_with_policy(
+                config=config,
+                effective_windows=effective_windows,
+                run_root=staged_root,
+                run_id=run_id,
+                layout=layout,
+                resource_policy=resource_policy,
+            )
+        _publish_staged_run_root(
+            staged_root,
+            staged_identity=staged_identity,
+            run_root=run_root,
+            replaced_identity=replaced_identity,
+        )
+    except BaseException:
+        if staged_identity is None:
+            try:
+                staged_identity = staged_root.lstat()
+            except BaseException:
+                staged_identity = None
+        if staged_identity is not None:
+            try:
+                remove_owned_scratch(staged_root, staged_identity)
+            except BaseException:
+                pass
+        raise
+    return LocalVerificationRunResult(
+        status=result.status,
+        run_id=result.run_id,
+        run_root=_logical_run_root(run_root),
+        summary=result.summary,
+    )
 
 
 def _run_local_verification_with_policy(
@@ -585,11 +621,58 @@ def _find_git_root(path: Path) -> Path | None:
     return None
 
 
+def _replacement_target_identity(
+    run_root: Path,
+    *,
+    replace_output: bool,
+) -> os.stat_result | None:
+    if not run_root.exists():
+        return None
+    identity = run_root.lstat()
+    if not stat.S_ISDIR(identity.st_mode):
+        raise ValueError("local_verification_run_root_invalid")
+    if not replace_output:
+        raise ValueError("run_root_already_exists")
+    _read_run_json(run_root)
+    current = run_root.lstat()
+    if not stat.S_ISDIR(current.st_mode) or not os.path.samestat(current, identity):
+        raise ValueError("local_verification_run_root_invalid")
+    return identity
+
+
+def _publish_staged_run_root(
+    staged_root: Path,
+    *,
+    staged_identity: os.stat_result,
+    run_root: Path,
+    replaced_identity: os.stat_result | None,
+) -> None:
+    require_owned_scratch(staged_root, staged_identity)
+    if replaced_identity is None:
+        move_path_no_replace(staged_root, run_root)
+        return
+    require_owned_scratch(run_root, replaced_identity)
+    backup_root = run_root.with_name(owned_scratch_name(".lv-old-", uuid4().hex[:8]))
+    move_path_no_replace(run_root, backup_root)
+    try:
+        require_owned_scratch(staged_root, staged_identity)
+        move_path_no_replace(staged_root, run_root)
+    except BaseException as primary:
+        try:
+            move_path_no_replace(backup_root, run_root)
+        except BaseException as rollback_error:
+            primary.add_note(
+                "local verification old-good rollback also failed: "
+                f"{type(rollback_error).__name__}"
+            )
+        raise
+    remove_owned_scratch(backup_root, replaced_identity)
+
+
 def _prepare_run_root(
     path: Path,
     *,
     run_id: str,
-    replace_output: bool,
     repo_root: Path | None = None,
 ) -> None:
     run_root = require_unaliased_path(
@@ -605,26 +688,8 @@ def _prepare_run_root(
         metadata = run_root.lstat()
         if not stat.S_ISDIR(metadata.st_mode):
             raise ValueError("local_verification_run_root_invalid")
-        identity = metadata
-        entries = tuple(run_root.iterdir())
-        if entries and not replace_output:
-            raise ValueError("run_root_already_exists")
-        if entries:
-            _read_run_json(run_root)
-            require_unaliased_path(
-                run_root, error="local_verification_run_root_invalid"
-            )
-            current = run_root.lstat()
-            if not stat.S_ISDIR(current.st_mode) or not os.path.samestat(
-                current, identity
-            ):
-                raise ValueError("local_verification_run_root_invalid")
-            remove_owned_scratch(run_root, identity)
-            if run_root.exists():
-                raise ValueError("local_verification_run_root_invalid")
-            run_root.mkdir(parents=True, exist_ok=False)
-    else:
-        run_root.mkdir(parents=True, exist_ok=False)
+        raise ValueError("run_root_already_exists")
+    run_root.mkdir(parents=True, exist_ok=False)
     _write_seed_run_json(run_root, run_id=run_id)
 
 
@@ -735,7 +800,7 @@ def _read_run_json(run_root: Path) -> dict[str, Any]:
         run_id = payload.get("run_id")
         created_at = payload.get("created_at")
         if (
-            set(payload) != _SEED_RUN_KEYS
+            not _SEED_RUN_KEYS.issubset(payload)
             or payload.get("workflow_id") != _WORKFLOW_ID
             or not isinstance(run_id, str)
             or not run_id

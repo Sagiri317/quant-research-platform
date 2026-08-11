@@ -126,10 +126,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     if summary_failure:
         with pytest.raises(OSError, match="summary_publish_failed"):
             run_local_verification(config)
-        seed_payload = json.loads(
-            (run_root / "run.json").read_text(encoding="utf-8")
-        )
-        assert "completed_at" not in seed_payload
+        assert not run_root.exists()
         assert publish_order == ["summary"]
         return
     result = run_local_verification(config)
@@ -211,6 +208,90 @@ def test_local_verification_publishes_completed_run_only_after_summary(
         "run.json",
         "summary.md",
     }
+
+
+def test_local_verification_replace_failure_preserves_old_good(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "old_good")
+    module._prepare_run_root(
+        run_root,
+        run_id="old_good",
+        repo_root=run_root.parents[1],
+    )
+    marker = run_root / "old-good.txt"
+    marker.write_text("old-good\n", encoding="utf-8")
+    old_run_json = (run_root / "run.json").read_bytes()
+
+    def fail_replacement(**kwargs):
+        candidate = kwargs["run_root"]
+        (candidate / "partial.txt").write_text("partial\n", encoding="utf-8")
+        raise RuntimeError("replacement_failed")
+
+    monkeypatch.setattr(
+        module,
+        "_run_local_verification_with_policy",
+        fail_replacement,
+    )
+    config = make_local_verification_config(
+        run_root=run_root,
+        run_id="old_good",
+        start_date="2014-01-01",
+        end_date="2014-12-31",
+        replace_output=True,
+        profile=profile_with_empty_prediction_and_portfolio_builders(),
+    )
+
+    with pytest.raises(RuntimeError, match="replacement_failed"):
+        run_local_verification(config)
+
+    assert (run_root / "run.json").read_bytes() == old_run_json
+    assert marker.read_text(encoding="utf-8") == "old-good\n"
+    assert not (run_root / "partial.txt").exists()
+    assert tuple(path.name for path in run_root.parent.iterdir()) == ("old_good",)
+
+    def complete_replacement(**kwargs):
+        candidate = kwargs["run_root"]
+        (candidate / "new-good.txt").write_text("new-good\n", encoding="utf-8")
+        return module.LocalVerificationRunResult(
+            status="PASS",
+            run_id="old_good",
+            run_root=candidate.name,
+            summary={},
+        )
+
+    monkeypatch.setattr(
+        module,
+        "_run_local_verification_with_policy",
+        complete_replacement,
+    )
+    original_move = module.move_path_no_replace
+
+    def fail_candidate_publish(source, target):
+        if (
+            source.name.startswith(".lv-")
+            and not source.name.startswith(".lv-old-")
+            and target == run_root
+        ):
+            raise OSError("replacement_publish_failed")
+        return original_move(source, target)
+
+    monkeypatch.setattr(module, "move_path_no_replace", fail_candidate_publish)
+    with pytest.raises(OSError, match="replacement_publish_failed"):
+        run_local_verification(config)
+
+    assert (run_root / "run.json").read_bytes() == old_run_json
+    assert marker.read_text(encoding="utf-8") == "old-good\n"
+    assert tuple(path.name for path in run_root.parent.iterdir()) == ("old_good",)
+
+    monkeypatch.setattr(module, "move_path_no_replace", original_move)
+    result = run_local_verification(config)
+
+    assert result.run_root == "old_good"
+    assert not marker.exists()
+    assert (run_root / "new-good.txt").read_text(encoding="utf-8") == "new-good\n"
+    assert tuple(path.name for path in run_root.parent.iterdir()) == ("old_good",)
 
 
 def test_local_verification_skips_empty_prediction_and_portfolio_catalogs(

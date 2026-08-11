@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
-import shutil
+import os
 from pathlib import Path
 
 import pytest
@@ -106,7 +106,6 @@ def test_local_verification_run_root_writes_seed_run_json(
     module._prepare_run_root(
         run_root,
         run_id="local_verification_output",
-        replace_output=False,
         repo_root=repo_root,
     )
 
@@ -123,54 +122,6 @@ def test_local_verification_run_root_writes_seed_run_json(
     }
 
 
-def test_local_verification_replace_quarantines_owned_root_before_delete(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _workflow_module()
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    run_root = repo_root / ".run" / "local" / "report-output"
-    module._prepare_run_root(
-        run_root,
-        run_id="report_output",
-        replace_output=False,
-        repo_root=repo_root,
-    )
-    (run_root / "owned.txt").write_text("owned", encoding="utf-8")
-    replace_hits: list[tuple[Path, Path]] = []
-    shared = importlib.import_module(
-        "quant_research_platform.storage._scratch_ownership"
-    )
-
-    def move_no_replace(source, destination):  # noqa: ANN001, ANN202
-        source_path = Path(source)
-        destination_path = Path(destination)
-        source_path.rename(destination_path)
-        if source_path == run_root:
-            replace_hits.append((source_path, destination_path))
-            run_root.mkdir()
-            (run_root / "foreign.txt").write_text("foreign", encoding="utf-8")
-
-    monkeypatch.setattr(shared, "move_path_no_replace", move_no_replace, raising=False)
-    caught: BaseException | None = None
-    try:
-        module._prepare_run_root(
-            run_root,
-            run_id="report_output",
-            replace_output=True,
-            repo_root=repo_root,
-        )
-    except BaseException as error:
-        caught = error
-
-    assert len(replace_hits) == 1
-    assert (run_root / "foreign.txt").read_text(encoding="utf-8") == "foreign"
-    assert not replace_hits[0][1].exists()
-    assert isinstance(caught, ValueError)
-    shutil.rmtree(run_root)
-
-
 def test_local_verification_replace_output_rejects_unowned_directory(
     tmp_path: Path,
 ) -> None:
@@ -185,17 +136,15 @@ def test_local_verification_replace_output_rejects_unowned_directory(
         ValueError,
         match="run_root_not_owned_by_local_verification_workflow",
     ):
-        module._prepare_run_root(
+        module._replacement_target_identity(
             run_root,
-            run_id="local_verification_output",
             replace_output=True,
-            repo_root=repo_root,
         )
 
     assert (run_root / "unowned.txt").is_file()
 
 
-def test_local_verification_replace_output_allows_owned_directory(
+def test_local_verification_replace_target_validation_preserves_owned_directory(
     tmp_path: Path,
 ) -> None:
     module = _workflow_module()
@@ -206,19 +155,18 @@ def test_local_verification_replace_output_allows_owned_directory(
     module._prepare_run_root(
         run_root,
         run_id="report_output",
-        replace_output=False,
         repo_root=repo_root,
     )
     (run_root / "old-artifact.txt").write_text("old\n", encoding="utf-8")
-    module._prepare_run_root(
+    identity = module._replacement_target_identity(
         run_root,
-        run_id="report_output",
         replace_output=True,
-        repo_root=repo_root,
     )
 
     assert run_root.is_dir()
-    assert not (run_root / "old-artifact.txt").exists()
+    assert identity is not None
+    assert os.path.samestat(identity, run_root.lstat())
+    assert (run_root / "old-artifact.txt").is_file()
     assert module._read_run_json(run_root)["root_ownership"]["replace_safe"] is True
 
 
@@ -232,7 +180,6 @@ def test_local_verification_rejects_owned_run_json_with_nested_identity_violatio
     module._prepare_run_root(
         run_root,
         run_id="report_output",
-        replace_output=False,
         repo_root=repo_root,
     )
     payload = module._read_run_json(run_root)
@@ -243,11 +190,9 @@ def test_local_verification_rejects_owned_run_json_with_nested_identity_violatio
         ValueError,
         match="run_root_not_owned_by_local_verification_workflow",
     ):
-        module._prepare_run_root(
+        module._replacement_target_identity(
             run_root,
-            run_id="report_output",
             replace_output=True,
-            repo_root=repo_root,
         )
 
 

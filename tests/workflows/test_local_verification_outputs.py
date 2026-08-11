@@ -43,7 +43,6 @@ def test_prepare_run_root_creates_explicit_repo_internal_output(
     module._prepare_run_root(
         run_root,
         run_id="s1",
-        replace_output=False,
         repo_root=repo_root,
     )
 
@@ -68,6 +67,5 @@ def test_prepare_run_root_uses_git_boundary_outside_cwd(
     module._prepare_run_root(
         run_root,
         run_id="s1",
-        replace_output=False,
     )
     assert (run_root / "run.json").is_file()
