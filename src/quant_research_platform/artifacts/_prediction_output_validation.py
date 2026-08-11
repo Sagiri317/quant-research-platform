@@ -21,6 +21,7 @@ from quant_research_platform.contracts.predictions import (
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research.models.algorithm_facts import (
+    algorithm_facts,
     model_default_hyperparameters,
 )
 
@@ -217,6 +218,8 @@ def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obje
         or dependency_status["status"] != "available"
         or type(dependency_status["package"]) is not str
         or not dependency_status["package"]
+        or dependency_status["package"]
+        != (algorithm_facts(model_algorithm).dependency_package or "internal")
         or type(dependency_status["version"]) is not str
         or not dependency_status["version"]
     ):

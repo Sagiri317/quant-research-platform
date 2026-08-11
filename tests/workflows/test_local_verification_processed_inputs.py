@@ -216,6 +216,12 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
         for prediction_spec in smoke_prediction_specs()
     }
     prediction_ids = sorted(prediction_specs)
+    representative_prediction_id = next(
+        prediction_id
+        for prediction_id, prediction_spec in prediction_specs.items()
+        if base_profile.models.get(prediction_spec.model_id).model_algorithm
+        == "linear_regression"
+    )
 
     def materialize_processed(layout, kinds):
         assert kinds == frozenset(
@@ -296,7 +302,15 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
     assert share_safety_scan["existing_scanned_count"] == expected_evidence_count
     assert share_safety_scan["missing_count"] == 0
     assert share_safety_scan["requested_paths"] == expected_evidence_paths
-    assert len(run_payload["outputs"]) == len(prediction_ids) + 2
+    assert len(run_payload["outputs"]) == len(prediction_ids) + 3
+    assert {
+        output["output_id"]
+        for output in run_payload["outputs"]
+        if output["output_definition_id"] == "portfolio_outputs"
+    } == {
+        "signal_forward_return_20d_portfolio",
+        f"{representative_prediction_id}_portfolio",
+    }
     assert set(metrics["signal"]) == {"mom_20d", "rev_1d", "mom_20d_zscore"}
     assert "mom_20d_zscore" in research.columns
     assert all(

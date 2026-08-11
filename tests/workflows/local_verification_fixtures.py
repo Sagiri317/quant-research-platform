@@ -350,22 +350,31 @@ def persist_tiny_a_share_processed_inputs(
     profile,
 ) -> dict[str, object]:
     dataset_spec = profile.research_datasets.get("price_volume_forward_returns")
+    training_periods = max(
+        model.purge_gap_steps for model in profile.models.list()
+    ) + 2
     inspections: dict[str, object] = {}
     for data_id in dataset_spec.input_data_ids:
         spec = profile.processed.get(data_id)
         root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
         write_dataset(
             root,
-            _tiny_a_share_processed_frame(spec),
+            _tiny_a_share_processed_frame(spec, training_periods=training_periods),
             spec=spec,
         )
         inspections[data_id] = inspect_dataset(root)
     return inspections
 
 
-def _tiny_a_share_processed_frame(spec: ProcessedDataSpec) -> pd.DataFrame:
+def _tiny_a_share_processed_frame(
+    spec: ProcessedDataSpec,
+    *,
+    training_periods: int,
+) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    dates = pd.to_datetime(["2014-01-02", "2014-01-03", "2014-07-02", "2015-01-05"])
+    dates = pd.bdate_range("2014-01-02", periods=training_periods).append(
+        pd.to_datetime(["2014-07-02", "2015-01-05"])
+    )
     for date_index, timestamp in enumerate(dates, start=1):
         for asset_index in range(1, 7):
             row: dict[str, object] = {
