@@ -647,7 +647,7 @@ def test_csv_owner_admits_fast_decoded_list_copy() -> None:
 
 def test_over_width_header_rejects_before_field_decode() -> None:
     record = SimpleNamespace(
-        field_count=raw_schemas._legal_provider_field_count_bound() + 1,
+        field_count=50_000,
         iter_fields=lambda: pytest.fail("over_width_header_decoded"),
     )
 
@@ -1828,7 +1828,7 @@ def test_standalone_reference_dedup_uses_source_sibling_parent(
     assert observed == [source_parent]
 
 
-def test_csmar_over_width_header_fails_at_inspection_and_reader_boundaries(
+def test_csmar_duplicate_header_fails_at_inspection_and_reader_boundaries(
     tmp_path: Path,
 ) -> None:
     export = tmp_path / "TRDNEW_Dalyr.csv"
@@ -1837,9 +1837,9 @@ def test_csmar_over_width_header_fails_at_inspection_and_reader_boundaries(
     frame.columns = ("Stkcd", "Stkcd", *frame.columns[2:])
     frame.to_csv(export, index=False)
 
-    with pytest.raises(ValueError, match="csmar_raw_export_schema_invalid"):
+    with pytest.raises(ValueError, match="duplicate_csmar_provider_column"):
         raw_schemas.inspect_raw_export_file(export)
-    with pytest.raises(ValueError, match="csmar_raw_export_schema_invalid"):
+    with pytest.raises(ValueError, match="duplicate_csmar_provider_column"):
         list(
             raw_exports.iter_private_export_chunks(
                 export,
@@ -1847,6 +1847,45 @@ def test_csmar_over_width_header_fails_at_inspection_and_reader_boundaries(
                 chunksize=1,
             )
         )
+
+
+def test_csmar_provider_superset_is_projected_before_dataframe_conversion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    export = tmp_path / "daily_market.csv"
+    frame = _market_bars_daily_raw_frame().iloc[:2].copy()
+    extra_columns = tuple(f"ProviderExtra{index}" for index in range(5))
+    for column in extra_columns:
+        frame[column] = "unused"
+    frame.to_csv(export, index=False)
+
+    inspection = raw_schemas.inspect_raw_export_file(export)
+    assert inspection.dataset == frequency_ids.MARKET_BARS_DATA_ID
+    assert inspection.columns == tuple(frame.columns)
+
+    original_raw_frame = raw_exports._raw_frame
+
+    def projected_raw_frame(rows: list[list[str]], header: list[str]) -> pd.DataFrame:
+        assert not set(extra_columns).intersection(header)
+        assert all(len(row) == len(header) for row in rows)
+        return original_raw_frame(rows, header)
+
+    monkeypatch.setattr(raw_exports, "_raw_frame", projected_raw_frame)
+    chunks = list(
+        raw_exports.iter_private_export_chunks(
+            export,
+            dataset=frequency_ids.MARKET_BARS_DATA_ID,
+            chunksize=2,
+        )
+    )
+
+    assert sum(len(chunk) for chunk in chunks) == len(frame)
+    assert all(
+        tuple(chunk.columns)
+        == tuple(column for column in frame.columns if column not in extra_columns)
+        for chunk in chunks
+    )
 
 
 def test_csmar_raw_schema_sidecar_and_missing_columns_are_reported(
@@ -4555,7 +4594,8 @@ def test_csv_reader_avoids_fast_record_duplicate_before_yield(
     gc.collect()
 
     assert row == ["a", "b"]
-    assert references == []
+    assert len(references) == 1
+    assert references[0]() is None
     rows.close()
 
 

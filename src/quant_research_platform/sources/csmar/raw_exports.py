@@ -1049,6 +1049,7 @@ def iter_private_export_chunks_with_policy(
     rows = iter(
         _iter_csv_records(
             export_path,
+            dataset=dataset,
             resource_policy=resource_policy,
             require_exact_width=True,
             expected_identity=expected_identity,
@@ -1139,6 +1140,7 @@ def _iter_csv_records(
     *,
     resource_policy: RuntimeResourcePolicy,
     require_exact_width: bool,
+    dataset: str | None = None,
     expected_identity: DatasetFileIdentity | None = None,
     retained_payload_bytes: list[int] | None = None,
 ) -> Iterator[tuple[list[str], list[str] | BoundedCsvRecord, int]]:
@@ -1152,21 +1154,38 @@ def _iter_csv_records(
             resource_policy=resource_policy,
             expected_identity=expected_identity,
             retained_payload_bytes=reader_retained_bytes,
-            materialize_records=require_exact_width,
-            first_record_field_count_error="csmar_raw_export_schema_invalid",
+            materialize_records=False,
         )
     )
     with closing_dataset_iterator(rows):
         header_record = next(rows, None)
         if header_record is None:
             return
-        header = (
-            header_record[0]
-            if require_exact_width
-            else materialize_header_record(header_record[0])
-        )
-        if require_exact_width and len(header) != len(set(header)):
-            raise ValueError("duplicate_csmar_provider_column")
+        physical_header = materialize_header_record(header_record[0])
+        physical_width = len(physical_header)
+        selected_positions: frozenset[int] | None = None
+        header = physical_header
+        if require_exact_width and dataset is not None:
+            from quant_research_platform.sources.csmar.field_mappings import (
+                COLUMN_ALIASES,
+                COLUMN_MAPPINGS,
+                validate_raw_column_names,
+            )
+
+            validate_raw_column_names(tuple(physical_header), dataset)
+            selected_columns = set(COLUMN_MAPPINGS[dataset])
+            selected_columns.update(
+                alias
+                for aliases in COLUMN_ALIASES.get(dataset, {}).values()
+                for alias in aliases
+            )
+            selected_positions = frozenset(
+                index
+                for index, column in enumerate(physical_header)
+                if column in selected_columns
+            )
+            header = [physical_header[index] for index in sorted(selected_positions)]
+            del physical_header
         del header_record
         header_owner_bytes = _pending_decoded_owner_known_bytes(
             payload_bytes=sum(_utf8_size(column) for column in header),
@@ -1181,9 +1200,13 @@ def _iter_csv_records(
                 break
             row: list[str] | BoundedCsvRecord = record
             if require_exact_width:
-                if len(record) != len(header):
+                if record.field_count != physical_width:
                     raise ValueError("malformed_csmar_csv_row")
-                row = record
+                row = [
+                    value
+                    for index, value in enumerate(record.iter_fields())
+                    if selected_positions is None or index in selected_positions
+                ]
                 del record
             yield header, row, source_bytes
             del row

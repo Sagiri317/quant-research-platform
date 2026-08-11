@@ -32,6 +32,7 @@ from tests.research.prediction_output_helpers import write_prediction_result
 
 def test_prediction_runner_selects_model_using_validation_metric(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = make_research_dataset_catalog(
@@ -77,6 +78,23 @@ def test_prediction_runner_selects_model_using_validation_metric(
             context_columns=(),
         ),
     )
+
+    original_to_dict = pd.DataFrame.to_dict
+
+    def reject_validation_row_graph(frame, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        orient = args[0] if args else kwargs.get("orient", "dict")
+        if orient == "records" and {
+            "timestamp",
+            "asset_id",
+            "label",
+            "prediction_score",
+        }.issubset(frame.columns):
+            raise AssertionError(
+                "validation predictions converted to a Python row graph"
+            )
+        return original_to_dict(frame, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "to_dict", reject_validation_row_graph)
 
     result = build_prediction_result_from_research_dataset(
         layout=layout,

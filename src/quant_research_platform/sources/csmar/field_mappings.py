@@ -257,14 +257,9 @@ def missing_raw_column_names(columns: tuple[str, ...], dataset: str) -> list[str
 
 
 def validate_raw_column_names(columns: tuple[str, ...], dataset: str) -> None:
-    """Reject provider fields outside the current registered mapping contract."""
+    """Reject ambiguous aliases while allowing bounded provider-superset fields."""
 
-    mapping = COLUMN_MAPPINGS[dataset]
     aliases = COLUMN_ALIASES.get(dataset, {})
-    legal = set(mapping)
-    legal.update(alias for values in aliases.values() for alias in values)
-    if set(columns).difference(legal):
-        raise ValueError("csmar_raw_export_schema_invalid")
     available = set(columns)
     for primary, provider_aliases in aliases.items():
         if sum(column in available for column in (primary, *provider_aliases)) > 1:

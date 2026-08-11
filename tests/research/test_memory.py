@@ -205,6 +205,27 @@ def test_complete_time_sized_frames_rejects_single_timestamp_over_budget() -> No
         )
 
 
+def test_complete_time_sized_frames_honor_live_root_reservations() -> None:
+    frame = _single_time_frame()
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with policy.reserve("outer_owner", policy.task_memory_budget_bytes):
+            with pytest.raises(
+                ValueError,
+                match="research_indivisible_time_unit_exceeds_task_memory_budget",
+            ):
+                list(
+                    iter_complete_time_sized_frames(
+                        iter((frame,)),
+                        timestamp_column="timestamp",
+                    )
+                )
+
+
 def test_time_boundary_concat_rejects_peak_before_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

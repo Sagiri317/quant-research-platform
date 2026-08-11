@@ -16,6 +16,10 @@ from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+)
 
 
 @dataclass(frozen=True)
@@ -211,6 +215,14 @@ def fit_linear_coefficients(
             chunk_start if train_start is None else min(train_start, chunk_start)
         )
         train_end = chunk_end if train_end is None else max(train_end, chunk_end)
+        _require_model_matrix_headroom(
+            usable,
+            spec,
+            live_array_bytes=(
+                (0 if r_factor is None else int(r_factor.nbytes))
+                + (0 if qt_y is None else int(qt_y.nbytes))
+            ),
+        )
         chunk_design = linear_design_matrix(usable, spec)
         if r_factor is None or qt_y is None:
             stacked_design = chunk_design
@@ -220,6 +232,7 @@ def fit_linear_coefficients(
             stacked_y = np.concatenate([qt_y, y])
         q_factor, r_factor = np.linalg.qr(stacked_design, mode="reduced")
         qt_y = q_factor.T @ stacked_y
+        del chunk_design, q_factor, stacked_design, stacked_y, y
 
     row_counts = {
         "rows_input": rows_input,
@@ -238,6 +251,9 @@ def fit_linear_coefficients(
     if row_count == 0:
         return np.empty(input_count + 1, dtype="float64"), row_counts, filter_metadata
     if chunk_count == 1 and first_usable is not None:
+        del chunk, filtered, usable
+        r_factor = None
+        qt_y = None
         return (
             fit_linear_coefficients_exact(first_usable, spec),
             row_counts,
@@ -311,6 +327,7 @@ def collect_training_frame(
     filter_columns_used: list[str] = []
     filter_definition = ""
     capped_training: pd.DataFrame | None = None
+    resource_policy = None
     for chunk in iter_complete_time_sized_frames(
         iter_model_work_frames(
             frames,
@@ -319,6 +336,19 @@ def collect_training_frame(
         ),
         timestamp_column="timestamp",
     ):
+        resource_policy = current_runtime_resource_policy()
+        retained_training_bytes = (
+            0
+            if capped_training is None
+            else pandas_frame_payload_bytes(capped_training)
+        )
+        if resource_policy is not None and (
+            resource_policy.reserved_memory_bytes
+            + retained_training_bytes
+            + 3 * pandas_frame_payload_bytes(chunk)
+            > resource_policy.task_memory_budget_bytes
+        ):
+            raise ValueError("model_training_working_set_exceeds_task_memory_budget")
         filtered, metadata = apply_filter_mode(
             chunk,
             mode=spec.sample_filter_mode,
@@ -334,13 +364,41 @@ def collect_training_frame(
             :, ["timestamp", *spec.input_columns, spec.label_column]
         ]
         if not usable.empty:
+            usable_payload_bytes = pandas_frame_payload_bytes(usable)
+            if resource_policy is not None and (
+                resource_policy.reserved_memory_bytes
+                + retained_training_bytes
+                + 3 * usable_payload_bytes
+                > resource_policy.task_memory_budget_bytes
+            ):
+                raise ValueError(
+                    "model_training_working_set_exceeds_task_memory_budget"
+                )
+            usable = validation_split.trim_training_buffer(usable, spec)
+            if capped_training is None:
+                capped_training = usable
+                continue
+            combined_payload_bytes = pandas_frame_payload_bytes(
+                capped_training
+            ) + pandas_frame_payload_bytes(usable)
+            if resource_policy is not None and (
+                resource_policy.reserved_memory_bytes + 3 * combined_payload_bytes
+                > resource_policy.task_memory_budget_bytes
+            ):
+                raise ValueError(
+                    "model_training_working_set_exceeds_task_memory_budget"
+                )
             capped_training = validation_split.trim_training_buffer(
-                usable
-                if capped_training is None
-                else pd.concat([capped_training, usable], ignore_index=True),
+                pd.concat([capped_training, usable], ignore_index=True),
                 spec,
             )
     training = capped_training if capped_training is not None else pd.DataFrame()
+    if resource_policy is not None and (
+        resource_policy.reserved_memory_bytes
+        + 3 * pandas_frame_payload_bytes(training)
+        > resource_policy.task_memory_budget_bytes
+    ):
+        raise ValueError("model_training_working_set_exceeds_task_memory_budget")
     training = validation_split.apply_training_controls(training, spec)
     train_start = None
     train_end = None
@@ -372,6 +430,7 @@ def fit_predictor(
     y: np.ndarray,
     estimator: object,
 ) -> object:
+    _require_model_matrix_headroom(training, spec)
     fit_training_frame = getattr(estimator, "fit_training_frame", None)
     if callable(fit_training_frame):
         return fit_training_frame(training)
@@ -385,6 +444,7 @@ def fit_linear_coefficients_exact(
     frame: pd.DataFrame,
     spec: ModelSpec,
 ) -> np.ndarray:
+    _require_model_matrix_headroom(frame, spec)
     design = linear_design_matrix(frame, spec)
     y = frame.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
     beta, *_ = np.linalg.lstsq(design, y, rcond=None)
@@ -414,6 +474,26 @@ def linear_design_matrix(
     design[:, 0] = 1.0
     design[:, 1:] = x
     return design
+
+
+def _require_model_matrix_headroom(
+    frame: pd.DataFrame,
+    spec: ModelSpec,
+    *,
+    live_array_bytes: int = 0,
+) -> None:
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        return
+    matrix_bytes = len(frame) * (len(spec.input_columns) + 1) * 8
+    if (
+        policy.reserved_memory_bytes
+        + live_array_bytes
+        + pandas_frame_payload_bytes(frame)
+        + 6 * matrix_bytes
+        > policy.task_memory_budget_bytes
+    ):
+        raise ValueError("model_matrix_working_set_exceeds_task_memory_budget")
 
 
 def fit_linear_coefficients_from_tsqr(

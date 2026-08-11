@@ -20,6 +20,7 @@ from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
 from quant_research_platform.runtime.resources import (
+    pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
 from tests.helpers.research_specs import (
@@ -46,6 +47,7 @@ def wrap_filter_for_chunking(original_filter, filtered_chunk_rows: list[int]):
 def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import quant_research_platform.research._memory as memory_owner
     from quant_research_platform.research.evaluations import engine as eval_engine
 
     frame = pd.concat(
@@ -85,7 +87,14 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         wrapped_compute,
     )
     policy = capture_test_policy(
-        available_memory_bytes=1_000,
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    )
+    original_frame_bytes = memory_owner.pandas_frame_payload_bytes
+    monkeypatch.setattr(
+        memory_owner,
+        "pandas_frame_payload_bytes",
+        lambda chunk: 1500 * original_frame_bytes(chunk),
     )
     with runtime_resource_policy_scope(policy):
         result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
@@ -346,6 +355,34 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
             )
 
 
+def test_evaluation_output_accumulation_honors_shared_root_headroom() -> None:
+    frame = make_filter_mode_frame()
+    spec = EvaluationSpec(
+        run_id="eval_shared_headroom",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        signals=(make_signal_spec("factor"),),
+        label_columns=("label",),
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    )
+    frame_bytes = pandas_frame_payload_bytes(frame)
+    assert frame_bytes < policy.task_memory_budget_bytes
+
+    with runtime_resource_policy_scope(policy):
+        with policy.reserve(
+            "outer_owner",
+            policy.task_memory_budget_bytes - frame_bytes,
+        ):
+            with pytest.raises(
+                ValueError,
+                match="research_evaluation_working_set_exceeds_task_memory_budget",
+            ):
+                evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
+
+
 def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
     spec = EvaluationSpec(
         run_id="bad_timestamp",
@@ -369,6 +406,7 @@ def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
 def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import quant_research_platform.research._memory as memory_owner
 
     frame = pd.concat(
         [
@@ -408,7 +446,14 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     )
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
     policy = capture_test_policy(
-        available_memory_bytes=800,
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    )
+    original_frame_bytes = memory_owner.pandas_frame_payload_bytes
+    monkeypatch.setattr(
+        memory_owner,
+        "pandas_frame_payload_bytes",
+        lambda chunk: 1500 * original_frame_bytes(chunk),
     )
     with runtime_resource_policy_scope(policy):
         result = model_fitting.fit_model_result_from_frames(

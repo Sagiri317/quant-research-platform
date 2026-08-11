@@ -98,11 +98,33 @@ def test_portfolio_runner_accepts_equivalent_timezone_representations() -> None:
 
 def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_gaps(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout, dataset_catalog, portfolio_catalog, prediction, manifest = (
         _prediction_portfolio_inputs(tmp_path)
     )
 
+    expected_result = build_portfolio_result_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        portfolio_catalog=portfolio_catalog,
+        portfolio_id="demo_prediction_portfolio",
+        time_window=TimeWindow("2024-01-01", "2024-01-02"),
+        prediction_frame=prediction,
+        prediction_metadata=manifest["metadata"],
+    )
+    expected_chunks = list(expected_result.output_chunks)
+    expected_summary = expected_result.summary_factory()
+
+    original_to_dict = pd.DataFrame.to_dict
+
+    def reject_return_row_graph(frame, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        orient = args[0] if args else kwargs.get("orient", "dict")
+        if orient == "records" and "gross_portfolio_return" in frame.columns:
+            raise AssertionError("portfolio returns converted to a Python row graph")
+        return original_to_dict(frame, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "to_dict", reject_return_row_graph)
     result = build_portfolio_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -113,13 +135,18 @@ def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_g
         prediction_metadata=manifest["metadata"],
     )
     chunks = list(result.output_chunks)
+    summary = result.summary_factory()
     returns = pd.concat(
         [chunk["portfolio_returns"] for chunk in chunks],
         ignore_index=True,
     )
 
+    assert len(chunks) == len(expected_chunks)
     assert returns["timestamp"].tolist() == [pd.Timestamp("2024-01-02")]
     assert returns["gross_portfolio_return"].tolist() == pytest.approx([0.20])
+    assert summary.keys() == expected_summary.keys()
+    for name in summary:
+        pd.testing.assert_frame_equal(summary[name], expected_summary[name])
 
 
 @pytest.mark.parametrize(

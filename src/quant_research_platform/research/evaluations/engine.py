@@ -27,6 +27,11 @@ from quant_research_platform.research.evaluations.diagnostics import (
 from quant_research_platform.research.signals.materialization import (
     normalize_signal_frame,
 )
+from quant_research_platform.runtime.resources import (
+    active_runtime_resource_policy,
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,17 @@ def evaluate_signal_frame_chunks(
             source_columns_by_kind=source_columns_by_kind,
         )
     )
+    policy = current_runtime_resource_policy()
+    if policy is not None and (
+        policy.reserved_memory_bytes
+        + 4
+        * (
+            pandas_frame_payload_bytes(metrics)
+            + pandas_frame_payload_bytes(grouped_label_values)
+        )
+        > policy.task_memory_budget_bytes
+    ):
+        raise ValueError("research_evaluation_working_set_exceeds_task_memory_budget")
     ic_summary = summarize_period_ic(metrics)
     group_spread_summary = summarize_group_spread(grouped_label_values)
     diagnostics = build_evaluation_diagnostics(
@@ -100,6 +116,7 @@ def _compute_evaluation_frames(
     rows_after_dropna = 0
     filter_columns_used: list[str] = []
     filter_definition = ""
+    retained_output_bytes = 0
 
     for chunk in iter_complete_time_sized_frames(
         _iter_evaluation_work_frames(
@@ -124,6 +141,17 @@ def _compute_evaluation_frames(
         filter_columns_used = list(metadata["filter_columns_used"])
         filter_definition = str(metadata["filter_definition"])
         for label_column in label_columns:
+            policy = active_runtime_resource_policy()
+            filtered_bytes = pandas_frame_payload_bytes(filtered)
+            if (
+                policy.reserved_memory_bytes
+                + 2 * retained_output_bytes
+                + 4 * filtered_bytes
+                > policy.task_memory_budget_bytes
+            ):
+                raise ValueError(
+                    "research_evaluation_working_set_exceeds_task_memory_budget"
+                )
             compute_spec = ComputePanelSpec(
                 signal_columns=signal_columns,
                 label_column=label_column,
@@ -142,11 +170,24 @@ def _compute_evaluation_frames(
                 compute_spec,
                 n_groups=n_groups,
             )
+            next_output_bytes = (
+                pandas_frame_payload_bytes(metrics)
+                + pandas_frame_payload_bytes(grouped_label_values)
+            )
+            if (
+                policy.reserved_memory_bytes
+                + 2 * (retained_output_bytes + next_output_bytes)
+                > policy.task_memory_budget_bytes
+            ):
+                raise ValueError(
+                    "research_evaluation_working_set_exceeds_task_memory_budget"
+                )
             rows_after_dropna += int(
                 strict_non_negative_count_series(metrics["n_obs"]).sum()
             )
             metric_parts.append(metrics)
             grouped_parts.append(grouped_label_values)
+            retained_output_bytes += next_output_bytes
 
     filter_metadata = {
         "filter_mode": spec.filter_mode,

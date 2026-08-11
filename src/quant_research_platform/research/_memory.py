@@ -52,7 +52,14 @@ def _iter_time_sized_frames_with_policy(
         1,
         min(
             len(sessions),
-            policy.payload_target_bytes // estimated_bytes,
+            min(
+                policy.payload_target_bytes,
+                max(
+                    0,
+                    policy.task_memory_budget_bytes - policy.reserved_memory_bytes,
+                ),
+            )
+            // estimated_bytes,
         ),
     )
     if target >= len(sessions):
@@ -171,10 +178,16 @@ def _concat_time_boundary_frames(
 ) -> pd.DataFrame:
     policy = resource_policy
     retained_payload_bytes = _frame_bytes(left) + _frame_bytes(right)
-    if retained_payload_bytes > policy.task_memory_budget_bytes:
+    if (
+        policy.reserved_memory_bytes + 2 * retained_payload_bytes
+        > policy.task_memory_budget_bytes
+    ):
         raise ValueError("research_time_boundary_payloads_exceed_task_memory_budget")
     result = pd.concat([left, right], ignore_index=True)
-    if retained_payload_bytes + _frame_bytes(result) > policy.task_memory_budget_bytes:
+    if (
+        policy.reserved_memory_bytes + retained_payload_bytes + _frame_bytes(result)
+        > policy.task_memory_budget_bytes
+    ):
         raise ValueError("research_time_boundary_payloads_exceed_task_memory_budget")
     return result
 
@@ -188,5 +201,11 @@ def _require_time_chunk_budget(
     *,
     policy: RuntimeResourcePolicy,
 ) -> None:
-    if _frame_bytes(frame) > policy.payload_target_bytes:
+    frame_bytes = _frame_bytes(frame)
+    if frame_bytes > policy.payload_target_bytes:
         raise ValueError("research_indivisible_time_unit_exceeds_payload_target")
+    if (
+        policy.reserved_memory_bytes + frame_bytes
+        > policy.task_memory_budget_bytes
+    ):
+        raise ValueError("research_indivisible_time_unit_exceeds_task_memory_budget")

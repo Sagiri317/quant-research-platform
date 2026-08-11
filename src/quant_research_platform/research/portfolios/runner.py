@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
-from typing import cast
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -29,6 +28,11 @@ from quant_research_platform.research.portfolios.engine import (
     construct_portfolio_positions,
     summarize_period_breakdown,
 )
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -37,6 +41,14 @@ class PortfolioResult:
     spec: PortfolioSpec
     output_chunks: Iterable[Mapping[str, pd.DataFrame]]
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]]
+
+
+@dataclass
+class _PortfolioSummaryState:
+    return_parts: list[pd.DataFrame] = field(default_factory=list)
+    return_bytes: int = 0
+    position_stats: dict[str, dict[str, float | int]] = field(default_factory=dict)
+    resource_policy: RuntimeResourcePolicy | None = None
 
 
 def build_portfolio_result_from_research_dataset(
@@ -83,11 +95,9 @@ def build_portfolio_result_from_research_dataset(
         "feature": tuple(dataset_spec.feature_columns),
         "prediction": tuple(signal.source_column for signal in prediction_signals),
     }
-    summary_state: dict[str, object] = {
-        "return_records": [],
-        "exposure_periods": {},
-        "concentration_periods": {},
-    }
+    summary_state = _PortfolioSummaryState(
+        resource_policy=current_runtime_resource_policy()
+    )
     input_chunks = _portfolio_input_chunks(
         layout=layout,
         market_id=dataset_spec.market_id,
@@ -203,29 +213,41 @@ def _validated_prediction_input(
     expected_columns = (*primary_key, signal.source_column)
     if tuple(frame.columns) != expected_columns:
         raise ValueError("persisted_prediction_columns_mismatch")
-    result = frame.copy()
-    if result.loc[:, list(primary_key)].isna().any(axis=None):
+    policy = current_runtime_resource_policy()
+    frame_bytes = pandas_frame_payload_bytes(frame)
+    if policy is not None and (
+        policy.reserved_memory_bytes + 3 * frame_bytes
+        > policy.task_memory_budget_bytes
+    ):
+        raise ValueError("portfolio_prediction_working_set_exceeds_task_memory_budget")
+    if frame.loc[:, list(primary_key)].isna().any(axis=None):
         raise ValueError("persisted_prediction_key_null")
-    result["timestamp"] = strict_timestamp_series(
-        result["timestamp"], error="invalid_persisted_prediction_timestamp"
+    timestamps = strict_timestamp_series(
+        frame["timestamp"], error="invalid_persisted_prediction_timestamp"
     )
-    if result.duplicated(list(primary_key)).any():
+    if frame.duplicated(list(primary_key)).any():
         raise ValueError("duplicate_persisted_prediction_keys")
-    timestamps = result["timestamp"]
     if bool((timestamps < pd.Timestamp(test_start)).any()) or (
         test_end is not None and bool((timestamps > pd.Timestamp(test_end)).any())
     ):
         raise ValueError("persisted_prediction_window_mismatch")
-    values = pd.to_numeric(result[signal.source_column], errors="coerce")
+    values = pd.to_numeric(frame[signal.source_column], errors="coerce")
     if not np.isfinite(values.to_numpy(dtype="float64", copy=False)).all():
         raise ValueError("persisted_prediction_values_invalid")
-    result[signal.source_column] = values
+    result = frame
+    if not timestamps.equals(frame["timestamp"]) or not values.equals(
+        frame[signal.source_column]
+    ):
+        result = frame.copy()
+        result["timestamp"] = timestamps
+        result[signal.source_column] = values
     if time_window is not None:
         in_window = timestamps.between(
             pd.Timestamp(time_window.start),
             pd.Timestamp(time_window.end),
         )
-        result = result.loc[in_window].reset_index(drop=True)
+        if not bool(in_window.all()):
+            result = result.loc[in_window].reset_index(drop=True)
     return (
         result,
         primary_key,
@@ -246,12 +268,34 @@ def _iter_prediction_joined_chunks(
     test_start: str,
     test_end: str | None,
 ):
+    policy = current_runtime_resource_policy()
+    prediction_bytes = pandas_frame_payload_bytes(prediction_frame)
+    prediction_index_bytes = len(prediction_frame) * (len(primary_key) * 8 + 1)
+    if policy is not None and (
+        policy.reserved_memory_bytes
+        + 2 * prediction_bytes
+        + prediction_index_bytes
+        > policy.task_memory_budget_bytes
+    ):
+        raise ValueError(
+            "portfolio_prediction_join_working_set_exceeds_task_memory_budget"
+        )
     prediction_index = pd.MultiIndex.from_frame(
         prediction_frame.loc[:, list(primary_key)]
     )
     matched = np.zeros(len(prediction_frame), dtype=bool)
     missing_required = False
     for chunk in chunks:
+        if policy is not None and (
+            policy.reserved_memory_bytes
+            + 2 * prediction_bytes
+            + prediction_index_bytes
+            + 3 * pandas_frame_payload_bytes(chunk)
+            > policy.task_memory_budget_bytes
+        ):
+            raise ValueError(
+                "portfolio_prediction_join_working_set_exceeds_task_memory_budget"
+            )
         eligible, _metadata = apply_filter_mode(
             chunk,
             mode=sample_filter_mode,
@@ -371,7 +415,7 @@ def _iter_portfolio_output_chunks(
 
 def _observe_portfolio_summary_chunks(
     output_chunks: Iterable[dict[str, pd.DataFrame]],
-    summary_state: dict[str, object],
+    summary_state: _PortfolioSummaryState,
 ) -> Iterable[dict[str, pd.DataFrame]]:
     for output_chunk in output_chunks:
         _update_portfolio_summary_state(
@@ -383,38 +427,61 @@ def _observe_portfolio_summary_chunks(
 
 
 def _update_portfolio_summary_state(
-    summary_state: dict[str, object],
+    summary_state: _PortfolioSummaryState,
     *,
     positions: pd.DataFrame,
     portfolio_returns: pd.DataFrame,
 ) -> None:
-    _portfolio_return_records(summary_state).extend(
-        _portfolio_return_summary_records(portfolio_returns)
-    )
-    _update_position_period_summary(
-        _portfolio_period_map(summary_state, "exposure_periods"),
-        _portfolio_period_map(summary_state, "concentration_periods"),
-        positions,
-    )
+    policy = current_runtime_resource_policy()
+    if policy is not None:
+        if summary_state.resource_policy not in (None, policy):
+            raise RuntimeError("runtime_resource_policy_conflict")
+        summary_state.resource_policy = policy
+    policy = summary_state.resource_policy
+    input_bytes = pandas_frame_payload_bytes(
+        portfolio_returns
+    ) + pandas_frame_payload_bytes(positions)
+    if policy is not None and (
+        policy.reserved_memory_bytes
+        + 2 * summary_state.return_bytes
+        + 4 * input_bytes
+        > policy.task_memory_budget_bytes
+    ):
+        raise ValueError("portfolio_summary_working_set_exceeds_task_memory_budget")
+    return_frame = _portfolio_return_summary_frame(portfolio_returns)
+    if not return_frame.empty:
+        next_bytes = pandas_frame_payload_bytes(return_frame)
+        if policy is not None and (
+            policy.reserved_memory_bytes
+            + 2 * (summary_state.return_bytes + next_bytes)
+            > policy.task_memory_budget_bytes
+        ):
+            raise ValueError(
+                "portfolio_summary_working_set_exceeds_task_memory_budget"
+            )
+        summary_state.return_parts.append(return_frame)
+        summary_state.return_bytes += next_bytes
+    _update_position_period_summary(summary_state.position_stats, positions)
 
 
-def _portfolio_return_summary_records(
+def _portfolio_return_summary_frame(
     portfolio_returns: pd.DataFrame,
-) -> list[dict[str, object]]:
+) -> pd.DataFrame:
     if portfolio_returns.empty:
-        return []
+        return _empty_summary_frame(RETURNS_COLUMNS)
     selected = portfolio_returns.loc[:, RETURNS_COLUMNS].copy()
     selected["timestamp"] = strict_timestamp_series(
         selected["timestamp"], error="invalid_portfolio_timestamp_values"
     )
-    return selected.sort_values(["signal", "timestamp"], kind="mergesort").to_dict(
-        "records"
+    return selected.sort_values(
+        ["signal", "timestamp"], kind="mergesort"
+    ).reset_index(
+        drop=True
     )
 
 
 def _update_position_period_summary(
-    exposure_periods: dict[str, list[dict[str, object]]],
-    concentration_periods: dict[str, list[dict[str, object]]],
+    position_stats: dict[str, dict[str, float | int]],
     positions: pd.DataFrame,
 ) -> None:
     if positions.empty:
@@ -434,13 +501,6 @@ def _update_position_period_summary(
         gross_exposure = float(group["abs_position"].sum())
         net_exposure = float(group["position"].sum())
         position_count = int((group["position"] != 0).sum())
-        exposure_periods.setdefault(signal_id, []).append(
-            {
-                "gross_exposure": gross_exposure,
-                "net_exposure": net_exposure,
-                "position_count": position_count,
-            }
-        )
         if gross_exposure:
             shares = group["abs_position"] / gross_exposure
             hhi = float((shares.pow(2)).sum())
@@ -448,19 +508,48 @@ def _update_position_period_summary(
         else:
             hhi = 0.0
             top_weight = 0.0
-        concentration_periods.setdefault(signal_id, []).append(
+        stats = position_stats.setdefault(
+            signal_id,
             {
-                "hhi": hhi,
-                "top_weight": top_weight,
-                "position_count": position_count,
-            }
+                "periods": 0,
+                "gross_sum": 0.0,
+                "net_sum": 0.0,
+                "max_gross": 0.0,
+                "max_abs_net": 0.0,
+                "position_count_sum": 0,
+                "hhi_sum": 0.0,
+                "max_hhi": 0.0,
+                "top_weight_sum": 0.0,
+                "max_top_weight": 0.0,
+            },
+        )
+        stats["periods"] += 1
+        stats["gross_sum"] += gross_exposure
+        stats["net_sum"] += net_exposure
+        stats["max_gross"] = max(float(stats["max_gross"]), gross_exposure)
+        stats["max_abs_net"] = max(
+            float(stats["max_abs_net"]), abs(net_exposure)
+        )
+        stats["position_count_sum"] += position_count
+        stats["hhi_sum"] += hhi
+        stats["max_hhi"] = max(float(stats["max_hhi"]), hhi)
+        stats["top_weight_sum"] += top_weight
+        stats["max_top_weight"] = max(
+            float(stats["max_top_weight"]), top_weight
         )
 
 
 def _portfolio_summary_outputs(
-    summary_state: dict[str, object],
+    summary_state: _PortfolioSummaryState,
 ) -> dict[str, pd.DataFrame]:
     portfolio_returns = _portfolio_returns_summary_frame(summary_state)
+    policy = summary_state.resource_policy
+    if policy is not None and (
+        policy.reserved_memory_bytes
+        + 4 * pandas_frame_payload_bytes(portfolio_returns)
+        > policy.task_memory_budget_bytes
+    ):
+        raise ValueError("portfolio_summary_working_set_exceeds_task_memory_budget")
     cumulative_returns = compute_cumulative_returns(portfolio_returns)
     performance_summary = compute_performance_summary(
         portfolio_returns,
@@ -479,58 +568,54 @@ def _portfolio_summary_outputs(
 
 
 def _portfolio_returns_summary_frame(
-    summary_state: dict[str, object],
+    summary_state: _PortfolioSummaryState,
 ) -> pd.DataFrame:
-    records = _portfolio_return_records(summary_state)
-    if not records:
+    if not summary_state.return_parts:
         return _empty_summary_frame(RETURNS_COLUMNS)
-    frame = pd.DataFrame.from_records(records, columns=RETURNS_COLUMNS)
-    frame["timestamp"] = strict_timestamp_series(
-        frame["timestamp"], error="invalid_portfolio_timestamp_values"
+    frame = (
+        summary_state.return_parts[0]
+        if len(summary_state.return_parts) == 1
+        else pd.concat(summary_state.return_parts, ignore_index=True)
     )
-    return frame.sort_values(["signal", "timestamp"], kind="mergesort").reset_index(
+    return frame.sort_values(
+        ["signal", "timestamp"], kind="mergesort"
+    ).reset_index(
         drop=True
     )
 
 
 def _portfolio_exposure_summary(
-    summary_state: dict[str, object],
+    summary_state: _PortfolioSummaryState,
     portfolio_returns: pd.DataFrame,
 ) -> pd.DataFrame:
-    exposure_periods = _portfolio_period_map(summary_state, "exposure_periods")
-    if not exposure_periods:
+    if not summary_state.position_stats:
         return _empty_summary_frame(EXPOSURE_SUMMARY_COLUMNS)
     count_summary = _return_count_summary(portfolio_returns)
     records: list[dict[str, object]] = []
-    for signal_id in sorted(exposure_periods):
-        periods = exposure_periods[signal_id]
-        gross_values = [float(period["gross_exposure"]) for period in periods]
-        net_values = [float(period["net_exposure"]) for period in periods]
-        position_counts = [float(period["position_count"]) for period in periods]
+    for signal_id in sorted(summary_state.position_stats):
+        stats = summary_state.position_stats[signal_id]
+        periods = int(stats["periods"])
         count_values = count_summary.get(signal_id, {})
         records.append(
             {
                 "signal": signal_id,
-                "mean_gross_exposure": _mean(gross_values),
-                "mean_net_exposure": _mean(net_values),
-                "max_gross_exposure": max(gross_values, default=0.0),
-                "max_abs_net_exposure": max(
-                    (abs(value) for value in net_values),
-                    default=0.0,
-                ),
+                "mean_gross_exposure": float(stats["gross_sum"]) / periods,
+                "mean_net_exposure": float(stats["net_sum"]) / periods,
+                "max_gross_exposure": float(stats["max_gross"]),
+                "max_abs_net_exposure": float(stats["max_abs_net"]),
                 "mean_long_count": float(count_values.get("mean_long_count", 0.0)),
                 "mean_short_count": float(count_values.get("mean_short_count", 0.0)),
-                "mean_position_count": _mean(position_counts),
+                "mean_position_count": (
+                    float(stats["position_count_sum"]) / periods
+                ),
             }
         )
     return pd.DataFrame.from_records(records, columns=EXPOSURE_SUMMARY_COLUMNS)
 
 
-def _portfolio_concentration_summary(summary_state: dict[str, object]) -> pd.DataFrame:
-    concentration_periods = _portfolio_period_map(
-        summary_state,
-        "concentration_periods",
-    )
+def _portfolio_concentration_summary(
+    summary_state: _PortfolioSummaryState,
+) -> pd.DataFrame:
     columns = [
         "signal",
         "periods",
@@ -540,23 +625,23 @@ def _portfolio_concentration_summary(summary_state: dict[str, object]) -> pd.Dat
         "max_top_weight",
         "mean_position_count",
     ]
-    if not concentration_periods:
+    if not summary_state.position_stats:
         return _empty_summary_frame(columns)
     records: list[dict[str, object]] = []
-    for signal_id in sorted(concentration_periods):
-        periods = concentration_periods[signal_id]
-        hhi_values = [float(period["hhi"]) for period in periods]
-        top_weight_values = [float(period["top_weight"]) for period in periods]
-        position_counts = [float(period["position_count"]) for period in periods]
+    for signal_id in sorted(summary_state.position_stats):
+        stats = summary_state.position_stats[signal_id]
+        periods = int(stats["periods"])
         records.append(
             {
                 "signal": signal_id,
-                "periods": len(periods),
-                "mean_hhi": _mean(hhi_values),
-                "max_hhi": max(hhi_values, default=0.0),
-                "mean_top_weight": _mean(top_weight_values),
-                "max_top_weight": max(top_weight_values, default=0.0),
-                "mean_position_count": _mean(position_counts),
+                "periods": periods,
+                "mean_hhi": float(stats["hhi_sum"]) / periods,
+                "max_hhi": float(stats["max_hhi"]),
+                "mean_top_weight": float(stats["top_weight_sum"]) / periods,
+                "max_top_weight": float(stats["max_top_weight"]),
+                "mean_position_count": (
+                    float(stats["position_count_sum"]) / periods
+                ),
             }
         )
     return pd.DataFrame.from_records(records, columns=columns)
@@ -577,26 +662,6 @@ def _return_count_summary(
             "mean_short_count": float(group["short_count"].mean()),
         }
     return result
-
-
-def _portfolio_return_records(
-    summary_state: dict[str, object],
-) -> list[dict[str, object]]:
-    return cast(list[dict[str, object]], summary_state["return_records"])
-
-
-def _portfolio_period_map(
-    summary_state: dict[str, object],
-    state_key: str,
-) -> dict[str, list[dict[str, object]]]:
-    return cast(dict[str, list[dict[str, object]]], summary_state[state_key])
-
-
-def _mean(values: Iterable[float]) -> float:
-    sequence = tuple(values)
-    if not sequence:
-        return 0.0
-    return float(sum(sequence) / len(sequence))
 
 
 def _combine_context_and_chunk(

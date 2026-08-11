@@ -448,16 +448,30 @@ def test_model_max_train_rows_trims_streaming_training_buffer(
         spec,
     )
     original_trim = validation_split.trim_training_buffer
+    original_concat = pd.concat
     observed_buffer_inputs: list[int] = []
 
     def wrapped_trim(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:
         observed_buffer_inputs.append(len(frame))
         return original_trim(frame, spec)
 
+    def bounded_concat(frames, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        materialized = list(frames)
+        if materialized and all(
+            isinstance(part, pd.DataFrame)
+            and {"timestamp", "factor", "label"}.issubset(part.columns)
+            for part in materialized
+        ):
+            assert sum(len(part) for part in materialized) <= 2 * (
+                spec.max_train_rows + spec.purge_gap_steps
+            )
+        return original_concat(materialized, *args, **kwargs)
+
     monkeypatch.setattr(validation_split, "trim_training_buffer", wrapped_trim)
+    monkeypatch.setattr(pd, "concat", bounded_concat)
 
     training, row_counts, _metadata = model_fitting.collect_training_frame(
-        (chunk for _, chunk in frame.groupby(frame.index // 5)),
+        (chunk for _, chunk in frame.groupby(frame.index // 20)),
         spec,
     )
 
@@ -495,6 +509,57 @@ def test_model_training_collection_rejects_unbounded_collection() -> None:
             (chunk for _, chunk in frame.groupby("timestamp")),
             spec,
         )
+
+
+def test_model_matrix_admission_precedes_linear_and_estimator_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import quant_research_platform.research.models.fitting as model_fitting
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    frame = make_filter_mode_frame().loc[:, ["timestamp", "factor", "label"]]
+    spec = ModelSpec(
+        model_id="linear_matrix_admission",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+        max_train_rows=len(frame),
+    )
+    entered: list[str] = []
+
+    def reject_linear_matrix(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        entered.append("linear")
+        raise AssertionError("linear matrix allocated before admission")
+
+    class Estimator:
+        def fit(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            entered.append("estimator")
+            raise AssertionError("estimator fit entered before admission")
+
+    monkeypatch.setattr(model_fitting, "linear_design_matrix", reject_linear_matrix)
+    for operation in ("linear", "estimator"):
+        policy = capture_test_policy(
+            available_memory_bytes=16 * 1024 * 1024,
+            explicit_cap_bytes=1 * 1024 * 1024,
+        )
+        with runtime_resource_policy_scope(policy):
+            with policy.reserve("outer_owner", policy.task_memory_budget_bytes):
+                with pytest.raises(
+                    ValueError,
+                    match="model_matrix_working_set_exceeds_task_memory_budget",
+                ):
+                    if operation == "linear":
+                        model_fitting.fit_linear_coefficients_exact(frame, spec)
+                    else:
+                        model_fitting.fit_predictor(
+                            spec,
+                            training=frame,
+                            y=frame["label"].to_numpy(),
+                            estimator=Estimator(),
+                        )
+
+    assert entered == []
 
 
 @pytest.mark.parametrize(

@@ -37,6 +37,10 @@ from quant_research_platform.research.predictions.outputs import (
     build_prediction_result_from_frames,
     prediction_callable,
 )
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -272,8 +276,20 @@ def _validation_prediction_frame(
         candidate_spec.input_columns,
         model_result.prediction_model,
     )
-    records: list[dict[str, object]] = []
+    parts: list[pd.DataFrame] = []
+    retained_bytes = 0
+    resource_policy = None
     for chunk in chunks:
+        resource_policy = current_runtime_resource_policy()
+        if resource_policy is not None and (
+            resource_policy.reserved_memory_bytes
+            + 2 * retained_bytes
+            + 4 * pandas_frame_payload_bytes(chunk)
+            > resource_policy.task_memory_budget_bytes
+        ):
+            raise ValueError(
+                "prediction_validation_working_set_exceeds_task_memory_budget"
+            )
         timestamps = _prediction_timestamps(chunk)
         validation = chunk.loc[
             (timestamps >= validation_start) & (timestamps <= validation_end)
@@ -288,15 +304,35 @@ def _validation_prediction_frame(
         )
         if validation.empty:
             continue
+        validation_bytes = pandas_frame_payload_bytes(validation)
+        if resource_policy is not None and (
+            resource_policy.reserved_memory_bytes
+            + 2 * retained_bytes
+            + 4 * validation_bytes
+            > resource_policy.task_memory_budget_bytes
+        ):
+            raise ValueError(
+                "prediction_validation_working_set_exceeds_task_memory_budget"
+            )
         output = validation.loc[
             :,
             ["timestamp", "asset_id", candidate_spec.label_column],
         ].copy()
         output[prediction_spec.prediction_column] = predictor(validation)
-        records.extend(output.to_dict("records"))
-    if not records:
+        output_bytes = pandas_frame_payload_bytes(output)
+        if resource_policy is not None and (
+            resource_policy.reserved_memory_bytes
+            + 2 * (retained_bytes + output_bytes)
+            > resource_policy.task_memory_budget_bytes
+        ):
+            raise ValueError(
+                "prediction_validation_working_set_exceeds_task_memory_budget"
+            )
+        parts.append(output)
+        retained_bytes += output_bytes
+    if not parts:
         raise ValueError("empty_model_selection_validation_window")
-    return pd.DataFrame.from_records(records)
+    return parts[0] if len(parts) == 1 else pd.concat(parts, ignore_index=True)
 
 
 def _validate_prediction_window_order(spec) -> None:

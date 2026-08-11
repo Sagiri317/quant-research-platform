@@ -35,6 +35,7 @@ from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 MAX_LOGICAL_RECORD_BYTES = MIB
+_MAX_PROVIDER_HEADER_FIELDS = 64
 LOGICAL_RECORD_LIMIT_ERROR = "csmar_logical_record_exceeds_source_limit"
 
 
@@ -931,14 +932,15 @@ def read_export_header(
 def materialize_header_record(record: BoundedCsvRecord) -> list[str]:
     """Materialize a legal header while preserving duplicate-header errors."""
 
-    legal_bound = _legal_provider_field_count_bound()
-    if record.field_count <= legal_bound:
-        columns = record.materialize(max_fields=legal_bound)
-        if len(columns) != len(set(columns)):
-            raise ValueError("duplicate_csmar_provider_column")
-        return columns
-
-    raise ValueError("csmar_raw_export_schema_invalid")
+    if record.field_count > _MAX_PROVIDER_HEADER_FIELDS:
+        raise ValueError("csmar_raw_export_schema_invalid")
+    columns = record.materialize(
+        max_fields=_MAX_PROVIDER_HEADER_FIELDS,
+        field_count_error="csmar_raw_export_schema_invalid",
+    )
+    if len(columns) != len(set(columns)):
+        raise ValueError("duplicate_csmar_provider_column")
+    return columns
 
 
 def expected_metadata_sidecar_path(path: str | Path) -> Path:
