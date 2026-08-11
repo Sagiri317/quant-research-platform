@@ -9181,7 +9181,7 @@ def test_dataset_inventory_disk_gates_native_page_and_encoded_rows(
         resource_policy=policy,
     )
 
-    assert reserve_calls[0] == 1024
+    assert reserve_calls[0] >= 32 * dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
     assert len(reserve_calls) > 1
     assert policy.task_memory_budget_bytes not in reserve_calls
     assert all(value > 0 for value in reserve_calls)

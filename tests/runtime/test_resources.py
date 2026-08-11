@@ -16,6 +16,11 @@ MIB = 1024 * 1024
 GIB = 1024 * MIB
 
 
+def test_runtime_resource_policy_direct_construction_fails_closed() -> None:
+    with pytest.raises(TypeError, match="runtime_resource_policy_capture_required"):
+        RuntimeResourcePolicy()
+
+
 def test_runtime_resource_policy_captures_one_shot_budget_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

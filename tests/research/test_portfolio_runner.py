@@ -24,6 +24,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios.runner import (
     build_portfolio_result_from_research_dataset,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
@@ -31,6 +32,7 @@ from tests.helpers.research_specs import (
     make_portfolio_research_dataset_spec,
     make_research_dataset_catalog,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.prediction_output_helpers import write_prediction_output_and_read
 
 
@@ -147,6 +149,50 @@ def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_g
     assert summary.keys() == expected_summary.keys()
     for name in summary:
         pd.testing.assert_frame_equal(summary[name], expected_summary[name])
+
+
+def test_portfolio_prediction_join_keeps_its_creation_policy(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout, dataset_catalog, portfolio_catalog, prediction, manifest = (
+        _prediction_portfolio_inputs(tmp_path)
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=2 * 1024**2,
+        explicit_cap_bytes=1024**2,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        result = build_portfolio_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            portfolio_catalog=portfolio_catalog,
+            portfolio_id="demo_prediction_portfolio",
+            time_window=TimeWindow("2024-01-01", "2024-01-02"),
+            prediction_frame=prediction,
+            prediction_metadata=manifest["metadata"],
+        )
+
+    monkeypatch.setattr(
+        portfolio_runner,
+        "pandas_frame_payload_bytes",
+        lambda _frame: policy.task_memory_budget_bytes,
+    )
+
+    def reject_prediction_index(*_args, **_kwargs):
+        raise AssertionError("prediction index allocated before admission")
+
+    monkeypatch.setattr(
+        pd.MultiIndex,
+        "from_frame",
+        classmethod(reject_prediction_index),
+    )
+    with pytest.raises(
+        ValueError,
+        match="portfolio_prediction_join_working_set_exceeds_task_memory_budget",
+    ):
+        list(result.output_chunks)
 
 
 @pytest.mark.parametrize(

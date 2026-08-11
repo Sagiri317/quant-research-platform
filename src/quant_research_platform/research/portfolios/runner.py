@@ -30,6 +30,7 @@ from quant_research_platform.research.portfolios.engine import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
@@ -114,6 +115,7 @@ def build_portfolio_result_from_research_dataset(
             sample_filter_mode=prediction_input[3],
             test_start=prediction_input[4],
             test_end=prediction_input[5],
+            resource_policy=summary_state.resource_policy,
         )
     output_chunks = _observe_portfolio_summary_chunks(
         _iter_portfolio_output_chunks(
@@ -267,8 +269,9 @@ def _iter_prediction_joined_chunks(
     sample_filter_mode: str,
     test_start: str,
     test_end: str | None,
+    resource_policy: RuntimeResourcePolicy | None,
 ):
-    policy = current_runtime_resource_policy()
+    policy = bind_runtime_resource_policy(resource_policy)
     prediction_bytes = pandas_frame_payload_bytes(prediction_frame)
     prediction_index_bytes = len(prediction_frame) * (len(primary_key) * 8 + 1)
     if policy is not None and (

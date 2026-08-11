@@ -33,6 +33,7 @@ from quant_research_platform.storage._scratch_ownership import (
 _MAX_SQLITE_CACHE_BYTES = 8 * 1024 * 1024
 _DISK_RESERVE_BATCH_BYTES = 1024**2
 EXACT_KEY_SQLITE_PAGE_BYTES = 1024
+_EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES = 8 * EXACT_KEY_SQLITE_PAGE_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +114,7 @@ class ExactPrimaryKeyIndex:
         )
         require_free_disk_headroom(
             self._scratch_parent,
-            reserve_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
+            reserve_bytes=_EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES,
         )
         parent_identity = self._scratch_parent.lstat()
         cleanup_stale_owned_scratch(

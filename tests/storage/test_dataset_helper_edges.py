@@ -1302,7 +1302,7 @@ def test_exact_key_index_disk_gates_initial_page_and_bounded_batch(
             payload_target_bytes=1024**2,
         )
 
-    assert reserves[0] == key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES
+    assert reserves[0] >= 8 * key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES
     assert len(reserves) == 2
     assert all(reserve > 0 for reserve in reserves)
 

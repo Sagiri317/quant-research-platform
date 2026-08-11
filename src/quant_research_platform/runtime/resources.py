@@ -53,6 +53,9 @@ class RuntimeResourcePolicy:
     payload_target_bytes: int
     _ledger: _ReservationLedger
 
+    def __new__(cls) -> RuntimeResourcePolicy:
+        raise TypeError("runtime_resource_policy_capture_required")
+
     @classmethod
     def capture(
         cls,

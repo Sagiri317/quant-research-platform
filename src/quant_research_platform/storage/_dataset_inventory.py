@@ -34,6 +34,9 @@ from quant_research_platform.storage._scratch_ownership import (
 _PREFIX = ".i-"
 _PART_FILE_PATTERN = re.compile(r"^part-(\d+)\.parquet$")
 DATASET_INVENTORY_RESERVE_BYTES = 1024
+_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES = (
+    32 * DATASET_INVENTORY_RESERVE_BYTES
+)
 
 
 class DatasetInventoryPaths:
@@ -100,7 +103,7 @@ class DatasetSessionInventory:
         )
         require_free_disk_headroom(
             self._scratch_parent,
-            reserve_bytes=DATASET_INVENTORY_RESERVE_BYTES,
+            reserve_bytes=_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
         )
         parent_identity = self._scratch_parent.lstat()
         cleanup_stale_owned_scratch(
