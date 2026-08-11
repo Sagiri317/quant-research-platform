@@ -316,6 +316,7 @@ def collect_training_frame(
         dict.fromkeys(
             (
                 "timestamp",
+                "asset_id",
                 *spec.input_columns,
                 spec.label_column,
                 *required_filter_columns(spec.sample_filter_mode),
@@ -360,8 +361,9 @@ def collect_training_frame(
         )
         filter_columns_used = list(metadata["filter_columns_used"])
         filter_definition = str(metadata["filter_definition"])
+        identity_columns = ("asset_id",) if "asset_id" in filtered.columns else ()
         usable = filtered.dropna(subset=[*spec.input_columns, spec.label_column]).loc[
-            :, ["timestamp", *spec.input_columns, spec.label_column]
+            :, ["timestamp", *identity_columns, *spec.input_columns, spec.label_column]
         ]
         if not usable.empty:
             usable_payload_bytes = pandas_frame_payload_bytes(usable)
@@ -400,6 +402,8 @@ def collect_training_frame(
     ):
         raise ValueError("model_training_working_set_exceeds_task_memory_budget")
     training = validation_split.apply_training_controls(training, spec)
+    if "asset_id" in training.columns:
+        training = training.drop(columns="asset_id")
     train_start = None
     train_end = None
     if not training.empty:

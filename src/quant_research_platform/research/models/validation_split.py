@@ -33,7 +33,11 @@ def apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFram
     result = frame.copy()
     result["timestamp"] = pd.to_datetime(result["timestamp"], errors="coerce")
     result = result.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
-    result = _purge_trailing_timestamps(result, spec.purge_gap_steps)
+    result = _purge_trailing_timestamps(
+        result,
+        spec.purge_gap_steps,
+        group_column="asset_id" if "asset_id" in result.columns else None,
+    )
     if spec.max_train_rows is not None and len(result) > spec.max_train_rows:
         result = result.tail(spec.max_train_rows)
     return result.reset_index(drop=True)

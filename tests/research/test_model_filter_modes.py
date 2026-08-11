@@ -14,6 +14,12 @@ from quant_research_platform.contracts.predictions import (
     PREDICTION_SCORE_COLUMN,
     PredictionSpec,
 )
+from quant_research_platform.markets.implementations.a_share.labels import (
+    calculations as label_calculations,
+)
+from quant_research_platform.markets.implementations.a_share.labels.definitions import (
+    label_catalog,
+)
 from quant_research_platform.research.models.algorithm_facts import (
     model_algorithm_ids,
 )
@@ -414,6 +420,47 @@ def test_model_training_controls_apply_to_linear_and_estimators(
     assert purge.metadata["train_end"] == "2024-01-02"
 
 
+def test_model_training_purge_uses_each_assets_valid_label_rows() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    panel = pd.DataFrame.from_records(
+        [
+            {
+                "market_id": "a_share",
+                "asset_id": asset_id,
+                "timestamp": timestamp,
+                "adj_open": float(100 + offset),
+            }
+            for asset_id, asset_dates in (
+                ("dense", dates),
+                ("sparse", dates[[0, 2, 4]]),
+            )
+            for offset, timestamp in enumerate(asset_dates)
+        ]
+    )
+    definition = label_catalog().get("forward_return_1d")
+    frame = label_calculations.calculate_labels_for_panel(
+        panel,
+        definitions=(definition,),
+    )
+    frame["factor"] = np.where(frame["asset_id"].eq("dense"), 1.0, 99.0)
+    frame["eligible"] = True
+    spec = ModelSpec(
+        model_id="linear_valid_bar_purge",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column=definition.output_column,
+        purge_gap_steps=definition.lookahead,
+        max_train_rows=len(frame),
+    )
+
+    training, _row_counts, _metadata = model_fitting.collect_training_frame(
+        (frame,), spec
+    )
+
+    assert definition.lookahead == 2
+    assert training["factor"].tolist() == [1.0]
+
+
 def test_model_max_train_rows_trims_streaming_training_buffer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -425,7 +472,7 @@ def test_model_max_train_rows_trims_streaming_training_buffer(
             pd.DataFrame(
                 {
                     "timestamp": [pd.Timestamp("2024-01-01") + pd.Timedelta(days=day)],
-                    "asset_id": [f"asset_{day:02d}"],
+                    "asset_id": ["asset_a"],
                     "factor": [float(day)],
                     "label": [float(day) * 2.0],
                     "eligible": [True],

@@ -147,6 +147,55 @@ def test_eight_bars_bind_factor_signal_entry_exit_and_return_attribution() -> No
     )
 
 
+def test_default_daily_portfolio_uses_one_day_realized_capital_returns() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=2)
+    frame = pd.DataFrame.from_records(
+        [
+            {
+                "market_id": "a_share",
+                "asset_id": asset_id,
+                "timestamp": timestamp,
+                "signal": 1.0 if asset_id == "long" else -1.0,
+                "forward_return_1d": one_day_return,
+                "forward_return_20d": 0.10 if asset_id == "long" else -0.10,
+                "amount": 1_000_000.0,
+                "float_market_cap": 10_000_000.0,
+                "csrc_2012_industry_code": "demo",
+            }
+            for timestamp, long_return in zip(dates, (0.01, 0.02), strict=True)
+            for asset_id, one_day_return in (
+                ("long", long_return),
+                ("short", -long_return),
+            )
+        ]
+    )
+    spec = research_scenarios.build_portfolio_specs(
+        signals=(
+            SignalSpec(
+                signal_id="signal",
+                source_kind="factor",
+                source_column="signal",
+            ),
+        ),
+    )[0]
+
+    result = construct_portfolio_positions(
+        frame,
+        spec,
+        source_columns_by_kind={"factor": ("signal",)},
+    )
+
+    assert spec.portfolio_id == "signal_forward_return_20d_portfolio"
+    assert spec.return_source_column == "forward_return_1d"
+    assert spec.rebalance_frequency == "1d"
+    assert result.portfolio_returns["gross_portfolio_return"].tolist() == pytest.approx(
+        [0.02, 0.04]
+    )
+    assert result.cumulative_returns["cumulative_gross_return"].tolist() == (
+        pytest.approx([0.02, 0.06])
+    )
+
+
 def test_a_share_model_purge_is_derived_from_live_label_lookahead() -> None:
     spec = research_scenarios.build_model_specs(
         model_algorithm_ids=("linear_regression",),

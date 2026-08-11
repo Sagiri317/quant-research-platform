@@ -88,6 +88,11 @@ DEFAULT_RETURN_SOURCE_COLUMN = forward_return_label_column(
     SCENARIO_DEFAULTS.return_horizon,
     SCENARIO_DEFAULTS.frequency,
 )
+_DEFAULT_PORTFOLIO_RETURN_SOURCE_COLUMN = forward_return_label_column(
+    1,
+    SCENARIO_DEFAULTS.frequency,
+)
+_DEFAULT_FACTOR_PORTFOLIO_ID = f"signal_{DEFAULT_RETURN_SOURCE_COLUMN}_portfolio"
 DEFAULT_MODEL_RANDOM_SEED = SCENARIO_DEFAULTS.random_seed
 DEFAULT_MAX_TRAIN_ROWS = SCENARIO_DEFAULTS.max_train_rows
 DEFAULT_TEST_END: str | None = SCENARIO_DEFAULTS.test_end
@@ -209,12 +214,16 @@ def build_portfolio_specs(
     rebalance_frequency: str = SCENARIO_DEFAULTS.rebalance_frequency,
     execution_lag_steps: int = SCENARIO_DEFAULTS.execution_lag_steps,
     signals: tuple[SignalSpec, ...] | None = None,
-    return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
+    return_source_column: str = _DEFAULT_PORTFOLIO_RETURN_SOURCE_COLUMN,
     prediction_id: str | None = None,
 ) -> tuple[PortfolioSpec, ...]:
     specs = [
         PortfolioSpec(
-            portfolio_id=f"signal_{return_source_column}_portfolio",
+            portfolio_id=(
+                _DEFAULT_FACTOR_PORTFOLIO_ID
+                if return_source_column == _DEFAULT_PORTFOLIO_RETURN_SOURCE_COLUMN
+                else f"signal_{return_source_column}_portfolio"
+            ),
             market_id=MARKET_ID,
             research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             signals=signals or build_signal_specs(),
@@ -305,7 +314,7 @@ def build_portfolio_catalog(
     rebalance_frequency: str = SCENARIO_DEFAULTS.rebalance_frequency,
     execution_lag_steps: int = SCENARIO_DEFAULTS.execution_lag_steps,
     signals: tuple[SignalSpec, ...] | None = None,
-    return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
+    return_source_column: str = _DEFAULT_PORTFOLIO_RETURN_SOURCE_COLUMN,
     prediction_id: str | None = None,
 ) -> PortfolioCatalog:
     catalog = PortfolioCatalog()
