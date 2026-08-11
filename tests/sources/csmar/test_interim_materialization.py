@@ -2358,6 +2358,24 @@ def test_csmar_raw_reader_preserves_code_strings_and_index_formula_commas(
     assert pd.isna(index_info.loc[1, "Idxinfo11"])
 
 
+def test_csmar_raw_reader_rejects_nonnumeric_registered_value(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily.csv"
+    raw = _market_bars_daily_raw_frame().iloc[:1].copy()
+    raw["Opnprc"] = pd.Series(["not-a-number"], dtype="object")
+    raw.to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match="^invalid_csmar_numeric_value$"):
+        list(
+            raw_exports.iter_private_export_chunks(
+                path,
+                dataset=frequency_ids.MARKET_BARS_DATA_ID,
+                chunksize=1,
+            )
+        )
+
+
 def test_csmar_dirty_index_info_csv_preserves_alignment_and_raw_semantics(
     tmp_path: Path,
 ) -> None:
@@ -2498,7 +2516,8 @@ def test_csmar_index_info_ignores_terminal_code_like_formula_candidate(
     raw = _collect_raw_export(index_path, "index_info")
 
     assert raw.loc[0, "Idxinfo04"] == "sample,scope,with comma"
-    assert raw.loc[0, "Idxinfo10"] == 1
+    assert raw.loc[0, "Idxinfo10"] == "1"
+    assert str(raw["Idxinfo10"].dtype) == "string"
 
 
 @pytest.mark.parametrize(
@@ -4291,6 +4310,7 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     export = raw_dir / "TRDNEW_Dalyr.csv"
     raw = _market_bars_daily_raw_frame()
     raw["LimitStatus"] = pd.Series([None, "0"], dtype="object")
+    raw["Opnprc"] = pd.Series(["10", "20.5"], dtype="object")
     raw.to_csv(export, index=False)
 
     result = interim.materialize_interim_data(
@@ -4313,6 +4333,8 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     assert read_back["limit_status"].dtype == "float64"
     assert read_back["limit_status"].isna().sum() == 1
     assert read_back["limit_status"].dropna().tolist() == [0.0]
+    assert read_back["open"].dtype == "float64"
+    assert read_back["open"].tolist() == [10.0, 20.5]
     assert read_back["turnover"].dtype == "float64"
     assert read_back["turnover"].isna().all()
     assert "asset_id" not in read_back.columns

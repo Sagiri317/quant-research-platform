@@ -53,7 +53,30 @@ from .raw_schemas import (
 )
 
 SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv"}
-STRING_CODE_DTYPES = {"Stkcd": str, "Symbol": str, "Indexcd": str}
+STRING_CODE_DTYPES = {
+    "Stkcd": str,
+    "Symbol": str,
+    "Indexcd": str,
+    "Stknme": str,
+    "Listdt": str,
+    "DelistedDate": str,
+    "Nnindcd": str,
+    "Nnindnme": str,
+    "Statco": str,
+    "Statdt": str,
+    "Trddt": str,
+    "Shrchgdt": str,
+    "TradingDate": str,
+    "Idxtrd01": str,
+    "Idxtrd09": str,
+    "Idxinfo01": str,
+    "Idxinfo11": str,
+    "Idxinfo02": str,
+    "Idxinfo04": str,
+    "Idxinfo10": str,
+    "Clddt": str,
+    "State": str,
+}
 INDEX_INFO_CODE_RE = re.compile(r"^[0-9A-Za-z_.-]{1,32}$")
 INDEX_INFO_SOURCE_CODE_ENUMS = (
     frozenset({"1", "2", "3", "4"}),
@@ -1239,11 +1262,12 @@ def _raw_frame(rows: list[list[str]], header: list[str]) -> pd.DataFrame:
     frame.replace("", pd.NA, inplace=True)
     for column in frame.columns:
         if column in STRING_CODE_DTYPES or column in INDEX_INFO_SOURCE_CODE_COLUMNS:
+            frame[column] = frame[column].astype("string")
             continue
         try:
-            numeric = pd.to_numeric(frame[column], errors="raise")
+            numeric = pd.to_numeric(frame[column], errors="raise").astype("float64")
         except (TypeError, ValueError):
-            continue
+            raise ValueError("invalid_csmar_numeric_value") from None
         frame[column] = numeric
     return frame
 
@@ -1259,7 +1283,7 @@ def _raw_frame_owner_known_bytes(
     cells = sum(len(row) for row in rows)
     pending_backing_bytes = len(rows) * pointer_bytes + cells * pointer_bytes
     frame_reference_bytes = (len(header) + cells) * pointer_bytes
-    numeric_decode_bytes = cells * 8
+    numeric_decode_bytes = cells * 16
     return pending_backing_bytes + frame_reference_bytes + numeric_decode_bytes
 
 
