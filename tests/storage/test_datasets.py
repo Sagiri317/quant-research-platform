@@ -877,7 +877,10 @@ def test_converter_enforces_actual_arrow_and_pandas_operation_headroom(
         lambda _frame: 512,
     )
 
-    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+    with pytest.raises(
+        ValueError,
+        match="dataset_working_set_exceeds_task_memory_budget",
+    ):
         tuple(
             dataset_reading._arrow_batch_to_bounded_pandas(
                 batch,
