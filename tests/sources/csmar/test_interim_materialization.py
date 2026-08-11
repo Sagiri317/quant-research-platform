@@ -4289,7 +4289,9 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     raw_dir = tmp_path / "data" / "raw" / "csmar" / "provider_exports"
     raw_dir.mkdir(parents=True, exist_ok=True)
     export = raw_dir / "TRDNEW_Dalyr.csv"
-    _market_bars_daily_raw_frame().to_csv(export, index=False)
+    raw = _market_bars_daily_raw_frame()
+    raw["LimitStatus"] = pd.Series([None, "0"], dtype="object")
+    raw.to_csv(export, index=False)
 
     result = interim.materialize_interim_data(
         layout=StorageLayout(project_root=tmp_path),
@@ -4308,6 +4310,9 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     assert inspection.row_count == 2
     assert len(read_back) == 2
     assert read_back.columns.tolist() == list(interim.MARKET_BARS_INTERIM_COLUMNS)
+    assert read_back["limit_status"].dtype == "float64"
+    assert read_back["limit_status"].isna().sum() == 1
+    assert read_back["limit_status"].dropna().tolist() == [0.0]
     assert read_back["turnover"].dtype == "float64"
     assert read_back["turnover"].isna().all()
     assert "asset_id" not in read_back.columns
@@ -4316,6 +4321,12 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     assert parts
     assert all(
         pa.types.is_float64(pq.ParquetFile(part).schema_arrow.field("turnover").type)
+        for part in parts
+    )
+    assert all(
+        pa.types.is_float64(
+            pq.ParquetFile(part).schema_arrow.field("limit_status").type
+        )
         for part in parts
     )
 

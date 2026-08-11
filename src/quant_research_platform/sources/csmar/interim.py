@@ -419,6 +419,7 @@ def normalize_raw_frame(
         return _normalize_trading_calendar_frame(mapped)
     if data_id == MARKET_BARS_DATA_ID:
         result = mapped
+        result["limit_status"] = result["limit_status"].astype("float64")
         result["trade_date"] = pd.to_datetime(result["trade_date"])
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
