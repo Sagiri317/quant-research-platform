@@ -420,7 +420,9 @@ def normalize_raw_frame(
     if data_id == MARKET_BARS_DATA_ID:
         result = mapped
         result["limit_status"] = result["limit_status"].astype("float64")
-        result["trade_date"] = pd.to_datetime(result["trade_date"])
+        result["trade_date"] = pd.to_datetime(result["trade_date"]).astype(
+            "datetime64[ns]"
+        )
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
         result["period_return"] = result["return_with_dividend"]
@@ -438,7 +440,9 @@ def normalize_raw_frame(
         return result
     if data_id == "adjustment":
         result = mapped
-        result["trade_date"] = pd.to_datetime(result["trade_date"])
+        result["trade_date"] = pd.to_datetime(result["trade_date"]).astype(
+            "datetime64[ns]"
+        )
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
@@ -446,7 +450,9 @@ def normalize_raw_frame(
         return result
     if data_id == "market_cap":
         result = mapped
-        result["share_change_date"] = pd.to_datetime(result["share_change_date"])
+        result["share_change_date"] = pd.to_datetime(
+            result["share_change_date"]
+        ).astype("datetime64[ns]")
         result["timestamp"] = result["share_change_date"]
         result["source_asset_id"] = result["stock_code"]
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
@@ -456,7 +462,9 @@ def normalize_raw_frame(
         result = mapped
         for column in ("listing_date", "delisting_date", "status_change_date"):
             if column in result.columns:
-                result[column] = pd.to_datetime(result[column], errors="coerce")
+                result[column] = pd.to_datetime(
+                    result[column], errors="coerce"
+                ).astype("datetime64[ns]")
         status_change = (
             result["status_change_date"]
             if "status_change_date" in result.columns
@@ -495,7 +503,7 @@ def _parse_optional_index_info_date(series: pd.Series, column: str) -> pd.Series
     invalid = text.notna() & text.ne("") & parsed.isna()
     if bool(invalid.any()):
         raise ValueError(f"invalid_index_info_date: {column}")
-    return parsed
+    return parsed.astype("datetime64[ns]")
 
 
 def filter_by_source_date_range(
@@ -1224,7 +1232,9 @@ def _column_roles(
 
 def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame
-    result["calendar_date"] = pd.to_datetime(result["calendar_date"], errors="raise")
+    result["calendar_date"] = pd.to_datetime(
+        result["calendar_date"], errors="raise"
+    ).astype("datetime64[ns]")
     result["source_market_type"] = pd.to_numeric(
         result["source_market_type"],
         errors="raise",

@@ -2912,9 +2912,12 @@ def test_csmar_calendar_chunk_normalizes_date_first_with_market_tie_break(
 
     result = interim.normalize_raw_frame(raw, "trading_calendar")
 
-    assert result[["timestamp", "source_market_type"]].to_records(
-        index=False
-    ).tolist() == [
+    assert list(
+        result[["timestamp", "source_market_type"]].itertuples(
+            index=False,
+            name=None,
+        )
+    ) == [
         (pd.Timestamp("2024-01-02"), 1),
         (pd.Timestamp("2024-01-02"), 4),
         (pd.Timestamp("2024-01-03"), 1),
@@ -2939,6 +2942,38 @@ def test_csmar_stock_master_missing_effective_dates_fails_closed() -> None:
 
     with pytest.raises(ValueError, match="missing_stock_master_effective_timestamp"):
         interim.normalize_raw_frame(raw, "stock_master")
+
+
+def test_csmar_stock_master_dates_have_stable_cross_chunk_precision(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "stock_master.csv"
+    first = _stock_master_raw_row("normal", "I1", "2020-01-01")
+    second = _stock_master_raw_row("normal", "I1", "2020-01-02")
+    second["Stkcd"] = "2"
+    second["DelistedDate"] = "2020-06-01"
+    pd.DataFrame([first, second]).to_csv(path, index=False)
+
+    chunks = list(
+        raw_exports.iter_private_export_chunks(
+            path,
+            dataset="stock_master",
+            chunksize=1,
+        )
+    )
+    normalized = [
+        interim.normalize_raw_frame(chunk, "stock_master") for chunk in chunks
+    ]
+
+    assert len(normalized) == 2
+    for frame in normalized:
+        for column in (
+            "timestamp",
+            "listing_date",
+            "delisting_date",
+            "status_change_date",
+        ):
+            assert str(frame[column].dtype) == "datetime64[ns]"
 
 
 def test_csmar_reference_interim_dedupes_exact_duplicates_and_rejects_conflicts(
