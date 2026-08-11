@@ -405,7 +405,7 @@ class ExactPrimaryKeyIndex:
                     keep_count += 1
                 reserve = connection.execute(
                     "SELECT COALESCE(SUM(27 + length(CAST(namespace AS BLOB)) "
-                    "+ length(payload) + length(value)), 0) FROM ("
+                    "+ length(payload) + length(value)), 0), COUNT(*) FROM ("
                     "SELECT incoming.namespace, incoming.payload, MIN(incoming.value) "
                     "AS value FROM comparison_rows AS incoming "
                     "LEFT JOIN exact_keys AS existing "
@@ -415,10 +415,17 @@ class ExactPrimaryKeyIndex:
                     "GROUP BY incoming.namespace, incoming.payload)"
                 ).fetchone()
                 assert reserve is not None
-                if int(reserve[0]) > 0:
+                logical_bytes = int(reserve[0])
+                row_count = int(reserve[1])
+                if logical_bytes > 0:
+                    # WITHOUT ROWID table, doubled for journal, with B-tree page slack.
+                    reserve_bytes = 2 * (
+                        logical_bytes
+                        + 4 * EXACT_KEY_SQLITE_PAGE_BYTES * row_count
+                    )
                     require_free_disk_headroom(
                         self._scratch_parent,
-                        reserve_bytes=int(reserve[0]),
+                        reserve_bytes=reserve_bytes,
                     )
                 connection.execute(
                     "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
