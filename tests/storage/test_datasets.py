@@ -8475,7 +8475,7 @@ def test_writer_checks_actual_arrow_headroom_after_conversion(
     monkeypatch.setattr(
         dataset_writing,
         "pandas_frame_payload_bytes",
-        lambda _: 300_000,
+        lambda _: 100_000,
     )
     conversions = 0
 
@@ -8497,6 +8497,112 @@ def test_writer_checks_actual_arrow_headroom_after_conversion(
         )
 
     assert conversions == 1
+
+
+def test_writer_deducts_other_live_root_reservations_before_allocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _writer_test_policy()
+    allocations = 0
+
+    def forbid_prepare(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal allocations
+        allocations += 1
+        raise AssertionError("writer_allocated_without_shared_headroom")
+
+    monkeypatch.setattr(dataset_writing._WriteStats, "prepare_frame", forbid_prepare)
+    other_owner_bytes = (
+        policy.task_memory_budget_bytes
+        - dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with policy.reserve("test.outer.owner", other_owner_bytes):
+            with pytest.raises(
+                ValueError,
+                match="dataset_working_set_exceeds_task_memory_budget",
+            ):
+                dataset_writing.write_dataset(
+                    make_dataset_artifact_root(tmp_path, "writer_shared_headroom"),
+                    make_default_dataset_frame(),
+                    spec=make_processed_dataset_spec("writer_shared_headroom"),
+                    resource_policy=policy,
+                )
+
+    assert allocations == 0
+
+
+def test_writer_rejects_before_pandas_conversion_overlap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _writer_test_policy(working_headroom_bytes=250_000)
+    monkeypatch.setattr(
+        dataset_writing,
+        "pandas_frame_payload_bytes",
+        lambda _: 100_000,
+    )
+    conversions = 0
+
+    def forbid_prepare(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal conversions
+        conversions += 1
+        raise AssertionError("pandas_conversion_started_before_admission")
+
+    monkeypatch.setattr(dataset_writing._WriteStats, "prepare_frame", forbid_prepare)
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_working_set_exceeds_task_memory_budget",
+    ):
+        dataset_writing.write_dataset(
+            make_dataset_artifact_root(tmp_path, "writer_conversion_admission"),
+            make_default_dataset_frame(),
+            spec=make_processed_dataset_spec("writer_conversion_admission"),
+            resource_policy=policy,
+        )
+
+    assert conversions == 0
+
+
+def test_writer_rejects_before_native_parquet_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_table = pa.table({"payload": [b"x" * 600_000]})
+    policy = _writer_test_policy(working_headroom_bytes=native_table.nbytes + 4)
+    monkeypatch.setattr(
+        dataset_writing,
+        "pandas_frame_payload_bytes",
+        lambda _: 1,
+    )
+    monkeypatch.setattr(
+        dataset_writing._WriteStats,
+        "table_for_frame",
+        lambda *_args, **_kwargs: native_table,
+    )
+    native_writes = 0
+
+    def forbid_native_write(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal native_writes
+        native_writes += 1
+        raise AssertionError("native_write_started_before_admission")
+
+    monkeypatch.setattr(dataset_writing.pq, "write_table", forbid_native_write)
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_working_set_exceeds_task_memory_budget",
+    ):
+        dataset_writing.write_dataset(
+            make_dataset_artifact_root(tmp_path, "writer_native_admission"),
+            make_default_dataset_frame(),
+            spec=make_processed_dataset_spec("writer_native_admission"),
+            resource_policy=policy,
+        )
+
+    assert native_writes == 0
 
 
 def test_writer_enforces_task_wide_copy_and_arrow_headroom(tmp_path: Path) -> None:
@@ -8587,7 +8693,7 @@ def test_writer_passes_payload_target_and_actual_headroom_to_persisted_readback(
     assert observed_targets
     assert observed_headroom
     assert observed_targets[-1] == policy.payload_target_bytes
-    assert observed_operation_headroom[-1] == observed_headroom[-1]
+    assert observed_operation_headroom[-1] in observed_headroom
     persisted = read_dataset(root)
     assert tuple(persisted.columns) == tuple(frame.columns)
     assert len(persisted) == len(frame)
