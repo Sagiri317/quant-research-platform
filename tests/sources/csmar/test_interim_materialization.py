@@ -697,12 +697,13 @@ def test_index_info_continuation_spool_is_disk_gated_on_source_parent(
         (b"\xef\xbb\xbfname,note\r\n", [["name", "note"]]),
         (b'a,"b""c"\n', [["a", 'b"c']]),
         (b'a,"b\r\nc"\r\n', [["a", "b\r\nc"]]),
+        (b'a,"b"x\n', [["a", "bx"]]),
         (b'a,b"c\r', [["a", 'b"c']]),
         (b"\n", [[]]),
         (b"a,b", [["a", "b"]]),
     ),
 )
-def test_bounded_csv_owner_preserves_strict_supported_grammar(
+def test_bounded_csv_owner_preserves_supported_provider_grammar(
     tmp_path: Path,
     payload: bytes,
     expected: list[list[str]],
@@ -721,7 +722,7 @@ def test_bounded_csv_owner_preserves_strict_supported_grammar(
     assert [row for row, _ in records] == expected
 
 
-@pytest.mark.parametrize("payload", (b'a,"unterminated\n', b'a,"b"x\n', b"\xff\n"))
+@pytest.mark.parametrize("payload", (b'a,"unterminated\n', b"\xff\n"))
 def test_bounded_csv_owner_rejects_strict_malformed_input(
     tmp_path: Path,
     payload: bytes,
@@ -2480,6 +2481,24 @@ def test_csmar_index_info_sample_scope_and_formula_commas_preserve_alignment(
     assert raw.loc[0, "Idxinfo05"] == "1"
     assert raw.loc[0, "Idxinfo09"] == "5"
     assert raw.loc[0, "Idxinfo10"] == "formula text, with comma"
+
+
+def test_csmar_index_info_ignores_terminal_code_like_formula_candidate(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "index_info_code_like_formula.csv"
+    index_path.write_text(
+        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
+        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
+        "000985,benchmark,2014-01-02,2013-12-31,-9666,"
+        "sample,scope,with comma,1,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    raw = _collect_raw_export(index_path, "index_info")
+
+    assert raw.loc[0, "Idxinfo04"] == "sample,scope,with comma"
+    assert raw.loc[0, "Idxinfo10"] == 1
 
 
 @pytest.mark.parametrize(

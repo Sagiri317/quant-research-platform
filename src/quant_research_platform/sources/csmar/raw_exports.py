@@ -751,7 +751,7 @@ def _normalize_bounded_index_info_record(
         if len(window) > 5:
             del window[0]
         start = position - 4
-        if start < 6 or len(window) != 5:
+        if start < 6 or len(window) != 5 or start + 5 >= record.field_count:
             continue
         if all(
             _looks_like_source_category_code(item, allowed_values)

@@ -720,7 +720,9 @@ class _BoundedCsvRecords:
                     finish_field()
                     decoder.decode(bytes(validation), final=True)
                     break
-                raise ValueError("malformed_csmar_csv_row")
+                write_field(byte)
+                state = self._IN_UNQUOTED
+                continue
 
             if byte in (10, 13):
                 consume(byte)
