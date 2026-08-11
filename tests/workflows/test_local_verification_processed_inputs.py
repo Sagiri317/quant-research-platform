@@ -198,12 +198,7 @@ def test_local_verification_rejects_persisted_primary_key_null_summary_mismatch(
                 ),
             )
         )
-    seed_payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
-
-    assert "completed_at" not in seed_payload
-    assert "status" not in seed_payload
-    assert "checks" not in seed_payload
-    assert not (run_root / "summary.md").exists()
+    assert not run_root.exists()
 
 
 def test_local_verification_workflow_runs_real_tiny_research_stack(
