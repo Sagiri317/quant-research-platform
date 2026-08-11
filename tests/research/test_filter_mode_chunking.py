@@ -20,12 +20,12 @@ from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
 from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
 from tests.helpers.research_specs import (
     make_signal_spec,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.filter_mode_fixtures import (
     make_filter_mode_frame,
 )
@@ -84,7 +84,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         "compute_ic_and_grouped_label_values",
         wrapped_compute,
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_000,
     )
     with runtime_resource_policy_scope(policy):
@@ -330,7 +330,7 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
         signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=500,
     )
 
@@ -407,7 +407,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=800,
     )
     with runtime_resource_policy_scope(policy):
@@ -468,7 +468,7 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
         "apply_filter_mode",
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_000,
     )
     with runtime_resource_policy_scope(policy):

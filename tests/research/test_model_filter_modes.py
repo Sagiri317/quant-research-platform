@@ -22,12 +22,12 @@ from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
 from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
 from tests.helpers.research_specs import (
     make_signal_spec,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.filter_mode_fixtures import (
     make_filter_mode_frame,
     make_filter_mode_model_hyperparameters,
@@ -669,7 +669,7 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design() -> None:
 
     assert result.coefficients.tolist() == pytest.approx(expected.tolist())
 
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4_000,
     )
     with runtime_resource_policy_scope(policy):

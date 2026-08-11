@@ -16,10 +16,11 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_types import DatasetReadMode
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _policy(megabytes: int) -> RuntimeResourcePolicy:
-    return RuntimeResourcePolicy.capture(
+    return capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         rss_bytes=1024,
         explicit_cap_bytes=megabytes * 1024 * 1024,

@@ -34,6 +34,10 @@ from quant_research_platform.storage import (
     manifests,
 )
 from quant_research_platform.storage._dataset_types import DatasetReadMode
+from tests.helpers.runtime_resources import (
+    capture_storage_test_policy,
+    capture_test_policy,
+)
 
 _PRIMARY_EXCEPTION_TYPES = (
     RuntimeError,
@@ -1830,7 +1834,7 @@ def test_directory_callers_stop_before_foreign_file_side_effect(
 
 
 def _policy(megabytes: int) -> RuntimeResourcePolicy:
-    return RuntimeResourcePolicy.capture(
+    return capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=megabytes * 1024 * 1024,
     )
@@ -1982,9 +1986,8 @@ def test_standalone_storage_root_preflights_before_admission_and_cleans_before_r
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
-    policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1 * 1024 * 1024,
+    policy = capture_storage_test_policy(
+        working_headroom_bytes=1024**2,
     )
 
     class Session:
@@ -2055,11 +2058,11 @@ def test_read_dataset_keeps_discovered_policy_active_through_session_exit(
     mode: DatasetReadMode,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
-    competing = RuntimeResourcePolicy.capture(
+    competing = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -2134,10 +2137,10 @@ def test_session_owner_rejects_policy_mismatch_before_storage_work(
     owner,
     later_name: str,
 ) -> None:
-    session_policy = RuntimeResourcePolicy.capture(
+    session_policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
-    explicit_policy = RuntimeResourcePolicy.capture(
+    explicit_policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
     module = (
@@ -2268,7 +2271,7 @@ def _patch_open_session_metadata_preflight(
 def test_open_session_construction_cleanup_preserves_primary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -2301,7 +2304,7 @@ def test_open_session_construction_cleanup_preserves_primary(
 def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -2400,7 +2403,7 @@ def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
 def test_open_session_policy_entry_failure_precedes_inventory_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -2476,9 +2479,8 @@ def test_write_dataset_activates_and_closes_caller_iterator_under_policy(
     primary_type: type[BaseException],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1 * 1024 * 1024,
+    policy = capture_storage_test_policy(
+        working_headroom_bytes=1024**2,
     )
     events: list[tuple[str, RuntimeResourcePolicy | None]] = []
     primary = primary_type("body_primary")
@@ -3302,7 +3304,7 @@ def test_compare_expected_storage_validation_still_maps(
     right = tmp_path / "right"
     left.mkdir()
     right.mkdir()
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -3464,7 +3466,7 @@ def test_compare_rechecks_artifact_roots_before_each_exists_probe(
     validations = {left: 0, right: 0}
     probes = {left: 0, right: 0}
     original_exists = Path.exists
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -3605,7 +3607,7 @@ def test_compare_internal_recheck_blocks_new_ancestor_alias_before_exists(
     result = comparison.compare_datasets(
         left,
         right,
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=16 * 1024 * 1024,
             explicit_cap_bytes=1 * 1024 * 1024,
         ),

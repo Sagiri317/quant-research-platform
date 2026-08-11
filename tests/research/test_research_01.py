@@ -79,6 +79,10 @@ from tests.helpers.research_specs import (
     make_research_dataset_catalog,
     make_signal_spec,
 )
+from tests.helpers.runtime_resources import (
+    capture_storage_test_policy,
+    capture_test_policy,
+)
 from tests.research.prediction_output_helpers import (
     write_prediction_output_and_read,
 )
@@ -87,7 +91,7 @@ from tests.research.prediction_output_helpers import (
 def test_research_dataset_chunk_wrapper_captures_outer_at_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -119,7 +123,7 @@ def test_research_dataset_chunk_wrapper_captures_outer_at_creation(
 def test_research_dataset_chunk_wrapper_rejects_delayed_consumption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -291,7 +295,7 @@ def test_research_time_key_scan_uses_payload_target(
 ) -> None:
     observed_targets: list[int] = []
     timestamps = pd.date_range("2026-01-01", periods=20, freq="min")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1024,
     )
     session = SimpleNamespace(path_selection=None, close=lambda: None)
@@ -333,7 +337,7 @@ def test_research_time_key_scan_uses_payload_target(
 def test_research_time_key_scan_preserves_single_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=320,
     )
     session = SimpleNamespace(path_selection=None, close=lambda: None)
@@ -367,7 +371,7 @@ def test_research_time_key_scan_closes_iterator_before_view_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1024,
     )
 
@@ -426,7 +430,7 @@ def test_research_view_cleanup_preserves_active_primary(
     primary_type: type[BaseException],
 ) -> None:
     primary = primary_type("body_primary")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1024,
     )
     window = TimeWindow("2026-01-01", "2026-01-01")
@@ -565,7 +569,7 @@ def test_research_processed_input_uses_task_budget_for_materialization(
     processed_catalog = make_demo_processed_catalog()
     dataset_spec = make_research_dataset_catalog().get("demo")
     processed_spec = processed_catalog.get("demo_factors")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=12 * 1024,
     )
     observed: dict[str, object] = {}
@@ -610,7 +614,7 @@ def test_research_processed_input_uses_task_budget_for_materialization(
 
 
 def test_research_join_rejects_known_payloads_over_task_budget() -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_024,
     )
 
@@ -628,7 +632,7 @@ def test_research_join_rejects_known_payloads_over_task_budget() -> None:
 
 
 def test_research_join_bound_includes_retained_base_keys() -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_000,
     )
 
@@ -648,7 +652,7 @@ def test_research_join_bound_includes_retained_base_keys() -> None:
 def test_research_join_bound_keeps_live_session_state_after_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_000,
     )
     frame = pd.DataFrame({"id": [1]})
@@ -690,7 +694,7 @@ def test_research_join_bound_keeps_live_session_state_after_read(
 def test_research_join_preflights_merged_output_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_000,
     )
     base = pd.DataFrame({"id": [1], "left": [1]})
@@ -735,7 +739,7 @@ def test_research_join_preflights_merged_output_allocation(
 def test_research_join_preflights_feature_transform_output_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_000,
     )
     frame = pd.DataFrame({"id": [1], "value": [1.0]})
@@ -779,7 +783,7 @@ def test_research_join_preflights_feature_transform_output_allocation(
 def test_research_join_preflights_real_transform_payload_before_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=50_000,
     )
     frame = pd.DataFrame({"id": range(1_000), "value": [1.0] * 1_000})
@@ -818,7 +822,7 @@ def test_research_join_preflights_real_transform_payload_before_allocation(
 def test_research_join_preflights_final_projection_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=37_500,
     )
     frame = pd.DataFrame({"id": range(1_000), "value": [1.0] * 1_000})
@@ -886,7 +890,7 @@ def test_research_join_preflights_final_projection_allocation(
 
 
 def test_research_final_write_rejects_output_over_payload_target() -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_000,
     )
     output = pd.DataFrame({"value": ["x" * 2_000]})
@@ -1121,10 +1125,8 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
         "_estimate_research_join_bytes_per_session",
         lambda **_kwargs: 600_000,
     )
-    tiny_policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=2 * 1024**2,
-        rss_bytes=0,
-        explicit_cap_bytes=1024**2,
+    tiny_policy = capture_storage_test_policy(
+        working_headroom_bytes=1024**2,
     )
     tiny_root = assemble_research_dataset(
         layout=tiny_layout,
@@ -1180,7 +1182,7 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
         processed_spec,
         existing_columns=(),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
     with assembler_module.open_dataset_session(
@@ -1301,7 +1303,7 @@ def test_research_sizing_probe_materializes_one_session_at_a_time(
         time_keys=sessions,
         time_window=TimeWindow("2026-01-01", "2026-01-20"),
         base_data_id="base",
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=1024**3,
         ),
     )
@@ -1871,10 +1873,8 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         "_estimate_research_join_bytes_per_session",
         lambda **_kwargs: 600_000,
     )
-    assembly_policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=2 * 1024**2,
-        rss_bytes=0,
-        explicit_cap_bytes=1024**2,
+    assembly_policy = capture_storage_test_policy(
+        working_headroom_bytes=1024**2,
     )
     assemble_research_dataset(
         layout=layout,
@@ -1954,7 +1954,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         wrapped_write,
     )
 
-    prediction_policy = RuntimeResourcePolicy.capture(
+    prediction_policy = capture_test_policy(
         available_memory_bytes=2 * 1024**2,
         rss_bytes=0,
         explicit_cap_bytes=1024**2,
@@ -2056,10 +2056,8 @@ def test_evaluation_runner_streams_research_chunks(
         "_estimate_research_join_bytes_per_session",
         lambda **_kwargs: 600_000,
     )
-    assembly_policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=2 * 1024**2,
-        rss_bytes=0,
-        explicit_cap_bytes=1024**2,
+    assembly_policy = capture_storage_test_policy(
+        working_headroom_bytes=1024**2,
     )
     assemble_research_dataset(
         layout=layout,
@@ -2093,7 +2091,7 @@ def test_evaluation_runner_streams_research_chunks(
         wrapped_iter,
     )
 
-    evaluation_policy = RuntimeResourcePolicy.capture(
+    evaluation_policy = capture_test_policy(
         available_memory_bytes=2 * 1024**2,
         rss_bytes=0,
         explicit_cap_bytes=1024**2,

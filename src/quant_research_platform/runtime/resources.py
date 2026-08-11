@@ -57,27 +57,17 @@ class RuntimeResourcePolicy:
     def capture(
         cls,
         *,
-        available_memory_bytes: int | None = None,
-        rss_bytes: int | None = None,
         explicit_cap_bytes: int | None = None,
     ) -> RuntimeResourcePolicy:
         """Capture available memory and RSS exactly once before root allocation."""
 
-        available = (
-            _available_memory_bytes()
-            if available_memory_bytes is None
-            else _exact_positive_int(
-                available_memory_bytes,
-                error="invalid_runtime_resource_available_memory",
-            )
+        available = _exact_positive_int(
+            _available_memory_bytes(),
+            error="invalid_runtime_resource_available_memory",
         )
-        rss0 = (
-            _process_rss_bytes()
-            if rss_bytes is None
-            else _exact_nonnegative_int(
-                rss_bytes,
-                error="invalid_runtime_resource_rss",
-            )
+        rss0 = _exact_nonnegative_int(
+            _process_rss_bytes(),
+            error="invalid_runtime_resource_rss",
         )
         hard_budget = (
             available

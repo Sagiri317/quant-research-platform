@@ -6,6 +6,7 @@ from quant_research_platform.runtime import resources as resource_module
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.workflows import local_verification as module
 from quant_research_platform.workflows.local_verification import run_local_verification
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.workflows.local_verification_fixtures import (
     GIB,
     fake_evaluation_result,
@@ -29,7 +30,7 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
     snapshots: list[RuntimeResourcePolicy] = []
     capture_calls = 0
     explicit_cap = 5 * GIB
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=10 * GIB,
         explicit_cap_bytes=explicit_cap,
     )

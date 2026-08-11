@@ -70,6 +70,7 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
@@ -78,8 +79,20 @@ from tests.storage.low_level_fixtures import (
 
 
 def _issued_test_policy(task_bytes: int = 16 * 1024**2) -> RuntimeResourcePolicy:
-    return RuntimeResourcePolicy.capture(
+    return capture_test_policy(
         available_memory_bytes=task_bytes * 5 // 4,
+    )
+
+
+def _writer_test_policy(
+    working_headroom_bytes: int = 1024**2,
+) -> RuntimeResourcePolicy:
+    return capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=(
+            dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+            + working_headroom_bytes
+        ),
     )
 
 
@@ -482,6 +495,38 @@ def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) ->
     )
 
 
+def test_writer_reserves_complete_fixed_owner_before_sqlite_or_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ForbiddenInput:
+        def __iter__(self) -> ForbiddenInput:
+            return self
+
+        def __next__(self) -> pd.DataFrame:
+            raise AssertionError("input_pulled_before_storage_owner_admission")
+
+        def close(self) -> None:
+            pass
+
+    def reject_connect(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("sqlite_opened_before_storage_owner_admission")
+
+    monkeypatch.setattr(dataset_inventory.sqlite3, "connect", reject_connect)
+    policy = capture_test_policy(
+        available_memory_bytes=2560,
+        explicit_cap_bytes=2048,
+    )
+
+    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+        dataset_writing.write_dataset(
+            make_dataset_artifact_root(tmp_path, "fixed_owner_admission"),
+            ForbiddenInput(),
+            spec=make_processed_dataset_spec("fixed_owner_admission"),
+            resource_policy=policy,
+        )
+
+
 @pytest.mark.parametrize(
     "exit_mode",
     (
@@ -832,10 +877,7 @@ def test_converter_enforces_actual_arrow_and_pandas_operation_headroom(
         lambda _frame: 512,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
+    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
         tuple(
             dataset_reading._arrow_batch_to_bounded_pandas(
                 batch,
@@ -2380,7 +2422,7 @@ def test_dataset_write_removes_reused_pid_staged_scratch(
         encoding="utf-8",
     )
     (reused_scratch / "k.db").write_bytes(b"scratch")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         rss_bytes=0,
     )
@@ -3337,7 +3379,7 @@ def test_empty_materialized_and_chunked_reads_preserve_stored_dtypes(
         expected,
         spec=make_processed_dataset_spec("empty_dtypes"),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=8 * 1024 * 1024,
     )
@@ -3520,7 +3562,7 @@ def test_fingerprint_accounts_for_live_arrow_and_nested_pandas_payloads(
         + max(pandas_frame_payload_bytes(canonical), canonical_value_bytes * 2)
         + 8
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=8 * 1024 * 1024,
     )
@@ -3640,7 +3682,7 @@ def test_fingerprint_releases_hash_array_before_next_source_batch(
 
     monkeypatch.setattr(dataset_fingerprinting, "iter_dataset_file_batches", batches)
     monkeypatch.setattr(dataset_fingerprinting, "_iter_fingerprint_hashes", hashes)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
     context = SimpleNamespace(
@@ -3671,7 +3713,7 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
 ) -> None:
     frame = pd.DataFrame({"nested": [["x" * 50] * 4 for _ in range(20_000)]})
     arrow_batch = pa.RecordBatch.from_pandas(frame, preserve_index=False)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=32 * 1024**2,
         explicit_cap_bytes=16 * 1024 * 1024,
     )
@@ -3765,7 +3807,7 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
 def test_fingerprint_rejects_exhausted_operation_headroom_before_traversal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=8 * 1024 * 1024,
     )
@@ -3805,7 +3847,7 @@ def test_fingerprint_reserves_many_partition_counters_before_traversal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024,
     )
     traversals = 0
@@ -3847,7 +3889,7 @@ def test_fingerprint_rejects_many_partition_output_overlap_after_traversal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=2 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -3993,7 +4035,7 @@ def test_storage_operations_propagate_the_captured_payload_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -4144,7 +4186,7 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
     left = tmp_path / "left"
@@ -4982,7 +5024,7 @@ def test_fingerprint_normalizes_bounded_slices_without_full_frame_copy(
         batch = pa.RecordBatch.from_pandas(frame, preserve_index=False)
     input_bytes = pandas_frame_payload_bytes(frame)
     operation_headroom = batch.get_total_buffer_size() + input_bytes + 64 * 1024
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=8 * 1024 * 1024,
     )
@@ -5058,7 +5100,7 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("exact_payload_reserve"),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=1024**2,
     )
@@ -5338,7 +5380,7 @@ def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
         (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
         spec=make_processed_dataset_spec("writer_receipt"),
         staged_validator=validate_receipt,
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=64 * 1024**2,
             explicit_cap_bytes=32 * 1024 * 1024,
         ),
@@ -5380,7 +5422,7 @@ def test_open_dataset_session_counts_caller_retained_before_inventory(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("session_nested_retained"),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -5442,7 +5484,7 @@ def test_session_from_inventory_rejects_live_caller_overlap_before_build(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("writer_session_overlap"),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -5506,7 +5548,7 @@ def test_open_dataset_session_rejects_live_caller_overlap_before_build(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("owned_session_overlap"),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -5611,7 +5653,7 @@ def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec(f"metadata_stat_{entrypoint}"),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -5709,7 +5751,7 @@ def test_writer_bounds_raw_pandas_arrow_and_persisted_conversion(
         root,
         frame,
         spec=make_processed_dataset_spec("bounded_writer"),
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=16 * 1024**2,
             explicit_cap_bytes=8 * 1024 * 1024,
         ),
@@ -5727,7 +5769,7 @@ def test_private_writer_returns_final_inspection_and_public_writer_returns_none(
 ) -> None:
     private_root = make_dataset_artifact_root(tmp_path, "private_return")
     public_root = make_dataset_artifact_root(tmp_path, "public_return")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -5931,10 +5973,7 @@ def test_writer_rejects_indivisible_categorical_identity_over_payload_target(
     frame = make_default_dataset_frame().iloc[:1].copy()
     value = "x" * (1024**2 + 1)
     frame["asset_id"] = pd.Categorical([value], categories=[value])
-    policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=1024**2,
-    )
+    policy = _writer_test_policy()
     with pytest.raises(
         ValueError,
         match="dataset_categorical_value_exceeds_payload_target",
@@ -6222,7 +6261,7 @@ def test_session_filter_reuses_prepared_values(
         spec=make_processed_dataset_spec("tuple_in_filter_prepared_once"),
     )
     values = ("A", "C", *(f"missing_{position:08d}" for position in range(40_000)))
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=16 * 1024 * 1024,
     )
@@ -6317,7 +6356,7 @@ def test_dataset_filter_capacity_uses_the_typed_storage_signal(tmp_path: Path) -
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("typed_filter_capacity"),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -6346,7 +6385,7 @@ def test_dataset_filter_preflight_rejects_before_bulk_arrow_array(
     monkeypatch: pytest.MonkeyPatch,
     shape: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -6392,7 +6431,7 @@ def test_dataset_filter_preflight_rejects_before_bulk_arrow_array(
 def test_dataset_filter_preparation_rejects_pointer_overlap_before_sort_or_arrow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -6428,7 +6467,7 @@ def test_membership_internal_grammar_rejects_raw_arrow_values() -> None:
 def test_dataset_prepared_in_filter_compacts_sorted_duplicates_without_arrow_unique(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
 
@@ -6456,7 +6495,7 @@ def test_dataset_prepared_in_filter_payload_gate_uses_compact_values(
     data_type: pa.DataType,
     value: object,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=8 * 1024 * 1024,
     )
@@ -6474,7 +6513,7 @@ def test_dataset_prepared_in_filter_payload_gate_uses_compact_values(
 
 
 def test_dataset_prepared_in_filter_rejects_distinct_equal_string_payloads() -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=32 * 1024**2,
         explicit_cap_bytes=16 * 1024 * 1024,
     )
@@ -6505,7 +6544,7 @@ def test_dataset_prepared_in_filter_accepts_arrow_time_values(
     data_type: pa.DataType,
     values: tuple[time, ...],
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
 
@@ -6537,7 +6576,7 @@ def test_persisted_arrow_time_filters_support_equal_and_membership(
 ) -> None:
     path = tmp_path / "time.parquet"
     pq.write_table(pa.table({"value": pa.array(values, type=data_type)}), path)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
     prepared = dataset_reading._prepare_in_filter(
@@ -6576,7 +6615,7 @@ def test_persisted_arrow_time_filters_support_equal_and_membership(
 
 
 def test_dataset_prepared_in_filter_rejects_unsupported_arrow_family() -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
 
@@ -6590,7 +6629,7 @@ def test_dataset_prepared_in_filter_rejects_unsupported_arrow_family() -> None:
 
 
 def test_dataset_prepared_in_filter_accepts_fixed_size_binary() -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
 
@@ -6607,7 +6646,7 @@ def test_dataset_prepared_in_filter_accepts_fixed_size_binary() -> None:
 def test_dataset_filter_preflight_rejects_surrogate_before_arrow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -6639,7 +6678,7 @@ def test_dataset_binary_filter_preflight_rejects_before_arrow(
     offset_bytes: int,
     shape: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -6681,7 +6720,7 @@ def test_dataset_filter_capacity_includes_inventory_during_preparation(
         time_window=None,
     ) as session:
         inventory_bytes = session.inventory.retained_memory_bytes
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -7402,10 +7441,7 @@ def test_writer_stops_single_category_domain_before_descriptor_tail(
             AssertionError("full_category_descriptor_materialized_before_gate")
         ),
     )
-    policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=2 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
+    policy = _writer_test_policy()
 
     with pytest.raises(
         ValueError,
@@ -7633,10 +7669,7 @@ def test_writer_rejects_cumulative_logical_dtype_metadata_over_target(
                 }
             )
         )
-    policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=1024**2,
-    )
+    policy = _writer_test_policy()
     stream_calls = 0
     streamed_values = 0
     original_values = dataset_writing.ExactPrimaryKeyIndex.identity_payload_values
@@ -7707,7 +7740,7 @@ def test_unordered_category_domain_uses_live_exact_index_namespace(
         frame,
         spec=make_processed_dataset_spec("category_spill"),
         staged_validator=validate,
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=64 * 1024**2,
             explicit_cap_bytes=32 * 1024 * 1024,
         ),
@@ -7828,7 +7861,7 @@ def test_staged_validator_wrong_keys_rejects_and_cleans_atomic_state(
             frame,
             spec=make_processed_dataset_spec("wrong_staged_keys"),
             staged_validator=reject_wrong_keys,
-            resource_policy=RuntimeResourcePolicy.capture(
+            resource_policy=capture_test_policy(
                 available_memory_bytes=64 * 1024**2,
                 explicit_cap_bytes=32 * 1024 * 1024,
             ),
@@ -8031,7 +8064,7 @@ def test_physical_membership_preserves_generic_exact_scalar_semantics(
     members: tuple[object, ...],
     expected: int,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
     prepared = dataset_reading._prepare_in_filter(
@@ -8056,7 +8089,7 @@ def test_physical_membership_preserves_generic_exact_scalar_semantics(
 
 
 def test_physical_membership_rejects_null_filter_member_before_sort() -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
 
@@ -8435,10 +8468,7 @@ def test_writer_checks_actual_arrow_headroom_after_conversion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
+    policy = _writer_test_policy()
     monkeypatch.setattr(
         dataset_writing,
         "pandas_frame_payload_bytes",
@@ -8476,10 +8506,7 @@ def test_writer_enforces_task_wide_copy_and_arrow_headroom(tmp_path: Path) -> No
             "value": ["x" * 1_500] * row_count,
         }
     )
-    policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
+    policy = _writer_test_policy()
     with pytest.raises(
         ValueError,
         match="dataset_working_set_exceeds_task_memory_budget",
@@ -8506,10 +8533,7 @@ def test_writer_passes_payload_target_and_actual_headroom_to_persisted_readback(
         frame = frame.iloc[:0].copy()
     elif variant == "override":
         frame["value"] = pd.Series(frame["value"], dtype="Int64")
-    policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
+    policy = _writer_test_policy()
     observed_targets: list[int] = []
     observed_operation_headroom: list[int] = []
     observed_headroom: list[int] = []
@@ -8581,7 +8605,7 @@ def test_read_admission_occurs_after_metadata_preflight_and_at_lazy_activation(
     mode: DatasetReadMode,
 ) -> None:
     events: list[str] = []
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
 
@@ -8673,7 +8697,7 @@ def test_chunked_explicit_inactive_policy_preflights_before_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
 
@@ -8863,7 +8887,7 @@ def test_dataset_inventory_disk_gates_native_page_and_encoded_rows(
         "require_free_disk_headroom",
         lambda _path, *, reserve_bytes: reserve_calls.append(reserve_bytes),
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -9019,7 +9043,7 @@ def test_inspection_window_file_count_counts_consecutive_file_batches_once(
         manifest={},
         inventory=SimpleNamespace(retained_memory_bytes=1024),
         retained_memory_bytes=1024,
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=16 * 1024**2,
         ),
         read_paths=(path, empty_path),
@@ -9046,7 +9070,7 @@ def test_inspection_rejects_output_overlap_after_partition_traversal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=8 * 1024 * 1024,
     )
@@ -9133,10 +9157,7 @@ def test_bounded_metadata_reader_rejects_hardlink_before_open(
 def test_private_writer_envelope_reserves_upstream_retained_payload(
     tmp_path: Path,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
-        available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
+    policy = _writer_test_policy()
     frame = make_default_dataset_frame()
     envelope = dataset_writing.DatasetWriteChunk(
         frame,
@@ -9158,7 +9179,7 @@ def test_private_writer_envelope_reserves_upstream_retained_payload(
 def test_private_writer_baseline_rejects_before_input_generation(
     tmp_path: Path,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -9169,10 +9190,7 @@ def test_private_writer_baseline_rejects_before_input_generation(
         generated = True
         yield make_default_dataset_frame()
 
-    with pytest.raises(
-        ValueError,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
+    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "retained_baseline"),
             chunks(),
@@ -9224,13 +9242,17 @@ def test_writer_final_session_receives_key_index_and_last_external_envelope(
         resource_policy=None,
     )
 
-    assert observed == [key_index_bytes[0] + external_envelopes[-1]]
+    assert observed == [
+        dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+        - dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
+        + external_envelopes[-1]
+    ]
 
 
 def test_string_filter_grammar_precedes_capacity_for_surrogate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -9262,7 +9284,7 @@ def test_string_filter_compact_utf8_sizing_matches_arrow(
     field: pa.Field,
     values: tuple[str, ...],
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=8 * 1024 * 1024,
     )

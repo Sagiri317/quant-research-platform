@@ -13,7 +13,7 @@ from quant_research_platform.contracts._json import render_qrp_json_object
 from quant_research_platform.policy.share_safety import (
     MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS,
 )
-from quant_research_platform.runtime.resources import MIB, RuntimeResourcePolicy
+from quant_research_platform.runtime.resources import MIB
 from quant_research_platform.storage import manifests
 from quant_research_platform.storage._dataset_inspection import (
     dataset_inspection_retained_memory_bytes,
@@ -33,6 +33,7 @@ from tests.helpers.report_output_frames import (
     make_report_prediction_output_frame,
     make_report_prediction_spec,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.low_level_fixtures import (
     make_default_dataset_frame,
     make_processed_dataset_spec,
@@ -312,7 +313,7 @@ def test_validated_text_scan_accepts_payload_at_exact_runtime_target(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "summary.md"
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=2 * MIB,
     )
     line_pairs, remainder = divmod(policy.payload_target_bytes, 2)
@@ -328,7 +329,7 @@ def test_validated_text_scan_accepts_many_short_lines_over_runtime_soft_target(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "summary.md"
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=2 * MIB,
     )
     path.write_bytes(b"x\n" * (policy.payload_target_bytes + 1))
@@ -1026,7 +1027,7 @@ def test_validation_summary_reports_all_observed_dataset_failure_classes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dataset_root = _valid_dataset(tmp_path, "observed_failures")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * MIB,
     )
     inspection = validation_summary.inspect_dataset(

@@ -20,6 +20,7 @@ from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _single_time_frame() -> pd.DataFrame:
@@ -35,7 +36,7 @@ def _single_time_frame() -> pd.DataFrame:
 def test_lazy_memory_factory_binds_outer_for_active_consumption(
     explicit_mode: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -53,7 +54,7 @@ def test_lazy_memory_factory_binds_outer_for_active_consumption(
 def test_lazy_memory_factory_rejects_delayed_consumption_after_outer_exit(
     explicit_mode: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -70,11 +71,11 @@ def test_lazy_memory_factory_rejects_delayed_consumption_after_outer_exit(
 
 
 def test_lazy_memory_factory_rejects_different_explicit_policy_at_creation() -> None:
-    active = RuntimeResourcePolicy.capture(
+    active = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
-    different = RuntimeResourcePolicy.capture(
+    different = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=2 * 1024 * 1024,
     )
@@ -92,11 +93,11 @@ def test_lazy_memory_factory_rejects_different_explicit_policy_at_creation() -> 
 def test_complete_memory_factory_closes_once_on_creation_policy_conflict(
     close_fails: bool,
 ) -> None:
-    active = RuntimeResourcePolicy.capture(
+    active = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
-    different = RuntimeResourcePolicy.capture(
+    different = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=2 * 1024 * 1024,
     )
@@ -187,7 +188,7 @@ def test_complete_time_sized_frames_rejects_single_timestamp_over_budget() -> No
             "value": ["x" * 20] * 400,
         }
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_000,
     )
 
@@ -213,7 +214,7 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
             "value": ["x" * 20] * 200,
         }
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_000,
     )
 
@@ -237,7 +238,7 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
 def test_complete_frames_transfer_captured_input_to_lazy_activation(
     exit_kind: str,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -300,7 +301,7 @@ def test_unactivated_complete_frames_close_once_without_unraisable(
     termination: str,
     close_fails: bool,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -358,7 +359,7 @@ def test_unactivated_complete_frames_close_once_without_unraisable(
 def test_complete_time_frames_close_upstream_inside_policy_scope(
     primary_type: type[BaseException],
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -402,7 +403,7 @@ def test_complete_time_frames_close_once_when_policy_entry_fails(
     close_fails: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )

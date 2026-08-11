@@ -10,7 +10,6 @@ from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
 )
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
@@ -25,6 +24,7 @@ from tests.helpers.research_specs import (
     correctness_processed_catalog,
     correctness_research_dataset_catalog,
 )
+from tests.helpers.runtime_resources import capture_storage_test_policy
 
 
 @pytest.mark.parametrize(
@@ -107,7 +107,7 @@ def test_research_assembly_session_chunks_equal_default_and_keep_nan_positions(
     monkeypatch.setattr(
         assembler_module,
         "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 30_000,
+        lambda **_kwargs: 600_000,
     )
     tiny_root = assemble_research_dataset(
         layout=tiny_layout,
@@ -115,8 +115,8 @@ def test_research_assembly_session_chunks_equal_default_and_keep_nan_positions(
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
-        resource_policy=RuntimeResourcePolicy.capture(
-            available_memory_bytes=100_000,
+        resource_policy=capture_storage_test_policy(
+            working_headroom_bytes=80_000,
         ),
     )
 
@@ -192,8 +192,8 @@ def test_research_feature_transform_session_chunks_equal_default(
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
-        resource_policy=RuntimeResourcePolicy.capture(
-            available_memory_bytes=100_000,
+        resource_policy=capture_storage_test_policy(
+            working_headroom_bytes=80_000,
         ),
     )
 

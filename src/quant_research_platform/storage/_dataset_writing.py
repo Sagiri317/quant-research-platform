@@ -78,6 +78,12 @@ from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 
+_DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES = (
+    1024**2
+    + EXACT_KEY_SQLITE_PAGE_BYTES
+    + DATASET_INVENTORY_RESERVE_BYTES
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DatasetWriteReceipt:
@@ -394,7 +400,15 @@ def write_dataset(
     issued_policy = resource_policy or active_runtime_resource_policy()
     if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
         raise ValueError("invalid_dataset_retained_payload_bytes")
-    with runtime_resource_policy_scope(issued_policy):
+    owner_reserve_bytes = (
+        _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES + retained_payload_bytes
+    )
+    if owner_reserve_bytes >= issued_policy.task_memory_budget_bytes:
+        raise MemoryError("runtime_memory_budget_exceeded")
+    with (
+        runtime_resource_policy_scope(issued_policy),
+        issued_policy.reserve("storage.dataset.write", owner_reserve_bytes),
+    ):
         return _write_dataset_under_policy(
             final_root,
             data,
@@ -441,10 +455,6 @@ def _write_dataset_under_policy(
                 if spec.column_roles.get(column) is ColumnRole.TIMESTAMP
             )
             with (
-                resource_policy.reserve(
-                    "storage.dataset.write.indexes",
-                    EXACT_KEY_SQLITE_PAGE_BYTES + DATASET_INVENTORY_RESERVE_BYTES,
-                ),
                 ExactPrimaryKeyIndex(
                     primary_key=spec.primary_key,
                     timestamp_columns=timestamp_columns,
@@ -457,8 +467,9 @@ def _write_dataset_under_policy(
                     task_memory_budget_bytes=resource_policy.task_memory_budget_bytes,
                 ) as inventory,
             ):
-                working_headroom = resource_policy.task_memory_budget_bytes - (
-                    key_tracker.retained_memory_bytes + inventory.retained_memory_bytes
+                working_headroom = (
+                    resource_policy.task_memory_budget_bytes
+                    - _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
                 )
                 if working_headroom - retained_payload_bytes <= 0:
                     raise ValueError("dataset_working_set_exceeds_task_memory_budget")
@@ -496,7 +507,8 @@ def _write_dataset_under_policy(
                     time_window=None,
                     resource_policy=resource_policy,
                     retained_payload_bytes=(
-                        key_tracker.retained_memory_bytes
+                        _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+                        - inventory.retained_memory_bytes
                         + accumulator.retained_payload_bytes
                     ),
                 )

@@ -42,6 +42,7 @@ from quant_research_platform.storage._dataset_physical import DatasetFileIdentit
 from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_csmar_spool_owners_reject_aliased_parent_before_disk_access(
@@ -156,7 +157,7 @@ def test_csv_owner_bounds_total_logical_record_and_restores_limit_before_yield(
 ) -> None:
     path = tmp_path / "wide-header.csv"
     path.write_text(",".join(["x" * 100] * 11_000) + "\n", encoding="utf-8")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -180,7 +181,7 @@ def test_csv_owner_accepts_source_record_boundary_and_rejects_next_byte(
     path.write_bytes(
         b"x" * (CSMAR_LOGICAL_RECORD_LIMIT_BYTES - 1 + extra_bytes) + b"\n"
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -202,7 +203,7 @@ def test_csv_owner_accepts_source_record_boundary_and_rejects_next_byte(
 def test_csv_owner_accepts_exact_boundary_at_end_of_file(tmp_path: Path) -> None:
     path = tmp_path / "boundary-without-line-ending.csv"
     path.write_bytes(b"x" * CSMAR_LOGICAL_RECORD_LIMIT_BYTES)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -223,7 +224,7 @@ def test_csv_owner_rejects_oversize_data_record_with_larger_payload(
     oversize = b"x" * CSMAR_LOGICAL_RECORD_LIMIT_BYTES + b"\n"
     rows = [oversize, b"ok\n"] if position == "first" else [b"ok\n", oversize]
     path.write_bytes(b"value\n" + b"".join(rows))
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -243,7 +244,7 @@ def test_csv_owner_bounds_quoted_newline_as_one_source_record(tmp_path: Path) ->
     path = tmp_path / "quoted-newline.csv"
     content = b"x" * (CSMAR_LOGICAL_RECORD_LIMIT_BYTES - 4)
     path.write_bytes(b'value\n"' + content + b'\ny"\n')
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -265,7 +266,7 @@ def test_csv_owner_preserves_bom_utf8_crlf_quotes_and_escapes(tmp_path: Path) ->
 
     records = raw_schemas.iter_export_csv_records(
         path,
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=64 * 1024**2,
             explicit_cap_bytes=32 * 1024 * 1024,
         ),
@@ -280,7 +281,7 @@ def test_csv_owner_preserves_bom_utf8_crlf_quotes_and_escapes(tmp_path: Path) ->
 def test_csv_owner_restores_field_limit_while_row_is_suspended(tmp_path: Path) -> None:
     path = tmp_path / "row.csv"
     path.write_text("a,b\n1,2\n", encoding="utf-8")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -296,7 +297,7 @@ def test_csv_owner_restores_field_limit_while_row_is_suspended(tmp_path: Path) -
 def test_csv_owner_rejects_retained_headroom_before_physical_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -330,7 +331,7 @@ def test_csv_owner_rejects_retained_headroom_before_physical_read(
 def test_csv_owner_never_requests_bytes_beyond_retained_headroom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -387,7 +388,7 @@ def test_csv_owner_task_equal_rejection_python_allocation_diagnostic(
 ) -> None:
     path = tmp_path / "task-equal.csv"
     path.write_bytes(b"value\n" + b"x" * (CSMAR_LOGICAL_RECORD_LIMIT_BYTES - 1) + b"\n")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -444,7 +445,7 @@ def test_csv_owner_fast_path_admits_before_content_materialization(
     monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: Handle())
     records = raw_schemas.iter_export_csv_records(
         Path("source.csv"),
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=4 * 1024**2,
             explicit_cap_bytes=2 * 1024 * 1024,
         ),
@@ -468,7 +469,7 @@ def test_index_info_high_field_unicode_python_allocation_diagnostic(
         + "\n",
         encoding="utf-8",
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -511,7 +512,7 @@ def test_csv_owner_closes_record_spool_on_consumer_abandon(
     monkeypatch.setattr(raw_schemas.tempfile, "TemporaryFile", TrackedFile)
     records = raw_schemas.iter_export_csv_records(
         path,
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=64 * 1024**2,
             explicit_cap_bytes=32 * 1024 * 1024,
         ),
@@ -551,7 +552,7 @@ def test_csv_owner_spool_is_disk_gated_on_source_parent(
 
     records = raw_schemas.iter_export_csv_records(
         path,
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=64 * 1024**2,
             explicit_cap_bytes=32 * 1024 * 1024,
         ),
@@ -565,7 +566,7 @@ def test_csv_owner_spool_is_disk_gated_on_source_parent(
 def test_csv_owner_admits_slow_controls_before_spool_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -598,7 +599,7 @@ def test_csv_owner_admits_slow_controls_before_spool_creation(
 def test_csv_owner_admits_total_slow_materialization_before_decode(
     tmp_path: Path,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -711,7 +712,7 @@ def test_bounded_csv_owner_preserves_strict_supported_grammar(
 
     records = raw_schemas.iter_export_csv_records(
         path,
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=64 * 1024**2,
             explicit_cap_bytes=32 * 1024 * 1024,
         ),
@@ -732,7 +733,7 @@ def test_bounded_csv_owner_rejects_strict_malformed_input(
         list(
             raw_schemas.iter_export_csv_records(
                 path,
-                resource_policy=RuntimeResourcePolicy.capture(
+                resource_policy=capture_test_policy(
                     available_memory_bytes=64 * 1024**2,
                     explicit_cap_bytes=32 * 1024 * 1024,
                 ),
@@ -745,7 +746,7 @@ def test_private_export_flushes_publishable_batch_before_next_record(
     dataset: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -789,7 +790,7 @@ def test_private_export_chunks_reject_indivisible_wide_logical_record(
             "State": states,
         }
     ).to_csv(path, index=False)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -817,7 +818,7 @@ def test_private_export_adapts_across_later_wide_rows(
             "State": ["O", *("x" * 200_000 for _ in range(20))],
         }
     ).to_csv(path, index=False)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -839,7 +840,7 @@ def test_private_export_adapts_across_later_wide_rows(
 def test_private_export_next_batch_accounts_for_retained_previous_yield(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -891,7 +892,7 @@ def test_private_export_next_batch_accounts_for_retained_previous_yield(
 def test_private_export_tracks_distinct_live_parents_until_last_dependent_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -937,7 +938,7 @@ def test_private_export_tracks_distinct_live_parents_until_last_dependent_releas
 def test_private_export_releases_parent_after_unretained_exhaustion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -962,7 +963,7 @@ def test_private_export_releases_parent_after_unretained_exhaustion(
 def test_private_export_reserves_downstream_retained_before_dataframe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -1007,7 +1008,7 @@ def test_private_export_reserves_downstream_retained_before_dataframe(
 def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=1024**2,
     )
@@ -1134,7 +1135,7 @@ def test_interim_previous_publication_survives_chunk_and_file_boundaries(
         lambda candidate, **_kwargs: (candidate, {}),
     )
     monkeypatch.setattr(interim, "_merge_pruning_report", lambda *_args: None)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
     )
 
@@ -1175,7 +1176,7 @@ def test_private_export_chunks_keep_normal_wide_record_with_default_payload(
             "State": [state],
         }
     ).to_csv(path, index=False)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -1196,7 +1197,7 @@ def test_private_export_chunks_keep_normal_wide_record_with_default_payload(
 def test_private_export_chunks_small_fit_has_no_hidden_budget_floor(
     tmp_path: Path,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=31 * 1024 * 1024,
     )
@@ -1225,7 +1226,7 @@ def test_materialize_low_budget_fails_only_on_exact_working_set(
         "Markettype,Clddt,Daywk,State\n4,2024-01-02,2,O\n",
         encoding="utf-8",
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -1253,7 +1254,7 @@ def test_materialize_low_budget_fails_only_on_exact_working_set(
 def test_export_header_bounds_logical_record(tmp_path: Path) -> None:
     path = tmp_path / "TRDNEW_Cale.csv"
     path.write_text("x" * (2 * 1024**2) + "\n", encoding="utf-8")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -1279,7 +1280,7 @@ def test_export_header_rejects_empty_and_malformed_csv(
 def test_header_only_export_has_no_data_chunks(tmp_path: Path) -> None:
     path = tmp_path / "TRDNEW_Cale.csv"
     path.write_text("Markettype,Clddt,Daywk,State\n", encoding="utf-8")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -1304,7 +1305,7 @@ def test_header_only_export_has_no_data_chunks(tmp_path: Path) -> None:
 
 
 def test_private_export_batch_target_adapts_to_measured_frame_payload() -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -1340,7 +1341,7 @@ def test_index_info_continuations_join_once_after_linear_accumulation(
         + f"part {continuation_count - 1},1,2,3,4,5,formula\n",
         encoding="utf-8",
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -1401,7 +1402,7 @@ def test_index_info_reconstructed_source_record_uses_owner_limit(
     start = "000905,mid,2014-01-06,2013-12-31,500," + "s" * 600_000 + "\n"
     continuation = "x " * 225_000 + ",1,2,3,4,5,formula\n"
     path.write_text(header + start + continuation, encoding="utf-8")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -1757,7 +1758,7 @@ def test_reference_dedup_uses_selected_sibling_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -2234,7 +2235,7 @@ def test_csv_owner_rejects_same_handle_size_mtime_change_at_close(
 ) -> None:
     export = tmp_path / "calendar.csv"
     _write_trading_calendar_raw_export(export)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -2402,7 +2403,7 @@ def test_csmar_reconstructed_index_info_uses_exact_source_bytes_at_boundary(
         first_prefix + b"x" * (filler_size + extra_bytes) + first_suffix + continuation
     )
     path.write_bytes(header + reconstructed)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -2514,7 +2515,7 @@ def test_index_info_ambiguity_fails_before_candidate_row_slices() -> None:
 def test_index_info_reconstruction_admits_result_overlap_before_join(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -2575,7 +2576,7 @@ def test_index_info_continuation_admits_before_materialized_string(
         + ",1,2,3,4,5,formula\n",
         encoding="utf-8",
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -3126,7 +3127,7 @@ def test_csmar_reference_arrow_retry_precedes_exact_index_mutation(
             "stock_name": ["name"] * 4,
         }
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -3148,7 +3149,7 @@ def test_csmar_reference_arrow_retry_precedes_exact_index_mutation(
 def test_csmar_direct_lazy_iteration_captures_policy_before_first_raw_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -3559,7 +3560,7 @@ def test_csv_owner_open_failure_preserves_primary(
         next(
             raw_schemas.iter_export_csv_records(
                 FailingPath(),  # type: ignore[arg-type]
-                resource_policy=RuntimeResourcePolicy.capture(
+                resource_policy=capture_test_policy(
                     available_memory_bytes=64 * 1024**2,
                     explicit_cap_bytes=32 * 1024 * 1024,
                 ),
@@ -3572,7 +3573,7 @@ def test_csv_owner_open_failure_preserves_primary(
 def test_csv_owner_open_primary_does_not_create_spool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -3647,7 +3648,7 @@ def test_csv_owner_identity_probe_failure_closes_once_and_preserves_primary(
         next(
             raw_schemas.iter_export_csv_records(
                 OpenedPath(),  # type: ignore[arg-type]
-                resource_policy=RuntimeResourcePolicy.capture(
+                resource_policy=capture_test_policy(
                     available_memory_bytes=64 * 1024**2,
                     explicit_cap_bytes=32 * 1024 * 1024,
                 ),
@@ -3695,7 +3696,7 @@ def test_csmar_total_pipeline_materializes_all_rows(
             "State": ["O"] * row_count,
         }
     ).to_csv(path, index=False)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -3719,7 +3720,7 @@ def test_csmar_total_pipeline_materializes_all_rows(
 def test_csmar_direct_reference_iteration_uses_active_policy_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -3774,7 +3775,7 @@ def test_csmar_direct_reference_iteration_uses_active_policy_target(
 def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -4367,7 +4368,7 @@ def test_csmar_reference_frames_close_under_policy_and_preserve_primary(
     primary_type: type[BaseException],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -4421,7 +4422,7 @@ def test_csmar_reference_frames_close_under_policy_and_preserve_primary(
 def test_private_export_first_frame_reserves_owner_known_decode_buffers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -4462,7 +4463,7 @@ def test_private_export_retains_pending_decoded_owner_state_before_next_pull(
     dataset: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -4509,7 +4510,7 @@ def test_csv_reader_counts_copied_fast_header_before_data_pull(
         f"{'x' * field_span},{'y' * field_span}\n",
         encoding="utf-8",
     )
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
@@ -4532,7 +4533,7 @@ def test_csv_reader_avoids_fast_record_duplicate_before_yield(
 ) -> None:
     path = tmp_path / "fast.csv"
     path.write_text("left,right\na,b\nc,d\n", encoding="utf-8")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -4563,7 +4564,7 @@ def test_index_continuation_unicode_write_admits_transient_before_append(
     tmp_path: Path,
     existing_continuation: bool,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -4891,7 +4892,7 @@ def test_raw_export_tree_releases_inventory_index_on_primary_exception(
 def test_interim_transform_variable_width_preflight_precedes_normalize(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -4931,7 +4932,7 @@ def test_interim_transform_variable_width_preflight_precedes_normalize(
 def test_reference_dedup_admits_upstream_before_arrow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -4980,7 +4981,7 @@ def test_reference_dedup_admits_upstream_before_arrow(
 def test_public_interim_without_identity_uses_retained_private_raw_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -5041,7 +5042,7 @@ def test_non_reference_publication_counts_only_additional_upstream_state(
     )
     raw_bytes = 400_000
     current_bytes = 500_000
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -5130,11 +5131,11 @@ def test_csmar_index_info_handle_close_preserves_active_primary(
 def test_index_info_rows_bind_creation_policy_before_delayed_consumption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    creation_policy = RuntimeResourcePolicy.capture(
+    creation_policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
-    consumer_policy = RuntimeResourcePolicy.capture(
+    consumer_policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -5158,7 +5159,7 @@ def test_index_info_rows_bind_creation_policy_before_delayed_consumption(
 def test_index_info_rows_scope_covers_spool_read_and_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -5214,7 +5215,7 @@ def test_csmar_text_reader_closes_under_policy_and_preserves_primary(
     primary_type: type[BaseException],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024 * 1024,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -5252,7 +5253,7 @@ def test_csmar_text_reader_closes_under_policy_and_preserves_primary(
 def test_csmar_text_reader_close_preserves_consumer_generator_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024 * 1024,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -5285,7 +5286,7 @@ def test_csmar_text_reader_close_preserves_consumer_generator_exit(
 def test_csmar_nonreference_frames_close_preserves_consumer_generator_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -5330,7 +5331,7 @@ def test_csmar_nonreference_frames_close_preserves_consumer_generator_exit(
 def test_csmar_index_info_iterator_close_preserves_consumer_generator_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024 * 1024,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -5378,7 +5379,7 @@ def test_csmar_csv_reader_rejects_hardlink_before_read(tmp_path: Path) -> None:
         os.link(source, alias)
     except OSError as exc:
         pytest.skip(f"hardlink_not_available: {exc}")
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -5391,7 +5392,7 @@ def test_csmar_csv_reader_rejects_hardlink_before_read(tmp_path: Path) -> None:
 def test_csmar_direct_csv_reader_activates_explicit_policy_before_identity_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -5422,7 +5423,7 @@ def test_csmar_lazy_inventory_policy_is_resolved_only_at_activation(
     monkeypatch: pytest.MonkeyPatch,
     factory,
 ) -> None:  # noqa: ANN001
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
@@ -5501,7 +5502,7 @@ def test_csmar_chunk_reader_rejects_unknown_dataset_before_reader(
     monkeypatch: pytest.MonkeyPatch,
     dataset: object,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )

@@ -62,6 +62,7 @@ from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.processed_chunk_parity import (
     assert_forced_tiny_processed_chunks_match_default,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.helpers.synthetic_a_share import (
     processed_a_share_root,
     write_synthetic_interim_inputs,
@@ -74,7 +75,7 @@ MARKET_CONTEXT_DATA_ID = market_context_data_id()
 
 
 def _publication_policy() -> RuntimeResourcePolicy:
-    return RuntimeResourcePolicy.capture(
+    return capture_test_policy(
         available_memory_bytes=2 * 1024**3,
         explicit_cap_bytes=1024 * 1024 * 1024,
     )
@@ -118,7 +119,7 @@ def test_a_share_output_publication_rejects_near_headroom_before_sort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
@@ -209,7 +210,7 @@ def test_sorted_output_chunks_reject_different_creation_and_activation_policies(
     None
 ):
     policy = _publication_policy()
-    creation_other_policy = RuntimeResourcePolicy.capture(
+    creation_other_policy = capture_test_policy(
         available_memory_bytes=2 * 1024**3,
         explicit_cap_bytes=512 * 1024 * 1024,
     )
@@ -231,7 +232,7 @@ def test_sorted_output_chunks_reject_different_creation_and_activation_policies(
     wrapped = materialization_io.iter_sorted_output_chunks(
         Source(), spec, resource_policy=policy
     )
-    activation_other_policy = RuntimeResourcePolicy.capture(
+    activation_other_policy = capture_test_policy(
         available_memory_bytes=2 * 1024**3,
         explicit_cap_bytes=512 * 1024 * 1024,
     )
@@ -408,7 +409,7 @@ def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
             scratch_parent=tmp_path,
         )
     else:
-        policy = RuntimeResourcePolicy.capture(
+        policy = capture_test_policy(
             available_memory_bytes=16 * 1024 * 1024,
         )
 
@@ -538,7 +539,7 @@ def test_a_share_io_wrapper_cleanup_lifecycle(
             scratch_parent=tmp_path,
         )
     else:
-        policy = RuntimeResourcePolicy.capture(
+        policy = capture_test_policy(
             available_memory_bytes=16 * 1024 * 1024,
         )
 
@@ -605,7 +606,7 @@ def test_write_and_inspect_activates_explicit_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
     )
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
@@ -751,7 +752,7 @@ def test_panel_materializer_does_not_preload_full_market_bars(
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
         data_ids=(MARKET_PANEL_DATA_ID,),
-        resource_policy=RuntimeResourcePolicy.capture(
+        resource_policy=capture_test_policy(
             available_memory_bytes=16 * 1024 * 1024,
             explicit_cap_bytes=5 * 1024 * 1024,
         ),

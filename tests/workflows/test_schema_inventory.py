@@ -26,6 +26,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.workflows.diagnostics import schema_inventory
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 @pytest.mark.skipif(
@@ -180,7 +181,7 @@ def test_schema_inventory_closes_chunks_on_retained_consumer_error(
         lambda *_a, **_k: chunks(),
     )
     monkeypatch.setattr(schema_inventory.pd, "to_datetime", fail_in_consumer)
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
     )
 
@@ -203,7 +204,7 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
     )
     captures = {"count": 0}
@@ -256,7 +257,7 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = RuntimeResourcePolicy.capture(
+    policy = capture_test_policy(
         available_memory_bytes=1_000,
     )
     monkeypatch.setattr(
