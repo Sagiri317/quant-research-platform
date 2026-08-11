@@ -9059,6 +9059,11 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
         statements: list[str] = []
         connection.set_trace_callback(statements.append)
         try:
+            first_selected = session.inventory.path_at(
+                0,
+                selected=True,
+                path_selection=selection,
+            )
             selected = list(
                 session.inventory.iter_paths(
                     selected=True,
@@ -9067,6 +9072,7 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
             )
         finally:
             connection.set_trace_callback(None)
+        assert first_selected.name == expected[0]
         assert [path.name for path in selected] == expected
         ordered_selection = [
             statement
@@ -9084,6 +9090,73 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
         ]
         assert not any("TEMP B-TREE" in detail for detail in plan)
         session.inventory.release_path_selection(selection)
+
+
+def test_dataset_inventory_selected_count_is_selection_index_driven(
+    tmp_path: Path,
+) -> None:
+    with dataset_inventory.DatasetSessionInventory(
+        data_root=tmp_path / "data",
+        scratch_parent=tmp_path,
+        task_memory_budget_bytes=1024,
+    ) as inventory:
+        connection = inventory._require_connection()
+        with connection:
+            connection.executemany(
+                "INSERT INTO parts(relative_path, partition_kind, partition_year, "
+                "part_index, selected, device, inode, size, modified_ns) "
+                "VALUES (?, 0, 0, ?, 1, ?, ?, '1', '1')",
+                (
+                    (
+                        f"part-{index}.parquet",
+                        index,
+                        f"device-{index}",
+                        f"inode-{index}",
+                    )
+                    for index in range(5_000)
+                ),
+            )
+            selection = inventory.new_path_selection()
+            connection.execute(
+                "INSERT INTO path_selections(selection_id, relative_path) "
+                "VALUES (?, ?)",
+                (selection, "part-4999.parquet"),
+            )
+
+        statements: list[str] = []
+        vm_steps = 0
+
+        def count_vm_step() -> int:
+            nonlocal vm_steps
+            vm_steps += 1
+            return 0
+
+        connection.set_trace_callback(statements.append)
+        connection.set_progress_handler(count_vm_step, 1)
+        try:
+            assert inventory.path_count(
+                selected=True,
+                path_selection=selection,
+            ) == 1
+        finally:
+            connection.set_progress_handler(None, 0)
+            connection.set_trace_callback(None)
+
+        count_query = next(
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith("SELECT COUNT(*)")
+            and "path_selections" in statement.casefold()
+        )
+        plan = [
+            detail
+            for *_prefix, detail in connection.execute(
+                "EXPLAIN QUERY PLAN " + count_query
+            )
+        ]
+        assert not any("TEMP B-TREE" in detail for detail in plan)
+        assert not any("SCAN PARTS" in detail.upper() for detail in plan)
+        assert vm_steps < 200
 
 
 def test_dataset_inventory_disk_gates_native_page_and_encoded_rows(

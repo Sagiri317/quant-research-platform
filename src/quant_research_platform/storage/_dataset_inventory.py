@@ -477,6 +477,19 @@ class DatasetSessionInventory:
         selected: bool,
         path_selection: int | None = None,
     ) -> int:
+        if path_selection is not None:
+            row = (
+                self._require_connection()
+                .execute(
+                    "SELECT COUNT(*) FROM path_selections "
+                    "JOIN parts ON parts.relative_path = path_selections.relative_path "
+                    "WHERE path_selections.selection_id = ? AND parts.selected = 1",
+                    (path_selection,),
+                )
+                .fetchone()
+            )
+            assert row is not None
+            return int(row[0])
         join, where, parameters = self._path_selection_query(
             selected=selected,
             path_selection=path_selection,
