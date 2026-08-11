@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.research.models.fitting as model_fitting
+from quant_research_platform._version import __version__ as qrp_version
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.research.models.algorithm_facts import (
@@ -133,6 +134,39 @@ def test_model_metadata_records_resolved_parameters_and_backend_version() -> Non
         "package": "sklearn",
         "version": pytest.importorskip("sklearn").__version__,
     }
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "module_prefix", "package"),
+    (
+        ("linear_regression", "quant_research_platform.", "internal"),
+        ("ridge_regression", "sklearn.", "sklearn"),
+    ),
+)
+def test_model_metadata_matches_actual_execution_owner(
+    algorithm: str,
+    module_prefix: str,
+    package: str,
+) -> None:
+    frame = _model_frame()
+    spec = ModelSpec(
+        model_id=f"{algorithm}_demo",
+        model_algorithm=algorithm,
+        input_factor_columns=("factor",),
+        input_feature_columns=("feature",),
+        label_column="label",
+        max_train_rows=len(frame),
+    )
+
+    estimator = build_estimator_from_model_spec(spec)
+    result = model_fitting.fit_model_result_from_frames(
+        (frame,), spec, estimator=estimator
+    )
+
+    assert type(estimator).__module__.startswith(module_prefix)
+    assert result.metadata["dependency_status"]["package"] == package
+    if package == "internal":
+        assert result.metadata["dependency_status"]["version"] == qrp_version
 
 
 def test_prediction_output_helpers_do_not_export_bundle_semantics() -> None:

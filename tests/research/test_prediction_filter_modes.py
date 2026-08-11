@@ -237,7 +237,7 @@ def _prediction_model_metadata() -> dict[str, object]:
         "purge_gap_steps": 0,
         "dependency_status": {
             "status": "available",
-            "package": "sklearn",
+            "package": "internal",
             "version": "test",
         },
         "coefficient_count": 2,

@@ -6,6 +6,7 @@ from datetime import timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -235,6 +236,50 @@ def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
         )
 
 
+def test_model_selection_purges_validation_tail_before_test_window() -> None:
+    dates = pd.date_range("2024-01-01", periods=6, freq="D")
+    candidate_spec = _model(
+        "linear_model",
+        ("factor_a",),
+        label_column="forward_return_20d",
+        purge_gap_steps=2,
+    )
+    prediction_spec = PredictionSpec(
+        prediction_id="prediction_demo",
+        model_id=candidate_spec.model_id,
+        research_dataset_id="research_demo",
+        train_end="2024-01-01",
+        test_start="2024-01-05",
+        test_end="2024-01-06",
+        candidate_model_ids=("candidate_model",),
+        model_selection_validation_start="2024-01-02",
+        model_selection_validation_end="2024-01-04",
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "asset_id": "asset_a",
+            "factor_a": np.arange(len(dates), dtype="float64"),
+            "forward_return_20d": np.arange(len(dates), dtype="float64"),
+            "eligible": True,
+        }
+    )
+
+    validation = prediction_runner._validation_prediction_frame(
+        (frame,),
+        prediction_spec=prediction_spec,
+        candidate_spec=candidate_spec,
+        model_result=prediction_runner.fitting.ModelFitResult(
+            coefficients=np.array([0.0, 1.0]),
+            metadata={},
+        ),
+        validation_start=dates[1],
+        validation_end=dates[3],
+    )
+
+    assert validation["timestamp"].tolist() == [dates[1]]
+
+
 def test_prediction_runner_accepts_equivalent_timezone_representations() -> None:
     chunk = pd.DataFrame(
         {
@@ -273,10 +318,12 @@ def _model(
     input_columns: tuple[str, ...],
     *,
     label_column: str = "label",
+    purge_gap_steps: int = 0,
 ) -> ModelSpec:
     return ModelSpec(
         model_id=model_id,
         model_algorithm="linear_regression",
         input_factor_columns=input_columns,
         label_column=label_column,
+        purge_gap_steps=purge_gap_steps,
     )

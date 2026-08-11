@@ -249,7 +249,8 @@ def test_prediction_output_validation_rejects_bad_frames(
 @pytest.mark.parametrize(
     ("model_algorithm", "dependency_package"),
     (
-        ("linear_regression", "lightgbm"),
+        ("linear_regression", "sklearn"),
+        ("ridge_regression", "internal"),
         ("single_factor_baseline", "sklearn"),
     ),
 )

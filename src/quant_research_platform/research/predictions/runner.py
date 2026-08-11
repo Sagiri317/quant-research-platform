@@ -8,6 +8,7 @@ from dataclasses import replace
 import pandas as pd
 
 import quant_research_platform.research.models.fitting as fitting
+import quant_research_platform.research.models.validation_split as validation_split
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
@@ -332,7 +333,15 @@ def _validation_prediction_frame(
         retained_bytes += output_bytes
     if not parts:
         raise ValueError("empty_model_selection_validation_window")
-    return parts[0] if len(parts) == 1 else pd.concat(parts, ignore_index=True)
+    result = parts[0] if len(parts) == 1 else pd.concat(parts, ignore_index=True)
+    parts.clear()
+    result = validation_split._purge_trailing_timestamps(
+        result,
+        candidate_spec.purge_gap_steps,
+    )
+    if result.empty:
+        raise ValueError("empty_model_selection_validation_window")
+    return result
 
 
 def _validate_prediction_window_order(spec) -> None:

@@ -22,7 +22,6 @@ class AlgorithmFacts:
 _MODEL_ALGORITHM_FACTS = {
     "linear_regression": AlgorithmFacts(
         "linear_regression",
-        "sklearn",
         estimator_factory=estimators.linear_regression_estimator,
     ),
     "ridge_regression": AlgorithmFacts(

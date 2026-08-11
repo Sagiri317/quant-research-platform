@@ -33,16 +33,24 @@ def apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFram
     result = frame.copy()
     result["timestamp"] = pd.to_datetime(result["timestamp"], errors="coerce")
     result = result.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
-    if spec.purge_gap_steps > 0:
-        unique_timestamps = tuple(sorted(result["timestamp"].dropna().unique()))
-        if spec.purge_gap_steps >= len(unique_timestamps):
-            result = result.iloc[0:0]
-        else:
-            cutoff = unique_timestamps[-spec.purge_gap_steps]
-            result = result.loc[result["timestamp"] < cutoff]
+    result = _purge_trailing_timestamps(result, spec.purge_gap_steps)
     if spec.max_train_rows is not None and len(result) > spec.max_train_rows:
         result = result.tail(spec.max_train_rows)
     return result.reset_index(drop=True)
+
+
+def _purge_trailing_timestamps(
+    frame: pd.DataFrame,
+    purge_gap_steps: int,
+) -> pd.DataFrame:
+    if purge_gap_steps <= 0 or frame.empty:
+        return frame
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    unique_timestamps = tuple(sorted(timestamps.dropna().unique()))
+    if purge_gap_steps >= len(unique_timestamps):
+        return frame.iloc[0:0]
+    cutoff = unique_timestamps[-purge_gap_steps]
+    return frame.loc[timestamps < cutoff]
 
 
 __all__ = ["apply_training_controls", "trim_training_buffer"]

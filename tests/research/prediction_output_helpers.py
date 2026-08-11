@@ -159,7 +159,7 @@ def synthetic_prediction_model_metadata(
         "purge_gap_steps": 0,
         "dependency_status": {
             "status": "available",
-            "package": "sklearn",
+            "package": "internal",
             "version": "1",
         },
         "coefficient_count": len(input_columns) + 1,
