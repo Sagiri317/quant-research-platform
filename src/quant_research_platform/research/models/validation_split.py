@@ -42,10 +42,19 @@ def apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFram
 def _purge_trailing_timestamps(
     frame: pd.DataFrame,
     purge_gap_steps: int,
+    *,
+    group_column: str | None = None,
 ) -> pd.DataFrame:
     if purge_gap_steps <= 0 or frame.empty:
         return frame
     timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    if group_column is not None:
+        trailing_rank = timestamps.groupby(
+            frame[group_column],
+            sort=False,
+            dropna=False,
+        ).rank(method="dense", ascending=False)
+        return frame.loc[trailing_rank > purge_gap_steps]
     unique_timestamps = tuple(sorted(timestamps.dropna().unique()))
     if purge_gap_steps >= len(unique_timestamps):
         return frame.iloc[0:0]

@@ -338,6 +338,7 @@ def _validation_prediction_frame(
     result = validation_split._purge_trailing_timestamps(
         result,
         candidate_spec.purge_gap_steps,
+        group_column="asset_id",
     )
     if result.empty:
         raise ValueError("empty_model_selection_validation_window")

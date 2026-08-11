@@ -16,6 +16,9 @@ from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.research.labels.forward_returns import (
+    add_forward_return_labels,
+)
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
 )
@@ -236,13 +239,55 @@ def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
         )
 
 
-def test_model_selection_purges_validation_tail_before_test_window() -> None:
+@pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize(
+    ("purge_gap_steps", "expected_keys"),
+    [
+        (0, (("dense", 1), ("dense", 2), ("dense", 3), ("sparse", 1))),
+        (2, (("dense", 1),)),
+        (3, None),
+    ],
+)
+def test_model_selection_purges_each_assets_validation_tail_before_test_window(
+    chunked: bool,
+    purge_gap_steps: int,
+    expected_keys: tuple[tuple[str, int], ...] | None,
+) -> None:
     dates = pd.date_range("2024-01-01", periods=6, freq="D")
+    dense = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "asset_id": "dense",
+            "factor_a": np.arange(len(dates), dtype="float64"),
+            "adj_open": np.arange(10.0, 16.0),
+            "eligible": True,
+        }
+    )
+    sparse = pd.DataFrame(
+        {
+            "timestamp": dates[[0, 1, 4, 5]],
+            "asset_id": "sparse",
+            "factor_a": np.arange(4, dtype="float64"),
+            "adj_open": [20.0, 21.0, 50.0, 60.0],
+            "eligible": True,
+        }
+    )
+    labeled = add_forward_return_labels(
+        pd.concat([dense, sparse], ignore_index=True),
+        horizons=(1,),
+    )
+    sparse_validation_label = labeled.loc[
+        labeled["asset_id"].eq("sparse")
+        & labeled["timestamp"].eq(dates[1]),
+        "forward_return_1d",
+    ].item()
+    assert sparse_validation_label == pytest.approx(60.0 / 50.0 - 1.0)
+
     candidate_spec = _model(
         "linear_model",
         ("factor_a",),
-        label_column="forward_return_20d",
-        purge_gap_steps=2,
+        label_column="forward_return_1d",
+        purge_gap_steps=purge_gap_steps,
     )
     prediction_spec = PredictionSpec(
         prediction_id="prediction_demo",
@@ -255,29 +300,37 @@ def test_model_selection_purges_validation_tail_before_test_window() -> None:
         model_selection_validation_start="2024-01-02",
         model_selection_validation_end="2024-01-04",
     )
-    frame = pd.DataFrame(
-        {
-            "timestamp": dates,
-            "asset_id": "asset_a",
-            "factor_a": np.arange(len(dates), dtype="float64"),
-            "forward_return_20d": np.arange(len(dates), dtype="float64"),
-            "eligible": True,
-        }
+    chunks = (
+        (
+            labeled.loc[labeled["asset_id"].eq("dense")],
+            labeled.loc[labeled["asset_id"].eq("sparse")],
+        )
+        if chunked
+        else (labeled,)
     )
 
-    validation = prediction_runner._validation_prediction_frame(
-        (frame,),
-        prediction_spec=prediction_spec,
-        candidate_spec=candidate_spec,
-        model_result=prediction_runner.fitting.ModelFitResult(
-            coefficients=np.array([0.0, 1.0]),
-            metadata={},
-        ),
-        validation_start=dates[1],
-        validation_end=dates[3],
-    )
+    def validation_frame() -> pd.DataFrame:
+        return prediction_runner._validation_prediction_frame(
+            chunks,
+            prediction_spec=prediction_spec,
+            candidate_spec=candidate_spec,
+            model_result=prediction_runner.fitting.ModelFitResult(
+                coefficients=np.array([0.0, 1.0]),
+                metadata={},
+            ),
+            validation_start=dates[1],
+            validation_end=dates[3],
+        )
 
-    assert validation["timestamp"].tolist() == [dates[1]]
+    if expected_keys is None:
+        with pytest.raises(ValueError, match="empty_model_selection_validation_window"):
+            validation_frame()
+        return
+    validation = validation_frame()
+    assert list(validation[["asset_id", "timestamp"]].itertuples(index=False)) == [
+        (asset_id, dates[date_position])
+        for asset_id, date_position in expected_keys
+    ]
 
 
 def test_prediction_runner_accepts_equivalent_timezone_representations() -> None:
