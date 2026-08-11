@@ -284,6 +284,44 @@ def test_exact_key_classifier_gates_disk_overlap_before_exact_mutation(
         assert index.add_table(table, namespace="overlap") == 0
 
 
+def test_exact_key_classifier_renews_disk_gate_for_secondary_index_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = pa.table(
+        {"asset_id": ["a" * 300_000, "b" * 300_000]},
+    )
+
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        reserves: list[int] = []
+
+        def gate(_path: Path, *, reserve_bytes: int) -> None:
+            reserves.append(reserve_bytes)
+            if len(reserves) == 2 and reserve_bytes == reserves[0]:
+                raise OSError("disk_headroom_exhausted")
+
+        monkeypatch.setattr(key_tracking, "require_free_disk_headroom", gate)
+        with pytest.raises(OSError, match="disk_headroom_exhausted"):
+            index.classify_comparison_table(
+                table,
+                namespace="indexed-overlap",
+                value_columns=(),
+                payload_target_bytes=1024**2,
+            )
+        assert index._connection is not None
+        assert index._connection.execute(
+            "SELECT COUNT(*) FROM comparison_rows"
+        ).fetchone() == (0,)
+        assert index._connection.execute(
+            "SELECT COUNT(*) FROM exact_keys WHERE namespace = ?",
+            ("indexed-overlap",),
+        ).fetchone() == (0,)
+
+
 def test_exact_key_classifier_batches_large_duplicate_group(tmp_path: Path) -> None:
     table = pa.table({"asset_id": ["same"] * 4096})
 

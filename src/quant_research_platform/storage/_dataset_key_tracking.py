@@ -646,11 +646,14 @@ class ExactPrimaryKeyIndex:
     ) -> Iterator[tuple[str, bytes | bytearray, bytes | bytearray | None]]:
         admitted_bytes = 0
         for namespace, payload, value in rows:
-            reserve_bytes = (
-                27
-                + len(namespace.encode("utf-8"))
-                + len(payload)
-                + (0 if value is None else len(value))
+            key_bytes = len(namespace.encode("utf-8")) + len(payload)
+            logical_row_bytes = 27 + key_bytes + (0 if value is None else len(value))
+            # Table + secondary index, doubled for journal, with B-tree page slack.
+            reserve_bytes = 2 * (
+                logical_row_bytes
+                + 27
+                + key_bytes
+                + 4 * EXACT_KEY_SQLITE_PAGE_BYTES
             )
             if reserve_bytes > admitted_bytes:
                 admitted_bytes = max(_DISK_RESERVE_BATCH_BYTES, reserve_bytes)
