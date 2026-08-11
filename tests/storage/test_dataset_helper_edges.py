@@ -191,6 +191,66 @@ def test_exact_key_classifier_batches_sql_and_returns_compact_positions(
     assert duplicate_count == 0
 
 
+def test_exact_key_classifier_uses_one_sorter_free_staging_transaction(
+    tmp_path: Path,
+) -> None:
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        index.classify_comparison_table(
+            pa.table({"asset_id": ["existing"], "value": [1]}),
+            namespace="ordered",
+            value_columns=("value",),
+            payload_target_bytes=1024**2,
+        )
+        assert index._connection is not None
+        connection = index._connection
+        statements: list[str] = []
+        connection.set_trace_callback(statements.append)
+        try:
+            keep, duplicate_count = index.classify_comparison_table(
+                pa.table(
+                    {
+                        "asset_id": ["new-b", "existing", "new-a", "new-b"],
+                        "value": [2, 1, 3, 2],
+                    }
+                ),
+                namespace="ordered",
+                value_columns=("value",),
+                payload_target_bytes=1024**2,
+            )
+        finally:
+            connection.set_trace_callback(None)
+
+        assert list(keep) == [0, 2]
+        assert duplicate_count == 2
+        assert connection.execute("PRAGMA temp_store").fetchone() == (1,)
+        staged_statements = [
+            statement
+            for statement in statements
+            if "comparison_rows" in statement.casefold()
+        ]
+        plan = [
+            detail
+            for statement in staged_statements
+            for *_prefix, detail in connection.execute(
+                "EXPLAIN QUERY PLAN " + statement
+            )
+        ]
+        assert not any("TEMP B-TREE" in detail for detail in plan)
+        assert [
+            statement.lstrip().split(maxsplit=1)[0].upper()
+            for statement in statements
+            if statement.lstrip().upper().startswith(("BEGIN", "COMMIT", "ROLLBACK"))
+        ] == ["BEGIN", "COMMIT"]
+        remaining = connection.execute(
+            "SELECT COUNT(*) FROM comparison_rows"
+        ).fetchone()
+        assert remaining == (0,)
+
+
 def test_exact_key_classifier_preflights_compact_positions_before_mutation(
     tmp_path: Path,
 ) -> None:

@@ -364,82 +364,72 @@ class ExactPrimaryKeyIndex:
             validated_columns=selected,
         )
         keep_count = 0
-        try:
-            with connection:
-                connection.execute("DELETE FROM comparison_rows")
-                connection.executemany(
-                    "INSERT INTO comparison_rows(position, namespace, payload, value) "
-                    "VALUES (?, ?, ?, ?)",
-                    (
-                        (position, row_namespace, identity, value)
-                        for position, (row_namespace, identity, value) in enumerate(
-                            rows
-                        )
-                    ),
+        with connection:
+            connection.executemany(
+                "INSERT INTO comparison_rows(position, namespace, payload, value) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    (position, row_namespace, identity, value)
+                    for position, (row_namespace, identity, value) in enumerate(rows)
+                ),
+            )
+            incoming_conflict = connection.execute(
+                "SELECT 1 FROM comparison_rows "
+                "GROUP BY namespace, payload HAVING MIN(value) != MAX(value) "
+                "LIMIT 1"
+            ).fetchone()
+            existing_conflict = connection.execute(
+                "SELECT 1 FROM comparison_rows AS incoming "
+                "JOIN exact_keys AS existing "
+                "ON existing.namespace = incoming.namespace "
+                "AND existing.payload = incoming.payload "
+                "WHERE existing.value != incoming.value LIMIT 1"
+            ).fetchone()
+            if incoming_conflict is not None or existing_conflict is not None:
+                raise ValueError("conflicting_exact_primary_key_payload")
+            admitted = connection.execute(
+                "SELECT incoming.position FROM comparison_rows AS incoming "
+                "WHERE NOT EXISTS (SELECT 1 FROM comparison_rows AS earlier "
+                "WHERE earlier.namespace = incoming.namespace "
+                "AND earlier.payload = incoming.payload "
+                "AND earlier.position < incoming.position) "
+                "AND NOT EXISTS (SELECT 1 FROM exact_keys AS existing "
+                "WHERE existing.namespace = incoming.namespace "
+                "AND existing.payload = incoming.payload) "
+                "ORDER BY incoming.position"
+            )
+            for (position,) in admitted:
+                position_state[keep_count] = int(position)
+                keep_count += 1
+            reserve = connection.execute(
+                "SELECT COALESCE(SUM(27 + length(CAST(namespace AS BLOB)) "
+                "+ length(payload) + length(value)), 0), COUNT(*) FROM ("
+                "SELECT incoming.namespace, incoming.payload, MIN(incoming.value) "
+                "AS value FROM comparison_rows AS incoming "
+                "LEFT JOIN exact_keys AS existing "
+                "ON existing.namespace = incoming.namespace "
+                "AND existing.payload = incoming.payload "
+                "WHERE existing.payload IS NULL "
+                "GROUP BY incoming.namespace, incoming.payload)"
+            ).fetchone()
+            assert reserve is not None
+            logical_bytes = int(reserve[0])
+            row_count = int(reserve[1])
+            if logical_bytes > 0:
+                # WITHOUT ROWID table, doubled for journal, with B-tree page slack.
+                reserve_bytes = 2 * (
+                    logical_bytes + 4 * EXACT_KEY_SQLITE_PAGE_BYTES * row_count
                 )
-                incoming_conflict = connection.execute(
-                    "SELECT 1 FROM comparison_rows "
-                    "GROUP BY namespace, payload HAVING MIN(value) != MAX(value) "
-                    "LIMIT 1"
-                ).fetchone()
-                existing_conflict = connection.execute(
-                    "SELECT 1 FROM comparison_rows AS incoming "
-                    "JOIN exact_keys AS existing "
-                    "ON existing.namespace = incoming.namespace "
-                    "AND existing.payload = incoming.payload "
-                    "WHERE existing.value != incoming.value LIMIT 1"
-                ).fetchone()
-                if incoming_conflict is not None or existing_conflict is not None:
-                    raise ValueError("conflicting_exact_primary_key_payload")
-                admitted = connection.execute(
-                    "SELECT MIN(incoming.position) FROM comparison_rows AS incoming "
-                    "LEFT JOIN exact_keys AS existing "
-                    "ON existing.namespace = incoming.namespace "
-                    "AND existing.payload = incoming.payload "
-                    "WHERE existing.payload IS NULL "
-                    "GROUP BY incoming.namespace, incoming.payload "
-                    "ORDER BY MIN(incoming.position)"
+                require_free_disk_headroom(
+                    self._scratch_parent,
+                    reserve_bytes=reserve_bytes,
                 )
-                for (position,) in admitted:
-                    position_state[keep_count] = int(position)
-                    keep_count += 1
-                reserve = connection.execute(
-                    "SELECT COALESCE(SUM(27 + length(CAST(namespace AS BLOB)) "
-                    "+ length(payload) + length(value)), 0), COUNT(*) FROM ("
-                    "SELECT incoming.namespace, incoming.payload, MIN(incoming.value) "
-                    "AS value FROM comparison_rows AS incoming "
-                    "LEFT JOIN exact_keys AS existing "
-                    "ON existing.namespace = incoming.namespace "
-                    "AND existing.payload = incoming.payload "
-                    "WHERE existing.payload IS NULL "
-                    "GROUP BY incoming.namespace, incoming.payload)"
-                ).fetchone()
-                assert reserve is not None
-                logical_bytes = int(reserve[0])
-                row_count = int(reserve[1])
-                if logical_bytes > 0:
-                    # WITHOUT ROWID table, doubled for journal, with B-tree page slack.
-                    reserve_bytes = 2 * (
-                        logical_bytes
-                        + 4 * EXACT_KEY_SQLITE_PAGE_BYTES * row_count
-                    )
-                    require_free_disk_headroom(
-                        self._scratch_parent,
-                        reserve_bytes=reserve_bytes,
-                    )
-                connection.execute(
-                    "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
-                    "SELECT namespace, payload, MIN(value) FROM comparison_rows "
-                    "GROUP BY namespace, payload"
-                )
-        finally:
-            primary = sys.exception()
-            try:
-                with connection:
-                    connection.execute("DELETE FROM comparison_rows")
-            except BaseException:
-                if primary is None:
-                    raise
+            connection.execute(
+                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
+                "SELECT namespace, payload, MIN(value) FROM comparison_rows "
+                "GROUP BY namespace, payload"
+            )
+            connection.execute("DELETE FROM comparison_rows")
         return (
             CompactPositionState(position_state, keep_count),
             table.num_rows - keep_count,

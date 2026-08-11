@@ -9048,9 +9048,42 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
         columns=None,
         time_window=None,
     ) as session:
-        assert [path.name for path in session.all_paths] == [
+        expected = [
             f"part-{part_index}.parquet" for part_index in part_indices
         ]
+        assert [path.name for path in session.all_paths] == expected
+        selection = session.inventory.new_path_selection()
+        for path in reversed(tuple(session.all_paths)):
+            session.inventory.select_path(selection, path)
+        connection = session.inventory._require_connection()
+        statements: list[str] = []
+        connection.set_trace_callback(statements.append)
+        try:
+            selected = list(
+                session.inventory.iter_paths(
+                    selected=True,
+                    path_selection=selection,
+                )
+            )
+        finally:
+            connection.set_trace_callback(None)
+        assert [path.name for path in selected] == expected
+        ordered_selection = [
+            statement
+            for statement in statements
+            if "path_selections" in statement.casefold()
+            and "order by" in statement.casefold()
+        ]
+        assert ordered_selection
+        plan = [
+            detail
+            for statement in ordered_selection
+            for *_prefix, detail in connection.execute(
+                "EXPLAIN QUERY PLAN " + statement
+            )
+        ]
+        assert not any("TEMP B-TREE" in detail for detail in plan)
+        session.inventory.release_path_selection(selection)
 
 
 def test_dataset_inventory_disk_gates_native_page_and_encoded_rows(
@@ -9079,6 +9112,53 @@ def test_dataset_inventory_disk_gates_native_page_and_encoded_rows(
     assert len(reserve_calls) > 1
     assert policy.task_memory_budget_bytes not in reserve_calls
     assert all(value > 0 for value in reserve_calls)
+    physical_floor = 16 * dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
+    assert min(reserve_calls[1:]) >= physical_floor
+
+
+def test_dataset_inventory_release_gates_before_selection_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "inventory_selection_release")
+    frame = make_default_dataset_frame()
+    write_dataset(
+        root,
+        (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
+        spec=make_processed_dataset_spec("inventory_selection_release"),
+    )
+
+    with dataset_reading.open_dataset_session(
+        root,
+        columns=None,
+        time_window=None,
+    ) as session:
+        paths = tuple(session.all_paths)
+        selection = session.inventory.new_path_selection()
+        for path in paths:
+            session.inventory.select_path(selection, path)
+        monkeypatch.setattr(
+            dataset_inventory,
+            "require_free_disk_headroom",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("selection_release_disk_full")
+            ),
+        )
+        with pytest.raises(OSError, match="selection_release_disk_full"):
+            session.inventory.release_path_selection(selection)
+        assert tuple(
+            session.inventory.iter_paths(selected=True, path_selection=selection)
+        ) == paths
+        monkeypatch.setattr(
+            dataset_inventory,
+            "require_free_disk_headroom",
+            lambda *_args, **_kwargs: None,
+        )
+        session.inventory.release_path_selection(selection)
+        assert session.inventory.path_count(
+            selected=True,
+            path_selection=selection,
+        ) == 0
 
 
 def test_dataset_inventory_insert_disk_failure_cleans_scratch(

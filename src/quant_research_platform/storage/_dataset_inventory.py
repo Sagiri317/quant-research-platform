@@ -341,25 +341,36 @@ class DatasetSessionInventory:
         row = (
             self._require_connection()
             .execute(
-                "SELECT device, inode, size, modified_ns FROM parts "
-                "WHERE relative_path = ?",
+                "SELECT partition_kind, partition_year, part_index, "
+                "device, inode, size, modified_ns FROM parts WHERE relative_path = ?",
                 (relative,),
             )
             .fetchone()
         )
         if row is None:
             raise ValueError("dataset_inventory_changed")
-        if tuple(str(value) for value in row) != _identity_values(identity):
+        if tuple(str(value) for value in row[3:]) != _identity_values(identity):
             raise ValueError("dataset_file_identity_changed")
+        schema_payload = metadata.schema.serialize().to_pybytes()
+        prospective_row = (
+            relative,
+            *row[:3],
+            int(selected),
+            *row[3:],
+            schema_payload,
+            metadata.row_count,
+            metadata.file_size_bytes,
+            metadata.logical_dtype_payload,
+        )
         values = (
             int(selected),
-            metadata.schema.serialize().to_pybytes(),
+            schema_payload,
             metadata.row_count,
             metadata.file_size_bytes,
             metadata.logical_dtype_payload,
             relative,
         )
-        self._gate_row_write(values[:-1])
+        self._gate_row_write(prospective_row)
         with self._require_connection():
             self._require_connection().execute(
                 "UPDATE parts SET selected = ?, schema = ?, row_count = ?, "
@@ -401,8 +412,20 @@ class DatasetSessionInventory:
                 raise ValueError("dataset_path_not_selected")
 
     def release_path_selection(self, selection_id: int) -> None:
-        with self._require_connection():
-            self._require_connection().execute(
+        connection = self._require_connection()
+        reserve = connection.execute(
+            "SELECT COALESCE(SUM(18 + length(CAST(selection_id AS BLOB)) "
+            "+ length(CAST(relative_path AS BLOB))), 0), COUNT(*) "
+            "FROM path_selections WHERE selection_id = ?",
+            (selection_id,),
+        ).fetchone()
+        assert reserve is not None
+        self._gate_physical_write(
+            logical_bytes=int(reserve[0]),
+            row_count=int(reserve[1]),
+        )
+        with connection:
+            connection.execute(
                 "DELETE FROM path_selections WHERE selection_id = ?",
                 (selection_id,),
             )
@@ -502,9 +525,11 @@ class DatasetSessionInventory:
         if path_selection is None:
             return "", " WHERE selected = 1" if selected else "", ()
         return (
-            " JOIN path_selections ON "
-            "path_selections.relative_path = parts.relative_path",
-            " WHERE selected = 1 AND path_selections.selection_id = ?",
+            "",
+            " WHERE selected = 1 AND EXISTS ("
+            "SELECT 1 FROM path_selections "
+            "WHERE path_selections.selection_id = ? "
+            "AND path_selections.relative_path = parts.relative_path)",
             (path_selection,),
         )
 
@@ -679,7 +704,7 @@ class DatasetSessionInventory:
             raise ValueError("invalid_dataset_part_files") from exc
 
     def _gate_row_write(self, values: tuple[object, ...]) -> None:
-        reserve_bytes = 0
+        logical_bytes = 0
         for value in values:
             if isinstance(value, bytes):
                 encoded_size = len(value)
@@ -691,7 +716,21 @@ class DatasetSessionInventory:
                 encoded_size = 0
             else:
                 raise TypeError("invalid_dataset_inventory_row_value")
-            reserve_bytes += 1 + 8 + encoded_size
+            logical_bytes += 1 + 8 + encoded_size
+
+        self._gate_physical_write(
+            logical_bytes=logical_bytes,
+            row_count=1,
+        )
+
+    def _gate_physical_write(self, *, logical_bytes: int, row_count: int) -> None:
+        if row_count == 0:
+            return
+        # Worst-case parts row: table plus three indexes, doubled for journal.
+        reserve_bytes = 2 * (
+            4 * logical_bytes
+            + 8 * DATASET_INVENTORY_RESERVE_BYTES * row_count
+        )
         require_free_disk_headroom(
             self._scratch_parent,
             reserve_bytes=reserve_bytes,
