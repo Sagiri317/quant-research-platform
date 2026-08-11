@@ -1,89 +1,292 @@
-# QRP Agent 指令
+# QRP Agent Instructions
 
-本文件只保存长期执行边界。当前 branch、phase、review、PR 和运行结果必须从本轮用户指令、live Git 与当前文件重建，不写入仓库文档。
+本文件只保存长期、可执行的仓库边界。当前 branch、HEAD、Phase、finding、测试结果和 next action 只写入 `.run/ledger.md`。
 
-## 1. Live baseline
+## 1. Authority and live truth
 
-任何修改或审查前运行：
-
-```text
-git status --short --branch
-git log -1 --date=iso-strict --format="%H%n%cd%n%s"
-git branch -a
-```
-
-涉及远端或 merge 时再检查 upstream 与 divergence。事实优先级是：用户本轮指令、live Git/代码/测试/配置、本文、当前合同文档；叙事与可执行行为冲突时停止并报告。
-
-## 2. 产品与安全边界
-
-QRP 是本地量化研究平台，不是 live/paper trading、broker/exchange connector、deployment、SaaS 或 investment-advice 系统。未经明确批准，不新增 public API/CLI、依赖、framework、registry、scheduler、worker、deployment、connector 或 external LLM/vendor API。
-
-不读取、复制、提交或公开 private data、secret、vendor raw marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE 内容只包含 schema、计数、hash、状态、逻辑路径结构与无私有行的摘要。
-
-## 3. 执行角色与修改范围
-
-受控 Goal/Phase 同时至多一个 writable implementer；controller 只管理控制状态、派发与只读 reconciliation，不修改或提交 tracked implementation；reviewer 必须独立只读。实现者不得自审，review finding 由 controller 复现并按唯一 owner family 回交修正。
-
-默认只修改任务直接相关的最小文件。修改 public/machine contract、schema、CLI、持久化布局、跨层依赖或业务语义前停止并请求批准。新实现替代旧实现，不保留 compatibility shim、alias、parallel path、tests-only API 或 proof-only framework。
-
-## 4. Current contract 与 owner
-
-QRP 采用 current-contract-only。行为、public machine contract、owner tests 与 dependency direction 定义当前事实；历史名称、目录或实现形状不构成兼容要求。
-
-- `contracts/`：结构合同、枚举、ID、时间窗口和基础校验。
-- `sources/`：摄取、raw schema、字段映射和 raw/interim 转换。
-- `markets/`：市场领域；具体市场语义位于对应 implementation。
-- `policy/`：共享安全规则与 `PASS`/`FAIL`/`NOT_RUN`/`BLOCKED` 聚合，不依赖业务层。
-- `profiles/`：API、CLI 与 workflow 的组合根。
-- `research/`、`compute/`：纯研究与数值计算，不写文件。
-- `storage/`：dataset IO、identity、exact compare 与 data layout。
-- `runtime/`：资源 policy、logical paths 与 execution metrics。
-- `reports/`：构建内容，不写文件、不重算研究逻辑。
-- `artifacts/`：写 LOCAL_ONLY outputs 与 REVIEW_SAFE evidence。
-- `workflows/`：编排 research -> reports -> artifacts。
-- `interfaces/`：已批准的 API、CLI 与 service adapter。
-
-## 5. 资源生命周期硬合同
-
-每个 top-level resource-bearing operation 在首次数据规模 read、decode 或 allocation 前只 admission 一次：
+规范优先级：
 
 ```text
-captured_available_memory_bytes
-= min(OS available memory, applicable cgroup/container/job/process headroom)
-
-task_memory_budget_bytes
-= min(floor(captured_available_memory_bytes * 0.80), valid explicit cap if any)
+用户本轮明确指令
+-> active Goal
+-> live AGENTS.md
+-> GPT 项目源长期工程标准
 ```
 
-显式 cap 只能降低预算。适用平台上限无法可靠读取时使用可证明的更保守上限；无法建立安全上限则在数据规模分配前 fail closed。Policy 与 budget 捕获后 immutable；available memory 增加不能上调预算，已观察到 pressure 后只能 shrink、release、spill 或 fail closed。
-
-一个 process 默认只有一个 active root policy、一个 execution owner/lease 和一个 total reservation ledger。Nested owner 继承同一 policy identity；different-policy nesting/parallel root fail closed。Same-policy reentry 只允许同 owner 真嵌套，copied context 跨 thread/task 不继承 authority，child 不得越过 root lifetime。
-
-Resource-bearing child process 不得重新捕获 80% 预算；父 operation 必须从 root budget 划分并显式传递 child cap。跨进程共享 reservation 未实现前，production resource-bearing execution 保持 single-process。
-
-raw/decoded/Arrow/Pandas/copy/index/sort/join/reducer/planner/model/native/output/writer/readback/spill/overlap state 共用一个预算。每次数据规模 allocation 前 reserve conservative owner-local upper bound，planned reservation 绝不超过 budget；不足则 shrink、release、spill 或 fail closed。不可分割结果超预算时必须在完整创建前失败。不建立 universal deep-size framework，不用 probe 波动为计划超额分配发明容忍线。
-
-## 6. Identity、原子性与异常
-
-保持 factor/label/mask、registered schema/dtype/PK、逻辑时间与输出范围、确定性和已批准 public machine contracts。QRP-owned generated JSON 顶层身份只使用 `schema_id`。
-
-Storage 拥有唯一 physical traversal/session。Fingerprint 只能 quick reject；只有 exact comparison 可以产生 `MATCH`。发布必须 staged/atomic 并保留 old-good；partial-run 状态必须真实。Cleanup 只处理 owner-qualified resources，`BaseException` active primary 不得被 cleanup、metrics 或 secondary failure 覆盖。
-
-## 7. 验证
-
-只使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`；每个 `PASS` 绑定实际 command、scope 与 result。先运行最窄相关测试，再按任务要求运行 direct full suite。环境名从 `environment.yml` 动态读取。
+事实优先级：
 
 ```text
-git diff --check
-conda run -n <env> ruff check .
-conda run -n <env> python -m pytest -q -o "addopts=--import-mode=importlib --strict-markers" tests
-conda run -n <env> python -m build --no-isolation --sdist --wheel --outdir <run-dir>
+live Git / worktree / index
+-> live code / tests / config / schemas / runtime behavior
+-> 当前 Ledger 与当前 commit 的实际证据
+-> 历史 branch、bundle、handoff、review、报告仅作线索
 ```
 
-构建 smoke 不安装 package：用标准库解压 wheel，再以解压目录作为 `PYTHONPATH` import。不得把未运行或阻塞的检查写成 `PASS`。
+Live implementation 描述“现在是什么”，不自动决定“应该是什么”。发现 Goal 与实现冲突时，先在 Ledger 登记 drift，再按 Goal 处理。不得覆盖无法解释的 WIP。
 
-## 8. Git 与环境安全
+## 2. Product boundary and preserved capability
 
-编辑和 commit 前检查 `git status` 与 diff，不丢弃或覆盖无法解释的 WIP。未经明确批准，不执行 reset、restore、clean、stash、rebase、amend、force push、main push、branch deletion、递归/通配删除、依赖安装或系统/环境配置修改。删除必须绑定已批准的精确路径。
+QRP 是本地量化研究平台：
 
-最终报告列出 branch、HEAD、changed/deleted files、每条验证状态、remaining issues 与 working tree status。
+```text
+source / market data
+-> interim / processed dataset
+-> factor / label / mask / context
+-> research dataset / transform
+-> evaluation / model / prediction
+-> portfolio / diagnostics
+-> artifact / report
+```
+
+默认不属于：
+
+```text
+live trading / paper trading
+broker / exchange connector
+SaaS / production deployment
+investment advice
+```
+
+除非用户明确批准，不新增 public API/CLI、scheduler、worker、deployment、broker/vendor connector、新市场垂直链路、新长期架构 owner 或新重型 runtime dependency。
+
+不得为了删代码、降内存、缩依赖、架构对称或测试方便而删除 active Goal base 上的量化能力、已注册模型、scenario、schema、artifact/report、A-share/CSMAR、既有 Binance/Crypto 能力或 Goal 指定的 mandatory dependencies。
+
+未经用户明确批准，不得静默改变：
+
+```text
+factor / label / mask definitions
+point-in-time availability
+schema / dtype / primary key
+logical time / window / horizon / output scope
+train-validation-test separation
+execution timing / lag / cost / return attribution
+prediction determinism
+persisted exact identity
+approved public machine contracts
+```
+
+确认 semantic bug 时可以修复，但必须先有最小 executable RED、手算 fixture 或足以唯一证明违反合同的静态证据，并验证 persisted/downstream behavior。
+
+## 3. Ponytail Ultra
+
+使用本地已经安装的官方 Ponytail plugin/skill。不得重新安装、升级、修改 hooks/plugin、复制 skill 正文进仓库，或声称执行了未实际执行的 audit/review。
+
+理解真实调用流后，按第一个可行层停止：
+
+```text
+需求能否不存在？
+-> 能否删除旧路径或旧 surface？
+-> 能否复用现有唯一 owner？
+-> stdlib / Git / pytest / 平台原生能力？
+-> 已安装依赖？
+-> 能否内联？
+-> 最后才新增最小实现
+```
+
+优先挑战并删除：
+
+```text
+dead / tests-only production surface
+无独立 invariant 的 wrapper / alias / shim / fallback
+旧实现与新实现并存
+重复 validator / planner / estimator / registry / schema constants
+proof / freeze / receipt / handoff / hash ceremony
+当前调用流 code-map / code-flow 快照
+private helper、文件名、import、__all__ shape-only tests
+无 live caller 的 platform / concurrency / hostile-filesystem machinery
+DataFrame -> Python row graph -> DataFrame
+repeated concat / vstack / copy / full materialization
+```
+
+以下不得以“代码更少”为由删除：
+
+```text
+获批量化功能与模型
+private-data boundary
+one-shot memory admission 与共享 root budget
+persisted schema / PK / exact compare
+atomic old-good preservation
+truthful partial state
+primary exception preservation
+owner-qualified cleanup
+真实 public / trust / platform boundary
+```
+
+Ponytail 的目标是删除 accidental complexity，不是删除所有 abstraction。移除 abstraction 前必须证明不会丢失 public/trust/lifecycle/ownership/platform boundary。
+
+不维护全仓 KEEP manifest，不逐文件证明“永远不可删”。Repo-wide audit 只在 active Goal 指定的 intake/final 节点运行；普通 Phase 只审 committed diff 和 affected owners。
+
+## 4. Owner and scope discipline
+
+QRP 使用 current-contract-only：live behavior、approved machine contract、owner tests 与 dependency direction 定义当前合同；历史名称、目录或实现形状不自动构成兼容义务。
+
+同一 invariant 只允许一个权威 owner；“唯一 owner”表示唯一规则来源，不表示把所有逻辑塞进一个大文件。
+
+| Semantics | Owner |
+|---|---|
+| base contracts、IDs、time windows、validation | `contracts/` |
+| provider/raw ingestion、decode、normalization | `sources/` |
+| calendar、market rules、valid bars、masks | corresponding market implementation |
+| shared safety rules、PASS/FAIL/NOT_RUN/BLOCKED aggregation | `policy/` |
+| approved profile/composition-root binding | `profiles/` |
+| queryable catalog views over owner-defined facts | `catalog/`；不得重定义业务语义或复制 registry |
+| factor/label/dataset/model/prediction/portfolio numerical semantics | `research/` / `compute/` |
+| physical IO、manifest、persisted identity、exact compare | `storage/` |
+| one-shot admission、root budget、reservation、RSS evidence | `runtime/` |
+| report content | `reports/` |
+| artifact validation/write | `artifacts/` |
+| run identity、orchestration、publication、partial truth | `workflows/` |
+| approved adapters | `interfaces/` |
+
+每个 writer Phase 开始时，只允许一次 bounded discovery pass，并在 Ledger 冻结当前 Phase 的精确 path/symbol allowlist、acceptance ID、直接证据、test path 和 forbidden adjacent owners。禁止 `src/**`、`tests/**` 等仓库级修改范围。
+
+Allowlist 外编辑前必须停止并在 Ledger 写明：具体 caller、失败证据、拟加入路径和原因。只有同一 acceptance 的直接 caller/sibling/downstream 可以在 Ledger 中扩展后继续；新 owner、新产品、新 public surface、新 dependency 或新平台进入 `DECISION_REQUIRED`。
+
+每项 production/config 修改前必须绑定当前 HEAD 的 executable RED 或 conclusive static proof。只因“更干净、更通用、未来可能需要”不得修改。
+
+不得新增 tracked `governance/`、`status/`、`audit/`、`review/`、`handoff/`、`freeze/`、`receipt/`、`code-flow/`、control generator 或 evidence archive。动态 Goal/Ledger/Reviewer 只存在于 ignored `.run/`。
+
+## 5. One-shot local memory contract
+
+### 5.1 Root definition
+
+Composition root 仅指能够独立启动 data-scale work 的已批准 CLI/public entrypoint 或现有 profile/workflow root。普通 helper、tests-only harness、只能在父 root 内调用的 stage 不是 root。
+
+每次 top-level resource-bearing operation，在第一次 data-scale read/decode/allocation 前，由 canonical Runtime admission owner 只读取一次：
+
+```python
+available0 = psutil.virtual_memory().available
+rss0 = psutil.Process().memory_info().rss
+hard_budget = (available0 * 80) // 100
+if explicit_cap_bytes is not None:
+    hard_budget = min(hard_budget, explicit_cap_bytes)
+```
+
+`explicit_cap_bytes` 必须是正整数 bytes，`bool` 不合法。Provider 失败、`available0 <= 0`、非法 cap 或最终 `hard_budget <= 0` 时，在首次 data-scale action 前稳定失败。
+
+随后：
+
+```text
+available0 immutable
+rss0 immutable
+hard_budget immutable
+```
+
+运行中不得再次读取 available memory 作预算规划，不得因其变化上调、下调或重建 root。只有 canonical Runtime owner 可以创建 root budget；其他模块不得独立计算新的 80% 预算。
+
+### 5.2 Shared budget
+
+一次 operation 只有一个显式 root identity/ledger，贯穿：
+
+```text
+source -> decode -> normalization -> materialization
+-> evaluation -> model -> prediction -> portfolio -> writer/artifact
+```
+
+Nested stage 继承同一 root，不得再次乘 80%。Reader、transformer、model、writer 不得各获一套完整预算。
+
+默认本地 single-process，只允许一层主要并行。没有真实 production caller 时，不建立 ContextVar/thread/task/fork authority 系统；不自动解析 cgroup、RLIMIT 或 Windows Job Object。受限部署由用户另行批准，或用 explicit cap 表达。
+
+Allocation 前使用 owner-local conservative upper bound，覆盖 native/allocator overhead 与同时存活的 old/new overlap。Reservation 粒度是 logical operator 或 owner-held buffer group，不是每个 Python object/scalar 或第三方库内部 allocation。不建立逐对象账本、universal deep-size、Pandas private backing graph。
+
+预算不足时按固定顺序：
+
+```text
+projection / predicate / partition pushdown
+-> bounded batch and readahead
+-> release stale overlap
+-> incremental accumulator/writer
+-> owner-local spill/external sort/join
+-> bounded model matrix/window with unchanged approved semantics
+-> only truly indivisible object: fail before full allocation
+```
+
+单个 operator 最多一次观测性 batch 下调；随后进入预定义 spill path 或稳定失败。Spill 前必须用 conservative upper bound 检查 approved scratch root 的 free space；spill 文件必须 owner-qualified、数量/大小有界、异常可清理。禁止无限 retry/halve、丢行、降采样、Float32、近似指标、缩短 approved output/window、删除模型或静默近似。
+
+### 5.3 Measurement
+
+权威验收使用 operation-scoped RSS sampler：
+
+```text
+start: rss0 capture 后、首次 data-scale action 前
+cadence: <= 20 ms
+end: publication/cleanup 完成后最后一次采样
+peak_incremental_rss = max(0, sampled_peak_rss - rss0)
+acceptance: peak_incremental_rss <= hard_budget
+等价报告: sampled_peak_rss <= rss0 + hard_budget
+```
+
+Resource benchmark 必须在 fresh child process 中运行。Process-lifetime high-watermark 只作补充证据；除非平台支持 reset/operation-scoped peak，且 admission 发生在非平凡 QRP/native allocation 前，否则不得直接用 lifetime peak 减 `rss0` 冒充 operation peak。
+
+Reservation 是规划合同，不是 Python/native allocator 的逐字节形式证明；必须用 representative process RSS evidence 验收。
+
+## 6. Quant semantic discipline
+
+- Label timing、signal observation、entry、exit、portfolio attribution 必须用少量有效 bar 的手算 fixture 明确。
+- 防泄漏从 live label lookahead 推导，复用现有 purge/split contract；feature fit、model fit、model selection 不得读取 future/validation/test rows。
+- Prediction artifact 与 portfolio/research 输入按 persisted primary key 对齐；required coverage、允许缺失和 failure mode 必须明确，不得从 context column 猜 prediction。
+- Missing/duplicate/misaligned required prediction 必须稳定失败。
+- Fixed seed、backend version、thread settings 与现有 exact/tolerance contract 决定 determinism；不得承诺无法证明的跨平台 bitwise identity。
+- Diagnostics/proxy 必须诚实命名。未实现的 impact/risk/capacity model 不得输出零值并标称已生效。
+- Mandatory model dependencies 和 base-registered algorithms 不得通过 silent fallback、dummy backend 或 optionalization 逃避验证。
+
+## 7. Performance discipline
+
+先保证量化语义和硬内存，再优化：
+
+```text
+column projection / predicate / partition pushdown
+columnar batches instead of Python row graphs
+bounded Arrow/Parquet batch + readahead
+incremental writer and accumulator
+avoid repeated concat / vstack / full copies
+reuse one preparation across compatible model candidates
+one parallelism layer; bound BLAS/OpenMP/joblib/XGBoost/LightGBM threads
+```
+
+Native thread environment 必须在 measured fresh child 导入相关 native libraries 前设置。Pandas Copy-on-Write 下，只在 mutation tests 证明安全后删除 defensive copy。
+
+不得仅为“可能更快”增加 Dask/Ray/Modin/Polars/DuckDB。Profiling 工具可临时装入隔离 dev 环境，但不得进入 runtime dependency metadata。
+
+## 8. Identity, publication, cleanup and private safety
+
+- Persisted schema、dtype、PK、lineage 和 exact equality 以最终 persisted representation 为准。
+- QRP-owned generated JSON 的顶层 identity 继续使用 live current contract 的 `schema_id`；不得为重构方便引入平行 version/type identity。
+- Fingerprint/hash 只能 quick reject；只有 exact comparison 可以产生 `MATCH`。
+- 新输出在同父目录 owner-owned staging 中完成和验证，再 atomic publish；失败保留 old-good。
+- Partial run 必须真实标记。
+- Cleanup 只能删除当前 owner 可证明创建的资源。
+- Active `BaseException` 存在时，cleanup/verify/release failure 不得覆盖 primary；无 primary 时 secondary 正常传播。
+- Agent/reviewer 不得把 private row values、raw payload、secret、未经清洗的本地绝对路径或 raw traceback 写入 Ledger、review、retained evidence 或 final report。证据只保留 schema、计数、hash、状态、逻辑路径别名和无私有行摘要。
+- 默认 threat model 是可信本地用户与正常并发；hostile local actor、reparse/hardlink/native namespace 防御需要用户明确批准。
+
+## 9. Implementation, review and correction
+
+任一时刻只有一个 writable agent。主 Goal agent可以计划、实现、验证、commit/push 和 reconciliation，但不得担任自己的 formal reviewer。
+
+Reviewer 必须 fresh、read-only，只读 committed snapshot、Goal、Ledger、diff 与必要 affected owners/callers/downstream；不读取主 agent 私有分析、其他 reviewer 报告或辩护说明。Formal review 只写 reviewer-specific、仓库外 temp/cache。Review window 内主 agent暂停 tracked files、commit/branch、push 与 Ledger 写入。
+
+每个 Phase 的 review/correction 次数由 Goal 限定。Blocking finding 必须：修复并由 fresh reviewer recheck；或用直接证据反证并由 fresh reviewer recheck；或进入 `DECISION_REQUIRED`。不得静默省略、降级、改写或以多数票关闭。
+
+Review 使用 clean committed SHA。Commit SHA 即 snapshot，不创建 freeze packet、receipt、inventory hash、ZIP 或 handoff verifier。
+
+## 10. Tests, package, Git and resume
+
+测试原则：最少，但能杀死错误实现。优先保留 timing/leakage fixture、chunk/full/spill parity、schema/PK/exact identity、one-shot/shared budget、all-model tiny smoke、prediction-backed portfolio、atomic old-good、primary exception 和 private-safe failure。优先删除 private helper、文件/import/`__all__` shape、coverage-only 和 retired-mechanism tests。
+
+Formal tests/build/benchmark 只写仓库外 owner-qualified temp/scratch/benchmark roots，不覆盖 canonical user data、old-good artifacts 或 tracked files。使用 Conda 时，环境名从 live `environment.yml` 动态读取，不硬编码。Direct full suite 必须显式覆盖项目默认的 non-slow selection；普通 `pytest -q` 不得冒充 full。
+
+Package validation 从 exact committed HEAD 的仓库外 clean export 构建 fresh sdist，再从 extracted sdist 构建 wheel，并在 repo 外隔离导入；不得由 editable checkout 假通过。
+
+Git 安全：
+
+```text
+不 force push / rebase / amend
+不 merge/push main
+不 reset/restore/clean/stash 用户或其他 agent 工作
+不做递归/通配删除
+每个 coherent commit 按授权 push feature branch
+.run ignored，永不 stage/commit
+```
+
+新 thread、上下文压缩、模型切换或恢复后，从 byte 1 重读 `AGENTS.md`、`.run/goal.md`、`.run/ledger.md`，核对 branch/HEAD/status、Ponytail ultra、当前 Phase scope、review quota 和唯一 next action。不得无理由重跑已关闭的 repo-wide audit 或 full suite。
