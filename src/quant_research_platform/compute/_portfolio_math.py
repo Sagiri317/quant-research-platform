@@ -98,15 +98,14 @@ def cost_components(
     slippage_cost = turnover * float(cost_config.slippage_bps) / 10_000.0
     spread_bps = 0.0 if cost_config.spread_bps is None else cost_config.spread_bps
     spread_cost = turnover * float(spread_bps) / 10_000.0
-    impact_cost = 0.0
     return {
         "buy_cost": buy_cost,
         "sell_cost": sell_cost,
         "slippage_cost": slippage_cost,
         "spread_cost": spread_cost,
-        "impact_cost": impact_cost,
-        "total_cost": buy_cost + sell_cost + slippage_cost + spread_cost + impact_cost,
-        "cost_model": cost_config.impact_model or "detailed_bps",
+        "impact_cost": 0.0,
+        "total_cost": buy_cost + sell_cost + slippage_cost + spread_cost,
+        "cost_model": "detailed_bps",
     }
 
 
@@ -122,5 +121,4 @@ def _uses_detailed_cost_config(cost_config: CostConfig) -> bool:
         or cost_config.sell_cost_bps != 0
         or cost_config.slippage_bps != 0
         or cost_config.spread_bps not in (None, 0)
-        or cost_config.impact_model is not None
     )

@@ -154,14 +154,15 @@ def test_portfolio_helper_costs_signals_and_group_keys() -> None:
             sell_cost_bps=20,
             slippage_bps=1,
             spread_bps=2,
-            impact_model="custom",
         ),
     )
 
     assert simple["cost_model"] == "zero_cost"
     assert simple["total_cost"] == pytest.approx(0.0)
-    assert _uses_detailed_cost_config(CostConfig(impact_model="custom")) is True
-    assert detailed["cost_model"] == "custom"
+    with pytest.raises(ValueError, match="unsupported_portfolio_impact_model"):
+        CostConfig(impact_model="custom")
+    assert _uses_detailed_cost_config(CostConfig(spread_bps=2)) is True
+    assert detailed["cost_model"] == "detailed_bps"
     assert detailed["total_cost"] == pytest.approx(0.001 + 0.004 + 0.0003 + 0.0006)
     assert selection_count(3, 0.1) == 1
     assert normalize_group_key("signal", ["signal"]) == {"signal": "signal"}

@@ -22,11 +22,12 @@ def test_compute_costs_are_owned_by_cost_config() -> None:
             sell_cost_bps=20,
             slippage_bps=1,
             spread_bps=2,
-            impact_model="custom",
         ),
     )
+    with pytest.raises(ValueError, match="unsupported_portfolio_impact_model"):
+        CostConfig(impact_model="custom")
 
     assert zero["cost_model"] == "zero_cost"
     assert zero["total_cost"] == 0.0
-    assert detailed["cost_model"] == "custom"
+    assert detailed["cost_model"] == "detailed_bps"
     assert detailed["total_cost"] == pytest.approx(0.001 + 0.004 + 0.0003 + 0.0006)

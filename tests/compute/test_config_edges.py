@@ -72,7 +72,7 @@ def test_tradability_config_validation_errors(
         ({"sell_cost_bps": -1}, "sell_cost_bps must be nonnegative"),
         ({"slippage_bps": -1}, "slippage_bps must be nonnegative"),
         ({"spread_bps": -1}, "spread_bps must be nonnegative"),
-        ({"impact_model": ""}, "impact_model must be"),
+        ({"impact_model": ""}, "unsupported_portfolio_impact_model"),
     ],
 )
 def test_cost_config_validation_errors(kwargs: dict[str, object], error: str) -> None:
