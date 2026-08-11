@@ -8571,24 +8571,30 @@ def test_writer_rejects_before_native_parquet_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     native_table = pa.table({"payload": [b"x" * 600_000]})
-    policy = _writer_test_policy(working_headroom_bytes=native_table.nbytes + 4)
+    policy = _writer_test_policy(working_headroom_bytes=native_table.nbytes + 7)
     monkeypatch.setattr(
         dataset_writing,
         "pandas_frame_payload_bytes",
         lambda _: 1,
     )
-    monkeypatch.setattr(
-        dataset_writing._WriteStats,
-        "table_for_frame",
-        lambda *_args, **_kwargs: native_table,
-    )
+    conversions = 0
     native_writes = 0
+
+    def convert_to_table(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal conversions
+        conversions += 1
+        return native_table
 
     def forbid_native_write(*_args, **_kwargs):  # noqa: ANN002, ANN003
         nonlocal native_writes
         native_writes += 1
         raise AssertionError("native_write_started_before_admission")
 
+    monkeypatch.setattr(
+        dataset_writing._WriteStats,
+        "table_for_frame",
+        convert_to_table,
+    )
     monkeypatch.setattr(dataset_writing.pq, "write_table", forbid_native_write)
 
     with pytest.raises(
@@ -8602,6 +8608,7 @@ def test_writer_rejects_before_native_parquet_write(
             resource_policy=policy,
         )
 
+    assert conversions == 1
     assert native_writes == 0
 
 

@@ -586,25 +586,25 @@ def _write_contents(
             chunk,
             target_chunk_bytes=target_chunk_bytes,
         )
+        declared_bytes = pandas_frame_payload_bytes(declared)
         if declared.empty:
             _require_writer_headroom(
                 chunk_headroom,
-                declared,
-                allocation_bytes=2 * pandas_frame_payload_bytes(declared),
+                retained_bytes=declared_bytes,
+                allocation_bytes=2 * declared_bytes,
             )
             frame, logical_dtypes = accumulator.prepare_frame(declared)
+            frame_bytes = pandas_frame_payload_bytes(frame)
             _require_writer_headroom(
                 chunk_headroom,
-                declared,
-                frame,
-                allocation_bytes=2 * pandas_frame_payload_bytes(frame),
+                retained_bytes=declared_bytes + frame_bytes,
+                allocation_bytes=2 * frame_bytes,
             )
             table = accumulator.table_for_frame(frame)
             _require_writer_headroom(
                 chunk_headroom,
-                declared,
-                frame,
                 arrow_bytes=table.nbytes,
+                retained_bytes=declared_bytes + frame_bytes,
             )
             accumulator.observe_logical_dtype_payload(
                 logical_dtypes,
@@ -617,53 +617,57 @@ def _write_contents(
             declared,
             target_chunk_bytes=target_chunk_bytes,
         ):
+            bounded_frame_bytes = pandas_frame_payload_bytes(bounded_frame)
             _require_writer_headroom(
                 chunk_headroom,
-                declared,
-                allocation_bytes=2 * pandas_frame_payload_bytes(bounded_frame),
+                retained_bytes=declared_bytes,
+                allocation_bytes=2 * bounded_frame_bytes,
             )
             prepared_frame, bounded_logical_dtypes = accumulator.prepare_frame(
                 bounded_frame
             )
+            prepared_frame_bytes = pandas_frame_payload_bytes(prepared_frame)
             partition_mask_bytes = (
                 len(prepared_frame) if spec.partition_columns else 0
             )
             _require_writer_headroom(
                 chunk_headroom,
-                declared,
-                prepared_frame,
-                allocation_bytes=(
-                    pandas_frame_payload_bytes(prepared_frame)
-                    + 3 * partition_mask_bytes
-                ),
+                retained_bytes=declared_bytes + prepared_frame_bytes,
+                allocation_bytes=prepared_frame_bytes + 3 * partition_mask_bytes,
             )
             for partition, partition_frame in partition_frames(
                 prepared_frame,
                 timestamp_column=timestamp_column,
                 partition_columns=spec.partition_columns,
             ):
+                partition_frame_bytes = (
+                    0
+                    if partition_frame is prepared_frame
+                    else pandas_frame_payload_bytes(partition_frame)
+                )
+                retained_frame_bytes = (
+                    declared_bytes
+                    + prepared_frame_bytes
+                    + partition_frame_bytes
+                    + partition_mask_bytes
+                )
                 for bounded_partition in iter_bounded_frame_chunks(
                     partition_frame,
                     target_chunk_bytes=target_chunk_bytes,
                 ):
+                    bounded_partition_bytes = pandas_frame_payload_bytes(
+                        bounded_partition
+                    )
                     _require_writer_headroom(
                         chunk_headroom,
-                        declared,
-                        prepared_frame,
-                        partition_frame,
-                        allocation_bytes=(
-                            partition_mask_bytes
-                            + 2 * pandas_frame_payload_bytes(bounded_partition)
-                        ),
+                        retained_bytes=retained_frame_bytes,
+                        allocation_bytes=2 * bounded_partition_bytes,
                     )
                     table = accumulator.table_for_frame(bounded_partition)
                     remaining_headroom = _require_writer_headroom(
                         chunk_headroom,
-                        declared,
-                        prepared_frame,
-                        partition_frame,
                         arrow_bytes=table.nbytes,
-                        allocation_bytes=partition_mask_bytes,
+                        retained_bytes=retained_frame_bytes,
                     )
                     if remaining_headroom <= 0:
                         raise ValueError(
@@ -683,13 +687,9 @@ def _write_contents(
                         )
                         _require_writer_headroom(
                             chunk_headroom,
-                            declared,
-                            prepared_frame,
-                            partition_frame,
                             arrow_bytes=table.nbytes,
-                            allocation_bytes=(
-                                partition_mask_bytes + persisted_table.nbytes
-                            ),
+                            retained_bytes=retained_frame_bytes,
+                            allocation_bytes=persisted_table.nbytes,
                         )
                         write_parquet_file(persisted_table, output_path)
                         accumulator.observe_file(
@@ -746,6 +746,7 @@ def _require_writer_headroom(
     task_memory_budget_bytes: int,
     *frames: pd.DataFrame,
     arrow_bytes: int = 0,
+    retained_bytes: int = 0,
     allocation_bytes: int = 0,
 ) -> int:
     if (
@@ -753,17 +754,19 @@ def _require_writer_headroom(
         or task_memory_budget_bytes <= 0
         or type(arrow_bytes) is not int
         or arrow_bytes < 0
+        or type(retained_bytes) is not int
+        or retained_bytes < 0
         or type(allocation_bytes) is not int
         or allocation_bytes < 0
     ):
         raise ValueError("invalid_dataset_task_memory_budget")
-    retained_bytes = arrow_bytes + allocation_bytes + sum(
+    working_set_bytes = arrow_bytes + retained_bytes + allocation_bytes + sum(
         pandas_frame_payload_bytes(frame)
         for frame in {id(item): item for item in frames}.values()
     )
-    if retained_bytes > task_memory_budget_bytes:
+    if working_set_bytes > task_memory_budget_bytes:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-    return task_memory_budget_bytes - retained_bytes
+    return task_memory_budget_bytes - working_set_bytes
 
 
 def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
