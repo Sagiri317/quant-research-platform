@@ -1335,7 +1335,7 @@ def iter_declared_parquet_member_batches(
     persisted_frame_observer: Callable[[pd.DataFrame], None] | None = None,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
     _previous_output_bytes: list[int] | None = None,
-    _operation_headroom_bytes: list[int] | None = None,
+    _operation_headroom: Callable[[], int] | None = None,
 ) -> Iterator[pd.DataFrame]:
     """Traverse one frozen Parquet member through the sole Pandas converter."""
 
@@ -1343,6 +1343,26 @@ def iter_declared_parquet_member_batches(
     previous_output_bytes = (
         [0] if _previous_output_bytes is None else _previous_output_bytes
     )
+    live_operation_headroom = _operation_headroom
+    policy = current_runtime_resource_policy()
+    if live_operation_headroom is None and policy is not None:
+        fixed_operation_headroom = (
+            operation_headroom_bytes
+            if operation_headroom_bytes is not None
+            else policy.task_memory_budget_bytes
+        )
+
+        def current_operation_headroom(
+            active_policy: RuntimeResourcePolicy = policy,
+            maximum: int = fixed_operation_headroom,
+        ) -> int:
+            return min(
+                maximum,
+                active_policy.task_memory_budget_bytes
+                - active_policy.reserved_memory_bytes,
+            )
+
+        live_operation_headroom = current_operation_headroom
     for batch in iter_dataset_part_batches(
         Path(path),
         expected_identity=expected_identity,
@@ -1352,19 +1372,8 @@ def iter_declared_parquet_member_batches(
         parquet_filters=parquet_filters,
         metadata_observer=metadata_observer,
         _previous_output_bytes=previous_output_bytes,
-        _operation_headroom_bytes=_operation_headroom_bytes,
+        _operation_headroom=live_operation_headroom,
     ):
-        converter_headroom = _operation_headroom_bytes
-        policy = current_runtime_resource_policy()
-        if converter_headroom is None and policy is not None:
-            converter_headroom = [
-                min(
-                    operation_headroom_bytes
-                    if operation_headroom_bytes is not None
-                    else policy.task_memory_budget_bytes,
-                    policy.task_memory_budget_bytes - policy.reserved_memory_bytes,
-                )
-            ]
         yield from _arrow_batch_to_bounded_pandas(
             batch,
             target_chunk_bytes=target_bytes,
@@ -1373,7 +1382,7 @@ def iter_declared_parquet_member_batches(
             persisted_frame_observer=persisted_frame_observer,
             batch_observer=batch_observer,
             _previous_output_bytes=previous_output_bytes,
-            _operation_headroom_bytes=converter_headroom,
+            _operation_headroom=live_operation_headroom,
         )
 
 
@@ -1433,21 +1442,25 @@ def _iter_dataset_file_batches(
     )
     context.verify()
     previous_output_bytes = [0]
+
+    def current_operation_headroom() -> int:
+        unaccounted_reserved_bytes = max(
+            0,
+            context.resource_policy.reserved_memory_bytes
+            - credited_reservation_bytes
+            - previous_output_bytes[0],
+        )
+        current = operation_headroom - unaccounted_reserved_bytes
+        if current <= 0:
+            raise DatasetReadCapacityExceeded(
+                "dataset_working_set_exceeds_task_memory_budget"
+            )
+        return current
+
     try:
         for path in context.read_paths:
             metadata = context.metadata_for(path)
-            unaccounted_reserved_bytes = max(
-                0,
-                context.resource_policy.reserved_memory_bytes
-                - credited_reservation_bytes
-                - previous_output_bytes[0],
-            )
-            member_headroom = operation_headroom - unaccounted_reserved_bytes
-            if member_headroom <= 0:
-                raise DatasetReadCapacityExceeded(
-                    "dataset_working_set_exceeds_task_memory_budget"
-                )
-            current_headroom_bytes = [member_headroom]
+            member_headroom = current_operation_headroom()
             with closing_dataset_iterator(
                 iter_declared_parquet_member_batches(
                     path,
@@ -1459,23 +1472,10 @@ def _iter_dataset_file_batches(
                     dtype_overrides=dtype_overrides,
                     batch_observer=batch_observer,
                     _previous_output_bytes=previous_output_bytes,
-                    _operation_headroom_bytes=current_headroom_bytes,
+                    _operation_headroom=current_operation_headroom,
                 )
                 ) as member_batches:
                 while True:
-                    unaccounted_reserved_bytes = max(
-                        0,
-                        context.resource_policy.reserved_memory_bytes
-                        - credited_reservation_bytes
-                        - previous_output_bytes[0],
-                    )
-                    current_headroom_bytes[0] = (
-                        operation_headroom - unaccounted_reserved_bytes
-                    )
-                    if current_headroom_bytes[0] <= 0:
-                        raise DatasetReadCapacityExceeded(
-                            "dataset_working_set_exceeds_task_memory_budget"
-                        )
                     try:
                         frame = next(member_batches)
                     except StopIteration:
@@ -1797,7 +1797,7 @@ def _arrow_batch_to_bounded_pandas(
     persisted_frame_observer: Callable[[pd.DataFrame], None] | None = None,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
     _previous_output_bytes: list[int] | None = None,
-    _operation_headroom_bytes: list[int] | None = None,
+    _operation_headroom: Callable[[], int] | None = None,
 ) -> Iterator[pd.DataFrame]:
     if batch.num_rows == 0:
         return
@@ -1825,7 +1825,7 @@ def _arrow_batch_to_bounded_pandas(
     }
     conversion_row_bytes = source_row_bytes
     conversion_fixed_bytes = _PANDAS_FRAME_FIXED_BYTES + (
-        source_fixed_bytes if _operation_headroom_bytes is None else 0
+        source_fixed_bytes if _operation_headroom is None else 0
     )
     if overrides:
         conversion_row_bytes += source_row_bytes
@@ -1850,13 +1850,13 @@ def _arrow_batch_to_bounded_pandas(
     while start < batch.num_rows:
         current_operation_headroom = (
             fixed_operation_headroom
-            if _operation_headroom_bytes is None
-            else _operation_headroom_bytes[0]
+            if _operation_headroom is None
+            else _operation_headroom()
         )
         previous_output_bound = previous_output_bytes[0]
         parent_buffer_bytes = (
             batch.get_total_buffer_size()
-            if _operation_headroom_bytes is None
+            if _operation_headroom is None
             else 0
         )
         conversion_budget = (

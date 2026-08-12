@@ -118,7 +118,7 @@ def iter_dataset_part_batches(
     source_batch_rows: int | None = None,
     metadata_observer: Callable[[DatasetPartMetadata], None] | None = None,
     _previous_output_bytes: list[int] | None = None,
-    _operation_headroom_bytes: list[int] | None = None,
+    _operation_headroom: Callable[[], int] | None = None,
 ) -> Iterator[pa.RecordBatch]:
     """Decode one part once while binding metadata and bytes to one handle."""
 
@@ -160,8 +160,8 @@ def iter_dataset_part_batches(
         )
         initial_operation_headroom = (
             operation_headroom_bytes
-            if _operation_headroom_bytes is None
-            else _operation_headroom_bytes[0]
+            if _operation_headroom is None
+            else _operation_headroom()
         )
         initial_physical_headroom = (
             None
@@ -240,8 +240,8 @@ def iter_dataset_part_batches(
             )
             current_operation_headroom = (
                 operation_headroom_bytes
-                if _operation_headroom_bytes is None
-                else _operation_headroom_bytes[0]
+                if _operation_headroom is None
+                else _operation_headroom()
             )
             physical_headroom = (
                 None

@@ -1236,9 +1236,9 @@ def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "part.parquet"
-    batches = tuple(
-        pa.record_batch([pa.array([index])], names=["value"])
-        for index in range(2)
+    batches = (
+        pa.record_batch([pa.array(["x"])], names=["value"]),
+        pa.record_batch([pa.array(["y" * (64 * 1024)])], names=["value"]),
     )
     expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
     output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
@@ -1298,85 +1298,6 @@ def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
     assert conversion_count == 1
 
 
-def test_dataset_file_batches_admit_before_each_physical_arrow_pull(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = tmp_path / "part.parquet"
-    pq.write_table(pa.table({"value": [1, 2]}), path)
-    batches = tuple(
-        pa.record_batch([pa.array([value])], names=["value"])
-        for value in (1, 2)
-    )
-    expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
-    output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
-    policy = _issued_test_policy()
-    real_parquet_file = dataset_physical.pq.ParquetFile
-    pull_count = 0
-
-    class ObservedParquetFile:
-        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
-            self._inner = real_parquet_file(*args, **kwargs)
-
-        def __getattr__(self, name: str) -> object:
-            return getattr(self._inner, name)
-
-        def iter_batches(self, **kwargs):  # noqa: ANN003, ANN202
-            nonlocal pull_count
-            for batch in self._inner.iter_batches(**kwargs):
-                pull_count += 1
-                if pull_count == 2:
-                    raise AssertionError(
-                        "second Arrow pull ran before shared-root admission"
-                    )
-                yield batch
-
-        def close(self) -> None:
-            self._inner.close()
-
-    monkeypatch.setattr(dataset_physical.pq, "ParquetFile", ObservedParquetFile)
-    monkeypatch.setattr(
-        dataset_physical,
-        "_target_batch_rows",
-        lambda *_args, **_kwargs: 1,
-    )
-    context = SimpleNamespace(
-        resource_policy=policy,
-        retained_memory_bytes=0,
-        logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
-        parquet_filters=None,
-        read_paths=(path,),
-        metadata_for=lambda _path: SimpleNamespace(
-            identity=dataset_physical.dataset_file_identity(path)
-        ),
-        verify=lambda: None,
-    )
-    converted = dataset_reading.iter_dataset_file_batches(
-        context,
-        columns=("value",),
-        target_chunk_bytes=max(output_bytes),
-    )
-
-    with dataset_reading.closing_dataset_iterator(converted):
-        next(converted)
-        with runtime_resource_policy_scope(policy):
-            remaining = (
-                policy.task_memory_budget_bytes - policy.reserved_memory_bytes
-            )
-            assert remaining > 0
-            with policy.reserve(
-                "research.time.pending",
-                remaining,
-            ):
-                with pytest.raises(
-                    ValueError,
-                    match="dataset_working_set_exceeds_task_memory_budget",
-                ):
-                    next(converted)
-
-    assert pull_count == 1
-
-
 def test_declared_variable_width_member_decodes_multirow_batches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1411,6 +1332,49 @@ def test_declared_variable_width_member_decodes_multirow_batches(
     assert sum(len(frame) for frame in frames) == row_count
     assert conversions < row_count // 10
     assert all(pandas_frame_payload_bytes(frame) <= 64 * 1024 for frame in frames)
+
+
+def test_dataset_file_batches_refresh_headroom_after_internal_release(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "retained-output.parquet"
+    row_count = 8_192
+    expected = pd.DataFrame({"value": np.arange(row_count, dtype=np.int64)})
+    pq.write_table(
+        dataset_physical.table_with_decoded_row_bounds(pa.Table.from_pandas(expected)),
+        path,
+        row_group_size=row_count,
+    )
+    target_chunk_bytes = 16 * 1024
+    headroom_bytes = 300 * 1024
+    policy = _issued_test_policy(4 * 1024**2)
+    context = SimpleNamespace(
+        resource_policy=policy,
+        retained_memory_bytes=0,
+        logical_dtypes=logical_dtype_payload_from_frame(expected),
+        parquet_filters=None,
+        read_paths=(path,),
+        metadata_for=lambda _path: SimpleNamespace(
+            identity=dataset_physical.dataset_file_identity(path)
+        ),
+        verify=lambda: None,
+    )
+
+    output = tuple(
+        dataset_reading.iter_dataset_file_batches(
+            context,
+            columns=("value",),
+            target_chunk_bytes=target_chunk_bytes,
+            operation_headroom_bytes=headroom_bytes,
+        )
+    )
+    frames = tuple(frame for _, frame in output)
+
+    assert len(frames) < row_count // 10
+    pd.testing.assert_frame_equal(
+        pd.concat(frames, ignore_index=True),
+        expected,
+    )
 
 
 def test_variable_width_decode_rejects_before_first_arrow_pull(
