@@ -28,6 +28,7 @@ from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
 from quant_research_platform.runtime.resources import (
+    pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
 from tests.helpers.research_specs import (
@@ -637,6 +638,105 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
                 y=frame["label"].to_numpy(),
                 estimator=Estimator(),
             )
+
+
+def test_linear_tsqr_reserves_first_frame_across_second_pull() -> None:
+    rows = 512
+    first = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=rows, freq="min"),
+            "factor": np.linspace(0.0, 1.0, rows),
+            "label": np.linspace(1.0, 2.0, rows),
+        }
+    )
+    second = first.assign(timestamp=first["timestamp"] + pd.Timedelta(days=1))
+    spec = ModelSpec(
+        model_id="linear_tsqr_retained_frame",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+        sample_filter_mode="unfiltered",
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024 * 1024)
+    retained_bytes = pandas_frame_payload_bytes(first)
+
+    def frames():
+        yield first
+        assert policy.reserved_memory_bytes >= retained_bytes
+        yield second
+
+    with runtime_resource_policy_scope(policy):
+        coefficients, row_counts, _metadata = model_fitting.fit_linear_coefficients(
+            frames(),
+            spec=spec,
+            fit_columns=("timestamp", "factor", "label"),
+        )
+
+    assert len(coefficients) == 2
+    assert row_counts["rows_after_input_label_dropna"] == 2 * rows
+
+
+def test_estimator_target_and_model_state_stay_reserved_through_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = 64
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=rows, freq="min"),
+            "factor": np.linspace(0.0, 1.0, rows),
+            "label": pd.Series(range(rows), dtype="Int64"),
+        }
+    )
+    spec = ModelSpec(
+        model_id="tree_retained_state",
+        model_algorithm="decision_tree_regressor",
+        input_factor_columns=("factor",),
+        label_column="label",
+        sample_filter_mode="unfiltered",
+        max_train_rows=rows,
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024 * 1024)
+    expected_training_bytes = pandas_frame_payload_bytes(frame)
+    expected_model_bytes = model_fitting._model_state_upper_bound_bytes(frame, spec)
+    original_to_numpy = pd.Series.to_numpy
+    observations: list[int] = []
+
+    def admitted_to_numpy(series, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        dtype = kwargs.get("dtype", args[0] if args else None)
+        if series.name == "label" and dtype is not None and np.dtype(dtype) == np.dtype(
+            "float64"
+        ):
+            assert policy.reserved_memory_bytes >= len(series) * np.dtype(
+                "float64"
+            ).itemsize
+        return original_to_numpy(series, *args, **kwargs)
+
+    class Estimator:
+        coefficient_count = 1
+        coefficients = np.array([1.0])
+
+        def fit(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        @property
+        def feature_importances_(self) -> np.ndarray:
+            observations.append(policy.reserved_memory_bytes)
+            assert policy.reserved_memory_bytes >= (
+                expected_training_bytes + expected_model_bytes
+            )
+            return np.array([1.0])
+
+    monkeypatch.setattr(pd.Series, "to_numpy", admitted_to_numpy)
+
+    with runtime_resource_policy_scope(policy):
+        result = model_fitting.fit_estimator_model_result_from_frames(
+            (frame,),
+            spec,
+            estimator=Estimator(),
+        )
+
+    assert observations
+    assert result.metadata["feature_importance"] == {"factor": 1.0}
 
 
 @pytest.mark.parametrize(

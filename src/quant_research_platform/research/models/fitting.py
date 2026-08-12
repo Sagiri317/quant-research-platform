@@ -201,67 +201,108 @@ def fit_linear_coefficients(
     train_start: str | None = None
     train_end: str | None = None
     factor_reservation = ExitStack()
+    first_usable_reservation = ExitStack()
     try:
         for chunk in frames:
             chunk_count += 1
-            filtered, metadata = apply_filter_mode(
-                chunk,
-                mode=spec.sample_filter_mode,
-                metadata_key="sample_filter_mode",
-            )
-            rows_input += _strict_non_negative_count_value(metadata["rows_input"])
-            rows_after_filter += _strict_non_negative_count_value(
-                metadata["rows_after_filter_mode"]
-            )
-            filter_columns_used = list(metadata["filter_columns_used"])
-            filter_definition = str(metadata["filter_definition"])
-            usable = filtered.dropna(
-                subset=[*spec.input_columns, spec.label_column]
-            ).loc[:, list(fit_columns)]
-            if first_usable is None:
-                first_usable = usable
-            elif not first_usable.empty:
-                first_usable = pd.DataFrame()
-            y = usable.loc[:, spec.label_column].to_numpy(
-                dtype="float64", copy=False
-            )
-            row_count += int(len(y))
-            if len(y) == 0:
-                continue
-            usable_timestamps = pd.to_datetime(
-                usable["timestamp"], errors="coerce"
-            )
-            chunk_start = date_string(usable_timestamps.min())
-            chunk_end = date_string(usable_timestamps.max())
-            train_start = (
-                chunk_start if train_start is None else min(train_start, chunk_start)
-            )
-            train_end = chunk_end if train_end is None else max(train_end, chunk_end)
             policy = current_runtime_resource_policy()
-            with ExitStack() as qr_work:
-                if policy is not None:
-                    qr_work.enter_context(
+            if chunk_count == 2:
+                first_usable = None
+                first_usable_reservation.close()
+                first_usable_reservation = ExitStack()
+            with ExitStack() as chunk_work:
+                filtered, metadata = apply_filter_mode(
+                    chunk,
+                    mode=spec.sample_filter_mode,
+                    metadata_key="sample_filter_mode",
+                )
+                if policy is not None and filtered is not chunk:
+                    chunk_work.enter_context(
                         policy.reserve(
-                            "research.model.qr_work",
-                            _linear_qr_working_set_bytes(
-                                row_count=len(usable),
-                                input_count=input_count,
-                                has_retained_factor=r_factor is not None,
-                            ),
+                            "research.model.linear_filtered",
+                            pandas_frame_payload_bytes(filtered),
                         )
                     )
-                chunk_design = linear_design_matrix(usable, spec)
-                if r_factor is None or qt_y is None:
-                    stacked_design = chunk_design
-                    stacked_y = y
-                else:
-                    stacked_design = np.vstack([r_factor, chunk_design])
-                    stacked_y = np.concatenate([qt_y, y])
-                q_factor, next_r_factor = np.linalg.qr(
-                    stacked_design, mode="reduced"
+                rows_input += _strict_non_negative_count_value(metadata["rows_input"])
+                rows_after_filter += _strict_non_negative_count_value(
+                    metadata["rows_after_filter_mode"]
                 )
-                next_qt_y = q_factor.T @ stacked_y
-                del chunk_design, q_factor, stacked_design, stacked_y, y
+                filter_columns_used = list(metadata["filter_columns_used"])
+                filter_definition = str(metadata["filter_definition"])
+                usable_bound = _selected_frame_payload_bytes(
+                    filtered,
+                    list(fit_columns),
+                )
+                with ExitStack() as usable_reservation:
+                    if policy is not None:
+                        usable_reservation.enter_context(
+                            policy.reserve(
+                                "research.model.linear_projection",
+                                usable_bound,
+                            )
+                        )
+                    usable = filtered.dropna(
+                        subset=[*spec.input_columns, spec.label_column]
+                    ).loc[:, list(fit_columns)]
+                    if pandas_frame_payload_bytes(usable) > usable_bound:
+                        raise ValueError(
+                            "model_training_working_set_exceeds_task_memory_budget"
+                        )
+                    if chunk_count == 1:
+                        first_usable = usable
+                        first_usable_reservation = usable_reservation.pop_all()
+                    row_count += int(len(usable))
+                    if len(usable) == 0:
+                        continue
+                    with ExitStack() as qr_work:
+                        if policy is not None:
+                            qr_work.enter_context(
+                                policy.reserve(
+                                    "research.model.qr_work",
+                                    _linear_qr_working_set_bytes(
+                                        row_count=len(usable),
+                                        input_count=input_count,
+                                        has_retained_factor=r_factor is not None,
+                                    ),
+                                )
+                            )
+                        y = usable.loc[:, spec.label_column].to_numpy(
+                            dtype="float64", copy=False
+                        )
+                        usable_timestamps = pd.to_datetime(
+                            usable["timestamp"], errors="coerce"
+                        )
+                        chunk_start = date_string(usable_timestamps.min())
+                        chunk_end = date_string(usable_timestamps.max())
+                        train_start = (
+                            chunk_start
+                            if train_start is None
+                            else min(train_start, chunk_start)
+                        )
+                        train_end = (
+                            chunk_end
+                            if train_end is None
+                            else max(train_end, chunk_end)
+                        )
+                        chunk_design = linear_design_matrix(usable, spec)
+                        if r_factor is None or qt_y is None:
+                            stacked_design = chunk_design
+                            stacked_y = y
+                        else:
+                            stacked_design = np.vstack([r_factor, chunk_design])
+                            stacked_y = np.concatenate([qt_y, y])
+                        q_factor, next_r_factor = np.linalg.qr(
+                            stacked_design, mode="reduced"
+                        )
+                        next_qt_y = q_factor.T @ stacked_y
+                        del (
+                            chunk_design,
+                            q_factor,
+                            stacked_design,
+                            stacked_y,
+                            usable_timestamps,
+                            y,
+                        )
             factor_reservation.close()
             factor_reservation = ExitStack()
             if policy is not None:
@@ -297,6 +338,7 @@ def fit_linear_coefficients(
         if chunk_count == 1 and first_usable is not None:
             del chunk, filtered, usable
             factor_reservation.close()
+            first_usable_reservation.close()
             r_factor = None
             qt_y = None
             return (
@@ -317,6 +359,7 @@ def fit_linear_coefficients(
         )
     finally:
         factor_reservation.close()
+        first_usable_reservation.close()
 
 
 def fit_estimator_model_result_from_frames(
@@ -328,31 +371,65 @@ def fit_estimator_model_result_from_frames(
     training, row_counts, filter_metadata = collect_training_frame(frames, spec)
     if row_counts["rows_after_input_label_dropna"] == 0:
         raise ValueError("model_training_sample_empty")
-    y = training.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
-    predictor = fit_predictor(spec, training=training, y=y, estimator=estimator)
-    coefficient_count = int(
-        getattr(predictor, "coefficient_count", len(spec.input_columns))
-    )
-    metadata = model_metadata(
-        spec,
-        filter_metadata=filter_metadata,
-        row_counts=row_counts,
-        coefficient_count=coefficient_count,
-        feature_importance=feature_importance.estimator_feature_importance(
+    policy = current_runtime_resource_policy()
+    training_bytes = pandas_frame_payload_bytes(training)
+    target_bytes = len(training) * np.dtype(np.float64).itemsize
+    model_state_bytes = _model_state_upper_bound_bytes(training, spec)
+    with ExitStack() as retained_state:
+        if policy is not None:
+            retained_state.enter_context(
+                policy.reserve("research.model.training_result", training_bytes)
+            )
+            retained_state.enter_context(
+                policy.reserve("research.model.fit_state", model_state_bytes)
+            )
+        with ExitStack() as target_state:
+            if policy is not None:
+                target_state.enter_context(
+                    policy.reserve("research.model.target", target_bytes)
+                )
+            y = training.loc[:, spec.label_column].to_numpy(
+                dtype="float64", copy=False
+            )
+            with ExitStack() as fit_work:
+                if policy is not None:
+                    fit_work.enter_context(
+                        policy.reserve(
+                            "research.model.fit_work",
+                            _estimator_fit_working_set_bytes(training, spec),
+                        )
+                    )
+                predictor = _fit_predictor(
+                    spec,
+                    training=training,
+                    y=y,
+                    estimator=estimator,
+                )
+            del y
+        coefficient_count = int(
+            getattr(predictor, "coefficient_count", len(spec.input_columns))
+        )
+        metadata = model_metadata(
             spec,
-            predictor,
-        ),
-    )
-    coefficients = np.asarray(
-        getattr(predictor, "coefficients", np.full(coefficient_count, np.nan)),
-        dtype="float64",
-    )
-    return ModelFitResult(
-        coefficients=coefficients,
-        metadata=metadata,
-        prediction_model=predictor,
-        retained_memory_bytes=_model_state_upper_bound_bytes(training, spec),
-    )
+            filter_metadata=filter_metadata,
+            row_counts=row_counts,
+            coefficient_count=coefficient_count,
+            feature_importance=feature_importance.estimator_feature_importance(
+                spec,
+                predictor,
+            ),
+        )
+        coefficients = np.asarray(
+            getattr(predictor, "coefficients", np.full(coefficient_count, np.nan)),
+            dtype="float64",
+        )
+        result = ModelFitResult(
+            coefficients=coefficients,
+            metadata=metadata,
+            prediction_model=predictor,
+            retained_memory_bytes=model_state_bytes,
+        )
+    return result
 
 
 def collect_training_frame(
@@ -597,13 +674,28 @@ def fit_predictor(
                     _model_state_upper_bound_bytes(training, spec),
                 )
             )
-        fit_training_frame = getattr(estimator, "fit_training_frame", None)
-        if callable(fit_training_frame):
-            return fit_training_frame(training)
-        if not hasattr(estimator, "fit"):
-            return estimator
-        estimator.fit(training.loc[:, spec.input_columns], y)
+        return _fit_predictor(
+            spec,
+            training=training,
+            y=y,
+            estimator=estimator,
+        )
+
+
+def _fit_predictor(
+    spec: ModelSpec,
+    *,
+    training: pd.DataFrame,
+    y: np.ndarray,
+    estimator: object,
+) -> object:
+    fit_training_frame = getattr(estimator, "fit_training_frame", None)
+    if callable(fit_training_frame):
+        return fit_training_frame(training)
+    if not hasattr(estimator, "fit"):
         return estimator
+    estimator.fit(training.loc[:, spec.input_columns], y)
+    return estimator
 
 
 def fit_linear_coefficients_exact(
@@ -724,6 +816,7 @@ def _linear_qr_working_set_bytes(
     columns = input_count + 1
     stacked_rows = row_count + (columns if has_retained_factor else 0)
     chunk_design = row_count * columns * np.dtype(np.float64).itemsize
+    timestamp_values = row_count * np.dtype("datetime64[ns]").itemsize
     stacked_design = (
         stacked_rows * columns * np.dtype(np.float64).itemsize
         if has_retained_factor
@@ -741,6 +834,7 @@ def _linear_qr_working_set_bytes(
     native_workspace = 64 * 1024 + r_factor
     return (
         chunk_design
+        + timestamp_values
         + stacked_design
         + stacked_label
         + qr_input_copy

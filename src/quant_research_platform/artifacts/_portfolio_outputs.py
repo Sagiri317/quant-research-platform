@@ -161,6 +161,7 @@ def _write_portfolio_row_artifact_chunks(
     spec: PortfolioSpec,
 ) -> dict[str, int]:
     writers: dict[str, pq.ParquetWriter] = {}
+    decoded_metadata: dict[str, dict[bytes, bytes]] = {}
     temp_paths = {
         artifact_name: temp_root / PORTFOLIO_ARTIFACTS[artifact_name]
         for artifact_name in row_artifacts
@@ -196,7 +197,13 @@ def _write_portfolio_row_artifact_chunks(
                             continue
                         table = pa.Table.from_pandas(selected, preserve_index=False)
                         persisted, table_state, batch_rows = (
-                            _artifact_table_write_state(table)
+                            _artifact_table_write_state(
+                                table,
+                                previous_metadata=decoded_metadata.get(artifact_name),
+                            )
+                        )
+                        decoded_metadata[artifact_name] = dict(
+                            persisted.schema.metadata or {}
                         )
                         writer = writers.get(artifact_name)
                         if writer is None:
@@ -214,8 +221,10 @@ def _write_portfolio_row_artifact_chunks(
                             )
                         row_counts[artifact_name] += len(selected)
             for artifact_name in tuple(writers):
-                writer = writers.pop(artifact_name)
-                writer.close()
+                writer = writers[artifact_name]
+                writer.add_key_value_metadata(decoded_metadata[artifact_name])
+                active_writer = writers.pop(artifact_name)
+                active_writer.close()
             for artifact_name in row_artifacts:
                 if row_counts[artifact_name] == 0:
                     write_parquet(

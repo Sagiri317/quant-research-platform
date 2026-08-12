@@ -73,6 +73,7 @@ def write_parquet_chunks(
     claimed_temp: os.stat_result | None = None
     row_count = 0
     effective_test_end: str | None = None
+    decoded_metadata: dict[bytes, bytes] | None = None
     try:
         with _artifact_writer_reservation(include_key_index=True):
             with closing_dataset_iterator(iter(frames)) as active_frames:
@@ -142,7 +143,13 @@ def write_parquet_chunks(
                                                 preserve_index=False,
                                             )
                                             persisted, table_state, batch_rows = (
-                                                _artifact_table_write_state(table)
+                                                _artifact_table_write_state(
+                                                    table,
+                                                    previous_metadata=decoded_metadata,
+                                                )
+                                            )
+                                            decoded_metadata = dict(
+                                                persisted.schema.metadata or {}
                                             )
                                             try:
                                                 duplicates = key_index.add_table(
@@ -184,6 +191,7 @@ def write_parquet_chunks(
                                 writer = None
                             raise
                         if writer is not None:
+                            writer.add_key_value_metadata(decoded_metadata or {})
                             active_writer = writer
                             writer = None
                             active_writer.close()
@@ -340,8 +348,13 @@ def _artifact_frame_reservation(
 
 def _artifact_table_write_state(
     table: pa.Table,
+    *,
+    previous_metadata: dict[bytes, bytes] | None = None,
 ) -> tuple[pa.Table, ExitStack, int]:
-    persisted = table_with_decoded_row_bounds(table)
+    persisted = table_with_decoded_row_bounds(
+        table,
+        previous_metadata=previous_metadata,
+    )
     stack = ExitStack()
     row_bytes, fixed_bytes = table_decoded_working_set_bounds(persisted)
     policy = current_runtime_resource_policy()

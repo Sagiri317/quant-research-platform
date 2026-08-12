@@ -211,6 +211,9 @@ def iter_dataset_part_batches(
                 use_threads=False,
             )
         )
+        footer_decoded_bounds = (parquet_file.metadata.metadata or {}).get(
+            _DECODED_ROW_BOUNDS_KEY
+        )
         selected_source_rows = sum(
             int(parquet_file.metadata.row_group(index).num_rows)
             for index in selected_row_groups
@@ -272,6 +275,10 @@ def iter_dataset_part_batches(
                     operation_headroom_bytes=physical_headroom,
                 )
                 del raw_batch
+                if footer_decoded_bounds is not None:
+                    batch_metadata = dict(filtered.schema.metadata or {})
+                    batch_metadata[_DECODED_ROW_BOUNDS_KEY] = footer_decoded_bounds
+                    filtered = filtered.replace_schema_metadata(batch_metadata)
                 yield filtered
                 del filtered
 
@@ -494,16 +501,31 @@ def _maximum_projected_decode_fixed_bytes(
         ) from None
 
 
-def table_with_decoded_row_bounds(table: pa.Table) -> pa.Table:
+def table_with_decoded_row_bounds(
+    table: pa.Table,
+    *,
+    previous_metadata: dict[bytes, bytes] | None = None,
+) -> pa.Table:
+    previous_bounds = (
+        {}
+        if previous_metadata is None
+        or _DECODED_ROW_BOUNDS_KEY not in previous_metadata
+        else _parse_decoded_row_bounds(
+            previous_metadata[_DECODED_ROW_BOUNDS_KEY],
+            names=table.column_names,
+        )
+    )
     columns = []
     for name, column in zip(table.column_names, table.columns, strict=True):
         per_row_bytes, fixed_bytes = _column_decoded_row_bound(column)
+        previous_per_row, previous_fixed = previous_bounds.get(name, (0, 0))
         columns.append(
             {
                 "name": name,
-                "per_row_bytes": per_row_bytes,
-                "fixed_bytes": (
-                    fixed_bytes + per_row_bytes + 2 * PARQUET_DATA_PAGE_BYTES
+                "per_row_bytes": max(previous_per_row, per_row_bytes),
+                "fixed_bytes": max(
+                    previous_fixed,
+                    fixed_bytes + per_row_bytes + 2 * PARQUET_DATA_PAGE_BYTES,
                 ),
             }
         )
@@ -513,7 +535,8 @@ def table_with_decoded_row_bounds(table: pa.Table) -> pa.Table:
             "columns": columns,
         }
     ).encode("utf-8")
-    metadata = dict(table.schema.metadata or {})
+    metadata = dict(previous_metadata or {})
+    metadata.update(table.schema.metadata or {})
     metadata[_DECODED_ROW_BOUNDS_KEY] = payload
     return table.replace_schema_metadata(metadata)
 
@@ -609,7 +632,9 @@ def _column_decoded_row_bound(column: pa.ChunkedArray) -> tuple[int, int]:
 def _decoded_row_bounds(
     parquet_file: pq.ParquetFile,
 ) -> dict[str, tuple[int, int]] | None:
-    raw = (parquet_file.schema_arrow.metadata or {}).get(_DECODED_ROW_BOUNDS_KEY)
+    raw = (parquet_file.metadata.metadata or {}).get(_DECODED_ROW_BOUNDS_KEY)
+    if raw is None:
+        raw = (parquet_file.schema_arrow.metadata or {}).get(_DECODED_ROW_BOUNDS_KEY)
     if raw is None:
         return None
     return _parse_decoded_row_bounds(raw, names=parquet_file.schema_arrow.names)

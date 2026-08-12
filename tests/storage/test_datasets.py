@@ -518,10 +518,7 @@ def test_writer_reserves_complete_fixed_owner_before_sqlite_or_input(
         explicit_cap_bytes=2048,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
+    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "fixed_owner_admission"),
             ForbiddenInput(),

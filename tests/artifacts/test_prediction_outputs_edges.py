@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.artifacts import (
@@ -23,6 +24,9 @@ from quant_research_platform.artifacts._output_manifest import (
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
+from quant_research_platform.storage._dataset_physical import (
+    parquet_decoded_working_set_bounds,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_manifest
 from tests.artifacts.output_edge_fixtures import (
@@ -340,6 +344,31 @@ def test_prediction_chunk_writer_rejects_cross_chunk_duplicate_and_cleans_scratc
     assert not final_path.exists()
     assert not list(tmp_path.glob(".k-*"))
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_prediction_chunk_writer_persists_widest_decoded_row_bound(
+    tmp_path: Path,
+) -> None:
+    narrow = make_artifact_prediction_output_frame()
+    wide = narrow.copy()
+    wide_value = "asset_" + "x" * (128 * 1024)
+    wide.loc[:, "asset_id"] = wide_value
+    wide.loc[:, "timestamp"] = pd.Timestamp("2024-01-03")
+    final_path = tmp_path / "prediction.parquet"
+
+    parquet_writers.write_parquet_chunks(
+        (narrow, wide),
+        final_path,
+        required=tuple(narrow.columns),
+        key_columns=("asset_id", "timestamp"),
+        compression="zstd",
+    )
+
+    row_bytes, _fixed_bytes = parquet_decoded_working_set_bounds(
+        pq.ParquetFile(final_path),
+        tuple(narrow.columns),
+    )
+    assert row_bytes >= len(wide_value.encode("utf-8"))
 
 
 def test_artifact_parquet_writers_admit_before_native_state(

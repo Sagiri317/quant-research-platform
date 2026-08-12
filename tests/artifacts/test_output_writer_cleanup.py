@@ -204,6 +204,9 @@ def test_prediction_writer_close_is_attempted_once(
     class Writer:
         close_calls = 0
 
+        def add_key_value_metadata(self, _metadata: object) -> None:
+            pass
+
         def write_table(self, _table: object, **_kwargs: object) -> None:
             pass
 
@@ -250,6 +253,9 @@ def test_portfolio_writers_close_once_and_attempt_all(
             self.close_calls = 0
 
         def write_table(self, _table: object, **_kwargs: object) -> None:
+            pass
+
+        def add_key_value_metadata(self, _metadata: object) -> None:
             pass
 
         def close(self) -> None:
@@ -344,6 +350,9 @@ def test_parquet_writers_close_once_without_replacing_body_primary(
 
         def write_table(self, _table: object, **_kwargs: object) -> None:
             self.write_calls += 1
+
+        def add_key_value_metadata(self, _metadata: object) -> None:
+            pass
 
         def close(self) -> None:
             self.close_calls += 1
