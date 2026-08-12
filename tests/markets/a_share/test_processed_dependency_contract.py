@@ -1795,7 +1795,7 @@ def test_active_materialization_outer_scope_owns_factory_snapshot_and_primary(
     } == {
         "caught_is_primary": True,
         "snapshot": [original],
-        "observed": [("source", policy), ("materialize", policy), ("close", policy)],
+        "observed": [("source", policy), ("close", policy), ("materialize", policy)],
     }
 
 
@@ -1930,6 +1930,71 @@ def test_active_materialization_owner_deduplicates_splits_and_closes(
     assert attempts[0][0] == ("a", "b")
     assert all(retained > 0 for _, retained in attempts)
     assert closed == [True]
+
+
+def test_active_materialization_orders_late_discovered_assets_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=1024**3)
+    sessions = tuple(pd.to_datetime(["2024-01-02"]))
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+
+    monkeypatch.setattr(
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
+        lambda *_args, **_kwargs: iter(
+            (
+                pd.DataFrame({"asset_id": ["b"]}),
+                pd.DataFrame({"asset_id": ["a"]}),
+            )
+        ),
+    )
+
+    def materialize(asset_ids, current_sessions, *_args):  # noqa: ANN001, ANN202
+        rows = tuple(
+            (asset_id, timestamp)
+            for asset_id in asset_ids
+            for timestamp in current_sessions
+        )
+        return pd.DataFrame(
+            {
+                column: (
+                    ["a_share"] * len(rows)
+                    if column == "market_id"
+                    else [asset_id for asset_id, _timestamp in rows]
+                    if column == "asset_id"
+                    else [timestamp for _asset_id, timestamp in rows]
+                    if column == "timestamp"
+                    else [1.0] * len(rows)
+                )
+                for column in spec.required_columns
+            }
+        ).sort_values(list(spec.primary_key))
+
+    publications = _scoped_active_materialization_batches(
+        tmp_path / "panel",
+        time_window=TimeWindow("2024-01-02", "2024-01-02"),
+        sessions=sessions,
+        resource_policy=policy,
+        materialize=materialize,
+    )
+    ordered = materialization_io.iter_sorted_output_chunks(
+        publications,
+        spec,
+        resource_policy=policy,
+    )
+    result = pd.concat(
+        (
+            publication.frame
+            if isinstance(publication, dataset_writing.DatasetWriteChunk)
+            else publication
+            for publication in ordered
+        ),
+        ignore_index=True,
+    )
+
+    assert result["asset_id"].tolist() == ["a", "b"]
 
 
 @pytest.mark.parametrize(
@@ -2368,44 +2433,6 @@ def test_active_materialization_owner_splits_real_storage_capacity(
     assert output["payload"].str.len().tolist() == [180_000, 180_000]
 
 
-@pytest.mark.parametrize(
-    "error_type",
-    (KeyboardInterrupt,),
-)
-def test_active_materialization_owner_preserves_primary_base_exception(
-    monkeypatch: pytest.MonkeyPatch,
-    error_type: type[BaseException],
-) -> None:
-    closed: list[bool] = []
-    policy = capture_test_policy(
-        available_memory_bytes=1024**3,
-    )
-
-    def source():
-        try:
-            yield pd.DataFrame({"asset_id": ["asset_a"]})
-        finally:
-            closed.append(True)
-            raise OSError("close_failure")
-
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: source(),
-    )
-    batches = _scoped_active_materialization_batches(
-        Path("panel"),
-        time_window=TimeWindow("2024-01-02", "2024-01-02"),
-        sessions=(pd.Timestamp("2024-01-02"),),
-        resource_policy=policy,
-        materialize=lambda *_args: (_ for _ in ()).throw(error_type("primary")),
-    )
-
-    with pytest.raises(error_type, match="primary"):
-        next(batches)
-    assert closed == [True]
-
-
 def test_active_materialization_owner_closes_source_on_early_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2453,6 +2480,7 @@ def test_active_materialization_scope_covers_indexes_source_materialize_and_clos
         retained_memory_bytes = 0
 
         def __init__(self, **_kwargs: object) -> None:
+            self.payloads: list[bytes] = []
             observed.append(("index_init", current_runtime_resource_policy()))
 
         def __enter__(self) -> Index:
@@ -2462,9 +2490,14 @@ def test_active_materialization_scope_covers_indexes_source_materialize_and_clos
         def __exit__(self, *_args: object) -> None:
             observed.append(("index_exit", current_runtime_resource_policy()))
 
-        def classify_comparison_table(self, table, **_kwargs):  # noqa: ANN001, ANN202
-            observed.append(("classify", current_runtime_resource_policy()))
-            return list(range(len(table))), ()
+        def add_identity_payload_rows(self, *, rows):  # noqa: ANN001, ANN202
+            observed.append(("add", current_runtime_resource_policy()))
+            self.payloads.extend(value for _namespace, _identity, value in rows)
+            return len(self.payloads)
+
+        def identity_payload_values(self, **_kwargs):  # noqa: ANN003, ANN202
+            observed.append(("iterate", current_runtime_resource_policy()))
+            return iter(sorted(set(self.payloads)))
 
     def source():
         try:
@@ -2611,11 +2644,6 @@ def test_valid_bar_index_streams_exact_rows_without_column_validation_copies(
         lambda *_args, **_kwargs: iter((frame,)),
     )
     monkeypatch.setattr(
-        materialization_planning,
-        "strict_hashable_key_series",
-        lambda *_args, **_kwargs: pytest.fail("whole_asset_column_copy"),
-    )
-    monkeypatch.setattr(
         materialization_planning.strict_values,
         "strict_timestamp_value_series",
         lambda *_args, **_kwargs: pytest.fail("whole_timestamp_column_copy"),
@@ -2635,7 +2663,7 @@ def test_valid_bar_index_streams_exact_rows_without_column_validation_copies(
     ]
 
 
-def test_active_asset_discovery_admits_before_validation_or_arrow(
+def test_active_asset_discovery_admits_before_string_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
@@ -2654,20 +2682,8 @@ def test_active_asset_discovery_admits_before_validation_or_arrow(
     )
     monkeypatch.setattr(
         materialization_planning,
-        "strict_hashable_key_series",
+        "strict_string_series",
         lambda *_args, **_kwargs: pytest.fail("asset_validation_before_admission"),
-    )
-
-    def arrow_sentinel(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("arrow_before_admission")
-
-    monkeypatch.setattr(
-        materialization_planning,
-        "pa",
-        SimpleNamespace(
-            Array=SimpleNamespace(from_pandas=arrow_sentinel),
-            Table=SimpleNamespace(from_arrays=arrow_sentinel),
-        ),
     )
 
     with pytest.raises(
@@ -2958,8 +2974,13 @@ def test_active_materialization_indexes_use_dataset_sibling_parent(
         def __exit__(self, *_args: object) -> None:
             pass
 
-        def classify_comparison_table(self, *_args: object, **_kwargs: object):
-            return (), 0
+        @staticmethod
+        def add_identity_payload_rows(**_kwargs: object) -> int:
+            return 0
+
+        @staticmethod
+        def identity_payload_values(**_kwargs: object):  # noqa: ANN205
+            return iter(())
 
     monkeypatch.setattr(materialization_planning, "ExactPrimaryKeyIndex", Index)
     monkeypatch.setattr(

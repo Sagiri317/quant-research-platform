@@ -12,7 +12,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 
 from quant_research_platform.contracts.data import (
     ProcessedDataKind,
@@ -20,7 +19,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow, require_date_window
-from quant_research_platform.contracts.validation import strict_hashable_key_series
+from quant_research_platform.contracts.validation import strict_string_series
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
 )
@@ -298,6 +297,7 @@ def iter_active_materialization_batches(
                 resource_policy=bound_policy,
             )
             with active_index as index:
+                active_asset_batch_counts = array("Q")
                 persistent_index_bytes = index.retained_memory_bytes + (
                     0
                     if valid_bar_index is None
@@ -330,14 +330,16 @@ def iter_active_materialization_batches(
                                 bound_policy.task_memory_budget_bytes
                                 - owner_retained_bytes
                                 - source_payload_bytes
+                                - 256
+                                - (len(active_asset_batch_counts) + 1)
+                                * active_asset_batch_counts.itemsize
                             )
                             slice_payload_bytes = pandas_frame_payload_bytes(
                                 source_values.to_frame()
                             )
-                            position_bytes = len(source_values) * array("Q").itemsize
                             if (
                                 available_bytes <= 0
-                                or 3 * slice_payload_bytes + position_bytes
+                                or 3 * slice_payload_bytes + 256 * len(source_values)
                                 > available_bytes
                             ):
                                 if stop - start == 1:
@@ -348,59 +350,108 @@ def iter_active_materialization_batches(
                                     )
                                 span = max(1, (stop - start) // 2)
                                 continue
-                            values = strict_hashable_key_series(
+                            values = strict_string_series(
                                 source_values,
                                 error="invalid_processed_panel_asset_id",
+                                strip=False,
                             ).reset_index(drop=True)
-                            table = pa.Table.from_arrays(
-                                (pa.Array.from_pandas(values),), names=("asset_id",)
-                            )
-                            position_bytes = len(table) * array("Q").itemsize
-                            if (
-                                slice_payload_bytes + 2 * table.nbytes + position_bytes
-                                > available_bytes
-                            ):
-                                del values, table
-                                if stop - start == 1:
-                                    raise (
-                                        materialization_io.MaterializationCapacityExceeded(
-                                            "a_share_known_payloads_exceed_task_memory_budget"
-                                        )
+                            inserted = index.add_identity_payload_rows(
+                                rows=(
+                                    (
+                                        "active-assets",
+                                        encoded,
+                                        encoded,
                                     )
-                                span = max(1, (stop - start) // 2)
-                                continue
-                            keep, _ = index.classify_comparison_table(
-                                table,
-                                namespace="active-assets",
-                                value_columns=(),
-                                payload_target_bytes=bound_policy.payload_target_bytes,
+                                    for value in values
+                                    for encoded in (value.encode("utf-8"),)
+                                )
                             )
-                            if keep:
-                                output = tuple(
-                                    values.iloc[position] for position in keep
+                            if inserted:
+                                active_asset_batch_counts.append(inserted)
+                            del source_values, values
+                            start = stop
+                            span = len(chunk) - start
+                        del chunk
+                asset_batch: list[str] = []
+                asset_batch_bytes = 0
+                batch_count_bytes = (
+                    256
+                    + len(active_asset_batch_counts)
+                    * active_asset_batch_counts.itemsize
+                )
+                asset_batch_limit = min(
+                    bound_policy.payload_target_bytes,
+                    bound_policy.task_memory_budget_bytes
+                    - owner_retained_bytes
+                    - batch_count_bytes,
+                )
+                if asset_batch_limit <= 0:
+                    raise materialization_io.MaterializationCapacityExceeded(
+                        "a_share_known_payloads_exceed_task_memory_budget"
+                    )
+                payloads = index.identity_payload_values(namespace="active-assets")
+                with closing_dataset_iterator(payloads):
+                    for batch_count in active_asset_batch_counts:
+                        for _ in range(batch_count):
+                            try:
+                                payload = next(payloads)
+                            except StopIteration:
+                                raise RuntimeError(
+                                    "a_share_active_asset_index_count_mismatch"
+                                ) from None
+                            item_bytes = 2 * pointer_bytes + 256 + 8 * len(payload)
+                            if item_bytes > asset_batch_limit:
+                                raise (
+                                    materialization_io.MaterializationCapacityExceeded(
+                                        "a_share_known_payloads_exceed_task_memory_budget"
+                                    )
                                 )
-                                upstream_retained_bytes = (
-                                    persistent_index_bytes
-                                    + source_payload_bytes
-                                    + len(output) * pointer_bytes
-                                    + retained_session_bytes
-                                )
-                                del source_values, values, table, keep
+                            if asset_batch and (
+                                asset_batch_bytes + item_bytes > asset_batch_limit
+                            ):
+                                output = tuple(asset_batch)
                                 yield from _iter_adaptive_materialization_batches(
                                     asset_ids=output,
                                     sessions=target_sessions,
                                     session_context=session_context,
-                                    retained_payload_bytes=upstream_retained_bytes,
+                                    retained_payload_bytes=(
+                                        owner_retained_bytes
+                                        + batch_count_bytes
+                                        + asset_batch_bytes
+                                    ),
                                     valid_bar_index=valid_bar_index,
                                     valid_bar_offsets=valid_bar_offsets,
                                     materialize=materialize,
                                 )
                                 del output
-                            else:
-                                del values, table, keep
-                            start = stop
-                            span = len(chunk) - start
-                        del chunk
+                                asset_batch.clear()
+                                asset_batch_bytes = 0
+                            asset_batch.append(payload.decode("utf-8"))
+                            asset_batch_bytes += item_bytes
+                        if asset_batch:
+                            output = tuple(asset_batch)
+                            yield from _iter_adaptive_materialization_batches(
+                                asset_ids=output,
+                                sessions=target_sessions,
+                                session_context=session_context,
+                                retained_payload_bytes=(
+                                    owner_retained_bytes
+                                    + batch_count_bytes
+                                    + asset_batch_bytes
+                                ),
+                                valid_bar_index=valid_bar_index,
+                                valid_bar_offsets=valid_bar_offsets,
+                                materialize=materialize,
+                            )
+                            del output
+                            asset_batch.clear()
+                            asset_batch_bytes = 0
+                    try:
+                        next(payloads)
+                    except StopIteration:
+                        pass
+                    else:
+                        raise RuntimeError("a_share_active_asset_index_count_mismatch")
 
     def activate() -> Iterator[DatasetWriteChunk]:
         assert bound_policy is not None
