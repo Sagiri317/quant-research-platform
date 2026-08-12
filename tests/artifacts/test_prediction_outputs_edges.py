@@ -418,6 +418,39 @@ def test_artifact_parquet_writers_admit_before_native_state(
                 )
 
 
+def test_prediction_model_reservation_precedes_writer_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = make_artifact_prediction_output_frame()
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1024 * 1024,
+    )
+    retained_model_bytes = 128 * 1024
+    writer_bytes = max(64 * 1024, policy.payload_target_bytes // 8)
+    original_enter = ExactPrimaryKeyIndex.__enter__
+
+    def assert_model_reserved(index):  # noqa: ANN001, ANN202
+        assert policy.reserved_memory_bytes >= retained_model_bytes + writer_bytes
+        return original_enter(index)
+
+    def frames():
+        with policy.reserve("research.model.fitted_state", retained_model_bytes):
+            yield frame
+
+    monkeypatch.setattr(ExactPrimaryKeyIndex, "__enter__", assert_model_reserved)
+
+    with runtime_resource_policy_scope(policy):
+        parquet_writers.write_parquet_chunks(
+            frames(),
+            tmp_path / "prediction.parquet",
+            required=tuple(frame.columns),
+            key_columns=("asset_id", "timestamp"),
+            compression="zstd",
+        )
+
+
 def test_prediction_outputs_require_standard_metadata_attrs(
     tmp_path: Path,
 ) -> None:

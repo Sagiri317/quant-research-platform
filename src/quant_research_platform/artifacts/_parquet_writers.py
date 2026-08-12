@@ -6,6 +6,7 @@ import os
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 from uuid import uuid4
 
@@ -65,79 +66,108 @@ def write_parquet_chunks(
     effective_test_end: str | None = None
     try:
         with _artifact_writer_reservation():
-            handle, claimed_temp = scratch_owner.open_owned_scratch_file(temp_path)
-            with scratch_owner.handle_preserving_primary(handle):
-                require_owned_scratch(final_path.parent, parent_identity)
+            with closing_dataset_iterator(iter(frames)) as active_frames:
                 try:
-                    with closing_dataset_iterator(iter(frames)) as active_frames:
-                        with ExactPrimaryKeyIndex(
-                            primary_key=key_columns,
-                            timestamp_columns=tuple(
-                                column
-                                for column in key_columns
-                                if column == "timestamp"
-                            ),
-                            scratch_parent=temp_path.parent,
-                        ) as key_index:
-                            for frame in active_frames:
-                                with _artifact_frame_reservation(
-                                    frame,
-                                    key_columns=key_columns,
-                                ):
-                                    selected = _prediction_output_chunk_frame(
-                                        frame,
-                                        required=required,
-                                        key_columns=key_columns,
-                                    )
-                                    if selected.empty:
-                                        continue
-                                    timestamps = strict_timestamp_series(
-                                        selected["timestamp"],
-                                        error="prediction_metadata_inconsistent",
-                                    )
-                                    current_end = (
-                                        pd.Timestamp(timestamps.max())
-                                        .date()
-                                        .isoformat()
-                                    )
-                                    if effective_test_end is None or pd.Timestamp(
-                                        current_end
-                                    ) > pd.Timestamp(effective_test_end):
-                                        effective_test_end = current_end
-                                    table = pa.Table.from_pandas(
-                                        selected,
-                                        preserve_index=False,
-                                    )
-                                    try:
-                                        duplicates = key_index.add_table(table)
-                                    except ValueError as exc:
-                                        raise ValueError(
-                                            "invalid_prediction_keys"
-                                        ) from exc
-                                    if duplicates:
-                                        raise ValueError("duplicate_prediction_keys")
-                                    if writer is None:
-                                        writer = pq.ParquetWriter(
-                                            handle,
-                                            table.schema,
-                                            compression=compression,
-                                        )
-                                    writer.write_table(table)
-                                    row_count += len(selected)
-                except BaseException:
-                    if writer is not None:
+                    first_frame = next(active_frames)
+                except StopIteration:
+                    raise ValueError("empty_prediction_window") from None
+                with ExitStack() as first_frame_state:
+                    first_frame_state.enter_context(
+                        _artifact_frame_reservation(
+                            first_frame,
+                            key_columns=key_columns,
+                        )
+                    )
+                    handle, claimed_temp = scratch_owner.open_owned_scratch_file(
+                        temp_path
+                    )
+                    with scratch_owner.handle_preserving_primary(handle):
+                        require_owned_scratch(final_path.parent, parent_identity)
                         try:
-                            writer.close()
+                            with ExactPrimaryKeyIndex(
+                                primary_key=key_columns,
+                                timestamp_columns=tuple(
+                                    column
+                                    for column in key_columns
+                                    if column == "timestamp"
+                                ),
+                                scratch_parent=temp_path.parent,
+                            ) as key_index:
+                                first_pending = True
+                                for frame in chain((first_frame,), active_frames):
+                                    is_first = first_pending
+                                    first_pending = False
+                                    try:
+                                        with ExitStack() as frame_state:
+                                            if not is_first:
+                                                frame_state.enter_context(
+                                                    _artifact_frame_reservation(
+                                                        frame,
+                                                        key_columns=key_columns,
+                                                    )
+                                                )
+                                            selected = _prediction_output_chunk_frame(
+                                                frame,
+                                                required=required,
+                                                key_columns=key_columns,
+                                            )
+                                            if selected.empty:
+                                                continue
+                                            timestamps = strict_timestamp_series(
+                                                selected["timestamp"],
+                                                error="prediction_metadata_inconsistent",
+                                            )
+                                            current_end = (
+                                                pd.Timestamp(timestamps.max())
+                                                .date()
+                                                .isoformat()
+                                            )
+                                            if (
+                                                effective_test_end is None
+                                                or pd.Timestamp(current_end)
+                                                > pd.Timestamp(effective_test_end)
+                                            ):
+                                                effective_test_end = current_end
+                                            table = pa.Table.from_pandas(
+                                                selected,
+                                                preserve_index=False,
+                                            )
+                                            try:
+                                                duplicates = key_index.add_table(table)
+                                            except ValueError as exc:
+                                                raise ValueError(
+                                                    "invalid_prediction_keys"
+                                                ) from exc
+                                            if duplicates:
+                                                raise ValueError(
+                                                    "duplicate_prediction_keys"
+                                                )
+                                            if writer is None:
+                                                writer = pq.ParquetWriter(
+                                                    handle,
+                                                    table.schema,
+                                                    compression=compression,
+                                                )
+                                            writer.write_table(table)
+                                            row_count += len(selected)
+                                    finally:
+                                        if is_first:
+                                            first_frame_state.close()
+                                            del first_frame
                         except BaseException:
-                            pass
-                        writer = None
-                    raise
-                if writer is not None:
-                    active_writer = writer
-                    writer = None
-                    active_writer.close()
-                handle.flush()
-                os.fsync(handle.fileno())
+                            if writer is not None:
+                                try:
+                                    writer.close()
+                                except BaseException:
+                                    pass
+                                writer = None
+                            raise
+                        if writer is not None:
+                            active_writer = writer
+                            writer = None
+                            active_writer.close()
+                        handle.flush()
+                        os.fsync(handle.fileno())
         if row_count == 0 or effective_test_end is None:
             raise ValueError("empty_prediction_window")
         reject_if_exists(final_path)

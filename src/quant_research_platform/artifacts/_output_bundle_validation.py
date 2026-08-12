@@ -288,6 +288,14 @@ def _read_prediction_output_bundle(
                         )
                     ):
                         raise ValueError("persisted_prediction_window_mismatch")
+                    duplicates = key_index.add_float_value_table(
+                        table,
+                        namespace="prediction-bundle-validation",
+                        value_column=prediction_column,
+                        payload_target_bytes=policy.payload_target_bytes,
+                    )
+                    if duplicates:
+                        raise ValueError("duplicate_persisted_prediction_keys")
                     if time_window is not None:
                         keep = pc.and_(
                             pc.greater_equal(

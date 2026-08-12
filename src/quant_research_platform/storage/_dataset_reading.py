@@ -1405,18 +1405,52 @@ def _iter_dataset_file_batches(
     try:
         for path in context.read_paths:
             metadata = context.metadata_for(path)
-            for frame in iter_declared_parquet_member_batches(
-                path,
-                expected_identity=metadata.identity,
-                columns=columns,
-                parquet_filters=context.parquet_filters,
-                target_chunk_bytes=target_bytes,
-                operation_headroom_bytes=operation_headroom,
-                dtype_overrides=dtype_overrides,
-                batch_observer=batch_observer,
-                _previous_output_bytes=previous_output_bytes,
-            ):
-                yield path, frame
+            initial_reserved_bytes = context.resource_policy.reserved_memory_bytes
+            initial_unaccounted_reserved_bytes = max(
+                0,
+                initial_reserved_bytes - previous_output_bytes[0],
+            )
+            member_headroom = (
+                operation_headroom
+                - initial_unaccounted_reserved_bytes
+            )
+            if member_headroom <= 0:
+                raise DatasetReadCapacityExceeded(
+                    "dataset_working_set_exceeds_task_memory_budget"
+                )
+            with closing_dataset_iterator(
+                iter_declared_parquet_member_batches(
+                    path,
+                    expected_identity=metadata.identity,
+                    columns=columns,
+                    parquet_filters=context.parquet_filters,
+                    target_chunk_bytes=target_bytes,
+                    operation_headroom_bytes=member_headroom,
+                    dtype_overrides=dtype_overrides,
+                    batch_observer=batch_observer,
+                    _previous_output_bytes=previous_output_bytes,
+                )
+                ) as member_batches:
+                while True:
+                    unaccounted_reserved_bytes = max(
+                        0,
+                        context.resource_policy.reserved_memory_bytes
+                        - previous_output_bytes[0],
+                    )
+                    additional_reserved_bytes = max(
+                        0,
+                        unaccounted_reserved_bytes
+                        - initial_unaccounted_reserved_bytes,
+                    )
+                    if member_headroom - additional_reserved_bytes <= 0:
+                        raise DatasetReadCapacityExceeded(
+                            "dataset_working_set_exceeds_task_memory_budget"
+                        )
+                    try:
+                        frame = next(member_batches)
+                    except StopIteration:
+                        break
+                    yield path, frame
     finally:
         _verify_preserving_primary(context)
 

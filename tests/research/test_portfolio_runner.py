@@ -273,6 +273,54 @@ def test_persisted_prediction_portfolio_uses_bounded_disk_lookup(
     assert summary["performance_summary"].iloc[0]["periods"] == 1
 
 
+def test_prediction_bundle_rejects_duplicate_outside_selected_window(
+    tmp_path,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share", "a_share"],
+            "asset_id": ["a", "a"],
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "model_input": [1.0, 2.0],
+            "eligible": [True, True],
+        }
+    )
+    spec = PredictionSpec(
+        prediction_id="windowed_prediction",
+        model_id="linear_regression_demo",
+        research_dataset_id="research_demo",
+        train_end="2024-01-01",
+        test_start="2024-01-02",
+        test_end="2024-01-03",
+    )
+    _prediction, root, _manifest = write_prediction_output_and_read(
+        tmp_path,
+        (frame,),
+        spec,
+        np.array([0.0, 1.0]),
+        ("model_input",),
+    )
+    path = root / "prediction.parquet"
+    persisted = pd.read_parquet(path)
+    excluded = persisted.loc[
+        persisted["timestamp"] == pd.Timestamp("2024-01-02")
+    ].iloc[[0]]
+    pd.concat([persisted, excluded], ignore_index=True).to_parquet(path, index=False)
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=4 * 1024 * 1024,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="duplicate_persisted_prediction_keys"):
+            with _read_prediction_output_bundle(
+                root,
+                expected_output_id=spec.prediction_id,
+                time_window=TimeWindow("2024-01-03", "2024-01-03"),
+            ):
+                pass
+
+
 def _prediction_portfolio_inputs(tmp_path):
     layout = StorageLayout(project_root=tmp_path)
     dataset_spec = make_portfolio_research_dataset_spec(
