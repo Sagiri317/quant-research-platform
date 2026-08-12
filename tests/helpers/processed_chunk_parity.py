@@ -57,7 +57,7 @@ def assert_forced_tiny_processed_chunks_match_default(
         time_window=time_window,
         data_ids=(data_id,),
         resource_policy=capture_storage_test_policy(
-            working_headroom_bytes=5 * 1024 * 1024,
+            working_headroom_bytes=12 * 1024 * 1024,
         ),
     )
 

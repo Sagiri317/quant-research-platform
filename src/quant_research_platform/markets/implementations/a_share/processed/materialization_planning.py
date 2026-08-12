@@ -66,7 +66,9 @@ def filter_output_sessions(
 ) -> pd.DataFrame:
     selected_columns = tuple(frame.columns) if columns is None else tuple(columns)
     filter_state_bytes = len(frame) * np.dtype(np.bool_).itemsize
-    output_bound = pandas_frame_payload_bytes(frame)
+    output_bound = pandas_frame_payload_bytes(frame) + len(frame) * np.dtype(
+        np.intp
+    ).itemsize
     require_known_materialization_payload_bound(
         frames=(*retained_frames, frame),
         output=None,

@@ -3360,6 +3360,31 @@ def test_sorted_output_releases_previous_publication_before_upstream_next(
     next(output)
 
 
+def test_output_session_filter_admits_range_index_copy_growth() -> None:
+    timestamps = pd.date_range("2024-01-01", periods=102)
+    frame = pd.DataFrame(
+        {
+            "market_id": pd.Series(["a_share"] * 102, dtype="str"),
+            "asset_id": pd.Series(["asset"] * 102, dtype=object),
+            "timestamp": timestamps,
+            "eligible": True,
+        }
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=32 * 1024 * 1024,
+    )
+
+    output = materialization_planning.filter_output_sessions(
+        frame,
+        timestamps.delete([1, 100]),
+        resource_policy=policy,
+    )
+
+    assert output["timestamp"].tolist() == timestamps.delete([1, 100]).tolist()
+    assert tuple(output.columns) == tuple(frame.columns)
+
+
 def test_adaptive_materialization_does_not_retry_after_capacity_failure() -> None:
     calls = 0
     retained: list[int] = []
