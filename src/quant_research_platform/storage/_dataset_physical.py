@@ -104,6 +104,8 @@ def iter_dataset_part_batches(
     row_groups: tuple[int, ...] | None = None,
     source_batch_rows: int | None = None,
     metadata_observer: Callable[[DatasetPartMetadata], None] | None = None,
+    _previous_output_bytes: list[int] | None = None,
+    _operation_headroom_bytes: list[int] | None = None,
 ) -> Iterator[pa.RecordBatch]:
     """Decode one part once while binding metadata and bytes to one handle."""
 
@@ -140,40 +142,106 @@ def iter_dataset_part_batches(
             if row_groups is None
             else list(row_groups)
         )
+        previous_output_bytes = (
+            [0] if _previous_output_bytes is None else _previous_output_bytes
+        )
+        initial_operation_headroom = (
+            operation_headroom_bytes
+            if _operation_headroom_bytes is None
+            else _operation_headroom_bytes[0]
+        )
+        initial_physical_headroom = (
+            None
+            if initial_operation_headroom is None
+            else initial_operation_headroom - previous_output_bytes[0]
+        )
+        membership = any(
+            operator == "in" for _, operator, _ in parquet_filters or ()
+        )
+        membership_max_scalar_bytes = max(
+            (
+                _membership_max_scalar_bytes(value)
+                for _, operator, value in parquet_filters or ()
+                if operator == "in"
+            ),
+            default=0,
+        )
         admitted_batch_rows = _target_batch_rows(
             parquet_file,
             columns=selected_columns,
             target_chunk_bytes=target_chunk_bytes,
             operation_headroom_bytes=(
-                operation_headroom_bytes if parquet_filters else None
+                initial_physical_headroom if parquet_filters else None
             ),
-            membership=any(
-                operator == "in" for _, operator, _ in parquet_filters or ()
-            ),
-            membership_max_scalar_bytes=max(
-                (
-                    _membership_max_scalar_bytes(value)
-                    for _, operator, value in parquet_filters or ()
-                    if operator == "in"
-                ),
-                default=0,
-            ),
+            membership=membership,
+            membership_max_scalar_bytes=membership_max_scalar_bytes,
         )
         batch_rows = (
             admitted_batch_rows
             if source_batch_rows is None
             else min(source_batch_rows, admitted_batch_rows)
         )
-        for raw_batch in parquet_file.iter_batches(
-            batch_size=batch_rows,
-            row_groups=selected_row_groups,
-            columns=list(selected_columns),
-            use_threads=False,
-        ):
+        maximum_projected_row_bytes = _maximum_projected_row_bytes(
+            parquet_file,
+            selected_columns,
+        )
+        raw_batches = iter(
+            parquet_file.iter_batches(
+                batch_size=batch_rows,
+                row_groups=selected_row_groups,
+                columns=list(selected_columns),
+                use_threads=False,
+            )
+        )
+        selected_source_rows = sum(
+            int(parquet_file.metadata.row_group(index).num_rows)
+            for index in selected_row_groups
+        )
+        pulled_source_rows = 0
+        while True:
+            if pulled_source_rows >= selected_source_rows:
+                break
+            next_batch_rows = min(
+                batch_rows,
+                selected_source_rows - pulled_source_rows,
+            )
+            source_batch_bytes = next_batch_rows * maximum_projected_row_bytes
+            physical_pull_bytes = (
+                _filter_working_set_bytes(
+                    source_batch_bytes=source_batch_bytes,
+                    row_count=next_batch_rows,
+                    membership=membership,
+                    membership_max_scalar_bytes=membership_max_scalar_bytes,
+                )
+                if parquet_filters
+                else source_batch_bytes
+            )
+            current_operation_headroom = (
+                operation_headroom_bytes
+                if _operation_headroom_bytes is None
+                else _operation_headroom_bytes[0]
+            )
+            physical_headroom = (
+                None
+                if current_operation_headroom is None
+                else current_operation_headroom - previous_output_bytes[0]
+            )
+            if (
+                physical_headroom is not None
+                and physical_pull_bytes > physical_headroom
+            ):
+                raise DatasetReadCapacityExceeded(
+                    "dataset_working_set_exceeds_task_memory_budget"
+                )
+            try:
+                raw_batch = next(raw_batches)
+            except StopIteration:
+                break
+            pulled_source_rows += raw_batch.num_rows
             filtered = _filter_arrow_batch(
                 raw_batch,
                 parquet_filters,
-                operation_headroom_bytes=operation_headroom_bytes,
+                operation_headroom_bytes=physical_headroom,
             )
             del raw_batch
             yield from _bounded_arrow_batches(
@@ -271,20 +339,7 @@ def _target_batch_rows(
     membership: bool = False,
     membership_max_scalar_bytes: int = 0,
 ) -> int:
-    positions = _projected_parquet_leaf_positions(parquet_file, columns)
-    maximum_row_bytes = 1
-    for row_group_index in range(parquet_file.metadata.num_row_groups):
-        row_group = parquet_file.metadata.row_group(row_group_index)
-        if row_group.num_rows <= 0:
-            continue
-        projected_bytes = sum(
-            max(0, int(row_group.column(index).total_uncompressed_size))
-            for index in positions
-        )
-        maximum_row_bytes = max(
-            maximum_row_bytes,
-            (projected_bytes + int(row_group.num_rows) - 1) // int(row_group.num_rows),
-        )
+    maximum_row_bytes = _maximum_projected_row_bytes(parquet_file, columns)
     target_rows = max(1, target_chunk_bytes // maximum_row_bytes)
     if operation_headroom_bytes is None:
         return target_rows
@@ -310,6 +365,27 @@ def _target_batch_rows(
             "dataset_filter_working_set_exceeds_task_memory_budget"
         )
     return admitted
+
+
+def _maximum_projected_row_bytes(
+    parquet_file: pq.ParquetFile,
+    columns: tuple[str, ...],
+) -> int:
+    positions = _projected_parquet_leaf_positions(parquet_file, columns)
+    maximum_row_bytes = 1
+    for row_group_index in range(parquet_file.metadata.num_row_groups):
+        row_group = parquet_file.metadata.row_group(row_group_index)
+        if row_group.num_rows <= 0:
+            continue
+        projected_bytes = sum(
+            max(0, int(row_group.column(index).total_uncompressed_size))
+            for index in positions
+        )
+        maximum_row_bytes = max(
+            maximum_row_bytes,
+            (projected_bytes + int(row_group.num_rows) - 1) // int(row_group.num_rows),
+        )
+    return maximum_row_bytes
 
 
 def _projected_parquet_leaf_positions(

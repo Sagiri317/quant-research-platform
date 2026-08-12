@@ -1344,6 +1344,8 @@ def iter_declared_parquet_member_batches(
         columns=columns,
         parquet_filters=parquet_filters,
         metadata_observer=metadata_observer,
+        _previous_output_bytes=previous_output_bytes,
+        _operation_headroom_bytes=_operation_headroom_bytes,
     ):
         yield from _arrow_batch_to_bounded_pandas(
             batch,
@@ -1398,13 +1400,15 @@ def _iter_dataset_file_batches(
         raise DatasetReadCapacityExceeded(
             "dataset_working_set_exceeds_task_memory_budget"
         )
-    accounted_reservation_bytes = (
-        context.resource_policy.task_memory_budget_bytes - operation_headroom
-    )
-    credited_reservation_bytes = min(
-        context.resource_policy.reserved_memory_bytes,
-        accounted_reservation_bytes,
-    )
+    credited_reservation_bytes = 0
+    if operation_headroom_bytes is not None:
+        accounted_reservation_bytes = (
+            context.resource_policy.task_memory_budget_bytes - operation_headroom
+        )
+        credited_reservation_bytes = min(
+            context.resource_policy.reserved_memory_bytes,
+            accounted_reservation_bytes,
+        )
     dtype_overrides = pandas_dtype_overrides_from_logical_payload(
         context.logical_dtypes,
         columns=columns,

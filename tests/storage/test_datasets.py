@@ -1146,6 +1146,53 @@ def test_dataset_file_batches_do_not_repeat_explicitly_composed_reservations(
     pd.testing.assert_frame_equal(output[0][1], expected)
 
 
+def test_dataset_file_batches_do_not_credit_implicit_live_reservations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "part.parquet"
+    batch = pa.record_batch([pa.array([1], type=pa.int64())], names=["value"])
+    expected = batch.to_pandas(use_threads=False)
+    retained_bytes = 256
+    exact_headroom = batch.get_total_buffer_size() + pandas_frame_payload_bytes(
+        expected
+    )
+    policy = _issued_test_policy(exact_headroom + retained_bytes)
+    monkeypatch.setattr(
+        dataset_reading,
+        "iter_dataset_part_batches",
+        lambda *_args, **_kwargs: iter((batch,)),
+    )
+
+    def reject_conversion(_batch: pa.RecordBatch) -> pd.DataFrame:
+        raise AssertionError("conversion ran after uncomposed reservation was credited")
+
+    monkeypatch.setattr(dataset_reading, "_arrow_slice_to_pandas", reject_conversion)
+    context = SimpleNamespace(
+        resource_policy=policy,
+        retained_memory_bytes=retained_bytes,
+        logical_dtypes=logical_dtype_payload_from_frame(expected),
+        parquet_filters=None,
+        read_paths=(path,),
+        metadata_for=lambda _path: SimpleNamespace(identity=SimpleNamespace()),
+        verify=lambda: None,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with policy.reserve("research.model.fitted_state", retained_bytes):
+            with pytest.raises(
+                ValueError,
+                match="dataset_working_set_exceeds_task_memory_budget",
+            ):
+                next(
+                    dataset_reading.iter_dataset_file_batches(
+                        context,
+                        columns=("value",),
+                        target_chunk_bytes=pandas_frame_payload_bytes(expected),
+                    )
+                )
+
+
 def test_dataset_file_batches_do_not_double_count_reserved_previous_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1265,6 +1312,84 @@ def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
                     next(converted)
 
     assert conversion_count == 1
+
+
+def test_dataset_file_batches_admit_before_each_physical_arrow_pull(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "part.parquet"
+    pq.write_table(pa.table({"value": [1, 2]}), path)
+    batches = tuple(
+        pa.record_batch([pa.array([value])], names=["value"])
+        for value in (1, 2)
+    )
+    expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
+    output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
+    arrow_bytes = max(batch.get_total_buffer_size() for batch in batches)
+    exact_headroom = arrow_bytes + sum(output_bytes)
+    policy = _issued_test_policy()
+    real_parquet_file = dataset_physical.pq.ParquetFile
+    pull_count = 0
+
+    class ObservedParquetFile:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            self._inner = real_parquet_file(*args, **kwargs)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+        def iter_batches(self, **kwargs):  # noqa: ANN003, ANN202
+            nonlocal pull_count
+            for batch in self._inner.iter_batches(**kwargs):
+                pull_count += 1
+                if pull_count == 2:
+                    raise AssertionError(
+                        "second Arrow pull ran before shared-root admission"
+                    )
+                yield batch
+
+        def close(self) -> None:
+            self._inner.close()
+
+    monkeypatch.setattr(dataset_physical.pq, "ParquetFile", ObservedParquetFile)
+    monkeypatch.setattr(
+        dataset_physical,
+        "_target_batch_rows",
+        lambda *_args, **_kwargs: 1,
+    )
+    context = SimpleNamespace(
+        resource_policy=policy,
+        retained_memory_bytes=0,
+        logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
+        parquet_filters=None,
+        read_paths=(path,),
+        metadata_for=lambda _path: SimpleNamespace(
+            identity=dataset_physical.dataset_file_identity(path)
+        ),
+        verify=lambda: None,
+    )
+    converted = dataset_reading.iter_dataset_file_batches(
+        context,
+        columns=("value",),
+        target_chunk_bytes=max(output_bytes),
+        operation_headroom_bytes=exact_headroom,
+    )
+
+    with dataset_reading.closing_dataset_iterator(converted):
+        next(converted)
+        with runtime_resource_policy_scope(policy):
+            with policy.reserve(
+                "research.time.pending",
+                sum(output_bytes) + 1,
+            ):
+                with pytest.raises(
+                    ValueError,
+                    match="dataset_working_set_exceeds_task_memory_budget",
+                ):
+                    next(converted)
+
+    assert pull_count == 1
 
 
 def test_declared_variable_width_member_decodes_multirow_batches(
