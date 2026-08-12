@@ -39,7 +39,6 @@ def test_local_verification_workflow_preserves_dataset_manifests(
     tmp_path,
     monkeypatch,
 ):
-    captured_roots: list[Path] = []
     captured_manifests: list[dict[str, object]] = []
 
     monkeypatch.setattr(
@@ -72,16 +71,21 @@ def test_local_verification_workflow_preserves_dataset_manifests(
             end_date="2016-12-31",
             profile=profile_with_materializers(
                 stub_interim_importer(
-                    on_artifact=lambda root, manifest: (
-                        captured_roots.append(root),
-                        captured_manifests.append(manifest),
+                    on_artifact=lambda _root, manifest: captured_manifests.append(
+                        manifest
                     )
                 ),
                 empty_processed_inputs,
             ),
         )
     )
-    manifest = inspect_dataset(captured_roots[0]).manifest
+    manifest = inspect_dataset(
+        run_root
+        / "data"
+        / "interim"
+        / "csmar"
+        / frequency_ids.MARKET_BARS_DATA_ID
+    ).manifest
 
     assert result.status == "NOT_RUN"
     assert manifest == captured_manifests[0]

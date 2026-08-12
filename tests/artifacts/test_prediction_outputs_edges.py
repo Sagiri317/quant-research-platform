@@ -100,6 +100,7 @@ def _valid_prediction_output_metadata_with_selection() -> dict[str, object]:
         "model_purge_gap_bool",
         "model_max_train_rows_zero",
         "model_max_train_rows_bool",
+        "model_resolved_hyperparameters",
     ),
 )
 def test_prediction_metadata_reuses_complete_business_owner_graph(
@@ -194,6 +195,9 @@ def test_prediction_metadata_reuses_complete_business_owner_graph(
         model_metadata["purge_gap_steps"] = True
     elif mutation == "model_max_train_rows_zero":
         model_metadata["max_train_rows"] = 0
+    elif mutation == "model_resolved_hyperparameters":
+        model_metadata["hyperparameters"] = {"alpha": 2.0}
+        model_metadata["resolved_hyperparameters"] = {"alpha": 1.0}
     else:
         model_metadata["max_train_rows"] = True
 
@@ -248,47 +252,6 @@ def test_prediction_output_validation_rejects_bad_frames(
             output_spec=report_spec,
             layout=layout,
         )
-
-
-@pytest.mark.parametrize(
-    ("model_algorithm", "dependency_package"),
-    (
-        ("linear_regression", "sklearn"),
-        ("ridge_regression", "internal"),
-        ("single_factor_baseline", "sklearn"),
-    ),
-)
-def test_prediction_outputs_bind_dependency_package_to_model_algorithm(
-    tmp_path: Path,
-    model_algorithm: str,
-    dependency_package: str,
-) -> None:
-    spec = make_output_edge_prediction_spec()
-    output_spec = make_output_edge_report_spec(
-        "prediction_outputs",
-        spec.prediction_id,
-        "prediction",
-    )
-    frame = make_artifact_prediction_output_frame()
-    frame.attrs["model_metadata"] = {
-        **frame.attrs["model_metadata"],
-        "model_algorithm": model_algorithm,
-        "dependency_status": {
-            "status": "available",
-            "package": dependency_package,
-            "version": "test",
-        },
-    }
-    layout = StorageLayout(project_root=tmp_path)
-
-    with pytest.raises(ValueError, match="invalid_model_metadata"):
-        outputs.write_prediction_outputs(
-            frame,
-            spec=spec,
-            output_spec=output_spec,
-            layout=layout,
-        )
-    assert not (tmp_path / "outputs" / output_spec.output_id).exists()
 
 
 @pytest.mark.parametrize(

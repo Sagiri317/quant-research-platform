@@ -101,7 +101,16 @@ def test_terminal_writer_propagates_close_only_failure_once(
     tmp_path: Path,
 ) -> None:
     close_failure = OSError("close_failed")
-    source = _TerminalInput(close_failure=close_failure)
+    source = _TerminalInput(
+        values=(
+            pd.DataFrame(
+                {"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]}
+            ),
+        )
+        if owner == "prediction"
+        else (),
+        close_failure=close_failure,
+    )
 
     with pytest.raises(OSError) as raised:
         _run_terminal_writer(owner, source, tmp_path)
@@ -568,8 +577,10 @@ def test_parquet_cleanup_uses_shared_owned_scratch_removal(
     else:
 
         def frames():  # type: ignore[no-untyped-def]
+            yield pd.DataFrame(
+                {"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]}
+            )
             raise RuntimeError("body_primary")
-            yield pd.DataFrame()
 
         def operation() -> object:
             return parquet_writers.write_parquet_chunks(

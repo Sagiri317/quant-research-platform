@@ -1731,6 +1731,67 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     assert output_bundle.as_posix().endswith("outputs/pred_demo")
 
 
+@pytest.mark.parametrize(
+    ("model_algorithm", "expected_package", "wrong_package"),
+    (
+        ("linear_regression", "internal", "sklearn"),
+        ("ridge_regression", "sklearn", "internal"),
+    ),
+)
+def test_prediction_builder_binds_backend_package_to_actual_model_owner(
+    model_algorithm: str,
+    expected_package: str,
+    wrong_package: str,
+) -> None:
+    frame = _research_rows()
+    model_spec = ModelSpec(
+        model_id=f"{model_algorithm}_demo",
+        model_algorithm=model_algorithm,
+        input_factor_columns=("mom_20d",),
+        label_column="forward_return_20d",
+        max_train_rows=len(frame),
+    )
+    model_result = model_fitting.fit_model_result_from_frames(
+        (frame,),
+        model_spec,
+        estimator=build_estimator_from_model_spec(model_spec),
+    )
+    prediction_spec = PredictionSpec(
+        prediction_id=f"{model_algorithm}_prediction",
+        model_id=model_spec.model_id,
+        research_dataset_id="demo",
+        train_end="2014-01-02",
+        test_start="2014-01-03",
+        test_end="2014-01-03",
+    )
+    result = prediction_runner_module.build_prediction_result_from_frames(
+        (frame,),
+        prediction_spec,
+        model_result.coefficients,
+        model_spec.input_columns,
+        prediction_model=model_result.prediction_model,
+        model_metadata=model_result.metadata,
+    )
+
+    assert result.model_metadata["dependency_status"]["package"] == expected_package
+    wrong_metadata = {
+        **model_result.metadata,
+        "dependency_status": {
+            **model_result.metadata["dependency_status"],
+            "package": wrong_package,
+        },
+    }
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
+        prediction_runner_module.build_prediction_result_from_frames(
+            (frame,),
+            prediction_spec,
+            model_result.coefficients,
+            model_spec.input_columns,
+            prediction_model=model_result.prediction_model,
+            model_metadata=wrong_metadata,
+        )
+
+
 def test_prediction_handoff_reads_research_dataset_and_writes_report(
     tmp_path: Path,
 ) -> None:
@@ -1967,7 +2028,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
             prediction_catalog=prediction_catalog,
             prediction_id="pred_demo",
         )
-    output_bundle = _write_prediction_result(layout, result)
+        output_bundle = _write_prediction_result(layout, result)
 
     assert (output_bundle / "prediction.parquet").is_file()
     assert len([rows for rows in read_chunk_rows if rows]) > 1

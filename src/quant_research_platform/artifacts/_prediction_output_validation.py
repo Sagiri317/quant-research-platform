@@ -20,10 +20,6 @@ from quant_research_platform.contracts.predictions import (
     PredictionSpec,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.research.models.algorithm_facts import (
-    algorithm_facts,
-    model_default_hyperparameters,
-)
 
 _MODEL_METADATA_BASE_KEYS = frozenset(
     {
@@ -204,12 +200,12 @@ def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obje
         )
     except ValueError as exc:
         raise ValueError("invalid_model_metadata") from exc
-    model_algorithm = require_metadata_string(
-        metadata, "model_algorithm", "invalid_model_metadata"
-    )
-    resolved_hyperparameters = model_default_hyperparameters(model_algorithm)
-    resolved_hyperparameters.update(metadata["hyperparameters"])
-    if metadata["resolved_hyperparameters"] != resolved_hyperparameters:
+    require_metadata_string(metadata, "model_algorithm", "invalid_model_metadata")
+    if any(
+        key not in metadata["resolved_hyperparameters"]
+        or metadata["resolved_hyperparameters"][key] != value
+        for key, value in metadata["hyperparameters"].items()
+    ):
         raise ValueError("invalid_model_metadata")
     dependency_status = metadata["dependency_status"]
     if (
@@ -218,8 +214,6 @@ def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obje
         or dependency_status["status"] != "available"
         or type(dependency_status["package"]) is not str
         or not dependency_status["package"]
-        or dependency_status["package"]
-        != (algorithm_facts(model_algorithm).dependency_package or "internal")
         or type(dependency_status["version"]) is not str
         or not dependency_status["version"]
     ):

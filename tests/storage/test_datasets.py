@@ -1102,6 +1102,50 @@ def test_dataset_file_batches_subtract_live_root_reservations_before_conversion(
                 )
 
 
+def test_dataset_file_batches_do_not_repeat_explicitly_composed_reservations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "part.parquet"
+    batch = pa.record_batch([pa.array([1], type=pa.int64())], names=["value"])
+    expected = batch.to_pandas(use_threads=False)
+    output_bytes = pandas_frame_payload_bytes(expected)
+    exact_headroom = batch.get_total_buffer_size() + output_bytes
+    policy = _issued_test_policy()
+    monkeypatch.setattr(
+        dataset_reading,
+        "iter_dataset_part_batches",
+        lambda *_args, **_kwargs: iter((batch,)),
+    )
+    context = SimpleNamespace(
+        resource_policy=policy,
+        retained_memory_bytes=0,
+        logical_dtypes=logical_dtype_payload_from_frame(expected),
+        parquet_filters=None,
+        read_paths=(path,),
+        metadata_for=lambda _path: SimpleNamespace(identity=SimpleNamespace()),
+        verify=lambda: None,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with policy.reserve(
+            "storage.dataset.write",
+            policy.task_memory_budget_bytes - exact_headroom,
+        ):
+            output = tuple(
+                dataset_reading.iter_dataset_file_batches(
+                    context,
+                    columns=("value",),
+                    target_chunk_bytes=output_bytes,
+                    operation_headroom_bytes=exact_headroom,
+                )
+            )
+
+    assert len(output) == 1
+    assert output[0][0] == path
+    pd.testing.assert_frame_equal(output[0][1], expected)
+
+
 def test_dataset_file_batches_do_not_double_count_reserved_previous_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

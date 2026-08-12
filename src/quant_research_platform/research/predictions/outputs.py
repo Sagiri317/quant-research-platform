@@ -17,6 +17,7 @@ from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.research.models.algorithm_facts import algorithm_facts
 from quant_research_platform.research.models.prediction import (
     prediction_model_input_frame,
 )
@@ -46,6 +47,32 @@ def build_prediction_result_from_frames(
     retained_model_bytes: int = 0,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> PredictionResult:
+    if type(model_metadata) is not dict:
+        raise ValueError("invalid_model_metadata")
+    model_algorithm = model_metadata.get("model_algorithm")
+    hyperparameters = model_metadata.get("hyperparameters")
+    resolved_hyperparameters = model_metadata.get("resolved_hyperparameters")
+    dependency_status = model_metadata.get("dependency_status")
+    if (
+        type(model_algorithm) is not str
+        or not model_algorithm
+        or type(hyperparameters) is not dict
+        or type(resolved_hyperparameters) is not dict
+        or type(dependency_status) is not dict
+    ):
+        raise ValueError("invalid_model_metadata")
+    try:
+        facts = algorithm_facts(model_algorithm)
+    except ValueError as exc:
+        raise ValueError("invalid_model_metadata") from exc
+    expected_hyperparameters = dict(facts.default_hyperparameters)
+    expected_package = facts.dependency_package or "internal"
+    expected_hyperparameters.update(hyperparameters)
+    if (
+        resolved_hyperparameters != expected_hyperparameters
+        or dependency_status.get("package") != expected_package
+    ):
+        raise ValueError("invalid_model_metadata")
     reject_filter_input_columns(input_columns)
     required = set((*spec.primary_key, *input_columns))
     _validate_oos_split(spec)

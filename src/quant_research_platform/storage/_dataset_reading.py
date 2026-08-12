@@ -1398,6 +1398,13 @@ def _iter_dataset_file_batches(
         raise DatasetReadCapacityExceeded(
             "dataset_working_set_exceeds_task_memory_budget"
         )
+    accounted_reservation_bytes = (
+        context.resource_policy.task_memory_budget_bytes - operation_headroom
+    )
+    credited_reservation_bytes = min(
+        context.resource_policy.reserved_memory_bytes,
+        accounted_reservation_bytes,
+    )
     dtype_overrides = pandas_dtype_overrides_from_logical_payload(
         context.logical_dtypes,
         columns=columns,
@@ -1407,15 +1414,13 @@ def _iter_dataset_file_batches(
     try:
         for path in context.read_paths:
             metadata = context.metadata_for(path)
-            initial_reserved_bytes = context.resource_policy.reserved_memory_bytes
-            initial_unaccounted_reserved_bytes = max(
+            unaccounted_reserved_bytes = max(
                 0,
-                initial_reserved_bytes - previous_output_bytes[0],
+                context.resource_policy.reserved_memory_bytes
+                - credited_reservation_bytes
+                - previous_output_bytes[0],
             )
-            member_headroom = (
-                operation_headroom
-                - initial_unaccounted_reserved_bytes
-            )
+            member_headroom = operation_headroom - unaccounted_reserved_bytes
             if member_headroom <= 0:
                 raise DatasetReadCapacityExceeded(
                     "dataset_working_set_exceeds_task_memory_budget"
@@ -1439,15 +1444,11 @@ def _iter_dataset_file_batches(
                     unaccounted_reserved_bytes = max(
                         0,
                         context.resource_policy.reserved_memory_bytes
+                        - credited_reservation_bytes
                         - previous_output_bytes[0],
                     )
-                    additional_reserved_bytes = max(
-                        0,
-                        unaccounted_reserved_bytes
-                        - initial_unaccounted_reserved_bytes,
-                    )
                     current_headroom_bytes[0] = (
-                        member_headroom - additional_reserved_bytes
+                        operation_headroom - unaccounted_reserved_bytes
                     )
                     if current_headroom_bytes[0] <= 0:
                         raise DatasetReadCapacityExceeded(

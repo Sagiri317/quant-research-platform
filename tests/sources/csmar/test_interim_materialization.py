@@ -4593,8 +4593,20 @@ def test_private_export_retains_pending_decoded_owner_state_before_next_pull(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=32 * 1024 * 1024,
     )
-    header = ["left", "right"]
-    rows = (["a", "b"], ["c", "d"], ["e", "f"])
+    if dataset == "trading_calendar":
+        header = ["Markettype", "Clddt", "Daywk", "State"]
+        rows = (
+            ["4", "2014-01-01", "3", "O"],
+            ["4", "2014-01-02", "4", "O"],
+            ["4", "2014-01-03", "5", "O"],
+        )
+    else:
+        header = ["Indexcd", "Idxinfo11", "Idxinfo02"]
+        rows = (
+            ["000985", "2014-01-01", "2013-12-31"],
+            ["000986", "2014-01-02", "2013-12-31"],
+            ["000987", "2014-01-03", "2013-12-31"],
+        )
     row_bytes = 4
     observed: list[int] = []
 
@@ -4619,7 +4631,7 @@ def test_private_export_retains_pending_decoded_owner_state_before_next_pull(
     chunks.close()
 
     pointer_bytes = struct.calcsize("P")
-    assert observed[2] - observed[1] == row_bytes + 3 * pointer_bytes
+    assert observed[2] - observed[1] == row_bytes + (1 + len(header)) * pointer_bytes
     assert len(first) == 1
     assert len(second) == 2
 
@@ -5474,7 +5486,13 @@ def test_csmar_index_info_iterator_close_preserves_consumer_generator_exit(
             if self.position == 2:
                 raise StopIteration
             self.position += 1
-            return ["code"], [f"x{self.position}"], 3
+            header = ["Indexcd", "Idxinfo11", "Idxinfo02"]
+            row = [
+                f"00098{self.position}",
+                f"2014-01-0{self.position}",
+                "2013-12-31",
+            ]
+            return header, row, sum(len(value.encode("utf-8")) for value in row)
 
         def close(self) -> None:
             closed_under.append(current_runtime_resource_policy())

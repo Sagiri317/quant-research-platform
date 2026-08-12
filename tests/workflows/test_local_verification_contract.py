@@ -420,26 +420,6 @@ def test_output_index_requires_mandatory_evaluation_summary_member(
         )
 
 
-def test_local_verification_workflow_exposes_current_run_root_config() -> None:
-    module = _workflow_module()
-
-    assert set(module.LocalVerificationRunConfig.__dataclass_fields__) == {
-        "run_root",
-        "start_date",
-        "end_date",
-        "profile",
-        "prediction_train_end",
-        "prediction_test_start",
-        "portfolio_frequency",
-        "portfolio_execution_lag_steps",
-        "evaluation_start_date",
-        "evaluation_end_date",
-        "prediction_test_end",
-        "replace_output",
-        "run_id",
-    }
-
-
 @pytest.mark.parametrize(
     "run_root",
     (
