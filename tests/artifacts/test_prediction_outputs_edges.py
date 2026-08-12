@@ -22,6 +22,7 @@ from quant_research_platform.artifacts._output_manifest import (
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.storage.manifests import read_manifest
 from tests.artifacts.output_edge_fixtures import (
     make_output_edge_prediction_spec,
     make_output_edge_report_spec,
@@ -636,6 +637,39 @@ def test_prediction_outputs_bind_feature_importance_to_exact_model_inputs(
             )
 
     assert not (tmp_path / "outputs" / output_spec.output_id).exists()
+
+
+def test_prediction_outputs_preserve_six_digit_aggregate_counts(
+    tmp_path: Path,
+) -> None:
+    spec = make_output_edge_prediction_spec()
+    output_spec = make_output_edge_report_spec(
+        "prediction_outputs",
+        spec.prediction_id,
+        "prediction",
+    )
+    frame = make_artifact_prediction_output_frame()
+    model_metadata = {
+        **frame.attrs["model_metadata"],
+        "rows_input": 687_688,
+        "rows_after_filter_mode": 600_000,
+        "rows_after_input_label_dropna": 5_000,
+    }
+
+    output_root = outputs.write_prediction_outputs(
+        spec=spec,
+        output_spec=output_spec,
+        layout=StorageLayout(project_root=tmp_path),
+        output_chunks=(frame,),
+        model_metadata=model_metadata,
+        prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
+    )
+
+    persisted = read_manifest(output_root / "manifest.json")
+    persisted_model = persisted["metadata"]["model_metadata"]
+    assert persisted_model["rows_input"] == 687_688
+    assert persisted_model["rows_after_filter_mode"] == 600_000
+    assert persisted_model["rows_after_input_label_dropna"] == 5_000
 
 
 def test_prediction_outputs_reject_tampered_model_selection_direction(

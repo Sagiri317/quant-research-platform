@@ -405,6 +405,8 @@ def _sanitize_shared_node(
         return sanitized, ("str", value), ("str", sanitized)
     if not isinstance(value, (Mapping, list, tuple, set, frozenset)):
         identity = _sanitize_scalar_identity(value)
+        if value is None or type(value) in {bool, int, float}:
+            return value, identity, identity
         if unsafe_for_share_reason(value) is not None:
             sanitized = sanitize_shared_text(value)
             return sanitized, identity, ("str", sanitized)

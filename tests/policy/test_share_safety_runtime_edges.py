@@ -337,6 +337,17 @@ def test_sanitizer_makes_scanner_rejected_path_scalars_share_safe() -> None:
         sanitize_shared_object([first, second])
 
 
+def test_sanitizer_preserves_json_numeric_aggregate_types() -> None:
+    payload = {
+        "rows_input": 687_688,
+        "ratio": 0.687688,
+        "complete": True,
+        "missing": None,
+    }
+
+    assert sanitize_shared_object(payload) == payload
+
+
 @pytest.mark.parametrize(
     ("text", "reason"),
     [
