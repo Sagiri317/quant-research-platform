@@ -1997,6 +1997,63 @@ def test_active_materialization_orders_late_discovered_assets_before_publication
     assert result["asset_id"].tolist() == ["a", "b"]
 
 
+def test_active_materialization_keeps_discovery_batch_counts_disk_backed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    )
+    original_index = materialization_planning.ExactPrimaryKeyIndex
+    count_payloads: list[bytes] = []
+    published_assets: list[str] = []
+
+    class RecordingIndex(original_index):
+        def add_identity_payload_rows(self, *, rows):  # noqa: ANN001, ANN202
+            owned_rows = tuple(rows)
+            inserted = super().add_identity_payload_rows(rows=owned_rows)
+            count_payloads.extend(
+                value
+                for namespace, _identity, value in owned_rows
+                if namespace == "active-asset-batches"
+            )
+            return inserted
+
+    def source():
+        for position in range(300):
+            assert len(count_payloads) == position
+            yield pd.DataFrame({"asset_id": [f"asset_{300 - position:04d}"]})
+
+    def materialize(asset_ids, sessions, *_args):  # noqa: ANN001, ANN202
+        published_assets.extend(asset_ids)
+        return pd.DataFrame({"asset_id": asset_ids, "timestamp": sessions})
+
+    monkeypatch.setattr(
+        materialization_planning,
+        "ExactPrimaryKeyIndex",
+        RecordingIndex,
+    )
+    monkeypatch.setattr(
+        materialization_io,
+        "iter_dataset_chunks_with_policy",
+        lambda *_args, **_kwargs: source(),
+    )
+
+    list(
+        _scoped_active_materialization_batches(
+            tmp_path / "panel",
+            time_window=TimeWindow("2024-01-02", "2024-01-02"),
+            sessions=(pd.Timestamp("2024-01-02"),),
+            resource_policy=policy,
+            materialize=materialize,
+        )
+    )
+
+    assert [int.from_bytes(payload) for payload in count_payloads] == [1] * 300
+    assert published_assets == sorted(published_assets)
+
+
 @pytest.mark.parametrize(
     ("container_kind", "window_kind", "mutation_timing"),
     (
@@ -2480,7 +2537,7 @@ def test_active_materialization_scope_covers_indexes_source_materialize_and_clos
         retained_memory_bytes = 0
 
         def __init__(self, **_kwargs: object) -> None:
-            self.payloads: list[bytes] = []
+            self.payloads: dict[str, list[tuple[bytes, bytes]]] = {}
             observed.append(("index_init", current_runtime_resource_policy()))
 
         def __enter__(self) -> Index:
@@ -2492,12 +2549,18 @@ def test_active_materialization_scope_covers_indexes_source_materialize_and_clos
 
         def add_identity_payload_rows(self, *, rows):  # noqa: ANN001, ANN202
             observed.append(("add", current_runtime_resource_policy()))
-            self.payloads.extend(value for _namespace, _identity, value in rows)
-            return len(self.payloads)
+            inserted = 0
+            for namespace, identity, value in rows:
+                self.payloads.setdefault(namespace, []).append((identity, value))
+                inserted += 1
+            return inserted
 
-        def identity_payload_values(self, **_kwargs):  # noqa: ANN003, ANN202
+        def identity_payload_values(self, *, namespace):  # noqa: ANN001, ANN202
             observed.append(("iterate", current_runtime_resource_policy()))
-            return iter(sorted(set(self.payloads)))
+            return iter(
+                value
+                for _identity, value in sorted(self.payloads.get(namespace, ()))
+            )
 
     def source():
         try:

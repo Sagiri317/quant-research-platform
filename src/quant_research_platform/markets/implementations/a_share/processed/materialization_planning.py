@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from array import array
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import nullcontext
@@ -297,7 +296,7 @@ def iter_active_materialization_batches(
                 resource_policy=bound_policy,
             )
             with active_index as index:
-                active_asset_batch_counts = array("Q")
+                active_asset_batch_ordinal = 0
                 persistent_index_bytes = index.retained_memory_bytes + (
                     0
                     if valid_bar_index is None
@@ -331,8 +330,6 @@ def iter_active_materialization_batches(
                                 - owner_retained_bytes
                                 - source_payload_bytes
                                 - 256
-                                - (len(active_asset_batch_counts) + 1)
-                                * active_asset_batch_counts.itemsize
                             )
                             slice_payload_bytes = pandas_frame_payload_bytes(
                                 source_values.to_frame()
@@ -366,32 +363,62 @@ def iter_active_materialization_batches(
                                     for encoded in (value.encode("utf-8"),)
                                 )
                             )
-                            if inserted:
-                                active_asset_batch_counts.append(inserted)
                             del source_values, values
+                            if inserted:
+                                count_identity = active_asset_batch_ordinal.to_bytes(
+                                    8, "big"
+                                )
+                                count_value = inserted.to_bytes(8, "big")
+                                if (
+                                    index.add_identity_payload_rows(
+                                        rows=(
+                                            (
+                                                "active-asset-batches",
+                                                count_identity,
+                                                count_value,
+                                            ),
+                                        )
+                                    )
+                                    != 1
+                                ):
+                                    raise RuntimeError(
+                                        "a_share_active_asset_index_count_mismatch"
+                                    )
+                                active_asset_batch_ordinal += 1
                             start = stop
                             span = len(chunk) - start
                         del chunk
                 asset_batch: list[str] = []
                 asset_batch_bytes = 0
-                batch_count_bytes = (
-                    256
-                    + len(active_asset_batch_counts)
-                    * active_asset_batch_counts.itemsize
-                )
+                batch_state_bytes = 256
                 asset_batch_limit = min(
                     bound_policy.payload_target_bytes,
                     bound_policy.task_memory_budget_bytes
                     - owner_retained_bytes
-                    - batch_count_bytes,
+                    - batch_state_bytes,
                 )
                 if asset_batch_limit <= 0:
                     raise materialization_io.MaterializationCapacityExceeded(
                         "a_share_known_payloads_exceed_task_memory_budget"
                     )
+                batch_counts = index.identity_payload_values(
+                    namespace="active-asset-batches"
+                )
                 payloads = index.identity_payload_values(namespace="active-assets")
-                with closing_dataset_iterator(payloads):
-                    for batch_count in active_asset_batch_counts:
+                with (
+                    closing_dataset_iterator(batch_counts),
+                    closing_dataset_iterator(payloads),
+                ):
+                    for count_payload in batch_counts:
+                        if len(count_payload) != 8:
+                            raise RuntimeError(
+                                "a_share_active_asset_index_count_mismatch"
+                            )
+                        batch_count = int.from_bytes(count_payload, "big")
+                        if batch_count <= 0:
+                            raise RuntimeError(
+                                "a_share_active_asset_index_count_mismatch"
+                            )
                         for _ in range(batch_count):
                             try:
                                 payload = next(payloads)
@@ -416,7 +443,7 @@ def iter_active_materialization_batches(
                                     session_context=session_context,
                                     retained_payload_bytes=(
                                         owner_retained_bytes
-                                        + batch_count_bytes
+                                        + batch_state_bytes
                                         + asset_batch_bytes
                                     ),
                                     valid_bar_index=valid_bar_index,
@@ -436,7 +463,7 @@ def iter_active_materialization_batches(
                                 session_context=session_context,
                                 retained_payload_bytes=(
                                     owner_retained_bytes
-                                    + batch_count_bytes
+                                    + batch_state_bytes
                                     + asset_batch_bytes
                                 ),
                                 valid_bar_index=valid_bar_index,
