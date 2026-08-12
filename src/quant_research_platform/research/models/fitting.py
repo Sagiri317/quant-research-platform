@@ -253,6 +253,7 @@ def fit_linear_coefficients(
                         first_usable_reservation = usable_reservation.pop_all()
                     row_count += int(len(usable))
                     if len(usable) == 0:
+                        del usable, filtered, chunk
                         continue
                     with ExitStack() as qr_work:
                         if policy is not None:
@@ -303,6 +304,7 @@ def fit_linear_coefficients(
                             usable_timestamps,
                             y,
                         )
+                del usable, filtered, chunk
             factor_reservation.close()
             factor_reservation = ExitStack()
             if policy is not None:
@@ -336,7 +338,6 @@ def fit_linear_coefficients(
                 filter_metadata,
             )
         if chunk_count == 1 and first_usable is not None:
-            del chunk, filtered, usable
             factor_reservation.close()
             first_usable_reservation.close()
             r_factor = None

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import weakref
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -640,30 +642,51 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
             )
 
 
-def test_linear_tsqr_reserves_first_frame_across_second_pull() -> None:
+def test_linear_tsqr_reserves_first_frame_across_second_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     rows = 512
     first = pd.DataFrame(
         {
             "timestamp": pd.date_range("2024-01-01", periods=rows, freq="min"),
             "factor": np.linspace(0.0, 1.0, rows),
             "label": np.linspace(1.0, 2.0, rows),
+            "eligible": True,
         }
     )
     second = first.assign(timestamp=first["timestamp"] + pd.Timedelta(days=1))
+    third = first.assign(timestamp=first["timestamp"] + pd.Timedelta(days=2))
     spec = ModelSpec(
         model_id="linear_tsqr_retained_frame",
         model_algorithm="linear_regression",
         input_factor_columns=("factor",),
         label_column="label",
-        sample_filter_mode="unfiltered",
+        sample_filter_mode="eligible",
     )
     policy = capture_test_policy(available_memory_bytes=64 * 1024 * 1024)
-    retained_bytes = pandas_frame_payload_bytes(first)
+    input_ids = {id(first), id(second), id(third)}
+    ephemeral_refs: list[weakref.ReferenceType[pd.DataFrame]] = []
+    original_payload = model_fitting.pandas_frame_payload_bytes
+
+    def tracked_payload(frame: pd.DataFrame) -> int:
+        if id(frame) not in input_ids:
+            ephemeral_refs.append(weakref.ref(frame))
+        return original_payload(frame)
+
+    monkeypatch.setattr(model_fitting, "pandas_frame_payload_bytes", tracked_payload)
 
     def frames():
         yield first
-        assert policy.reserved_memory_bytes >= retained_bytes
+        assert len(ephemeral_refs) == 2
+        assert ephemeral_refs[0]() is None
+        retained = ephemeral_refs[1]()
+        assert retained is not None
+        assert policy.reserved_memory_bytes >= original_payload(retained)
+        del retained
         yield second
+        assert len(ephemeral_refs) == 4
+        assert all(reference() is None for reference in ephemeral_refs)
+        yield third
 
     with runtime_resource_policy_scope(policy):
         coefficients, row_counts, _metadata = model_fitting.fit_linear_coefficients(
@@ -673,7 +696,7 @@ def test_linear_tsqr_reserves_first_frame_across_second_pull() -> None:
         )
 
     assert len(coefficients) == 2
-    assert row_counts["rows_after_input_label_dropna"] == 2 * rows
+    assert row_counts["rows_after_input_label_dropna"] == 3 * rows
 
 
 def test_estimator_target_and_model_state_stay_reserved_through_metadata(
