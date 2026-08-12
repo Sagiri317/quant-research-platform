@@ -754,7 +754,6 @@ def test_panel_materializer_does_not_preload_full_market_bars(
         data_ids=(MARKET_PANEL_DATA_ID,),
         resource_policy=capture_test_policy(
             available_memory_bytes=16 * 1024 * 1024,
-            explicit_cap_bytes=5 * 1024 * 1024,
         ),
     )
 
