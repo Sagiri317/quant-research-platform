@@ -1106,48 +1106,121 @@ def test_dataset_file_batches_do_not_double_count_reserved_previous_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths = (tmp_path / "part-0.parquet", tmp_path / "part-1.parquet")
-    batches = {
-        path: pa.record_batch([pa.array([index])], names=["value"])
-        for index, path in enumerate(paths)
-    }
-    expected = batches[paths[0]].to_pandas(use_threads=False)
-    output_bytes = pandas_frame_payload_bytes(expected)
-    exact_headroom = (
-        batches[paths[0]].get_total_buffer_size() + 2 * output_bytes
+    path = tmp_path / "part.parquet"
+    batches = tuple(
+        pa.record_batch([pa.array([index])], names=["value"])
+        for index in range(2)
+    )
+    expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
+    output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
+    exact_headroom = max(
+        batch.get_total_buffer_size()
+        + output_bytes[index]
+        + (output_bytes[index - 1] if index else 0)
+        for index, batch in enumerate(batches)
     )
     policy = _issued_test_policy()
     monkeypatch.setattr(
         dataset_reading,
         "iter_dataset_part_batches",
-        lambda path, **_kwargs: iter((batches[Path(path)],)),
+        lambda *_args, **_kwargs: iter(batches),
     )
     context = SimpleNamespace(
         resource_policy=policy,
         retained_memory_bytes=0,
-        logical_dtypes=logical_dtype_payload_from_frame(expected),
+        logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
         parquet_filters=None,
-        read_paths=paths,
+        read_paths=(path,),
         metadata_for=lambda _path: SimpleNamespace(identity=SimpleNamespace()),
         verify=lambda: None,
     )
     converted = dataset_reading.iter_dataset_file_batches(
         context,
         columns=("value",),
-        target_chunk_bytes=output_bytes,
+        target_chunk_bytes=max(output_bytes),
         operation_headroom_bytes=exact_headroom,
     )
 
     with dataset_reading.closing_dataset_iterator(converted):
         first_path, first = next(converted)
         with runtime_resource_policy_scope(policy):
-            with policy.reserve("research.time.pending", output_bytes):
+            with policy.reserve("research.time.pending", output_bytes[0]):
                 second_path, second = next(converted)
 
-    assert first_path == paths[0]
-    assert second_path == paths[1]
-    pd.testing.assert_frame_equal(first, expected)
-    pd.testing.assert_frame_equal(second, expected.assign(value=1))
+    assert first_path == path
+    assert second_path == path
+    pd.testing.assert_frame_equal(first, expected[0])
+    pd.testing.assert_frame_equal(second, expected[1])
+
+
+def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "part.parquet"
+    batches = tuple(
+        pa.record_batch([pa.array([index])], names=["value"])
+        for index in range(2)
+    )
+    expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
+    output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
+    exact_headroom = max(
+        batch.get_total_buffer_size()
+        + output_bytes[index]
+        + (output_bytes[index - 1] if index else 0)
+        for index, batch in enumerate(batches)
+    )
+    policy = _issued_test_policy()
+    monkeypatch.setattr(
+        dataset_reading,
+        "iter_dataset_part_batches",
+        lambda *_args, **_kwargs: iter(batches),
+    )
+    original_conversion = dataset_reading._arrow_slice_to_pandas
+    conversion_count = 0
+
+    def reject_second_conversion(batch: pa.RecordBatch) -> pd.DataFrame:
+        nonlocal conversion_count
+        conversion_count += 1
+        if conversion_count == 2:
+            raise AssertionError("second conversion ran before shared-root admission")
+        return original_conversion(batch)
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "_arrow_slice_to_pandas",
+        reject_second_conversion,
+    )
+    context = SimpleNamespace(
+        resource_policy=policy,
+        retained_memory_bytes=0,
+        logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
+        parquet_filters=None,
+        read_paths=(path,),
+        metadata_for=lambda _path: SimpleNamespace(identity=SimpleNamespace()),
+        verify=lambda: None,
+    )
+    converted = dataset_reading.iter_dataset_file_batches(
+        context,
+        columns=("value",),
+        target_chunk_bytes=max(output_bytes),
+        operation_headroom_bytes=exact_headroom,
+    )
+
+    with dataset_reading.closing_dataset_iterator(converted):
+        next(converted)
+        with runtime_resource_policy_scope(policy):
+            with policy.reserve(
+                "research.time.pending",
+                output_bytes[0] + 1,
+            ):
+                with pytest.raises(
+                    ValueError,
+                    match="dataset_working_set_exceeds_task_memory_budget",
+                ):
+                    next(converted)
+
+    assert conversion_count == 1
 
 
 def test_declared_variable_width_member_decodes_multirow_batches(

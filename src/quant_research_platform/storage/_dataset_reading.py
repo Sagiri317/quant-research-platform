@@ -1328,6 +1328,7 @@ def iter_declared_parquet_member_batches(
     persisted_frame_observer: Callable[[pd.DataFrame], None] | None = None,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
     _previous_output_bytes: list[int] | None = None,
+    _operation_headroom_bytes: list[int] | None = None,
 ) -> Iterator[pd.DataFrame]:
     """Traverse one frozen Parquet member through the sole Pandas converter."""
 
@@ -1352,6 +1353,7 @@ def iter_declared_parquet_member_batches(
             persisted_frame_observer=persisted_frame_observer,
             batch_observer=batch_observer,
             _previous_output_bytes=previous_output_bytes,
+            _operation_headroom_bytes=_operation_headroom_bytes,
         )
 
 
@@ -1418,6 +1420,7 @@ def _iter_dataset_file_batches(
                 raise DatasetReadCapacityExceeded(
                     "dataset_working_set_exceeds_task_memory_budget"
                 )
+            current_headroom_bytes = [member_headroom]
             with closing_dataset_iterator(
                 iter_declared_parquet_member_batches(
                     path,
@@ -1429,6 +1432,7 @@ def _iter_dataset_file_batches(
                     dtype_overrides=dtype_overrides,
                     batch_observer=batch_observer,
                     _previous_output_bytes=previous_output_bytes,
+                    _operation_headroom_bytes=current_headroom_bytes,
                 )
                 ) as member_batches:
                 while True:
@@ -1442,7 +1446,10 @@ def _iter_dataset_file_batches(
                         unaccounted_reserved_bytes
                         - initial_unaccounted_reserved_bytes,
                     )
-                    if member_headroom - additional_reserved_bytes <= 0:
+                    current_headroom_bytes[0] = (
+                        member_headroom - additional_reserved_bytes
+                    )
+                    if current_headroom_bytes[0] <= 0:
                         raise DatasetReadCapacityExceeded(
                             "dataset_working_set_exceeds_task_memory_budget"
                         )
@@ -1785,18 +1792,21 @@ def _arrow_batch_to_bounded_pandas(
     persisted_frame_observer: Callable[[pd.DataFrame], None] | None = None,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
     _previous_output_bytes: list[int] | None = None,
+    _operation_headroom_bytes: list[int] | None = None,
 ) -> Iterator[pd.DataFrame]:
     if batch.num_rows == 0:
         return
     pandas_budget = _validated_target_chunk_bytes(target_chunk_bytes)
     overrides = dict(dtype_overrides or {})
-    conversion_budget = (
+    fixed_operation_headroom = (
         None
         if operation_headroom_bytes is None
         else _validated_target_chunk_bytes(operation_headroom_bytes)
-        - batch.get_total_buffer_size()
     )
-    if conversion_budget is not None and conversion_budget <= 0:
+    if (
+        fixed_operation_headroom is not None
+        and fixed_operation_headroom - batch.get_total_buffer_size() <= 0
+    ):
         raise DatasetReadCapacityExceeded(
             "dataset_working_set_exceeds_task_memory_budget"
         )
@@ -1807,6 +1817,20 @@ def _arrow_batch_to_bounded_pandas(
         [0] if _previous_output_bytes is None else _previous_output_bytes
     )
     while start < batch.num_rows:
+        current_operation_headroom = (
+            fixed_operation_headroom
+            if _operation_headroom_bytes is None
+            else _operation_headroom_bytes[0]
+        )
+        conversion_budget = (
+            None
+            if current_operation_headroom is None
+            else current_operation_headroom - batch.get_total_buffer_size()
+        )
+        if conversion_budget is not None and conversion_budget <= 0:
+            raise DatasetReadCapacityExceeded(
+                "dataset_working_set_exceeds_task_memory_budget"
+            )
         current_pandas_budget = (
             pandas_budget
             if conversion_budget is None
@@ -1819,6 +1843,15 @@ def _arrow_batch_to_bounded_pandas(
         slice_budget = min(pandas_budget, current_pandas_budget)
         stop = min(batch.num_rows, start + rows_per_slice)
         arrow_slice = batch.slice(start, stop - start)
+        if (
+            _operation_headroom_bytes is not None
+            and fixed_operation_headroom is not None
+            and current_operation_headroom < fixed_operation_headroom
+            and current_pandas_budget < pandas_budget
+        ):
+            raise DatasetReadCapacityExceeded(
+                "dataset_working_set_exceeds_task_memory_budget"
+            )
         frame = _arrow_slice_to_pandas(arrow_slice)
         frame_bytes = pandas_frame_payload_bytes(frame)
         if frame_bytes > pandas_budget or (
@@ -1902,8 +1935,8 @@ def _arrow_batch_to_bounded_pandas(
         if batch_observer is not None:
             batch_observer(arrow_slice, output)
         del frame
-        yield output
         previous_output_bytes[0] = output_bytes
+        yield output
         del output
         start = stop
         if start >= batch.num_rows:
