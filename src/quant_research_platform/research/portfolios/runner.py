@@ -23,6 +23,7 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research._memory import (
     _ResearchFrameSpill,
     _selected_frame_payload_bytes,
+    _time_sort_working_set_bytes,
     iter_complete_session_frames,
 )
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
@@ -849,7 +850,7 @@ def _portfolio_returns_summary_frame(
     frame = spill.materialize()
     policy = summary_state.resource_policy
     input_bytes = pandas_frame_payload_bytes(frame)
-    sorted_output_bound = input_bytes
+    sorted_output_bound = _time_sort_working_set_bytes(frame)
     with ExitStack() as sort_reservation:
         if policy is not None:
             sort_reservation.enter_context(

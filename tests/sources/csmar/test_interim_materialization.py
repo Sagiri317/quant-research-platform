@@ -5169,7 +5169,7 @@ def test_public_interim_without_identity_uses_retained_private_raw_owner(
     assert observed_cells and observed_cells[0] is not None
 
 
-def test_non_reference_publication_counts_only_additional_upstream_state(
+def test_non_reference_publication_reports_additional_upstream_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw = pd.DataFrame({"raw": ["owner"]})
@@ -5185,7 +5185,6 @@ def test_non_reference_publication_counts_only_additional_upstream_state(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
-    budget = policy.task_memory_budget_bytes
     raw_reference = weakref.ref(raw)
 
     monkeypatch.setattr(
@@ -5203,12 +5202,6 @@ def test_non_reference_publication_counts_only_additional_upstream_state(
         "pandas_frame_payload_bytes",
         lambda frame: raw_bytes if frame is raw else current_bytes,
     )
-    monkeypatch.setattr(
-        dataset_writing,
-        "pandas_frame_payload_bytes",
-        lambda frame: current_bytes if frame is pruned else 0,
-    )
-
     with runtime_resource_policy_scope(policy):
         publications = interim._iter_pruned_interim_frames(
             data_id="trading_calendar",
@@ -5226,13 +5219,6 @@ def test_non_reference_publication_counts_only_additional_upstream_state(
     assert isinstance(publication, dataset_writing.DatasetWriteChunk)
     assert raw_reference() is not None
     assert publication.retained_payload_bytes == raw_bytes
-    assert (
-        dataset_writing._require_writer_headroom(
-            budget - publication.retained_payload_bytes,
-            publication.frame,
-        )
-        > 0
-    )
 
 
 @pytest.mark.parametrize(

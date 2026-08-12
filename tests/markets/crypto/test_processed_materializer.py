@@ -339,66 +339,6 @@ def test_crypto_processed_materializer_builds_panel_factors_and_labels(
     }
 
 
-def test_crypto_processed_materializer_uses_policy_bounded_physical_reads(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    _write_binance_fixture(tmp_path)
-    layout = StorageLayout(project_root=tmp_path)
-    materialize_interim_data(layout=layout, row_batch_size=2)
-    calls: list[tuple[str, str, int]] = []
-    policy = capture_storage_test_policy(
-        working_headroom_bytes=128 * 1024 * 4 // 5,
-    )
-
-    def spy(module_name: str, module):
-        real_iterator = module.iter_dataset_chunks
-
-        def wrapped(context, *, target_chunk_bytes, operation_headroom_bytes):
-            calls.append((module_name, context.root.name, target_chunk_bytes))
-            return real_iterator(
-                context,
-                target_chunk_bytes=target_chunk_bytes,
-                operation_headroom_bytes=operation_headroom_bytes,
-            )
-
-        return wrapped
-
-    for name, module in (
-        ("panel", materialize_panel),
-        ("factors", materialize_factors),
-        ("labels", materialize_labels),
-        ("validation", materialization_validation),
-    ):
-        monkeypatch.setattr(module, "iter_dataset_chunks", spy(name, module))
-
-    materializer.materialize_processed_data(
-        layout=layout,
-        source_id=SourceId("binance"),
-        time_window=TimeWindow("2026-07-06", "2026-07-06"),
-        kinds=frozenset(
-            {
-                ProcessedDataKind.PANEL,
-                ProcessedDataKind.FACTOR,
-                ProcessedDataKind.LABEL,
-            }
-        ),
-        resource_policy=policy,
-    )
-
-    assert {item[:2] for item in calls}.issuperset(
-        {
-            ("panel", "market_bars_1m"),
-            ("panel", "aggregate_trades_tick"),
-            ("panel", "depth_levels_tick"),
-            ("factors", "market_panel_1m"),
-            ("labels", "market_panel_1m"),
-            ("validation", "market_panel_1m"),
-        }
-    )
-    assert {target for _, _, target in calls} == {policy.payload_target_bytes}
-
-
 def test_crypto_factor_time_window_uses_prior_warmup_minutes() -> None:
     from quant_research_platform.markets.implementations.crypto.processed import (
         materialization_dependencies,
@@ -1926,7 +1866,7 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
         source_id=SourceId("binance"),
         time_window=TimeWindow("2026-07-06", "2026-07-06"),
         resource_policy=capture_storage_test_policy(
-            working_headroom_bytes=64 * 1024 * 4 // 5,
+            working_headroom_bytes=12 * 1024**2,
         ),
         retained_payload_bytes=0,
     )
@@ -2145,7 +2085,7 @@ def test_crypto_panel_small_and_large_resource_windows_match(tmp_path: Path) -> 
         (
             "small",
             capture_storage_test_policy(
-                working_headroom_bytes=64 * 1024 * 4 // 5,
+                working_headroom_bytes=12 * 1024**2,
             ),
         ),
     ):

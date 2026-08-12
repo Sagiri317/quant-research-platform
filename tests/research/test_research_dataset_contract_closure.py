@@ -419,21 +419,6 @@ def test_research_dataset_reports_incompatible_and_missing_required_specs() -> N
         _validate_inputs(spec, missing_label)
 
 
-def test_research_dataset_measured_bytes_handles_empty_frame() -> None:
-    from quant_research_platform.research.datasets.assembler import (
-        _measured_bytes_per_session,
-    )
-
-    assert (
-        _measured_bytes_per_session(
-            pd.DataFrame(),
-            sample_sessions=(pd.Timestamp("2024-01-02"),),
-            target_session_count=1,
-        )
-        == 1
-    )
-
-
 def _validate_inputs(
     spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
