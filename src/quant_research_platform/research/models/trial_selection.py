@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+from contextlib import ExitStack
 
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
+)
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
 )
 
 VALIDATION_METRIC_COLUMNS = ("validation_ic", "validation_rankic", "validation_mse")
@@ -78,21 +83,48 @@ def evaluate_model_trial_metrics(
     missing = sorted({label_column, prediction_column}.difference(frame.columns))
     if missing:
         raise ValueError(f"missing_trial_metric_columns: {', '.join(missing)}")
-    usable = frame.loc[:, [label_column, prediction_column]].dropna()
-    if usable.empty:
-        raise ValueError("empty_model_selection_validation_window")
-    label_values = pd.to_numeric(usable[label_column], errors="coerce")
-    prediction_values = pd.to_numeric(usable[prediction_column], errors="coerce")
-    if bool(label_values.isna().any()) or bool(prediction_values.isna().any()):
-        raise ValueError("invalid_trial_metric_values")
-    errors = prediction_values - label_values
-    return {
-        "model_id": model_id,
-        "validation_rows": int(len(usable)),
-        "validation_ic": _correlation(label_values, prediction_values, rank=False),
-        "validation_rankic": _correlation(label_values, prediction_values, rank=True),
-        "validation_mse": float(np.square(errors).mean()),
-    }
+    frame_bytes = pandas_frame_payload_bytes(frame)
+    selected_output_bound = frame_bytes
+    usable_output_bound = selected_output_bound
+    numeric_vector_count = 6
+    numeric_working_bytes = len(frame) * 8 * numeric_vector_count
+    mask_working_bytes = len(frame) * 3
+    with ExitStack() as reservation:
+        policy = current_runtime_resource_policy()
+        if policy is not None:
+            reservation.enter_context(
+                policy.reserve(
+                    "research.model.selection.metric",
+                    frame_bytes
+                    + selected_output_bound
+                    + usable_output_bound
+                    + numeric_working_bytes
+                    + mask_working_bytes,
+                )
+            )
+        usable = frame.loc[:, [label_column, prediction_column]].dropna()
+        if usable.empty:
+            raise ValueError("empty_model_selection_validation_window")
+        label_values = pd.to_numeric(usable[label_column], errors="coerce")
+        prediction_values = pd.to_numeric(usable[prediction_column], errors="coerce")
+        if bool(label_values.isna().any()) or bool(prediction_values.isna().any()):
+            raise ValueError("invalid_trial_metric_values")
+        errors = prediction_values - label_values
+        return {
+            "model_id": model_id,
+            "validation_rows": int(len(usable)),
+            "validation_ic": _correlation(
+                label_values,
+                prediction_values,
+                rank=False,
+            ),
+            "validation_rankic": _correlation(
+                label_values,
+                prediction_values,
+                rank=True,
+            ),
+            "validation_mse": float(np.square(errors).mean()),
+        }
 
 
 def build_model_selection_metadata(

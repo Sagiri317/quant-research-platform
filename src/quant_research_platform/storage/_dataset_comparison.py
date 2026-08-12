@@ -24,6 +24,9 @@ from quant_research_platform.storage._dataset_key_tracking import (
     ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage._dataset_paths import require_artifact_root
+from quant_research_platform.storage._dataset_physical import (
+    PARQUET_READER_NATIVE_BYTES,
+)
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
     iter_dataset_file_batches,
@@ -290,29 +293,31 @@ def _index_dataset_rows(
         headroom -= retained_before_session + context.retained_memory_bytes
         if headroom <= 0:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        exact_payload_target = min(
-            resource_policy.payload_target_bytes,
-            headroom // 3,
-        )
-        sqlite_binding_headroom = exact_payload_target
-        reader_headroom = (
-            resource_policy.task_memory_budget_bytes
-            - retained_before_session
-            - exact_payload_target
-            - sqlite_binding_headroom
-        )
-        if exact_payload_target <= 0 or reader_headroom <= 0:
+        exact_payload_target = max(1, headroom - PARQUET_READER_NATIVE_BYTES)
+        reader_headroom = headroom
+        if reader_headroom <= PARQUET_READER_NATIVE_BYTES:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         duplicates = 0
 
         def index_batch(batch: pa.RecordBatch, _frame: Any) -> None:
             nonlocal duplicates
-            duplicates += index.add_comparison_table(
-                pa.Table.from_batches([batch]),
-                namespace=namespace,
-                value_columns=value_columns,
-                payload_target_bytes=exact_payload_target,
+            callback_headroom = (
+                resource_policy.task_memory_budget_bytes
+                - resource_policy.reserved_memory_bytes
             )
+            callback_target = min(exact_payload_target, callback_headroom)
+            if callback_target <= 0:
+                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+            with resource_policy.reserve(
+                "storage.dataset.comparison.payload",
+                callback_target,
+            ):
+                duplicates += index.add_comparison_table(
+                    pa.Table.from_batches([batch]),
+                    namespace=namespace,
+                    value_columns=value_columns,
+                    payload_target_bytes=callback_target,
+                )
 
         for _path, _frame in iter_dataset_file_batches(
             context,

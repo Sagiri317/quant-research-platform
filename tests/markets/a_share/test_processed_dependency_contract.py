@@ -90,7 +90,6 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import write_dataset
-from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.runtime_resources import capture_test_policy
 
@@ -476,33 +475,53 @@ def test_chunk_reader_passes_caller_retained_state_to_session_acquisition(
     assert observed == [retained]
 
 
-def test_chunk_target_rejection_happens_before_dataset_session_acquisition(
+def test_chunk_target_above_soft_default_reaches_dataset_reader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
-    acquisitions = 0
+    observed_targets: list[int] = []
 
-    def forbidden_open(*_args: object, **_kwargs: object) -> object:
-        nonlocal acquisitions
-        acquisitions += 1
-        raise AssertionError("dataset_session_acquired_before_target_validation")
+    @contextmanager
+    def open_session(*_args: object, **_kwargs: object):
+        yield SimpleNamespace()
 
-    monkeypatch.setattr(materialization_io, "open_dataset_session", forbidden_open)
+    def iter_chunks(*_args: object, **kwargs: object):
+        observed_targets.append(kwargs["target_chunk_bytes"])
+        return iter(())
+
+    monkeypatch.setattr(materialization_io, "open_dataset_session", open_session)
+    monkeypatch.setattr(materialization_io, "iter_dataset_chunks", iter_chunks)
+    target = policy.payload_target_bytes + 1
     chunks = materialization_io.iter_dataset_chunks_with_policy(
         Path("dataset"),
         resource_policy=policy,
-        target_chunk_bytes=policy.payload_target_bytes + 1,
+        target_chunk_bytes=target,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="a_share_indivisible_market_unit_exceeds_payload_target",
-    ):
-        next(chunks)
+    assert list(chunks) == []
+    assert observed_targets == [target]
 
-    assert acquisitions == 0
+
+def test_sorted_output_can_exceed_soft_payload_default() -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=32 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+    output = _key_frame()
+    output["market_id"] = "a" * (policy.payload_target_bytes + 1024)
+    assert pandas_frame_payload_bytes(output) > policy.payload_target_bytes
+
+    result = list(
+        materialization_io.iter_sorted_output_chunks(
+            output,
+            _processed_spec("large-key", kind=ProcessedDataKind.PANEL),
+            resource_policy=policy,
+        )
+    )
+    assert len(result) == 1
+    assert result[0] is output
 
 
 @pytest.mark.parametrize("operation", ("chunks", "assets"))
@@ -619,7 +638,7 @@ def test_invalid_chunk_target_rejection_happens_before_dataset_session_acquisiti
     assert acquisitions == 0
 
 
-def test_a_share_indivisible_output_rejects_payload_over_target() -> None:
+def test_a_share_indivisible_output_rejects_hard_budget() -> None:
     policy = capture_test_policy(
         available_memory_bytes=100,
     )
@@ -627,7 +646,7 @@ def test_a_share_indivisible_output_rejects_payload_over_target() -> None:
 
     with pytest.raises(
         ValueError,
-        match="a_share_indivisible_market_unit_exceeds_payload_target",
+        match="a_share_known_payloads_exceed_task_memory_budget",
     ):
         materialization_planning.require_known_materialization_payload_bound(
             frames=(),
@@ -832,6 +851,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         "label_key_batch": 0,
     }
     asset_filters: list[tuple[object, ...] | None] = []
+    key_asset_filters: list[tuple[object, ...] | None] = []
     key_time_windows: list[TimeWindow | None] = []
 
     def fake_inspect_dataset(*args: object, **kwargs: object):
@@ -917,6 +937,7 @@ def test_write_paths_read_processed_inputs_via_helper(
     def iter_dataset_chunks_with_policy(*args: object, **kwargs: object):
         del args
         if kwargs.get("columns") == ("asset_id", "timestamp"):
+            key_asset_filters.append(kwargs.get("asset_ids"))
             key_time_windows.append(kwargs.get("time_window"))
         return (_key_frame() for _ in range(1))
 
@@ -1025,7 +1046,8 @@ def test_write_paths_read_processed_inputs_via_helper(
         "label_key_batch": 1,
     }
     assert asset_filters == [("asset_a",)] * 3
-    assert key_time_windows == [None, None]
+    assert key_asset_filters == [("asset_a",), ("asset_a",)]
+    assert key_time_windows == [window, window]
 
 
 @pytest.mark.parametrize("writer_kind", ("panel", "factor", "label", "annotation"))
@@ -1073,22 +1095,10 @@ def test_write_paths_reserve_registered_output_before_transform(
         live_frames = (panel, current_keys)
     else:
         live_frames = (panel,)
-    output_bytes = materialization_planning.registered_output_buffer_bytes(
-        spec,
-        row_count=1,
+    retained_bytes = 0
+    live_frame_bytes = sum(
+        pandas_frame_payload_bytes(frame) for frame in live_frames
     )
-    if writer_kind == "factor":
-        output_bytes = (1 + len(spec.required_columns)) * np.dtype(np.intp).itemsize
-        excess_bytes = 0
-    else:
-        excess_bytes = 1
-    retained_bytes = (
-        policy.task_memory_budget_bytes
-        - sum(pandas_frame_payload_bytes(frame) for frame in live_frames)
-        - output_bytes
-        + excess_bytes
-    )
-    assert retained_bytes >= 0
 
     monkeypatch.setattr(
         materialization_planning,
@@ -1104,21 +1114,22 @@ def test_write_paths_reserve_registered_output_before_transform(
     def invoke_materialize(*_args: object, **kwargs: object):
         materialize = kwargs["materialize"]
         arguments = (("asset_a",), tuple(sessions), tuple(sessions), retained_bytes)
-        if kwargs.get("valid_bar_offsets") is not None:
-            yield materialize(*arguments, current_keys)
-        else:
-            yield materialize(*arguments)
+        with policy.reserve("test.upstream.retained", retained_bytes):
+            if kwargs.get("valid_bar_offsets") is not None:
+                yield materialize(*arguments, current_keys)
+            else:
+                yield materialize(*arguments)
 
     monkeypatch.setattr(
         materialization_planning,
         "iter_active_materialization_batches",
         invoke_materialize,
     )
-    monkeypatch.setattr(
-        materialization_io,
-        "write_and_inspect",
-        lambda _spec, frames, **_kwargs: tuple(frames),
-    )
+    def consume_frames(_spec, frames, **_kwargs):  # noqa: ANN001, ANN202
+        with runtime_resource_policy_scope(policy):
+            return tuple(frames)
+
+    monkeypatch.setattr(materialization_io, "write_and_inspect", consume_frames)
     monkeypatch.setattr(
         materialization_io,
         "read_processed_inputs_for_spec",
@@ -1188,20 +1199,17 @@ def test_write_paths_reserve_registered_output_before_transform(
         "annotation": (materialize_annotations.annotations, "derive_annotations"),
     }[writer_kind]
 
-    def reject_transform(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("transform_started_before_output_reservation")
+    class TransformObserved(RuntimeError):
+        pass
 
-    def reject_lexsort(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("lexsort_started_before_output_lifecycle_reservation")
+    def reject_transform(*_args: object, **_kwargs: object) -> object:
+        assert policy.reserved_memory_bytes > live_frame_bytes
+        raise TransformObserved
 
     monkeypatch.setattr(transform_owner, transform_name, reject_transform)
-    monkeypatch.setattr(materialization_io.np, "lexsort", reject_lexsort)
     layout = StorageLayout(project_root=tmp_path)
 
-    with pytest.raises(
-        materialization_io.MaterializationCapacityExceeded,
-        match="a_share_known_payloads_exceed_task_memory_budget",
-    ):
+    with pytest.raises(TransformObserved):
         if writer_kind == "panel":
             materialize_panel.write_panel(
                 spec,
@@ -1619,53 +1627,6 @@ def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
         )
 
 
-def test_adaptive_tuple_slice_is_released_before_next_slice_allocation() -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=8 * 1024**2,
-        explicit_cap_bytes=2 * 1024 * 1024,
-    )
-    previous_slice: list[weakref.ReferenceType[object] | None] = [None]
-
-    class SliceAlias:
-        def __init__(self, values: tuple[object, ...]) -> None:
-            self.values = values
-
-        def __len__(self) -> int:
-            return len(self.values)
-
-    class LivenessTuple(tuple):
-        def __getitem__(self, item):  # noqa: ANN001, ANN204
-            if not isinstance(item, slice):
-                return super().__getitem__(item)
-            gc.collect()
-            assert previous_slice[0] is None or previous_slice[0]() is None
-            alias = SliceAlias(super().__getitem__(item))
-            previous_slice[0] = weakref.ref(alias)
-            return alias
-
-    calls = 0
-
-    def materialize(*_args):  # noqa: ANN002, ANN202
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise materialization_io.MaterializationCapacityExceeded("split")
-        return pd.DataFrame({"value": [calls]})
-
-    with runtime_resource_policy_scope(policy):
-        output = materialization_planning._iter_adaptive_materialization_batches(
-            asset_ids=("a",),
-            sessions=LivenessTuple(
-                (pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03"))
-            ),
-            session_context=(pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")),
-            retained_payload_bytes=0,
-            materialize=materialize,
-        )
-        next(output)
-        next(output)
-
-
 def test_sorted_publication_reserves_upstream_before_key_temporaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1875,16 +1836,11 @@ def test_active_materialization_never_consumed_factory_abandons_without_resource
     }
 
 
-@pytest.mark.parametrize(
-    "error_type",
-    (DatasetReadCapacityExceeded,),
-)
-def test_active_materialization_owner_deduplicates_splits_and_closes(
+def test_active_materialization_owner_deduplicates_planned_batches_and_closes(
     monkeypatch: pytest.MonkeyPatch,
-    error_type: type[ValueError],
 ) -> None:
     closed: list[bool] = []
-    attempts: list[tuple[tuple[object, ...], int]] = []
+    attempts: list[tuple[tuple[object, ...], int, int]] = []
     sessions = tuple(pd.to_datetime(["2024-01-02", "2024-01-03"]))
     policy = capture_test_policy(
         available_memory_bytes=1024**3,
@@ -1899,9 +1855,13 @@ def test_active_materialization_owner_deduplicates_splits_and_closes(
     def materialize(  # noqa: ANN001, ANN202
         asset_ids, current_sessions, _session_context, retained_payload_bytes
     ):
-        attempts.append((tuple(asset_ids), retained_payload_bytes))
-        if len(asset_ids) > 1 or len(current_sessions) > 1:
-            raise error_type("capacity")
+        attempts.append(
+            (
+                tuple(asset_ids),
+                retained_payload_bytes,
+                policy.reserved_memory_bytes,
+            )
+        )
         return pd.DataFrame({"asset_id": asset_ids, "timestamp": current_sessions})
 
     monkeypatch.setattr(
@@ -1914,6 +1874,7 @@ def test_active_materialization_owner_deduplicates_splits_and_closes(
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
         sessions=sessions,
         resource_policy=policy,
+        output_row_bound_bytes=policy.payload_target_bytes,
         materialize=materialize,
     )
     result = pd.concat(
@@ -1927,8 +1888,14 @@ def test_active_materialization_owner_deduplicates_splits_and_closes(
         ("b", sessions[0]),
         ("b", sessions[1]),
     ]
-    assert attempts[0][0] == ("a", "b")
-    assert all(retained > 0 for _, retained in attempts)
+    assert [assets for assets, _retained, _reserved in attempts] == [
+        ("a",),
+        ("a",),
+        ("b",),
+        ("b",),
+    ]
+    assert all(retained == 0 for _assets, retained, _reserved in attempts)
+    assert all(reserved > 0 for _assets, _retained, reserved in attempts)
     assert closed == [True]
 
 
@@ -1997,63 +1964,6 @@ def test_active_materialization_orders_late_discovered_assets_before_publication
     assert result["asset_id"].tolist() == ["a", "b"]
 
 
-def test_active_materialization_keeps_discovery_batch_counts_disk_backed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    original_index = materialization_planning.ExactPrimaryKeyIndex
-    count_payloads: list[bytes] = []
-    published_assets: list[str] = []
-
-    class RecordingIndex(original_index):
-        def add_identity_payload_rows(self, *, rows):  # noqa: ANN001, ANN202
-            owned_rows = tuple(rows)
-            inserted = super().add_identity_payload_rows(rows=owned_rows)
-            count_payloads.extend(
-                value
-                for namespace, _identity, value in owned_rows
-                if namespace == "active-asset-batches"
-            )
-            return inserted
-
-    def source():
-        for position in range(300):
-            assert len(count_payloads) == position
-            yield pd.DataFrame({"asset_id": [f"asset_{300 - position:04d}"]})
-
-    def materialize(asset_ids, sessions, *_args):  # noqa: ANN001, ANN202
-        published_assets.extend(asset_ids)
-        return pd.DataFrame({"asset_id": asset_ids, "timestamp": sessions})
-
-    monkeypatch.setattr(
-        materialization_planning,
-        "ExactPrimaryKeyIndex",
-        RecordingIndex,
-    )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: source(),
-    )
-
-    list(
-        _scoped_active_materialization_batches(
-            tmp_path / "panel",
-            time_window=TimeWindow("2024-01-02", "2024-01-02"),
-            sessions=(pd.Timestamp("2024-01-02"),),
-            resource_policy=policy,
-            materialize=materialize,
-        )
-    )
-
-    assert [int.from_bytes(payload) for payload in count_payloads] == [1] * 300
-    assert published_assets == sorted(published_assets)
-
-
 @pytest.mark.parametrize(
     ("container_kind", "window_kind", "mutation_timing"),
     (
@@ -2112,8 +2022,6 @@ def test_active_materialization_owns_stable_target_sessions_across_capacity_spli
     policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
-    first_attempt = True
-
     def mutate_source() -> None:
         replacement = pd.Timestamp("2099-01-03")
         position = original.index(target[-1])
@@ -2130,13 +2038,8 @@ def test_active_materialization_owns_stable_target_sessions_across_capacity_spli
     def materialize(  # noqa: ANN001, ANN202
         asset_ids, current_sessions, _session_context, _retained
     ):
-        nonlocal first_attempt
-        if first_attempt:
-            first_attempt = False
-            if mutation_timing == "before_first_pull":
-                mutate_source()
-        if len(current_sessions) > 1:
-            raise materialization_io.MaterializationCapacityExceeded("split")
+        if mutation_timing == "before_first_pull":
+            mutate_source()
         return pd.DataFrame(
             {"asset_id": [asset_ids[0]], "timestamp": [current_sessions[0]]}
         )
@@ -2151,6 +2054,7 @@ def test_active_materialization_owns_stable_target_sessions_across_capacity_spli
         time_window=window,
         sessions=sessions,
         resource_policy=policy,
+        output_row_bound_bytes=policy.payload_target_bytes,
         materialize=materialize,
     )
     first = next(output).frame["timestamp"].iloc[0]
@@ -2428,68 +2332,6 @@ def test_active_materialization_requires_artifact_root_before_index_or_source(
         next(batches)
 
 
-def test_active_materialization_owner_splits_real_storage_capacity(
-    tmp_path: Path,
-) -> None:
-    spec = _processed_spec(
-        MARKET_PANEL_DATA_ID,
-        kind=ProcessedDataKind.PANEL,
-        columns=(*platform_entity_time_key(), "payload"),
-    )
-    root = StorageLayout(project_root=tmp_path).processed_data_root(
-        spec.market_id, spec.kind, spec.data_id
-    )
-    session = pd.Timestamp("2024-01-02")
-    write_dataset(
-        root,
-        pd.DataFrame(
-            {
-                "market_id": ["a_share", "a_share"],
-                "asset_id": ["asset_a", "asset_b"],
-                "timestamp": [session, session],
-                "payload": ["x" * 180_000, "y" * 180_000],
-            }
-        ),
-        spec=spec,
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    attempts: list[tuple[object, ...]] = []
-
-    def materialize(
-        asset_ids: tuple[object, ...],
-        _sessions: tuple[pd.Timestamp, ...],
-        _session_context: tuple[pd.Timestamp, ...],
-        retained_payload_bytes: int,
-    ) -> pd.DataFrame:
-        attempts.append(asset_ids)
-        return materialization_io.read_materialized_dataset(
-            root,
-            columns=("asset_id", "timestamp", "payload"),
-            asset_ids=asset_ids,
-            retained_payload_bytes=retained_payload_bytes,
-            resource_policy=policy,
-        )
-
-    publications = _scoped_active_materialization_batches(
-        root,
-        time_window=TimeWindow(session.date(), session.date()),
-        sessions=(session,),
-        resource_policy=policy,
-        materialize=materialize,
-    )
-    output = pd.concat(
-        (publication.frame for publication in publications),
-        ignore_index=True,
-    )
-
-    assert attempts == [("asset_a", "asset_b"), ("asset_a",), ("asset_b",)]
-    assert output["asset_id"].tolist() == ["asset_a", "asset_b"]
-    assert output["payload"].str.len().tolist() == [180_000, 180_000]
-
-
 def test_active_materialization_owner_closes_source_on_early_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2558,8 +2400,7 @@ def test_active_materialization_scope_covers_indexes_source_materialize_and_clos
         def identity_payload_values(self, *, namespace):  # noqa: ANN001, ANN202
             observed.append(("iterate", current_runtime_resource_policy()))
             return iter(
-                value
-                for _identity, value in sorted(self.payloads.get(namespace, ()))
+                value for _identity, value in sorted(self.payloads.get(namespace, ()))
             )
 
     def source():
@@ -2733,20 +2574,16 @@ def test_active_asset_discovery_admits_before_string_validation(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
+    class UnencodableAsset(str):
+        def encode(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+            pytest.fail("asset_encoding_before_admission")
+
+    asset = UnencodableAsset("a" * policy.task_memory_budget_bytes)
+    frame = pd.DataFrame({"asset_id": pd.Series([asset], dtype=object)})
     monkeypatch.setattr(
         materialization_io,
         "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: iter((pd.DataFrame({"asset_id": ["a"]}),)),
-    )
-    monkeypatch.setattr(
-        materialization_planning,
-        "pandas_frame_payload_bytes",
-        lambda _frame: policy.task_memory_budget_bytes,
-    )
-    monkeypatch.setattr(
-        materialization_planning,
-        "strict_string_series",
-        lambda *_args, **_kwargs: pytest.fail("asset_validation_before_admission"),
+        lambda *_args, **_kwargs: iter((frame,)),
     )
 
     with pytest.raises(
@@ -2828,50 +2665,15 @@ def test_valid_bar_output_capacity_is_checked_before_dataframe_construction(
             value = pd.Timestamp("2024-01-03").value
             yield materialization_planning._valid_bar_timestamp_payload(value)
 
-    expected_retained_bytes = 2 * np.dtype(np.int64).itemsize + (
-        np.dtype(np.int64).itemsize + np.dtype(object).itemsize
-    )
-    preflight_retained_bytes: list[int] = []
+    original_empty = materialization_planning.np.empty
+    observed_reservations: list[int] = []
 
-    def bound(  # noqa: ANN202
-        *,
-        frames,
-        output,
-        retained_payload_bytes,
-        **_kwargs,  # noqa: ANN001
-    ):
-        if not frames and output is None:
-            preflight_retained_bytes.append(retained_payload_bytes)
-            assert retained_payload_bytes == expected_retained_bytes
-            raise materialization_io.MaterializationCapacityExceeded(
-                "a_share_known_payloads_exceed_task_memory_budget"
-            )
-        if output is not None:
-            raise AssertionError("output_constructed_before_capacity_preflight")
+    def observe_empty(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        observed_reservations.append(policy.reserved_memory_bytes)
+        return original_empty(*args, **kwargs)
 
-    monkeypatch.setattr(
-        materialization_planning,
-        "require_known_materialization_payload_bound",
-        bound,
-    )
-    real_pd = materialization_planning.pd
-
-    def fail_dataframe(*_args, **_kwargs):  # noqa: ANN001, ANN202
-        raise AssertionError("output_constructed_before_capacity_preflight")
-
-    monkeypatch.setattr(
-        materialization_planning,
-        "pd",
-        SimpleNamespace(
-            DataFrame=fail_dataframe,
-            Timestamp=real_pd.Timestamp,
-        ),
-    )
-
-    with pytest.raises(
-        materialization_io.MaterializationCapacityExceeded,
-        match="a_share_known_payloads_exceed_task_memory_budget",
-    ):
+    monkeypatch.setattr(materialization_planning.np, "empty", observe_empty)
+    with runtime_resource_policy_scope(policy):
         materialization_planning.bounded_valid_bar_key_coverage(
             Index(),  # type: ignore[arg-type]
             asset_ids=("a",),
@@ -2881,7 +2683,8 @@ def test_valid_bar_output_capacity_is_checked_before_dataframe_construction(
             retained_payload_bytes=0,
             resource_policy=policy,
         )
-    assert preflight_retained_bytes == [expected_retained_bytes]
+    assert observed_reservations
+    assert min(observed_reservations) > 0
 
 
 def test_valid_bar_index_builds_once_across_adaptive_asset_splits(
@@ -2890,17 +2693,38 @@ def test_valid_bar_index_builds_once_across_adaptive_asset_splits(
     policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
-    reads: list[tuple[str, ...]] = []
+    reads: list[
+        tuple[
+            tuple[str, ...],
+            tuple[object, ...] | None,
+            TimeWindow | None,
+        ]
+    ] = []
 
-    def read(*_args, columns, **_kwargs):  # noqa: ANN001, ANN003, ANN202
-        reads.append(tuple(columns))
+    def read(*_args, columns, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        reads.append(
+            (
+                tuple(columns),
+                kwargs.get("asset_ids"),
+                kwargs.get("time_window"),
+            )
+        )
         if tuple(columns) == ("asset_id", "timestamp"):
             return iter(
                 (
                     pd.DataFrame(
                         {
-                            "asset_id": ["a", "b"],
-                            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+                            "asset_id": ["a", "a", "a", "b", "b", "b"],
+                            "timestamp": pd.to_datetime(
+                                [
+                                    "2024-01-01",
+                                    "2024-01-02",
+                                    "2024-01-03",
+                                    "2024-01-01",
+                                    "2024-01-02",
+                                    "2024-01-03",
+                                ]
+                            ),
                         }
                     ),
                 )
@@ -2912,24 +2736,35 @@ def test_valid_bar_index_builds_once_across_adaptive_asset_splits(
     def materialize(  # noqa: ANN001, ANN202
         assets, sessions, _session_context, retained, keys
     ):
-        assert retained > 0
-        if len(assets) > 1:
-            raise materialization_io.MaterializationCapacityExceeded("split")
+        assert retained == 0
+        assert policy.reserved_memory_bytes > 0
+        assert len(assets) == 1
         assert set(keys["asset_id"]) == set(assets)
         return pd.DataFrame({"asset_id": assets, "timestamp": sessions})
 
     chunks = _scoped_active_materialization_batches(
         Path("panel"),
         time_window=TimeWindow("2024-01-02", "2024-01-02"),
-        sessions=(pd.Timestamp("2024-01-02"),),
+        sessions=pd.date_range("2024-01-01", "2024-01-03"),
         resource_policy=policy,
         valid_bar_offsets=(1, 1),
+        output_row_bound_bytes=policy.payload_target_bytes,
         materialize=materialize,
     )
 
     assert len(list(chunks)) == 2
-    assert reads.count(("asset_id", "timestamp")) == 1
-    assert reads.count(("asset_id",)) == 1
+    assert reads == [
+        (
+            ("asset_id",),
+            None,
+            TimeWindow("2024-01-02", "2024-01-02"),
+        ),
+        (
+            ("asset_id", "timestamp"),
+            ("a", "b"),
+            TimeWindow("2024-01-01", "2024-01-03"),
+        ),
+    ]
 
 
 @pytest.mark.parametrize("build_fails", (False, True))
@@ -2941,7 +2776,9 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
         available_memory_bytes=1024**3,
     )
     active_indexes: list[materialization_planning.ExactPrimaryKeyIndex] = []
-    build_observations: list[tuple[int, int, int]] = []
+    build_observations: list[
+        tuple[int, int, int, tuple[object, ...] | None, TimeWindow | None]
+    ] = []
     original_index = materialization_planning.ExactPrimaryKeyIndex
 
     class RecordingIndex(original_index):
@@ -2956,13 +2793,19 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
             finally:
                 active_indexes.remove(self)
 
-    def read(*_args, columns, retained_payload_bytes, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+    def read(*_args, columns, retained_payload_bytes, **kwargs):  # noqa: ANN001, ANN003, ANN202
         if tuple(columns) == ("asset_id", "timestamp"):
+            live_cache_bytes = sum(
+                index.retained_memory_bytes for index in active_indexes
+            )
+            assert policy.reserved_memory_bytes >= live_cache_bytes
             build_observations.append(
                 (
                     len(active_indexes),
                     retained_payload_bytes,
-                    sum(index.retained_memory_bytes for index in active_indexes),
+                    live_cache_bytes,
+                    kwargs.get("asset_ids"),
+                    kwargs.get("time_window"),
                 )
             )
             if build_fails:
@@ -3010,8 +2853,15 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
         timestamp_columns=("timestamp",),
         scratch_parent=Path(tempfile.gettempdir()),
     ).retained_memory_bytes
-    expected_reader_bytes = expected_cache_bytes + np.dtype(object).itemsize
-    assert build_observations == [(1, expected_reader_bytes, expected_cache_bytes)]
+    assert len(build_observations) == 1
+    active_count, retained_bytes, cache_bytes, asset_ids, time_window = (
+        build_observations[0]
+    )
+    assert active_count == 2
+    assert retained_bytes == 0
+    assert cache_bytes == 2 * expected_cache_bytes
+    assert asset_ids == ("a",)
+    assert time_window == TimeWindow("2024-01-02", "2024-01-02")
     assert active_indexes == []
 
 
@@ -3070,7 +2920,7 @@ def test_active_materialization_indexes_use_dataset_sibling_parent(
         )
         == []
     )
-    assert observed == [root.parent, root.parent]
+    assert observed == [root.parent]
 
 
 def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(
@@ -3510,7 +3360,7 @@ def test_sorted_output_releases_previous_publication_before_upstream_next(
     next(output)
 
 
-def test_adaptive_materialization_has_no_live_pending_tuple_backing() -> None:
+def test_adaptive_materialization_does_not_retry_after_capacity_failure() -> None:
     calls = 0
     retained: list[int] = []
 
@@ -3519,23 +3369,29 @@ def test_adaptive_materialization_has_no_live_pending_tuple_backing() -> None:
     ):
         nonlocal calls
         calls += 1
-        if calls == 1:
-            raise materialization_io.MaterializationCapacityExceeded("split")
         retained.append(retained_payload_bytes)
-        return pd.DataFrame({"value": [1]})
+        raise materialization_io.MaterializationCapacityExceeded("capacity")
 
     base = 100
-    output = materialization_planning._iter_adaptive_materialization_batches(
-        asset_ids=("a", "b"),
-        sessions=(pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")),
-        session_context=(pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")),
-        retained_payload_bytes=base,
-        materialize=materialize,
-    )
-    next(output)
-    pointer_bytes = np.dtype(object).itemsize
-
-    assert retained[0] == base + pointer_bytes
+    policy = capture_test_policy(available_memory_bytes=1024**3)
+    with runtime_resource_policy_scope(policy):
+        output = materialization_planning._iter_adaptive_materialization_batches(
+            asset_ids=("a", "b"),
+            sessions=(pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")),
+            session_context=(
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-02"),
+            ),
+            retained_payload_bytes=base,
+            materialize=materialize,
+        )
+        with pytest.raises(
+            materialization_io.MaterializationCapacityExceeded,
+            match="a_share_known_payloads_exceed_task_memory_budget",
+        ):
+            next(output)
+    assert calls == 1
+    assert retained[0] == base
 
 
 def _factor_definition(output_column: str, *, lookback_window: int) -> FactorDefinition:

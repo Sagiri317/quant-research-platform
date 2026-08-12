@@ -13,6 +13,7 @@ import pytest
 import quant_research_platform.research._memory as memory_owner
 from quant_research_platform.research._memory import (
     _concat_time_boundary_frames,
+    iter_complete_session_frames,
     iter_complete_time_sized_frames,
 )
 from quant_research_platform.runtime.resources import (
@@ -31,6 +32,42 @@ def _single_time_frame() -> pd.DataFrame:
             "value": [1],
         }
     )
+
+
+def test_complete_session_frames_merge_boundary_and_emit_one_session() -> None:
+    frames = iter(
+        (
+            pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(
+                        ["2024-01-01", "2024-01-01", "2024-01-02"]
+                    ),
+                    "value": [1, 2, 3],
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                    "value": [4, 5],
+                }
+            ),
+        )
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1024 * 1024,
+    )
+
+    chunks = list(
+        iter_complete_session_frames(
+            frames,
+            timestamp_column="timestamp",
+            resource_policy=policy,
+        )
+    )
+
+    assert [len(chunk) for chunk in chunks] == [2, 2, 1]
+    assert [chunk["timestamp"].nunique() for chunk in chunks] == [1, 1, 1]
 
 
 @pytest.mark.parametrize("explicit_mode", ("none", "same"))
@@ -195,7 +232,7 @@ def test_complete_time_sized_frames_rejects_single_timestamp_over_budget() -> No
 
     with pytest.raises(
         ValueError,
-        match="research_indivisible_time_unit_exceeds_payload_target",
+        match="research_indivisible_time_unit_exceeds_task_memory_budget",
     ):
         list(
             iter_complete_time_sized_frames(
@@ -279,7 +316,7 @@ def test_time_chunk_admission_precedes_timestamp_conversion(
 
     with pytest.raises(
         ValueError,
-        match="research_indivisible_time_unit_exceeds_payload_target",
+        match="research_indivisible_time_unit_exceeds_task_memory_budget",
     ):
         list(
             iter_complete_time_sized_frames(
@@ -288,6 +325,42 @@ def test_time_chunk_admission_precedes_timestamp_conversion(
                 resource_policy=policy,
             )
         )
+
+
+def test_time_chunk_refreshes_shared_headroom_before_next_session_copy() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2026-01-01")] * 750
+            + [pd.Timestamp("2026-01-02")] * 750,
+            "value": ["x" * 900] * 1_500,
+        }
+    )
+    first_bytes = pandas_frame_payload_bytes(frame.iloc[:750].copy())
+    second_bytes = pandas_frame_payload_bytes(frame.iloc[750:].copy())
+    timestamp_bytes = int(
+        frame["timestamp"].memory_usage(index=False, deep=True)
+    ) + 40 * len(frame)
+    hard_budget = max(first_bytes, second_bytes) + timestamp_bytes + 64 * 1024
+    policy = capture_test_policy(
+        available_memory_bytes=32 * 1024 * 1024,
+        explicit_cap_bytes=hard_budget,
+    )
+
+    chunks = iter_complete_time_sized_frames(
+        iter((frame,)),
+        timestamp_column="timestamp",
+        resource_policy=policy,
+    )
+    first = next(chunks)
+    assert first["timestamp"].nunique() == 1
+    new_owner_bytes = hard_budget - timestamp_bytes - second_bytes + 1
+    with policy.reserve("outer_after_first_yield", new_owner_bytes):
+        with pytest.raises(
+            ValueError,
+            match="research_indivisible_time_unit_exceeds_task_memory_budget",
+        ):
+            next(chunks)
+    chunks.close()
 
 
 def test_time_boundary_concat_rejects_peak_before_allocation(

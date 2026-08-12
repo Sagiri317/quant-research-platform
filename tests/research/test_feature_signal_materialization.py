@@ -12,6 +12,8 @@ from quant_research_platform.research.features.transforms import apply_feature_t
 from quant_research_platform.research.signals.materialization import (
     normalize_signal_frame,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_winsorize_clips_by_timestamp_quantiles_instead_of_zscore() -> None:
@@ -82,6 +84,38 @@ def test_zero_variance_zscore_keeps_numeric_output() -> None:
     assert result["factor_zscore"].isna().all()
 
 
+def test_feature_transform_admits_before_result_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "factor": [1.0, 2.0],
+        }
+    )
+    spec = FeatureTransformSpec(
+        transform_id="factor_rank",
+        source_columns=("factor",),
+        transform="cross_sectional_rank",
+        output_columns=("factor_rank",),
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=1024,
+        explicit_cap_bytes=1,
+    )
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "copy",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("feature result copied before admission")
+        ),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            apply_feature_transform(frame, spec)
+
+
 def test_signal_materialization_normalizes_direction_and_transform() -> None:
     frame = pd.DataFrame(
         {
@@ -101,6 +135,39 @@ def test_signal_materialization_normalizes_direction_and_transform() -> None:
 
     assert result["risk_signal"].tolist() == pytest.approx([-1.0, -2.0, -3.0])
     assert "risk" not in result.columns
+
+
+def test_signal_materialization_admits_before_result_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "risk": [1.0, 2.0],
+        }
+    )
+    signal = SignalSpec(
+        signal_id="risk_signal",
+        source_kind="factor",
+        source_column="risk",
+        transform="zscore",
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=1024,
+        explicit_cap_bytes=1,
+    )
+
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "copy",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("signal result copied before admission")
+        ),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            normalize_signal_frame(frame, (signal,))
 
 
 def test_signal_materialization_enforces_source_kind_column_ownership() -> None:

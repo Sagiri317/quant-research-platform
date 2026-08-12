@@ -20,7 +20,11 @@ from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.research._memory import iter_complete_time_sized_frames
+from quant_research_platform.research._memory import (
+    _ResearchFrameSpill,
+    _selected_frame_payload_bytes,
+    iter_complete_session_frames,
+)
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.portfolios.engine import (
@@ -37,6 +41,9 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 
+_PORTFOLIO_ROW_WORKING_BYTES = 2048
+_PORTFOLIO_PERIOD_WORKING_BYTES = 4096
+
 
 @dataclass(frozen=True)
 class PortfolioResult:
@@ -47,11 +54,9 @@ class PortfolioResult:
 
 @dataclass
 class _PortfolioSummaryState:
-    return_parts: list[pd.DataFrame] = field(default_factory=list)
-    return_bytes: int = 0
     position_stats: dict[str, dict[str, float | int]] = field(default_factory=dict)
     resource_policy: RuntimeResourcePolicy | None = None
-    reservations: ExitStack = field(default_factory=ExitStack, repr=False)
+    return_spill: _ResearchFrameSpill | None = field(default=None, repr=False)
 
 
 def build_portfolio_result_from_research_dataset(
@@ -233,39 +238,59 @@ def _validated_prediction_input(
     if tuple(frame.columns) != expected_columns:
         raise ValueError("persisted_prediction_columns_mismatch")
     policy = current_runtime_resource_policy()
+    row_count = len(frame)
+    index_bytes = int(frame.index.memory_usage(deep=True))
     frame_bytes = pandas_frame_payload_bytes(frame)
-    if policy is not None and (
-        policy.reserved_memory_bytes + 3 * frame_bytes > policy.task_memory_budget_bytes
-    ):
-        raise ValueError("portfolio_prediction_working_set_exceeds_task_memory_budget")
-    if frame.loc[:, list(primary_key)].isna().any(axis=None):
-        raise ValueError("persisted_prediction_key_null")
-    timestamps = strict_timestamp_series(
-        frame["timestamp"], error="invalid_persisted_prediction_timestamp"
+    key_projection_bytes = _selected_frame_payload_bytes(frame, list(primary_key))
+    key_validation_bytes = index_bytes + row_count * (32 + 16 * len(primary_key))
+    timestamp_bytes = index_bytes + 8 * row_count
+    value_bytes = index_bytes + 16 * row_count
+    normalized_output_bytes = frame_bytes
+    window_bytes = 0 if time_window is None else index_bytes + row_count + frame_bytes
+    validation_bytes = (
+        key_projection_bytes
+        + key_validation_bytes
+        + timestamp_bytes
+        + value_bytes
+        + normalized_output_bytes
+        + window_bytes
     )
-    if frame.duplicated(list(primary_key)).any():
-        raise ValueError("duplicate_persisted_prediction_keys")
-    if bool((timestamps < pd.Timestamp(test_start)).any()) or (
-        test_end is not None and bool((timestamps > pd.Timestamp(test_end)).any())
-    ):
-        raise ValueError("persisted_prediction_window_mismatch")
-    values = pd.to_numeric(frame[signal.source_column], errors="coerce")
-    if not np.isfinite(values.to_numpy(dtype="float64", copy=False)).all():
-        raise ValueError("persisted_prediction_values_invalid")
-    result = frame
-    if not timestamps.equals(frame["timestamp"]) or not values.equals(
-        frame[signal.source_column]
-    ):
-        result = frame.copy()
-        result["timestamp"] = timestamps
-        result[signal.source_column] = values
-    if time_window is not None:
-        in_window = timestamps.between(
-            pd.Timestamp(time_window.start),
-            pd.Timestamp(time_window.end),
+    with ExitStack() as validation_reservation:
+        if policy is not None:
+            validation_reservation.enter_context(
+                policy.reserve(
+                    "research.portfolio.prediction.validate",
+                    validation_bytes,
+                )
+            )
+        if frame.loc[:, list(primary_key)].isna().any(axis=None):
+            raise ValueError("persisted_prediction_key_null")
+        timestamps = strict_timestamp_series(
+            frame["timestamp"], error="invalid_persisted_prediction_timestamp"
         )
-        if not bool(in_window.all()):
-            result = result.loc[in_window].reset_index(drop=True)
+        if frame.duplicated(list(primary_key)).any():
+            raise ValueError("duplicate_persisted_prediction_keys")
+        if bool((timestamps < pd.Timestamp(test_start)).any()) or (
+            test_end is not None and bool((timestamps > pd.Timestamp(test_end)).any())
+        ):
+            raise ValueError("persisted_prediction_window_mismatch")
+        values = pd.to_numeric(frame[signal.source_column], errors="coerce")
+        if not np.isfinite(values.to_numpy(dtype="float64", copy=False)).all():
+            raise ValueError("persisted_prediction_values_invalid")
+        result = frame
+        if not timestamps.equals(frame["timestamp"]) or not values.equals(
+            frame[signal.source_column]
+        ):
+            result = frame.copy()
+            result["timestamp"] = timestamps
+            result[signal.source_column] = values
+        if time_window is not None:
+            in_window = timestamps.between(
+                pd.Timestamp(time_window.start),
+                pd.Timestamp(time_window.end),
+            )
+            if not bool(in_window.all()):
+                result = result.loc[in_window].reset_index(drop=True)
     return (
         result,
         primary_key,
@@ -300,64 +325,99 @@ def _iter_prediction_joined_chunks(
         return
     policy = bind_runtime_resource_policy(resource_policy)
     prediction_bytes = pandas_frame_payload_bytes(prediction_frame)
-    prediction_index_bytes = len(prediction_frame) * (len(primary_key) * 8 + 1)
-    if policy is not None and (
-        policy.reserved_memory_bytes + 2 * prediction_bytes + prediction_index_bytes
-        > policy.task_memory_budget_bytes
-    ):
-        raise ValueError(
-            "portfolio_prediction_join_working_set_exceeds_task_memory_budget"
-        )
-    prediction_index = pd.MultiIndex.from_frame(
-        prediction_frame.loc[:, list(primary_key)]
+    prediction_rows = len(prediction_frame)
+    prediction_key_bytes = _selected_frame_payload_bytes(
+        prediction_frame,
+        list(primary_key),
     )
-    matched = np.zeros(len(prediction_frame), dtype=bool)
-    missing_required = False
-    for chunk in chunks:
-        if policy is not None and (
-            policy.reserved_memory_bytes
-            + 2 * prediction_bytes
-            + prediction_index_bytes
-            + 3 * pandas_frame_payload_bytes(chunk)
-            > policy.task_memory_budget_bytes
-        ):
-            raise ValueError(
-                "portfolio_prediction_join_working_set_exceeds_task_memory_budget"
+    prediction_index_bytes = prediction_key_bytes + prediction_rows * (
+        8 * len(primary_key)
+    )
+    matched_bytes = prediction_rows
+    with ExitStack() as prediction_state:
+        if policy is not None:
+            try:
+                prediction_state.enter_context(
+                    policy.reserve(
+                        "research.portfolio.prediction.input",
+                        prediction_bytes + prediction_index_bytes + matched_bytes,
+                    )
+                )
+            except MemoryError:
+                raise ValueError(
+                    "portfolio_prediction_join_working_set_exceeds_task_memory_budget"
+                ) from None
+        prediction_index = pd.MultiIndex.from_frame(
+            prediction_frame.loc[:, list(primary_key)]
+        )
+        matched = np.zeros(prediction_rows, dtype=bool)
+        missing_required = False
+        for chunk in chunks:
+            chunk_rows = len(chunk)
+            chunk_bytes = pandas_frame_payload_bytes(chunk)
+            chunk_index_bytes = int(chunk.index.memory_usage(deep=True))
+            timestamp_bytes = chunk_index_bytes + 8 * chunk_rows
+            required_mask_bytes = chunk_index_bytes + chunk_rows
+            required_key_bytes = _selected_frame_payload_bytes(
+                chunk,
+                list(primary_key),
             )
-        eligible, _metadata = apply_filter_mode(
-            chunk,
-            mode=sample_filter_mode,
-            metadata_key="sample_filter_mode",
-        )
-        eligible = eligible.dropna(subset=list(input_columns))
-        timestamps = strict_timestamp_series(
-            eligible["timestamp"], error="invalid_portfolio_timestamp_values"
-        )
-        required_mask = timestamps >= pd.Timestamp(test_start)
-        if test_end is not None:
-            required_mask &= timestamps <= pd.Timestamp(test_end)
-        required_index = pd.MultiIndex.from_frame(
-            eligible.loc[required_mask, list(primary_key)]
-        )
-        positions = prediction_index.get_indexer(required_index)
-        missing_required |= bool((positions < 0).any())
-        matched[positions[positions >= 0]] = True
-        try:
-            yield chunk.merge(
-                prediction_frame,
-                on=list(primary_key),
-                how="left",
-                validate="one_to_one",
+            required_index_bytes = required_key_bytes + chunk_rows * (
+                8 * len(primary_key)
             )
-        except pd.errors.MergeError as exc:
-            raise ValueError("persisted_prediction_join_key_invalid") from exc
-    unexpected = bool((~matched).any())
-    if missing_required and unexpected:
-        raise ValueError("misaligned_persisted_prediction_keys")
-    if missing_required:
-        raise ValueError("missing_required_prediction_keys")
-    if unexpected:
-        raise ValueError("misaligned_persisted_prediction_keys")
+            positions_bytes = chunk_rows * np.dtype(np.intp).itemsize
+            join_hash_bytes = chunk_rows * (32 + 16 * len(primary_key))
+            joined_output_bytes = chunk_bytes + chunk_index_bytes + 8 * chunk_rows
+            chunk_working_bytes = (
+                timestamp_bytes
+                + required_mask_bytes
+                + required_index_bytes
+                + positions_bytes
+                + join_hash_bytes
+                + joined_output_bytes
+            )
+            with ExitStack() as chunk_state:
+                if policy is not None:
+                    chunk_state.enter_context(
+                        policy.reserve(
+                            "research.portfolio.prediction.join",
+                            chunk_working_bytes,
+                        )
+                    )
+                eligible, _metadata = apply_filter_mode(
+                    chunk,
+                    mode=sample_filter_mode,
+                    metadata_key="sample_filter_mode",
+                )
+                eligible = eligible.dropna(subset=list(input_columns))
+                timestamps = strict_timestamp_series(
+                    eligible["timestamp"], error="invalid_portfolio_timestamp_values"
+                )
+                required_mask = timestamps >= pd.Timestamp(test_start)
+                if test_end is not None:
+                    required_mask &= timestamps <= pd.Timestamp(test_end)
+                required_index = pd.MultiIndex.from_frame(
+                    eligible.loc[required_mask, list(primary_key)]
+                )
+                positions = prediction_index.get_indexer(required_index)
+                missing_required |= bool((positions < 0).any())
+                matched[positions[positions >= 0]] = True
+                try:
+                    yield chunk.merge(
+                        prediction_frame,
+                        on=list(primary_key),
+                        how="left",
+                        validate="one_to_one",
+                    )
+                except pd.errors.MergeError as exc:
+                    raise ValueError("persisted_prediction_join_key_invalid") from exc
+        unexpected = bool((~matched).any())
+        if missing_required and unexpected:
+            raise ValueError("misaligned_persisted_prediction_keys")
+        if missing_required:
+            raise ValueError("missing_required_prediction_keys")
+        if unexpected:
+            raise ValueError("misaligned_persisted_prediction_keys")
 
 
 def _iter_prediction_lookup_joined_chunks(
@@ -372,38 +432,52 @@ def _iter_prediction_lookup_joined_chunks(
 ):
     missing_required = False
     for chunk in chunks:
-        values, _found = prediction_lookup.values_for_frame(
-            chunk,
-            mark_matched=False,
-        )
-        eligible, _metadata = apply_filter_mode(
-            chunk,
-            mode=sample_filter_mode,
-            metadata_key="sample_filter_mode",
-        )
-        eligible = eligible.dropna(subset=list(input_columns))
-        timestamps = strict_timestamp_series(
-            eligible["timestamp"], error="invalid_portfolio_timestamp_values"
-        )
-        required_mask = timestamps >= pd.Timestamp(test_start)
-        if test_end is not None:
-            required_mask &= timestamps <= pd.Timestamp(test_end)
-        required = eligible.loc[required_mask]
-        if not required.empty:
-            _required_values, required_found = prediction_lookup.values_for_frame(
-                required,
-                mark_matched=True,
-            )
-            missing_required |= 0 in required_found
+        row_count = len(chunk)
+        frame_bytes = pandas_frame_payload_bytes(chunk)
+        index_bytes = int(chunk.index.memory_usage(deep=True))
+        timestamp_bytes = index_bytes + 8 * row_count
+        required_mask_bytes = index_bytes + row_count
+        required_output_bytes = frame_bytes
+        output_frame_bytes = frame_bytes + index_bytes + 8 * row_count
         policy = current_runtime_resource_policy()
-        with ExitStack() as output_reservation:
+        with ExitStack() as chunk_state:
             if policy is not None:
-                output_reservation.enter_context(
+                chunk_state.enter_context(
                     policy.reserve(
-                        "research.portfolio.prediction.join",
-                        2 * pandas_frame_payload_bytes(chunk) + 8 * len(chunk),
+                        "research.portfolio.prediction.output",
+                        timestamp_bytes
+                        + required_mask_bytes
+                        + required_output_bytes
+                        + output_frame_bytes,
                     )
                 )
+            values, _found = chunk_state.enter_context(
+                prediction_lookup.values_for_frame(
+                    chunk,
+                    mark_matched=False,
+                )
+            )
+            eligible, _metadata = apply_filter_mode(
+                chunk,
+                mode=sample_filter_mode,
+                metadata_key="sample_filter_mode",
+            )
+            eligible = eligible.dropna(subset=list(input_columns))
+            timestamps = strict_timestamp_series(
+                eligible["timestamp"], error="invalid_portfolio_timestamp_values"
+            )
+            required_mask = timestamps >= pd.Timestamp(test_start)
+            if test_end is not None:
+                required_mask &= timestamps <= pd.Timestamp(test_end)
+            required = eligible.loc[required_mask]
+            if not required.empty:
+                _required_values, required_found = chunk_state.enter_context(
+                    prediction_lookup.values_for_frame(
+                        required,
+                        mark_matched=True,
+                    )
+                )
+                missing_required |= 0 in required_found
             output = chunk.copy()
             output[prediction_lookup.prediction_column] = values
             yield output
@@ -426,7 +500,7 @@ def _portfolio_input_chunks(
     time_window: TimeWindow | None,
     columns: tuple[str, ...],
 ):
-    return iter_complete_time_sized_frames(
+    return iter_complete_session_frames(
         iter_research_dataset_chunks(
             layout,
             market_id=market_id,
@@ -457,69 +531,112 @@ def _iter_portfolio_output_chunks(
             context_reservation.close()
             context_reservation = ExitStack()
             saw_rows = True
-            _require_portfolio_frames_headroom((context, chunk), multiplier=2)
-            actual_timestamps = _timestamp_set(chunk)
-            working = _combine_context_and_chunk(context, chunk)
-            _require_portfolio_frame_headroom(working, multiplier=16)
-            result = construct_portfolio_positions(
-                working,
-                spec,
-                source_columns_by_kind=source_columns_by_kind,
-            )
-            output = {
-                "positions": _select_actual_timestamps(
-                    result.positions,
-                    actual_timestamps,
-                ),
-                "turnover": _select_actual_timestamps(
-                    result.turnover,
-                    actual_timestamps,
-                ),
-                "cost_breakdown": _select_actual_timestamps(
-                    result.cost_breakdown,
-                    actual_timestamps,
-                ),
-                "portfolio_returns": _select_actual_timestamps(
-                    result.portfolio_returns,
-                    actual_timestamps,
-                ),
-                "diagnostics": _select_actual_timestamps(
-                    result.diagnostics,
-                    actual_timestamps,
-                ),
-                "capacity_diagnostics": _select_actual_timestamps(
-                    result.capacity_diagnostics,
-                    actual_timestamps,
-                ),
-                "numeric_exposure_diagnostics": _select_actual_timestamps(
-                    result.numeric_exposure_diagnostics,
-                    actual_timestamps,
-                ),
-                "categorical_exposure_diagnostics": _select_actual_timestamps(
-                    result.categorical_exposure_diagnostics,
-                    actual_timestamps,
-                ),
-            }
             policy = current_runtime_resource_policy()
-            output_bytes = sum(
-                pandas_frame_payload_bytes(frame) for frame in output.values()
+            if resource_policy is not None and policy is not resource_policy:
+                raise RuntimeError("runtime_resource_policy_conflict")
+            input_bytes = pandas_frame_payload_bytes(
+                context
+            ) + pandas_frame_payload_bytes(chunk)
+            row_count = len(context) + len(chunk)
+            signal_count = max(1, len(spec.signals))
+            combined_frame_bytes = 0 if context.empty else input_bytes
+            validated_panel_bytes = input_bytes
+            sorted_panel_bytes = input_bytes
+            row_output_bytes = row_count * signal_count * _PORTFOLIO_ROW_WORKING_BYTES
+            period_output_bytes = (
+                (context_periods + 1) * signal_count * _PORTFOLIO_PERIOD_WORKING_BYTES
             )
-            with ExitStack() as output_reservation:
+            timestamp_state_bytes = len(chunk) * (
+                np.dtype("datetime64[ns]").itemsize
+                + np.dtype(np.intp).itemsize
+                + np.dtype(np.bool_).itemsize
+            )
+            selection_bytes = row_output_bytes + period_output_bytes
+            next_context_bytes = input_bytes
+            operation_bytes = (
+                combined_frame_bytes
+                + validated_panel_bytes
+                + sorted_panel_bytes
+                + row_output_bytes
+                + period_output_bytes
+                + timestamp_state_bytes
+                + selection_bytes
+                + next_context_bytes
+            )
+            with ExitStack() as operation_reservation:
                 if policy is not None:
-                    output_reservation.enter_context(
-                        policy.reserve("research.portfolio.output", output_bytes)
+                    operation_reservation.enter_context(
+                        policy.reserve(
+                            "research.portfolio.operation",
+                            operation_bytes,
+                        )
                     )
-                yield output
-            del output, result
-            context = _trailing_timestamp_context(working, periods=context_periods)
-            if resource_policy is not None:
-                context_reservation.enter_context(
-                    resource_policy.reserve(
-                        "research.portfolio.context",
-                        pandas_frame_payload_bytes(context),
-                    )
+                actual_timestamps = _timestamp_set(chunk)
+                working = _combine_context_and_chunk(context, chunk)
+                result = construct_portfolio_positions(
+                    working,
+                    spec,
+                    source_columns_by_kind=source_columns_by_kind,
                 )
-            del actual_timestamps, chunk, working
+                output = {
+                    "positions": _select_actual_timestamps(
+                        result.positions,
+                        actual_timestamps,
+                    ),
+                    "turnover": _select_actual_timestamps(
+                        result.turnover,
+                        actual_timestamps,
+                    ),
+                    "cost_breakdown": _select_actual_timestamps(
+                        result.cost_breakdown,
+                        actual_timestamps,
+                    ),
+                    "portfolio_returns": _select_actual_timestamps(
+                        result.portfolio_returns,
+                        actual_timestamps,
+                    ),
+                    "diagnostics": _select_actual_timestamps(
+                        result.diagnostics,
+                        actual_timestamps,
+                    ),
+                    "capacity_diagnostics": _select_actual_timestamps(
+                        result.capacity_diagnostics,
+                        actual_timestamps,
+                    ),
+                    "numeric_exposure_diagnostics": _select_actual_timestamps(
+                        result.numeric_exposure_diagnostics,
+                        actual_timestamps,
+                    ),
+                    "categorical_exposure_diagnostics": _select_actual_timestamps(
+                        result.categorical_exposure_diagnostics,
+                        actual_timestamps,
+                    ),
+                }
+                next_context = _trailing_timestamp_context(
+                    working,
+                    periods=context_periods,
+                )
+                output_bytes = sum(
+                    pandas_frame_payload_bytes(frame) for frame in output.values()
+                )
+                retained_context_bytes = pandas_frame_payload_bytes(next_context)
+                del actual_timestamps, result, working, chunk
+                operation_reservation.close()
+                context = next_context
+                if resource_policy is not None:
+                    context_reservation.enter_context(
+                        resource_policy.reserve(
+                            "research.portfolio.context",
+                            retained_context_bytes,
+                        )
+                    )
+                with ExitStack() as output_reservation:
+                    if policy is not None:
+                        output_reservation.enter_context(
+                            policy.reserve("research.portfolio.output", output_bytes)
+                        )
+                    yield output
+                del output, next_context
     finally:
         context_reservation.close()
 
@@ -543,7 +660,7 @@ def _observe_portfolio_summary_chunks(
         completed = True
     finally:
         if not completed:
-            summary_state.reservations.close()
+            _close_portfolio_summary_spill(summary_state)
 
 
 def _update_portfolio_summary_state(
@@ -557,29 +674,44 @@ def _update_portfolio_summary_state(
         if active_policy is not summary_state.resource_policy:
             raise RuntimeError("runtime_resource_policy_conflict")
     policy = summary_state.resource_policy
-    input_bytes = pandas_frame_payload_bytes(
-        portfolio_returns
-    ) + pandas_frame_payload_bytes(positions)
-    if policy is not None and (
-        policy.reserved_memory_bytes + 2 * summary_state.return_bytes + 4 * input_bytes
-        > policy.task_memory_budget_bytes
-    ):
-        raise ValueError("portfolio_summary_working_set_exceeds_task_memory_budget")
-    return_frame = _portfolio_return_summary_frame(portfolio_returns)
-    if not return_frame.empty:
-        next_bytes = pandas_frame_payload_bytes(return_frame)
-        if policy is not None and (
-            policy.reserved_memory_bytes + 2 * (summary_state.return_bytes + next_bytes)
-            > policy.task_memory_budget_bytes
-        ):
-            raise ValueError("portfolio_summary_working_set_exceeds_task_memory_budget")
-        summary_state.return_parts.append(return_frame)
-        summary_state.return_bytes += next_bytes
+    return_rows = len(portfolio_returns)
+    position_rows = len(positions)
+    return_index_bytes = int(portfolio_returns.index.memory_usage(deep=True))
+    position_index_bytes = int(positions.index.memory_usage(deep=True))
+    return_projection_bytes = pandas_frame_payload_bytes(portfolio_returns)
+    return_timestamp_bytes = return_index_bytes + 8 * return_rows
+    return_sort_bytes = return_projection_bytes
+    position_projection_bytes = pandas_frame_payload_bytes(positions)
+    position_timestamp_bytes = position_index_bytes + 8 * position_rows
+    position_numeric_bytes = position_index_bytes + 3 * 8 * position_rows
+    position_group_bytes = position_index_bytes + 3 * 8 * position_rows
+    operation_bytes = (
+        return_projection_bytes
+        + return_timestamp_bytes
+        + return_sort_bytes
+        + position_projection_bytes
+        + position_timestamp_bytes
+        + position_numeric_bytes
+        + position_group_bytes
+    )
+    with ExitStack() as operation:
         if policy is not None:
-            summary_state.reservations.enter_context(
-                policy.reserve("research.portfolio.summary", next_bytes)
+            operation.enter_context(
+                policy.reserve(
+                    "research.portfolio.summary.update",
+                    operation_bytes,
+                )
             )
-    _update_position_period_summary(summary_state.position_stats, positions)
+        return_frame = _portfolio_return_summary_frame(portfolio_returns)
+        if not return_frame.empty:
+            if summary_state.return_spill is None:
+                summary_state.return_spill = _ResearchFrameSpill(
+                    "research.portfolio.summary",
+                    resource_policy=policy,
+                )
+            summary_state.return_spill.append(return_frame)
+        _update_position_period_summary(summary_state.position_stats, positions)
+        del return_frame
 
 
 def _portfolio_return_summary_frame(
@@ -657,20 +789,46 @@ def _portfolio_summary_outputs(
     try:
         portfolio_returns = _portfolio_returns_summary_frame(summary_state)
         policy = summary_state.resource_policy
-        if policy is not None and (
-            policy.reserved_memory_bytes
-            + 3 * pandas_frame_payload_bytes(portfolio_returns)
-            > policy.task_memory_budget_bytes
-        ):
-            raise ValueError("portfolio_summary_working_set_exceeds_task_memory_budget")
-        cumulative_returns = compute_cumulative_returns(portfolio_returns)
-        performance_summary = compute_performance_summary(
-            portfolio_returns,
-            cumulative_returns,
-        )
-        exposure_summary = _portfolio_exposure_summary(summary_state, portfolio_returns)
-        concentration = _portfolio_concentration_summary(summary_state)
-        period_breakdown = summarize_period_breakdown(portfolio_returns)
+        returns_bytes = pandas_frame_payload_bytes(portfolio_returns)
+        aggregation_state_bytes = len(portfolio_returns) * 8 * 8
+        summary_output_bound = returns_bytes + 64 * 1024
+        with ExitStack() as summary_reservation:
+            if policy is not None:
+                summary_reservation.enter_context(
+                    policy.reserve(
+                        "research.portfolio.summary.outputs",
+                        returns_bytes
+                        + aggregation_state_bytes
+                        + summary_output_bound,
+                    )
+                )
+            cumulative_returns = compute_cumulative_returns(portfolio_returns)
+            performance_summary = compute_performance_summary(
+                portfolio_returns,
+                cumulative_returns,
+            )
+            exposure_summary = _portfolio_exposure_summary(
+                summary_state,
+                portfolio_returns,
+            )
+            concentration = _portfolio_concentration_summary(summary_state)
+            period_breakdown = summarize_period_breakdown(portfolio_returns)
+            if (
+                sum(
+                    pandas_frame_payload_bytes(frame)
+                    for frame in (
+                        cumulative_returns,
+                        performance_summary,
+                        exposure_summary,
+                        concentration,
+                        period_breakdown,
+                    )
+                )
+                > summary_output_bound
+            ):
+                raise ValueError(
+                    "portfolio_summary_working_set_exceeds_task_memory_budget"
+                )
         return {
             "cumulative_returns": cumulative_returns,
             "performance_summary": performance_summary,
@@ -679,24 +837,40 @@ def _portfolio_summary_outputs(
             "period_breakdown": period_breakdown,
         }
     finally:
-        summary_state.reservations.close()
-        summary_state.return_parts.clear()
-        summary_state.return_bytes = 0
+        _close_portfolio_summary_spill(summary_state)
 
 
 def _portfolio_returns_summary_frame(
     summary_state: _PortfolioSummaryState,
 ) -> pd.DataFrame:
-    if not summary_state.return_parts:
+    spill = summary_state.return_spill
+    if spill is None or spill.row_count == 0:
         return _empty_summary_frame(RETURNS_COLUMNS)
-    frame = (
-        summary_state.return_parts[0]
-        if len(summary_state.return_parts) == 1
-        else pd.concat(summary_state.return_parts, ignore_index=True)
-    )
-    return frame.sort_values(["signal", "timestamp"], kind="mergesort").reset_index(
-        drop=True
-    )
+    frame = spill.materialize()
+    policy = summary_state.resource_policy
+    input_bytes = pandas_frame_payload_bytes(frame)
+    sorted_output_bound = input_bytes
+    with ExitStack() as sort_reservation:
+        if policy is not None:
+            sort_reservation.enter_context(
+                policy.reserve(
+                    "research.portfolio.summary.sort",
+                    input_bytes + sorted_output_bound,
+                )
+            )
+        output = frame.sort_values(
+            ["signal", "timestamp"],
+            kind="mergesort",
+        ).reset_index(drop=True)
+        if pandas_frame_payload_bytes(output) > sorted_output_bound:
+            raise ValueError("portfolio_summary_working_set_exceeds_task_memory_budget")
+        return output
+
+
+def _close_portfolio_summary_spill(summary_state: _PortfolioSummaryState) -> None:
+    if summary_state.return_spill is not None:
+        summary_state.return_spill.close()
+        summary_state.return_spill = None
 
 
 def _portfolio_exposure_summary(
@@ -785,21 +959,19 @@ def _combine_context_and_chunk(
     return pd.concat([context, chunk], ignore_index=True)
 
 
-def _timestamp_set(frame: pd.DataFrame) -> set[pd.Timestamp]:
-    _require_portfolio_frame_headroom(frame, multiplier=3)
+def _timestamp_set(frame: pd.DataFrame) -> pd.DatetimeIndex:
     timestamps = strict_timestamp_series(
         frame["timestamp"], error="invalid_portfolio_timestamp_values"
     )
-    return set(pd.Index(timestamps).unique())
+    return pd.DatetimeIndex(timestamps.unique()).sort_values()
 
 
 def _select_actual_timestamps(
     frame: pd.DataFrame,
-    actual_timestamps: set[pd.Timestamp],
+    actual_timestamps: pd.DatetimeIndex,
 ) -> pd.DataFrame:
     if frame.empty:
         return frame.copy()
-    _require_portfolio_frame_headroom(frame, multiplier=3)
     timestamps = strict_timestamp_series(
         frame["timestamp"], error="invalid_portfolio_timestamp_values"
     )
@@ -807,39 +979,11 @@ def _select_actual_timestamps(
 
 
 def _trailing_timestamp_context(frame: pd.DataFrame, *, periods: int) -> pd.DataFrame:
-    _require_portfolio_frame_headroom(frame, multiplier=3)
     timestamps = strict_timestamp_series(
         frame["timestamp"], error="invalid_portfolio_timestamp_values"
     )
-    trailing = pd.Index(timestamps.unique()).sort_values().tolist()[-periods:]
+    trailing = pd.DatetimeIndex(timestamps.unique()).sort_values()[-periods:]
     return frame.loc[timestamps.isin(trailing)].copy()
-
-
-def _require_portfolio_frame_headroom(
-    frame: pd.DataFrame,
-    *,
-    multiplier: int,
-) -> None:
-    policy = current_runtime_resource_policy()
-    if policy is not None and (
-        policy.reserved_memory_bytes + multiplier * pandas_frame_payload_bytes(frame)
-        > policy.task_memory_budget_bytes
-    ):
-        raise ValueError("portfolio_working_set_exceeds_task_memory_budget")
-
-
-def _require_portfolio_frames_headroom(
-    frames: tuple[pd.DataFrame, ...],
-    *,
-    multiplier: int,
-) -> None:
-    policy = current_runtime_resource_policy()
-    if policy is not None and (
-        policy.reserved_memory_bytes
-        + multiplier * sum(pandas_frame_payload_bytes(frame) for frame in frames)
-        > policy.task_memory_budget_bytes
-    ):
-        raise ValueError("portfolio_working_set_exceeds_task_memory_budget")
 
 
 def _empty_summary_frame(columns: Iterable[str]) -> pd.DataFrame:

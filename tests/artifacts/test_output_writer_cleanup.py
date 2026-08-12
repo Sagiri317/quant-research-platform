@@ -204,7 +204,7 @@ def test_prediction_writer_close_is_attempted_once(
     class Writer:
         close_calls = 0
 
-        def write_table(self, _table: object) -> None:
+        def write_table(self, _table: object, **_kwargs: object) -> None:
             pass
 
         def close(self) -> None:
@@ -249,7 +249,7 @@ def test_portfolio_writers_close_once_and_attempt_all(
             self.position = position
             self.close_calls = 0
 
-        def write_table(self, _table: object) -> None:
+        def write_table(self, _table: object, **_kwargs: object) -> None:
             pass
 
         def close(self) -> None:
@@ -342,7 +342,7 @@ def test_parquet_writers_close_once_without_replacing_body_primary(
             self.close_calls = 0
             self.write_calls = 0
 
-        def write_table(self, _table: object) -> None:
+        def write_table(self, _table: object, **_kwargs: object) -> None:
             self.write_calls += 1
 
         def close(self) -> None:
@@ -433,11 +433,12 @@ def test_report_parquet_writer_cleans_temp_on_failure(
 ) -> None:
     frame = pd.DataFrame({"value": [1]})
 
-    def fail_to_parquet(self, sink, **kwargs):  # noqa: ANN001
+    def fail_to_parquet(_table, sink, **kwargs):  # noqa: ANN001
+        del kwargs
         sink.write(b"temporary")
         raise RuntimeError("write failed")
 
-    monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_to_parquet)
+    monkeypatch.setattr(parquet_writers.pq, "write_table", fail_to_parquet)
 
     with pytest.raises(RuntimeError, match="write failed"):
         parquet_writers.write_parquet(
@@ -478,12 +479,12 @@ def test_report_parquet_writer_cleans_temp_on_control_flow_cancellation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    def cancel_to_parquet(self, sink, **kwargs):  # noqa: ANN001
-        del self, kwargs
+    def cancel_to_parquet(_table, sink, **kwargs):  # noqa: ANN001
+        del kwargs
         sink.write(b"temporary")
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(pd.DataFrame, "to_parquet", cancel_to_parquet)
+    monkeypatch.setattr(parquet_writers.pq, "write_table", cancel_to_parquet)
 
     with pytest.raises(KeyboardInterrupt):
         parquet_writers.write_parquet(
@@ -519,8 +520,8 @@ def test_artifact_parquet_cleanup_preserves_active_primary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        pd.DataFrame,
-        "to_parquet",
+        parquet_writers.pq,
+        "write_table",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(GeneratorExit()),
     )
     monkeypatch.setattr(
@@ -561,8 +562,8 @@ def test_parquet_cleanup_uses_shared_owned_scratch_removal(
     monkeypatch.setattr(scratch_owner, "remove_owned_scratch", remove)
     if writer_name == "write_parquet":
         monkeypatch.setattr(
-            pd.DataFrame,
-            "to_parquet",
+            parquet_writers.pq,
+            "write_table",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 RuntimeError("body_primary")
             ),

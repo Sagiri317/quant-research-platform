@@ -518,7 +518,10 @@ def test_writer_reserves_complete_fixed_owner_before_sqlite_or_input(
         explicit_cap_bytes=2048,
     )
 
-    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+    with pytest.raises(
+        ValueError,
+        match="dataset_working_set_exceeds_task_memory_budget",
+    ):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "fixed_owner_admission"),
             ForbiddenInput(),
@@ -867,14 +870,31 @@ def test_categorical_converter_rejects_nonnull_value_outside_declared_domain() -
         )
 
 
-def test_converter_enforces_actual_arrow_and_pandas_operation_headroom(
+def test_converter_rejects_before_pandas_allocation_when_bound_exceeds_headroom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     batch = pa.record_batch([pa.array([1])], names=["value"])
+    converted = False
+
+    def reject_conversion(_slice: pa.RecordBatch) -> pd.DataFrame:
+        nonlocal converted
+        converted = True
+        raise AssertionError("Pandas conversion ran before conservative admission")
+
     monkeypatch.setattr(
         dataset_reading,
-        "pandas_frame_payload_bytes",
-        lambda _frame: 512,
+        "_arrow_slice_to_pandas",
+        reject_conversion,
+    )
+    row_bytes, fixed_bytes = (
+        dataset_physical.record_batch_decoded_working_set_bounds(batch)
+    )
+    conversion_bound = (
+        fixed_bytes
+        + dataset_reading._PANDAS_FRAME_FIXED_BYTES
+        + row_bytes
+        + len(batch.schema.names) * dataset_reading._PANDAS_OBJECT_CELL_BYTES
+        + dataset_reading._PANDAS_INDEX_BYTES_PER_ROW
     )
 
     with pytest.raises(
@@ -885,9 +905,12 @@ def test_converter_enforces_actual_arrow_and_pandas_operation_headroom(
             dataset_reading._arrow_batch_to_bounded_pandas(
                 batch,
                 target_chunk_bytes=4_096,
-                operation_headroom_bytes=batch.nbytes + 511,
+                operation_headroom_bytes=(
+                    batch.get_total_buffer_size() + conversion_bound - 1
+                ),
             )
         )
+    assert not converted
 
 
 @pytest.mark.parametrize(
@@ -913,8 +936,21 @@ def test_converter_accounts_for_parent_buffers_and_previous_output(
     )
     output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
     target_chunk_bytes = max(output_bytes)
+    row_bytes, fixed_bytes = (
+        dataset_physical.record_batch_decoded_working_set_bounds(batch)
+    )
+    conversion_row_bytes = (
+        row_bytes
+        + len(batch.schema.names) * dataset_reading._PANDAS_OBJECT_CELL_BYTES
+        + dataset_reading._PANDAS_INDEX_BYTES_PER_ROW
+    )
     operation_headroom_bytes = (
-        batch.get_total_buffer_size() + sum(output_bytes) + headroom_delta
+        batch.get_total_buffer_size()
+        + fixed_bytes
+        + dataset_reading._PANDAS_FRAME_FIXED_BYTES
+        + conversion_row_bytes
+        + output_bytes[0]
+        + headroom_delta
     )
     observed_slices: list[tuple[str, int]] = []
 
@@ -951,15 +987,9 @@ def test_converter_accounts_for_parent_buffers_and_previous_output(
     ]
 
 
-@pytest.mark.parametrize(
-    ("headroom_delta", "should_fail"),
-    ((0, False), (-1, True)),
-)
-def test_declared_member_accounts_for_previous_output_across_parent_batches(
+def test_declared_member_preserves_output_across_parent_batches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    headroom_delta: int,
-    should_fail: bool,
 ) -> None:
     path = tmp_path / "part.parquet"
     batches = (
@@ -969,12 +999,6 @@ def test_declared_member_accounts_for_previous_output_across_parent_batches(
     expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
     output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
     target_chunk_bytes = max(output_bytes)
-    exact_headroom = max(
-        batch.get_total_buffer_size()
-        + output_bytes[index]
-        + (output_bytes[index - 1] if index else 0)
-        for index, batch in enumerate(batches)
-    )
     monkeypatch.setattr(
         dataset_reading,
         "iter_dataset_part_batches",
@@ -984,31 +1008,17 @@ def test_declared_member_accounts_for_previous_output_across_parent_batches(
     converted = dataset_reading.iter_declared_parquet_member_batches(
         path,
         target_chunk_bytes=target_chunk_bytes,
-        operation_headroom_bytes=exact_headroom + headroom_delta,
+        operation_headroom_bytes=64 * 1024,
         expected_identity=SimpleNamespace(),
     )
-    if should_fail:
-        with pytest.raises(
-            ValueError,
-            match="dataset_working_set_exceeds_task_memory_budget",
-        ):
-            tuple(converted)
-        return
-
     output = tuple(converted)
     for observed, expected_frame in zip(output, expected, strict=True):
         pd.testing.assert_frame_equal(observed, expected_frame)
 
 
-@pytest.mark.parametrize(
-    ("headroom_delta", "should_fail"),
-    ((0, False), (-1, True)),
-)
-def test_dataset_file_batches_account_for_previous_output_across_files(
+def test_dataset_file_batches_preserve_output_across_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    headroom_delta: int,
-    should_fail: bool,
 ) -> None:
     paths = (tmp_path / "part-0.parquet", tmp_path / "part-1.parquet")
     batches = {
@@ -1018,12 +1028,6 @@ def test_dataset_file_batches_account_for_previous_output_across_files(
     expected = tuple(batch.to_pandas(use_threads=False) for batch in batches.values())
     output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
     target_chunk_bytes = max(output_bytes)
-    exact_headroom = max(
-        batches[path].get_total_buffer_size()
-        + output_bytes[index]
-        + (output_bytes[index - 1] if index else 0)
-        for index, path in enumerate(paths)
-    )
     monkeypatch.setattr(
         dataset_reading,
         "iter_dataset_part_batches",
@@ -1043,16 +1047,8 @@ def test_dataset_file_batches_account_for_previous_output_across_files(
         context,
         columns=("value",),
         target_chunk_bytes=target_chunk_bytes,
-        operation_headroom_bytes=exact_headroom + headroom_delta,
+        operation_headroom_bytes=64 * 1024,
     )
-    if should_fail:
-        with pytest.raises(
-            ValueError,
-            match="dataset_working_set_exceeds_task_memory_budget",
-        ):
-            tuple(converted)
-        return
-
     output = tuple(converted)
     assert tuple(path for path, _ in output) == paths
     for (_, observed), expected_frame in zip(output, expected, strict=True):
@@ -1110,7 +1106,7 @@ def test_dataset_file_batches_do_not_repeat_explicitly_composed_reservations(
     batch = pa.record_batch([pa.array([1], type=pa.int64())], names=["value"])
     expected = batch.to_pandas(use_threads=False)
     output_bytes = pandas_frame_payload_bytes(expected)
-    exact_headroom = batch.get_total_buffer_size() + output_bytes
+    composed_headroom = 64 * 1024
     policy = _issued_test_policy()
     monkeypatch.setattr(
         dataset_reading,
@@ -1130,14 +1126,14 @@ def test_dataset_file_batches_do_not_repeat_explicitly_composed_reservations(
     with runtime_resource_policy_scope(policy):
         with policy.reserve(
             "storage.dataset.write",
-            policy.task_memory_budget_bytes - exact_headroom,
+            policy.task_memory_budget_bytes - composed_headroom,
         ):
             output = tuple(
                 dataset_reading.iter_dataset_file_batches(
                     context,
                     columns=("value",),
                     target_chunk_bytes=output_bytes,
-                    operation_headroom_bytes=exact_headroom,
+                    operation_headroom_bytes=composed_headroom,
                 )
             )
 
@@ -1204,12 +1200,6 @@ def test_dataset_file_batches_do_not_double_count_reserved_previous_output(
     )
     expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
     output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
-    exact_headroom = max(
-        batch.get_total_buffer_size()
-        + output_bytes[index]
-        + (output_bytes[index - 1] if index else 0)
-        for index, batch in enumerate(batches)
-    )
     policy = _issued_test_policy()
     monkeypatch.setattr(
         dataset_reading,
@@ -1229,7 +1219,7 @@ def test_dataset_file_batches_do_not_double_count_reserved_previous_output(
         context,
         columns=("value",),
         target_chunk_bytes=max(output_bytes),
-        operation_headroom_bytes=exact_headroom,
+        operation_headroom_bytes=64 * 1024,
     )
 
     with dataset_reading.closing_dataset_iterator(converted):
@@ -1255,12 +1245,6 @@ def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
     )
     expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
     output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
-    exact_headroom = max(
-        batch.get_total_buffer_size()
-        + output_bytes[index]
-        + (output_bytes[index - 1] if index else 0)
-        for index, batch in enumerate(batches)
-    )
     policy = _issued_test_policy()
     monkeypatch.setattr(
         dataset_reading,
@@ -1295,15 +1279,18 @@ def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
         context,
         columns=("value",),
         target_chunk_bytes=max(output_bytes),
-        operation_headroom_bytes=exact_headroom,
     )
 
     with dataset_reading.closing_dataset_iterator(converted):
         next(converted)
         with runtime_resource_policy_scope(policy):
+            remaining = (
+                policy.task_memory_budget_bytes - policy.reserved_memory_bytes
+            )
+            assert remaining > 0
             with policy.reserve(
                 "research.time.pending",
-                output_bytes[0] + 1,
+                remaining,
             ):
                 with pytest.raises(
                     ValueError,
@@ -1326,8 +1313,6 @@ def test_dataset_file_batches_admit_before_each_physical_arrow_pull(
     )
     expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
     output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
-    arrow_bytes = max(batch.get_total_buffer_size() for batch in batches)
-    exact_headroom = arrow_bytes + sum(output_bytes)
     policy = _issued_test_policy()
     real_parquet_file = dataset_physical.pq.ParquetFile
     pull_count = 0
@@ -1373,15 +1358,18 @@ def test_dataset_file_batches_admit_before_each_physical_arrow_pull(
         context,
         columns=("value",),
         target_chunk_bytes=max(output_bytes),
-        operation_headroom_bytes=exact_headroom,
     )
 
     with dataset_reading.closing_dataset_iterator(converted):
         next(converted)
         with runtime_resource_policy_scope(policy):
+            remaining = (
+                policy.task_memory_budget_bytes - policy.reserved_memory_bytes
+            )
+            assert remaining > 0
             with policy.reserve(
                 "research.time.pending",
-                sum(output_bytes) + 1,
+                remaining,
             ):
                 with pytest.raises(
                     ValueError,
@@ -1426,6 +1414,51 @@ def test_declared_variable_width_member_decodes_multirow_batches(
     assert sum(len(frame) for frame in frames) == row_count
     assert conversions < row_count // 10
     assert all(pandas_frame_payload_bytes(frame) <= 64 * 1024 for frame in frames)
+
+
+def test_variable_width_decode_rejects_before_first_arrow_pull(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "skewed-variable-width.parquet"
+    values = ["x"] * 1023 + ["y" * 1024**2]
+    pq.write_table(pa.table({"value": values}), path)
+    real_parquet_file = dataset_physical.pq.ParquetFile
+    pulled = False
+
+    class ObservedParquetFile:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            self._inner = real_parquet_file(*args, **kwargs)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+        def iter_batches(self, **kwargs):  # noqa: ANN003, ANN202
+            nonlocal pulled
+            for batch in self._inner.iter_batches(**kwargs):
+                pulled = True
+                raise AssertionError("Arrow decode ran before conservative admission")
+                yield batch
+
+        def close(self) -> None:
+            self._inner.close()
+
+    monkeypatch.setattr(dataset_physical.pq, "ParquetFile", ObservedParquetFile)
+
+    with pytest.raises(
+        storage_errors.DatasetReadCapacityExceeded,
+        match="dataset_working_set_exceeds_task_memory_budget",
+    ):
+        list(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=dataset_physical.dataset_file_identity(path),
+                target_chunk_bytes=8 * 1024,
+                operation_headroom_bytes=64 * 1024,
+            )
+        )
+
+    assert not pulled
 
 
 def test_categorical_converter_releases_temporary_codes_after_publication(
@@ -1473,7 +1506,7 @@ def test_categorical_converter_releases_temporary_codes_after_publication(
     ),
     ids=("uniform", "skewed"),
 )
-def test_arrow_batch_converter_calibrates_without_duplicate_observer_effects(
+def test_arrow_batch_converter_preflights_without_duplicate_observer_effects(
     values: tuple[str, ...],
     target_chunk_bytes: int,
     monkeypatch: pytest.MonkeyPatch,
@@ -1518,93 +1551,6 @@ def test_arrow_batch_converter_calibrates_without_duplicate_observer_effects(
     assert all(
         pandas_frame_payload_bytes(frame) <= target_chunk_bytes for frame in output
     )
-
-
-@pytest.mark.parametrize(
-    ("oversized_stage", "retry_conversion_count"),
-    (("raw", 3), ("override", 4)),
-)
-def test_arrow_batch_converter_releases_rejected_frames_before_retry(
-    monkeypatch: pytest.MonkeyPatch,
-    oversized_stage: str,
-    retry_conversion_count: int,
-) -> None:
-    row_count = 512
-    batch = pa.record_batch(
-        [pa.array(range(row_count)), pa.array(["x"] * row_count)],
-        names=["row_id", "value"],
-    )
-    raw_refs: list[weakref.ReferenceType[pd.DataFrame]] = []
-    output_refs: list[weakref.ReferenceType[pd.DataFrame]] = []
-    raw_alive_before_conversion: list[int] = []
-    output_alive_before_conversion: list[int] = []
-    original_conversion = dataset_reading._arrow_slice_to_pandas
-    original_astype = pd.DataFrame.astype
-
-    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
-        raw_alive_before_conversion.append(
-            sum(reference() is not None for reference in raw_refs)
-        )
-        output_alive_before_conversion.append(
-            sum(reference() is not None for reference in output_refs)
-        )
-        frame = original_conversion(arrow_slice)
-        raw_refs.append(weakref.ref(frame))
-        return frame
-
-    def record_astype(
-        frame: pd.DataFrame,
-        *args: object,
-        **kwargs: object,
-    ) -> pd.DataFrame:
-        output = original_astype(frame, *args, **kwargs)
-        output_refs.append(weakref.ref(output))
-        return output
-
-    def staged_payload_bytes(frame: pd.DataFrame) -> int:
-        per_row = 100
-        if len(frame) > 1 and (
-            oversized_stage == "raw"
-            or any(reference() is frame for reference in output_refs)
-        ):
-            per_row = 200
-        return len(frame) * per_row
-
-    monkeypatch.setattr(
-        dataset_reading,
-        "_arrow_slice_to_pandas",
-        record_conversion,
-    )
-    monkeypatch.setattr(
-        dataset_reading,
-        "pandas_frame_payload_bytes",
-        staged_payload_bytes,
-    )
-    if oversized_stage == "override":
-        monkeypatch.setattr(pd.DataFrame, "astype", record_astype)
-
-    chunks = tuple(
-        dataset_reading._arrow_batch_to_bounded_pandas(
-            batch,
-            target_chunk_bytes=10_000,
-            dtype_overrides={"value": "string"}
-            if oversized_stage == "override"
-            else None,
-        )
-    )
-
-    assert (
-        raw_alive_before_conversion[:retry_conversion_count]
-        == [0] * retry_conversion_count
-    )
-    if oversized_stage == "override":
-        assert (
-            output_alive_before_conversion[:retry_conversion_count]
-            == [0] * retry_conversion_count
-        )
-    assert len(raw_alive_before_conversion) < row_count // 10
-    assert len(chunks) < row_count // 10
-    assert sum(len(frame) for frame in chunks) == row_count
 
 
 def test_chunk_iterator_verifies_session_on_close_empty_and_error(
@@ -1696,7 +1642,7 @@ def test_chunk_iterator_verifies_session_on_close_empty_and_error(
     ],
     ids=["null", "fixed-binary", "decimal", "date"],
 )
-def test_wide_single_row_fails_after_actual_pandas_payload_check(
+def test_wide_single_row_can_exceed_the_soft_chunk_target(
     arrays: list[pa.Array],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1717,15 +1663,16 @@ def test_wide_single_row_fails_after_actual_pandas_payload_check(
         record_conversion,
     )
 
-    with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
-        tuple(
-            dataset_reading._arrow_batch_to_bounded_pandas(
-                batch,
-                target_chunk_bytes=4_096,
-            )
+    chunks = tuple(
+        dataset_reading._arrow_batch_to_bounded_pandas(
+            batch,
+            target_chunk_bytes=4_096,
         )
+    )
 
     assert calls["count"] == 1
+    assert len(chunks) == 1
+    pd.testing.assert_frame_equal(chunks[0], batch.to_pandas(use_threads=False))
 
 
 def test_large_map_row_uses_only_approved_pandas_payload_diagnostic(
@@ -2982,7 +2929,7 @@ def test_internal_physical_reader_uses_bounded_record_batches(
     pd.testing.assert_frame_equal(projected, expected_projected)
 
 
-def test_internal_physical_reader_rejects_single_row_over_target(
+def test_internal_physical_reader_allows_single_row_over_soft_target(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(
@@ -3011,13 +2958,15 @@ def test_internal_physical_reader_rejects_single_row_over_target(
         columns=None,
         time_window=None,
     ) as context:
-        with pytest.raises(ValueError, match="dataset_row_exceeds_target_chunk_bytes"):
-            list(
-                dataset_reading.iter_dataset_chunks(
-                    context,
-                    target_chunk_bytes=512,
-                )
+        chunks = list(
+            dataset_reading.iter_dataset_chunks(
+                context,
+                target_chunk_bytes=512,
             )
+        )
+    expected = frame.copy()
+    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
+    pd.testing.assert_frame_equal(pd.concat(chunks, ignore_index=True), expected)
 
 
 def test_bounded_dataset_read_path_never_calls_full_file_pandas_reader(
@@ -5442,6 +5391,7 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
     )
     reader_headrooms: list[int] = []
     payload_targets: list[int] = []
+    comparison_reservations: list[int] = []
     value_columns: list[tuple[str, ...]] = []
     iter_batches = dataset_comparison.iter_dataset_file_batches
     add_table = dataset_comparison.ExactPrimaryKeyIndex.add_comparison_table
@@ -5452,6 +5402,7 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
 
     def observed_add(self: object, *args: object, **kwargs: object) -> int:
         payload_targets.append(kwargs["payload_target_bytes"])  # type: ignore[arg-type]
+        comparison_reservations.append(policy.reserved_memory_bytes)
         value_columns.append(tuple(kwargs["value_columns"]))  # type: ignore[arg-type]
         return add_table(self, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -5483,12 +5434,18 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
     assert comparison.status == "MATCH"
     assert payload_targets
     assert len(reader_headrooms) == 2
-    assert len(set(payload_targets)) == 1
-    payload_target = payload_targets[0]
     assert all(
-        payload_target <= reader - session_retained_bytes <= payload_target + 2
-        for reader in reader_headrooms
+        0 < target < policy.task_memory_budget_bytes for target in payload_targets
     )
+    assert all(
+        reserved >= target
+        for reserved, target in zip(
+            comparison_reservations,
+            payload_targets,
+            strict=True,
+        )
+    )
+    assert all(reader > session_retained_bytes for reader in reader_headrooms)
     assert value_columns and set(value_columns) == {("value",)}
 
 
@@ -6302,26 +6259,6 @@ def test_writer_rejects_persisted_category_outside_declared_domain(
         )
 
 
-def test_writer_rejects_indivisible_categorical_identity_over_payload_target(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "oversized_category")
-    frame = make_default_dataset_frame().iloc[:1].copy()
-    value = "x" * (1024**2 + 1)
-    frame["asset_id"] = pd.Categorical([value], categories=[value])
-    policy = _writer_test_policy()
-    with pytest.raises(
-        ValueError,
-        match="dataset_categorical_value_exceeds_payload_target",
-    ):
-        dataset_writing.write_dataset(
-            root,
-            frame,
-            spec=make_processed_dataset_spec("oversized_category"),
-            resource_policy=policy,
-        )
-
-
 def test_full_inspection_rejects_forged_persisted_date_summary(
     tmp_path: Path,
 ) -> None:
@@ -6521,7 +6458,7 @@ def test_dataset_session_tuple_in_filter_empty_result_preserves_projected_dtypes
     }
 
 
-def test_categorical_empty_result_enforces_typed_overlap_capacity(
+def test_categorical_empty_result_can_exceed_the_soft_chunk_target(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "categorical_empty_capacity")
@@ -6539,11 +6476,12 @@ def test_categorical_empty_result_enforces_typed_overlap_capacity(
         time_window=None,
         row_filters=(("asset_id", "in", ("missing",)),),
     ) as session:
-        with pytest.raises(
-            storage_errors.DatasetReadCapacityExceeded,
-            match="dataset_row_exceeds_target_chunk_bytes",
-        ):
-            list(dataset_reading.iter_dataset_chunks(session, target_chunk_bytes=1))
+        chunks = list(
+            dataset_reading.iter_dataset_chunks(session, target_chunk_bytes=1)
+        )
+    assert len(chunks) == 1
+    assert chunks[0].empty
+    assert isinstance(chunks[0]["value"].dtype, pd.CategoricalDtype)
 
 
 def test_dataset_session_tuple_in_filter_prunes_nonmatching_row_groups(
@@ -6701,7 +6639,7 @@ def test_dataset_filter_capacity_uses_the_typed_storage_signal(tmp_path: Path) -
 
     with pytest.raises(
         capacity_error,
-        match="dataset_filter_values_exceed_payload_target",
+        match="dataset_filter_values_exceed_task_memory_budget",
     ):
         with dataset_reading.open_dataset_session(
             root,
@@ -6764,14 +6702,14 @@ def test_dataset_filter_preflight_rejects_before_bulk_arrow_array(
     assert scalar_called is False
 
 
-def test_dataset_filter_preparation_rejects_pointer_overlap_before_sort_or_arrow(
+def test_dataset_filter_preparation_subtracts_shared_reservations_before_sort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
-    values = tuple(range(60_000))
+    values = (1, 2)
 
     def reject_late_work(*_args, **_kwargs):
         raise AssertionError("late filter preparation work ran before task admission")
@@ -6779,9 +6717,13 @@ def test_dataset_filter_preparation_rejects_pointer_overlap_before_sort_or_arrow
     monkeypatch.setattr(builtins, "sorted", reject_late_work)
     monkeypatch.setattr(dataset_reading.pa, "array", reject_late_work)
 
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="dataset_filter_values_exceed_task_memory_budget",
+    with (
+        runtime_resource_policy_scope(policy),
+        policy.reserve("outer", policy.task_memory_budget_bytes - 1),
+        pytest.raises(
+            storage_errors.DatasetReadCapacityExceeded,
+            match="dataset_filter_values_exceed_task_memory_budget",
+        ),
     ):
         dataset_reading._prepare_in_filter(
             pa.field("value", pa.int64()),
@@ -6927,7 +6869,7 @@ def test_persisted_arrow_time_filters_support_equal_and_membership(
             path,
             expected_identity=dataset_physical.dataset_file_identity(path),
             target_chunk_bytes=1024,
-            operation_headroom_bytes=4096,
+            operation_headroom_bytes=1024**2,
             parquet_filters=[("value", "==", values[1])],
         )
     )
@@ -6936,7 +6878,7 @@ def test_persisted_arrow_time_filters_support_equal_and_membership(
             path,
             expected_identity=dataset_physical.dataset_file_identity(path),
             target_chunk_bytes=1024,
-            operation_headroom_bytes=4096,
+            operation_headroom_bytes=1024**2,
             parquet_filters=[("value", "in", prepared)],
         )
     )
@@ -7732,68 +7674,6 @@ def test_unordered_decimal_zero_category_has_one_canonical_domain(
     assert materialized.tolist() == [Decimal("0"), Decimal("0")]
 
 
-@pytest.mark.parametrize("ordered", (False, True))
-def test_writer_stops_single_category_domain_before_descriptor_tail(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ordered: bool,
-) -> None:
-    root = make_dataset_artifact_root(
-        tmp_path,
-        f"single_domain_early_{ordered}",
-    )
-    categories = [f"category-{index:05d}-" + "x" * 512 for index in range(5_000)]
-    frame = pd.DataFrame(
-        {
-            "market_id": ["a_share"],
-            "asset_id": pd.Categorical(
-                [categories[0]],
-                categories=categories,
-                ordered=ordered,
-            ),
-            "timestamp": [pd.Timestamp("2026-01-01")],
-            "value": [1.0],
-        }
-    )
-    conversions = 0
-    original_value_payload = dataset_schema._typed_category_value_payload
-
-    def guarded_value_payload(value):  # noqa: ANN001
-        nonlocal conversions
-        conversions += 1
-        if conversions == 6_000:
-            raise AssertionError("single_category_domain_tail_materialized")
-        return original_value_payload(value)
-
-    monkeypatch.setattr(
-        dataset_schema,
-        "_typed_category_value_payload",
-        guarded_value_payload,
-    )
-    monkeypatch.setattr(
-        dataset_writing,
-        "logical_dtype_payload_from_frame",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("full_category_descriptor_materialized_before_gate")
-        ),
-    )
-    policy = _writer_test_policy()
-
-    with pytest.raises(
-        ValueError,
-        match="dataset_logical_dtype_metadata_exceeds_payload_target",
-    ):
-        dataset_writing.write_dataset(
-            root,
-            frame,
-            spec=make_processed_dataset_spec(f"single_domain_early_{ordered}"),
-            resource_policy=policy,
-        )
-    assert conversions < 6_000
-    assert conversions < len(categories) * 2
-    assert not root.exists()
-
-
 @pytest.mark.parametrize(
     "series",
     (
@@ -7979,72 +7859,6 @@ def test_writer_retains_one_incremental_logical_dtype_plan(
 
     assert retained_column_counts
     assert set(retained_column_counts) == {len(base.columns)}
-
-
-def test_writer_rejects_cumulative_logical_dtype_metadata_over_target(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "category_metadata_bound")
-    chunks = []
-    for chunk_index in range(24):
-        categories = [
-            f"category-{chunk_index:02d}-{index:04d}-" + "x" * 48
-            for index in range(1_000)
-        ]
-        chunks.append(
-            pd.DataFrame(
-                {
-                    "market_id": ["a_share"],
-                    "asset_id": pd.Categorical(
-                        [categories[0]],
-                        categories=categories,
-                    ),
-                    "timestamp": [pd.Timestamp("2026-01-01")],
-                    "value": [float(chunk_index)],
-                }
-            )
-        )
-    policy = _writer_test_policy()
-    stream_calls = 0
-    streamed_values = 0
-    original_values = dataset_writing.ExactPrimaryKeyIndex.identity_payload_values
-
-    def guarded_values(self, *, namespace):  # noqa: ANN001
-        nonlocal stream_calls, streamed_values
-        stream_calls += 1
-        if stream_calls > 1:
-            raise AssertionError("category_domain_materialized_after_failed_gate")
-        source = original_values(self, namespace=namespace)
-        try:
-            for raw in source:
-                streamed_values += 1
-                if streamed_values == 15_000:
-                    raise AssertionError("category_domain_tail_materialized")
-                yield raw
-        finally:
-            source.close()
-
-    monkeypatch.setattr(
-        dataset_writing.ExactPrimaryKeyIndex,
-        "identity_payload_values",
-        guarded_values,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="dataset_logical_dtype_metadata_exceeds_payload_target",
-    ):
-        dataset_writing.write_dataset(
-            root,
-            chunks,
-            spec=make_processed_dataset_spec("category_metadata_bound"),
-            resource_policy=policy,
-        )
-    assert stream_calls == 1
-    assert streamed_values < 15_000
-    assert streamed_values < 24_000
-    assert not root.exists()
 
 
 def test_unordered_category_domain_uses_live_exact_index_namespace(
@@ -8651,22 +8465,19 @@ def test_physical_owner_releases_raw_batch_before_bounded_yield(
             [pa.array(raw_batch.column(0).to_pylist())], names=["value"]
         )
 
-    def require_release(batch, *, target_chunk_bytes):  # noqa: ANN001, ARG001
-        assert raw_reference is not None and raw_reference() is None
-        yield batch
-
     monkeypatch.setattr(dataset_physical, "_filter_arrow_batch", replace_raw)
-    monkeypatch.setattr(dataset_physical, "_bounded_arrow_batches", require_release)
 
-    batches = list(
-        dataset_physical.iter_dataset_part_batches(
+    batches = dataset_physical.iter_dataset_part_batches(
             path,
             expected_identity=dataset_physical.dataset_file_identity(path),
             target_chunk_bytes=1024,
         )
-    )
-
-    assert batches[0].column(0).to_pylist() == [1, 2]
+    try:
+        first = next(batches)
+        assert raw_reference is not None and raw_reference() is None
+        assert first.column(0).to_pylist() == [1, 2]
+    finally:
+        batches.close()
 
 
 @pytest.mark.parametrize(
@@ -8870,7 +8681,7 @@ def test_writer_rejects_before_pandas_conversion_overlap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = _writer_test_policy(working_headroom_bytes=250_000)
+    policy = _writer_test_policy(working_headroom_bytes=200_000)
     monkeypatch.setattr(
         dataset_writing,
         "pandas_frame_payload_bytes",
@@ -8885,10 +8696,7 @@ def test_writer_rejects_before_pandas_conversion_overlap(
 
     monkeypatch.setattr(dataset_writing._WriteStats, "prepare_frame", forbid_prepare)
 
-    with pytest.raises(
-        ValueError,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
+    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "writer_conversion_admission"),
             make_default_dataset_frame(),
@@ -8919,11 +8727,12 @@ def test_writer_rejects_timestamp_prepare_before_large_temporary_graph(
             target_chunk_bytes=target_chunk_bytes,
         )
     )
-    current_threshold = pandas_frame_payload_bytes(frame) + 2 * (
-        pandas_frame_payload_bytes(bounded)
+    current_threshold = (
+        pandas_frame_payload_bytes(frame)
+        + pandas_frame_payload_bytes(bounded)
+        + len(bounded) * dataset_writing._TIMESTAMP_PREPARATION_BYTES_PER_ROW
     )
-    policy = _writer_test_policy(working_headroom_bytes=current_threshold)
-    assert policy.payload_target_bytes == target_chunk_bytes
+    policy = _writer_test_policy(working_headroom_bytes=current_threshold - 1)
     spec = replace(
         make_processed_dataset_spec("writer_timestamp_admission"),
         column_roles={"timestamp": ColumnRole.TIMESTAMP},
@@ -8942,10 +8751,7 @@ def test_writer_rejects_timestamp_prepare_before_large_temporary_graph(
         forbid_timestamp_conversion,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
+    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(
                 tmp_path,
@@ -9016,10 +8822,7 @@ def test_writer_enforces_task_wide_copy_and_arrow_headroom(tmp_path: Path) -> No
         }
     )
     policy = _writer_test_policy()
-    with pytest.raises(
-        ValueError,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
+    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "writer_task_headroom"),
             frame,
@@ -9032,7 +8835,7 @@ def test_writer_enforces_task_wide_copy_and_arrow_headroom(tmp_path: Path) -> No
     "variant",
     ("normal", "empty", "override"),
 )
-def test_writer_passes_payload_target_and_actual_headroom_to_persisted_readback(
+def test_writer_passes_soft_target_and_live_headroom_to_persisted_readback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     variant: str,
@@ -9045,9 +8848,7 @@ def test_writer_passes_payload_target_and_actual_headroom_to_persisted_readback(
     policy = _writer_test_policy()
     observed_targets: list[int] = []
     observed_operation_headroom: list[int] = []
-    observed_headroom: list[int] = []
     original = dataset_writing.iter_declared_parquet_member_batches
-    require_headroom = dataset_writing._require_writer_headroom
 
     def record_target(  # noqa: ANN002, ANN003
         *args,
@@ -9070,17 +8871,6 @@ def test_writer_passes_payload_target_and_actual_headroom_to_persisted_readback(
         record_target,
     )
 
-    def record_headroom(*args, **kwargs):  # noqa: ANN002, ANN003
-        result = require_headroom(*args, **kwargs)
-        if "arrow_bytes" in kwargs:
-            observed_headroom.append(result)
-        return result
-
-    monkeypatch.setattr(
-        dataset_writing,
-        "_require_writer_headroom",
-        record_headroom,
-    )
     root = make_dataset_artifact_root(tmp_path, f"writer_readback_{variant}")
 
     dataset_writing.write_dataset(
@@ -9091,9 +8881,8 @@ def test_writer_passes_payload_target_and_actual_headroom_to_persisted_readback(
     )
 
     assert observed_targets
-    assert observed_headroom
     assert observed_targets[-1] == policy.payload_target_bytes
-    assert observed_operation_headroom[-1] in observed_headroom
+    assert 0 < observed_operation_headroom[-1] < policy.task_memory_budget_bytes
     persisted = read_dataset(root)
     assert tuple(persisted.columns) == tuple(frame.columns)
     assert len(persisted) == len(frame)
@@ -9826,10 +9615,7 @@ def test_private_writer_envelope_reserves_upstream_retained_payload(
         policy.task_memory_budget_bytes,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
+    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "retained_publication"),
             iter((envelope,)),

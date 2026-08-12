@@ -20,7 +20,6 @@ from quant_research_platform.artifacts._output_manifest import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
-    pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
@@ -28,6 +27,7 @@ from quant_research_platform.storage._dataset_paths import require_unaliased_pat
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
     dataset_file_identity,
+    parquet_decoded_working_set_bounds,
 )
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
 
@@ -140,29 +140,38 @@ class _PredictionLookup:
         self.resource_policy = resource_policy
         self.row_count = 0
 
-    def add_table(self, table: pa.Table) -> None:
+    def add_table(self, table: pa.Table, *, payload_headroom_bytes: int) -> None:
         duplicates = self._index.add_float_value_table(
             table,
             namespace="prediction",
             value_column=self.prediction_column,
-            payload_target_bytes=self.resource_policy.payload_target_bytes,
+            payload_target_bytes=payload_headroom_bytes,
         )
         if duplicates:
             raise ValueError("duplicate_persisted_prediction_keys")
         self.row_count += table.num_rows
 
+    @contextmanager
     def values_for_frame(
         self,
         frame: pd.DataFrame,
         *,
         mark_matched: bool,
-    ) -> tuple[Sequence[float], bytearray]:
+    ) -> Iterator[tuple[Sequence[float], bytearray]]:
         if tuple(column for column in self.primary_key if column not in frame.columns):
             raise ValueError("persisted_prediction_join_key_invalid")
-        frame_bytes = pandas_frame_payload_bytes(frame)
+        row_count = len(frame)
+        index_bytes = int(frame.index.memory_usage(deep=True))
+        key_frame_bytes = index_bytes + sum(
+            int(frame[column].memory_usage(index=False, deep=True))
+            for column in self.primary_key
+        )
+        key_arrow_bytes = key_frame_bytes + 9 * row_count * len(self.primary_key)
+        lookup_state_bytes = 9 * row_count
+        operation_bytes = key_frame_bytes + key_arrow_bytes + lookup_state_bytes
         with self.resource_policy.reserve(
             "artifacts.prediction.lookup.batch",
-            3 * frame_bytes + 9 * len(frame),
+            operation_bytes,
         ):
             table = pa.Table.from_pandas(
                 frame.loc[:, list(self.primary_key)],
@@ -172,9 +181,9 @@ class _PredictionLookup:
                 table,
                 source_namespace="prediction",
                 matched_namespace="prediction-matched" if mark_matched else None,
-                payload_target_bytes=self.resource_policy.payload_target_bytes,
+                payload_target_bytes=max(1, operation_bytes),
             )
-        return values, found
+            yield values, found
 
     def coverage_counts(self) -> tuple[int, int]:
         return self._index.difference_counts(
@@ -231,8 +240,7 @@ def _read_prediction_output_bundle(
             stack.enter_context(
                 policy.reserve(
                     "artifacts.prediction.lookup",
-                    key_index.retained_memory_bytes
-                    + max(64 * 1024, policy.payload_target_bytes // 8),
+                    key_index.retained_memory_bytes,
                 )
             )
             stack.enter_context(key_index)
@@ -256,15 +264,26 @@ def _read_prediction_output_bundle(
                 )
             ):
                 raise ValueError("persisted_prediction_metadata_mismatch")
+            decoded_row_bytes, decode_fixed_bytes = (
+                parquet_decoded_working_set_bounds(parquet, expected_columns)
+            )
+            filter_row_bytes = 0 if time_window is None else decoded_row_bytes + 3
+            batch_row_bytes = decoded_row_bytes + filter_row_bytes
+            batch_headroom = (
+                policy.task_memory_budget_bytes - policy.reserved_memory_bytes
+            )
+            if decode_fixed_bytes + batch_row_bytes > batch_headroom:
+                raise MemoryError("runtime_memory_budget_exceeded")
             batch_size = max(
                 1,
-                min(65_536, policy.payload_target_bytes // 4096),
+                min(65_536, (batch_headroom - decode_fixed_bytes) // batch_row_bytes),
             )
+            batch_working_bytes = decode_fixed_bytes + batch_size * batch_row_bytes
             batches = iter(parquet.iter_batches(batch_size=batch_size))
             while True:
                 with policy.reserve(
                     "artifacts.prediction.read.batch",
-                    policy.payload_target_bytes,
+                    batch_working_bytes,
                 ):
                     try:
                         batch = next(batches)
@@ -292,7 +311,7 @@ def _read_prediction_output_bundle(
                         table,
                         namespace="prediction-bundle-validation",
                         value_column=prediction_column,
-                        payload_target_bytes=policy.payload_target_bytes,
+                        payload_target_bytes=batch_working_bytes,
                     )
                     if duplicates:
                         raise ValueError("duplicate_persisted_prediction_keys")
@@ -309,7 +328,10 @@ def _read_prediction_output_bundle(
                         )
                         table = table.filter(keep)
                     if table.num_rows:
-                        lookup.add_table(table)
+                        lookup.add_table(
+                            table,
+                            payload_headroom_bytes=batch_working_bytes,
+                        )
             if lookup.row_count == 0:
                 raise ValueError("empty_prediction_window")
         except Exception as exc:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from contextlib import ExitStack
 
 import pandas as pd
 
@@ -62,6 +63,21 @@ def write_panel(
         columns=("open", "high", "low", "close", "volume", "amount"),
     )
     del market_bars_inspection
+    market_bars_row_buffer = (
+        materialization_planning.registered_output_buffer_bytes(
+            spec,
+            row_count=1,
+        )
+    )
+    source_join_row_buffer = market_bars_row_buffer
+    output_row_buffer = market_bars_row_buffer
+    merge_index_row_buffer = 3 * 8
+    operation_row_bound = (
+        market_bars_row_buffer
+        + source_join_row_buffer
+        + output_row_buffer
+        + merge_index_row_buffer
+    )
 
     def chunks() -> Iterable[pd.DataFrame]:
         def materialize(
@@ -70,103 +86,102 @@ def write_panel(
             session_context: Sequence[pd.Timestamp],
             upstream_retained_bytes: int,
         ) -> pd.DataFrame:
-            read_window = materialization_planning.session_batch_window(
-                session_context,
-                current_sessions,
-                lookahead_sessions=1,
-            )
-            source_inputs = materialization_io.read_source_inputs_for_spec(
-                spec,
-                layout=layout,
-                source_id=source_id,
-                market_bars_data_id=market_bars_data_id,
-                columns_by_data_id={
-                    "trading_calendar": (
-                        "calendar_date",
-                        "source_market_type",
-                        "is_trading_day",
-                    )
-                },
-                asset_ids_by_data_id={
-                    "stock_master": asset_ids,
-                    "market_cap": asset_ids,
-                },
-                asset_columns_by_data_id={
-                    "stock_master": "source_asset_id",
-                    "market_cap": "source_asset_id",
-                },
-                retained_payload_bytes=upstream_retained_bytes,
-                resource_policy=policy,
-            )
-            materialization_validation.require_source_inputs_for_spec(
-                spec, source_inputs
-            )
-            materialization_planning.require_known_materialization_payload_bound(
-                frames=tuple(source_inputs.values()),
-                output=None,
-                retained_payload_bytes=upstream_retained_bytes,
-                resource_policy=policy,
-            )
-            stock_master = source_inputs["stock_master"]
-            market_cap = source_inputs["market_cap"]
-            trading_calendar = source_inputs["trading_calendar"]
-            retained_payload_bytes = upstream_retained_bytes + sum(
-                pandas_frame_payload_bytes(frame) for frame in source_inputs.values()
-            )
-            market_bars = materialization_io.read_materialized_dataset(
-                market_bars_root,
-                time_window=read_window,
-                resource_policy=policy,
-                retained_payload_bytes=retained_payload_bytes,
-                asset_ids=asset_ids,
-                asset_column="source_asset_id",
-            )
-            materialization_validation.require_source_input_columns(
-                market_bars_data_id,
-                market_bars,
-                columns=("open", "high", "low", "close", "volume", "amount"),
-            )
-            materialization_planning.require_known_materialization_payload_bound(
-                frames=(*source_inputs.values(), market_bars),
-                output=None,
-                retained_payload_bytes=(
-                    upstream_retained_bytes
-                    + materialization_planning.registered_output_buffer_bytes(
+            with ExitStack() as live:
+                read_window = materialization_planning.session_batch_window(
+                    session_context,
+                    current_sessions,
+                    lookahead_sessions=1,
+                )
+                source_inputs = materialization_io.read_source_inputs_for_spec(
+                    spec,
+                    layout=layout,
+                    source_id=source_id,
+                    market_bars_data_id=market_bars_data_id,
+                    columns_by_data_id={
+                        "trading_calendar": (
+                            "calendar_date",
+                            "source_market_type",
+                            "is_trading_day",
+                        )
+                    },
+                    asset_ids_by_data_id={
+                        "stock_master": asset_ids,
+                        "market_cap": asset_ids,
+                    },
+                    asset_columns_by_data_id={
+                        "stock_master": "source_asset_id",
+                        "market_cap": "source_asset_id",
+                    },
+                    retained_payload_bytes=upstream_retained_bytes,
+                    resource_policy=policy,
+                )
+                materialization_validation.require_source_inputs_for_spec(
+                    spec, source_inputs
+                )
+                source_bytes = sum(
+                    pandas_frame_payload_bytes(frame)
+                    for frame in source_inputs.values()
+                )
+                live.enter_context(
+                    policy.reserve("a_share.panel.source_inputs", source_bytes)
+                )
+                stock_master = source_inputs["stock_master"]
+                market_cap = source_inputs["market_cap"]
+                trading_calendar = source_inputs["trading_calendar"]
+                market_bars = materialization_io.read_materialized_dataset(
+                    market_bars_root,
+                    time_window=read_window,
+                    resource_policy=policy,
+                    retained_payload_bytes=upstream_retained_bytes,
+                    asset_ids=asset_ids,
+                    asset_column="source_asset_id",
+                )
+                materialization_validation.require_source_input_columns(
+                    market_bars_data_id,
+                    market_bars,
+                    columns=(
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                        "amount",
+                    ),
+                )
+                market_bars_bytes = pandas_frame_payload_bytes(market_bars)
+                live.enter_context(
+                    policy.reserve("a_share.panel.market_bars", market_bars_bytes)
+                )
+                output_buffer = (
+                    materialization_planning.registered_output_buffer_bytes(
                         spec,
                         row_count=len(market_bars),
                     )
-                ),
-                resource_policy=policy,
-            )
-            panel = panels.compute_market_panel(
-                market_bars,
-                stock_master=stock_master,
-                market_cap=market_cap,
-                trading_calendar=trading_calendar,
-            )
-            materialization_planning.require_known_materialization_payload_bound(
-                frames=(*source_inputs.values(), market_bars, panel),
-                output=None,
-                retained_payload_bytes=(
-                    upstream_retained_bytes + pandas_frame_payload_bytes(panel)
-                ),
-                resource_policy=policy,
-            )
-            selected = materialization_planning.filter_output_sessions(
-                panel,
-                current_sessions,
-                columns=spec.required_columns,
-                retained_frames=(*source_inputs.values(), market_bars),
-                retained_payload_bytes=upstream_retained_bytes,
-                resource_policy=policy,
-            )
-            materialization_planning.require_known_materialization_payload_bound(
-                frames=(*source_inputs.values(), market_bars, panel),
-                output=selected,
-                retained_payload_bytes=upstream_retained_bytes,
-                resource_policy=policy,
-            )
-            return selected
+                )
+                merge_state = source_bytes + market_bars_bytes
+                panel_bound = output_buffer + merge_state
+                live.enter_context(
+                    policy.reserve("a_share.panel.calculate", panel_bound)
+                )
+                panel = panels.compute_market_panel(
+                    market_bars,
+                    stock_master=stock_master,
+                    market_cap=market_cap,
+                    trading_calendar=trading_calendar,
+                )
+                if pandas_frame_payload_bytes(panel) > panel_bound:
+                    raise materialization_io.MaterializationCapacityExceeded(
+                        "a_share_known_payloads_exceed_task_memory_budget"
+                    )
+                selected = materialization_planning.filter_output_sessions(
+                    panel,
+                    current_sessions,
+                    columns=spec.required_columns,
+                    retained_frames=(*source_inputs.values(), market_bars),
+                    retained_payload_bytes=upstream_retained_bytes,
+                    resource_policy=policy,
+                )
+                return selected
 
         yield from materialization_planning.iter_active_materialization_batches(
             market_bars_root,
@@ -174,6 +189,7 @@ def write_panel(
             time_window=time_window,
             sessions=sessions,
             resource_policy=policy,
+            output_row_bound_bytes=operation_row_bound,
             retained_payload_bytes=retained_written_bytes,
             materialize=materialize,
         )

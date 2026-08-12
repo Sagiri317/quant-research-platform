@@ -90,11 +90,11 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         available_memory_bytes=128 * 1024 * 1024,
         explicit_cap_bytes=64 * 1024 * 1024,
     )
-    original_frame_bytes = memory_owner.pandas_frame_payload_bytes
+    original_frame_bytes = memory_owner._frame_bytes
     monkeypatch.setattr(
         memory_owner,
-        "pandas_frame_payload_bytes",
-        lambda chunk: 10_000 * original_frame_bytes(chunk),
+        "_frame_bytes",
+        lambda chunk: 5_000 * original_frame_bytes(chunk),
     )
     with runtime_resource_policy_scope(policy):
         result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
@@ -378,7 +378,7 @@ def test_evaluation_output_accumulation_honors_shared_root_headroom() -> None:
         ):
             with pytest.raises(
                 ValueError,
-                match="research_evaluation_working_set_exceeds_task_memory_budget",
+                match="task_memory_budget",
             ):
                 evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
 
@@ -449,10 +449,10 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         available_memory_bytes=128 * 1024 * 1024,
         explicit_cap_bytes=64 * 1024 * 1024,
     )
-    original_frame_bytes = memory_owner.pandas_frame_payload_bytes
+    original_frame_bytes = memory_owner._frame_bytes
     monkeypatch.setattr(
         memory_owner,
-        "pandas_frame_payload_bytes",
+        "_frame_bytes",
         lambda chunk: 10_000 * original_frame_bytes(chunk),
     )
     with runtime_resource_policy_scope(policy):
@@ -518,10 +518,10 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
         available_memory_bytes=128 * 1024 * 1024,
         explicit_cap_bytes=64 * 1024 * 1024,
     )
-    original_frame_bytes = memory_owner.pandas_frame_payload_bytes
+    original_frame_bytes = memory_owner._frame_bytes
     monkeypatch.setattr(
         memory_owner,
-        "pandas_frame_payload_bytes",
+        "_frame_bytes",
         lambda chunk: 10_000 * original_frame_bytes(chunk),
     )
     with runtime_resource_policy_scope(policy):

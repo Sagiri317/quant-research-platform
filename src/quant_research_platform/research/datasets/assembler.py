@@ -6,9 +6,9 @@ import sys
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import replace
-from math import ceil
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
@@ -50,11 +50,6 @@ from quant_research_platform.storage._dataset_writing import (
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
-
-SIZING_SAMPLE_SESSION_CAP = 20
-# Research assembly temporarily holds merge/sort/write copies of the joined frame,
-# so session sizing must reserve peak headroom beyond the steady-state frame size.
-RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER = 4
 
 
 def assemble_research_dataset(
@@ -186,34 +181,18 @@ def _iter_joined_processed_chunks(
         primary_key=dataset_spec.primary_key,
         time_window=time_window,
         resource_policy=policy,
-        retained_payload_bytes=sum(
-            session.retained_memory_bytes
-            for data_id, session in sessions.items()
-            if data_id != base_data_id
+        retained_payload_bytes=max(
+            0,
+            policy.reserved_memory_bytes
+            - sessions[base_data_id].retained_memory_bytes,
         ),
     )
     if not time_keys:
         raise ValueError("no_research_dataset_sessions")
-    estimated = _estimate_research_join_bytes_per_session(
-        dataset_spec=dataset_spec,
-        processed_catalog=processed_catalog,
-        sessions=sessions,
-        time_keys=time_keys,
-        time_window=time_window,
-        base_data_id=base_data_id,
-        resource_policy=policy,
-    )
-    target_core_session_count = max(
-        1,
-        min(
-            len(time_keys),
-            policy.payload_target_bytes // estimated,
-        ),
-    )
     chunk_windows = _research_chunk_windows(
         time_keys,
         time_window=time_window,
-        target_core_count=target_core_session_count,
+        target_core_count=1,
         reason="research_assembly",
     )
 
@@ -226,19 +205,29 @@ def _iter_joined_processed_chunks(
             base_data_id=base_data_id,
             resource_policy=policy,
         )
-        validate_research_dataset(chunk, dataset_spec)
-        output = chunk.sort_values(
-            list(dataset_spec.primary_key),
-            ignore_index=True,
-        )
-        _require_research_final_write_payload(
-            output,
-            resource_policy=policy,
-        )
-        yield DatasetWriteChunk(
-            output,
-            sum(session.retained_memory_bytes for session in sessions.values()),
-        )
+        chunk_bytes = _frame_bytes(chunk)
+        with policy.reserve("research.assembly.joined", chunk_bytes):
+            validate_research_dataset(chunk, dataset_spec)
+            sort_index_bytes = len(chunk) * np.dtype(np.intp).itemsize
+            with policy.reserve("research.assembly.output", chunk_bytes):
+                with policy.reserve(
+                    "research.assembly.sort",
+                    sort_index_bytes + sort_index_bytes,
+                ):
+                    output = chunk.sort_values(
+                        list(dataset_spec.primary_key),
+                        ignore_index=True,
+                    )
+                if _frame_bytes(output) > chunk_bytes:
+                    raise ValueError(
+                        "research_known_join_payloads_exceed_task_memory_budget"
+                    )
+                yield DatasetWriteChunk(
+                    output,
+                    sum(
+                        session.retained_memory_bytes for session in sessions.values()
+                    ),
+                )
 
 
 def _join_processed_inputs(
@@ -256,118 +245,156 @@ def _join_processed_inputs(
     )
     assembled: pd.DataFrame | None = None
     base_keys: pd.DataFrame | None = None
-    retained_session_bytes = sum(
-        session.retained_memory_bytes for session in sessions.values()
-    )
-    for input_data_id in ordered_input_ids:
-        processed_spec = processed_catalog.get(input_data_id)
-        input_frame = _read_processed_input(
-            dataset_spec=dataset_spec,
-            processed_spec=processed_spec,
-            session=sessions[input_data_id],
-            existing_columns=tuple(assembled.columns) if assembled is not None else (),
-            time_window=time_window,
-            resource_policy=resource_policy,
-            retained_payload_bytes=(
-                retained_session_bytes
-                - sessions[input_data_id].retained_memory_bytes
-                + (0 if assembled is None else _frame_bytes(assembled))
-                + (0 if base_keys is None else _frame_bytes(base_keys))
-            ),
-        )
-        if assembled is None:
-            _require_research_known_join_payload_bound(
-                retained_payload_bytes=retained_session_bytes,
-                input_bytes=_frame_bytes(input_frame),
-                base_key_bytes=_frame_bytes(
-                    input_frame.loc[:, list(dataset_spec.primary_key)]
+    assembled_state = ExitStack()
+    base_key_state = ExitStack()
+    try:
+        for input_data_id in ordered_input_ids:
+            processed_spec = processed_catalog.get(input_data_id)
+            session = sessions[input_data_id]
+            input_frame = _read_processed_input(
+                dataset_spec=dataset_spec,
+                processed_spec=processed_spec,
+                session=session,
+                existing_columns=(
+                    tuple(assembled.columns) if assembled is not None else ()
                 ),
-                output_bytes=0,
+                time_window=time_window,
                 resource_policy=resource_policy,
+                retained_payload_bytes=max(
+                    0,
+                    resource_policy.reserved_memory_bytes
+                    - session.retained_memory_bytes,
+                ),
             )
-            assembled = input_frame
-            base_keys = input_frame.loc[:, list(dataset_spec.primary_key)].copy()
-            continue
-        assert base_keys is not None
-        retained_payload_bytes = retained_session_bytes + _frame_bytes(assembled)
-        input_bytes = _frame_bytes(input_frame)
-        base_key_bytes = _frame_bytes(base_keys)
-        _require_research_known_join_payload_bound(
-            retained_payload_bytes=retained_payload_bytes,
-            input_bytes=input_bytes,
-            base_key_bytes=base_key_bytes,
-            output_bytes=_frame_bytes(assembled) + input_bytes,
-            resource_policy=resource_policy,
-        )
-        _validate_input_key_coverage(
-            base_keys,
-            input_frame,
-            dataset_spec=dataset_spec,
-            input_data_id=input_data_id,
-        )
-        assembled = assembled.merge(
-            input_frame,
-            on=list(dataset_spec.primary_key),
-            how="left",
-            validate="one_to_one",
-        )
-    if assembled is None:
-        raise ValueError("empty_research_dataset_inputs")
-    del base_keys
-    assembled_bytes = _frame_bytes(assembled)
-    transformed_output_bytes = assembled_bytes + (
-        len(assembled)
-        * 8
-        * sum(
-            len(transform.output_columns)
-            for transform in dataset_spec.feature_transforms
-        )
-    )
-    if (
-        retained_session_bytes
-        + assembled_bytes
-        + min(2, len(dataset_spec.feature_transforms)) * transformed_output_bytes
-        > resource_policy.task_memory_budget_bytes
-    ):
-        raise ValueError("research_known_join_payloads_exceed_task_memory_budget")
-    assembled = _apply_feature_transforms(assembled, dataset_spec)
-    assembled_bytes = _frame_bytes(assembled)
-    _require_research_known_join_payload_bound(
-        retained_payload_bytes=retained_session_bytes,
-        input_bytes=assembled_bytes,
-        base_key_bytes=0,
-        output_bytes=assembled_bytes,
-        resource_policy=resource_policy,
-    )
-    return assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
+            input_bytes = _frame_bytes(input_frame)
+            input_state = ExitStack()
+            try:
+                input_state.enter_context(
+                    resource_policy.reserve("research.assembly.input", input_bytes)
+                )
+                if assembled is None:
+                    next_base_state = ExitStack()
+                    try:
+                        next_base_state.enter_context(
+                            resource_policy.reserve(
+                                "research.assembly.base_keys",
+                                input_bytes,
+                            )
+                        )
+                        next_base_keys = input_frame.loc[
+                            :, list(dataset_spec.primary_key)
+                        ].copy()
+                        if _frame_bytes(next_base_keys) > input_bytes:
+                            raise ValueError(
+                                "research_known_join_payloads_exceed_task_memory_budget"
+                            )
+                    except BaseException:
+                        next_base_state.close()
+                        raise
+                    assembled = input_frame
+                    assembled_state.close()
+                    assembled_state = input_state.pop_all()
+                    base_keys = next_base_keys
+                    base_key_state.close()
+                    base_key_state = next_base_state.pop_all()
+                    continue
 
+                assert base_keys is not None
+                assembled_bytes = _frame_bytes(assembled)
+                base_key_bytes = _frame_bytes(base_keys)
+                output_bound = assembled_bytes + input_bytes
+                output_state = ExitStack()
+                try:
+                    output_state.enter_context(
+                        resource_policy.reserve(
+                            "research.assembly.merge.output",
+                            output_bound,
+                        )
+                    )
+                    coverage_bound = sum(
+                        (
+                            input_bytes,  # input key projection
+                            base_key_bytes + input_bytes,  # extra-key join
+                            base_key_bytes + input_bytes,  # missing-key join
+                            len(base_keys) + len(input_frame),  # result masks
+                        )
+                    )
+                    with resource_policy.reserve(
+                        "research.assembly.coverage",
+                        coverage_bound,
+                    ):
+                        _validate_input_key_coverage(
+                            base_keys,
+                            input_frame,
+                            dataset_spec=dataset_spec,
+                            input_data_id=input_data_id,
+                        )
+                    join_index_bytes = (
+                        len(assembled) + len(input_frame)
+                    ) * np.dtype(np.intp).itemsize
+                    with resource_policy.reserve(
+                        "research.assembly.merge.workspace",
+                        base_key_bytes + input_bytes + join_index_bytes,
+                    ):
+                        merged = assembled.merge(
+                            input_frame,
+                            on=list(dataset_spec.primary_key),
+                            how="left",
+                            validate="one_to_one",
+                        )
+                    if _frame_bytes(merged) > output_bound:
+                        raise ValueError(
+                            "research_known_join_payloads_exceed_task_memory_budget"
+                        )
+                except BaseException:
+                    output_state.close()
+                    raise
+                assembled_state.close()
+                assembled = merged
+                assembled_state = output_state.pop_all()
+            finally:
+                input_state.close()
 
-def _require_research_known_join_payload_bound(
-    *,
-    retained_payload_bytes: int,
-    input_bytes: int,
-    base_key_bytes: int,
-    output_bytes: int,
-    resource_policy: RuntimeResourcePolicy,
-) -> None:
-    known_payload_bytes = (
-        retained_payload_bytes + input_bytes + base_key_bytes + output_bytes
-    )
-    if known_payload_bytes > resource_policy.task_memory_budget_bytes:
-        raise ValueError("research_known_join_payloads_exceed_task_memory_budget")
+        if assembled is None:
+            raise ValueError("empty_research_dataset_inputs")
+        base_key_state.close()
+        base_keys = None
+        transformed = _apply_feature_transforms(assembled, dataset_spec)
+        if transformed is not assembled:
+            transformed_bytes = _frame_bytes(transformed)
+            transformed_state = ExitStack()
+            try:
+                transformed_state.enter_context(
+                    resource_policy.reserve(
+                        "research.assembly.transformed",
+                        transformed_bytes,
+                    )
+                )
+            except BaseException:
+                transformed_state.close()
+                raise
+            assembled_state.close()
+            assembled = transformed
+            assembled_state = transformed_state.pop_all()
+
+        projection_bound = _frame_bytes(assembled)
+        with resource_policy.reserve(
+            "research.assembly.projection",
+            projection_bound,
+        ):
+            output = assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
+            if _frame_bytes(output) > projection_bound:
+                raise ValueError(
+                    "research_known_join_payloads_exceed_task_memory_budget"
+                )
+            return output
+    finally:
+        base_key_state.close()
+        assembled_state.close()
 
 
 def _frame_bytes(frame: pd.DataFrame) -> int:
     return pandas_frame_payload_bytes(frame)
-
-
-def _require_research_final_write_payload(
-    output: pd.DataFrame,
-    *,
-    resource_policy: RuntimeResourcePolicy,
-) -> None:
-    if _frame_bytes(output) > resource_policy.payload_target_bytes:
-        raise ValueError("research_indivisible_join_unit_exceeds_payload_target")
 
 
 def _time_keys_from_base_input(
@@ -785,9 +812,7 @@ def _open_input_dataset_sessions(
                     columns=columns,
                     time_window=time_window,
                     resource_policy=resource_policy,
-                    retained_payload_bytes=sum(
-                        retained.retained_memory_bytes for retained in sessions.values()
-                    ),
+                    retained_payload_bytes=resource_policy.reserved_memory_bytes,
                 ),
             )
         except ValueError as exc:
@@ -804,6 +829,12 @@ def _open_input_dataset_sessions(
                     ) from exc
             raise
         sessions[data_id] = session
+        stack.enter_context(
+            resource_policy.reserve(
+                f"research.assembly.session.{data_id}",
+                session.retained_memory_bytes,
+            )
+        )
         existing_columns = tuple(dict.fromkeys((*existing_columns, *columns)))
     return sessions
 
@@ -851,61 +882,6 @@ def _research_session_view(
         except BaseException:
             pass
         raise
-
-
-def _estimate_research_join_bytes_per_session(
-    *,
-    dataset_spec: ResearchDatasetSpec,
-    processed_catalog: ProcessedDataCatalog,
-    sessions: Mapping[str, DatasetSession],
-    time_keys: tuple[pd.Timestamp, ...],
-    time_window: TimeWindow,
-    base_data_id: str,
-    resource_policy: RuntimeResourcePolicy,
-) -> int:
-    sample_windows = _research_chunk_windows(
-        time_keys,
-        time_window=time_window,
-        target_core_count=1,
-        reason="research_sizing",
-    )[:SIZING_SAMPLE_SESSION_CAP]
-    estimates = []
-    for sample_window, sample_time_key in zip(
-        sample_windows,
-        time_keys[: len(sample_windows)],
-        strict=True,
-    ):
-        frame = _join_processed_inputs(
-            dataset_spec=dataset_spec,
-            processed_catalog=processed_catalog,
-            sessions=sessions,
-            time_window=sample_window,
-            base_data_id=base_data_id,
-            resource_policy=resource_policy,
-        )
-        estimates.append(
-            _measured_bytes_per_session(
-                frame,
-                sample_sessions=(sample_time_key,),
-                target_session_count=len(time_keys),
-            )
-        )
-    return max(estimates, default=1)
-
-
-def _measured_bytes_per_session(
-    frame: pd.DataFrame,
-    *,
-    sample_sessions: tuple[pd.Timestamp, ...],
-    target_session_count: int,
-) -> int:
-    if frame.empty:
-        return 1
-    total = pandas_frame_payload_bytes(frame)
-    sample_bytes_per_session = total / max(1, len(sample_sessions))
-    target_bytes_per_session = total / max(1, target_session_count)
-    measured = max(1, ceil(max(sample_bytes_per_session, target_bytes_per_session)))
-    return max(1, measured * RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER)
 
 
 __all__ = ["assemble_research_dataset"]

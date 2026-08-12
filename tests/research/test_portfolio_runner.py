@@ -92,10 +92,14 @@ def test_portfolio_runner_accepts_equivalent_timezone_representations() -> None:
         warnings.simplefilter("error")
         timestamps = portfolio_runner._timestamp_set(frame)
 
-    assert timestamps == {
-        pd.Timestamp("2024-01-15T11:00:00"),
-        pd.Timestamp("2024-01-15T11:01:00"),
-    }
+    assert timestamps.equals(
+        pd.DatetimeIndex(
+            [
+                pd.Timestamp("2024-01-15T11:00:00"),
+                pd.Timestamp("2024-01-15T11:01:00"),
+            ]
+        )
+    )
 
 
 def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_gaps(
@@ -174,25 +178,25 @@ def test_portfolio_prediction_join_keeps_its_creation_policy(
             prediction_metadata=manifest["metadata"],
         )
 
-    monkeypatch.setattr(
-        portfolio_runner,
-        "pandas_frame_payload_bytes",
-        lambda _frame: policy.task_memory_budget_bytes,
-    )
+        monkeypatch.setattr(
+            portfolio_runner,
+            "pandas_frame_payload_bytes",
+            lambda _frame: policy.task_memory_budget_bytes,
+        )
 
-    def reject_prediction_index(*_args, **_kwargs):
-        raise AssertionError("prediction index allocated before admission")
+        def reject_prediction_index(*_args, **_kwargs):
+            raise AssertionError("prediction index allocated before admission")
 
-    monkeypatch.setattr(
-        pd.MultiIndex,
-        "from_frame",
-        classmethod(reject_prediction_index),
-    )
-    with pytest.raises(
-        ValueError,
-        match="portfolio_prediction_join_working_set_exceeds_task_memory_budget",
-    ):
-        list(result.output_chunks)
+        monkeypatch.setattr(
+            pd.MultiIndex,
+            "from_frame",
+            classmethod(reject_prediction_index),
+        )
+        with pytest.raises(
+            ValueError,
+            match="portfolio_prediction_join_working_set_exceeds_task_memory_budget",
+        ):
+            list(result.output_chunks)
 
 
 @pytest.mark.parametrize(
@@ -302,9 +306,9 @@ def test_prediction_bundle_rejects_duplicate_outside_selected_window(
     )
     path = root / "prediction.parquet"
     persisted = pd.read_parquet(path)
-    excluded = persisted.loc[
-        persisted["timestamp"] == pd.Timestamp("2024-01-02")
-    ].iloc[[0]]
+    excluded = persisted.loc[persisted["timestamp"] == pd.Timestamp("2024-01-02")].iloc[
+        [0]
+    ]
     pd.concat([persisted, excluded], ignore_index=True).to_parquet(path, index=False)
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,

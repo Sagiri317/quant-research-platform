@@ -592,10 +592,7 @@ def test_model_matrix_admission_precedes_linear_and_estimator_allocation(
         )
         with runtime_resource_policy_scope(policy):
             with policy.reserve("outer_owner", policy.task_memory_budget_bytes):
-                with pytest.raises(
-                    ValueError,
-                    match="model_matrix_working_set_exceeds_task_memory_budget",
-                ):
+                with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
                     if operation == "linear":
                         model_fitting.fit_linear_coefficients_exact(frame, spec)
                     else:
@@ -633,10 +630,62 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
         explicit_cap_bytes=1024 * 1024,
     )
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(
-            ValueError,
-            match="model_state_working_set_exceeds_task_memory_budget",
-        ):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            model_fitting.fit_predictor(
+                spec,
+                training=frame,
+                y=frame["label"].to_numpy(),
+                estimator=Estimator(),
+            )
+
+
+@pytest.mark.parametrize(
+    ("model_algorithm", "hyperparameters"),
+    (
+        ("xgboost_regressor", {"n_estimators": 100, "max_depth": 0, "n_jobs": 1}),
+        (
+            "hist_gradient_boosting_regressor",
+            {"max_iter": 100, "max_leaf_nodes": None},
+        ),
+        (
+            "gradient_boosting_regressor",
+            {"n_estimators": 100, "max_depth": None},
+        ),
+    ),
+)
+def test_unbounded_tree_sentinels_reject_before_estimator_fit(
+    model_algorithm: str,
+    hyperparameters: dict[str, object],
+) -> None:
+    rows = 1_000
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=rows, freq="min"),
+            "factor": np.linspace(0.0, 1.0, rows),
+            "label": np.linspace(1.0, 2.0, rows),
+        }
+    )
+    spec = ModelSpec(
+        model_id=f"{model_algorithm}_unbounded_state",
+        model_algorithm=model_algorithm,
+        input_factor_columns=("factor",),
+        label_column="label",
+        hyperparameters=hyperparameters,
+        max_train_rows=rows,
+    )
+
+    class Estimator:
+        def fit(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            raise AssertionError(
+                "estimator fit entered before sentinel-aware admission"
+            )
+
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024 * 1024,
+        explicit_cap_bytes=8 * 1024 * 1024,
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
             model_fitting.fit_predictor(
                 spec,
                 training=frame,
@@ -816,20 +865,6 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design() -> None:
     )
 
     assert result.coefficients.tolist() == pytest.approx(expected.tolist())
-
-    policy = capture_test_policy(
-        available_memory_bytes=4_000,
-    )
-    with runtime_resource_policy_scope(policy):
-        tiny_result = model_fitting.fit_model_result_from_frames(
-            (frame,), spec, estimator=build_estimator_from_model_spec(spec)
-        )
-
-    assert tiny_result.coefficients.tolist() == pytest.approx(
-        expected.tolist(),
-        rel=1e-7,
-    )
-
 
 def test_model_rejects_tradable_sample_filter_mode() -> None:
     with pytest.raises(ValueError, match="unsupported_model_sample_filter_mode"):

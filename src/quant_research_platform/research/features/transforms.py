@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import pandas as pd
 
 from quant_research_platform.contracts.features import FeatureTransformSpec
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+)
 
 
 def apply_feature_transforms(
@@ -13,16 +19,11 @@ def apply_feature_transforms(
     *,
     timestamp_column: str = "timestamp",
 ) -> pd.DataFrame:
-    if not transforms:
-        return frame.copy()
-    result = frame
-    for transform in transforms:
-        result = apply_feature_transform(
-            result,
-            transform,
-            timestamp_column=timestamp_column,
-        )
-    return result
+    return _apply_feature_transforms_to_copy(
+        frame,
+        transforms,
+        timestamp_column=timestamp_column,
+    )
 
 
 def apply_feature_transform(
@@ -31,7 +32,125 @@ def apply_feature_transform(
     *,
     timestamp_column: str = "timestamp",
 ) -> pd.DataFrame:
-    result = frame.copy()
+    return _apply_feature_transforms_to_copy(
+        frame,
+        (transform,),
+        timestamp_column=timestamp_column,
+    )
+
+
+def _apply_feature_transforms_to_copy(
+    frame: pd.DataFrame,
+    transforms: tuple[FeatureTransformSpec, ...],
+    *,
+    timestamp_column: str,
+) -> pd.DataFrame:
+    row_count = len(frame)
+    index_bytes = int(frame.index.memory_usage(deep=True))
+    vector_bytes = index_bytes + row_count * 8
+    output_bound = pandas_frame_payload_bytes(frame) + row_count * 8 * sum(
+        len(transform.output_columns) for transform in transforms
+    )
+    workspace_bound = max(
+        (
+            _feature_transform_workspace_bytes(
+                transform,
+                row_count=row_count,
+                vector_bytes=vector_bytes,
+            )
+            for transform in transforms
+        ),
+        default=0,
+    )
+    policy = current_runtime_resource_policy()
+    reservation = (
+        policy.reserve(
+            "research.feature.transform",
+            output_bound + workspace_bound,
+        )
+        if policy is not None
+        else nullcontext()
+    )
+    with reservation:
+        result = frame.copy()
+        for transform in transforms:
+            _apply_feature_transform_to_owned_frame(
+                result,
+                transform,
+                timestamp_column=timestamp_column,
+            )
+        if pandas_frame_payload_bytes(result) > output_bound:
+            raise ValueError("research_feature_working_set_exceeds_task_memory_budget")
+        return result
+
+
+def _feature_transform_workspace_bytes(
+    transform: FeatureTransformSpec,
+    *,
+    row_count: int,
+    vector_bytes: int,
+) -> int:
+    group_codes = vector_bytes
+    numeric_values = vector_bytes
+    assignment_values = row_count * 8
+    if transform.transform == "cross_sectional_zscore":
+        transform_state = sum(
+            (
+                vector_bytes,  # group means
+                vector_bytes,  # group standard deviations
+                vector_bytes,  # nonzero standard deviations
+                vector_bytes,  # centered values
+                vector_bytes,  # normalized values
+                row_count,  # zero-standard-deviation mask
+            )
+        )
+    elif transform.transform == "cross_sectional_rank":
+        transform_state = vector_bytes + vector_bytes  # rank workspace + output
+    elif transform.transform == "winsorize":
+        transform_state = sum(
+            (vector_bytes, vector_bytes, vector_bytes)
+        )  # lower, upper, clipped
+    elif transform.transform == "winsorized_zscore":
+        transform_state = sum(
+            (
+                vector_bytes,  # lower quantile
+                vector_bytes,  # upper quantile
+                vector_bytes,  # clipped values
+                vector_bytes,  # group means
+                vector_bytes,  # group standard deviations
+                vector_bytes,  # nonzero standard deviations
+                vector_bytes,  # centered values
+                vector_bytes,  # normalized values
+                row_count,
+            )
+        )
+    elif transform.transform == "winsorized_rank":
+        transform_state = sum(
+            (
+                vector_bytes,  # lower quantile
+                vector_bytes,  # upper quantile
+                vector_bytes,  # clipped values
+                vector_bytes,  # rank workspace
+                vector_bytes,  # ranked values
+            )
+        )
+    elif transform.transform == "fillna_median":
+        transform_state = vector_bytes + vector_bytes  # medians + filled values
+    else:
+        transform_state = vector_bytes
+    if transform.fillna_policy == "median":
+        transform_state += vector_bytes + vector_bytes  # medians + filled values
+    elif transform.fillna_policy == "zero":
+        transform_state += vector_bytes
+    return numeric_values + group_codes + transform_state + assignment_values
+
+
+def _apply_feature_transform_to_owned_frame(
+    result: pd.DataFrame,
+    transform: FeatureTransformSpec,
+    *,
+    timestamp_column: str,
+) -> None:
     for source_column, output_column in zip(
         transform.source_columns,
         transform.output_columns,
@@ -50,7 +169,6 @@ def apply_feature_transform(
             timestamps=result[timestamp_column],
             fillna_policy=transform.fillna_policy,
         )
-    return result
 
 
 def _transform_values(

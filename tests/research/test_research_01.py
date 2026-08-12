@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from math import ceil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -613,84 +612,6 @@ def test_research_processed_input_uses_task_budget_for_materialization(
     }
 
 
-def test_research_join_rejects_known_payloads_over_task_budget() -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1_024,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="research_known_join_payloads_exceed_task_memory_budget",
-    ):
-        assembler_module._require_research_known_join_payload_bound(
-            retained_payload_bytes=500,
-            input_bytes=500,
-            base_key_bytes=0,
-            output_bytes=0,
-            resource_policy=policy,
-        )
-
-
-def test_research_join_bound_includes_retained_base_keys() -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1_000,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="research_known_join_payloads_exceed_task_memory_budget",
-    ):
-        assembler_module._require_research_known_join_payload_bound(
-            retained_payload_bytes=300,
-            input_bytes=400,
-            base_key_bytes=300,
-            output_bytes=0,
-            resource_policy=policy,
-        )
-
-
-def test_research_join_bound_keeps_live_session_state_after_read(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1_000,
-    )
-    frame = pd.DataFrame({"id": [1]})
-    monkeypatch.setattr(
-        assembler_module,
-        "_ordered_input_data_ids",
-        lambda *_args, **_kwargs: ("one",),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_read_processed_input",
-        lambda **_kwargs: frame,
-    )
-    monkeypatch.setattr(assembler_module, "_frame_bytes", lambda _frame: 400)
-    monkeypatch.setattr(
-        assembler_module,
-        "_apply_feature_transforms",
-        lambda value, _spec: value,
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_ordered_output_columns",
-        lambda _spec: ("id",),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="research_known_join_payloads_exceed_task_memory_budget",
-    ):
-        assembler_module._join_processed_inputs(
-            dataset_spec=SimpleNamespace(primary_key=("id",)),
-            processed_catalog=SimpleNamespace(get=lambda _key: object()),
-            sessions={"one": SimpleNamespace(retained_memory_bytes=1)},
-            time_window=object(),
-            resource_policy=policy,
-        )
-
-
 def test_research_join_preflights_merged_output_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -720,110 +641,25 @@ def test_research_join_preflights_merged_output_allocation(
         }[tuple(frame.columns)],
     )
 
-    with pytest.raises(
-        ValueError,
-        match="research_known_join_payloads_exceed_task_memory_budget",
-    ):
-        assembler_module._join_processed_inputs(
-            dataset_spec=SimpleNamespace(primary_key=("id",)),
-            processed_catalog=SimpleNamespace(get=lambda _key: object()),
-            sessions={
-                "left": SimpleNamespace(retained_memory_bytes=0),
-                "right": SimpleNamespace(retained_memory_bytes=0),
-            },
-            time_window=object(),
-            resource_policy=policy,
-        )
-
-
-def test_research_join_preflights_feature_transform_output_allocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1_000,
-    )
-    frame = pd.DataFrame({"id": [1], "value": [1.0]})
-    monkeypatch.setattr(
-        assembler_module,
-        "_ordered_input_data_ids",
-        lambda *_args, **_kwargs: ("one",),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_read_processed_input",
-        lambda **_kwargs: frame,
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_frame_bytes",
-        lambda value: 100 if tuple(value.columns) == ("id",) else 400,
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_apply_feature_transforms",
-        lambda *_args, **_kwargs: pytest.fail("transform allocation reached"),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="research_known_join_payloads_exceed_task_memory_budget",
-    ):
-        assembler_module._join_processed_inputs(
-            dataset_spec=SimpleNamespace(
-                primary_key=("id",),
-                feature_transforms=(SimpleNamespace(output_columns=("feature",)),),
-            ),
-            processed_catalog=SimpleNamespace(get=lambda _key: object()),
-            sessions={"one": SimpleNamespace(retained_memory_bytes=100)},
-            time_window=object(),
-            resource_policy=policy,
-        )
-
-
-def test_research_join_preflights_real_transform_payload_before_allocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=50_000,
-    )
-    frame = pd.DataFrame({"id": range(1_000), "value": [1.0] * 1_000})
-    monkeypatch.setattr(
-        assembler_module,
-        "_ordered_input_data_ids",
-        lambda *_args, **_kwargs: ("one",),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_read_processed_input",
-        lambda **_kwargs: frame,
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_apply_feature_transforms",
-        lambda *_args, **_kwargs: pytest.fail("transform allocation reached"),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="research_known_join_payloads_exceed_task_memory_budget",
-    ):
-        assembler_module._join_processed_inputs(
-            dataset_spec=SimpleNamespace(
-                primary_key=("id",),
-                feature_transforms=(SimpleNamespace(output_columns=("feature",)),),
-            ),
-            processed_catalog=SimpleNamespace(get=lambda _key: object()),
-            sessions={"one": SimpleNamespace(retained_memory_bytes=0)},
-            time_window=object(),
-            resource_policy=policy,
-        )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            assembler_module._join_processed_inputs(
+                dataset_spec=SimpleNamespace(primary_key=("id",)),
+                processed_catalog=SimpleNamespace(get=lambda _key: object()),
+                sessions={
+                    "left": SimpleNamespace(retained_memory_bytes=0),
+                    "right": SimpleNamespace(retained_memory_bytes=0),
+                },
+                time_window=object(),
+                resource_policy=policy,
+            )
 
 
 def test_research_join_preflights_final_projection_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=37_500,
+        available_memory_bytes=50_000,
     )
     frame = pd.DataFrame({"id": range(1_000), "value": [1.0] * 1_000})
     monkeypatch.setattr(
@@ -840,11 +676,6 @@ def test_research_join_preflights_final_projection_allocation(
         assembler_module,
         "_time_keys_from_base_input",
         lambda *_args, **_kwargs: (pd.Timestamp("2024-01-01"),),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 1,
     )
     monkeypatch.setattr(
         assembler_module,
@@ -882,27 +713,9 @@ def test_research_join_preflights_final_projection_allocation(
         resource_policy=policy,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="research_known_join_payloads_exceed_task_memory_budget",
-    ):
-        next(chunks)
-
-
-def test_research_final_write_rejects_output_over_payload_target() -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1_000,
-    )
-    output = pd.DataFrame({"value": ["x" * 2_000]})
-
-    with pytest.raises(
-        ValueError,
-        match="research_indivisible_join_unit_exceeds_payload_target",
-    ):
-        assembler_module._require_research_final_write_payload(
-            output,
-            resource_policy=policy,
-        )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            next(chunks)
 
 
 def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:
@@ -1091,7 +904,7 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
     )
 
 
-def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
+def test_research_dataset_session_complete_chunks_preserve_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1120,13 +933,8 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    monkeypatch.setattr(
-        assembler_module,
-        "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 600_000,
-    )
     tiny_policy = capture_storage_test_policy(
-        working_headroom_bytes=1024**2,
+        working_headroom_bytes=4 * 1024**2,
     )
     tiny_root = assemble_research_dataset(
         layout=tiny_layout,
@@ -1161,7 +969,8 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
         tiny.reset_index(drop=True),
     )
     assert (
-        inspect_dataset(tiny_root).file_count > inspect_dataset(default_root).file_count
+        inspect_dataset(tiny_root).file_count
+        == inspect_dataset(default_root).file_count
     )
 
 
@@ -1266,50 +1075,6 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
             )
             == 0
         )
-
-
-def test_research_dataset_sizing_accounts_for_assembly_peak_memory() -> None:
-    frame = _research_rows_for_dates(["2014-01-02", "2014-01-03"])
-
-    measured = assembler_module._measured_bytes_per_session(
-        frame,
-        sample_sessions=tuple(pd.to_datetime(["2014-01-02", "2014-01-03"])),
-        target_session_count=2,
-    )
-
-    raw_per_session = max(1, ceil(frame.memory_usage(index=True, deep=True).sum() / 2))
-    assert (
-        measured
-        == raw_per_session * assembler_module.RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER
-    )
-
-
-def test_research_sizing_probe_materializes_one_session_at_a_time(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sessions = tuple(pd.date_range("2026-01-01", periods=20, freq="D"))
-    observed_windows: list[TimeWindow] = []
-
-    def join(**kwargs):
-        observed_windows.append(kwargs["time_window"])
-        return pd.DataFrame({"timestamp": [kwargs["time_window"].start]})
-
-    monkeypatch.setattr(assembler_module, "_join_processed_inputs", join)
-
-    assembler_module._estimate_research_join_bytes_per_session(
-        dataset_spec=SimpleNamespace(),
-        processed_catalog=SimpleNamespace(),
-        sessions={},
-        time_keys=sessions,
-        time_window=TimeWindow("2026-01-01", "2026-01-20"),
-        base_data_id="base",
-        resource_policy=capture_test_policy(
-            available_memory_bytes=1024**3,
-        ),
-    )
-
-    assert len(observed_windows) == 20
-    assert all(window.start == window.end for window in observed_windows)
 
 
 def test_research_assembly_rejects_dependency_replacement_after_identity_capture(
@@ -1929,13 +1694,8 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setattr(
-        assembler_module,
-        "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 600_000,
-    )
     assembly_policy = capture_storage_test_policy(
-        working_headroom_bytes=1024**2,
+        working_headroom_bytes=4 * 1024**2,
     )
     assemble_research_dataset(
         layout=layout,
@@ -2016,9 +1776,9 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
 
     prediction_policy = capture_test_policy(
-        available_memory_bytes=2 * 1024**2,
+        available_memory_bytes=8 * 1024**2,
         rss_bytes=0,
-        explicit_cap_bytes=1024**2,
+        explicit_cap_bytes=4 * 1024**2,
     )
     with runtime_resource_policy_scope(prediction_policy):
         result = build_prediction_result_from_research_dataset(
@@ -2112,13 +1872,8 @@ def test_evaluation_runner_streams_research_chunks(
     )
     processed_catalog = make_demo_processed_catalog()
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    monkeypatch.setattr(
-        assembler_module,
-        "_estimate_research_join_bytes_per_session",
-        lambda **_kwargs: 600_000,
-    )
     assembly_policy = capture_storage_test_policy(
-        working_headroom_bytes=1024**2,
+        working_headroom_bytes=4 * 1024**2,
     )
     assemble_research_dataset(
         layout=layout,

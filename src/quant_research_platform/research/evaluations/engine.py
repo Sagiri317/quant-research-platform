@@ -19,7 +19,11 @@ from quant_research_platform.contracts.evaluations import (
     strict_non_negative_count_value,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.research._memory import iter_complete_time_sized_frames
+from quant_research_platform.research._memory import (
+    _ResearchFrameSpill,
+    _selected_frame_payload_bytes,
+    iter_complete_session_frames,
+)
 from quant_research_platform.research.evaluations.diagnostics import (
     build_evaluation_diagnostics,
     summarize_group_spread,
@@ -33,6 +37,8 @@ from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
+
+_EVALUATION_RECORD_WORKING_BYTES = 512
 
 
 @dataclass(frozen=True)
@@ -68,18 +74,19 @@ def evaluate_signal_frame_chunks(
     retained_bytes = pandas_frame_payload_bytes(metrics) + pandas_frame_payload_bytes(
         grouped_label_values
     )
+    aggregation_state_bytes = (len(metrics) + len(grouped_label_values)) * 8 * 8
+    summary_output_bound = retained_bytes + 64 * 1024
     with ExitStack() as retained_outputs:
         if owner_policy is not None:
             retained_outputs.enter_context(
                 owner_policy.reserve("research.evaluation.result", retained_bytes)
             )
-            if (
-                owner_policy.reserved_memory_bytes + 3 * retained_bytes
-                > owner_policy.task_memory_budget_bytes
-            ):
-                raise ValueError(
-                    "research_evaluation_working_set_exceeds_task_memory_budget"
+            retained_outputs.enter_context(
+                owner_policy.reserve(
+                    "research.evaluation.summary",
+                    aggregation_state_bytes + summary_output_bound,
                 )
+            )
         ic_summary = summarize_period_ic(metrics)
         group_spread_summary = summarize_group_spread(grouped_label_values)
         diagnostics = build_evaluation_diagnostics(
@@ -93,6 +100,14 @@ def evaluate_signal_frame_chunks(
             n_groups=n_groups,
             timestamp_column="timestamp",
         )
+        if (
+            pandas_frame_payload_bytes(ic_summary)
+            + pandas_frame_payload_bytes(group_spread_summary)
+            > summary_output_bound
+        ):
+            raise ValueError(
+                "research_evaluation_working_set_exceeds_task_memory_budget"
+            )
     return EvaluationResult(
         spec=spec,
         metrics=metrics,
@@ -115,28 +130,29 @@ def _compute_evaluation_frames(
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object], int]:
     from quant_research_platform.research.filtering import apply_filter_mode
 
-    metric_parts: list[pd.DataFrame] = []
-    grouped_parts: list[pd.DataFrame] = []
     rows_input = 0
     rows_after_filter = 0
     rows_after_dropna = 0
     filter_columns_used: list[str] = []
     filter_definition = ""
-    retained_output_bytes = 0
     retained_policy = current_runtime_resource_policy()
-    retained_outputs = ExitStack()
-
-    try:
-        for chunk in iter_complete_time_sized_frames(
-            _iter_evaluation_work_frames(
-                frames,
-                spec=spec,
-                signal_columns=signal_columns,
-                label_columns=label_columns,
-                asset_column=asset_column,
-                source_columns_by_kind=source_columns_by_kind,
-            ),
-            timestamp_column="timestamp",
+    with (
+        _ResearchFrameSpill(
+            "research.evaluation.metrics",
+            resource_policy=retained_policy,
+        ) as metric_spill,
+        _ResearchFrameSpill(
+            "research.evaluation.grouped",
+            resource_policy=retained_policy,
+        ) as grouped_spill,
+    ):
+        for chunk in _iter_evaluation_work_frames(
+            frames,
+            spec=spec,
+            signal_columns=signal_columns,
+            label_columns=label_columns,
+            asset_column=asset_column,
+            source_columns_by_kind=source_columns_by_kind,
         ):
             filtered, metadata = apply_filter_mode(
                 chunk,
@@ -151,19 +167,6 @@ def _compute_evaluation_frames(
             filter_definition = str(metadata["filter_definition"])
             for label_column in label_columns:
                 policy = active_runtime_resource_policy()
-                filtered_bytes = pandas_frame_payload_bytes(filtered)
-                retained_bytes = (
-                    0 if retained_policy is policy else retained_output_bytes
-                )
-                if (
-                    policy.reserved_memory_bytes
-                    + 2 * retained_bytes
-                    + 4 * filtered_bytes
-                    > policy.task_memory_budget_bytes
-                ):
-                    raise ValueError(
-                        "research_evaluation_working_set_exceeds_task_memory_budget"
-                    )
                 compute_spec = ComputePanelSpec(
                     signal_columns=signal_columns,
                     label_column=label_column,
@@ -176,38 +179,57 @@ def _compute_evaluation_frames(
                     *compute_spec.signal_columns,
                     compute_spec.label_column,
                 )
-                usable = filtered.loc[:, list(compute_columns)].copy()
-                metrics, grouped_label_values = compute_ic_and_grouped_label_values(
-                    usable,
-                    compute_spec,
-                    n_groups=n_groups,
+                row_count = len(filtered)
+                index_bytes = int(filtered.index.memory_usage(deep=True))
+                usable_bytes = _selected_frame_payload_bytes(
+                    filtered,
+                    compute_columns,
                 )
-                next_output_bytes = pandas_frame_payload_bytes(
+                retained_filter_bytes = (
+                    0 if filtered is chunk else pandas_frame_payload_bytes(filtered)
+                )
+                panel_copy_bytes = usable_bytes
+                sorted_panel_bytes = usable_bytes
+                null_key_mask_bytes = index_bytes + row_count
+                duplicate_key_mask_bytes = index_bytes + row_count
+                numeric_kernel_bytes = row_count * (
+                    3 * 1  # validity/group masks
+                    + 10 * 8  # selected, centered, ranked, and grouped arrays
+                )
+                output_record_count = len(signal_columns) * (1 + n_groups)
+                output_record_bytes = (
+                    output_record_count * _EVALUATION_RECORD_WORKING_BYTES
+                )
+                kernel_bytes = (
+                    retained_filter_bytes
+                    + usable_bytes
+                    + panel_copy_bytes
+                    + sorted_panel_bytes
+                    + null_key_mask_bytes
+                    + duplicate_key_mask_bytes
+                    + numeric_kernel_bytes
+                    + output_record_bytes
+                )
+                with policy.reserve("research.evaluation.kernel", kernel_bytes):
+                    usable = filtered.loc[:, list(compute_columns)].copy()
+                    metrics, grouped_label_values = compute_ic_and_grouped_label_values(
+                        usable,
+                        compute_spec,
+                        n_groups=n_groups,
+                    )
+                    del usable
+                output_bytes = pandas_frame_payload_bytes(
                     metrics
                 ) + pandas_frame_payload_bytes(grouped_label_values)
-                if (
-                    policy.reserved_memory_bytes
-                    + 2 * (retained_bytes + next_output_bytes)
-                    > policy.task_memory_budget_bytes
-                ):
-                    raise ValueError(
-                        "research_evaluation_working_set_exceeds_task_memory_budget"
+                with policy.reserve("research.evaluation.output", output_bytes):
+                    rows_after_dropna += int(
+                        strict_non_negative_count_series(metrics["n_obs"]).sum()
                     )
-                rows_after_dropna += int(
-                    strict_non_negative_count_series(metrics["n_obs"]).sum()
-                )
-                metric_parts.append(metrics)
-                grouped_parts.append(grouped_label_values)
-                retained_output_bytes += next_output_bytes
-                if retained_policy is policy:
-                    retained_outputs.enter_context(
-                        policy.reserve(
-                            "research.evaluation.retained",
-                            next_output_bytes,
-                        )
-                    )
+                    metric_spill.append(metrics)
+                    grouped_spill.append(grouped_label_values)
+                    del metrics, grouped_label_values
 
-        metrics_result = _concat_parts(metric_parts, policy=retained_policy)
+        metrics_result = metric_spill.materialize()
         result_reservation = ExitStack()
         try:
             if retained_policy is not None:
@@ -217,13 +239,9 @@ def _compute_evaluation_frames(
                         pandas_frame_payload_bytes(metrics_result),
                     )
                 )
-            grouped_result = _concat_parts(grouped_parts, policy=retained_policy)
+            grouped_result = grouped_spill.materialize()
         finally:
-            retained_outputs.close()
             result_reservation.close()
-    except BaseException:
-        retained_outputs.close()
-        raise
 
     filter_metadata = {
         "filter_mode": spec.filter_mode,
@@ -266,52 +284,43 @@ def _iter_evaluation_work_frames(
             )
         )
     )
-    for frame in frames:
+    for frame in iter_complete_session_frames(
+        iter(frames),
+        timestamp_column="timestamp",
+    ):
         missing = sorted(required.difference(frame.columns))
         if missing:
             raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
         selected = [column for column in work_columns if column in frame.columns]
         policy = current_runtime_resource_policy()
-        frame_bytes = int(frame.index.memory_usage(deep=True)) + sum(
-            int(frame[column].memory_usage(index=False, deep=True))
-            for column in selected
-        )
+        projection_bytes = _selected_frame_payload_bytes(frame, selected)
+        with ExitStack() as working:
+            if policy is not None:
+                working.enter_context(
+                    policy.reserve("research.evaluation.projection", projection_bytes)
+                )
+            selected_frame = frame.loc[:, selected]
+            normalized = selected_frame.pipe(
+                normalize_signal_frame,
+                signals=spec.signals,
+                timestamp_column="timestamp",
+                source_columns_by_kind=source_columns_by_kind,
+            )
+            del selected_frame
+        normalized_bytes = pandas_frame_payload_bytes(normalized)
         if policy is not None and (
-            policy.reserved_memory_bytes + 2 * frame_bytes
+            policy.reserved_memory_bytes + normalized_bytes
             > policy.task_memory_budget_bytes
         ):
             raise ValueError(
                 "research_evaluation_working_set_exceeds_task_memory_budget"
             )
-        yield frame.loc[
-            :,
-            selected,
-        ].pipe(
-            normalize_signal_frame,
-            signals=spec.signals,
-            timestamp_column="timestamp",
-            source_columns_by_kind=source_columns_by_kind,
-        )
-
-
-def _concat_parts(
-    parts: list[pd.DataFrame],
-    *,
-    policy,
-) -> pd.DataFrame:
-    non_empty = [part for part in parts if not part.empty]
-    if not non_empty:
-        return parts[0].copy() if parts else pd.DataFrame()
-    if policy is not None:
-        payload_bytes = sum(pandas_frame_payload_bytes(part) for part in non_empty)
-        if (
-            policy.reserved_memory_bytes + 2 * payload_bytes
-            > policy.task_memory_budget_bytes
-        ):
-            raise ValueError(
-                "research_evaluation_working_set_exceeds_task_memory_budget"
-            )
-    return pd.concat(non_empty, ignore_index=True)
+        with ExitStack() as retained:
+            if policy is not None:
+                retained.enter_context(
+                    policy.reserve("research.evaluation.input", normalized_bytes)
+                )
+            yield normalized
 
 
 __all__ = ["EvaluationResult", "evaluate_signal_frame_chunks"]

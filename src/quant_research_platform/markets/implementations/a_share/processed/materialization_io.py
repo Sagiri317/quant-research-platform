@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
@@ -102,7 +103,10 @@ def read_processed_inputs_for_spec(
     resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
-    with runtime_resource_policy_scope(resource_policy):
+    with (
+        runtime_resource_policy_scope(resource_policy),
+        ExitStack() as retained_inputs,
+    ):
         for data_id in spec.processed_input_data_ids:
             dependency = processed_catalog.get(data_id)
             inputs[data_id] = read_materialized_dataset(
@@ -114,11 +118,14 @@ def read_processed_inputs_for_spec(
                     if columns_by_data_id is None
                     else columns_by_data_id.get(data_id)
                 ),
-                retained_payload_bytes=(
-                    retained_payload_bytes
-                    + sum(_frame_bytes(frame) for frame in inputs.values())
-                ),
+                retained_payload_bytes=retained_payload_bytes,
                 asset_ids=asset_ids,
+            )
+            retained_inputs.enter_context(
+                resource_policy.reserve(
+                    "a_share.processed_input",
+                    _frame_bytes(inputs[data_id]),
+                )
             )
     return inputs
 
@@ -163,12 +170,9 @@ def iter_sorted_output_chunks(
                         len(spec.primary_key) * np.dtype(object).itemsize
                         + 2 * np.dtype(np.intp).itemsize
                     )
-                    if output_bytes > bound_policy.payload_target_bytes:
-                        raise MaterializationCapacityExceeded(
-                            "a_share_indivisible_market_unit_exceeds_payload_target"
-                        )
                     if (
-                        (retained_payload_bytes or 0)
+                        bound_policy.reserved_memory_bytes
+                        + (retained_payload_bytes or 0)
                         + output_bytes
                         + key_temporary_bytes
                         > bound_policy.task_memory_budget_bytes
@@ -176,32 +180,41 @@ def iter_sorted_output_chunks(
                         raise MaterializationCapacityExceeded(
                             "a_share_known_payloads_exceed_task_memory_budget"
                         )
-                    key_arrays = tuple(
-                        output[column].to_numpy(copy=False)
-                        for column in reversed(spec.primary_key)
-                    )
-                    try:
-                        order = np.lexsort(key_arrays)
-                    except (TypeError, ValueError):
-                        raise ValueError(
-                            "a_share_output_primary_key_order_regression"
-                        ) from None
-                    expected = np.arange(len(output), dtype=np.intp)
-                    if not np.array_equal(order, expected):
-                        raise ValueError("a_share_output_primary_key_order_regression")
-                    first_key = tuple(array[0] for array in reversed(key_arrays))
-                    try:
-                        cross_chunk_regression = previous_last_key is not None and bool(
-                            first_key < previous_last_key
+                    with bound_policy.reserve(
+                        "a_share.output.order",
+                        key_temporary_bytes,
+                    ):
+                        key_arrays = tuple(
+                            output[column].to_numpy(copy=False)
+                            for column in reversed(spec.primary_key)
                         )
-                    except (TypeError, ValueError):
-                        cross_chunk_regression = True
-                    if cross_chunk_regression:
-                        raise ValueError("a_share_output_primary_key_order_regression")
-                    previous_last_key = tuple(
-                        array[-1] for array in reversed(key_arrays)
-                    )
-                    del expected, key_arrays, order
+                        try:
+                            order = np.lexsort(key_arrays)
+                        except (TypeError, ValueError):
+                            raise ValueError(
+                                "a_share_output_primary_key_order_regression"
+                            ) from None
+                        expected = np.arange(len(output), dtype=np.intp)
+                        if not np.array_equal(order, expected):
+                            raise ValueError(
+                                "a_share_output_primary_key_order_regression"
+                            )
+                        first_key = tuple(array[0] for array in reversed(key_arrays))
+                        try:
+                            cross_chunk_regression = (
+                                previous_last_key is not None
+                                and bool(first_key < previous_last_key)
+                            )
+                        except (TypeError, ValueError):
+                            cross_chunk_regression = True
+                        if cross_chunk_regression:
+                            raise ValueError(
+                                "a_share_output_primary_key_order_regression"
+                            )
+                        previous_last_key = tuple(
+                            array[-1] for array in reversed(key_arrays)
+                        )
+                        del expected, key_arrays, order
                     del chunk
                     yield (
                         output
@@ -245,7 +258,10 @@ def read_source_inputs_for_spec(
     resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
-    with runtime_resource_policy_scope(resource_policy):
+    with (
+        runtime_resource_policy_scope(resource_policy),
+        ExitStack() as retained_inputs,
+    ):
         for data_id in spec.source_input_data_ids:
             if spec.kind is ProcessedDataKind.PANEL and data_id == market_bars_data_id:
                 continue
@@ -258,10 +274,7 @@ def read_source_inputs_for_spec(
                     if columns_by_data_id is None
                     else columns_by_data_id.get(data_id)
                 ),
-                retained_payload_bytes=sum(
-                    _frame_bytes(frame) for frame in inputs.values()
-                )
-                + retained_payload_bytes,
+                retained_payload_bytes=retained_payload_bytes,
                 asset_ids=(
                     None
                     if asset_ids_by_data_id is None
@@ -272,6 +285,12 @@ def read_source_inputs_for_spec(
                     if asset_columns_by_data_id is None
                     else asset_columns_by_data_id.get(data_id, "asset_id")
                 ),
+            )
+            retained_inputs.enter_context(
+                resource_policy.reserve(
+                    "a_share.source_input",
+                    _frame_bytes(inputs[data_id]),
+                )
             )
     return inputs
 
@@ -288,7 +307,11 @@ def read_materialized_dataset(
 ) -> pd.DataFrame:
     if retained_payload_bytes < 0:
         raise ValueError("invalid_a_share_retained_payload_bytes")
-    available_bytes = resource_policy.task_memory_budget_bytes - retained_payload_bytes
+    available_bytes = (
+        resource_policy.task_memory_budget_bytes
+        - resource_policy.reserved_memory_bytes
+        - retained_payload_bytes
+    )
     if available_bytes <= 0:
         raise MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
@@ -338,10 +361,10 @@ def iter_dataset_chunks_with_policy(
         )
         if type(target_bytes) is not int or target_bytes <= 0:
             raise ValueError("invalid_target_chunk_bytes")
-        if target_bytes > bound_policy.payload_target_bytes:
-            raise ValueError("a_share_indivisible_market_unit_exceeds_payload_target")
         operation_headroom_bytes = (
-            bound_policy.task_memory_budget_bytes - retained_payload_bytes
+            bound_policy.task_memory_budget_bytes
+            - bound_policy.reserved_memory_bytes
+            - retained_payload_bytes
         )
         if operation_headroom_bytes <= 0:
             raise MaterializationCapacityExceeded(

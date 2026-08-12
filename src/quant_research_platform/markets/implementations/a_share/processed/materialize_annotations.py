@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from contextlib import ExitStack
 
 import pandas as pd
 
@@ -56,6 +57,18 @@ def write_annotations(
     )
     panel_spec = catalog.get(contract.primary_input_data_id)
     panel_root = materialization_io.processed_root(layout, panel_spec)
+    input_row_buffer = materialization_planning.registered_output_buffer_bytes(
+        panel_spec,
+        row_count=1,
+    )
+    output_row_buffer = materialization_planning.registered_output_buffer_bytes(
+        spec,
+        row_count=1,
+    )
+    annotation_row_vectors = len(spec.required_columns) * 8
+    operation_row_bound = (
+        input_row_buffer + output_row_buffer + annotation_row_vectors
+    )
 
     def chunks() -> Iterable[pd.DataFrame]:
         def materialize(
@@ -64,70 +77,72 @@ def write_annotations(
             session_context: Sequence[pd.Timestamp],
             retained_payload_bytes: int,
         ) -> pd.DataFrame:
-            read_window = materialization_planning.session_batch_window(
-                session_context,
-                current_sessions,
-                lookahead_sessions=1,
-            )
-            processed_inputs = materialization_io.read_processed_inputs_for_spec(
-                spec,
-                layout=layout,
-                processed_catalog=catalog,
-                time_window=read_window,
-                resource_policy=policy,
-                asset_ids=asset_ids,
-                retained_payload_bytes=retained_payload_bytes,
-            )
-            materialization_validation.validate_processed_input_contract(
-                spec,
-                contract=contract,
-                purpose="annotation",
-                processed_inputs=processed_inputs,
-            )
-            panel = processed_inputs[contract.primary_input_data_id]
-            materialization_planning.require_known_materialization_payload_bound(
-                frames=(panel,),
-                output=None,
-                retained_payload_bytes=(
-                    retained_payload_bytes
-                    + materialization_planning.registered_output_buffer_bytes(
+            with ExitStack() as live:
+                read_window = materialization_planning.session_batch_window(
+                    session_context,
+                    current_sessions,
+                    lookahead_sessions=1,
+                )
+                processed_inputs = (
+                    materialization_io.read_processed_inputs_for_spec(
+                        spec,
+                        layout=layout,
+                        processed_catalog=catalog,
+                        time_window=read_window,
+                        resource_policy=policy,
+                        asset_ids=asset_ids,
+                        retained_payload_bytes=retained_payload_bytes,
+                    )
+                )
+                materialization_validation.validate_processed_input_contract(
+                    spec,
+                    contract=contract,
+                    purpose="annotation",
+                    processed_inputs=processed_inputs,
+                )
+                panel = processed_inputs[contract.primary_input_data_id]
+                panel_bytes = pandas_frame_payload_bytes(panel)
+                live.enter_context(
+                    policy.reserve("a_share.annotation.input", panel_bytes)
+                )
+                output_buffer = (
+                    materialization_planning.registered_output_buffer_bytes(
                         spec,
                         row_count=len(panel),
                     )
-                ),
-                resource_policy=policy,
-            )
-            outputs = annotations.derive_annotations(panel, data_ids=(spec.data_id,))
-            derived = outputs[spec.data_id]
-            materialization_planning.require_known_materialization_payload_bound(
-                frames=(panel, *outputs.values()),
-                output=None,
-                retained_payload_bytes=(
-                    retained_payload_bytes + pandas_frame_payload_bytes(derived)
-                ),
-                resource_policy=policy,
-            )
-            output = materialization_planning.filter_output_sessions(
-                derived,
-                current_sessions,
-                columns=spec.required_columns,
-                retained_frames=(panel, *outputs.values()),
-                retained_payload_bytes=retained_payload_bytes,
-                resource_policy=policy,
-            )
-            materialization_planning.require_known_materialization_payload_bound(
-                frames=(panel, *outputs.values()),
-                output=output,
-                retained_payload_bytes=retained_payload_bytes,
-                resource_policy=policy,
-            )
-            return output
+                )
+                annotation_bound = panel_bytes + output_buffer
+                live.enter_context(
+                    policy.reserve(
+                        "a_share.annotation.calculate",
+                        annotation_bound,
+                    )
+                )
+                outputs = annotations.derive_annotations(
+                    panel,
+                    data_ids=(spec.data_id,),
+                )
+                derived = outputs[spec.data_id]
+                if pandas_frame_payload_bytes(derived) > annotation_bound:
+                    raise materialization_io.MaterializationCapacityExceeded(
+                        "a_share_known_payloads_exceed_task_memory_budget"
+                    )
+                output = materialization_planning.filter_output_sessions(
+                    derived,
+                    current_sessions,
+                    columns=spec.required_columns,
+                    retained_frames=(panel, *outputs.values()),
+                    retained_payload_bytes=retained_payload_bytes,
+                    resource_policy=policy,
+                )
+                return output
 
         yield from materialization_planning.iter_active_materialization_batches(
             panel_root,
             time_window=time_window,
             sessions=sessions,
             resource_policy=policy,
+            output_row_bound_bytes=operation_row_bound,
             retained_payload_bytes=retained_written_bytes,
             materialize=materialize,
         )

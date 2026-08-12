@@ -19,6 +19,10 @@ from quant_research_platform.contracts.predictions import (
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.research._memory import (
+    _ResearchFrameSpill,
+    _selected_frame_payload_bytes,
+)
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.datasets.validation import (
     validate_prediction_input,
@@ -293,94 +297,117 @@ def _validation_prediction_frame(
         candidate_spec.input_columns,
         model_result.prediction_model,
     )
-    parts: list[pd.DataFrame] = []
-    retained_bytes = 0
-    resource_policy = None
     retained_policy = current_runtime_resource_policy()
-    retained_outputs = ExitStack()
-    try:
+    with _ResearchFrameSpill(
+        "research.prediction.validation",
+        resource_policy=retained_policy,
+    ) as spill:
         for chunk in chunks:
             resource_policy = current_runtime_resource_policy()
-            unreserved_bytes = (
-                0 if retained_policy is resource_policy else retained_bytes
-            )
-            if resource_policy is not None and (
-                resource_policy.reserved_memory_bytes
-                + 2 * unreserved_bytes
-                + 4 * pandas_frame_payload_bytes(chunk)
-                > resource_policy.task_memory_budget_bytes
-            ):
-                raise ValueError(
-                    "prediction_validation_working_set_exceeds_task_memory_budget"
-                )
-            timestamps = _prediction_timestamps(chunk)
-            validation = chunk.loc[
-                (timestamps >= validation_start) & (timestamps <= validation_end)
-            ]
-            validation, _filter_metadata = apply_filter_mode(
-                validation,
-                mode=prediction_spec.sample_filter_mode,
-                metadata_key="sample_filter_mode",
-            )
-            validation = validation.dropna(
-                subset=[*candidate_spec.input_columns, candidate_spec.label_column]
-            )
+            row_count = len(chunk)
+            index_bytes = int(chunk.index.memory_usage(deep=True))
+            timestamp_bytes = index_bytes + 8 * row_count
+            window_mask_bytes = index_bytes + row_count
+            window_output_bytes = pandas_frame_payload_bytes(chunk)
+            with ExitStack() as window_reservation:
+                if resource_policy is not None:
+                    window_reservation.enter_context(
+                        resource_policy.reserve(
+                            "research.prediction.validation.window",
+                            timestamp_bytes + window_mask_bytes + window_output_bytes,
+                        )
+                    )
+                timestamps = _prediction_timestamps(chunk)
+                validation = chunk.loc[
+                    (timestamps >= validation_start) & (timestamps <= validation_end)
+                ]
+                del timestamps
             if validation.empty:
+                del validation
                 continue
             validation_bytes = pandas_frame_payload_bytes(validation)
-            if resource_policy is not None and (
-                resource_policy.reserved_memory_bytes
-                + 2 * unreserved_bytes
-                + 4 * validation_bytes
-                > resource_policy.task_memory_budget_bytes
-            ):
-                raise ValueError(
-                    "prediction_validation_working_set_exceeds_task_memory_budget"
-                )
-            output = validation.loc[
-                :,
-                ["timestamp", "asset_id", candidate_spec.label_column],
-            ].copy()
-            output[prediction_spec.prediction_column] = predictor(validation)
-            output_bytes = pandas_frame_payload_bytes(output)
-            if resource_policy is not None and (
-                resource_policy.reserved_memory_bytes
-                + 2 * (unreserved_bytes + output_bytes)
-                > resource_policy.task_memory_budget_bytes
-            ):
-                raise ValueError(
-                    "prediction_validation_working_set_exceeds_task_memory_budget"
-                )
-            parts.append(output)
-            retained_bytes += output_bytes
-            if resource_policy is not None and retained_policy is resource_policy:
-                retained_outputs.enter_context(
-                    resource_policy.reserve(
-                        "research.prediction.validation",
-                        output_bytes,
+            with ExitStack() as retained:
+                if resource_policy is not None:
+                    retained.enter_context(
+                        resource_policy.reserve(
+                            "research.prediction.validation.input",
+                            validation_bytes,
+                        )
                     )
+                filtered, _filter_metadata = apply_filter_mode(
+                    validation,
+                    mode=prediction_spec.sample_filter_mode,
+                    metadata_key="sample_filter_mode",
                 )
-        if not parts:
+                if filtered is not validation and resource_policy is not None:
+                    retained.enter_context(
+                        resource_policy.reserve(
+                            "research.prediction.validation.filtered",
+                            pandas_frame_payload_bytes(filtered),
+                        )
+                    )
+                filtered_bytes = pandas_frame_payload_bytes(filtered)
+                usable_mask_bytes = int(filtered.index.memory_usage(deep=True)) + len(
+                    filtered
+                )
+                output_columns = (
+                    "timestamp",
+                    "asset_id",
+                    candidate_spec.label_column,
+                )
+                output_frame_bytes = _selected_frame_payload_bytes(
+                    filtered,
+                    output_columns,
+                ) + 8 * len(filtered)
+                model_matrix_bytes = (
+                    8 * len(filtered) * (len(candidate_spec.input_columns) + 1)
+                )
+                with ExitStack() as compute_reservation:
+                    if resource_policy is not None:
+                        compute_reservation.enter_context(
+                            resource_policy.reserve(
+                                "research.prediction.validation.compute",
+                                usable_mask_bytes
+                                + filtered_bytes
+                                + output_frame_bytes
+                                + model_matrix_bytes,
+                            )
+                        )
+                    usable = filtered.dropna(
+                        subset=[
+                            *candidate_spec.input_columns,
+                            candidate_spec.label_column,
+                        ]
+                    )
+                    if not usable.empty:
+                        output = usable.loc[:, list(output_columns)].copy()
+                        output[prediction_spec.prediction_column] = predictor(usable)
+                        spill.append(output)
+                        del output
+                    del usable
+            del filtered, validation
+        if spill.row_count == 0:
             raise ValueError("empty_model_selection_validation_window")
-        if len(parts) == 1:
-            result = parts[0]
-        else:
-            if resource_policy is not None and (
-                resource_policy.reserved_memory_bytes + retained_bytes
-                > resource_policy.task_memory_budget_bytes
-            ):
-                raise ValueError(
-                    "prediction_validation_working_set_exceeds_task_memory_budget"
+        result = spill.materialize()
+    input_bytes = pandas_frame_payload_bytes(result)
+    purged_output_bound = input_bytes
+    with ExitStack() as purge_reservation:
+        if retained_policy is not None:
+            purge_reservation.enter_context(
+                retained_policy.reserve(
+                    "research.prediction.validation.purge",
+                    input_bytes + purged_output_bound,
                 )
-            result = pd.concat(parts, ignore_index=True)
-        parts.clear()
-    finally:
-        retained_outputs.close()
-    result = validation_split._purge_trailing_timestamps(
-        result,
-        candidate_spec.purge_gap_steps,
-        group_column="asset_id",
-    )
+            )
+        result = validation_split._purge_trailing_timestamps(
+            result,
+            candidate_spec.purge_gap_steps,
+            group_column="asset_id",
+        )
+        if pandas_frame_payload_bytes(result) > purged_output_bound:
+            raise ValueError(
+                "research_prediction_working_set_exceeds_task_memory_budget"
+            )
     if result.empty:
         raise ValueError("empty_model_selection_validation_window")
     return result
@@ -402,10 +429,40 @@ def _prediction_train_chunks(
     train_end: pd.Timestamp,
 ) -> Iterable[pd.DataFrame]:
     for chunk in chunks:
-        timestamps = _prediction_timestamps(chunk)
-        train = chunk.loc[timestamps <= train_end]
+        policy = current_runtime_resource_policy()
+        index_bytes = int(chunk.index.memory_usage(deep=True))
+        timestamp_bytes = index_bytes + 8 * len(chunk)
+        mask_bytes = index_bytes + len(chunk)
+        working_bytes = timestamp_bytes + mask_bytes + pandas_frame_payload_bytes(chunk)
+        if policy is not None and (
+            policy.reserved_memory_bytes + working_bytes
+            > policy.task_memory_budget_bytes
+        ):
+            raise ValueError(
+                "prediction_training_working_set_exceeds_task_memory_budget"
+            )
+        with ExitStack() as working:
+            if policy is not None:
+                working.enter_context(
+                    policy.reserve("research.prediction.training", working_bytes)
+                )
+            timestamps = _prediction_timestamps(chunk)
+            train = chunk.loc[timestamps <= train_end]
         if not train.empty:
-            yield train
+            retained_bytes = pandas_frame_payload_bytes(train)
+            if policy is not None and (
+                policy.reserved_memory_bytes + retained_bytes
+                > policy.task_memory_budget_bytes
+            ):
+                raise ValueError(
+                    "prediction_training_working_set_exceeds_task_memory_budget"
+                )
+            with ExitStack() as retained:
+                if policy is not None:
+                    retained.enter_context(
+                        policy.reserve("research.prediction.train", retained_bytes)
+                    )
+                yield train
 
 
 def _prediction_timestamps(chunk: pd.DataFrame) -> pd.Series:

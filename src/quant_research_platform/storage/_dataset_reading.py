@@ -6,7 +6,7 @@ import math
 import struct
 import sys
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -58,6 +58,7 @@ from quant_research_platform.storage._dataset_physical import (
     dataset_file_identity,
     inspect_dataset_part,
     iter_dataset_part_batches,
+    record_batch_decoded_working_set_bounds,
 )
 from quant_research_platform.storage._dataset_schema import (
     logical_dtype_metadata_bytes,
@@ -75,6 +76,10 @@ from quant_research_platform.storage._dataset_types import (
 )
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
+
+_PANDAS_FRAME_FIXED_BYTES = 4 * 1024
+_PANDAS_OBJECT_CELL_BYTES = 64
+_PANDAS_INDEX_BYTES_PER_ROW = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,19 +323,23 @@ def _materialize_dataset_session(
             "dataset_materialized_result_exceeds_target_bytes"
         )
     second_pass_target_bytes = min(target_bytes, remaining_headroom)
-    buffers = _allocate_materialized_buffers(
-        dtype_plan,
-        row_count=row_count,
-        string_bytes=string_bytes,
-    )
-    _fill_materialized_buffers(
-        context,
-        buffers=buffers,
-        row_count=row_count,
-        target_chunk_bytes=second_pass_target_bytes,
-        operation_headroom_bytes=operation_headroom - required_payload_bytes,
-    )
-    return _materialized_frame(buffers)
+    with context.resource_policy.reserve(
+        "storage.materialized.output",
+        required_payload_bytes,
+    ):
+        buffers = _allocate_materialized_buffers(
+            dtype_plan,
+            row_count=row_count,
+            string_bytes=string_bytes,
+        )
+        _fill_materialized_buffers(
+            context,
+            buffers=buffers,
+            row_count=row_count,
+            target_chunk_bytes=second_pass_target_bytes,
+            operation_headroom_bytes=operation_headroom - required_payload_bytes,
+        )
+        return _materialized_frame(buffers)
 
 
 @dataclass(slots=True)
@@ -1287,7 +1296,6 @@ def _iter_dataset_chunks(
             yield _empty_frame(
                 context,
                 context.logical_columns,
-                target_chunk_bytes=target_bytes,
             )
             return
         yielded = False
@@ -1309,7 +1317,6 @@ def _iter_dataset_chunks(
             yield _empty_frame(
                 context,
                 context.logical_columns,
-                target_chunk_bytes=target_bytes,
             )
     finally:
         _verify_preserving_primary(context)
@@ -1347,6 +1354,17 @@ def iter_declared_parquet_member_batches(
         _previous_output_bytes=previous_output_bytes,
         _operation_headroom_bytes=_operation_headroom_bytes,
     ):
+        converter_headroom = _operation_headroom_bytes
+        policy = current_runtime_resource_policy()
+        if converter_headroom is None and policy is not None:
+            converter_headroom = [
+                min(
+                    operation_headroom_bytes
+                    if operation_headroom_bytes is not None
+                    else policy.task_memory_budget_bytes,
+                    policy.task_memory_budget_bytes - policy.reserved_memory_bytes,
+                )
+            ]
         yield from _arrow_batch_to_bounded_pandas(
             batch,
             target_chunk_bytes=target_bytes,
@@ -1355,7 +1373,7 @@ def iter_declared_parquet_member_batches(
             persisted_frame_observer=persisted_frame_observer,
             batch_observer=batch_observer,
             _previous_output_bytes=previous_output_bytes,
-            _operation_headroom_bytes=_operation_headroom_bytes,
+            _operation_headroom_bytes=converter_headroom,
         )
 
 
@@ -1575,9 +1593,9 @@ def _prepare_in_filter(
     is_binary = pa.types.is_binary(data_type) or pa.types.is_large_binary(data_type)
     max_scalar_bytes = 0
     pointer_bytes = struct.calcsize("P")
-    sort_state_bytes = len(values) * pointer_bytes
+    sort_state_bytes = sys.getsizeof([]) + len(values) * pointer_bytes
     timsort_scratch_bytes = (len(values) // 2) * pointer_bytes
-    input_state_bytes = len(values) * pointer_bytes
+    input_state_bytes = sys.getsizeof(values)
     if is_string or is_binary:
         offset_bytes = (
             8
@@ -1625,8 +1643,6 @@ def _prepare_in_filter(
             max_scalar_bytes = data_type.byte_width
         else:
             max_scalar_bytes = max(1, data_type.bit_width // 8)
-    if max_scalar_bytes > resource_policy.payload_target_bytes:
-        raise DatasetReadCapacityExceeded("dataset_filter_values_exceed_payload_target")
     _require_filter_preparation_overlap(
         preflight_bytes=0,
         input_state_bytes=input_state_bytes,
@@ -1635,61 +1651,52 @@ def _prepare_in_filter(
         resource_policy=resource_policy,
         retained_filter_bytes=retained_filter_bytes,
     )
-    sorted_values = sorted(values)
-    if sorted_values:
-        write_position = 1
-        for read_position in range(1, len(sorted_values)):
-            value = sorted_values[read_position]
-            if value != sorted_values[write_position - 1]:
-                sorted_values[write_position] = value
-                write_position += 1
-        del sorted_values[write_position:]
-    if is_string or is_binary:
-        compact_payload_bytes = offset_bytes * len(sorted_values)
-        compact_payload_bytes += sum(
-            len(value) if is_binary else _utf8_payload_length(value)
-            for value in sorted_values
-        )
-    elif pa.types.is_boolean(data_type):
-        compact_payload_bytes = (len(sorted_values) + 7) // 8
-    else:
-        compact_payload_bytes = len(sorted_values) * scalar_width_bytes
-    if compact_payload_bytes > resource_policy.payload_target_bytes:
-        raise DatasetReadCapacityExceeded("dataset_filter_values_exceed_payload_target")
-    if (
-        retained_filter_bytes
-        + input_state_bytes
-        + len(sorted_values) * pointer_bytes
-        + compact_payload_bytes
-        > resource_policy.task_memory_budget_bytes
+    with (
+        runtime_resource_policy_scope(resource_policy),
+        resource_policy.reserve(
+            "storage.filter.sort",
+            sort_state_bytes + timsort_scratch_bytes,
+        ),
     ):
-        raise DatasetReadCapacityExceeded(
-            "dataset_filter_values_exceed_task_memory_budget"
+        sorted_values = sorted(values)
+        if sorted_values:
+            write_position = 1
+            for read_position in range(1, len(sorted_values)):
+                value = sorted_values[read_position]
+                if value != sorted_values[write_position - 1]:
+                    sorted_values[write_position] = value
+                    write_position += 1
+            del sorted_values[write_position:]
+        value_count = len(sorted_values)
+        validity_bytes = (value_count + 7) // 8
+        if is_string or is_binary:
+            arrow_bound = offset_bytes * (value_count + 1) + validity_bytes
+            arrow_bound += sum(
+                len(value) if is_binary else _utf8_payload_length(value)
+                for value in sorted_values
+            )
+        elif pa.types.is_boolean(data_type):
+            arrow_bound = 2 * validity_bytes
+        else:
+            arrow_bound = value_count * scalar_width_bytes + validity_bytes
+        _require_filter_preparation_overlap(
+            preflight_bytes=arrow_bound,
+            input_state_bytes=input_state_bytes,
+            sort_state_bytes=0,
+            timsort_scratch_bytes=0,
+            resource_policy=resource_policy,
+            retained_filter_bytes=retained_filter_bytes,
         )
-    try:
-        acquired = pa.array(sorted_values, type=data_type)
-    except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
-        raise ValueError("invalid_dataset_physical_filter_value") from None
-    if acquired.nbytes > resource_policy.payload_target_bytes:
-        raise DatasetReadCapacityExceeded("dataset_filter_values_exceed_payload_target")
-    if (
-        retained_filter_bytes + acquired.nbytes
-        > resource_policy.task_memory_budget_bytes
-    ):
-        raise DatasetReadCapacityExceeded(
-            "dataset_filter_values_exceed_task_memory_budget"
-        )
-    if (
-        retained_filter_bytes
-        + input_state_bytes
-        + len(sorted_values) * pointer_bytes
-        + acquired.nbytes
-        > resource_policy.task_memory_budget_bytes
-    ):
-        raise DatasetReadCapacityExceeded(
-            "dataset_filter_values_exceed_task_memory_budget"
-        )
-    return PreparedMembershipValues(acquired, max_scalar_bytes, acquired.nbytes)
+        with resource_policy.reserve("storage.filter.arrow", arrow_bound):
+            try:
+                acquired = pa.array(sorted_values, type=data_type)
+            except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
+                raise ValueError("invalid_dataset_physical_filter_value") from None
+            if acquired.nbytes > arrow_bound:
+                raise DatasetReadCapacityExceeded(
+                    "dataset_filter_values_exceed_task_memory_budget"
+                )
+        return PreparedMembershipValues(acquired, max_scalar_bytes, acquired.nbytes)
 
 
 def _require_filter_preparation_overlap(
@@ -1702,7 +1709,8 @@ def _require_filter_preparation_overlap(
     retained_filter_bytes: int,
 ) -> None:
     if (
-        retained_filter_bytes
+        resource_policy.reserved_memory_bytes
+        + retained_filter_bytes
         + input_state_bytes
         + preflight_bytes
         + sort_state_bytes
@@ -1764,8 +1772,6 @@ def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:
 def _empty_frame(
     context: DatasetSession,
     columns: tuple[str, ...],
-    *,
-    target_chunk_bytes: int,
 ) -> pd.DataFrame:
     selected = pa.schema([context.arrow_schema.field(column) for column in columns])
     overrides = pandas_dtype_overrides_from_logical_payload(
@@ -1779,12 +1785,6 @@ def _empty_frame(
         )
     )
     output = frame.astype(overrides) if overrides else frame
-    if (
-        pandas_frame_payload_bytes(frame)
-        + (pandas_frame_payload_bytes(output) if output is not frame else 0)
-        > target_chunk_bytes
-    ):
-        raise DatasetReadCapacityExceeded("dataset_row_exceeds_target_chunk_bytes")
     return output
 
 
@@ -1801,22 +1801,48 @@ def _arrow_batch_to_bounded_pandas(
 ) -> Iterator[pd.DataFrame]:
     if batch.num_rows == 0:
         return
-    pandas_budget = _validated_target_chunk_bytes(target_chunk_bytes)
+    pandas_target = _validated_target_chunk_bytes(target_chunk_bytes)
     overrides = dict(dtype_overrides or {})
     fixed_operation_headroom = (
         None
         if operation_headroom_bytes is None
         else _validated_target_chunk_bytes(operation_headroom_bytes)
     )
-    if (
-        fixed_operation_headroom is not None
-        and fixed_operation_headroom - batch.get_total_buffer_size() <= 0
-    ):
-        raise DatasetReadCapacityExceeded(
-            "dataset_working_set_exceeds_task_memory_budget"
+    source_row_bytes, source_fixed_bytes = (
+        record_batch_decoded_working_set_bounds(batch)
+    )
+    source_row_bytes += (
+        len(batch.schema.names) * _PANDAS_OBJECT_CELL_BYTES
+        + _PANDAS_INDEX_BYTES_PER_ROW
+    )
+    categorical_overrides = {
+        name: dtype
+        for name, value in overrides.items()
+        if isinstance(
+            dtype := pd.api.types.pandas_dtype(value),
+            pd.CategoricalDtype,
         )
-    rows_per_slice = 1
-    calibrated = False
+    }
+    conversion_row_bytes = source_row_bytes
+    conversion_fixed_bytes = _PANDAS_FRAME_FIXED_BYTES + (
+        source_fixed_bytes if _operation_headroom_bytes is None else 0
+    )
+    if overrides:
+        conversion_row_bytes += source_row_bytes
+        conversion_fixed_bytes += _PANDAS_FRAME_FIXED_BYTES + sum(
+            int(dtype.categories.memory_usage(deep=True))
+            for dtype in categorical_overrides.values()
+        )
+    conversion_row_bytes += len(categorical_overrides) * (
+        np.dtype(np.intp).itemsize + 1
+    )
+    soft_row_bytes = max(
+        1,
+        (int(batch.nbytes) + batch.num_rows - 1) // batch.num_rows
+        + len(batch.schema.names) * _PANDAS_OBJECT_CELL_BYTES
+        + _PANDAS_INDEX_BYTES_PER_ROW,
+    )
+    soft_rows = max(1, pandas_target // soft_row_bytes)
     start = 0
     previous_output_bytes = (
         [0] if _previous_output_bytes is None else _previous_output_bytes
@@ -1827,141 +1853,97 @@ def _arrow_batch_to_bounded_pandas(
             if _operation_headroom_bytes is None
             else _operation_headroom_bytes[0]
         )
+        previous_output_bound = previous_output_bytes[0]
+        parent_buffer_bytes = (
+            batch.get_total_buffer_size()
+            if _operation_headroom_bytes is None
+            else 0
+        )
         conversion_budget = (
             None
             if current_operation_headroom is None
-            else current_operation_headroom - batch.get_total_buffer_size()
+            else (
+                current_operation_headroom
+                - parent_buffer_bytes
+                - previous_output_bound
+                - conversion_fixed_bytes
+            )
         )
-        if conversion_budget is not None and conversion_budget <= 0:
+        if conversion_budget is not None and conversion_budget < conversion_row_bytes:
             raise DatasetReadCapacityExceeded(
                 "dataset_working_set_exceeds_task_memory_budget"
             )
-        current_pandas_budget = (
-            pandas_budget
+        hard_rows = (
+            batch.num_rows - start
             if conversion_budget is None
-            else conversion_budget - previous_output_bytes[0]
+            else conversion_budget // conversion_row_bytes
         )
-        if current_pandas_budget <= 0:
-            raise DatasetReadCapacityExceeded(
-                "dataset_working_set_exceeds_task_memory_budget"
-            )
-        slice_budget = min(pandas_budget, current_pandas_budget)
-        stop = min(batch.num_rows, start + rows_per_slice)
-        arrow_slice = batch.slice(start, stop - start)
-        if (
-            _operation_headroom_bytes is not None
-            and fixed_operation_headroom is not None
-            and current_operation_headroom < fixed_operation_headroom
-            and current_pandas_budget < pandas_budget
-        ):
-            raise DatasetReadCapacityExceeded(
-                "dataset_working_set_exceeds_task_memory_budget"
-            )
-        frame = _arrow_slice_to_pandas(arrow_slice)
-        frame_bytes = pandas_frame_payload_bytes(frame)
-        if frame_bytes > pandas_budget or (
-            conversion_budget is not None and frame_bytes > current_pandas_budget
-        ):
-            if len(frame) == 1:
-                if frame_bytes > pandas_budget:
-                    raise DatasetReadCapacityExceeded(
-                        "dataset_row_exceeds_target_chunk_bytes"
-                    )
-                raise DatasetReadCapacityExceeded(
-                    "dataset_working_set_exceeds_task_memory_budget"
-                )
-            rows_per_slice = max(1, rows_per_slice // 2)
-            del frame
-            continue
-        categorical_overrides = {
-            name: dtype
-            for name, value in overrides.items()
-            if isinstance(
-                dtype := pd.api.types.pandas_dtype(value),
-                pd.CategoricalDtype,
-            )
-        }
-        if overrides:
-            ordinary_overrides = {
-                name: value
-                for name, value in overrides.items()
-                if name not in categorical_overrides
-            }
-            output = (
-                frame.astype(ordinary_overrides) if ordinary_overrides else frame.copy()
-            )
-            for name, dtype in categorical_overrides.items():
-                codes = dtype.categories.get_indexer(frame[name])
-                if np.any((codes == -1) & frame[name].notna().to_numpy()):
-                    raise ValueError("dataset_categorical_domain_mismatch")
-                output[name] = pd.Categorical.from_codes(
-                    codes,
-                    dtype=dtype,
-                    validate=False,
-                )
-                del codes
-        else:
-            output = frame
-        output_bytes = pandas_frame_payload_bytes(output)
-        if output_bytes > pandas_budget or (
-            output is not frame and frame_bytes + output_bytes > current_pandas_budget
-        ):
-            if len(frame) == 1:
-                if output_bytes > pandas_budget:
-                    raise DatasetReadCapacityExceeded(
-                        "dataset_row_exceeds_target_chunk_bytes"
-                    )
-                raise DatasetReadCapacityExceeded(
-                    "dataset_working_set_exceeds_task_memory_budget"
-                )
-            rows_per_slice = max(1, rows_per_slice // 2)
-            del output, frame
-            continue
-        measured_bytes = max(frame_bytes, output_bytes)
-        measured_row_bytes = max(
-            1,
-            (measured_bytes + len(frame) - 1) // len(frame),
-        )
-        if not calibrated:
-            calibrated = True
-            calibrated_rows = max(
-                1,
-                min(
-                    batch.num_rows - start,
-                    slice_budget // measured_row_bytes,
-                ),
-            )
-            if calibrated_rows > rows_per_slice:
-                del output, frame
-                rows_per_slice = calibrated_rows
-                continue
-        if persisted_frame_observer is not None:
-            persisted_frame_observer(frame)
-        if batch_observer is not None:
-            batch_observer(arrow_slice, output)
-        del frame
-        previous_output_bytes[0] = output_bytes
-        yield output
-        del output
-        start = stop
-        if start >= batch.num_rows:
-            continue
-        next_slice_budget = (
-            pandas_budget
-            if conversion_budget is None
-            else conversion_budget - previous_output_bytes[0]
-        )
-        if next_slice_budget <= 0:
-            raise DatasetReadCapacityExceeded(
-                "dataset_working_set_exceeds_task_memory_budget"
-            )
         rows_per_slice = max(
             1,
-            min(
-                batch.num_rows - start,
-                min(pandas_budget, next_slice_budget) // measured_row_bytes,
-            ),
+            min(batch.num_rows - start, soft_rows, hard_rows),
         )
+        stop = start + rows_per_slice
+        conversion_reserve_bytes = (
+            conversion_fixed_bytes + (stop - start) * conversion_row_bytes
+        )
+        policy = current_runtime_resource_policy()
+        with ExitStack() as conversion_reservation:
+            if policy is not None:
+                conversion_reservation.enter_context(
+                    policy.reserve(
+                        "storage.arrow.to_pandas",
+                        conversion_reserve_bytes,
+                    )
+                )
+            arrow_slice = batch.slice(start, stop - start)
+            frame = _arrow_slice_to_pandas(arrow_slice)
+            frame_bytes = pandas_frame_payload_bytes(frame)
+            if overrides:
+                ordinary_overrides = {
+                    name: value
+                    for name, value in overrides.items()
+                    if name not in categorical_overrides
+                }
+                output = (
+                    frame.astype(ordinary_overrides)
+                    if ordinary_overrides
+                    else frame.copy()
+                )
+                for name, dtype in categorical_overrides.items():
+                    codes = dtype.categories.get_indexer(frame[name])
+                    if np.any((codes == -1) & frame[name].notna().to_numpy()):
+                        raise ValueError("dataset_categorical_domain_mismatch")
+                    output[name] = pd.Categorical.from_codes(
+                        codes,
+                        dtype=dtype,
+                        validate=False,
+                    )
+                    del codes
+            else:
+                output = frame
+            output_bytes = pandas_frame_payload_bytes(output)
+            actual_working_bytes = frame_bytes + (
+                output_bytes if output is not frame else 0
+            )
+            if (
+                current_operation_headroom is not None
+                and parent_buffer_bytes
+                + previous_output_bound
+                + actual_working_bytes
+                > current_operation_headroom
+            ):
+                raise DatasetReadCapacityExceeded(
+                    "dataset_working_set_exceeds_task_memory_budget"
+                )
+            if persisted_frame_observer is not None:
+                persisted_frame_observer(frame)
+            if batch_observer is not None:
+                batch_observer(arrow_slice, output)
+            del frame
+            previous_output_bytes[0] = output_bytes
+            yield output
+            del output
+        start = stop
 
 
 def _arrow_slice_to_pandas(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
@@ -1975,30 +1957,18 @@ def iter_bounded_frame_chunks(
 ) -> Iterator[pd.DataFrame]:
     if frame.empty:
         return
+    target = _validated_target_chunk_bytes(target_chunk_bytes)
     frame_bytes = pandas_frame_payload_bytes(frame)
     rows_per_chunk = max(
         1,
         min(
             len(frame),
-            len(frame) * target_chunk_bytes // max(1, frame_bytes),
+            len(frame) * target // max(1, frame_bytes),
         ),
     )
-    start = 0
-    while start < len(frame):
+    for start in range(0, len(frame), rows_per_chunk):
         stop = min(len(frame), start + rows_per_chunk)
-        candidate = frame.iloc[start:stop]
-        candidate_bytes = pandas_frame_payload_bytes(candidate)
-        if candidate_bytes > target_chunk_bytes:
-            if len(candidate) == 1:
-                raise DatasetReadCapacityExceeded(
-                    "dataset_row_exceeds_target_chunk_bytes"
-                )
-            rows_per_chunk = max(1, rows_per_chunk // 2)
-            continue
-        yield candidate
-        start = stop
-        if start < len(frame) and candidate_bytes * 2 < target_chunk_bytes:
-            rows_per_chunk = min(len(frame) - start, rows_per_chunk * 2)
+        yield frame.iloc[start:stop]
 
 
 def filter_frame_by_time_window(

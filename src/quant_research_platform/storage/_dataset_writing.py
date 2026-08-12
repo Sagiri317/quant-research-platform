@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -49,8 +51,12 @@ from quant_research_platform.storage._dataset_paths import (
     validate_dataset_artifact_root,
 )
 from quant_research_platform.storage._dataset_physical import (
+    PARQUET_DATA_PAGE_BYTES,
+    PARQUET_WRITER_NATIVE_BYTES,
     DatasetPartMetadata,
     dataset_file_identity,
+    table_decoded_working_set_bounds,
+    table_with_decoded_row_bounds,
 )
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
@@ -78,10 +84,11 @@ from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 
-_PARQUET_WRITE_FIXED_RESERVE_BYTES = 1024**2
 _TIMESTAMP_PREPARATION_BYTES_PER_ROW = 256
+_ARROW_CELL_OVERHEAD_BYTES = 9
+_ARROW_FRAME_FIXED_BYTES = 4 * 1024
 _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES = (
-    _PARQUET_WRITE_FIXED_RESERVE_BYTES
+    PARQUET_WRITER_NATIVE_BYTES
     + EXACT_KEY_SQLITE_PAGE_BYTES
     + DATASET_INVENTORY_RESERVE_BYTES
 )
@@ -221,7 +228,7 @@ class _WriteStats:
             observed_logical_dtypes = logical_payload
             self.observe_logical_dtype_payload(
                 logical_payload,
-                target_chunk_bytes=target_chunk_bytes,
+                target_chunk_bytes=operation_headroom_bytes,
             )
             dtype_overrides.update(
                 pandas_dtype_overrides_from_logical_payload(
@@ -451,12 +458,11 @@ def _write_dataset_under_policy(
 
     def _writer(temp_root: Path) -> DatasetInspection:
         try:
-            working_headroom = (
+            if (
                 resource_policy.task_memory_budget_bytes
                 - resource_policy.reserved_memory_bytes
-                + retained_payload_bytes
-            )
-            if working_headroom - retained_payload_bytes <= 0:
+                <= 0
+            ):
                 raise ValueError("dataset_working_set_exceeds_task_memory_budget")
             timestamp_columns = tuple(
                 column
@@ -481,7 +487,7 @@ def _write_dataset_under_policy(
                     temp_root / "data",
                     spec=spec,
                     target_chunk_bytes=resource_policy.payload_target_bytes,
-                    task_memory_budget_bytes=working_headroom,
+                    resource_policy=resource_policy,
                     key_tracker=key_tracker,
                     inventory=inventory,
                     minimum_retained_payload_bytes=retained_payload_bytes,
@@ -493,7 +499,10 @@ def _write_dataset_under_policy(
                 manifest = merge_dataset_instance_metadata(
                     {
                         **accumulator.payload(
-                            target_chunk_bytes=resource_policy.payload_target_bytes
+                            target_chunk_bytes=(
+                                resource_policy.task_memory_budget_bytes
+                                - resource_policy.reserved_memory_bytes
+                            )
                         ),
                         "schema_id": "qrp-dataset-manifest",
                     },
@@ -546,7 +555,7 @@ def _write_contents(
     *,
     spec: DataSpec,
     target_chunk_bytes: int,
-    task_memory_budget_bytes: int,
+    resource_policy: RuntimeResourcePolicy,
     key_tracker: ExactPrimaryKeyIndex,
     inventory: DatasetSessionInventory,
     minimum_retained_payload_bytes: int,
@@ -565,218 +574,241 @@ def _write_contents(
     accumulator.retained_payload_bytes = minimum_retained_payload_bytes
     part_indices: dict[str, int] = {}
     saw_empty_schema = False
-    last_chunk_headroom = task_memory_budget_bytes
     while True:
+        reserved_before_pull = resource_policy.reserved_memory_bytes
         try:
             publication = next(chunks)
         except StopIteration:
             break
+        producer_reservation_credit = max(
+            0,
+            resource_policy.reserved_memory_bytes - reserved_before_pull,
+        )
         if isinstance(publication, DatasetWriteChunk):
             chunk = publication.frame
             accumulator.retained_payload_bytes = max(
                 minimum_retained_payload_bytes,
                 publication.retained_payload_bytes,
             )
-            chunk_headroom = (
-                task_memory_budget_bytes - accumulator.retained_payload_bytes
-            )
-            if chunk_headroom <= 0:
-                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         else:
             chunk = publication
             accumulator.retained_payload_bytes = minimum_retained_payload_bytes
-            chunk_headroom = task_memory_budget_bytes - minimum_retained_payload_bytes
-        last_chunk_headroom = chunk_headroom
-        declared = accumulator.declared_frame(
-            chunk,
-            target_chunk_bytes=target_chunk_bytes,
+        if type(chunk) is not pd.DataFrame:
+            raise TypeError("invalid_dataset_chunk")
+        chunk_bytes = pandas_frame_payload_bytes(chunk)
+        publication_live_bytes = chunk_bytes + max(
+            0,
+            accumulator.retained_payload_bytes - minimum_retained_payload_bytes,
         )
-        declared_bytes = pandas_frame_payload_bytes(declared)
-        if declared.empty:
-            _require_writer_headroom(
-                chunk_headroom,
-                retained_bytes=declared_bytes,
-                allocation_bytes=2 * declared_bytes,
+        with ExitStack() as publication_state:
+            publication_state.enter_context(
+                resource_policy.reserve(
+                    "storage.dataset.input",
+                    max(0, publication_live_bytes - producer_reservation_credit),
+                )
             )
-            frame, logical_dtypes = accumulator.prepare_frame(declared)
-            frame_bytes = pandas_frame_payload_bytes(frame)
-            _require_writer_headroom(
-                chunk_headroom,
-                retained_bytes=declared_bytes + frame_bytes,
-                allocation_bytes=2 * frame_bytes,
+            metadata_budget = (
+                resource_policy.task_memory_budget_bytes
+                - resource_policy.reserved_memory_bytes
             )
-            table = accumulator.table_for_frame(frame)
-            _require_writer_headroom(
-                chunk_headroom,
-                arrow_bytes=table.nbytes,
-                retained_bytes=declared_bytes + frame_bytes,
+            if metadata_budget <= 0:
+                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+            declared = accumulator.declared_frame(
+                chunk,
+                target_chunk_bytes=metadata_budget,
             )
-            accumulator.observe_logical_dtype_payload(
-                logical_dtypes,
+            if declared.empty:
+                prepared_bound = (
+                    chunk_bytes
+                    + len(declared)
+                    * timestamp_key_count
+                    * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
+                )
+                with resource_policy.reserve(
+                    "storage.dataset.prepare",
+                    prepared_bound,
+                ):
+                    frame, logical_dtypes = accumulator.prepare_frame(declared)
+                    frame_bytes = pandas_frame_payload_bytes(frame)
+                    arrow_bound = (
+                        _ARROW_FRAME_FIXED_BYTES
+                        + frame_bytes
+                        + len(frame)
+                        * len(frame.columns)
+                        * _ARROW_CELL_OVERHEAD_BYTES
+                    )
+                    arrow_cast_bound = arrow_bound
+                    with resource_policy.reserve(
+                        "storage.dataset.arrow",
+                        arrow_bound + arrow_cast_bound,
+                    ):
+                        table = accumulator.table_for_frame(frame)
+                        del table
+                    metadata_budget = (
+                        resource_policy.task_memory_budget_bytes
+                        - resource_policy.reserved_memory_bytes
+                    )
+                    accumulator.observe_logical_dtype_payload(
+                        logical_dtypes,
+                        target_chunk_bytes=metadata_budget,
+                    )
+                saw_empty_schema = True
+                del frame, logical_dtypes, declared, chunk, publication
+                continue
+            for bounded_frame in iter_bounded_frame_chunks(
+                declared,
                 target_chunk_bytes=target_chunk_bytes,
-            )
-            saw_empty_schema = True
-            del table, frame, logical_dtypes, declared, chunk, publication
-            continue
-        for bounded_frame in iter_bounded_frame_chunks(
-            declared,
-            target_chunk_bytes=target_chunk_bytes,
-        ):
-            bounded_frame_bytes = pandas_frame_payload_bytes(bounded_frame)
-            _require_writer_headroom(
-                chunk_headroom,
-                retained_bytes=declared_bytes,
-                allocation_bytes=(
-                    2 * bounded_frame_bytes
+            ):
+                bounded_frame_bytes = pandas_frame_payload_bytes(bounded_frame)
+                prepared_bound = (
+                    bounded_frame_bytes
                     + len(bounded_frame)
                     * timestamp_key_count
                     * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
-                ),
-            )
-            prepared_frame, bounded_logical_dtypes = accumulator.prepare_frame(
-                bounded_frame
-            )
-            prepared_frame_bytes = pandas_frame_payload_bytes(prepared_frame)
-            partition_mask_bytes = (
-                len(prepared_frame) if spec.partition_columns else 0
-            )
-            _require_writer_headroom(
-                chunk_headroom,
-                retained_bytes=declared_bytes + prepared_frame_bytes,
-                allocation_bytes=prepared_frame_bytes + 3 * partition_mask_bytes,
-            )
-            for partition, partition_frame in partition_frames(
-                prepared_frame,
-                timestamp_column=timestamp_column,
-                partition_columns=spec.partition_columns,
-            ):
-                partition_frame_bytes = (
-                    0
-                    if partition_frame is prepared_frame
-                    else pandas_frame_payload_bytes(partition_frame)
                 )
-                retained_frame_bytes = (
-                    declared_bytes
-                    + prepared_frame_bytes
-                    + partition_frame_bytes
-                    + partition_mask_bytes
-                )
-                for bounded_partition in iter_bounded_frame_chunks(
-                    partition_frame,
-                    target_chunk_bytes=target_chunk_bytes,
+                with resource_policy.reserve(
+                    "storage.dataset.prepare",
+                    prepared_bound,
                 ):
-                    bounded_partition_bytes = pandas_frame_payload_bytes(
-                        bounded_partition
+                    prepared_frame, bounded_logical_dtypes = (
+                        accumulator.prepare_frame(bounded_frame)
                     )
-                    _require_writer_headroom(
-                        chunk_headroom,
-                        retained_bytes=retained_frame_bytes,
-                        allocation_bytes=2 * bounded_partition_bytes,
-                    )
-                    table = accumulator.table_for_frame(bounded_partition)
-                    remaining_headroom = _require_writer_headroom(
-                        chunk_headroom,
-                        arrow_bytes=table.nbytes,
-                        retained_bytes=retained_frame_bytes,
-                    )
-                    if remaining_headroom <= 0:
+                    prepared_frame_bytes = pandas_frame_payload_bytes(prepared_frame)
+                    if prepared_frame_bytes > prepared_bound:
                         raise ValueError(
                             "dataset_working_set_exceeds_task_memory_budget"
                         )
-                    for persisted_table in _bounded_persisted_tables(
-                        table,
-                        logical_dtypes=bounded_logical_dtypes,
-                        target_chunk_bytes=target_chunk_bytes,
+                    partition_mask_bytes = (
+                        len(prepared_frame) if spec.partition_columns else 0
+                    )
+                    lower_bound_mask_bytes = partition_mask_bytes
+                    upper_bound_mask_bytes = partition_mask_bytes
+                    combined_mask_bytes = partition_mask_bytes
+                    partition_output_bound = (
+                        prepared_frame_bytes if spec.partition_columns else 0
+                    )
+                    partition_bound = sum(
+                        (
+                            lower_bound_mask_bytes,
+                            upper_bound_mask_bytes,
+                            combined_mask_bytes,
+                            partition_output_bound,
+                        )
+                    )
+                    with resource_policy.reserve(
+                        "storage.dataset.partition",
+                        partition_bound,
                     ):
-                        part_index = part_indices.get(partition, 0)
-                        part_indices[partition] = part_index + 1
-                        output_path = partition_part_path(
-                            root,
-                            partition,
-                            part_index,
-                        )
-                        _require_writer_headroom(
-                            chunk_headroom,
-                            arrow_bytes=table.nbytes,
-                            retained_bytes=retained_frame_bytes,
-                            allocation_bytes=persisted_table.nbytes,
-                        )
-                        write_parquet_file(persisted_table, output_path)
-                        accumulator.observe_file(
-                            output_path,
-                            target_chunk_bytes=target_chunk_bytes,
-                            operation_headroom_bytes=remaining_headroom,
-                        )
-                        _raise_accumulated_failures(accumulator)
-                        del persisted_table, output_path
-                    del table, remaining_headroom, bounded_partition
-                del partition, partition_frame
-            del prepared_frame, bounded_logical_dtypes, bounded_frame
-        del declared, chunk, publication
+                        for partition, partition_frame in partition_frames(
+                            prepared_frame,
+                            timestamp_column=timestamp_column,
+                            partition_columns=spec.partition_columns,
+                        ):
+                            for bounded_partition in iter_bounded_frame_chunks(
+                                partition_frame,
+                                target_chunk_bytes=target_chunk_bytes,
+                            ):
+                                bounded_partition_bytes = pandas_frame_payload_bytes(
+                                    bounded_partition
+                                )
+                                arrow_bound = (
+                                    _ARROW_FRAME_FIXED_BYTES
+                                    + bounded_partition_bytes
+                                    + len(bounded_partition)
+                                    * len(bounded_partition.columns)
+                                    * _ARROW_CELL_OVERHEAD_BYTES
+                                )
+                                arrow_cast_bound = arrow_bound
+                                written_paths: list[Path] = []
+                                with resource_policy.reserve(
+                                    "storage.dataset.arrow",
+                                    arrow_bound + arrow_cast_bound,
+                                ):
+                                    table = accumulator.table_for_frame(
+                                        bounded_partition
+                                    )
+                                    if table.nbytes > arrow_bound:
+                                        raise ValueError(
+                                            "dataset_working_set_exceeds_task_memory_budget"
+                                        )
+                                    for persisted_table in _bounded_persisted_tables(
+                                        table,
+                                        logical_dtypes=bounded_logical_dtypes,
+                                        target_chunk_bytes=target_chunk_bytes,
+                                    ):
+                                        part_index = part_indices.get(partition, 0)
+                                        part_indices[partition] = part_index + 1
+                                        output_path = partition_part_path(
+                                            root,
+                                            partition,
+                                            part_index,
+                                        )
+                                        write_parquet_file(
+                                            persisted_table,
+                                            output_path,
+                                        )
+                                        written_paths.append(output_path)
+                                        del persisted_table, output_path
+                                    del table, bounded_partition
+                                for output_path in written_paths:
+                                    readback_headroom = (
+                                        resource_policy.task_memory_budget_bytes
+                                        - resource_policy.reserved_memory_bytes
+                                    )
+                                    if readback_headroom <= 0:
+                                        raise ValueError(
+                                            "dataset_working_set_exceeds_task_memory_budget"
+                                        )
+                                    accumulator.observe_file(
+                                        output_path,
+                                        target_chunk_bytes=target_chunk_bytes,
+                                        operation_headroom_bytes=readback_headroom,
+                                    )
+                                    _raise_accumulated_failures(accumulator)
+                                del written_paths
+                            del partition, partition_frame
+                    del prepared_frame, bounded_logical_dtypes, bounded_frame
+            del declared, chunk, publication
     if accumulator.row_count == 0 and not saw_empty_schema:
         raise ValueError("empty_dataset_schema_missing")
     if saw_empty_schema:
+        metadata_budget = (
+            resource_policy.task_memory_budget_bytes
+            - resource_policy.reserved_memory_bytes
+        )
         logical_dtypes = accumulator.materialized_logical_dtypes(
-            target_chunk_bytes=target_chunk_bytes
+            target_chunk_bytes=metadata_budget
         )
         partition = "" if accumulator.row_count == 0 else min(part_indices)
         part_index = part_indices.get(partition, 0)
         part_indices[partition] = part_index + 1
         output_path = partition_part_path(root, partition, part_index)
         assert accumulator._arrow_schema is not None
-        empty_table = pa.Table.from_batches([], schema=accumulator._arrow_schema)
-        remaining_headroom = _require_writer_headroom(
-            last_chunk_headroom,
-            arrow_bytes=empty_table.nbytes,
-        )
-        if remaining_headroom <= 0:
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        persisted_table = next(
-            _bounded_persisted_tables(
-                empty_table,
-                logical_dtypes=logical_dtypes,
-                target_chunk_bytes=target_chunk_bytes,
+        empty_table_bound = _ARROW_FRAME_FIXED_BYTES
+        empty_cast_bound = _ARROW_FRAME_FIXED_BYTES
+        with resource_policy.reserve(
+            "storage.dataset.arrow",
+            empty_table_bound + empty_cast_bound,
+        ):
+            empty_table = pa.Table.from_batches([], schema=accumulator._arrow_schema)
+            persisted_table = next(
+                _bounded_persisted_tables(
+                    empty_table,
+                    logical_dtypes=logical_dtypes,
+                    target_chunk_bytes=target_chunk_bytes,
+                )
             )
-        )
-        _require_writer_headroom(
-            last_chunk_headroom,
-            arrow_bytes=empty_table.nbytes,
-            allocation_bytes=persisted_table.nbytes,
-        )
-        write_parquet_file(persisted_table, output_path)
-        accumulator.observe_file(
-            output_path,
-            target_chunk_bytes=target_chunk_bytes,
-            operation_headroom_bytes=remaining_headroom,
-        )
+            write_parquet_file(persisted_table, output_path)
+            readback_headroom = (
+                resource_policy.task_memory_budget_bytes
+                - resource_policy.reserved_memory_bytes
+            )
+            accumulator.observe_file(
+                output_path,
+                target_chunk_bytes=target_chunk_bytes,
+                operation_headroom_bytes=readback_headroom,
+            )
     return accumulator
-
-
-def _require_writer_headroom(
-    task_memory_budget_bytes: int,
-    *frames: pd.DataFrame,
-    arrow_bytes: int = 0,
-    retained_bytes: int = 0,
-    allocation_bytes: int = 0,
-) -> int:
-    if (
-        type(task_memory_budget_bytes) is not int
-        or task_memory_budget_bytes <= 0
-        or type(arrow_bytes) is not int
-        or arrow_bytes < 0
-        or type(retained_bytes) is not int
-        or retained_bytes < 0
-        or type(allocation_bytes) is not int
-        or allocation_bytes < 0
-    ):
-        raise ValueError("invalid_dataset_task_memory_budget")
-    working_set_bytes = arrow_bytes + retained_bytes + allocation_bytes + sum(
-        pandas_frame_payload_bytes(frame)
-        for frame in {id(item): item for item in frames}.values()
-    )
-    if working_set_bytes > task_memory_budget_bytes:
-        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-    return task_memory_budget_bytes - working_set_bytes
 
 
 def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
@@ -871,7 +903,8 @@ def _bounded_persisted_tables(
             yield candidate
             continue
         if candidate.num_rows == 1:
-            raise ValueError("dataset_row_exceeds_target_chunk_bytes")
+            yield candidate
+            continue
         left_rows = candidate.num_rows // 2
         pending.append(candidate.slice(left_rows))
         pending.append(candidate.slice(0, left_rows))
@@ -879,5 +912,36 @@ def _bounded_persisted_tables(
 
 def write_parquet_file(table: pa.Table, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, path, compression="zstd")
+    persisted = table_with_decoded_row_bounds(table)
+    row_bytes, fixed_bytes = table_decoded_working_set_bounds(persisted)
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        batch_rows = max(1, persisted.num_rows)
+        reservation = nullcontext()
+    else:
+        remaining = policy.task_memory_budget_bytes - policy.reserved_memory_bytes
+        minimum_rows = 0 if persisted.num_rows == 0 else 1
+        minimum_bytes = fixed_bytes + minimum_rows * row_bytes
+        if minimum_bytes > remaining:
+            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+        batch_rows = max(
+            1,
+            min(
+                persisted.num_rows,
+                (remaining - fixed_bytes) // row_bytes,
+            ),
+        )
+        reservation = policy.reserve(
+            "storage.parquet.native",
+            fixed_bytes + batch_rows * row_bytes,
+        )
+    with reservation:
+        pq.write_table(
+            persisted,
+            path,
+            compression="zstd",
+            data_page_size=PARQUET_DATA_PAGE_BYTES,
+            row_group_size=batch_rows,
+            write_batch_size=batch_rows,
+        )
     return path

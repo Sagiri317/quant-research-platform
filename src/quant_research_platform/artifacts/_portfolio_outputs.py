@@ -18,7 +18,11 @@ from quant_research_platform.artifacts._output_manifest import (
     output_manifest_payload,
     portfolio_output_metadata_from_row_counts,
 )
-from quant_research_platform.artifacts._parquet_writers import write_parquet
+from quant_research_platform.artifacts._parquet_writers import (
+    _artifact_frame_reservation,
+    _artifact_table_write_state,
+    write_parquet,
+)
 from quant_research_platform.artifacts._portfolio_output_validation import (
     PORTFOLIO_ARTIFACTS,
     portfolio_required_columns,
@@ -30,6 +34,10 @@ from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
+)
+from quant_research_platform.storage._dataset_physical import (
+    PARQUET_DATA_PAGE_BYTES,
+    PARQUET_WRITER_NATIVE_BYTES,
 )
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
@@ -165,8 +173,7 @@ def _write_portfolio_row_artifact_chunks(
             writer_reservations.enter_context(
                 policy.reserve(
                     "artifacts.portfolio.writers",
-                    len(row_artifacts)
-                    * max(64 * 1024, policy.payload_target_bytes // 16),
+                    len(row_artifacts) * PARQUET_WRITER_NATIVE_BYTES,
                 )
             )
         with closing_dataset_iterator(iter(artifact_chunks)) as active_chunks:
@@ -178,15 +185,7 @@ def _write_portfolio_row_artifact_chunks(
                 )
                 for artifact_name in row_artifacts:
                     frame = artifact_chunk[artifact_name]
-                    frame_bytes = pandas_frame_payload_bytes(frame)
-                    with (
-                        policy.reserve(
-                            "artifacts.portfolio.frame",
-                            3 * frame_bytes,
-                        )
-                        if policy is not None
-                        else nullcontext()
-                    ):
+                    with _artifact_frame_reservation(frame):
                         selected = _portfolio_output_chunk_frame(
                             frame,
                             artifact_name=artifact_name,
@@ -196,15 +195,23 @@ def _write_portfolio_row_artifact_chunks(
                         if selected.empty:
                             continue
                         table = pa.Table.from_pandas(selected, preserve_index=False)
+                        persisted, table_state, batch_rows = (
+                            _artifact_table_write_state(table)
+                        )
                         writer = writers.get(artifact_name)
                         if writer is None:
                             writer = pq.ParquetWriter(
                                 temp_paths[artifact_name],
-                                table.schema,
+                                persisted.schema,
                                 compression="zstd",
+                                data_page_size=PARQUET_DATA_PAGE_BYTES,
                             )
                             writers[artifact_name] = writer
-                        writer.write_table(table)
+                        with table_state:
+                            writer.write_table(
+                                persisted,
+                                row_group_size=batch_rows,
+                            )
                         row_counts[artifact_name] += len(selected)
             for artifact_name in tuple(writers):
                 writer = writers.pop(artifact_name)

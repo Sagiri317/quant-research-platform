@@ -388,10 +388,13 @@ def test_prediction_model_reservation_precedes_writer_startup(
     frame = make_artifact_prediction_output_frame()
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1024 * 1024,
+        explicit_cap_bytes=4 * 1024 * 1024,
     )
     retained_model_bytes = 128 * 1024
-    writer_bytes = max(64 * 1024, policy.payload_target_bytes // 8)
+    writer_bytes = (
+        parquet_writers.PARQUET_WRITER_NATIVE_BYTES
+        + parquet_writers.EXACT_KEY_SQLITE_PAGE_BYTES
+    )
     original_enter = ExactPrimaryKeyIndex.__enter__
 
     def assert_model_reserved(index):  # noqa: ANN001, ANN202
