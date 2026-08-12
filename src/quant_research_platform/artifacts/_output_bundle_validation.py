@@ -5,14 +5,25 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from quant_research_platform.artifacts._output_manifest import (
     validate_output_manifest_business_envelope,
 )
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
+)
+from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
@@ -114,33 +125,202 @@ def validate_output_bundle(
     return manifest, admitted_identities
 
 
+class _PredictionLookup:
+    def __init__(
+        self,
+        *,
+        index: ExactPrimaryKeyIndex,
+        primary_key: tuple[str, ...],
+        prediction_column: str,
+        resource_policy: RuntimeResourcePolicy,
+    ) -> None:
+        self._index = index
+        self.primary_key = primary_key
+        self.prediction_column = prediction_column
+        self.resource_policy = resource_policy
+        self.row_count = 0
+
+    def add_table(self, table: pa.Table) -> None:
+        duplicates = self._index.add_float_value_table(
+            table,
+            namespace="prediction",
+            value_column=self.prediction_column,
+            payload_target_bytes=self.resource_policy.payload_target_bytes,
+        )
+        if duplicates:
+            raise ValueError("duplicate_persisted_prediction_keys")
+        self.row_count += table.num_rows
+
+    def values_for_frame(
+        self,
+        frame: pd.DataFrame,
+        *,
+        mark_matched: bool,
+    ) -> tuple[Sequence[float], bytearray]:
+        if tuple(column for column in self.primary_key if column not in frame.columns):
+            raise ValueError("persisted_prediction_join_key_invalid")
+        frame_bytes = pandas_frame_payload_bytes(frame)
+        with self.resource_policy.reserve(
+            "artifacts.prediction.lookup.batch",
+            3 * frame_bytes + 9 * len(frame),
+        ):
+            table = pa.Table.from_pandas(
+                frame.loc[:, list(self.primary_key)],
+                preserve_index=False,
+            )
+            values, found = self._index.lookup_float_values(
+                table,
+                source_namespace="prediction",
+                matched_namespace="prediction-matched" if mark_matched else None,
+                payload_target_bytes=self.resource_policy.payload_target_bytes,
+            )
+        return values, found
+
+    def coverage_counts(self) -> tuple[int, int]:
+        return self._index.difference_counts(
+            expected_namespace="prediction",
+            actual_namespace="prediction-matched",
+        )
+
+
+@contextmanager
 def _read_prediction_output_bundle(
     root: Path,
     *,
     expected_output_id: str,
-) -> tuple[dict[str, object], pd.DataFrame]:
-    frames: list[pd.DataFrame] = []
+    time_window=None,  # noqa: ANN001
+) -> Iterator[tuple[dict[str, object], _PredictionLookup]]:
+    lookup: _PredictionLookup | None = None
+    policy = active_runtime_resource_policy()
+    stack = ExitStack()
 
     def read_prediction(
         manifest: dict[str, object],
         members: tuple[tuple[Path, DatasetFileIdentity], ...],
     ) -> None:
+        nonlocal lookup
         if manifest["output_definition_id"] != "prediction_outputs":
             raise ValueError("prediction_output_definition_mismatch")
+        metadata = manifest.get("metadata")
+        if type(metadata) is not dict:
+            raise ValueError("persisted_prediction_metadata_mismatch")
+        primary_key_value = metadata.get("primary_key")
+        prediction_column = metadata.get("prediction_column")
+        if (
+            type(primary_key_value) is not list
+            or not primary_key_value
+            or any(
+                type(column) is not str or not column for column in primary_key_value
+            )
+            or type(prediction_column) is not str
+            or not prediction_column
+        ):
+            raise ValueError("persisted_prediction_metadata_mismatch")
+        primary_key = tuple(primary_key_value)
         prediction_path = next(
             path for path, _identity in members if path.name == "prediction.parquet"
         )
         try:
-            frames.append(pd.read_parquet(prediction_path))
+            key_index = ExactPrimaryKeyIndex(
+                primary_key=primary_key,
+                timestamp_columns=tuple(
+                    column for column in primary_key if column == "timestamp"
+                ),
+                scratch_parent=prediction_path.parent.parent,
+            )
+            stack.enter_context(
+                policy.reserve(
+                    "artifacts.prediction.lookup",
+                    key_index.retained_memory_bytes
+                    + max(64 * 1024, policy.payload_target_bytes // 8),
+                )
+            )
+            stack.enter_context(key_index)
+            lookup = _PredictionLookup(
+                index=key_index,
+                primary_key=primary_key,
+                prediction_column=prediction_column,
+                resource_policy=policy,
+            )
+            parquet = pq.ParquetFile(prediction_path)
+            expected_columns = (*primary_key, prediction_column)
+            if tuple(parquet.schema_arrow.names) != expected_columns:
+                raise ValueError("persisted_prediction_columns_mismatch")
+            test_start = metadata.get("test_start")
+            test_end = metadata.get("test_end")
+            if (
+                type(test_start) is not str
+                or not test_start
+                or (
+                    test_end is not None and (type(test_end) is not str or not test_end)
+                )
+            ):
+                raise ValueError("persisted_prediction_metadata_mismatch")
+            batch_size = max(
+                1,
+                min(65_536, policy.payload_target_bytes // 4096),
+            )
+            batches = iter(parquet.iter_batches(batch_size=batch_size))
+            while True:
+                with policy.reserve(
+                    "artifacts.prediction.read.batch",
+                    policy.payload_target_bytes,
+                ):
+                    try:
+                        batch = next(batches)
+                    except StopIteration:
+                        break
+                    table = pa.Table.from_batches([batch])
+                    timestamps = table.column("timestamp")
+                    if bool(
+                        pc.any(
+                            pc.less(timestamps, pa.scalar(pd.Timestamp(test_start)))
+                        ).as_py()
+                    ) or (
+                        test_end is not None
+                        and bool(
+                            pc.any(
+                                pc.greater(
+                                    timestamps,
+                                    pa.scalar(pd.Timestamp(test_end)),
+                                )
+                            ).as_py()
+                        )
+                    ):
+                        raise ValueError("persisted_prediction_window_mismatch")
+                    if time_window is not None:
+                        keep = pc.and_(
+                            pc.greater_equal(
+                                timestamps,
+                                pa.scalar(pd.Timestamp(time_window.start)),
+                            ),
+                            pc.less_equal(
+                                timestamps,
+                                pa.scalar(pd.Timestamp(time_window.end)),
+                            ),
+                        )
+                        table = table.filter(keep)
+                    if table.num_rows:
+                        lookup.add_table(table)
+            if lookup.row_count == 0:
+                raise ValueError("empty_prediction_window")
         except Exception as exc:
+            if isinstance(exc, ValueError):
+                raise
             raise ValueError("prediction_output_unreadable") from exc
 
-    manifest, _members = validate_output_bundle(
-        root,
-        expected_output_id=expected_output_id,
-        observer=read_prediction,
-    )
-    return manifest, frames[0]
+    with runtime_resource_policy_scope(policy):
+        try:
+            manifest, _members = validate_output_bundle(
+                root,
+                expected_output_id=expected_output_id,
+                observer=read_prediction,
+            )
+            if lookup is None:
+                raise ValueError("prediction_output_unreadable")
+            yield manifest, lookup
+        finally:
+            stack.close()
 
 
 def _require_exact_member_set(root: Path, expected_names: tuple[str, ...]) -> None:

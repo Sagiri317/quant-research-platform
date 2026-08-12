@@ -306,6 +306,128 @@ class ExactPrimaryKeyIndex:
             )
         return connection.total_changes - before
 
+    def add_float_value_table(
+        self,
+        table: pa.Table,
+        *,
+        namespace: str,
+        value_column: str,
+        payload_target_bytes: int,
+    ) -> int:
+        """Index one bounded Arrow key/value batch with exact float values."""
+
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("exact_primary_key_index_not_open")
+        self._validate_comparison_table_grammar(
+            table,
+            namespace=namespace,
+            value_columns=(value_column,),
+            payload_target_bytes=payload_target_bytes,
+        )
+        keys = table.select(self._primary_key)
+        if self._key_schema is None:
+            self._key_schema = keys.schema.remove_metadata()
+        else:
+            try:
+                keys = keys.cast(self._key_schema, safe=True)
+            except (
+                pa.ArrowInvalid,
+                pa.ArrowNotImplementedError,
+                pa.ArrowTypeError,
+            ) as exc:
+                raise ValueError("invalid_dataset_primary_key_value") from exc
+        if any(column.null_count for column in keys.columns):
+            raise ValueError("dataset_primary_key_null")
+        values = table.column(value_column)
+
+        def rows() -> Iterator[tuple[str, bytearray, bytes]]:
+            for (row_namespace, payload, _), scalar in zip(
+                self._payload_rows(keys, namespace=namespace),
+                values,
+                strict=True,
+            ):
+                value = scalar.as_py()
+                if value is None or not math.isfinite(float(value)):
+                    raise ValueError("invalid_exact_float_value")
+                yield row_namespace, payload, struct.pack(">d", float(value))
+
+        before = connection.total_changes
+        with connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
+                "VALUES (?, ?, ?)",
+                self._gated_rows(rows()),
+            )
+        return int(table.num_rows - (connection.total_changes - before))
+
+    def lookup_float_values(
+        self,
+        table: pa.Table,
+        *,
+        source_namespace: str,
+        matched_namespace: str | None,
+        payload_target_bytes: int,
+    ) -> tuple[array, bytearray]:
+        """Look up one bounded Arrow key batch without materializing the index."""
+
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("exact_primary_key_index_not_open")
+        if matched_namespace is not None and (
+            not isinstance(matched_namespace, str) or not matched_namespace
+        ):
+            raise ValueError("invalid_exact_key_namespace")
+        rows = self._prepared_comparison_rows(
+            table,
+            namespace=source_namespace,
+            value_columns=(),
+            payload_target_bytes=payload_target_bytes,
+        )
+        state_bytes = table.num_rows * (array("d").itemsize + 1)
+        if state_bytes > payload_target_bytes:
+            raise ValueError("exact_key_position_state_exceeds_payload_target")
+        values = array("d", [math.nan]) * table.num_rows
+        found = bytearray(table.num_rows)
+        with connection:
+            connection.executemany(
+                "INSERT INTO comparison_rows(position, namespace, payload, value) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    (position, namespace, identity, value)
+                    for position, (namespace, identity, value) in enumerate(rows)
+                ),
+            )
+            matches = connection.execute(
+                "SELECT incoming.position, existing.value "
+                "FROM comparison_rows AS incoming "
+                "LEFT JOIN exact_keys AS existing "
+                "ON existing.namespace = ? "
+                "AND existing.payload = incoming.payload "
+                "ORDER BY incoming.position",
+                (source_namespace,),
+            )
+            for position, payload in matches:
+                if payload is None:
+                    continue
+                encoded = bytes(payload)
+                if len(encoded) != 8:
+                    raise ValueError("invalid_exact_float_value")
+                values[int(position)] = struct.unpack(">d", encoded)[0]
+                found[int(position)] = 1
+            if matched_namespace is not None:
+                connection.execute(
+                    "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
+                    "SELECT ?, incoming.payload, existing.value "
+                    "FROM comparison_rows AS incoming "
+                    "JOIN exact_keys AS existing "
+                    "ON existing.namespace = ? "
+                    "AND existing.payload = incoming.payload",
+                    (matched_namespace, source_namespace),
+                )
+            connection.execute("DELETE FROM comparison_rows")
+        return values, found
+
     def add_comparison_table(
         self,
         table: pa.Table,
@@ -648,10 +770,7 @@ class ExactPrimaryKeyIndex:
             logical_row_bytes = 27 + key_bytes + (0 if value is None else len(value))
             # Table + secondary index, doubled for journal, with B-tree page slack.
             reserve_bytes = 2 * (
-                logical_row_bytes
-                + 27
-                + key_bytes
-                + 4 * EXACT_KEY_SQLITE_PAGE_BYTES
+                logical_row_bytes + 27 + key_bytes + 4 * EXACT_KEY_SQLITE_PAGE_BYTES
             )
             if reserve_bytes > admitted_bytes:
                 admitted_bytes = max(_DISK_RESERVE_BATCH_BYTES, reserve_bytes)

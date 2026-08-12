@@ -18,6 +18,7 @@ from quant_research_platform.research._memory import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
 from tests.helpers.runtime_resources import capture_test_policy
@@ -224,6 +225,69 @@ def test_complete_time_sized_frames_honor_live_root_reservations() -> None:
                         timestamp_column="timestamp",
                     )
                 )
+
+
+def test_complete_time_frames_reserve_pending_before_next_input_pull() -> None:
+    first = pd.DataFrame(
+        {"timestamp": pd.to_datetime(["2026-01-01"]), "value": ["first"]}
+    )
+    second = pd.DataFrame(
+        {"timestamp": pd.to_datetime(["2026-01-02"]), "value": ["second"]}
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1024 * 1024,
+    )
+
+    def frames():
+        yield first
+        assert policy.reserved_memory_bytes >= pandas_frame_payload_bytes(first)
+        yield second
+
+    with runtime_resource_policy_scope(policy):
+        assert (
+            len(
+                list(
+                    iter_complete_time_sized_frames(
+                        frames(),
+                        timestamp_column="timestamp",
+                    )
+                )
+            )
+            == 2
+        )
+
+
+def test_time_chunk_admission_precedes_timestamp_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "value": ["x" * 20, "y" * 20],
+        }
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1,
+    )
+
+    def reject_conversion(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("timestamp conversion ran before owner admission")
+
+    monkeypatch.setattr(memory_owner, "strict_timestamp_series", reject_conversion)
+
+    with pytest.raises(
+        ValueError,
+        match="research_indivisible_time_unit_exceeds_payload_target",
+    ):
+        list(
+            iter_complete_time_sized_frames(
+                iter((frame,)),
+                timestamp_column="timestamp",
+                resource_policy=policy,
+            )
+        )
 
 
 def test_time_boundary_concat_rejects_peak_before_allocation(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -27,6 +28,7 @@ class ModelFitResult:
     coefficients: np.ndarray
     metadata: dict[str, object]
     prediction_model: object | None = field(default=None, compare=False, repr=False)
+    retained_memory_bytes: int = field(default=0, compare=False, repr=False)
 
 
 def fit_model_result_from_frames(
@@ -88,7 +90,11 @@ def fit_linear_model_result_from_frames(
         coefficient_count=int(len(beta)),
         feature_importance=feature_importance.linear_feature_importance(spec, beta),
     )
-    return ModelFitResult(coefficients=beta, metadata=metadata)
+    return ModelFitResult(
+        coefficients=beta,
+        metadata=metadata,
+        retained_memory_bytes=int(beta.nbytes),
+    )
 
 
 def model_metadata(
@@ -159,7 +165,11 @@ def fit_controlled_linear_model_result_from_frames(
         coefficient_count=int(len(beta)),
         feature_importance=feature_importance.linear_feature_importance(spec, beta),
     )
-    return ModelFitResult(coefficients=beta, metadata=metadata)
+    return ModelFitResult(
+        coefficients=beta,
+        metadata=metadata,
+        retained_memory_bytes=int(beta.nbytes),
+    )
 
 
 def fit_linear_coefficients(
@@ -300,6 +310,7 @@ def fit_estimator_model_result_from_frames(
         coefficients=coefficients,
         metadata=metadata,
         prediction_model=predictor,
+        retained_memory_bytes=_model_state_upper_bound_bytes(training, spec),
     )
 
 
@@ -329,79 +340,117 @@ def collect_training_frame(
     filter_definition = ""
     capped_training: pd.DataFrame | None = None
     resource_policy = None
-    for chunk in iter_complete_time_sized_frames(
-        iter_model_work_frames(
-            frames,
-            required=required,
-            work_columns=work_columns,
-        ),
-        timestamp_column="timestamp",
-    ):
-        resource_policy = current_runtime_resource_policy()
-        retained_training_bytes = (
-            0
-            if capped_training is None
-            else pandas_frame_payload_bytes(capped_training)
-        )
+    retained_policy = current_runtime_resource_policy()
+    retained_training = ExitStack()
+    try:
+        for chunk in iter_complete_time_sized_frames(
+            iter_model_work_frames(
+                frames,
+                required=required,
+                work_columns=work_columns,
+            ),
+            timestamp_column="timestamp",
+        ):
+            resource_policy = current_runtime_resource_policy()
+            retained_training_bytes = (
+                0
+                if capped_training is None
+                else pandas_frame_payload_bytes(capped_training)
+            )
+            unreserved_training_bytes = (
+                0 if resource_policy is retained_policy else retained_training_bytes
+            )
+            if resource_policy is not None and (
+                resource_policy.reserved_memory_bytes
+                + unreserved_training_bytes
+                + 3 * pandas_frame_payload_bytes(chunk)
+                > resource_policy.task_memory_budget_bytes
+            ):
+                raise ValueError(
+                    "model_training_working_set_exceeds_task_memory_budget"
+                )
+            filtered, metadata = apply_filter_mode(
+                chunk,
+                mode=spec.sample_filter_mode,
+                metadata_key="sample_filter_mode",
+            )
+            rows_input += _strict_non_negative_count_value(metadata["rows_input"])
+            rows_after_filter += _strict_non_negative_count_value(
+                metadata["rows_after_filter_mode"]
+            )
+            filter_columns_used = list(metadata["filter_columns_used"])
+            filter_definition = str(metadata["filter_definition"])
+            identity_columns = ("asset_id",) if "asset_id" in filtered.columns else ()
+            usable = filtered.dropna(
+                subset=[*spec.input_columns, spec.label_column]
+            ).loc[
+                :,
+                [
+                    "timestamp",
+                    *identity_columns,
+                    *spec.input_columns,
+                    spec.label_column,
+                ],
+            ]
+            if not usable.empty:
+                usable_payload_bytes = pandas_frame_payload_bytes(usable)
+                if resource_policy is not None and (
+                    resource_policy.reserved_memory_bytes
+                    + unreserved_training_bytes
+                    + 3 * usable_payload_bytes
+                    > resource_policy.task_memory_budget_bytes
+                ):
+                    raise ValueError(
+                        "model_training_working_set_exceeds_task_memory_budget"
+                    )
+                usable = validation_split.trim_training_buffer(usable, spec)
+                if capped_training is None:
+                    capped_training = usable
+                    if (
+                        resource_policy is not None
+                        and retained_policy is resource_policy
+                    ):
+                        retained_training.enter_context(
+                            resource_policy.reserve(
+                                "research.model.training",
+                                pandas_frame_payload_bytes(capped_training),
+                            )
+                        )
+                    continue
+                combined_payload_bytes = pandas_frame_payload_bytes(
+                    capped_training
+                ) + pandas_frame_payload_bytes(usable)
+                if resource_policy is not None and (
+                    resource_policy.reserved_memory_bytes + 2 * combined_payload_bytes
+                    > resource_policy.task_memory_budget_bytes
+                ):
+                    raise ValueError(
+                        "model_training_working_set_exceeds_task_memory_budget"
+                    )
+                combined = validation_split.trim_training_buffer(
+                    pd.concat([capped_training, usable], ignore_index=True),
+                    spec,
+                )
+                retained_training.close()
+                retained_training = ExitStack()
+                capped_training = combined
+                if resource_policy is not None and retained_policy is resource_policy:
+                    retained_training.enter_context(
+                        resource_policy.reserve(
+                            "research.model.training",
+                            pandas_frame_payload_bytes(capped_training),
+                        )
+                    )
+        training = capped_training if capped_training is not None else pd.DataFrame()
         if resource_policy is not None and (
             resource_policy.reserved_memory_bytes
-            + retained_training_bytes
-            + 3 * pandas_frame_payload_bytes(chunk)
+            + 2 * pandas_frame_payload_bytes(training)
             > resource_policy.task_memory_budget_bytes
         ):
             raise ValueError("model_training_working_set_exceeds_task_memory_budget")
-        filtered, metadata = apply_filter_mode(
-            chunk,
-            mode=spec.sample_filter_mode,
-            metadata_key="sample_filter_mode",
-        )
-        rows_input += _strict_non_negative_count_value(metadata["rows_input"])
-        rows_after_filter += _strict_non_negative_count_value(
-            metadata["rows_after_filter_mode"]
-        )
-        filter_columns_used = list(metadata["filter_columns_used"])
-        filter_definition = str(metadata["filter_definition"])
-        identity_columns = ("asset_id",) if "asset_id" in filtered.columns else ()
-        usable = filtered.dropna(subset=[*spec.input_columns, spec.label_column]).loc[
-            :, ["timestamp", *identity_columns, *spec.input_columns, spec.label_column]
-        ]
-        if not usable.empty:
-            usable_payload_bytes = pandas_frame_payload_bytes(usable)
-            if resource_policy is not None and (
-                resource_policy.reserved_memory_bytes
-                + retained_training_bytes
-                + 3 * usable_payload_bytes
-                > resource_policy.task_memory_budget_bytes
-            ):
-                raise ValueError(
-                    "model_training_working_set_exceeds_task_memory_budget"
-                )
-            usable = validation_split.trim_training_buffer(usable, spec)
-            if capped_training is None:
-                capped_training = usable
-                continue
-            combined_payload_bytes = pandas_frame_payload_bytes(
-                capped_training
-            ) + pandas_frame_payload_bytes(usable)
-            if resource_policy is not None and (
-                resource_policy.reserved_memory_bytes + 3 * combined_payload_bytes
-                > resource_policy.task_memory_budget_bytes
-            ):
-                raise ValueError(
-                    "model_training_working_set_exceeds_task_memory_budget"
-                )
-            capped_training = validation_split.trim_training_buffer(
-                pd.concat([capped_training, usable], ignore_index=True),
-                spec,
-            )
-    training = capped_training if capped_training is not None else pd.DataFrame()
-    if resource_policy is not None and (
-        resource_policy.reserved_memory_bytes
-        + 3 * pandas_frame_payload_bytes(training)
-        > resource_policy.task_memory_budget_bytes
-    ):
-        raise ValueError("model_training_working_set_exceeds_task_memory_budget")
-    training = validation_split.apply_training_controls(training, spec)
+        training = validation_split.apply_training_controls(training, spec)
+    finally:
+        retained_training.close()
     if "asset_id" in training.columns:
         training = training.drop(columns="asset_id")
     train_start = None
@@ -435,13 +484,20 @@ def fit_predictor(
     estimator: object,
 ) -> object:
     _require_model_matrix_headroom(training, spec)
-    fit_training_frame = getattr(estimator, "fit_training_frame", None)
-    if callable(fit_training_frame):
-        return fit_training_frame(training)
-    if not hasattr(estimator, "fit"):
+    state_bytes = _require_model_state_headroom(training, spec)
+    policy = current_runtime_resource_policy()
+    with ExitStack() as state_reservation:
+        if policy is not None:
+            state_reservation.enter_context(
+                policy.reserve("research.model.fit_state", state_bytes)
+            )
+        fit_training_frame = getattr(estimator, "fit_training_frame", None)
+        if callable(fit_training_frame):
+            return fit_training_frame(training)
+        if not hasattr(estimator, "fit"):
+            return estimator
+        estimator.fit(training.loc[:, spec.input_columns], y)
         return estimator
-    estimator.fit(training.loc[:, spec.input_columns], y)
-    return estimator
 
 
 def fit_linear_coefficients_exact(
@@ -498,6 +554,81 @@ def _require_model_matrix_headroom(
         > policy.task_memory_budget_bytes
     ):
         raise ValueError("model_matrix_working_set_exceeds_task_memory_budget")
+
+
+def _require_model_state_headroom(frame: pd.DataFrame, spec: ModelSpec) -> int:
+    policy = current_runtime_resource_policy()
+    state_bytes = _model_state_upper_bound_bytes(frame, spec)
+    if policy is not None and (
+        policy.reserved_memory_bytes + pandas_frame_payload_bytes(frame) + state_bytes
+        > policy.task_memory_budget_bytes
+    ):
+        raise ValueError("model_state_working_set_exceeds_task_memory_budget")
+    return state_bytes
+
+
+def _model_state_upper_bound_bytes(frame: pd.DataFrame, spec: ModelSpec) -> int:
+    rows = max(1, len(frame))
+    inputs = max(1, len(spec.input_columns))
+    params = supervised.resolved_model_hyperparameters(spec)
+    algorithm = spec.model_algorithm
+    if algorithm in {
+        "linear_regression",
+        "ridge_regression",
+        "lasso_regression",
+        "elastic_net",
+        "huber_regression",
+        "single_factor_baseline",
+        "equal_weight_rank_ensemble",
+        "ic_weighted_rank_ensemble",
+    }:
+        return 4096 + 64 * inputs
+
+    tree_count = 1
+    leaves = 2 * rows - 1
+    if algorithm in {"random_forest_regressor", "extra_trees_regressor"}:
+        tree_count = _positive_model_int(params.get("n_estimators"), default=100)
+        depth = _positive_model_int(params.get("max_depth"), default=0)
+        leaves = _bounded_tree_nodes(rows, depth=depth)
+    elif algorithm == "decision_tree_regressor":
+        depth = _positive_model_int(params.get("max_depth"), default=0)
+        leaves = _bounded_tree_nodes(rows, depth=depth)
+    elif algorithm == "gradient_boosting_regressor":
+        tree_count = _positive_model_int(params.get("n_estimators"), default=100)
+        leaves = _bounded_tree_nodes(
+            rows,
+            depth=_positive_model_int(params.get("max_depth"), default=3),
+        )
+    elif algorithm == "hist_gradient_boosting_regressor":
+        tree_count = _positive_model_int(params.get("max_iter"), default=100)
+        leaves = min(
+            2 * rows - 1,
+            2 * _positive_model_int(params.get("max_leaf_nodes"), default=31),
+        )
+    elif algorithm == "xgboost_regressor":
+        tree_count = _positive_model_int(params.get("n_estimators"), default=100)
+        leaves = _bounded_tree_nodes(
+            rows,
+            depth=_positive_model_int(params.get("max_depth"), default=6),
+        )
+    elif algorithm == "lightgbm_regressor":
+        tree_count = _positive_model_int(params.get("n_estimators"), default=100)
+        leaves = min(
+            2 * rows - 1,
+            2 * _positive_model_int(params.get("num_leaves"), default=31),
+        )
+    return tree_count * (4096 + max(1, leaves) * 256)
+
+
+def _bounded_tree_nodes(rows: int, *, depth: int) -> int:
+    row_bound = max(1, 2 * rows - 1)
+    if depth <= 0 or depth >= row_bound.bit_length():
+        return row_bound
+    return min(row_bound, (1 << (depth + 1)) - 1)
+
+
+def _positive_model_int(value: object, *, default: int) -> int:
+    return value if type(value) is int and value > 0 else default
 
 
 def fit_linear_coefficients_from_tsqr(

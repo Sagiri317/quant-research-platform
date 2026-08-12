@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,6 +19,11 @@ from quant_research_platform.research._memory import iter_complete_time_sized_fr
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.prediction import (
     prediction_model_input_frame,
+)
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    bind_runtime_resource_policy,
+    runtime_resource_policy_scope,
 )
 
 
@@ -37,6 +43,8 @@ def build_prediction_result_from_frames(
     *,
     prediction_model: object | None = None,
     model_metadata: dict[str, object],
+    retained_model_bytes: int = 0,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> PredictionResult:
     reject_filter_input_columns(input_columns)
     required = set((*spec.primary_key, *input_columns))
@@ -63,6 +71,13 @@ def build_prediction_result_from_frames(
         predictor=prediction_callable(coefficients, input_columns, prediction_model),
         build_state=build_state,
     )
+    bound_policy = bind_runtime_resource_policy(resource_policy)
+    if retained_model_bytes and bound_policy is not None:
+        output_frames = _reserved_prediction_output_frames(
+            output_frames,
+            resource_policy=bound_policy,
+            retained_model_bytes=retained_model_bytes,
+        )
     return PredictionResult(
         spec=spec,
         output_chunks=output_frames,
@@ -79,6 +94,22 @@ def build_prediction_result_from_frames(
     )
 
 
+def _reserved_prediction_output_frames(
+    frames: Iterable[pd.DataFrame],
+    *,
+    resource_policy: RuntimeResourcePolicy,
+    retained_model_bytes: int,
+) -> Iterable[pd.DataFrame]:
+    with runtime_resource_policy_scope(resource_policy), ExitStack() as retained:
+        retained.enter_context(
+            resource_policy.reserve(
+                "research.model.fitted_state",
+                retained_model_bytes,
+            )
+        )
+        yield from frames
+
+
 @dataclass
 class _PredictionBuildState:
     rows_input: int = 0
@@ -90,9 +121,7 @@ class _PredictionBuildState:
     effective_test_end: str | None = None
 
     def record_filter_metadata(self, metadata: dict[str, object]) -> None:
-        self.rows_input += _strict_non_negative_prediction_count(
-            metadata["rows_input"]
-        )
+        self.rows_input += _strict_non_negative_prediction_count(metadata["rows_input"])
         self.rows_after_filter += _strict_non_negative_prediction_count(
             metadata["rows_after_filter_mode"]
         )

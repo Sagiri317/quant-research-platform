@@ -609,6 +609,42 @@ def test_model_matrix_admission_precedes_linear_and_estimator_allocation(
     assert entered == []
 
 
+def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> None:
+    import quant_research_platform.research.models.fitting as model_fitting
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    frame = make_filter_mode_frame().loc[:, ["timestamp", "factor", "label"]]
+    spec = ModelSpec(
+        model_id="forest_native_state_admission",
+        model_algorithm="random_forest_regressor",
+        input_factor_columns=("factor",),
+        label_column="label",
+        hyperparameters={"n_estimators": 100_000, "n_jobs": 1},
+        max_train_rows=len(frame),
+    )
+
+    class Estimator:
+        def fit(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            raise AssertionError("estimator fit entered before native-state admission")
+
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1024 * 1024,
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            ValueError,
+            match="model_state_working_set_exceeds_task_memory_budget",
+        ):
+            model_fitting.fit_predictor(
+                spec,
+                training=frame,
+                y=frame["label"].to_numpy(),
+                estimator=Estimator(),
+            )
+
+
 @pytest.mark.parametrize(
     "model_algorithm",
     ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"],

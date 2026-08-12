@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 
 import pandas as pd
@@ -26,6 +27,10 @@ from quant_research_platform.artifacts._portfolio_output_validation import (
 )
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+)
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
@@ -95,25 +100,34 @@ def _write_portfolio_output_chunks(
             expected_names=summary_names,
             error="portfolio_summary_artifacts_invalid",
         )
-        for artifact_name in summary_names:
-            validate_output_frame(
-                summary_outputs[artifact_name],
-                required=required_columns[artifact_name],
-                error_name=f"portfolio_{artifact_name}",
-            )
-            validate_portfolio_artifact_membership_columns(
-                summary_outputs[artifact_name],
-                artifact_name=artifact_name,
-                spec=spec,
-            )
-            write_parquet(
-                summary_outputs[artifact_name],
-                temp_root / PORTFOLIO_ARTIFACTS[artifact_name],
-                engine="pyarrow",
-                compression="zstd",
-                index=False,
-            )
-            row_counts[artifact_name] = len(summary_outputs[artifact_name])
+        policy = current_runtime_resource_policy()
+        summary_bytes = sum(
+            pandas_frame_payload_bytes(summary_outputs[name]) for name in summary_names
+        )
+        with (
+            policy.reserve("artifacts.portfolio.summaries", summary_bytes)
+            if policy is not None
+            else nullcontext()
+        ):
+            for artifact_name in summary_names:
+                validate_output_frame(
+                    summary_outputs[artifact_name],
+                    required=required_columns[artifact_name],
+                    error_name=f"portfolio_{artifact_name}",
+                )
+                validate_portfolio_artifact_membership_columns(
+                    summary_outputs[artifact_name],
+                    artifact_name=artifact_name,
+                    spec=spec,
+                )
+                write_parquet(
+                    summary_outputs[artifact_name],
+                    temp_root / PORTFOLIO_ARTIFACTS[artifact_name],
+                    engine="pyarrow",
+                    compression="zstd",
+                    index=False,
+                )
+                row_counts[artifact_name] = len(summary_outputs[artifact_name])
         write_manifest(
             temp_root / "manifest.json",
             output_manifest_payload(
@@ -144,7 +158,17 @@ def _write_portfolio_row_artifact_chunks(
         for artifact_name in row_artifacts
     }
     row_counts = {artifact_name: 0 for artifact_name in PORTFOLIO_ARTIFACTS}
+    policy = current_runtime_resource_policy()
+    writer_reservations = ExitStack()
     try:
+        if policy is not None:
+            writer_reservations.enter_context(
+                policy.reserve(
+                    "artifacts.portfolio.writers",
+                    len(row_artifacts)
+                    * max(64 * 1024, policy.payload_target_bytes // 16),
+                )
+            )
         with closing_dataset_iterator(iter(artifact_chunks)) as active_chunks:
             for artifact_chunk in active_chunks:
                 artifact_chunk = validate_portfolio_artifact_mapping_keys(
@@ -154,25 +178,34 @@ def _write_portfolio_row_artifact_chunks(
                 )
                 for artifact_name in row_artifacts:
                     frame = artifact_chunk[artifact_name]
-                    selected = _portfolio_output_chunk_frame(
-                        frame,
-                        artifact_name=artifact_name,
-                        required=required_columns[artifact_name],
-                        spec=spec,
-                    )
-                    if selected.empty:
-                        continue
-                    table = pa.Table.from_pandas(selected, preserve_index=False)
-                    writer = writers.get(artifact_name)
-                    if writer is None:
-                        writer = pq.ParquetWriter(
-                            temp_paths[artifact_name],
-                            table.schema,
-                            compression="zstd",
+                    frame_bytes = pandas_frame_payload_bytes(frame)
+                    with (
+                        policy.reserve(
+                            "artifacts.portfolio.frame",
+                            3 * frame_bytes,
                         )
-                        writers[artifact_name] = writer
-                    writer.write_table(table)
-                    row_counts[artifact_name] += len(selected)
+                        if policy is not None
+                        else nullcontext()
+                    ):
+                        selected = _portfolio_output_chunk_frame(
+                            frame,
+                            artifact_name=artifact_name,
+                            required=required_columns[artifact_name],
+                            spec=spec,
+                        )
+                        if selected.empty:
+                            continue
+                        table = pa.Table.from_pandas(selected, preserve_index=False)
+                        writer = writers.get(artifact_name)
+                        if writer is None:
+                            writer = pq.ParquetWriter(
+                                temp_paths[artifact_name],
+                                table.schema,
+                                compression="zstd",
+                            )
+                            writers[artifact_name] = writer
+                        writer.write_table(table)
+                        row_counts[artifact_name] += len(selected)
             for artifact_name in tuple(writers):
                 writer = writers.pop(artifact_name)
                 writer.close()
@@ -193,6 +226,8 @@ def _write_portfolio_row_artifact_chunks(
             except BaseException:
                 pass
         raise
+    finally:
+        writer_reservations.close()
     return row_counts
 
 

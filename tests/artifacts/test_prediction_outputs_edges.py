@@ -21,6 +21,8 @@ from quant_research_platform.artifacts._output_manifest import (
     prediction_output_metadata,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_manifest
 from tests.artifacts.output_edge_fixtures import (
@@ -30,6 +32,7 @@ from tests.artifacts.output_edge_fixtures import (
 from tests.helpers.report_output_frames import (
     make_artifact_prediction_output_frame,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _valid_prediction_output_metadata_with_selection() -> dict[str, object]:
@@ -342,9 +345,7 @@ def test_prediction_output_nested_schema_identity_never_publishes_bundle(
     )
     frame = make_artifact_prediction_output_frame()
     frame.attrs["model_metadata"]["hyperparameters"]["schema_id"] = "forbidden"
-    frame.attrs["model_metadata"]["resolved_hyperparameters"]["schema_id"] = (
-        "forbidden"
-    )
+    frame.attrs["model_metadata"]["resolved_hyperparameters"]["schema_id"] = "forbidden"
     layout = StorageLayout(project_root=tmp_path)
 
     with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
@@ -376,6 +377,45 @@ def test_prediction_chunk_writer_rejects_cross_chunk_duplicate_and_cleans_scratc
     assert not final_path.exists()
     assert not list(tmp_path.glob(".k-*"))
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_artifact_parquet_writers_admit_before_native_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = make_artifact_prediction_output_frame()
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1024 * 1024,
+    )
+
+    def reject_index(_self):
+        raise AssertionError("SQLite state allocated before artifact admission")
+
+    def reject_parquet(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("native parquet state allocated before artifact admission")
+
+    monkeypatch.setattr(ExactPrimaryKeyIndex, "__enter__", reject_index)
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", reject_parquet)
+
+    with runtime_resource_policy_scope(policy):
+        with policy.reserve("outer", policy.task_memory_budget_bytes):
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                parquet_writers.write_parquet_chunks(
+                    (frame,),
+                    tmp_path / "chunked.parquet",
+                    required=tuple(frame.columns),
+                    key_columns=("asset_id", "timestamp"),
+                    compression="zstd",
+                )
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                parquet_writers.write_parquet(
+                    frame,
+                    tmp_path / "frame.parquet",
+                    engine="pyarrow",
+                    compression="zstd",
+                    index=False,
+                )
 
 
 def test_prediction_outputs_require_standard_metadata_attrs(

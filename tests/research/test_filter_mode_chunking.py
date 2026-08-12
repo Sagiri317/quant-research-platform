@@ -87,14 +87,14 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         wrapped_compute,
     )
     policy = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1 * 1024 * 1024,
+        available_memory_bytes=128 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024 * 1024,
     )
     original_frame_bytes = memory_owner.pandas_frame_payload_bytes
     monkeypatch.setattr(
         memory_owner,
         "pandas_frame_payload_bytes",
-        lambda chunk: 1500 * original_frame_bytes(chunk),
+        lambda chunk: 10_000 * original_frame_bytes(chunk),
     )
     with runtime_resource_policy_scope(policy):
         result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
@@ -340,7 +340,7 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
         label_columns=("label",),
     )
     policy = capture_test_policy(
-        available_memory_bytes=500,
+        available_memory_bytes=1_000,
     )
 
     with pytest.raises(
@@ -446,14 +446,14 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     )
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
     policy = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1 * 1024 * 1024,
+        available_memory_bytes=128 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024 * 1024,
     )
     original_frame_bytes = memory_owner.pandas_frame_payload_bytes
     monkeypatch.setattr(
         memory_owner,
         "pandas_frame_payload_bytes",
-        lambda chunk: 1500 * original_frame_bytes(chunk),
+        lambda chunk: 10_000 * original_frame_bytes(chunk),
     )
     with runtime_resource_policy_scope(policy):
         result = model_fitting.fit_model_result_from_frames(
@@ -474,6 +474,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
 def test_prediction_forced_tiny_resource_chunks_match_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import quant_research_platform.research._memory as memory_owner
     import quant_research_platform.research.predictions.outputs as artifacts_module
 
     frame = pd.concat(
@@ -514,7 +515,14 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
     policy = capture_test_policy(
-        available_memory_bytes=1_000,
+        available_memory_bytes=128 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024 * 1024,
+    )
+    original_frame_bytes = memory_owner.pandas_frame_payload_bytes
+    monkeypatch.setattr(
+        memory_owner,
+        "pandas_frame_payload_bytes",
+        lambda chunk: 10_000 * original_frame_bytes(chunk),
     )
     with runtime_resource_policy_scope(policy):
         result = prediction_frame_from_artifact(

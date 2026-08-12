@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -261,7 +262,7 @@ def stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         module,
         "_read_prediction_output_bundle",
-        lambda *_args, **_kwargs: ({"metadata": {}}, pd.DataFrame()),
+        lambda *_args, **_kwargs: nullcontext(({"metadata": {}}, pd.DataFrame())),
     )
 
 
@@ -290,9 +291,7 @@ def _stub_output_metadata(
             "filter_mode": spec.filter_mode,
             "evaluation_diagnostics": {
                 "filter_mode": spec.filter_mode,
-                "filter_columns_used": list(
-                    required_filter_columns(spec.filter_mode)
-                ),
+                "filter_columns_used": list(required_filter_columns(spec.filter_mode)),
                 "filter_definition": filter_definition(spec.filter_mode),
                 "rows_input": 0,
                 "rows_after_filter_mode": 0,
@@ -350,9 +349,7 @@ def persist_tiny_a_share_processed_inputs(
     profile,
 ) -> dict[str, object]:
     dataset_spec = profile.research_datasets.get("price_volume_forward_returns")
-    training_periods = max(
-        model.purge_gap_steps for model in profile.models.list()
-    ) + 2
+    training_periods = max(model.purge_gap_steps for model in profile.models.list()) + 2
     inspections: dict[str, object] = {}
     for data_id in dataset_spec.input_data_ids:
         spec = profile.processed.get(data_id)

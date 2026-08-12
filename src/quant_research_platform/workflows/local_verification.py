@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -61,6 +62,7 @@ from quant_research_platform.runtime.logical_paths import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    pandas_frame_payload_bytes,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
@@ -278,22 +280,34 @@ def _run_local_verification_with_policy(
             time_window=evaluation_time_window,
         )
         _require_output_disk_headroom(resource_policy, run_root)
-        evaluation_root = write_evaluation_outputs(
+        evaluation_frames = (
             evaluation_result.metrics,
             evaluation_result.grouped_label_values,
-            ic_summary=evaluation_result.ic_summary,
-            group_spread_summary=evaluation_result.group_spread_summary,
-            evaluation_diagnostics=evaluation_result.diagnostics,
-            spec=evaluation_result.spec,
-            output_spec=_output_spec(
-                output_id=evaluation_result.spec.run_id,
-                output_definition_id="evaluation_outputs",
-                run_id=run_id,
-                market_id=evaluation_result.spec.market_id,
-                run_type=evaluation_result.spec.run_type,
-            ),
-            layout=storage_layout,
+            evaluation_result.ic_summary,
+            evaluation_result.group_spread_summary,
         )
+        with resource_policy.reserve(
+            "workflow.evaluation.result",
+            sum(pandas_frame_payload_bytes(frame) for frame in evaluation_frames),
+        ):
+            evaluation_root = write_evaluation_outputs(
+                evaluation_result.metrics,
+                evaluation_result.grouped_label_values,
+                ic_summary=evaluation_result.ic_summary,
+                group_spread_summary=evaluation_result.group_spread_summary,
+                evaluation_diagnostics=evaluation_result.diagnostics,
+                spec=evaluation_result.spec,
+                output_spec=_output_spec(
+                    output_id=evaluation_result.spec.run_id,
+                    output_definition_id="evaluation_outputs",
+                    run_id=run_id,
+                    market_id=evaluation_result.spec.market_id,
+                    run_type=evaluation_result.spec.run_type,
+                ),
+                layout=storage_layout,
+            )
+        del evaluation_frames
+        del evaluation_result
     with recorder.record("prediction_generation"):
         prediction_roots_by_id: dict[str, Path] = {}
         for prediction_spec in prediction_specs:
@@ -319,58 +333,64 @@ def _run_local_verification_with_policy(
                     ).market_id,
                 )
             )
+            del prediction_result
         prediction_roots = tuple(prediction_roots_by_id.values())
     with recorder.record("portfolio_generation"):
         portfolio_roots_list: list[Path] = []
         for portfolio_id in _optional_portfolio_ids(portfolio_catalog):
-            portfolio_spec = portfolio_catalog.get(portfolio_id)
-            prediction_signals = tuple(
-                signal
-                for signal in portfolio_spec.signals
-                if signal.source_kind == "prediction"
-            )
-            prediction_frame = None
-            prediction_metadata = None
-            if prediction_signals:
-                if len(prediction_signals) != 1:
-                    raise ValueError("multiple_prediction_signals_unsupported")
-                prediction_id = prediction_signals[0].signal_id
-                try:
-                    prediction_root = prediction_roots_by_id[prediction_id]
-                except KeyError as exc:
-                    raise ValueError("persisted_prediction_output_missing") from exc
-                prediction_manifest, prediction_frame = (
-                    _read_prediction_output_bundle(
-                        prediction_root,
-                        expected_output_id=prediction_id,
+            with ExitStack() as prediction_input:
+                portfolio_spec = portfolio_catalog.get(portfolio_id)
+                prediction_signals = tuple(
+                    signal
+                    for signal in portfolio_spec.signals
+                    if signal.source_kind == "prediction"
+                )
+                prediction_frame = None
+                prediction_metadata = None
+                if prediction_signals:
+                    if len(prediction_signals) != 1:
+                        raise ValueError("multiple_prediction_signals_unsupported")
+                    prediction_id = prediction_signals[0].signal_id
+                    try:
+                        prediction_root = prediction_roots_by_id[prediction_id]
+                    except KeyError as exc:
+                        raise ValueError("persisted_prediction_output_missing") from exc
+                    prediction_manifest, prediction_frame = (
+                        prediction_input.enter_context(
+                            _read_prediction_output_bundle(
+                                prediction_root,
+                                expected_output_id=prediction_id,
+                                time_window=evaluation_time_window,
+                            )
+                        )
+                    )
+                    prediction_metadata = prediction_manifest["metadata"]
+                portfolio_result = build_portfolio_result_from_research_dataset(
+                    layout=storage_layout,
+                    dataset_catalog=catalogs.research_datasets,
+                    portfolio_catalog=portfolio_catalog,
+                    portfolio_id=portfolio_id,
+                    time_window=evaluation_time_window,
+                    prediction_frame=prediction_frame,
+                    prediction_metadata=prediction_metadata,
+                )
+                _require_output_disk_headroom(resource_policy, run_root)
+                portfolio_roots_list.append(
+                    write_portfolio_outputs(
+                        output_chunks=portfolio_result.output_chunks,
+                        summary_factory=portfolio_result.summary_factory,
+                        spec=portfolio_result.spec,
+                        output_spec=_output_spec(
+                            output_id=portfolio_result.spec.portfolio_id,
+                            output_definition_id="portfolio_outputs",
+                            run_id=run_id,
+                            market_id=portfolio_result.spec.market_id,
+                            run_type=portfolio_result.spec.run_type,
+                        ),
+                        layout=storage_layout,
                     )
                 )
-                prediction_metadata = prediction_manifest["metadata"]
-            portfolio_result = build_portfolio_result_from_research_dataset(
-                layout=storage_layout,
-                dataset_catalog=catalogs.research_datasets,
-                portfolio_catalog=portfolio_catalog,
-                portfolio_id=portfolio_id,
-                time_window=evaluation_time_window,
-                prediction_frame=prediction_frame,
-                prediction_metadata=prediction_metadata,
-            )
-            _require_output_disk_headroom(resource_policy, run_root)
-            portfolio_roots_list.append(
-                write_portfolio_outputs(
-                    output_chunks=portfolio_result.output_chunks,
-                    summary_factory=portfolio_result.summary_factory,
-                    spec=portfolio_result.spec,
-                    output_spec=_output_spec(
-                        output_id=portfolio_result.spec.portfolio_id,
-                        output_definition_id="portfolio_outputs",
-                        run_id=run_id,
-                        market_id=portfolio_result.spec.market_id,
-                        run_type=portfolio_result.spec.run_type,
-                    ),
-                    layout=storage_layout,
-                )
-            )
+                del portfolio_result, prediction_frame, prediction_metadata
         portfolio_roots = tuple(portfolio_roots_list)
 
     dataset_roots = _dataset_roots(

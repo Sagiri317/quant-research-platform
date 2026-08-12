@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import ExitStack
-from math import ceil
 
 import pandas as pd
 
@@ -33,6 +32,11 @@ def _iter_time_sized_frames_with_policy(
         return
 
     policy = resource_policy
+    _require_time_chunk_operation_budget(
+        frame,
+        timestamp_column=timestamp_column,
+        policy=policy,
+    )
 
     timestamps = strict_timestamp_series(
         frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
@@ -44,31 +48,20 @@ def _iter_time_sized_frames_with_policy(
         yield frame
         return
 
-    estimated_bytes = max(
-        1,
-        ceil(pandas_frame_payload_bytes(frame) / max(1, len(sessions))),
-    )
-    target = max(
-        1,
-        min(
-            len(sessions),
-            min(
-                policy.payload_target_bytes,
-                max(
-                    0,
-                    policy.task_memory_budget_bytes - policy.reserved_memory_bytes,
-                ),
-            )
-            // estimated_bytes,
-        ),
-    )
-    if target >= len(sessions):
+    frame_bytes = _frame_bytes(frame)
+    if (
+        frame_bytes <= policy.payload_target_bytes
+        and policy.reserved_memory_bytes + frame_bytes
+        <= policy.task_memory_budget_bytes
+    ):
         _require_time_chunk_budget(frame, policy=policy)
         yield frame
         return
 
-    for start in range(0, len(sessions), target):
-        window_sessions = sessions[start : start + target]
+    if policy.reserved_memory_bytes + 2 * frame_bytes > policy.task_memory_budget_bytes:
+        raise ValueError("research_time_chunk_copy_exceeds_task_memory_budget")
+    for session in sessions:
+        window_sessions = (session,)
         output = frame.loc[timestamps.isin(window_sessions)]
         _require_time_chunk_budget(output, policy=policy)
         yield output
@@ -115,59 +108,92 @@ def _iter_complete_time_sized_frames_with_policy(
     emitted_max: pd.Timestamp | None = None
     saw_empty = False
     first_empty: pd.DataFrame | None = None
+    pending_reservation = ExitStack()
 
-    for frame in frames:
-        if timestamp_column not in frame.columns:
-            raise ValueError("missing_time_chunk_timestamp_column")
-        if frame.empty:
-            saw_empty = True
-            if first_empty is None:
-                first_empty = frame
-            continue
-        current_timestamps = strict_timestamp_series(
-            frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
-        )
-        current_min = current_timestamps.min()
-        current_max = current_timestamps.max()
-        if emitted_max is not None and current_min <= emitted_max:
-            raise ValueError("non_monotonic_time_chunk_order")
-        if pending is None:
+    try:
+        for frame in frames:
+            if timestamp_column not in frame.columns:
+                raise ValueError("missing_time_chunk_timestamp_column")
+            if frame.empty:
+                saw_empty = True
+                if first_empty is None:
+                    first_empty = frame
+                continue
+            _require_time_chunk_operation_budget(
+                frame,
+                timestamp_column=timestamp_column,
+                policy=resource_policy,
+            )
+            current_timestamps = strict_timestamp_series(
+                frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
+            )
+            current_min = current_timestamps.min()
+            current_max = current_timestamps.max()
+            if emitted_max is not None and current_min <= emitted_max:
+                raise ValueError("non_monotonic_time_chunk_order")
+            if pending is None:
+                pending = frame
+                pending_min = current_min
+                pending_max = current_max
+                pending_reservation.enter_context(
+                    resource_policy.reserve(
+                        "research.time.pending",
+                        _frame_bytes(pending),
+                    )
+                )
+                continue
+            if pending_max is None or pending_min is None:
+                raise ValueError("invalid_time_chunk_state")
+            if current_min < pending_max:
+                raise ValueError("non_monotonic_time_chunk_order")
+            pending_reservation.close()
+            pending_reservation = ExitStack()
+            if current_min == pending_max:
+                pending = _concat_time_boundary_frames(
+                    pending,
+                    frame,
+                    resource_policy=resource_policy,
+                )
+                pending_min = min(pending_min, current_min)
+                pending_max = max(pending_max, current_max)
+                pending_reservation.enter_context(
+                    resource_policy.reserve(
+                        "research.time.pending",
+                        _frame_bytes(pending),
+                    )
+                )
+                continue
+            previous = pending
+            previous_max = pending_max
             pending = frame
             pending_min = current_min
             pending_max = current_max
-            continue
-        if pending_max is None or pending_min is None:
-            raise ValueError("invalid_time_chunk_state")
-        if current_min < pending_max:
-            raise ValueError("non_monotonic_time_chunk_order")
-        if current_min == pending_max:
-            pending = _concat_time_boundary_frames(
-                pending,
-                frame,
+            pending_reservation.enter_context(
+                resource_policy.reserve(
+                    "research.time.pending",
+                    _frame_bytes(pending),
+                )
+            )
+            yield from _iter_time_sized_frames_with_policy(
+                previous,
+                timestamp_column=timestamp_column,
                 resource_policy=resource_policy,
             )
-            pending_min = min(pending_min, current_min)
-            pending_max = max(pending_max, current_max)
-            continue
+            del previous
+            emitted_max = previous_max
+
+        pending_reservation.close()
+        if pending is None:
+            if saw_empty and first_empty is not None:
+                yield first_empty.iloc[0:0].copy()
+            return
         yield from _iter_time_sized_frames_with_policy(
             pending,
             timestamp_column=timestamp_column,
             resource_policy=resource_policy,
         )
-        emitted_max = pending_max
-        pending = frame
-        pending_min = current_min
-        pending_max = current_max
-
-    if pending is None:
-        if saw_empty and first_empty is not None:
-            yield first_empty.iloc[0:0].copy()
-        return
-    yield from _iter_time_sized_frames_with_policy(
-        pending,
-        timestamp_column=timestamp_column,
-        resource_policy=resource_policy,
-    )
+    finally:
+        pending_reservation.close()
 
 
 def _concat_time_boundary_frames(
@@ -204,8 +230,21 @@ def _require_time_chunk_budget(
     frame_bytes = _frame_bytes(frame)
     if frame_bytes > policy.payload_target_bytes:
         raise ValueError("research_indivisible_time_unit_exceeds_payload_target")
-    if (
-        policy.reserved_memory_bytes + frame_bytes
-        > policy.task_memory_budget_bytes
-    ):
+    if policy.reserved_memory_bytes + frame_bytes > policy.task_memory_budget_bytes:
         raise ValueError("research_indivisible_time_unit_exceeds_task_memory_budget")
+
+
+def _require_time_chunk_operation_budget(
+    frame: pd.DataFrame,
+    *,
+    timestamp_column: str,
+    policy: RuntimeResourcePolicy,
+) -> None:
+    required_bytes = int(
+        frame[timestamp_column].memory_usage(index=False, deep=True)
+    ) + 40 * len(frame)
+    if policy.reserved_memory_bytes + required_bytes <= policy.task_memory_budget_bytes:
+        return
+    if required_bytes > policy.payload_target_bytes:
+        raise ValueError("research_indivisible_time_unit_exceeds_payload_target")
+    raise ValueError("research_indivisible_time_unit_exceeds_task_memory_budget")

@@ -102,7 +102,7 @@ def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_g
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    layout, dataset_catalog, portfolio_catalog, prediction, manifest = (
+    layout, dataset_catalog, portfolio_catalog, prediction, manifest, _root = (
         _prediction_portfolio_inputs(tmp_path)
     )
 
@@ -155,7 +155,7 @@ def test_portfolio_prediction_join_keeps_its_creation_policy(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    layout, dataset_catalog, portfolio_catalog, prediction, manifest = (
+    layout, dataset_catalog, portfolio_catalog, prediction, manifest, _root = (
         _prediction_portfolio_inputs(tmp_path)
     )
     policy = capture_test_policy(
@@ -208,7 +208,7 @@ def test_portfolio_runner_rejects_invalid_persisted_prediction_coverage(
     corruption: str,
     error: str,
 ) -> None:
-    layout, dataset_catalog, portfolio_catalog, prediction, manifest = (
+    layout, dataset_catalog, portfolio_catalog, prediction, manifest, _root = (
         _prediction_portfolio_inputs(tmp_path)
     )
     if corruption == "duplicate":
@@ -230,6 +230,47 @@ def test_portfolio_runner_rejects_invalid_persisted_prediction_coverage(
             prediction_metadata=manifest["metadata"],
         )
         list(result.output_chunks)
+
+
+def test_persisted_prediction_portfolio_uses_bounded_disk_lookup(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout, dataset_catalog, portfolio_catalog, _prediction, _manifest, root = (
+        _prediction_portfolio_inputs(tmp_path)
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=4 * 1024 * 1024,
+    )
+
+    def reject_full_read(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("persisted prediction was materialized as one DataFrame")
+
+    monkeypatch.setattr(pd, "read_parquet", reject_full_read)
+    with runtime_resource_policy_scope(policy):
+        with _read_prediction_output_bundle(
+            root,
+            expected_output_id="demo_prediction",
+        ) as (manifest, prediction_lookup):
+            result = build_portfolio_result_from_research_dataset(
+                layout=layout,
+                dataset_catalog=dataset_catalog,
+                portfolio_catalog=portfolio_catalog,
+                portfolio_id="demo_prediction_portfolio",
+                time_window=TimeWindow("2024-01-01", "2024-01-02"),
+                prediction_frame=prediction_lookup,
+                prediction_metadata=manifest["metadata"],
+            )
+            chunks = list(result.output_chunks)
+            summary = result.summary_factory()
+
+    returns = pd.concat(
+        [chunk["portfolio_returns"] for chunk in chunks],
+        ignore_index=True,
+    )
+    assert returns["gross_portfolio_return"].tolist() == pytest.approx([0.20])
+    assert summary["performance_summary"].iloc[0]["periods"] == 1
 
 
 def _prediction_portfolio_inputs(tmp_path):
@@ -264,16 +305,12 @@ def _prediction_portfolio_inputs(tmp_path):
         test_start="2024-01-02",
         test_end="2024-01-02",
     )
-    _prediction, root, _manifest = write_prediction_output_and_read(
+    prediction, root, manifest = write_prediction_output_and_read(
         tmp_path,
         (frame,),
         prediction_spec,
         np.array([0.0, 1.0]),
         ("model_input",),
-    )
-    manifest, prediction = _read_prediction_output_bundle(
-        root,
-        expected_output_id=prediction_spec.prediction_id,
     )
     portfolio_catalog = PortfolioCatalog()
     portfolio_catalog.register(
@@ -293,4 +330,4 @@ def _prediction_portfolio_inputs(tmp_path):
             execution_lag_steps=0,
         )
     )
-    return layout, dataset_catalog, portfolio_catalog, prediction, manifest
+    return layout, dataset_catalog, portfolio_catalog, prediction, manifest, root
