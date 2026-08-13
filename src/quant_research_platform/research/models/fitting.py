@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from threadpoolctl import threadpool_limits
 
 import quant_research_platform.research.models.dependencies as dependencies
 import quant_research_platform.research.models.feature_importance as feature_importance
@@ -397,7 +399,11 @@ def fit_estimator_model_result_from_frames(
                     fit_work.enter_context(
                         policy.reserve(
                             "research.model.fit_work",
-                            _estimator_fit_working_set_bytes(training, spec),
+                            _estimator_fit_working_set_bytes(
+                                training,
+                                spec,
+                                estimator,
+                            ),
                         )
                     )
                 predictor = _fit_predictor(
@@ -666,7 +672,7 @@ def fit_predictor(
             fit_reservation.enter_context(
                 policy.reserve(
                     "research.model.fit_work",
-                    _estimator_fit_working_set_bytes(training, spec),
+                    _estimator_fit_working_set_bytes(training, spec, estimator),
                 )
             )
             fit_reservation.enter_context(
@@ -695,7 +701,16 @@ def _fit_predictor(
         return fit_training_frame(training)
     if not hasattr(estimator, "fit"):
         return estimator
-    estimator.fit(training.loc[:, spec.input_columns], y)
+    openmp_threads = (
+        supervised.model_thread_count(spec)
+        if spec.model_algorithm in {"xgboost_regressor", "lightgbm_regressor"}
+        else 1
+    )
+    with threadpool_limits(limits=1, user_api="blas"), threadpool_limits(
+        limits=openmp_threads,
+        user_api="openmp",
+    ):
+        estimator.fit(training.loc[:, spec.input_columns], y)
     return estimator
 
 
@@ -766,7 +781,11 @@ def linear_design_matrix(
     return design
 
 
-def _estimator_fit_working_set_bytes(frame: pd.DataFrame, spec: ModelSpec) -> int:
+def _estimator_fit_working_set_bytes(
+    frame: pd.DataFrame,
+    spec: ModelSpec,
+    estimator: object,
+) -> int:
     rows = len(frame)
     inputs = len(spec.input_columns)
     feature_frame = _selected_frame_payload_bytes(frame, list(spec.input_columns))
@@ -775,7 +794,18 @@ def _estimator_fit_working_set_bytes(frame: pd.DataFrame, spec: ModelSpec) -> in
     label_copy = rows * np.dtype(np.float64).itemsize
     row_index = rows * np.dtype(np.intp).itemsize
     coefficient_workspace = (inputs + 1) ** 2 * np.dtype(np.float64).itemsize
-    native_workspace = 64 * 1024
+    native_image = supervised.estimator_native_image_bytes(spec, estimator)
+    if native_image:
+        native_thread_pool = (
+            supervised.physical_core_count() * _native_thread_stack_bytes()
+        )
+    else:
+        native_thread_pool = 0
+    parallel_workspace = _parallel_estimator_workspace_bytes(
+        rows=rows,
+        inputs=inputs,
+        spec=spec,
+    )
     return (
         feature_frame
         + dense_features
@@ -783,8 +813,66 @@ def _estimator_fit_working_set_bytes(frame: pd.DataFrame, spec: ModelSpec) -> in
         + label_copy
         + row_index
         + coefficient_workspace
-        + native_workspace
+        + native_image
+        + native_thread_pool
+        + parallel_workspace
     )
+
+
+def _parallel_estimator_workspace_bytes(
+    *,
+    rows: int,
+    inputs: int,
+    spec: ModelSpec,
+) -> int:
+    algorithm = spec.model_algorithm
+    threads = supervised.model_thread_count(spec)
+    integer = np.dtype(np.intp).itemsize
+    floating = np.dtype(np.float64).itemsize
+    if algorithm in {"random_forest_regressor", "extra_trees_regressor"}:
+        return threads * (rows * (integer + floating) + inputs * floating)
+    if algorithm == "xgboost_regressor":
+        params = supervised.resolved_model_hyperparameters(spec)
+        bins = _positive_model_int(params.get("max_bin"), default=256)
+        quantized = rows * inputs * np.dtype(np.uint32).itemsize
+        gradients = 2 * rows * floating
+        histograms = threads * inputs * bins * 2 * floating
+        row_positions = threads * rows * integer
+        return quantized + gradients + histograms + row_positions
+    if algorithm == "lightgbm_regressor":
+        params = supervised.resolved_model_hyperparameters(spec)
+        bins = _positive_model_int(params.get("max_bin"), default=255)
+        bin_itemsize = 1 if bins <= 255 else 2 if bins <= 65_535 else 4
+        quantized = rows * inputs * bin_itemsize
+        gradients = 2 * rows * floating
+        histograms = threads * inputs * bins * 2 * floating
+        row_positions = threads * rows * integer
+        return quantized + gradients + histograms + row_positions
+    return 0
+
+
+def _native_thread_stack_bytes() -> int:
+    if sys.platform == "win32":
+        import ctypes
+
+        low = ctypes.c_size_t()
+        high = ctypes.c_size_t()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_limits = kernel32.GetCurrentThreadStackLimits
+        get_limits.argtypes = (
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_size_t),
+        )
+        get_limits.restype = None
+        get_limits(ctypes.byref(low), ctypes.byref(high))
+        stack_bytes = high.value - low.value
+    else:
+        import resource
+
+        stack_bytes = resource.getrlimit(resource.RLIMIT_STACK)[0]
+    if type(stack_bytes) is not int or stack_bytes <= 0:
+        raise RuntimeError("native_thread_stack_size_unavailable")
+    return stack_bytes
 
 
 def _linear_exact_working_set_bytes(frame: pd.DataFrame, spec: ModelSpec) -> int:

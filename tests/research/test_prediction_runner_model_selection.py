@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.research.predictions.runner as prediction_runner
+from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.ids import MarketId
@@ -118,6 +119,48 @@ def test_prediction_runner_selects_model_using_validation_metric(
     assert model_selection["candidate_model_ids"] == ["base_model", "candidate_model"]
     assert manifest["metadata"]["model_metadata"]["input_columns"] == ["factor_b"]
     assert model_selection["selected_model_input_columns"] == ["factor_b"]
+
+
+def test_prediction_runner_preloads_selected_models_before_root_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_catalog = _model_catalog(_model("base_model", ("factor_a",)))
+    prediction_catalog = PredictionCatalog()
+    prediction_catalog.register(
+        PredictionSpec(
+            prediction_id="prediction_demo",
+            model_id="base_model",
+            research_dataset_id="research_demo",
+            train_end="2024-01-03",
+            test_start="2024-01-04",
+        )
+    )
+    events: list[str] = []
+    monkeypatch.setattr(
+        prediction_runner,
+        "preflight_model_specs",
+        lambda specs: events.extend(spec.model_id for spec in specs),
+    )
+
+    def reject_capture(cls, **_kwargs):  # noqa: ANN001
+        assert events == ["base_model"]
+        raise RuntimeError("capture_after_model_preload")
+
+    monkeypatch.setattr(
+        prediction_runner.RuntimeResourcePolicy,
+        "capture",
+        classmethod(reject_capture),
+    )
+
+    with pytest.raises(RuntimeError, match="capture_after_model_preload"):
+        build_prediction_result_from_research_dataset(
+            layout=StorageLayout(project_root=tmp_path),
+            dataset_catalog=ResearchDatasetCatalog(),
+            model_catalog=model_catalog,
+            prediction_catalog=prediction_catalog,
+            prediction_id="prediction_demo",
+        )
 
 
 def test_model_selection_compares_common_validation_primary_keys(

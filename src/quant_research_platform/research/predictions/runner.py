@@ -31,6 +31,7 @@ from quant_research_platform.research.datasets.validation import (
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
+    preflight_model_specs,
 )
 from quant_research_platform.research.models.trial_selection import (
     TEST_METRIC_COLUMNS,
@@ -67,6 +68,16 @@ def build_prediction_result_from_research_dataset(
     prediction_test_end: str | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> PredictionResult:
+    configured_prediction = prediction_catalog.get(prediction_id)
+    preflight_model_specs(
+        model_catalog.get(model_id)
+        for model_id in dict.fromkeys(
+            (
+                configured_prediction.model_id,
+                *configured_prediction.candidate_model_ids,
+            )
+        )
+    )
     policy = bind_runtime_resource_policy(
         resource_policy,
         allow_implicit_active=False,

@@ -65,6 +65,38 @@ def test_local_verification_workflow_rejects_invalid_date_range(tmp_path):
         run_local_verification(config)
 
 
+def test_local_verification_preloads_models_before_root_capture(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_local_verification_config(
+        run_root=tmp_path / "local-verification-output" / "preload",
+        start_date="2014-01-01",
+        end_date="2016-12-31",
+        profile=profile_with_empty_prediction_and_portfolio_builders(),
+    )
+    expected = [spec.model_id for spec in config.profile.models.list()]
+    events: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "preflight_model_specs",
+        lambda specs: events.extend(spec.model_id for spec in specs),
+    )
+
+    def reject_capture(cls, **_kwargs):  # noqa: ANN001
+        assert events == expected
+        raise RuntimeError("capture_after_model_preload")
+
+    monkeypatch.setattr(
+        module.RuntimeResourcePolicy,
+        "capture",
+        classmethod(reject_capture),
+    )
+
+    with pytest.raises(RuntimeError, match="capture_after_model_preload"):
+        run_local_verification(config)
+
+
 def test_local_verification_checks_disk_before_creating_run_root(
     tmp_path,
     monkeypatch,

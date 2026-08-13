@@ -48,6 +48,7 @@ from quant_research_platform.research.datasets.assembler import (
 from quant_research_platform.research.evaluations.runner import (
     build_evaluation_result_from_research_dataset,
 )
+from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.research.portfolios.runner import (
     build_portfolio_result_from_research_dataset,
 )
@@ -145,12 +146,13 @@ def run_local_verification(
     )
     run_root = configured_run_root.resolve(strict=False)
     run_id = resolve_local_verification_run_id(config.run_id, run_root)
-    resource_policy = RuntimeResourcePolicy.capture(
-        explicit_cap_bytes=config.explicit_memory_cap_bytes
-    )
     replaced_identity = _replacement_target_identity(
         run_root,
         replace_output=config.replace_output,
+    )
+    preflight_model_specs(config.profile.models.list())
+    resource_policy = RuntimeResourcePolicy.capture(
+        explicit_cap_bytes=config.explicit_memory_cap_bytes
     )
     staged_root = run_root.with_name(owned_scratch_name(".lv-", uuid4().hex[:8]))
     staged_identity: os.stat_result | None = None

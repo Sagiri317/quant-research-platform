@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.research.models.fitting as model_fitting
+import quant_research_platform.research.models.supervised as model_supervised
 from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
@@ -631,6 +632,74 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
                 y=frame["label"].to_numpy(),
                 estimator=Estimator(),
             )
+
+
+def test_model_native_fit_workspace_is_admitted_before_backend_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sklearn.ensemble import RandomForestRegressor
+
+    rows = 32
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=rows, freq="min"),
+            "factor": np.linspace(0.0, 1.0, rows),
+            "label": np.linspace(1.0, 2.0, rows),
+        }
+    )
+    spec = ModelSpec(
+        model_id="forest_native_fit_admission",
+        model_algorithm="random_forest_regressor",
+        input_factor_columns=("factor",),
+        label_column="label",
+        hyperparameters={"n_estimators": 1, "max_depth": 2, "n_jobs": 1},
+        max_train_rows=rows,
+    )
+    estimator = build_estimator_from_model_spec(spec)
+    monkeypatch.setattr(
+        RandomForestRegressor,
+        "fit",
+        lambda *_args, **_kwargs: pytest.fail("backend fit entered before admission"),
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024 * 1024,
+        explicit_cap_bytes=16 * 1024 * 1024,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            model_fitting.fit_predictor(
+                spec,
+                training=frame,
+                y=frame["label"].to_numpy(),
+                estimator=estimator,
+            )
+
+
+def test_model_threads_are_bound_to_physical_cores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_supervised.psutil, "cpu_count", lambda **_kwargs: 2)
+    all_core = ModelSpec(
+        model_id="forest_all_physical_cores",
+        model_algorithm="random_forest_regressor",
+        input_factor_columns=("factor",),
+        label_column="label",
+        hyperparameters={"n_estimators": 1, "n_jobs": -1},
+        max_train_rows=8,
+    )
+    too_many = ModelSpec(
+        model_id="forest_too_many_threads",
+        model_algorithm="random_forest_regressor",
+        input_factor_columns=("factor",),
+        label_column="label",
+        hyperparameters={"n_estimators": 1, "n_jobs": 3},
+        max_train_rows=8,
+    )
+
+    assert build_estimator_from_model_spec(all_core).n_jobs == 2
+    with pytest.raises(ValueError, match="model_threads_exceed_physical_cores"):
+        build_estimator_from_model_spec(too_many)
 
 
 def test_linear_tsqr_reserves_first_frame_across_second_pull(
