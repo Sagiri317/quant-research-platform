@@ -52,6 +52,37 @@ def test_atomic_publish_rejects_failed_active_rss_checkpoint(tmp_path: Path) -> 
     assert tuple(tmp_path.iterdir()) == ()
 
 
+def test_atomic_publish_rolls_back_post_rename_rss_rejection(tmp_path: Path) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=1024,
+        rss_bytes=100,
+        explicit_cap_bytes=600,
+    )
+    measurement = policy._measurement  # noqa: SLF001
+    checkpoints = 0
+
+    def reject_after_rename() -> dict[str, int | float | str]:
+        nonlocal checkpoints
+        checkpoints += 1
+        payload = measurement._payload()  # type: ignore[attr-defined]  # noqa: SLF001
+        if checkpoints == 2:
+            payload["sampled_peak_rss_bytes"] = 701
+            payload["peak_incremental_rss_bytes"] = 601
+            payload["status"] = "FAIL"
+        return payload
+
+    measurement.checkpoint_evidence = reject_after_rename  # type: ignore[method-assign]
+    target = tmp_path / "result.txt"
+
+    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
+        with runtime_resource_policy_scope(policy):
+            atomic_write_text(target, "result\n")
+
+    assert checkpoints == 2
+    assert not target.exists()
+    assert tuple(tmp_path.iterdir()) == ()
+
+
 def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -> None:
     final_root = tmp_path / "outputs" / "local" / "a_share" / "bundle"
 

@@ -19,6 +19,9 @@ class _TestOperationRssMeasurement:
     def stop(self) -> None:
         self.state = "RETIRED"
 
+    def restore_backstop(self) -> None:
+        pass
+
     def checkpoint_evidence(self) -> dict[str, int | float | str]:
         if self.state != "ACTIVE":
             raise RuntimeError("runtime_rss_sampler_not_active")
@@ -72,6 +75,7 @@ def capture_storage_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=(
             _dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+            + _dataset_writing.PARQUET_WRITER_NATIVE_BYTES
             + working_headroom_bytes
         ),
     )

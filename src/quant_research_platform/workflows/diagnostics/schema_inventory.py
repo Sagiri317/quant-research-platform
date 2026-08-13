@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable
-from contextlib import ExitStack
+import sys
+from collections.abc import Collection, Iterable, Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -58,12 +59,13 @@ _INVENTORY_ITEM_KEYS = frozenset(
 _LOWER_HEX = frozenset("0123456789abcdef")
 
 
-def build_schema_inventory_payload(
+@contextmanager
+def open_schema_inventory_payload(
     project_root: Path,
     *,
     important_null_count_columns: Collection[str] | None = None,
-) -> dict[str, Any]:
-    """Build sanitized aggregate schema metadata for private dataset artifacts."""
+) -> Iterator[dict[str, Any]]:
+    """Retain sanitized schema metadata through its one consumer."""
 
     root = Path(project_root)
     declared_important_columns = (
@@ -83,10 +85,11 @@ def build_schema_inventory_payload(
         require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
     resource_policy = active_runtime_resource_policy()
     with runtime_resource_policy_scope(resource_policy), ExitStack() as retained:
-        items = []
+        items: list[dict[str, Any]] = []
+        retained_item_bytes = 0
         for artifact_root in _iter_dataset_artifact_roots(root):
             try:
-                item = _inventory_item(
+                item, item_bytes = _inventory_item(
                     root,
                     artifact_root,
                     important_null_count_columns=important_columns,
@@ -98,12 +101,36 @@ def build_schema_inventory_payload(
                     "schema_inventory_payload_exceeds_task_memory_budget"
                 ) from None
             items.append(item)
+            retained_item_bytes += item_bytes
         if not items:
             raise ValueError("schema_inventory_no_datasets_found")
-        return {
+        render_bound = 128 + retained_item_bytes + 2 * len(items)
+        try:
+            retained.enter_context(
+                resource_policy.reserve(
+                    "schema.inventory.consumer_overlap",
+                    render_bound + len(items) * sys.getsizeof(None),
+                )
+            )
+        except MemoryError:
+            raise ValueError(
+                "schema_inventory_payload_exceeds_task_memory_budget"
+            ) from None
+        payload = {
             "schema_id": "qrp-schema-inventory",
             "datasets": sorted(items, key=lambda item: item["logical_relative_root"]),
         }
+        try:
+            bounded_rendered_qrp_json_object_size(
+                payload,
+                lazy_arrays={},
+                max_bytes=render_bound,
+            )
+        except (MemoryError, ValueError):
+            raise ValueError(
+                "schema_inventory_payload_exceeds_task_memory_budget"
+            ) from None
+        yield payload
 
 
 def summarize_schema_inventory_payload(
@@ -369,7 +396,7 @@ def _inventory_item(
     important_null_count_columns: frozenset[str],
     resource_policy: RuntimeResourcePolicy,
     retained_items: ExitStack,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     with open_dataset_session(
         artifact_root,
         columns=None,
@@ -397,7 +424,7 @@ def _inventory_item_from_session(
     resource_policy: RuntimeResourcePolicy,
     retained_items: ExitStack,
     retained_payload_bytes: int = 0,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     inspection = inspect_dataset_session(
         session,
         resource_policy=resource_policy,
@@ -480,7 +507,7 @@ def _inventory_item_from_session(
             raise ValueError(
                 "schema_inventory_payload_exceeds_task_memory_budget"
             ) from None
-        return item
+        return item, build_bound
     except MemoryError:
         raise ValueError(
             "schema_inventory_payload_exceeds_task_memory_budget"
@@ -640,7 +667,7 @@ def _schema_hash(
 
 
 __all__ = [
-    "build_schema_inventory_payload",
+    "open_schema_inventory_payload",
     "summarize_schema_inventory_payload",
     "validate_schema_inventory_payload",
 ]

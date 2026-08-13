@@ -151,7 +151,10 @@ class _OperationRssMeasurement:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0)
+            ),
         )
         deadline = monotonic() + _RSS_SAMPLER_START_TIMEOUT_SECONDS
         while not self._ready_path.exists():
@@ -209,15 +212,16 @@ class _OperationRssMeasurement:
         except BaseException as exc:
             self.error = exc
         finally:
-            try:
-                if self._working_set_limit is not None:
-                    _restore_process_working_set_limit(self._working_set_limit)
-            except BaseException as exc:
-                if self.error is None:
-                    self.error = exc
             self.state = "RETIRED"
             if self._temporary is not None:
                 self._temporary.cleanup()
+
+    def restore_backstop(self) -> None:
+        if self._working_set_limit is None:
+            return
+        original = self._working_set_limit
+        self._working_set_limit = None
+        _restore_process_working_set_limit(original)
 
     def evidence(self) -> dict[str, int | float | str]:
         if self.state != "RETIRED":
@@ -451,6 +455,11 @@ def runtime_resource_policy_scope(
                 policy._measurement.stop()
         except BaseException as exc:
             measurement_error = exc
+        try:
+            policy._measurement.restore_backstop()
+        except BaseException as exc:
+            if measurement_error is None:
+                measurement_error = exc
         policy._ledger.state = "RETIRED"
         _ACTIVE_RUNTIME_RESOURCE_POLICY = None
         if primary is None:

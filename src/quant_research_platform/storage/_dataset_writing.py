@@ -88,9 +88,7 @@ _TIMESTAMP_PREPARATION_BYTES_PER_ROW = 256
 _ARROW_CELL_OVERHEAD_BYTES = 9
 _ARROW_FRAME_FIXED_BYTES = 4 * 1024
 _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES = (
-    PARQUET_WRITER_NATIVE_BYTES
-    + EXACT_KEY_SQLITE_PAGE_BYTES
-    + DATASET_INVENTORY_RESERVE_BYTES
+    EXACT_KEY_SQLITE_PAGE_BYTES + DATASET_INVENTORY_RESERVE_BYTES
 )
 
 
@@ -574,25 +572,35 @@ def _write_contents(
     accumulator.retained_payload_bytes = minimum_retained_payload_bytes
     part_indices: dict[str, int] = {}
     saw_empty_schema = False
+    writer_reserve_bytes = (
+        _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES + minimum_retained_payload_bytes
+    )
     while True:
-        reserved_before_pull = resource_policy.reserved_memory_bytes
         try:
             publication = next(chunks)
         except StopIteration:
             break
-        producer_reservation_credit = max(
-            0,
-            resource_policy.reserved_memory_bytes - reserved_before_pull,
-        )
         if isinstance(publication, DatasetWriteChunk):
             chunk = publication.frame
             accumulator.retained_payload_bytes = max(
                 minimum_retained_payload_bytes,
                 publication.retained_payload_bytes,
             )
+            producer_reservation_credit = min(
+                max(
+                    0,
+                    publication.retained_payload_bytes
+                    - minimum_retained_payload_bytes,
+                ),
+                max(
+                    0,
+                    resource_policy.reserved_memory_bytes - writer_reserve_bytes,
+                ),
+            )
         else:
             chunk = publication
             accumulator.retained_payload_bytes = minimum_retained_payload_bytes
+            producer_reservation_credit = 0
         if type(chunk) is not pd.DataFrame:
             raise TypeError("invalid_dataset_chunk")
         chunk_bytes = pandas_frame_payload_bytes(chunk)
@@ -613,6 +621,12 @@ def _write_contents(
             )
             if metadata_budget <= 0:
                 raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+            operator_target_bytes = _dataset_write_operator_target_bytes(
+                chunk,
+                operation_headroom_bytes=metadata_budget,
+                timestamp_key_count=timestamp_key_count,
+                partitioned=bool(spec.partition_columns),
+            )
             declared = accumulator.declared_frame(
                 chunk,
                 target_chunk_bytes=metadata_budget,
@@ -657,7 +671,7 @@ def _write_contents(
                 continue
             for bounded_frame in iter_bounded_frame_chunks(
                 declared,
-                target_chunk_bytes=target_chunk_bytes,
+                target_chunk_bytes=operator_target_bytes,
             ):
                 bounded_frame_bytes = pandas_frame_payload_bytes(bounded_frame)
                 prepared_bound = (
@@ -706,7 +720,7 @@ def _write_contents(
                         ):
                             for bounded_partition in iter_bounded_frame_chunks(
                                 partition_frame,
-                                target_chunk_bytes=target_chunk_bytes,
+                                target_chunk_bytes=operator_target_bytes,
                             ):
                                 bounded_partition_bytes = pandas_frame_payload_bytes(
                                     bounded_partition
@@ -734,7 +748,7 @@ def _write_contents(
                                     for persisted_table in _bounded_persisted_tables(
                                         table,
                                         logical_dtypes=bounded_logical_dtypes,
-                                        target_chunk_bytes=target_chunk_bytes,
+                                        target_chunk_bytes=operator_target_bytes,
                                     ):
                                         part_index = part_indices.get(partition, 0)
                                         part_indices[partition] = part_index + 1
@@ -761,7 +775,7 @@ def _write_contents(
                                         )
                                     accumulator.observe_file(
                                         output_path,
-                                        target_chunk_bytes=target_chunk_bytes,
+                                        target_chunk_bytes=operator_target_bytes,
                                         operation_headroom_bytes=readback_headroom,
                                     )
                                     _raise_accumulated_failures(accumulator)
@@ -819,6 +833,37 @@ def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
         raise ValueError("dataset_primary_key_null")
     if any(int(count) > 0 for count in summary.non_finite_count_summary.values()):
         raise ValueError("dataset_infinite_value")
+
+
+def _dataset_write_operator_target_bytes(
+    frame: pd.DataFrame,
+    *,
+    operation_headroom_bytes: int,
+    timestamp_key_count: int,
+    partitioned: bool,
+) -> int:
+    if frame.empty:
+        return operation_headroom_bytes
+    fixed_bytes = 2 * _ARROW_FRAME_FIXED_BYTES + PARQUET_WRITER_NATIVE_BYTES
+    available = operation_headroom_bytes - fixed_bytes
+    if available <= 0:
+        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+    payload_per_row = max(
+        1,
+        (pandas_frame_payload_bytes(frame) + len(frame) - 1) // len(frame),
+    )
+    payload_overlaps = 4 if partitioned else 3
+    row_overlap_bytes = (
+        timestamp_key_count * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
+        + (3 if partitioned else 0)
+        + 2 * len(frame.columns) * _ARROW_CELL_OVERHEAD_BYTES
+    )
+    rows = available // (
+        payload_overlaps * payload_per_row + row_overlap_bytes
+    )
+    if rows <= 0:
+        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+    return rows * payload_per_row
 
 
 def _category_namespace(column: str) -> str:

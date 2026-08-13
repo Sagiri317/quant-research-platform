@@ -416,6 +416,15 @@ def publish_no_replace(
             raise primary or target_probe_error or source_probe_error  # type: ignore[misc]
         if target_exact and not source_exact:
             if primary is None or isinstance(primary, OSError):
+                if policy is not None:
+                    try:
+                        policy.assert_memory_within_budget()
+                    except BaseException as acceptance_error:
+                        try:
+                            remove_owned_scratch(target, source_identity)
+                        except BaseException:
+                            raise acceptance_error from None
+                        raise
                 return
             raise primary
         if primary is not None:

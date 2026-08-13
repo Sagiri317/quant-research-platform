@@ -244,6 +244,8 @@ def read_dataset(
         return activate()
     if mode is not DatasetReadMode.MATERIALIZED:
         raise ValueError("unsupported_dataset_read_mode")
+    if resource_policy is None and current_runtime_resource_policy() is not None:
+        raise RuntimeError("runtime_resource_policy_competing_root")
     with open_dataset_session(
         dataset_root,
         columns=columns,

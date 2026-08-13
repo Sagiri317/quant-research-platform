@@ -15,7 +15,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.workflows.diagnostics.schema_inventory import (
-    build_schema_inventory_payload,
+    open_schema_inventory_payload,
 )
 from quant_research_platform.workflows.local_verification import (
     LocalVerificationRunConfig,
@@ -68,8 +68,8 @@ def schema_inventory(
     try:
         policy = RuntimeResourcePolicy.capture()
         with runtime_resource_policy_scope(policy):
-            inventory = build_schema_inventory_payload(project_root)
-            atomic_write_json(output, inventory)
+            with open_schema_inventory_payload(project_root) as inventory:
+                atomic_write_json(output, inventory)
     except Exception as exc:
         typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc

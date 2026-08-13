@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -11,7 +12,7 @@ from typer.testing import CliRunner
 
 from quant_research_platform.interfaces.private_cli import app as private_app
 from quant_research_platform.workflows.diagnostics.schema_inventory import (
-    build_schema_inventory_payload,
+    open_schema_inventory_payload,
 )
 from tests.helpers import frequency_ids
 from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
@@ -77,10 +78,11 @@ def test_qrp_private_script_entry_is_the_only_private_cli_addition() -> None:
 def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     _write_inventory_fixture(tmp_path)
 
-    inventory = build_schema_inventory_payload(
+    with open_schema_inventory_payload(
         tmp_path,
         important_null_count_columns=("eligible",),
-    )
+    ) as inventory:
+        inventory = json.loads(json.dumps(inventory))
     items = inventory["datasets"]
     roots = {item["logical_relative_root"] for item in items}
     combined = json.dumps(inventory, ensure_ascii=False)
@@ -143,7 +145,8 @@ def test_schema_inventory_default_has_no_a_share_important_columns(
 ) -> None:
     _write_inventory_fixture(tmp_path)
 
-    inventory = build_schema_inventory_payload(tmp_path)
+    with open_schema_inventory_payload(tmp_path) as inventory:
+        inventory = json.loads(json.dumps(inventory))
     annotation = _inventory_item(
         inventory,
         "data/processed/a_share/annotation/default",
@@ -172,7 +175,8 @@ def test_schema_inventory_reads_time_aware_reference_primary_key(tmp_path) -> No
         partition_columns=["year"],
     )
 
-    inventory = build_schema_inventory_payload(tmp_path)
+    with open_schema_inventory_payload(tmp_path) as inventory:
+        inventory = json.loads(json.dumps(inventory))
     item = _inventory_item(inventory, "data/interim/csmar/index_info")
 
     assert item["primary_key"] == [
@@ -252,13 +256,15 @@ def test_qrp_private_schema_inventory_sanitizes_unexpected_failures(
 ) -> None:
     output = tmp_path / "inventory.json"
 
+    @contextmanager
     def fail_with_private_context(project_root):
         raise RuntimeError(
             "boom at " + str(project_root / "data" / "research" / "a_share" / "demo")
         )
+        yield  # pragma: no cover
 
     monkeypatch.setattr(
-        "quant_research_platform.interfaces.private_cli.build_schema_inventory_payload",
+        "quant_research_platform.interfaces.private_cli.open_schema_inventory_payload",
         fail_with_private_context,
     )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Iterable
 from contextlib import ExitStack
 
@@ -105,12 +106,23 @@ def calculate_market_panel_from_chunks(
                     )
                 )
             depth_reducer.close()
-            return _calculate_market_panel(
-                prepared_bars,
-                trade_aggregates=trade_aggregates,
-                quote_snapshots=quote_snapshots,
-                max_quote_age=max_quote_age,
-            )
+            if policy is None:
+                return _calculate_market_panel(
+                    prepared_bars,
+                    trade_aggregates=trade_aggregates,
+                    quote_snapshots=quote_snapshots,
+                    max_quote_age=max_quote_age,
+                )
+            with policy.reserve(
+                "crypto.panel.merge",
+                _panel_temporary_upper_bound(prepared_bars),
+            ):
+                return _calculate_market_panel(
+                    prepared_bars,
+                    trade_aggregates=trade_aggregates,
+                    quote_snapshots=quote_snapshots,
+                    max_quote_age=max_quote_age,
+                )
     finally:
         if trade_reducer is not None:
             trade_reducer.close()
@@ -238,6 +250,23 @@ def _calculate_market_panel(
         .sort_values(["market_id", "asset_id", "timestamp"], kind="mergesort")
         .reset_index(drop=True)
     )
+
+
+def _panel_temporary_upper_bound(panel: pd.DataFrame) -> int:
+    pointer = sys.getsizeof(None)
+    trade_merge_columns = len(panel.columns) + 8
+    quote_match_columns = 11
+    quote_merge_columns = trade_merge_columns + quote_match_columns - 2
+    simultaneous_cells = (
+        9
+        + trade_merge_columns
+        + quote_match_columns
+        + quote_merge_columns
+        + 2 * len(PANEL_COLUMNS)
+    )
+    return len(panel) * (
+        simultaneous_cells * pointer + 6 * pointer
+    ) + simultaneous_cells * 1024
 
 
 def normalize_trade_chunk(trades: pd.DataFrame) -> pd.DataFrame:

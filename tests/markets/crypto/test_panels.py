@@ -494,7 +494,9 @@ def test_depth_reducer_merges_snapshot_across_chunks() -> None:
 
 
 
-def test_trade_reducer_admits_target_state_before_constructor_allocation() -> None:
+def test_trade_reducer_admits_target_and_output_before_constructor_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     module = _panel_input_reducers_module()
     bars = pd.concat(
         [panels.prepare_panel_bars(_bars_frame())] * 100,
@@ -504,6 +506,13 @@ def test_trade_reducer_admits_target_state_before_constructor_allocation() -> No
         available_memory_bytes=4096,
         explicit_cap_bytes=4096,
     )
+    monkeypatch.setattr(
+        module.pd,
+        "DataFrame",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("output allocation entered before state admission")
+        ),
+    )
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
@@ -512,6 +521,57 @@ def test_trade_reducer_admits_target_state_before_constructor_allocation() -> No
                 payload_target_bytes=policy.remaining_memory_bytes,
                 normalize_chunk=panels.normalize_trade_chunk,
             )
+
+
+def test_market_panel_admits_merge_before_calling_pandas_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Reducer:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def add_chunk(self, _chunk: pd.DataFrame) -> None:
+            pass
+
+        def finish(self) -> pd.DataFrame:
+            return pd.DataFrame()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        panels.panel_input_reducers,
+        "AggregateTradeReducer",
+        Reducer,
+    )
+    monkeypatch.setattr(
+        panels.panel_input_reducers,
+        "DepthSnapshotReducer",
+        Reducer,
+    )
+    monkeypatch.setattr(
+        panels,
+        "_calculate_market_panel",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("panel merge entered before admission")
+        ),
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024,
+        explicit_cap_bytes=64 * 1024,
+    )
+    prepared = pd.DataFrame({"market_id": ["crypto"] * 100})
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            panels.calculate_market_panel_from_chunks(
+                prepared,
+                trade_chunks=(),
+                depth_chunks=(),
+                payload_target_bytes=policy.remaining_memory_bytes,
+            )
+
+    assert policy.reserved_memory_bytes == 0
 
 
 def test_depth_reducer_admits_chunk_before_normalization() -> None:

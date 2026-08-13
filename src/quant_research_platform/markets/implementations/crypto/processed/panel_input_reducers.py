@@ -104,30 +104,40 @@ class AggregateTradeReducer:
         self._policy = current_runtime_resource_policy()
         self._reservations = ExitStack()
         if self._policy is not None:
+            with self._policy.reserve(
+                "crypto.trade.reducer_measure",
+                max(4096, 2 * len(bars) * sys.getsizeof(None)),
+            ):
+                state_bound = _target_state_upper_bound(
+                    bars,
+                    key_columns=len(required),
+                    output_columns=len(_TRADE_AGGREGATE_COLUMNS),
+                    retained_key_graphs=1,
+                    row_state_bytes=(
+                        sys.getsizeof(_TradeBarState())
+                        + 2 * sys.getsizeof(0.0)
+                        + 5 * sys.getsizeof(-(1 << 63))
+                    ),
+                )
             self._reservations.enter_context(
                 self._policy.reserve(
                     "crypto.trade.reducer_state",
-                    _target_state_upper_bound(
-                        len(bars),
-                        len(required),
-                        len(_TRADE_AGGREGATE_COLUMNS),
-                    ),
+                    state_bound,
                 )
             )
-        self._target_keys = frozenset(
-            (str(asset_id), pd.Timestamp(timestamp))
+        self._states = {
+            (str(asset_id), pd.Timestamp(timestamp)): _TradeBarState()
             for asset_id, timestamp in bars.loc[:, list(required)].itertuples(
                 index=False,
                 name=None,
             )
-        )
+        }
         self._payload_target_bytes = _validated_payload_target(
             payload_target_bytes,
             error="invalid_crypto_trade_payload_target",
         )
         self._normalize_chunk = normalize_chunk
         self._continuity_state = continuity_state or AggregateTradeContinuityState()
-        self._states: dict[tuple[str, pd.Timestamp], _TradeBarState] = {}
         self._finished = False
 
     def add_chunk(self, trades: pd.DataFrame) -> None:
@@ -199,11 +209,8 @@ class AggregateTradeReducer:
             continuity.last_aggregate_trade_id = aggregate_trade_id
             continuity.last_underlying_trade_id = last_trade_id
             key = (asset_id, timestamp)
-            if key in self._target_keys:
-                state = self._states.get(key)
-                if state is None:
-                    state = _TradeBarState()
-                    self._states[key] = state
+            state = self._states.get(key)
+            if state is not None:
                 state.signed_quantity_sum += signed_quantity
                 state.quantity_sum += quantity
                 state.covered_trade_count += last_trade_id - first_trade_id + 1
@@ -215,7 +222,11 @@ class AggregateTradeReducer:
 
     def finish(self) -> pd.DataFrame:
         self._finished = True
-        keys = sorted(self._states)
+        keys = sorted(
+            key
+            for key, state in self._states.items()
+            if state.covered_trade_count
+        )
         return _payload_checked_output_frame(
             {
                 "asset_id": [key[0] for key in keys],
@@ -261,14 +272,32 @@ class DepthSnapshotReducer:
         self._policy = current_runtime_resource_policy()
         self._reservations = ExitStack()
         if self._policy is not None:
+            with self._policy.reserve(
+                "crypto.depth.reducer_measure",
+                max(4096, 2 * len(bars) * sys.getsizeof(None)),
+            ):
+                state_bound = _target_state_upper_bound(
+                    bars,
+                    key_columns=len(required),
+                    output_columns=len(_QUOTE_COLUMNS),
+                    retained_key_graphs=2,
+                    row_state_bytes=(
+                        sys.getsizeof(_QuoteSnapshot("", pd.Timestamp(0)))
+                        + 7 * sys.getsizeof(0.0)
+                        + 2
+                        * (
+                            sys.getsizeof(
+                                _DepthSideState(1, 0.0, 0.0, 0.0, 0.0, 2)
+                            )
+                            + 4 * sys.getsizeof(0.0)
+                            + 2 * sys.getsizeof(0)
+                        )
+                    ),
+                )
             self._reservations.enter_context(
                 self._policy.reserve(
                     "crypto.depth.reducer_state",
-                    _target_state_upper_bound(
-                        len(bars),
-                        len(required),
-                        len(_QUOTE_COLUMNS),
-                    ),
+                    state_bound,
                 )
             )
         ordered_bars = bars.loc[:, list(required)].sort_values(
@@ -457,23 +486,32 @@ def _validated_payload_target(value: int, *, error: str) -> int:
 
 
 def _target_state_upper_bound(
-    row_count: int,
+    bars: pd.DataFrame,
+    *,
     key_columns: int,
     output_columns: int,
+    retained_key_graphs: int,
+    row_state_bytes: int,
 ) -> int:
+    row_count = len(bars)
     pointer = sys.getsizeof(None)
     key = sys.getsizeof(tuple([None] * key_columns))
-    mapping_entry = 4 * pointer
-    row_state = max(
-        sys.getsizeof(_TradeBarState()),
-        sys.getsizeof(_QuoteSnapshot("", pd.Timestamp(0))),
-        2 * sys.getsizeof(_DepthSideState(1, 0.0, 0.0, 0.0, 0.0, 2)),
+    mapping_entry = 5 * pointer
+    timestamp = sys.getsizeof(pd.Timestamp(0))
+    asset_text = int(bars["asset_id"].memory_usage(index=False, deep=True))
+    key_graph = (
+        sys.getsizeof({})
+        + asset_text
+        + row_count * (key + mapping_entry + timestamp)
     )
-    return sys.getsizeof({}) + sys.getsizeof(frozenset()) + row_count * (
-        key
-        + mapping_entry
-        + row_state
-        + (key_columns + output_columns) * pointer
+    output_overlap = (
+        row_count * (output_columns * (pointer + 8) + 3 * pointer)
+        + output_columns * (sys.getsizeof([]) + 1024)
+    )
+    return (
+        retained_key_graphs * key_graph
+        + row_count * row_state_bytes
+        + output_overlap
     )
 
 

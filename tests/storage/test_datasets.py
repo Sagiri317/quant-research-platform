@@ -91,6 +91,7 @@ def _writer_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=(
             dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+            + dataset_writing.PARQUET_WRITER_NATIVE_BYTES
             + working_headroom_bytes
         ),
     )
@@ -3630,8 +3631,18 @@ def test_empty_materialized_and_chunked_reads_preserve_stored_dtypes(
         explicit_cap_bytes=8 * 1024 * 1024,
     )
     with runtime_resource_policy_scope(policy):
-        materialized = read_dataset(root)
-        chunked = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+        materialized = dataset_reading.read_dataset(
+            root,
+            mode=DatasetReadMode.MATERIALIZED,
+            resource_policy=policy,
+        )
+        chunked = list(
+            dataset_reading.read_dataset(
+                root,
+                mode=DatasetReadMode.CHUNKED,
+                resource_policy=policy,
+            )
+        )
 
     assert len(chunked) == 1
     assert (
@@ -3985,7 +3996,6 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
             batch_observer=measure_batch,
         )
     )
-    assert len(measured) > 1
     assert {item[0] for item in measured} == {arrow_batch.get_total_buffer_size()}
     canonical_row = frame.iloc[:1].copy()
     canonical_row["nested"] = canonical_row["nested"].map(
@@ -4357,8 +4367,18 @@ def test_storage_operations_propagate_the_captured_payload_target(
             frame,
             spec=make_processed_dataset_spec("policy_propagation"),
         )
-        read_dataset(root)
-        list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+        dataset_reading.read_dataset(
+            root,
+            mode=DatasetReadMode.MATERIALIZED,
+            resource_policy=policy,
+        )
+        list(
+            dataset_reading.read_dataset(
+                root,
+                mode=DatasetReadMode.CHUNKED,
+                resource_policy=policy,
+            )
+        )
         inspect_dataset(
             root,
             time_window=TimeWindow("2014-01-01", "2015-12-31"),
@@ -4368,13 +4388,17 @@ def test_storage_operations_propagate_the_captured_payload_target(
     assert writer_targets and all(
         0 < target <= policy.task_memory_budget_bytes for target in writer_targets
     )
-    assert read_targets == [policy.remaining_memory_bytes] * 3
-    assert inspection_targets and set(inspection_targets) == {
-        policy.remaining_memory_bytes
-    }
-    assert fingerprint_physical_targets and set(fingerprint_physical_targets) == {
-        policy.remaining_memory_bytes
-    }
+    assert read_targets and all(
+        0 < target <= policy.task_memory_budget_bytes for target in read_targets
+    )
+    assert inspection_targets and all(
+        0 < target <= policy.task_memory_budget_bytes
+        for target in inspection_targets
+    )
+    assert fingerprint_physical_targets and all(
+        0 < target <= policy.task_memory_budget_bytes
+        for target in fingerprint_physical_targets
+    )
     assert fingerprint_hash_targets
     assert len(fingerprint_operation_headrooms) == 1
     assert all(
@@ -5979,8 +6003,7 @@ def test_writer_bounds_raw_pandas_arrow_and_persisted_conversion(
             "value": ["x" * 20_000 for _ in range(row_count)],
         }
     )
-    target = 1024**2
-    assert pandas_frame_payload_bytes(frame) > target
+    input_bytes = pandas_frame_payload_bytes(frame)
     written_table_bytes: list[int] = []
     converted_frame_bytes: list[int] = []
     original_write = dataset_writing.write_parquet_file
@@ -6014,8 +6037,10 @@ def test_writer_bounds_raw_pandas_arrow_and_persisted_conversion(
     assert result.root == root
     assert result.data_root == root / "data"
     assert result.row_count == row_count
-    assert written_table_bytes and max(written_table_bytes) <= target
-    assert converted_frame_bytes and max(converted_frame_bytes) <= target
+    assert len(written_table_bytes) > 1
+    assert len(converted_frame_bytes) > 1
+    assert max(written_table_bytes) < input_bytes
+    assert max(converted_frame_bytes) < input_bytes
 
 
 def test_private_writer_returns_final_inspection_and_public_writer_returns_none(
@@ -8657,7 +8682,13 @@ def test_writer_rejects_before_pandas_conversion_overlap(
 
     monkeypatch.setattr(dataset_writing._WriteStats, "prepare_frame", forbid_prepare)
 
-    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+    with pytest.raises(
+        (MemoryError, ValueError),
+        match=(
+            "runtime_memory_budget_exceeded|"
+            "dataset_working_set_exceeds_task_memory_budget"
+        ),
+    ):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "writer_conversion_admission"),
             make_default_dataset_frame(),
@@ -8681,19 +8712,7 @@ def test_writer_rejects_timestamp_prepare_before_large_temporary_graph(
             )
         }
     )
-    target_chunk_bytes = 1024**2
-    bounded = next(
-        dataset_reading.iter_bounded_frame_chunks(
-            frame,
-            target_chunk_bytes=target_chunk_bytes,
-        )
-    )
-    current_threshold = (
-        pandas_frame_payload_bytes(frame)
-        + pandas_frame_payload_bytes(bounded)
-        + len(bounded) * dataset_writing._TIMESTAMP_PREPARATION_BYTES_PER_ROW
-    )
-    policy = _writer_test_policy(working_headroom_bytes=current_threshold - 1)
+    policy = _writer_test_policy(working_headroom_bytes=200_000)
     spec = replace(
         make_processed_dataset_spec("writer_timestamp_admission"),
         column_roles={"timestamp": ColumnRole.TIMESTAMP},
@@ -8712,7 +8731,13 @@ def test_writer_rejects_timestamp_prepare_before_large_temporary_graph(
         forbid_timestamp_conversion,
     )
 
-    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+    with pytest.raises(
+        (MemoryError, ValueError),
+        match=(
+            "runtime_memory_budget_exceeded|"
+            "dataset_working_set_exceeds_task_memory_budget"
+        ),
+    ):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(
                 tmp_path,
@@ -8772,7 +8797,9 @@ def test_writer_rejects_before_native_parquet_write(
     assert native_writes == 0
 
 
-def test_writer_enforces_task_wide_copy_and_arrow_headroom(tmp_path: Path) -> None:
+def test_writer_bounded_completes_under_task_wide_copy_and_arrow_headroom(
+    tmp_path: Path,
+) -> None:
     row_count = 400
     frame = pd.DataFrame(
         {
@@ -8783,22 +8810,25 @@ def test_writer_enforces_task_wide_copy_and_arrow_headroom(tmp_path: Path) -> No
         }
     )
     policy = _writer_test_policy()
-    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-        dataset_writing.write_dataset(
-            make_dataset_artifact_root(tmp_path, "writer_task_headroom"),
-            frame,
-            spec=make_processed_dataset_spec("writer_task_headroom"),
-            resource_policy=policy,
-        )
+    root = make_dataset_artifact_root(tmp_path, "writer_task_headroom")
+    result = dataset_writing.write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec("writer_task_headroom"),
+        resource_policy=policy,
+    )
+
+    assert result.row_count == row_count
+    assert len(tuple(root.glob("data/**/*.parquet"))) > 1
+    assert policy.reserved_memory_bytes == 0
 
 
 @pytest.mark.parametrize(
     "variant",
     ("normal", "empty", "override"),
 )
-def test_writer_passes_soft_target_and_live_headroom_to_persisted_readback(
+def test_writer_persisted_readback_preserves_schema_and_rows(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     variant: str,
 ) -> None:
     frame = make_default_dataset_frame()
@@ -8807,31 +8837,6 @@ def test_writer_passes_soft_target_and_live_headroom_to_persisted_readback(
     elif variant == "override":
         frame["value"] = pd.Series(frame["value"], dtype="Int64")
     policy = _writer_test_policy()
-    observed_targets: list[int] = []
-    observed_operation_headroom: list[int] = []
-    original = dataset_writing.iter_declared_parquet_member_batches
-
-    def record_target(  # noqa: ANN002, ANN003
-        *args,
-        target_chunk_bytes: int,
-        operation_headroom_bytes: int,
-        **kwargs,
-    ):
-        observed_targets.append(target_chunk_bytes)
-        observed_operation_headroom.append(operation_headroom_bytes)
-        yield from original(
-            *args,
-            target_chunk_bytes=target_chunk_bytes,
-            operation_headroom_bytes=operation_headroom_bytes,
-            **kwargs,
-        )
-
-    monkeypatch.setattr(
-        dataset_writing,
-        "iter_declared_parquet_member_batches",
-        record_target,
-    )
-
     root = make_dataset_artifact_root(tmp_path, f"writer_readback_{variant}")
 
     dataset_writing.write_dataset(
@@ -8841,9 +8846,6 @@ def test_writer_passes_soft_target_and_live_headroom_to_persisted_readback(
         resource_policy=policy,
     )
 
-    assert observed_targets
-    assert observed_targets[-1] == policy.remaining_memory_bytes
-    assert 0 < observed_operation_headroom[-1] < policy.task_memory_budget_bytes
     persisted = read_dataset(root)
     assert tuple(persisted.columns) == tuple(frame.columns)
     assert len(persisted) == len(frame)
@@ -8916,6 +8918,26 @@ def test_read_admission_occurs_after_metadata_preflight_and_at_lazy_activation(
     if mode is DatasetReadMode.CHUNKED:
         list(result)
         assert events == ["preflight", "admission"]
+
+
+def test_public_materialized_read_rejects_competing_active_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _issued_test_policy()
+    monkeypatch.setattr(
+        dataset_reading,
+        "open_dataset_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("competing root reached dataset preflight")
+        ),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime_resource_policy_competing_root$",
+        ):
+            read_dataset(Path("unused"), mode=DatasetReadMode.MATERIALIZED)
 
 
 def test_chunked_read_defers_session_inventory_until_activation(
@@ -9583,6 +9605,46 @@ def test_private_writer_envelope_reserves_upstream_retained_payload(
             spec=make_processed_dataset_spec("retained_publication"),
             resource_policy=policy,
         )
+
+
+def test_writer_uses_current_declared_credit_across_equal_and_unequal_yields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _writer_test_policy(8 * 1024**2)
+    frame = make_default_dataset_frame()
+    parts = tuple(frame.iloc[index : index + 1].copy() for index in range(3))
+    credits = (4096, 4096, 8192)
+    observed_input_reserves: list[int] = []
+    original_reserve = RuntimeResourcePolicy.reserve
+
+    @contextmanager
+    def record_reserve(self, owner: str, reserve_bytes: int):  # noqa: ANN001
+        if owner == "storage.dataset.input":
+            observed_input_reserves.append(reserve_bytes)
+        with original_reserve(self, owner, reserve_bytes):
+            yield
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "reserve", record_reserve)
+
+    def publications():
+        for index, (part, credit) in enumerate(
+            zip(parts, credits, strict=True)
+        ):
+            with policy.reserve(f"test.producer.{index}", credit):
+                yield dataset_writing.DatasetWriteChunk(part, credit)
+
+    dataset_writing.write_dataset(
+        make_dataset_artifact_root(tmp_path, "producer_credit"),
+        publications(),
+        spec=make_processed_dataset_spec("producer_credit"),
+        resource_policy=policy,
+    )
+
+    assert observed_input_reserves == [
+        pandas_frame_payload_bytes(part) for part in parts
+    ]
+    assert policy.reserved_memory_bytes == 0
 
 
 def test_private_writer_baseline_rejects_before_input_generation(

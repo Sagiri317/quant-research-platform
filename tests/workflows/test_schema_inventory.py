@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -159,7 +159,8 @@ def test_schema_inventory_uses_storage_exact_duplicate_fact(
         ),
     )
 
-    payload = schema_inventory.build_schema_inventory_payload(tmp_path)
+    with schema_inventory.open_schema_inventory_payload(tmp_path) as payload:
+        payload = deepcopy(payload)
 
     assert payload["datasets"][0]["duplicate_primary_key_count"] == 0
 
@@ -226,7 +227,7 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
         important_null_count_columns: frozenset[str],
         resource_policy: RuntimeResourcePolicy,
         retained_items,
-    ) -> dict[str, object]:
+    ) -> tuple[dict[str, object], int]:
         assert important_null_count_columns == frozenset()
         assert active_runtime_resource_policy() is resource_policy
         observed_policies.append(resource_policy)
@@ -234,7 +235,7 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
         retained_items.enter_context(
             resource_policy.reserve("schema.inventory.items", 64)
         )
-        return {"logical_relative_root": artifact_root.name}
+        return {"logical_relative_root": artifact_root.name}, 64
 
     monkeypatch.setattr(
         schema_inventory,
@@ -248,7 +249,8 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
     )
     monkeypatch.setattr(schema_inventory, "_inventory_item", inventory_item)
 
-    payload = schema_inventory.build_schema_inventory_payload(tmp_path)
+    with schema_inventory.open_schema_inventory_payload(tmp_path) as payload:
+        payload = deepcopy(payload)
 
     assert captures["count"] == 1
     assert observed_policies == [policy, policy]
@@ -266,24 +268,29 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
 ) -> None:
     policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
     observed: list[RuntimeResourcePolicy] = []
+    observed_reserved: list[int] = []
     monkeypatch.setattr(
         private_cli.RuntimeResourcePolicy,
         "capture",
         staticmethod(lambda: policy),
     )
-    monkeypatch.setattr(
-        private_cli,
-        "build_schema_inventory_payload",
-        lambda _root: {"schema_id": "qrp-schema-inventory", "datasets": []},
-    )
+    @contextmanager
+    def inventory(_root: Path):
+        with policy.reserve("test.schema.inventory", 64):
+            yield {"schema_id": "qrp-schema-inventory", "datasets": []}
+
+    monkeypatch.setattr(private_cli, "open_schema_inventory_payload", inventory)
 
     def write(_path: Path, _payload: object) -> None:
         observed.append(active_runtime_resource_policy())
+        observed_reserved.append(policy.reserved_memory_bytes)
 
     monkeypatch.setattr(private_cli, "atomic_write_json", write)
     private_cli.schema_inventory(tmp_path, tmp_path / "inventory.json")
 
     assert observed == [policy]
+    assert observed_reserved == [64]
+    assert policy.reserved_memory_bytes == 0
 
 
 def test_schema_inventory_rejects_accumulated_items_over_budget(
@@ -307,10 +314,13 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
         kwargs["retained_items"].enter_context(
             kwargs["resource_policy"].reserve("schema.inventory.items", 500)
         )
-        return {
-            "logical_relative_root": artifact_root.name,
-            "payload": "x" * 500,
-        }
+        return (
+            {
+                "logical_relative_root": artifact_root.name,
+                "payload": "x" * 500,
+            },
+            500,
+        )
 
     monkeypatch.setattr(schema_inventory, "_inventory_item", inventory_item)
 
@@ -318,7 +328,8 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
         ValueError,
         match="schema_inventory_payload_exceeds_task_memory_budget",
     ):
-        schema_inventory.build_schema_inventory_payload(tmp_path)
+        with schema_inventory.open_schema_inventory_payload(tmp_path):
+            pass
 
 
 def test_schema_inventory_item_state_is_admitted_before_aggregation(
@@ -438,7 +449,8 @@ def test_schema_inventory_rejects_replacement_between_open_and_stats(
         ValueError,
         match="dataset_(spec|manifest)_identity_changed",
     ):
-        schema_inventory.build_schema_inventory_payload(tmp_path)
+        with schema_inventory.open_schema_inventory_payload(tmp_path):
+            pass
 
     assert open_count == 1
 
@@ -509,7 +521,8 @@ def test_schema_inventory_rejects_forged_storage_summary(
     manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match=error):
-        schema_inventory.build_schema_inventory_payload(tmp_path)
+        with schema_inventory.open_schema_inventory_payload(tmp_path):
+            pass
 
 
 @pytest.mark.parametrize("value", (True, 1, ""))
@@ -521,10 +534,11 @@ def test_schema_inventory_rejects_important_column_coercion(
         ValueError,
         match="schema_inventory_important_columns_invalid",
     ):
-        schema_inventory.build_schema_inventory_payload(
+        with schema_inventory.open_schema_inventory_payload(
             tmp_path,
             important_null_count_columns=(value,),  # type: ignore[arg-type]
-        )
+        ):
+            pass
 
 
 def _valid_inventory_payload() -> dict[str, object]:

@@ -168,6 +168,9 @@ def test_root_scope_records_one_operation_peak_and_fails_over_budget(
         def stop(self) -> None:
             self.state = "RETIRED"
 
+        def restore_backstop(self) -> None:
+            pass
+
         def evidence(self) -> dict[str, int | float | str]:
             return {
                 "rss0_bytes": 100,
@@ -202,6 +205,54 @@ def test_root_scope_records_one_operation_peak_and_fails_over_budget(
     assert evidence["sample_count"] >= 2
     assert evidence["cadence_status"] == "PASS"
     assert evidence["status"] == "FAIL"
+
+
+def test_finish_keeps_hard_backstop_until_root_cleanup_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Measurement:
+        error = None
+        state = "READY"
+
+        def start(self) -> None:
+            self.state = "ACTIVE"
+
+        def stop(self) -> None:
+            events.append("stop_sampler")
+            self.state = "RETIRED"
+
+        def restore_backstop(self) -> None:
+            events.append("restore_backstop")
+
+        def evidence(self) -> dict[str, int | float | str]:
+            return {
+                "rss0_bytes": 100,
+                "hard_budget_bytes": 600,
+                "sampled_peak_rss_bytes": 100,
+                "peak_incremental_rss_bytes": 0,
+                "sample_count": 2,
+                "max_sample_interval_ms": 1.0,
+                "cadence_status": "PASS",
+                "status": "PASS",
+            }
+
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
+    monkeypatch.setattr(
+        resources,
+        "_operation_rss_measurement",
+        lambda *_args: Measurement(),
+    )
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+
+    with runtime_resource_policy_scope(policy):
+        policy.finish_memory_measurement()
+        assert events == ["stop_sampler"]
+        events.append("cleanup")
+
+    assert events == ["stop_sampler", "cleanup", "restore_backstop"]
 
 
 def test_windows_hard_rss_backstop_sets_and_restores_exact_limit() -> None:
