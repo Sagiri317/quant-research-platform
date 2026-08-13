@@ -168,9 +168,6 @@ def test_root_scope_records_one_operation_peak_and_fails_over_budget(
         def stop(self) -> None:
             self.state = "RETIRED"
 
-        def restore_backstop(self) -> None:
-            pass
-
         def evidence(self) -> dict[str, int | float | str]:
             return {
                 "rss0_bytes": 100,
@@ -207,7 +204,7 @@ def test_root_scope_records_one_operation_peak_and_fails_over_budget(
     assert evidence["status"] == "FAIL"
 
 
-def test_finish_keeps_hard_backstop_until_root_cleanup_completes(
+def test_finish_accepts_before_retiring_the_operation_sampler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -224,10 +221,8 @@ def test_finish_keeps_hard_backstop_until_root_cleanup_completes(
             self.state = "RETIRED"
 
         def checkpoint_evidence(self) -> dict[str, int | float | str]:
+            events.append("checkpoint")
             return self.evidence()
-
-        def restore_backstop(self) -> None:
-            events.append("restore_backstop")
 
         def evidence(self) -> dict[str, int | float | str]:
             return {
@@ -250,74 +245,39 @@ def test_finish_keeps_hard_backstop_until_root_cleanup_completes(
     )
     policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
 
-    def cleanup() -> None:
-        assert policy._measurement.state == "ACTIVE"  # noqa: SLF001
-        events.append("cleanup")
-
     with runtime_resource_policy_scope(policy):
-        policy.finish_memory_measurement(cleanup=cleanup)
-        assert events == ["cleanup", "stop_sampler"]
+        policy.finish_memory_measurement()
+        assert events == ["checkpoint", "stop_sampler"]
 
-    assert events == ["cleanup", "stop_sampler", "restore_backstop"]
-
-
-def test_windows_hard_rss_backstop_sets_and_restores_exact_limit() -> None:
-    import ctypes
-    import os
-
-    if os.name != "nt":
-        pytest.skip("Windows working-set hard backstop")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    kernel32.GetProcessWorkingSetSizeEx.argtypes = (
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_size_t),
-        ctypes.POINTER(ctypes.c_size_t),
-        ctypes.POINTER(ctypes.c_ulong),
-    )
-    kernel32.GetProcessWorkingSetSizeEx.restype = ctypes.c_int
-
-    def limits() -> tuple[int, int, int]:
-        minimum = ctypes.c_size_t()
-        maximum = ctypes.c_size_t()
-        flags = ctypes.c_ulong()
-        assert kernel32.GetProcessWorkingSetSizeEx(
-            kernel32.GetCurrentProcess(),
-            ctypes.byref(minimum),
-            ctypes.byref(maximum),
-            ctypes.byref(flags),
-        )
-        return minimum.value, maximum.value, flags.value
-
-    before = limits()
-    hard_limit = resources._process_rss_bytes() + 64 * MIB
-    original = resources._set_process_working_set_limit(hard_limit)
-    try:
-        active = limits()
-        assert original == before
-        assert active[1] == hard_limit
-        assert active[2] & 0x00000004
-        assert not active[2] & 0x00000008
-    finally:
-        resources._restore_process_working_set_limit(original)
-    assert limits() == before
+    assert events == ["checkpoint", "stop_sampler"]
 
 
-def test_windows_hard_rss_backstop_keeps_opaque_touch_within_budget() -> None:
-    if os.name != "nt":
-        pytest.skip("Windows working-set hard backstop")
+def test_operation_rss_evidence_includes_child_processes() -> None:
     code = """
 import json
+import subprocess
+import sys
+import time
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
-budget = 64 * 1024 * 1024
+budget = 256 * 1024 * 1024
 policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=budget)
 with runtime_resource_policy_scope(policy):
-    opaque = bytearray(80 * 1024 * 1024)
-    for offset in range(0, len(opaque), 4096):
-        opaque[offset] = 1
+    child = subprocess.Popen(
+        (
+            sys.executable,
+            "-c",
+            "import time; payload=bytearray(32*1024*1024); "
+            "print('ready', flush=True); time.sleep(0.25)",
+        ),
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+    time.sleep(0.05)
+    child.wait(timeout=5)
 print(json.dumps(policy.memory_evidence()))
 """
 
@@ -334,6 +294,7 @@ print(json.dumps(policy.memory_evidence()))
     evidence = json.loads(completed.stdout)
 
     assert evidence["status"] == "PASS"
+    assert evidence["peak_incremental_rss_bytes"] >= 32 * MIB
     assert evidence["peak_incremental_rss_bytes"] <= evidence["hard_budget_bytes"]
     assert evidence["max_sample_interval_ms"] <= 20
 

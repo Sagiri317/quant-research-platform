@@ -252,9 +252,16 @@ def test_local_verification_replace_failure_preserves_old_good(
     assert not (run_root / "partial.txt").exists()
     assert tuple(path.name for path in run_root.parent.iterdir()) == ("old_good",)
 
+    replacement_count = 0
+
     def complete_replacement(**kwargs):
+        nonlocal replacement_count
+        replacement_count += 1
         candidate = kwargs["run_root"]
-        (candidate / "new-good.txt").write_text("new-good\n", encoding="utf-8")
+        (candidate / "new-good.txt").write_text(
+            f"new-good-{replacement_count}\n",
+            encoding="utf-8",
+        )
         return module.LocalVerificationRunResult(
             status="PASS",
             run_id="old_good",
@@ -287,28 +294,56 @@ def test_local_verification_replace_failure_preserves_old_good(
     assert tuple(path.name for path in run_root.parent.iterdir()) == ("old_good",)
 
     monkeypatch.setattr(module, "move_path_no_replace", original_move)
-    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
+    policies = iter(
+        (
+            capture_test_policy(available_memory_bytes=16 * 1024 * 1024),
+            capture_test_policy(available_memory_bytes=16 * 1024 * 1024),
+            capture_test_policy(available_memory_bytes=16 * 1024 * 1024),
+        )
+    )
     monkeypatch.setattr(
         module.RuntimeResourcePolicy,
         "capture",
-        staticmethod(lambda **_kwargs: policy),
+        staticmethod(lambda **_kwargs: next(policies)),
     )
-    cleanup_states: list[str] = []
-    original_remove = module.remove_owned_scratch
-
-    def record_remove(path, identity):  # noqa: ANN001, ANN202
-        if path.name.startswith(".lv-old-"):
-            cleanup_states.append(policy._measurement.state)  # noqa: SLF001
-        return original_remove(path, identity)
-
-    monkeypatch.setattr(module, "remove_owned_scratch", record_remove)
     result = run_local_verification(config)
+    previous_root = module._previous_generation_root(run_root)
 
     assert result.run_root == "old_good"
-    assert cleanup_states == ["ACTIVE"]
     assert not marker.exists()
-    assert (run_root / "new-good.txt").read_text(encoding="utf-8") == "new-good\n"
-    assert tuple(path.name for path in run_root.parent.iterdir()) == ("old_good",)
+    assert (run_root / "new-good.txt").read_text(encoding="utf-8") == "new-good-2\n"
+    assert (previous_root / "old-good.txt").read_text(encoding="utf-8") == "old-good\n"
+    assert {path.name for path in run_root.parent.iterdir()} == {
+        "old_good",
+        previous_root.name,
+    }
+
+    run_local_verification(config)
+
+    assert not (previous_root / "old-good.txt").exists()
+    assert (previous_root / "new-good.txt").read_text(encoding="utf-8") == (
+        "new-good-2\n"
+    )
+    assert {path.name for path in run_root.parent.iterdir()} == {
+        "old_good",
+        previous_root.name,
+    }
+
+    original_remove = module.remove_owned_scratch
+
+    def fail_previous_cleanup(path, identity):  # noqa: ANN001, ANN202
+        if path == previous_root:
+            raise OSError("previous_generation_cleanup_failed")
+        return original_remove(path, identity)
+
+    monkeypatch.setattr(module, "remove_owned_scratch", fail_previous_cleanup)
+    with pytest.raises(OSError, match="previous_generation_cleanup_failed"):
+        run_local_verification(config)
+
+    assert (run_root / "new-good.txt").read_text(encoding="utf-8") == "new-good-3\n"
+    assert (previous_root / "new-good.txt").read_text(encoding="utf-8") == (
+        "new-good-2\n"
+    )
 
 
 def test_final_rss_rejection_rolls_back_published_replacement(

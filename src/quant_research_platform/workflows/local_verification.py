@@ -158,6 +158,8 @@ def run_local_verification(
     published = False
     with runtime_resource_policy_scope(resource_policy):
         try:
+            if replaced_identity is not None:
+                _cleanup_previous_generation(run_root, run_id=run_id)
             _prepare_run_root(
                 staged_root,
                 run_id=run_id,
@@ -197,12 +199,7 @@ def run_local_verification(
                     move_path_no_replace(backup_root, run_root)
                 published = False
 
-            def cleanup_old_good() -> None:
-                if backup_root is not None and replaced_identity is not None:
-                    remove_owned_scratch(backup_root, replaced_identity)
-
             resource_policy.finish_memory_measurement(
-                cleanup=cleanup_old_good,
                 on_reject=rollback_final_rejection,
             )
         except BaseException as primary:
@@ -696,7 +693,7 @@ def _publish_staged_run_root(
         move_path_no_replace(staged_root, run_root)
         return None
     require_owned_scratch(run_root, replaced_identity)
-    backup_root = run_root.with_name(owned_scratch_name(".lv-old-", uuid4().hex[:8]))
+    backup_root = _previous_generation_root(run_root)
     move_path_no_replace(run_root, backup_root)
     try:
         require_owned_scratch(staged_root, staged_identity)
@@ -711,6 +708,28 @@ def _publish_staged_run_root(
             )
         raise
     return backup_root
+
+
+def _previous_generation_root(run_root: Path) -> Path:
+    root = Path(run_root)
+    return root.with_name(f".{root.name}.previous-good")
+
+
+def _cleanup_previous_generation(run_root: Path, *, run_id: str) -> None:
+    previous = _previous_generation_root(run_root)
+    try:
+        identity = previous.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(identity.st_mode):
+        raise ValueError("local_verification_previous_generation_invalid")
+    payload = _read_run_json(previous)
+    if payload["run_id"] != run_id:
+        raise ValueError("local_verification_previous_generation_invalid")
+    current = previous.lstat()
+    if not os.path.samestat(current, identity):
+        raise ValueError("local_verification_previous_generation_invalid")
+    remove_owned_scratch(previous, identity)
 
 
 def _prepare_run_root(

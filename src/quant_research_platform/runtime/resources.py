@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import mmap
 import os
 import shutil
@@ -70,6 +69,11 @@ try:
             while True:
                 now = time.monotonic_ns()
                 rss = process.memory_info().rss
+                for child in process.children(recursive=True):
+                    try:
+                        rss += child.memory_info().rss
+                    except psutil.NoSuchProcess:
+                        pass
                 peak = max(peak, rss)
                 count += 1
                 if last:
@@ -135,19 +139,11 @@ class _OperationRssMeasurement:
     _ready_path: Path | None = None
     _output_path: Path | None = None
     _state_path: Path | None = None
-    _working_set_limit: tuple[int, int, int] | None = None
 
     def start(self) -> None:
         if self.state != "READY":
             raise RuntimeError("runtime_rss_sampler_already_started")
         self.state = "ACTIVE"
-        if self.hard_budget_bytes < mmap.ALLOCATIONGRANULARITY:
-            raise RuntimeError("runtime_hard_rss_backstop_granularity_exceeded")
-        self._working_set_limit = _set_process_working_set_limit(
-            self.rss0_bytes
-            + self.hard_budget_bytes
-            - mmap.ALLOCATIONGRANULARITY
-        )
         self._temporary = tempfile.TemporaryDirectory(prefix="qrp-rss-")
         root = Path(self._temporary.name)
         self._stop_path = root / "stop"
@@ -242,13 +238,6 @@ class _OperationRssMeasurement:
             self.state = "RETIRED"
             if self._temporary is not None:
                 self._temporary.cleanup()
-
-    def restore_backstop(self) -> None:
-        if self._working_set_limit is None:
-            return
-        original = self._working_set_limit
-        self._working_set_limit = None
-        _restore_process_working_set_limit(original)
 
     def evidence(self) -> dict[str, int | float | str]:
         if self.state != "RETIRED":
@@ -407,7 +396,6 @@ class RuntimeResourcePolicy:
     def finish_memory_measurement(
         self,
         *,
-        cleanup: Callable[[], None] | None = None,
         on_reject: Callable[[], None] | None = None,
     ) -> dict[str, int | float | str]:
         """Finish and accept the sampler at an owner-controlled publish boundary."""
@@ -420,21 +408,6 @@ class RuntimeResourcePolicy:
             raise RuntimeError("runtime_rss_sampler_not_active")
         try:
             self.assert_memory_within_budget()
-            if cleanup is not None:
-                cleanup()
-            self.assert_memory_within_budget()
-        except BaseException as primary:
-            if on_reject is not None:
-                try:
-                    on_reject()
-                except BaseException as rollback_error:
-                    primary.add_note(
-                        "runtime memory rejection rollback also failed: "
-                        f"{type(rollback_error).__name__}"
-                    )
-            self._measurement.stop()
-            raise
-        try:
             self._measurement.stop()
             evidence = self.memory_evidence()
             _require_memory_acceptance(self._measurement, evidence)
@@ -448,6 +421,8 @@ class RuntimeResourcePolicy:
                         "runtime memory rejection rollback also failed: "
                         f"{type(rollback_error).__name__}"
                     )
+            if self._measurement.state != "RETIRED":
+                self._measurement.stop()
             raise
 
 _ACTIVE_RUNTIME_RESOURCE_POLICY: RuntimeResourcePolicy | None = None
@@ -514,11 +489,6 @@ def runtime_resource_policy_scope(
                 policy._measurement.stop()
         except BaseException as exc:
             measurement_error = exc
-        try:
-            policy._measurement.restore_backstop()
-        except BaseException as exc:
-            if measurement_error is None:
-                measurement_error = exc
         policy._ledger.state = "RETIRED"
         _ACTIVE_RUNTIME_RESOURCE_POLICY = None
         if primary is None:
@@ -588,70 +558,6 @@ def _process_rss_bytes() -> int:
     except Exception:
         raise RuntimeError("runtime_rss_discovery_failed") from None
     return _exact_nonnegative_int(rss, error="invalid_runtime_resource_rss")
-
-
-def _set_process_working_set_limit(limit_bytes: int) -> tuple[int, int, int]:
-    if os.name != "nt":
-        raise RuntimeError("runtime_hard_rss_backstop_unavailable")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle_type = ctypes.c_void_p
-    size_type = ctypes.c_size_t
-    flags_type = ctypes.c_ulong
-    kernel32.GetCurrentProcess.restype = handle_type
-    kernel32.GetProcessWorkingSetSizeEx.argtypes = (
-        handle_type,
-        ctypes.POINTER(size_type),
-        ctypes.POINTER(size_type),
-        ctypes.POINTER(flags_type),
-    )
-    kernel32.SetProcessWorkingSetSizeEx.argtypes = (
-        handle_type,
-        size_type,
-        size_type,
-        flags_type,
-    )
-    kernel32.GetProcessWorkingSetSizeEx.restype = ctypes.c_int
-    kernel32.SetProcessWorkingSetSizeEx.restype = ctypes.c_int
-    handle = kernel32.GetCurrentProcess()
-    minimum = size_type()
-    maximum = size_type()
-    flags = flags_type()
-    if not kernel32.GetProcessWorkingSetSizeEx(
-        handle,
-        ctypes.byref(minimum),
-        ctypes.byref(maximum),
-        ctypes.byref(flags),
-    ):
-        raise RuntimeError("runtime_hard_rss_backstop_unavailable")
-    original = (minimum.value, maximum.value, flags.value)
-    hard_flags = (flags.value | 0x00000004) & ~0x00000008
-    if not kernel32.SetProcessWorkingSetSizeEx(
-        handle,
-        size_type(min(minimum.value, limit_bytes)),
-        size_type(limit_bytes),
-        flags_type(hard_flags),
-    ):
-        raise RuntimeError("runtime_hard_rss_backstop_unavailable")
-    return original
-
-
-def _restore_process_working_set_limit(original: tuple[int, int, int]) -> None:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    kernel32.SetProcessWorkingSetSizeEx.argtypes = (
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_ulong,
-    )
-    kernel32.SetProcessWorkingSetSizeEx.restype = ctypes.c_int
-    if not kernel32.SetProcessWorkingSetSizeEx(
-        kernel32.GetCurrentProcess(),
-        ctypes.c_size_t(original[0]),
-        ctypes.c_size_t(original[1]),
-        ctypes.c_ulong(original[2]),
-    ):
-        raise RuntimeError("runtime_hard_rss_backstop_restore_failed")
 
 
 def _exact_positive_int(value: object, *, error: str) -> int:
