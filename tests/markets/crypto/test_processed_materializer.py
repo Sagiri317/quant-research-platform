@@ -2618,6 +2618,35 @@ def test_panel_writer_acquires_inputs_with_cumulative_live_session_bytes(
     assert set(publication_envelopes) == {sum(opened_retained)}
 
 
+def test_panel_chunk_keeps_output_admitted_through_consumer_yield(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    source_id = SourceId("synthetic_crypto")
+    _write_synthetic_crypto_interim(layout, source_id, minutes=3)
+    spec = processed_catalog().get("market_panel_1m")
+
+    with _panel_test_sessions(
+        layout,
+        source_id,
+        spec,
+        TimeWindow("2026-07-06", "2026-07-06"),
+    ) as (input_sessions, policy):
+        chunks = materialize_panel._iter_panel_chunks(
+            spec,
+            input_sessions=input_sessions,
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            resource_policy=policy,
+            retained_payload_bytes=0,
+        )
+        output = next(chunks)
+        assert policy._ledger.by_owner["crypto.panel.output"] >= (  # noqa: SLF001
+            materialize_panel.pandas_frame_payload_bytes(output)
+        )
+        chunks.close()
+        assert "crypto.panel.output" not in policy._ledger.by_owner  # noqa: SLF001
+
+
 def test_existing_panel_dependency_acquires_panel_after_all_live_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

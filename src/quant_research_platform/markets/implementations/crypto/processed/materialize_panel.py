@@ -236,6 +236,7 @@ def _iter_panel_chunks(
                                     ),
                                 )
                             ) as depth_chunks,
+                            ExitStack() as output_stack,
                         ):
                             output = panels.calculate_market_panel_from_chunks(
                                 prepared_bars,
@@ -244,13 +245,16 @@ def _iter_panel_chunks(
                                 payload_target_bytes=resource_policy.remaining_memory_bytes,
                                 trade_continuity_state=trade_continuity_state,
                                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
-                            ).loc[:, spec.required_columns]
-                        materialization_resources.require_frame_within_budget(
-                            output,
-                            target_bytes=resource_policy.remaining_memory_bytes,
-                            error="crypto_indivisible_reducer_unit_exceeds_payload_target",
-                        )
-                        yield output
+                                _output_stack=output_stack,
+                            )
+                            materialization_resources.require_frame_within_budget(
+                                output,
+                                target_bytes=resource_policy.remaining_memory_bytes,
+                                error=(
+                                    "crypto_indivisible_reducer_unit_exceeds_payload_target"
+                                ),
+                            )
+                            yield output
         for session in input_sessions.values():
             session.verify()
 

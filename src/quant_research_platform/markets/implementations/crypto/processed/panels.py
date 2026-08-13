@@ -63,6 +63,7 @@ def calculate_market_panel_from_chunks(
         panel_input_reducers.AggregateTradeContinuityState | None
     ) = None,
     max_quote_age: pd.Timedelta = DEFAULT_MAX_QUOTE_AGE,
+    _output_stack: ExitStack | None = None,
 ) -> pd.DataFrame:
     if not isinstance(max_quote_age, pd.Timedelta) or max_quote_age < pd.Timedelta(0):
         raise ValueError("invalid_crypto_max_quote_age")
@@ -117,12 +118,20 @@ def calculate_market_panel_from_chunks(
                 "crypto.panel.merge",
                 _panel_temporary_upper_bound(prepared_bars),
             ):
-                return _calculate_market_panel(
+                result = _calculate_market_panel(
                     prepared_bars,
                     trade_aggregates=trade_aggregates,
                     quote_snapshots=quote_snapshots,
                     max_quote_age=max_quote_age,
                 )
+                if _output_stack is not None:
+                    _output_stack.enter_context(
+                        policy.reserve(
+                            "crypto.panel.output",
+                            pandas_frame_payload_bytes(result),
+                        )
+                    )
+                return result
     finally:
         if trade_reducer is not None:
             trade_reducer.close()

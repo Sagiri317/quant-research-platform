@@ -223,6 +223,9 @@ def test_finish_keeps_hard_backstop_until_root_cleanup_completes(
             events.append("stop_sampler")
             self.state = "RETIRED"
 
+        def checkpoint_evidence(self) -> dict[str, int | float | str]:
+            return self.evidence()
+
         def restore_backstop(self) -> None:
             events.append("restore_backstop")
 

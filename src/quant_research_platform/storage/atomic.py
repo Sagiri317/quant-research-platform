@@ -36,7 +36,13 @@ def reject_if_exists(path: Path) -> None:
         raise OutputAlreadyExistsError()
 
 
-def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Path:
+def atomic_write_text(
+    path: Path,
+    text: str,
+    *,
+    encoding: str = "utf-8",
+    finalize_memory: bool = False,
+) -> Path:
     final_path = Path(path)
     reject_if_exists(final_path)
     require_unaliased_path(final_path.parent, error="invalid_storage_write_path")
@@ -65,7 +71,12 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Path
         reject_if_exists(final_path)
         require_unaliased_path(temp_path, error="invalid_storage_write_path")
         require_owned_scratch(temp_path, claimed_temp)
-        publish_no_replace(temp_path, final_path, source_identity=claimed_temp)
+        publish_no_replace(
+            temp_path,
+            final_path,
+            source_identity=claimed_temp,
+            finalize_memory=finalize_memory,
+        )
     except BaseException:
         if claimed_temp is not None:
             try:
@@ -76,11 +87,17 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Path
     return final_path
 
 
-def atomic_write_json(path: Path, payload: object) -> Path:
+def atomic_write_json(
+    path: Path,
+    payload: object,
+    *,
+    finalize_memory: bool = False,
+) -> Path:
     return atomic_write_text(
         path,
         render_qrp_json_object(payload) + "\n",
         encoding="utf-8",
+        finalize_memory=finalize_memory,
     )
 
 
@@ -375,10 +392,13 @@ def publish_no_replace(
     target: Path,
     *,
     source_identity: os.stat_result,
+    finalize_memory: bool = False,
 ) -> None:
     source = require_unaliased_path(Path(source), error="invalid_storage_write_path")
     target = require_unaliased_path(Path(target), error="invalid_storage_write_path")
     policy = current_runtime_resource_policy()
+    if finalize_memory and policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     if policy is not None:
         policy.assert_memory_within_budget()
     for attempt in range(1, 4):
@@ -425,6 +445,14 @@ def publish_no_replace(
                         except BaseException:
                             raise acceptance_error from None
                         raise
+                if finalize_memory:
+                    assert policy is not None
+                    policy.finish_memory_measurement(
+                        on_reject=lambda: remove_owned_scratch(
+                            target,
+                            source_identity,
+                        )
+                    )
                 return
             raise primary
         if primary is not None:

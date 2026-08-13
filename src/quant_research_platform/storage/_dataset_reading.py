@@ -211,8 +211,11 @@ def read_dataset(
         if resource_policy is None and captured_policy is not None:
             raise RuntimeError("runtime_resource_policy_competing_root")
         bound_policy = bind_runtime_resource_policy(resource_policy)
+        independent_root = resource_policy is None and captured_policy is None
 
         def activate() -> Iterator[pd.DataFrame]:
+            if independent_root and current_runtime_resource_policy() is not None:
+                raise RuntimeError("runtime_resource_policy_competing_root")
             if captured_policy is not None:
                 with runtime_resource_policy_scope(bound_policy):
                     with open_dataset_session(

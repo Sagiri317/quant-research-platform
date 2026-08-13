@@ -572,9 +572,6 @@ def _write_contents(
     accumulator.retained_payload_bytes = minimum_retained_payload_bytes
     part_indices: dict[str, int] = {}
     saw_empty_schema = False
-    writer_reserve_bytes = (
-        _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES + minimum_retained_payload_bytes
-    )
     while True:
         try:
             publication = next(chunks)
@@ -586,33 +583,27 @@ def _write_contents(
                 minimum_retained_payload_bytes,
                 publication.retained_payload_bytes,
             )
-            producer_reservation_credit = min(
-                max(
-                    0,
-                    publication.retained_payload_bytes
-                    - minimum_retained_payload_bytes,
-                ),
-                max(
-                    0,
-                    resource_policy.reserved_memory_bytes - writer_reserve_bytes,
-                ),
-            )
         else:
             chunk = publication
             accumulator.retained_payload_bytes = minimum_retained_payload_bytes
-            producer_reservation_credit = 0
         if type(chunk) is not pd.DataFrame:
             raise TypeError("invalid_dataset_chunk")
         chunk_bytes = pandas_frame_payload_bytes(chunk)
-        publication_live_bytes = chunk_bytes + max(
+        declared_retained_bytes = max(
             0,
             accumulator.retained_payload_bytes - minimum_retained_payload_bytes,
         )
         with ExitStack() as publication_state:
             publication_state.enter_context(
                 resource_policy.reserve(
+                    "storage.dataset.declared_retained",
+                    declared_retained_bytes,
+                )
+            )
+            publication_state.enter_context(
+                resource_policy.reserve(
                     "storage.dataset.input",
-                    max(0, publication_live_bytes - producer_reservation_credit),
+                    chunk_bytes,
                 )
             )
             metadata_budget = (

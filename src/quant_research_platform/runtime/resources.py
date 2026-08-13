@@ -10,7 +10,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,7 +42,28 @@ state = pathlib.Path(sys.argv[6])
 peak = count = max_gap = last = 0
 sequence = 0
 error = ""
+timer = None
 try:
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateWaitableTimerExW.restype = ctypes.c_void_p
+        kernel32.GetCurrentThread.restype = ctypes.c_void_p
+        kernel32.SetThreadPriority.argtypes = (ctypes.c_void_p, ctypes.c_int)
+        timer = kernel32.CreateWaitableTimerExW(None, None, 2, 0x1F0003)
+        due = ctypes.c_longlong(-max(1, int(interval * 10_000_000)))
+        if not timer or not kernel32.SetWaitableTimer(
+            timer,
+            ctypes.byref(due),
+            max(1, round(interval * 1000)),
+            None,
+            None,
+            False,
+        ):
+            raise OSError("runtime_rss_sampler_timer_failed")
+        if not kernel32.SetThreadPriority(kernel32.GetCurrentThread(), 2):
+            raise OSError("runtime_rss_sampler_priority_failed")
     with state.open("r+b", buffering=0) as handle:
         shared = mmap.mmap(handle.fileno(), 32)
         with shared:
@@ -62,9 +83,15 @@ try:
                     ready.touch(exist_ok=True)
                 if stop.exists():
                     break
-                time.sleep(interval)
+                if timer is None:
+                    time.sleep(interval)
+                elif kernel32.WaitForSingleObject(timer, 0xFFFFFFFF) != 0:
+                    raise OSError("runtime_rss_sampler_timer_failed")
 except BaseException as exc:
     error = type(exc).__name__
+finally:
+    if timer is not None:
+        kernel32.CloseHandle(timer)
 output.write_text(f"{peak},{count},{max_gap},{error}", encoding="ascii")
 """
 
@@ -153,7 +180,7 @@ class _OperationRssMeasurement:
             stderr=subprocess.DEVNULL,
             creationflags=(
                 getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                | getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0)
+                | getattr(subprocess, "HIGH_PRIORITY_CLASS", 0)
             ),
         )
         deadline = monotonic() + _RSS_SAMPLER_START_TIMEOUT_SECONDS
@@ -377,7 +404,11 @@ class RuntimeResourcePolicy:
         evidence = self._measurement.checkpoint_evidence()
         _require_memory_acceptance(self._measurement, evidence)
 
-    def finish_memory_measurement(self) -> dict[str, int | float | str]:
+    def finish_memory_measurement(
+        self,
+        *,
+        on_reject: Callable[[], None] | None = None,
+    ) -> dict[str, int | float | str]:
         """Finish and accept the sampler at an owner-controlled publish boundary."""
 
         if (
@@ -386,10 +417,22 @@ class RuntimeResourcePolicy:
             or self._measurement.state != "ACTIVE"
         ):
             raise RuntimeError("runtime_rss_sampler_not_active")
-        self._measurement.stop()
-        evidence = self.memory_evidence()
-        _require_memory_acceptance(self._measurement, evidence)
-        return evidence
+        try:
+            self.assert_memory_within_budget()
+            self._measurement.stop()
+            evidence = self.memory_evidence()
+            _require_memory_acceptance(self._measurement, evidence)
+            return evidence
+        except BaseException as primary:
+            if on_reject is not None:
+                try:
+                    on_reject()
+                except BaseException as rollback_error:
+                    primary.add_note(
+                        "runtime memory rejection rollback also failed: "
+                        f"{type(rollback_error).__name__}"
+                    )
+            raise
 
 _ACTIVE_RUNTIME_RESOURCE_POLICY: RuntimeResourcePolicy | None = None
 

@@ -69,7 +69,7 @@ def schema_inventory(
         policy = RuntimeResourcePolicy.capture()
         with runtime_resource_policy_scope(policy):
             with open_schema_inventory_payload(project_root) as inventory:
-                atomic_write_json(output, inventory)
+                atomic_write_json(output, inventory, finalize_memory=True)
     except Exception as exc:
         typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc

@@ -72,6 +72,7 @@ from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
     remove_owned_scratch,
     require_owned_scratch,
+    scratch_identity_matches,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
@@ -180,7 +181,25 @@ def run_local_verification(
                 resource_policy=resource_policy,
             )
             published = True
-            resource_policy.finish_memory_measurement()
+
+            def rollback_final_rejection() -> None:
+                nonlocal published
+                if staged_identity is not None and scratch_identity_matches(
+                    run_root,
+                    staged_identity,
+                ):
+                    remove_owned_scratch(run_root, staged_identity)
+                if (
+                    backup_root is not None
+                    and replaced_identity is not None
+                    and scratch_identity_matches(backup_root, replaced_identity)
+                ):
+                    move_path_no_replace(backup_root, run_root)
+                published = False
+
+            resource_policy.finish_memory_measurement(
+                on_reject=rollback_final_rejection,
+            )
             if backup_root is not None and replaced_identity is not None:
                 remove_owned_scratch(backup_root, replaced_identity)
         except BaseException as primary:

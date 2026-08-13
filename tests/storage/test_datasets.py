@@ -8940,6 +8940,27 @@ def test_public_materialized_read_rejects_competing_active_root(
             read_dataset(Path("unused"), mode=DatasetReadMode.MATERIALIZED)
 
 
+def test_public_chunked_read_rejects_root_appearing_after_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _issued_test_policy()
+    chunks = read_dataset(Path("unused"), mode=DatasetReadMode.CHUNKED)
+    monkeypatch.setattr(
+        dataset_reading,
+        "open_dataset_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("competing root reached dataset preflight")
+        ),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime_resource_policy_competing_root$",
+        ):
+            next(chunks)
+
+
 def test_chunked_read_defers_session_inventory_until_activation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9607,14 +9628,14 @@ def test_private_writer_envelope_reserves_upstream_retained_payload(
         )
 
 
-def test_writer_uses_current_declared_credit_across_equal_and_unequal_yields(
+def test_writer_input_reservation_ignores_declared_and_unrelated_credit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _writer_test_policy(8 * 1024**2)
     frame = make_default_dataset_frame()
     parts = tuple(frame.iloc[index : index + 1].copy() for index in range(3))
-    credits = (4096, 4096, 8192)
+    declarations = (4096, 4096, 8192)
     observed_input_reserves: list[int] = []
     original_reserve = RuntimeResourcePolicy.reserve
 
@@ -9628,11 +9649,11 @@ def test_writer_uses_current_declared_credit_across_equal_and_unequal_yields(
     monkeypatch.setattr(RuntimeResourcePolicy, "reserve", record_reserve)
 
     def publications():
-        for index, (part, credit) in enumerate(
-            zip(parts, credits, strict=True)
-        ):
-            with policy.reserve(f"test.producer.{index}", credit):
-                yield dataset_writing.DatasetWriteChunk(part, credit)
+        yield dataset_writing.DatasetWriteChunk(parts[0], declarations[0])
+        with policy.reserve("test.unrelated", declarations[1]):
+            yield dataset_writing.DatasetWriteChunk(parts[1], declarations[1])
+        with policy.reserve("test.producer", declarations[2]):
+            yield dataset_writing.DatasetWriteChunk(parts[2], declarations[2])
 
     dataset_writing.write_dataset(
         make_dataset_artifact_root(tmp_path, "producer_credit"),

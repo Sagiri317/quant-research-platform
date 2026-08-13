@@ -281,7 +281,13 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
 
     monkeypatch.setattr(private_cli, "open_schema_inventory_payload", inventory)
 
-    def write(_path: Path, _payload: object) -> None:
+    def write(
+        _path: Path,
+        _payload: object,
+        *,
+        finalize_memory: bool = False,
+    ) -> None:
+        assert finalize_memory
         observed.append(active_runtime_resource_policy())
         observed_reserved.append(policy.reserved_memory_bytes)
 
