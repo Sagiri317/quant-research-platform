@@ -9285,34 +9285,36 @@ def test_dataset_inventory_selected_count_is_selection_index_driven(
         assert vm_steps < 200
 
 
-def test_dataset_inventory_disk_gates_native_page_and_encoded_rows(
+def test_dataset_inventory_sets_cumulative_main_page_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    available = 64 * dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
     reserve_calls: list[int] = []
+
+    def free_bytes(_path: Path, *, reserve_bytes: int) -> int:
+        reserve_calls.append(reserve_bytes)
+        return available
+
     monkeypatch.setattr(
         dataset_inventory,
         "require_free_disk_headroom",
-        lambda _path, *, reserve_bytes: reserve_calls.append(reserve_bytes),
+        free_bytes,
     )
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
-    root = make_dataset_artifact_root(tmp_path, "inventory_disk_gate")
-    dataset_writing.write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("inventory_disk_gate"),
-        resource_policy=policy,
-    )
+    with dataset_inventory.DatasetSessionInventory(
+        data_root=tmp_path / "data",
+        scratch_parent=tmp_path,
+        task_memory_budget_bytes=1024,
+    ) as inventory:
+        assert inventory._connection is not None
+        assert inventory._connection.execute(
+            "PRAGMA main.max_page_count"
+        ).fetchone() == (
+            available // dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES,
+        )
 
     assert reserve_calls[0] >= 32 * dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
-    assert len(reserve_calls) > 1
-    assert policy.task_memory_budget_bytes not in reserve_calls
-    assert all(value > 0 for value in reserve_calls)
-    physical_floor = 16 * dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
-    assert min(reserve_calls[1:]) >= physical_floor
+    assert len(reserve_calls) == 1
 
 
 def test_dataset_inventory_release_gates_before_selection_mutation(
@@ -9372,12 +9374,13 @@ def test_dataset_inventory_insert_disk_failure_cleans_scratch(
     )
     reserve_calls = 0
 
-    def fail_first_row(_path: Path, *, reserve_bytes: int) -> None:
+    def fail_first_row(_path: Path, *, reserve_bytes: int) -> int:
         nonlocal reserve_calls
         reserve_calls += 1
         assert reserve_bytes > 0
         if reserve_calls > 1:
             raise OSError("inventory_disk_full")
+        return 1024**3
 
     monkeypatch.setattr(
         dataset_inventory,

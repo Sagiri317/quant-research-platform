@@ -1914,9 +1914,7 @@ def test_chunked_read_rejects_different_explicit_policy_at_creation(
             )
 
 
-@pytest.mark.parametrize("explicit_mode", ("none", "same"))
-def test_chunked_read_binds_outer_for_active_consumption(
-    explicit_mode: str,
+def test_chunked_read_binds_explicit_outer_for_active_consumption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _policy(1)
@@ -1938,16 +1936,14 @@ def test_chunked_read_binds_outer_for_active_consumption(
         chunks = dataset_reading.read_dataset(
             Path("unused"),
             mode=DatasetReadMode.CHUNKED,
-            resource_policy=policy if explicit_mode == "same" else None,
+            resource_policy=policy,
         )
         assert list(chunks) == []
 
     assert observed == [policy]
 
 
-@pytest.mark.parametrize("explicit_mode", ("none", "same"))
 def test_chunked_read_rejects_delayed_consumption_after_outer_exit(
-    explicit_mode: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _policy(1)
@@ -1961,11 +1957,32 @@ def test_chunked_read_rejects_delayed_consumption_after_outer_exit(
         chunks = dataset_reading.read_dataset(
             Path("unused"),
             mode=DatasetReadMode.CHUNKED,
-            resource_policy=policy if explicit_mode == "same" else None,
+            resource_policy=policy,
         )
 
     with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
         next(chunks)
+
+
+def test_chunked_read_rejects_implicit_active_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dataset_reading,
+        "open_dataset_session",
+        lambda *_args, **_kwargs: pytest.fail("session_opened_after_competing_root"),
+    )
+
+    with runtime_resource_policy_scope(_policy(1)):
+        with pytest.raises(
+            RuntimeError,
+            match="runtime_resource_policy_competing_root",
+        ):
+            dataset_reading.read_dataset(
+                Path("unused"),
+                mode=DatasetReadMode.CHUNKED,
+                resource_policy=None,
+            )
 
 
 @pytest.mark.parametrize(

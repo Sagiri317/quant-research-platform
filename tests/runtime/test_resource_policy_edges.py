@@ -44,7 +44,12 @@ def test_disk_headroom_is_independent_of_memory_policy(
         lambda _path: SimpleNamespace(free=100),
     )
 
-    require_free_disk_headroom(tmp_path / "missing" / "child", reserve_bytes=100)
+    assert (
+        require_free_disk_headroom(
+            tmp_path / "missing" / "child", reserve_bytes=100
+        )
+        == 100
+    )
     with pytest.raises(RuntimeError, match="insufficient_free_disk"):
         require_free_disk_headroom(tmp_path, reserve_bytes=101)
 

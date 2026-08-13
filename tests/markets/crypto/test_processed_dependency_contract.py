@@ -218,9 +218,7 @@ def test_asset_discovery_closes_file_batches_on_validation_failure(
     assert closed == [True]
 
 
-def test_disk_guard_closes_source_chunks_on_early_close(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_write_chunk_owner_closes_source_chunks_on_early_close() -> None:
     closed: list[bool] = []
 
     def source_chunks():
@@ -229,16 +227,11 @@ def test_disk_guard_closes_source_chunks_on_early_close(
         finally:
             closed.append(True)
 
-    monkeypatch.setattr(
-        materialization_resources,
-        "require_free_disk_headroom",
-        lambda *_args, **_kwargs: None,
-    )
-    iterator = materialization_resources.iter_disk_guarded_chunks(
+    iterator = materialization_resources.iter_write_chunks(
         source_chunks(),
-        scratch_parent=Path("unused"),
+        retained_payload_bytes=7,
     )
-    next(iterator)
+    assert next(iterator).retained_payload_bytes == 7
     iterator.close()
     assert closed == [True]
 
@@ -1113,31 +1106,21 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
     assert observed == [policy]
 
 
-def test_crypto_disk_guard_rechecks_between_chunks_and_before_publication(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    observed: list[tuple[Path, int]] = []
-    monkeypatch.setattr(
-        materialization_resources,
-        "require_free_disk_headroom",
-        lambda path, *, reserve_bytes: observed.append((Path(path), reserve_bytes)),
-    )
+def test_crypto_write_chunk_owner_retains_declared_state() -> None:
     frames = (
         pd.DataFrame({"value": [1]}),
         pd.DataFrame({"value": [2, 3]}),
     )
 
     result = list(
-        materialization_resources.iter_disk_guarded_chunks(
+        materialization_resources.iter_write_chunks(
             frames,
-            scratch_parent=tmp_path,
+            retained_payload_bytes=13,
         )
     )
 
-    assert [len(frame) for frame in result] == [1, 2]
-    assert [path for path, _ in observed] == [tmp_path, tmp_path]
-    assert [reserve for _, reserve in observed] == [140, 148]
+    assert [len(chunk.frame) for chunk in result] == [1, 2]
+    assert [chunk.retained_payload_bytes for chunk in result] == [13, 13]
 
 
 @pytest.mark.parametrize(
@@ -1211,11 +1194,6 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
         materialization_validation,
         "validate_panel_dependent_materialization",
         lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        materialization_resources,
-        "iter_disk_guarded_chunks",
-        lambda chunks, **_kwargs: chunks,
     )
     monkeypatch.setattr(
         module,

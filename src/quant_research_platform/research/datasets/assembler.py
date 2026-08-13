@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
@@ -30,7 +30,6 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
     pandas_frame_payload_bytes,
-    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_paths import require_artifact_root
@@ -122,15 +121,12 @@ def _assemble_research_dataset_from_sessions(
     artifact_root = require_artifact_root(
         layout.research_dataset_root(spec.market_id, spec.data_id)
     )
-    chunks = _iter_disk_guarded_output_chunks(
-        _iter_joined_processed_chunks(
-            dataset_spec=spec,
-            processed_catalog=processed_catalog,
-            sessions=input_sessions,
-            time_window=time_window,
-            resource_policy=policy,
-        ),
-        scratch_parent=artifact_root.parent,
+    chunks = _iter_joined_processed_chunks(
+        dataset_spec=spec,
+        processed_catalog=processed_catalog,
+        sessions=input_sessions,
+        time_window=time_window,
+        resource_policy=policy,
     )
 
     def verify_input_sessions(_receipt: DatasetWriteReceipt) -> None:
@@ -149,21 +145,6 @@ def _assemble_research_dataset_from_sessions(
         ),
     )
     return artifact_root
-
-
-def _iter_disk_guarded_output_chunks(
-    chunks: Iterable[pd.DataFrame | DatasetWriteChunk],
-    *,
-    scratch_parent: Path,
-) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
-    for chunk in chunks:
-        frame = chunk.frame if isinstance(chunk, DatasetWriteChunk) else chunk
-        chunk_bytes = pandas_frame_payload_bytes(frame)
-        require_free_disk_headroom(
-            scratch_parent,
-            reserve_bytes=chunk_bytes,
-        )
-        yield chunk
 
 
 def _iter_joined_processed_chunks(

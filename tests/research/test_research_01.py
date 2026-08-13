@@ -1298,7 +1298,7 @@ def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
     backup_root = current_root.with_name(current_root.name + "-before-replacement")
     artifact_root = layout.research_dataset_root(MarketId("a_share"), "demo")
     real_open = assembler_module.open_dataset_session
-    real_guarded_chunks = assembler_module._iter_disk_guarded_output_chunks
+    real_joined_chunks = assembler_module._iter_joined_processed_chunks
     real_write = assembler_module.write_dataset
     opened_roots: list[Path] = []
     replaced = False
@@ -1308,9 +1308,9 @@ def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
         opened_roots.append(Path(root))
         return real_open(root, **kwargs)
 
-    def replace_after_last_input(chunks, *, scratch_parent):  # noqa: ANN001
+    def replace_after_last_input(**kwargs):  # noqa: ANN003, ANN202
         nonlocal replaced
-        yield from real_guarded_chunks(chunks, scratch_parent=scratch_parent)
+        yield from real_joined_chunks(**kwargs)
         current_root.rename(backup_root)
         replacement_root.rename(current_root)
         replaced = True
@@ -1328,7 +1328,7 @@ def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
     monkeypatch.setattr(assembler_module, "open_dataset_session", record_open)
     monkeypatch.setattr(
         assembler_module,
-        "_iter_disk_guarded_output_chunks",
+        "_iter_joined_processed_chunks",
         replace_after_last_input,
     )
     monkeypatch.setattr(assembler_module, "write_dataset", record_write)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import tracemalloc
 from copy import deepcopy
@@ -316,12 +317,13 @@ def test_exact_key_classifier_gates_disk_overlap_before_exact_mutation(
 ) -> None:
     calls = 0
 
-    def gate(_path: Path, *, reserve_bytes: int) -> None:
+    def gate(_path: Path, *, reserve_bytes: int) -> int:
         nonlocal calls
         assert reserve_bytes > 0
         calls += 1
         if calls == 3:
             raise OSError("disk_headroom_exhausted")
+        return 1024**3
 
     monkeypatch.setattr(key_tracking, "require_free_disk_headroom", gate)
     table = pa.table({"asset_id": ["a", "b"]})
@@ -1279,15 +1281,21 @@ def test_nested_primary_key_nonfinite_rejects_but_nested_value_allows(
         )
 
 
-def test_exact_key_index_disk_gates_initial_page_and_bounded_batch(
+def test_exact_key_index_sets_cumulative_main_and_temp_page_limits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    available = 64 * key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES
     reserves: list[int] = []
+
+    def free_bytes(_path: Path, *, reserve_bytes: int) -> int:
+        reserves.append(reserve_bytes)
+        return available
+
     monkeypatch.setattr(
         key_tracking,
         "require_free_disk_headroom",
-        lambda _path, *, reserve_bytes: reserves.append(reserve_bytes),
+        free_bytes,
     )
 
     with ExactPrimaryKeyIndex(
@@ -1295,16 +1303,42 @@ def test_exact_key_index_disk_gates_initial_page_and_bounded_batch(
         timestamp_columns=(),
         scratch_parent=tmp_path,
     ) as index:
-        index.add_comparison_table(
-            pa.table({"asset_id": ["a", "b"], "value": [1, 2]}),
-            namespace="left",
-            value_columns=("value",),
-            payload_target_bytes=1024**2,
+        assert index._connection is not None
+        assert index._connection.execute("PRAGMA main.max_page_count").fetchone() == (
+            available // key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES,
+        )
+        assert index._connection.execute("PRAGMA temp.max_page_count").fetchone() == (
+            available // key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES,
         )
 
     assert reserves[0] >= 8 * key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES
-    assert len(reserves) == 2
-    assert all(reserve > 0 for reserve in reserves)
+    assert len(reserves) == 1
+
+
+def test_exact_key_index_cumulative_page_limit_stops_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    available = 16 * key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES
+    monkeypatch.setattr(
+        key_tracking,
+        "require_free_disk_headroom",
+        lambda *_args, **_kwargs: available,
+    )
+
+    with ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        with pytest.raises(sqlite3.OperationalError, match="database or disk is full"):
+            index.add_identity_payload_rows(
+                rows=(
+                    ("bounded", index.to_bytes(4, "big") + b"x" * 512, b"")
+                    for index in range(100_000)
+                )
+            )
+        assert index.database_path.stat().st_size <= available
 
 
 def test_exact_comparison_payload_target_has_an_exact_encoded_boundary(

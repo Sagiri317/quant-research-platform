@@ -112,7 +112,7 @@ class ExactPrimaryKeyIndex:
         require_unaliased_path(
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
-        require_free_disk_headroom(
+        free_disk_bytes = require_free_disk_headroom(
             self._scratch_parent,
             reserve_bytes=_EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES,
         )
@@ -143,9 +143,12 @@ class ExactPrimaryKeyIndex:
             require_owned_scratch(temporary_directory, temporary_identity)
             connection = sqlite3.connect(self.database_path)
             connection.execute("PRAGMA page_size=1024")
+            sqlite_page_limit = free_disk_bytes // EXACT_KEY_SQLITE_PAGE_BYTES
+            connection.execute(f"PRAGMA main.max_page_count={sqlite_page_limit}")
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA temp_store=FILE")
+            connection.execute(f"PRAGMA temp.max_page_count={sqlite_page_limit}")
             connection.execute(f"PRAGMA cache_size=-{self._sqlite_cache_kib}")
             connection.execute(
                 "CREATE TABLE exact_keys ("

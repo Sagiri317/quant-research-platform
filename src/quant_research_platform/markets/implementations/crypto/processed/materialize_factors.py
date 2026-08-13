@@ -32,7 +32,6 @@ from quant_research_platform.storage._dataset_reading import (
     iter_dataset_chunks,
 )
 from quant_research_platform.storage._dataset_writing import (
-    DatasetWriteChunk,
     DatasetWriteReceipt,
     write_dataset,
 )
@@ -64,21 +63,17 @@ def write_factors(
         input_identities = validation.input_dataset_identities(
             {MARKET_PANEL_DATA_ID: panel_session}
         )
-        chunks = (
-            DatasetWriteChunk(
-                frame,
-                retained_payload_bytes + panel_session.retained_memory_bytes,
-            )
-            for frame in materialization_resources.iter_disk_guarded_chunks(
-                _iter_factor_chunks(
-                    spec,
-                    panel_session=panel_session,
-                    time_window=time_window,
-                    resource_policy=resource_policy,
-                    retained_payload_bytes=retained_payload_bytes,
-                ),
-                scratch_parent=root.parent,
-            )
+        chunks = materialization_resources.iter_write_chunks(
+            _iter_factor_chunks(
+                spec,
+                panel_session=panel_session,
+                time_window=time_window,
+                resource_policy=resource_policy,
+                retained_payload_bytes=retained_payload_bytes,
+            ),
+            retained_payload_bytes=(
+                retained_payload_bytes + panel_session.retained_memory_bytes
+            ),
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:

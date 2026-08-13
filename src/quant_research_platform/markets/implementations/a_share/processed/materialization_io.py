@@ -17,7 +17,6 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     bind_runtime_resource_policy,
     pandas_frame_payload_bytes,
-    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
@@ -63,9 +62,10 @@ def write_and_inspect(
     root = processed_root(layout, spec)
     if root.exists():
         raise ValueError("dataset_exists")
-    output = _iter_disk_guarded_output_chunks(
-        iter_sorted_output_chunks(frame, spec, resource_policy=resource_policy),
-        scratch_parent=root.parent,
+    output = iter_sorted_output_chunks(
+        frame,
+        spec,
+        resource_policy=resource_policy,
     )
     with runtime_resource_policy_scope(resource_policy):
         _write_dataset(
@@ -224,25 +224,6 @@ def iter_sorted_output_chunks(
                     del output, publication
 
     return activate()
-
-
-def _iter_disk_guarded_output_chunks(
-    chunks: Iterable[pd.DataFrame | DatasetWriteChunk],
-    *,
-    scratch_parent: Path,
-) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
-    chunks = iter(chunks)
-    with closing_dataset_iterator(chunks):
-        for chunk in chunks:
-            frame = chunk.frame if isinstance(chunk, DatasetWriteChunk) else chunk
-            chunk_bytes = pandas_frame_payload_bytes(frame)
-            require_free_disk_headroom(
-                scratch_parent,
-                reserve_bytes=chunk_bytes,
-            )
-            del chunk_bytes
-            yield chunk
-            del chunk
 
 
 def read_source_inputs_for_spec(

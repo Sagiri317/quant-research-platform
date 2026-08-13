@@ -529,7 +529,7 @@ def pandas_frame_payload_bytes(frame: pd.DataFrame) -> int:
     return int(frame.memory_usage(index=True, deep=True).sum())
 
 
-def require_free_disk_headroom(path: Path, *, reserve_bytes: int) -> None:
+def require_free_disk_headroom(path: Path, *, reserve_bytes: int) -> int:
     """Require owner-specified free-space headroom on the target volume."""
 
     reserve = _exact_nonnegative_int(
@@ -539,8 +539,10 @@ def require_free_disk_headroom(path: Path, *, reserve_bytes: int) -> None:
     candidate = Path(path)
     while not candidate.exists() and candidate != candidate.parent:
         candidate = candidate.parent
-    if shutil.disk_usage(candidate.resolve()).free < reserve:
+    free = shutil.disk_usage(candidate.resolve()).free
+    if free < reserve:
         raise RuntimeError("insufficient_free_disk")
+    return free
 
 
 def _available_memory_bytes() -> int:

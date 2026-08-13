@@ -40,7 +40,6 @@ from quant_research_platform.storage._dataset_reading import (
     prune_paths_for_time_window,
 )
 from quant_research_platform.storage._dataset_writing import (
-    DatasetWriteChunk,
     DatasetWriteReceipt,
     write_dataset,
 )
@@ -91,21 +90,15 @@ def write_panel(
         retained_input_bytes = sum(
             session.retained_memory_bytes for session in input_sessions.values()
         )
-        chunks = (
-            DatasetWriteChunk(
-                frame,
-                retained_payload_bytes + retained_input_bytes,
-            )
-            for frame in materialization_resources.iter_disk_guarded_chunks(
-                _iter_panel_chunks(
-                    spec,
-                    input_sessions=input_sessions,
-                    time_window=time_window,
-                    resource_policy=resource_policy,
-                    retained_payload_bytes=retained_payload_bytes,
-                ),
-                scratch_parent=root.parent,
-            )
+        chunks = materialization_resources.iter_write_chunks(
+            _iter_panel_chunks(
+                spec,
+                input_sessions=input_sessions,
+                time_window=time_window,
+                resource_policy=resource_policy,
+                retained_payload_bytes=retained_payload_bytes,
+            ),
+            retained_payload_bytes=retained_payload_bytes + retained_input_bytes,
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:

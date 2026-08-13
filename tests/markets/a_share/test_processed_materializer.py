@@ -271,70 +271,6 @@ def test_sorted_output_chunks_closes_source_inside_bound_policy_on_failure(
     assert current_runtime_resource_policy() is None
 
 
-@pytest.mark.parametrize(
-    "exit_mode",
-    ("success", "runtime_error", "keyboard_interrupt", "system_exit", "close"),
-)
-def test_a_share_output_wrapper_close_cascades_to_source(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    exit_mode: str,
-) -> None:
-    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
-    frame = pd.DataFrame(
-        {
-            column: (
-                pd.to_datetime(["2014-01-02"])
-                if column == "timestamp"
-                else ["a_share" if column == "market_id" else "value"]
-            )
-            for column in spec.required_columns
-        }
-    )
-    closed = False
-
-    def source():  # noqa: ANN202
-        nonlocal closed
-        try:
-            yield frame.iloc[:0].copy()
-            yield frame
-            yield frame.copy()
-        finally:
-            closed = True
-
-    failure_types = {
-        "runtime_error": RuntimeError,
-        "keyboard_interrupt": KeyboardInterrupt,
-        "system_exit": SystemExit,
-    }
-    failure_type = failure_types.get(exit_mode)
-
-    def disk_check(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
-        if failure_type is not None:
-            raise failure_type("disk_exit")
-
-    monkeypatch.setattr(materialization_io, "require_free_disk_headroom", disk_check)
-    source_chunks = source()
-    sorted_chunks = materialization_io.iter_sorted_output_chunks(
-        source_chunks, spec, resource_policy=_publication_policy()
-    )
-    chunks = materialization_io._iter_disk_guarded_output_chunks(
-        sorted_chunks,
-        scratch_parent=tmp_path,
-    )
-    if exit_mode == "success":
-        assert len(tuple(chunks)) == 2
-    elif exit_mode == "close":
-        assert len(next(chunks)) == 1
-        chunks.close()
-    else:
-        assert failure_type is not None
-        with pytest.raises(failure_type, match="disk_exit"):
-            next(chunks)
-
-    assert closed
-
-
 _IO_WRAPPER_FAILURE_TYPES = (
     RuntimeError,
     OSError,
@@ -347,7 +283,7 @@ _IO_WRAPPER_FAILURE_TYPES = (
 
 @pytest.mark.parametrize(
     "wrapper_name",
-    ("sorted", "disk_guarded", "dataset_session"),
+    ("sorted", "dataset_session"),
 )
 @pytest.mark.parametrize("failure_type", _IO_WRAPPER_FAILURE_TYPES)
 @pytest.mark.parametrize("failure_after_yield", (False, True))
@@ -397,16 +333,6 @@ def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
     if wrapper_name == "sorted":
         wrapped = materialization_io.iter_sorted_output_chunks(
             source, spec, resource_policy=_publication_policy()
-        )
-    elif wrapper_name == "disk_guarded":
-        monkeypatch.setattr(
-            materialization_io,
-            "require_free_disk_headroom",
-            lambda *_args, **_kwargs: None,
-        )
-        wrapped = materialization_io._iter_disk_guarded_output_chunks(
-            source,
-            scratch_parent=tmp_path,
         )
     else:
         policy = capture_test_policy(
@@ -468,7 +394,7 @@ def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
 
 @pytest.mark.parametrize(
     "wrapper_name",
-    ("sorted", "disk_guarded", "dataset_session"),
+    ("sorted", "dataset_session"),
 )
 @pytest.mark.parametrize(
     ("item_count", "close_fails", "early_close"),
@@ -527,16 +453,6 @@ def test_a_share_io_wrapper_cleanup_lifecycle(
     if wrapper_name == "sorted":
         wrapped = materialization_io.iter_sorted_output_chunks(
             source, spec, resource_policy=_publication_policy()
-        )
-    elif wrapper_name == "disk_guarded":
-        monkeypatch.setattr(
-            materialization_io,
-            "require_free_disk_headroom",
-            lambda *_args, **_kwargs: None,
-        )
-        wrapped = materialization_io._iter_disk_guarded_output_chunks(
-            source,
-            scratch_parent=tmp_path,
         )
     else:
         policy = capture_test_policy(

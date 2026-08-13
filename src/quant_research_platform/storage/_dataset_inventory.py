@@ -101,7 +101,7 @@ class DatasetSessionInventory:
         require_unaliased_path(
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
-        require_free_disk_headroom(
+        free_disk_bytes = require_free_disk_headroom(
             self._scratch_parent,
             reserve_bytes=_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
         )
@@ -135,6 +135,8 @@ class DatasetSessionInventory:
             require_owned_scratch(temporary_directory, temporary_identity)
             connection = sqlite3.connect(temporary_directory / "i.db")
             connection.execute(f"PRAGMA page_size={DATASET_INVENTORY_RESERVE_BYTES}")
+            sqlite_page_limit = free_disk_bytes // DATASET_INVENTORY_RESERVE_BYTES
+            connection.execute(f"PRAGMA main.max_page_count={sqlite_page_limit}")
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA temp_store=MEMORY")
