@@ -416,7 +416,7 @@ def _time_keys_from_base_input(
         with closing_dataset_iterator(
             iter_dataset_chunks(
                 session,
-                target_chunk_bytes=resource_policy.payload_target_bytes,
+                target_chunk_bytes=resource_policy.remaining_memory_bytes,
                 operation_headroom_bytes=(
                     resource_policy.task_memory_budget_bytes - retained_payload_bytes
                 ),
@@ -540,7 +540,7 @@ def _read_processed_input(
     try:
         return materialize_dataset_session(
             view,
-            target_chunk_bytes=resource_policy.payload_target_bytes,
+            target_chunk_bytes=resource_policy.remaining_memory_bytes,
             materialized_budget_bytes=(
                 resource_policy.task_memory_budget_bytes - retained_payload_bytes
             ),

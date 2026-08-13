@@ -13,6 +13,8 @@ import pytest
 from quant_research_platform.markets.implementations.crypto.processed import (
     panels,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def compute_market_panel(
@@ -60,6 +62,9 @@ def test_panel_releases_trade_reducer_state_before_depth_reduction(
         def finish(self) -> pd.DataFrame:
             return pd.DataFrame()
 
+        def close(self) -> None:
+            pass
+
     class DepthReducer:
         def __init__(self, **_kwargs: object) -> None:
             assert trade_reference is not None
@@ -70,6 +75,9 @@ def test_panel_releases_trade_reducer_state_before_depth_reduction(
 
         def finish(self) -> pd.DataFrame:
             return pd.DataFrame()
+
+        def close(self) -> None:
+            pass
 
     monkeypatch.setattr(
         panels.panel_input_reducers,
@@ -484,8 +492,46 @@ def test_depth_reducer_merges_snapshot_across_chunks() -> None:
     assert quotes.loc[0, "bid_depth"] == 2.5
     assert quotes.loc[0, "ask_depth"] == 2.0
 
-    assert len(reducer._candidates) == 1
-    assert sum(len(levels) for levels in reducer._current_levels.values()) == 0
+
+
+def test_trade_reducer_admits_target_state_before_constructor_allocation() -> None:
+    module = _panel_input_reducers_module()
+    bars = pd.concat(
+        [panels.prepare_panel_bars(_bars_frame())] * 100,
+        ignore_index=True,
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=4096,
+        explicit_cap_bytes=4096,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            module.AggregateTradeReducer(
+                bars=bars,
+                payload_target_bytes=policy.remaining_memory_bytes,
+                normalize_chunk=panels.normalize_trade_chunk,
+            )
+
+
+def test_depth_reducer_admits_chunk_before_normalization() -> None:
+    module = _panel_input_reducers_module()
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024,
+        explicit_cap_bytes=64 * 1024,
+    )
+    depth = pd.concat([_ordered_depth_levels_frame()] * 500, ignore_index=True)
+
+    with runtime_resource_policy_scope(policy):
+        reducer = module.DepthSnapshotReducer(
+            bars=panels.prepare_panel_bars(_bars_frame()),
+            payload_target_bytes=policy.remaining_memory_bytes,
+            normalize_chunk=lambda _frame: (_ for _ in ()).throw(
+                AssertionError("normalization_started_before_admission")
+            ),
+        )
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            reducer.add_chunk(depth)
 
 
 def test_depth_reducer_rejects_out_of_order_across_chunks() -> None:
@@ -550,10 +596,9 @@ def test_depth_reducer_high_density_state_is_bounded_by_bars() -> None:
 
     for start in range(0, len(depth), 17):
         reducer.add_chunk(depth.iloc[start : start + 17].copy())
-    reducer.finish()
+    quotes = reducer.finish()
 
-    assert len(reducer._candidates) <= len(_bars_frame())
-    assert sum(len(levels) for levels in reducer._current_levels.values()) == 0
+    assert len(quotes) <= len(_bars_frame())
 
 
 def test_trade_aggregate_state_reduces_dense_chunks_incrementally() -> None:

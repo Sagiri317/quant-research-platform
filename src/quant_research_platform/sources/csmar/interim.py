@@ -983,7 +983,7 @@ def _iter_deduped_reference_frames(
     exact_duplicate_count = 0
     completed = False
     policy = active_runtime_resource_policy()
-    comparison_target = policy.payload_target_bytes
+    comparison_target = policy.remaining_memory_bytes
     task_budget = policy.task_memory_budget_bytes
     with (
         closing_dataset_iterator(frames),

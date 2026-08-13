@@ -63,7 +63,6 @@ from quant_research_platform.runtime.logical_paths import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
-    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
@@ -148,25 +147,23 @@ def run_local_verification(
     resource_policy = RuntimeResourcePolicy.capture(
         explicit_cap_bytes=config.explicit_memory_cap_bytes
     )
-    require_free_disk_headroom(
-        run_root,
-        reserve_bytes=resource_policy.payload_target_bytes * 2,
-    )
     replaced_identity = _replacement_target_identity(
         run_root,
         replace_output=config.replace_output,
     )
     staged_root = run_root.with_name(owned_scratch_name(".lv-", uuid4().hex[:8]))
     staged_identity: os.stat_result | None = None
-    try:
-        _prepare_run_root(
-            staged_root,
-            run_id=run_id,
-        )
-        staged_identity = staged_root.lstat()
-        layout = LocalVerificationLayout.from_run_root(staged_root)
-        _create_layout_directories(layout)
-        with runtime_resource_policy_scope(resource_policy):
+    backup_root: Path | None = None
+    published = False
+    with runtime_resource_policy_scope(resource_policy):
+        try:
+            _prepare_run_root(
+                staged_root,
+                run_id=run_id,
+            )
+            staged_identity = staged_root.lstat()
+            layout = LocalVerificationLayout.from_run_root(staged_root)
+            _create_layout_directories(layout)
             result = _run_local_verification_with_policy(
                 config=config,
                 effective_windows=effective_windows,
@@ -175,24 +172,40 @@ def run_local_verification(
                 layout=layout,
                 resource_policy=resource_policy,
             )
-        _publish_staged_run_root(
-            staged_root,
-            staged_identity=staged_identity,
-            run_root=run_root,
-            replaced_identity=replaced_identity,
-        )
-    except BaseException:
-        if staged_identity is None:
-            try:
-                staged_identity = staged_root.lstat()
-            except BaseException:
-                staged_identity = None
-        if staged_identity is not None:
-            try:
-                remove_owned_scratch(staged_root, staged_identity)
-            except BaseException:
-                pass
-        raise
+            backup_root = _publish_staged_run_root(
+                staged_root,
+                staged_identity=staged_identity,
+                run_root=run_root,
+                replaced_identity=replaced_identity,
+                resource_policy=resource_policy,
+            )
+            published = True
+            resource_policy.finish_memory_measurement()
+            if backup_root is not None and replaced_identity is not None:
+                remove_owned_scratch(backup_root, replaced_identity)
+        except BaseException as primary:
+            if published and staged_identity is not None:
+                try:
+                    remove_owned_scratch(run_root, staged_identity)
+                    if backup_root is not None:
+                        move_path_no_replace(backup_root, run_root)
+                except BaseException as rollback_error:
+                    primary.add_note(
+                        "local verification rollback also failed: "
+                        f"{type(rollback_error).__name__}"
+                    )
+            else:
+                if staged_identity is None:
+                    try:
+                        staged_identity = staged_root.lstat()
+                    except BaseException:
+                        staged_identity = None
+                if staged_identity is not None:
+                    try:
+                        remove_owned_scratch(staged_root, staged_identity)
+                    except BaseException:
+                        pass
+            raise
     return LocalVerificationRunResult(
         status=result.status,
         run_id=result.run_id,
@@ -279,7 +292,6 @@ def _run_local_verification_with_policy(
             run_id=evaluation_run_id,
             time_window=evaluation_time_window,
         )
-        _require_output_disk_headroom(resource_policy, run_root)
         evaluation_frames = (
             evaluation_result.metrics,
             evaluation_result.grouped_label_values,
@@ -322,7 +334,6 @@ def _run_local_verification_with_policy(
                 prediction_test_start=effective_windows["prediction_test_start"],
                 prediction_test_end=effective_windows["prediction_test_end"],
             )
-            _require_output_disk_headroom(resource_policy, run_root)
             prediction_roots_by_id[prediction_spec.prediction_id] = (
                 _write_prediction_result(
                     prediction_result,
@@ -374,7 +385,6 @@ def _run_local_verification_with_policy(
                     prediction_frame=prediction_frame,
                     prediction_metadata=prediction_metadata,
                 )
-                _require_output_disk_headroom(resource_policy, run_root)
                 portfolio_roots_list.append(
                     write_portfolio_outputs(
                         output_chunks=portfolio_result.output_chunks,
@@ -526,7 +536,6 @@ def _run_local_verification_with_policy(
         "summary": {"markdown_path": "summary.md"},
     }
     summary_markdown = render_run_summary_markdown(run_payload)
-    _require_output_disk_headroom(resource_policy, run_root)
     write_markdown_evidence(layout.summary_md_path, summary_markdown)
     replace_qrp_json(layout.run_json_path, run_payload)
     return LocalVerificationRunResult(
@@ -557,16 +566,6 @@ def _write_prediction_result(
         output_chunks=result.output_chunks,
         model_metadata=result.model_metadata,
         prediction_metadata_factory=result.prediction_metadata_factory,
-    )
-
-
-def _require_output_disk_headroom(
-    resource_policy: RuntimeResourcePolicy,
-    run_root: Path,
-) -> None:
-    require_free_disk_headroom(
-        run_root,
-        reserve_bytes=resource_policy.payload_target_bytes * 2,
     )
 
 
@@ -666,11 +665,13 @@ def _publish_staged_run_root(
     staged_identity: os.stat_result,
     run_root: Path,
     replaced_identity: os.stat_result | None,
-) -> None:
+    resource_policy: RuntimeResourcePolicy,
+) -> Path | None:
     require_owned_scratch(staged_root, staged_identity)
+    resource_policy.assert_memory_within_budget()
     if replaced_identity is None:
         move_path_no_replace(staged_root, run_root)
-        return
+        return None
     require_owned_scratch(run_root, replaced_identity)
     backup_root = run_root.with_name(owned_scratch_name(".lv-old-", uuid4().hex[:8]))
     move_path_no_replace(run_root, backup_root)
@@ -686,7 +687,7 @@ def _publish_staged_run_root(
                 f"{type(rollback_error).__name__}"
             )
         raise
-    remove_owned_scratch(backup_root, replaced_identity)
+    return backup_root
 
 
 def _prepare_run_root(

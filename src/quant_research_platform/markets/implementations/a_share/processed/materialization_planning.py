@@ -181,7 +181,7 @@ def _mark_dataset_session_coverage(
         time_window=time_window,
         resource_policy=resource_policy,
         target_chunk_bytes=min(
-            resource_policy.payload_target_bytes,
+            resource_policy.remaining_memory_bytes,
             reader_headroom_bytes,
         ),
         retained_payload_bytes=retained_state_bytes,
@@ -313,10 +313,7 @@ def iter_active_materialization_batches(
                 raise materialization_io.MaterializationCapacityExceeded(
                     "a_share_known_payloads_exceed_task_memory_budget"
                 )
-            discovery_target = max(
-                1,
-                min(bound_policy.payload_target_bytes, discovery_headroom // 2),
-            )
+            discovery_target = discovery_headroom
             chunks = materialization_io.iter_dataset_chunks_with_policy(
                 root,
                 columns=(asset_column,),
@@ -418,49 +415,50 @@ def iter_active_materialization_batches(
                 raise materialization_io.MaterializationCapacityExceeded(
                     "a_share_known_payloads_exceed_task_memory_budget"
                 )
-            asset_batch_limit = max(
-                1,
-                min(
-                    bound_policy.payload_target_bytes,
-                    batch_available // 8,
-                ),
-            )
+            asset_batch_limit = batch_available - max(1, output_row_bound_bytes or 1)
+            if asset_batch_limit <= 0:
+                raise materialization_io.MaterializationCapacityExceeded(
+                    "a_share_known_payloads_exceed_task_memory_budget"
+                )
             asset_batch: list[str] = []
             asset_batch_bytes = 0
             payloads = index.identity_payload_values(namespace="active-assets")
-            with (
-                bound_policy.reserve(
-                    "a_share.asset_batch",
-                    asset_batch_limit,
-                ),
-                closing_dataset_iterator(payloads),
-            ):
-                for payload in payloads:
-                    item_bytes = (
-                        3 * pointer_bytes
-                        + sys.getsizeof(b"")
-                        + sys.getsizeof("")
-                        + 5 * len(payload)
-                    )
-                    if item_bytes > asset_batch_limit:
-                        raise materialization_io.MaterializationCapacityExceeded(
-                            "a_share_known_payloads_exceed_task_memory_budget"
+            asset_reservations = ExitStack()
+            try:
+                with closing_dataset_iterator(payloads):
+                    for payload in payloads:
+                        item_bytes = (
+                            3 * pointer_bytes
+                            + sys.getsizeof(b"")
+                            + sys.getsizeof("")
+                            + 5 * len(payload)
                         )
-                    if asset_batch and (
-                        asset_batch_bytes + item_bytes > asset_batch_limit
-                    ):
+                        if item_bytes > asset_batch_limit:
+                            raise materialization_io.MaterializationCapacityExceeded(
+                                "a_share_known_payloads_exceed_task_memory_budget"
+                            )
+                        if asset_batch and (
+                            asset_batch_bytes + item_bytes > asset_batch_limit
+                        ):
+                            output = tuple(asset_batch)
+                            yield from emit_asset_batch(output)
+                            del output
+                            asset_batch.clear()
+                            asset_batch_bytes = 0
+                            asset_reservations.close()
+                            asset_reservations = ExitStack()
+                        asset_reservations.enter_context(
+                            bound_policy.reserve("a_share.asset_batch", item_bytes)
+                        )
+                        asset_batch.append(payload.decode("utf-8"))
+                        asset_batch_bytes += item_bytes
+                    if asset_batch:
                         output = tuple(asset_batch)
                         yield from emit_asset_batch(output)
                         del output
                         asset_batch.clear()
-                        asset_batch_bytes = 0
-                    asset_batch.append(payload.decode("utf-8"))
-                    asset_batch_bytes += item_bytes
-                if asset_batch:
-                    output = tuple(asset_batch)
-                    yield from emit_asset_batch(output)
-                    del output
-                    asset_batch.clear()
+            finally:
+                asset_reservations.close()
 
     def activate_under_policy() -> Iterator[DatasetWriteChunk]:
         assert bound_policy is not None
@@ -559,7 +557,7 @@ def _iter_adaptive_materialization_batches(
         if output_row_bound_bytes is None
         else max(
             1,
-            min(policy.payload_target_bytes, remaining)
+            remaining
             // output_row_bound_bytes,
         )
     )
@@ -712,7 +710,7 @@ def _build_valid_bar_key_index(
         columns=("asset_id", "timestamp"),
         time_window=time_window,
         resource_policy=resource_policy,
-        target_chunk_bytes=resource_policy.payload_target_bytes,
+        target_chunk_bytes=resource_policy.remaining_memory_bytes,
         asset_ids=asset_ids,
         retained_payload_bytes=owner_retained_bytes,
     )
@@ -959,7 +957,7 @@ def available_trading_sessions(
         + ceil(persisted_payload_bytes / max(1, calendar_row_count)),
     )
     read_target_bytes = min(
-        resource_policy.payload_target_bytes,
+        resource_policy.remaining_memory_bytes,
         initial_read_target_bytes,
         max(
             1,

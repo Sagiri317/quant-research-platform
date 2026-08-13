@@ -66,7 +66,7 @@ def fingerprint_dataset_session(
     with runtime_resource_policy_scope(resource_policy):
         if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
             raise ValueError("invalid_dataset_fingerprint_retained_payload_bytes")
-        payload_target_bytes = resource_policy.payload_target_bytes
+        payload_target_bytes = resource_policy.remaining_memory_bytes
         if (
             retained_payload_bytes + context.retained_memory_bytes
             >= resource_policy.task_memory_budget_bytes

@@ -211,7 +211,7 @@ def validate_panel_materialization(
             expected=expected_input_identities,
             error="crypto_panel_input_dataset_identity_mismatch",
         )
-        chunk_target_bytes = resource_policy.payload_target_bytes
+        chunk_target_bytes = resource_policy.remaining_memory_bytes
         retained_receipt_bytes = receipt.retained_memory_bytes + retained_payload_bytes
         with (
             closing_dataset_iterator(
@@ -261,7 +261,7 @@ def validate_panel_dependent_materialization(
             expected=expected_input_identities,
             error="crypto_processed_input_dataset_identity_mismatch",
         )
-        chunk_target_bytes = resource_policy.payload_target_bytes
+        chunk_target_bytes = resource_policy.remaining_memory_bytes
         retained_receipt_bytes = receipt.retained_memory_bytes + retained_payload_bytes
         with closing_dataset_iterator(
             _iter_core_window_chunks(
@@ -292,7 +292,7 @@ def _validate_receipt_key_coverage(
 ) -> None:
     if not primary_key:
         raise ValueError(error)
-    chunk_target_bytes = resource_policy.payload_target_bytes
+    chunk_target_bytes = resource_policy.remaining_memory_bytes
     receipt.session.verify()
     index = receipt.exact_primary_key_index
     for frame in expected:
@@ -335,7 +335,7 @@ def validate_existing_panel_materialization(
             expected=expected_input_identities,
             error="crypto_panel_input_dataset_identity_mismatch",
         )
-        chunk_target_bytes = resource_policy.payload_target_bytes
+        chunk_target_bytes = resource_policy.remaining_memory_bytes
         bar_upstream_headroom = (
             resource_policy.task_memory_budget_bytes
             - panel_session.retained_memory_bytes

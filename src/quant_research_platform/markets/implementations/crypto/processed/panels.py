@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
+from contextlib import ExitStack
 
 import pandas as pd
 from pandas.api.types import is_bool_dtype
@@ -18,6 +19,10 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 )
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     PANEL_COLUMNS,
+)
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
 )
 
 DEFAULT_MAX_QUOTE_AGE = pd.Timedelta(seconds=120)
@@ -60,33 +65,57 @@ def calculate_market_panel_from_chunks(
 ) -> pd.DataFrame:
     if not isinstance(max_quote_age, pd.Timedelta) or max_quote_age < pd.Timedelta(0):
         raise ValueError("invalid_crypto_max_quote_age")
+    policy = current_runtime_resource_policy()
     trade_reducer = panel_input_reducers.AggregateTradeReducer(
         bars=prepared_bars,
         payload_target_bytes=payload_target_bytes,
         normalize_chunk=normalize_trade_chunk,
         continuity_state=trade_continuity_state,
     )
-    for chunk in trade_chunks:
-        if not chunk.empty:
-            trade_reducer.add_chunk(chunk)
-    trade_aggregates = trade_reducer.finish()
-    del trade_reducer
-    depth_reducer = panel_input_reducers.DepthSnapshotReducer(
-        bars=prepared_bars,
-        payload_target_bytes=payload_target_bytes,
-        normalize_chunk=normalize_depth_chunk,
-    )
-    for chunk in depth_chunks:
-        if not chunk.empty:
-            depth_reducer.add_chunk(chunk)
-    quote_snapshots = depth_reducer.finish()
-    del depth_reducer
-    return _calculate_market_panel(
-        prepared_bars,
-        trade_aggregates=trade_aggregates,
-        quote_snapshots=quote_snapshots,
-        max_quote_age=max_quote_age,
-    )
+    depth_reducer = None
+    try:
+        for chunk in trade_chunks:
+            if not chunk.empty:
+                trade_reducer.add_chunk(chunk)
+        trade_aggregates = trade_reducer.finish()
+        with ExitStack() as outputs:
+            if policy is not None:
+                outputs.enter_context(
+                    policy.reserve(
+                        "crypto.panel.trade_output",
+                        pandas_frame_payload_bytes(trade_aggregates),
+                    )
+                )
+            trade_reducer.close()
+            trade_reducer = None
+            depth_reducer = panel_input_reducers.DepthSnapshotReducer(
+                bars=prepared_bars,
+                payload_target_bytes=payload_target_bytes,
+                normalize_chunk=normalize_depth_chunk,
+            )
+            for chunk in depth_chunks:
+                if not chunk.empty:
+                    depth_reducer.add_chunk(chunk)
+            quote_snapshots = depth_reducer.finish()
+            if policy is not None:
+                outputs.enter_context(
+                    policy.reserve(
+                        "crypto.panel.depth_output",
+                        pandas_frame_payload_bytes(quote_snapshots),
+                    )
+                )
+            depth_reducer.close()
+            return _calculate_market_panel(
+                prepared_bars,
+                trade_aggregates=trade_aggregates,
+                quote_snapshots=quote_snapshots,
+                max_quote_age=max_quote_age,
+            )
+    finally:
+        if trade_reducer is not None:
+            trade_reducer.close()
+        if depth_reducer is not None:
+            depth_reducer.close()
 
 
 def _calculate_market_panel(

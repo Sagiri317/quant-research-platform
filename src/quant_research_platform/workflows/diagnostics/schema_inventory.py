@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable
+from contextlib import ExitStack
 from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -10,8 +11,8 @@ from typing import Any
 import pandas as pd
 
 from quant_research_platform.contracts._json import (
+    bounded_rendered_qrp_json_object_size,
     canonical_json_hash,
-    render_qrp_json_object,
 )
 from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAYERS
 from quant_research_platform.runtime.resources import (
@@ -81,27 +82,28 @@ def build_schema_inventory_payload(
     ):
         require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
     resource_policy = active_runtime_resource_policy()
-    with runtime_resource_policy_scope(resource_policy):
+    with runtime_resource_policy_scope(resource_policy), ExitStack() as retained:
         items = []
-        retained_item_bytes = 0
         for artifact_root in _iter_dataset_artifact_roots(root):
-            item = _inventory_item(
-                root,
-                artifact_root,
-                important_null_count_columns=important_columns,
-                resource_policy=resource_policy,
-                retained_payload_bytes=retained_item_bytes,
-            )
-            retained_item_bytes += len(render_qrp_json_object(item).encode("utf-8"))
-            if retained_item_bytes > resource_policy.task_memory_budget_bytes:
-                raise ValueError("schema_inventory_payload_exceeds_task_memory_budget")
+            try:
+                item = _inventory_item(
+                    root,
+                    artifact_root,
+                    important_null_count_columns=important_columns,
+                    resource_policy=resource_policy,
+                    retained_items=retained,
+                )
+            except MemoryError:
+                raise ValueError(
+                    "schema_inventory_payload_exceeds_task_memory_budget"
+                ) from None
             items.append(item)
-    if not items:
-        raise ValueError("schema_inventory_no_datasets_found")
-    return {
-        "schema_id": "qrp-schema-inventory",
-        "datasets": sorted(items, key=lambda item: item["logical_relative_root"]),
-    }
+        if not items:
+            raise ValueError("schema_inventory_no_datasets_found")
+        return {
+            "schema_id": "qrp-schema-inventory",
+            "datasets": sorted(items, key=lambda item: item["logical_relative_root"]),
+        }
 
 
 def summarize_schema_inventory_payload(
@@ -366,7 +368,7 @@ def _inventory_item(
     *,
     important_null_count_columns: frozenset[str],
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
+    retained_items: ExitStack,
 ) -> dict[str, Any]:
     with open_dataset_session(
         artifact_root,
@@ -374,7 +376,7 @@ def _inventory_item(
         time_window=None,
         require_consumable=False,
         resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
+        retained_payload_bytes=0,
     ) as session:
         return _inventory_item_from_session(
             project_root,
@@ -382,7 +384,7 @@ def _inventory_item(
             session=session,
             important_null_count_columns=important_null_count_columns,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_payload_bytes,
+            retained_items=retained_items,
         )
 
 
@@ -393,6 +395,7 @@ def _inventory_item_from_session(
     session: DatasetSession,
     important_null_count_columns: frozenset[str],
     resource_policy: RuntimeResourcePolicy,
+    retained_items: ExitStack,
     retained_payload_bytes: int = 0,
 ) -> dict[str, Any]:
     inspection = inspect_dataset_session(
@@ -411,47 +414,102 @@ def _inventory_item_from_session(
         warnings.append(
             "primary_key_inferred" if primary_key else "primary_key_missing"
         )
-    stats = _aggregate_dataset_stats(
-        session,
-        columns,
-        primary_key,
-        important_null_count_columns=important_null_count_columns,
-        resource_policy=resource_policy,
-        exact_duplicate_count=int(inspection.manifest["duplicate_primary_key_count"]),
-        retained_payload_bytes=(
-            retained_payload_bytes
-            + dataset_inspection_retained_memory_bytes(inspection)
-        ),
+    build_bound = _inventory_item_upper_bound_bytes(
+        logical_root=logical_root,
+        columns=columns,
+        primary_key=primary_key,
+        partition_columns=partition_columns,
+        important_columns=important_null_count_columns.intersection(columns),
+        date_min=inspection.date_min,
+        date_max=inspection.date_max,
     )
-    session.verify()
-    layer, _, kind, artifact_id = _logical_identifiers(logical_root)
-    return {
-        "artifact_id": artifact_id,
-        "layer": layer,
-        "kind": kind,
-        "logical_relative_root": logical_root,
-        "columns": list(columns),
-        "dtypes": stats["dtypes"],
-        "primary_key": list(primary_key),
-        "partition_columns": list(partition_columns),
-        "file_count": inspection.file_count,
-        "row_count": inspection.row_count,
-        "row_count_by_year": stats["row_count_by_year"],
-        "min_timestamp": inspection.date_min,
-        "max_timestamp": inspection.date_max,
-        "duplicate_primary_key_count": stats["duplicate_primary_key_count"],
-        "null_key_counts": stats["null_key_counts"],
-        "selected_important_column_null_counts": (
-            stats["selected_important_column_null_counts"]
-        ),
-        "schema_hash": _schema_hash(
-            columns=columns,
-            dtypes=stats["dtypes"],
-            primary_key=primary_key,
-            partition_columns=partition_columns,
-        ),
-        "warnings": sorted(set(warnings)),
-    }
+    try:
+        retained_items.enter_context(
+            resource_policy.reserve("schema.inventory.items", build_bound)
+        )
+        stats = _aggregate_dataset_stats(
+            session,
+            columns,
+            primary_key,
+            important_null_count_columns=important_null_count_columns,
+            resource_policy=resource_policy,
+            exact_duplicate_count=int(
+                inspection.manifest["duplicate_primary_key_count"]
+            ),
+            retained_payload_bytes=(
+                retained_payload_bytes
+                + dataset_inspection_retained_memory_bytes(inspection)
+            ),
+        )
+        session.verify()
+        layer, _, kind, artifact_id = _logical_identifiers(logical_root)
+        item = {
+            "artifact_id": artifact_id,
+            "layer": layer,
+            "kind": kind,
+            "logical_relative_root": logical_root,
+            "columns": list(columns),
+            "dtypes": stats["dtypes"],
+            "primary_key": list(primary_key),
+            "partition_columns": list(partition_columns),
+            "file_count": inspection.file_count,
+            "row_count": inspection.row_count,
+            "row_count_by_year": stats["row_count_by_year"],
+            "min_timestamp": inspection.date_min,
+            "max_timestamp": inspection.date_max,
+            "duplicate_primary_key_count": stats["duplicate_primary_key_count"],
+            "null_key_counts": stats["null_key_counts"],
+            "selected_important_column_null_counts": stats[
+                "selected_important_column_null_counts"
+            ],
+            "schema_hash": _schema_hash(
+                columns=columns,
+                dtypes=stats["dtypes"],
+                primary_key=primary_key,
+                partition_columns=partition_columns,
+            ),
+            "warnings": sorted(set(warnings)),
+        }
+        try:
+            bounded_rendered_qrp_json_object_size(
+                item,
+                lazy_arrays={},
+                max_bytes=build_bound,
+            )
+        except (MemoryError, ValueError):
+            raise ValueError(
+                "schema_inventory_payload_exceeds_task_memory_budget"
+            ) from None
+        return item
+    except MemoryError:
+        raise ValueError(
+            "schema_inventory_payload_exceeds_task_memory_budget"
+        ) from None
+
+
+def _inventory_item_upper_bound_bytes(
+    *,
+    logical_root: str,
+    columns: tuple[str, ...],
+    primary_key: tuple[str, ...],
+    partition_columns: tuple[str, ...],
+    important_columns: frozenset[str],
+    date_min: str | None,
+    date_max: str | None,
+) -> int:
+    year_count = 0
+    if date_min is not None and date_max is not None:
+        year_count = date.fromisoformat(date_max).year - date.fromisoformat(
+            date_min
+        ).year + 1
+    text_bytes = len(logical_root.encode("utf-8")) + sum(
+        len(value.encode("utf-8"))
+        for value in (*columns, *primary_key, *partition_columns, *important_columns)
+    )
+    item_entries = 2 * len(columns) + 2 * len(primary_key) + len(
+        important_columns
+    ) + year_count
+    return 16 * 1024 + 4 * text_bytes + 512 * item_entries
 
 
 def _aggregate_dataset_stats(
@@ -477,7 +535,7 @@ def _aggregate_dataset_stats(
     duplicate_primary_key_count = exact_duplicate_count
     chunks = iter_dataset_chunks(
         session,
-        target_chunk_bytes=resource_policy.payload_target_bytes,
+        target_chunk_bytes=resource_policy.remaining_memory_bytes,
         operation_headroom_bytes=(
             resource_policy.task_memory_budget_bytes - retained_payload_bytes
         ),

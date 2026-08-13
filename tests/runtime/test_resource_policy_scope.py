@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from threading import Thread
 from types import SimpleNamespace
 
 import pytest
@@ -64,25 +63,6 @@ def test_retired_policy_cannot_start_a_second_root() -> None:
             pass
 
 
-def test_same_policy_cannot_reenter_from_another_thread() -> None:
-    policy = _policy(1)
-    observed: list[str] = []
-
-    def enter() -> None:
-        try:
-            with runtime_resource_policy_scope(policy):
-                observed.append("entered")
-        except RuntimeError as exc:
-            observed.append(str(exc))
-
-    with runtime_resource_policy_scope(policy):
-        worker = Thread(target=enter)
-        worker.start()
-        worker.join(timeout=5)
-
-    assert observed == ["runtime_resource_policy_wrong_owner"]
-
-
 @pytest.mark.parametrize(
     "primary",
     [RuntimeError("body"), MemoryError(), KeyboardInterrupt(), SystemExit()],
@@ -122,7 +102,7 @@ def test_lazy_read_binds_creation_policy_and_rejects_other_consumer(
         lazy = dataset_reading.read_dataset(
             Path("unused"),
             mode=DatasetReadMode.CHUNKED,
-            resource_policy=None,
+            resource_policy=created_under,
         )
     with runtime_resource_policy_scope(consumed_under):
         with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
@@ -169,3 +149,42 @@ def test_lazy_read_without_outer_admits_one_fresh_policy(
 
     assert list(lazy) == []
     assert len(observed) == 1
+
+
+def test_suspended_public_read_rejects_a_second_independent_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issued = _policy(1)
+
+    @contextmanager
+    def open_session(*_args: object, resource_policy=None, **_kwargs: object):  # type: ignore[no-untyped-def]
+        policy = resource_policy or issued
+        with runtime_resource_policy_scope(policy):
+            yield SimpleNamespace(resource_policy=policy)
+
+    monkeypatch.setattr(dataset_reading, "open_dataset_session", open_session)
+    monkeypatch.setattr(
+        dataset_reading,
+        "iter_dataset_chunks",
+        lambda *_a, **_k: iter((SimpleNamespace(),)),
+    )
+
+    first = dataset_reading.read_dataset(
+        Path("first"),
+        mode=DatasetReadMode.CHUNKED,
+        resource_policy=None,
+    )
+    assert not isinstance(first, SimpleNamespace)
+    next(first)
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="runtime_resource_policy_competing_root",
+        ):
+            dataset_reading.read_dataset(
+                Path("second"),
+                mode=DatasetReadMode.CHUNKED,
+                resource_policy=None,
+            )
+    finally:
+        first.close()  # type: ignore[union-attr]

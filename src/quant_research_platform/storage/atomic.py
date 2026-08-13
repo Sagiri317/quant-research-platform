@@ -14,6 +14,7 @@ import pandas as pd
 
 import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.contracts._json import render_qrp_json_object
+from quant_research_platform.runtime.resources import current_runtime_resource_policy
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._scratch_ownership import (
     create_owned_scratch,
@@ -377,6 +378,9 @@ def publish_no_replace(
 ) -> None:
     source = require_unaliased_path(Path(source), error="invalid_storage_write_path")
     target = require_unaliased_path(Path(target), error="invalid_storage_write_path")
+    policy = current_runtime_resource_policy()
+    if policy is not None:
+        policy.assert_memory_within_budget()
     for attempt in range(1, 4):
         require_unaliased_path(source, error="invalid_storage_write_path")
         require_unaliased_path(target, error="invalid_storage_write_path")

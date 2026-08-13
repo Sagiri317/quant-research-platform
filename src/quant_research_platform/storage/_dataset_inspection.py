@@ -68,7 +68,7 @@ def inspect_dataset_session(
     with runtime_resource_policy_scope(resource_policy):
         runtime = _inspection_runtime_metadata(
             context,
-            target_chunk_bytes=resource_policy.payload_target_bytes,
+            target_chunk_bytes=resource_policy.remaining_memory_bytes,
             retained_payload_bytes=retained_payload_bytes,
         )
         result = DatasetInspection(

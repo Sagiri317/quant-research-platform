@@ -210,7 +210,7 @@ def test_asset_discovery_closes_file_batches_on_validation_failure(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=policy.payload_target_bytes,
+            target_chunk_bytes=policy.remaining_memory_bytes,
             error="invalid_asset",
             operation_headroom_bytes=policy.task_memory_budget_bytes,
         ):

@@ -316,7 +316,7 @@ def test_validated_text_scan_accepts_payload_at_exact_runtime_target(
     policy = capture_test_policy(
         available_memory_bytes=2 * MIB,
     )
-    line_pairs, remainder = divmod(policy.payload_target_bytes, 2)
+    line_pairs, remainder = divmod(policy.remaining_memory_bytes, 2)
     path.write_bytes((b"x\n" * line_pairs) + (b"x" * remainder))
 
     assert (
@@ -332,7 +332,7 @@ def test_validated_text_scan_accepts_many_short_lines_over_runtime_soft_target(
     policy = capture_test_policy(
         available_memory_bytes=2 * MIB,
     )
-    path.write_bytes(b"x\n" * (policy.payload_target_bytes + 1))
+    path.write_bytes(b"x\n" * (policy.remaining_memory_bytes + 1))
 
     assert (
         validation_summary._scan_validated_text_evidence(*_evidence_members(path)[0])

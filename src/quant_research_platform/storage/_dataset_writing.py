@@ -486,7 +486,7 @@ def _write_dataset_under_policy(
                     input_chunks,
                     temp_root / "data",
                     spec=spec,
-                    target_chunk_bytes=resource_policy.payload_target_bytes,
+                    target_chunk_bytes=resource_policy.remaining_memory_bytes,
                     resource_policy=resource_policy,
                     key_tracker=key_tracker,
                     inventory=inventory,

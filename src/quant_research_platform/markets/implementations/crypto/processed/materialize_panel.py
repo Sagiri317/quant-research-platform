@@ -149,7 +149,7 @@ def _iter_panel_chunks(
     ):
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        chunk_target_bytes = resource_policy.payload_target_bytes
+        chunk_target_bytes = resource_policy.remaining_memory_bytes
         bar_session = input_sessions[source_ids.market_bars_source_data_id(spec)]
         trade_session = input_sessions[source_ids.aggregate_trades_source_data_id(spec)]
         depth_session = input_sessions[source_ids.depth_levels_source_data_id(spec)]
@@ -203,7 +203,7 @@ def _iter_panel_chunks(
                         )
                         materialization_resources.require_frame_within_budget(
                             prepared_bars,
-                            target_bytes=resource_policy.payload_target_bytes,
+                            target_bytes=resource_policy.remaining_memory_bytes,
                             error="crypto_indivisible_reducer_unit_exceeds_payload_target",
                         )
                         prepared_bar_bytes = pandas_frame_payload_bytes(prepared_bars)
@@ -241,13 +241,13 @@ def _iter_panel_chunks(
                                 prepared_bars,
                                 trade_chunks=trade_chunks,
                                 depth_chunks=depth_chunks,
-                                payload_target_bytes=resource_policy.payload_target_bytes,
+                                payload_target_bytes=resource_policy.remaining_memory_bytes,
                                 trade_continuity_state=trade_continuity_state,
                                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
                             ).loc[:, spec.required_columns]
                         materialization_resources.require_frame_within_budget(
                             output,
-                            target_bytes=resource_policy.payload_target_bytes,
+                            target_bytes=resource_policy.remaining_memory_bytes,
                             error="crypto_indivisible_reducer_unit_exceeds_payload_target",
                         )
                         yield output

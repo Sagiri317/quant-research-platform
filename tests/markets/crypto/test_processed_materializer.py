@@ -150,7 +150,7 @@ def test_existing_panel_validation_keeps_policy_active_across_both_iterators(
         target_chunk_bytes: int,
         operation_headroom_bytes: int,
     ):
-        assert target_chunk_bytes == policy.payload_target_bytes
+        assert target_chunk_bytes == policy.remaining_memory_bytes
         expected_external_bytes = 200 if session.name == "bar" else 100
         assert operation_headroom_bytes == (
             policy.task_memory_budget_bytes - expected_external_bytes
@@ -1080,7 +1080,7 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=session.resource_policy.payload_target_bytes,
+            target_chunk_bytes=session.resource_policy.remaining_memory_bytes,
             error="invalid_crypto_test_asset_grouping",
             operation_headroom_bytes=session.resource_policy.task_memory_budget_bytes,
         ) as views:
@@ -1104,7 +1104,7 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
             with materialization_validation.crypto_asset_session_views(
                 session,
                 columns=("asset_id",),
-                target_chunk_bytes=session.resource_policy.payload_target_bytes,
+                target_chunk_bytes=session.resource_policy.remaining_memory_bytes,
                 error="invalid_crypto_test_asset_grouping",
                 operation_headroom_bytes=session.resource_policy.task_memory_budget_bytes,
             ) as views:
@@ -1145,7 +1145,7 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
             with materialization_validation.crypto_asset_session_views(
                 session,
                 columns=("asset_id",),
-                target_chunk_bytes=session.resource_policy.payload_target_bytes,
+                target_chunk_bytes=session.resource_policy.remaining_memory_bytes,
                 error="invalid_crypto_test_asset_grouping",
                 operation_headroom_bytes=session.resource_policy.task_memory_budget_bytes,
             ):
@@ -1261,7 +1261,7 @@ def test_matching_chunk_caller_releases_selection_on_all_exit_paths(
             "time_window": TimeWindow("2026-01-01", "2026-12-31"),
             "source_asset_error": "invalid_test_source_asset_id",
             "timestamp_error": "invalid_test_timestamp",
-            "target_chunk_bytes": session.resource_policy.payload_target_bytes,
+            "target_chunk_bytes": session.resource_policy.remaining_memory_bytes,
             "operation_headroom_bytes": (
                 session.resource_policy.task_memory_budget_bytes
             ),
@@ -1379,7 +1379,7 @@ def test_asset_views_preserve_primary_and_attempt_all_selection_release(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=policy.payload_target_bytes,
+            target_chunk_bytes=policy.remaining_memory_bytes,
             error="invalid_test_asset_grouping",
             operation_headroom_bytes=session.resource_policy.task_memory_budget_bytes,
         ):
@@ -1445,7 +1445,7 @@ def test_asset_views_propagate_first_release_failure_after_attempting_all(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=policy.payload_target_bytes,
+            target_chunk_bytes=policy.remaining_memory_bytes,
             error="invalid_test_asset_grouping",
             operation_headroom_bytes=session.resource_policy.task_memory_budget_bytes,
         ):

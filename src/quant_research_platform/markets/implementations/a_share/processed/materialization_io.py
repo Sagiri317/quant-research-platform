@@ -326,7 +326,7 @@ def read_materialized_dataset(
     ) as session:
         return materialize_dataset_session(
             session,
-            target_chunk_bytes=resource_policy.payload_target_bytes,
+            target_chunk_bytes=resource_policy.remaining_memory_bytes,
             materialized_budget_bytes=available_bytes,
         )
 
@@ -355,7 +355,7 @@ def iter_dataset_chunks_with_policy(
     def activate() -> Iterator[pd.DataFrame]:
         assert bound_policy is not None
         target_bytes = (
-            bound_policy.payload_target_bytes
+            bound_policy.remaining_memory_bytes
             if target_chunk_bytes is None
             else target_chunk_bytes
         )

@@ -1030,7 +1030,7 @@ def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
     monkeypatch.setattr(
         interim,
         "pandas_frame_payload_bytes",
-        lambda _frame: policy.payload_target_bytes,
+        lambda _frame: policy.remaining_memory_bytes,
     )
 
     def reject_mapping(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
@@ -1323,7 +1323,7 @@ def test_private_export_batch_target_adapts_to_measured_frame_payload() -> None:
         resource_policy=policy,
     )
 
-    assert compact_target == policy.payload_target_bytes
+    assert compact_target == policy.remaining_memory_bytes // 2
     assert expanded_target == 2 * logical_bytes
     assert expanded_target < compact_target
 
@@ -3881,7 +3881,7 @@ def test_csmar_direct_reference_iteration_uses_active_policy_target(
         )
 
     assert len(result) == 1
-    assert observed_targets == [policy.payload_target_bytes]
+    assert observed_targets == [policy.remaining_memory_bytes]
 
 
 def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
@@ -3967,7 +3967,7 @@ def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
     )
 
     assert policy_calls == [True, True]
-    assert observed_targets == [policy.payload_target_bytes]
+    assert observed_targets == [policy.remaining_memory_bytes]
     assert write_policies == [policy]
 
 

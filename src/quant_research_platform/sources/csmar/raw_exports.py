@@ -1252,7 +1252,7 @@ def _next_batch_target_bytes(
     )
     measured_total_bytes = logical_bytes + frame_payload_bytes
     return min(
-        resource_policy.payload_target_bytes,
+        resource_policy.remaining_memory_bytes,
         max(1, available_bytes * logical_bytes // measured_total_bytes),
     )
 
@@ -1318,7 +1318,7 @@ def _bounded_export_frame(
     try:
         yield from iter_bounded_frame_chunks(
             frame,
-            target_chunk_bytes=resource_policy.payload_target_bytes,
+            target_chunk_bytes=resource_policy.remaining_memory_bytes,
         )
     except ValueError as exc:
         if str(exc) == "dataset_row_exceeds_target_chunk_bytes":

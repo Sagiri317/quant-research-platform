@@ -3981,7 +3981,7 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
     tuple(
         dataset_reading._arrow_batch_to_bounded_pandas(
             arrow_batch,
-            target_chunk_bytes=policy.payload_target_bytes,
+            target_chunk_bytes=policy.remaining_memory_bytes,
             batch_observer=measure_batch,
         )
     )
@@ -4366,14 +4366,14 @@ def test_storage_operations_propagate_the_captured_payload_target(
         fingerprint_dataset(root)
 
     assert writer_targets and all(
-        0 < target <= policy.payload_target_bytes for target in writer_targets
+        0 < target <= policy.task_memory_budget_bytes for target in writer_targets
     )
-    assert read_targets == [policy.payload_target_bytes] * 3
+    assert read_targets == [policy.remaining_memory_bytes] * 3
     assert inspection_targets and set(inspection_targets) == {
-        policy.payload_target_bytes
+        policy.remaining_memory_bytes
     }
     assert fingerprint_physical_targets and set(fingerprint_physical_targets) == {
-        policy.payload_target_bytes
+        policy.remaining_memory_bytes
     }
     assert fingerprint_hash_targets
     assert len(fingerprint_operation_headrooms) == 1
@@ -6628,9 +6628,9 @@ def test_dataset_filter_preflight_rejects_before_bulk_arrow_array(
     scalar_called = False
 
     if shape == "one_wide":
-        values = ("x" * (policy.payload_target_bytes + 1),)
+        values = ("x" * (policy.task_memory_budget_bytes + 1),)
     elif shape == "many_small":
-        values = ("x",) * (policy.payload_target_bytes // 4 + 1)
+        values = ("x",) * (policy.task_memory_budget_bytes // 4 + 1)
     else:
         value = "duplicate"
         per_value_bytes = 4 + len(value)
@@ -6748,7 +6748,7 @@ def test_dataset_prepared_in_filter_payload_gate_uses_compact_values(
     )
 
     assert prepared.values.to_pylist() == [value]
-    assert prepared.retained_memory_bytes <= policy.payload_target_bytes
+    assert prepared.retained_memory_bytes <= policy.task_memory_budget_bytes
 
 
 def test_dataset_prepared_in_filter_rejects_distinct_equal_string_payloads() -> None:
@@ -6922,10 +6922,10 @@ def test_dataset_binary_filter_preflight_rejects_before_arrow(
         explicit_cap_bytes=1 * 1024 * 1024,
     )
     if shape == "one_wide":
-        values = (b"x" * (policy.payload_target_bytes + 1),)
+        values = (b"x" * (policy.task_memory_budget_bytes + 1),)
         expected = "dataset_filter_values_exceed_(payload_target|task_memory_budget)"
     else:
-        count = policy.payload_target_bytes // (offset_bytes + 1) + 1
+        count = policy.task_memory_budget_bytes // (offset_bytes + 1) + 1
         values = (b"x",) * count
         expected = "dataset_filter_values_exceed_(payload_target|task_memory_budget)"
 
@@ -6965,7 +6965,7 @@ def test_dataset_filter_capacity_includes_inventory_during_preparation(
     )
     value = "x" * (policy.task_memory_budget_bytes - inventory_bytes - 3)
     acquired = pa.array((value,), type=pa.string())
-    assert acquired.nbytes <= policy.payload_target_bytes
+    assert acquired.nbytes <= policy.task_memory_budget_bytes
     assert inventory_bytes + acquired.nbytes > policy.task_memory_budget_bytes
 
     with pytest.raises(
@@ -7524,12 +7524,12 @@ def test_arrow_datetime_dtype_is_stable_for_filter_empty_direct_session(
             chunks = list(
                 dataset_reading.iter_dataset_chunks(
                     session,
-                    target_chunk_bytes=policy.payload_target_bytes,
+                    target_chunk_bytes=policy.remaining_memory_bytes,
                 )
             )
             materialized = dataset_reading.materialize_dataset_session(
                 session,
-                target_chunk_bytes=policy.payload_target_bytes,
+                target_chunk_bytes=policy.remaining_memory_bytes,
                 materialized_budget_bytes=policy.task_memory_budget_bytes,
             )
 
@@ -8842,7 +8842,7 @@ def test_writer_passes_soft_target_and_live_headroom_to_persisted_readback(
     )
 
     assert observed_targets
-    assert observed_targets[-1] == policy.payload_target_bytes
+    assert observed_targets[-1] == policy.remaining_memory_bytes
     assert 0 < observed_operation_headroom[-1] < policy.task_memory_budget_bytes
     persisted = read_dataset(root)
     assert tuple(persisted.columns) == tuple(frame.columns)

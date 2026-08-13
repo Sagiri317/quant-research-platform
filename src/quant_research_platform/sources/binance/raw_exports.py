@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Iterator
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+    bind_runtime_resource_policy,
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.binance.validation import (
-    depth_side_levels,
     first_present,
     strict_boolean,
     strict_data_kind,
@@ -28,6 +36,7 @@ DATA_ID_BY_RAW_KIND = {
     "agg_trades": "aggregate_trades_tick",
     "depth": "depth_levels_tick",
 }
+_SCAN_BUFFER_BYTES = 64 * 1024
 
 
 def dataset_files_by_id(raw_root: Path) -> dict[str, tuple[Path, ...]]:
@@ -38,26 +47,125 @@ def dataset_files_by_id(raw_root: Path) -> dict[str, tuple[Path, ...]]:
     }
 
 
-def iter_raw_envelopes(path: Path) -> Iterator[dict[str, Any]]:
+def iter_raw_envelopes(
+    path: Path,
+    *,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> Iterator[dict[str, Any]]:
+    captured_policy = current_runtime_resource_policy()
+    if resource_policy is None and captured_policy is not None:
+        raise RuntimeError("runtime_resource_policy_competing_root")
+    bound_policy = bind_runtime_resource_policy(resource_policy)
+
+    def activate() -> Iterator[dict[str, Any]]:
+        policy = bound_policy or active_runtime_resource_policy()
+        with runtime_resource_policy_scope(policy):
+            for batch in _iter_raw_envelope_batches(
+                path,
+                batch_size=1,
+                resource_policy=policy,
+            ):
+                yield batch[0]
+
+    return activate()
+
+
+def _iter_raw_envelope_batches(
+    path: Path,
+    *,
+    batch_size: int,
+    resource_policy: RuntimeResourcePolicy,
+) -> Iterator[tuple[dict[str, Any], ...]]:
     raw_path = Path(path)
     if not raw_path.is_file():
         raise FileNotFoundError(raw_path)
     if raw_path.stat().st_size == 0:
         raise ValueError("empty_binance_raw_file")
-    if raw_path.suffix == ".jsonl":
-        yielded = False
-        with raw_path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                yielded = True
-                yield _validate_envelope(
-                    _loads_json(line, raw_path, line_number=line_number)
-                )
-        if not yielded:
-            raise ValueError("empty_binance_raw_file")
-        return
-    raise ValueError("unsupported_binance_raw_file_extension")
+    if raw_path.suffix != ".jsonl":
+        raise ValueError("unsupported_binance_raw_file_extension")
+    if type(batch_size) is not int or batch_size <= 0:
+        raise ValueError("invalid_binance_raw_row_batch_size")
+    yielded = False
+    line_number = 0
+    scan_bytes = min(
+        _SCAN_BUFFER_BYTES,
+        max(1, resource_policy.remaining_memory_bytes),
+    )
+    with resource_policy.reserve("source.binance.scan", scan_bytes):
+        buffer = bytearray(scan_bytes)
+        with raw_path.open("rb") as handle:
+            while True:
+                batch: list[dict[str, Any]] = []
+                with ExitStack() as retained:
+                    records_in_batch = 0
+                    while records_in_batch < batch_size:
+                        record_length = _next_record_length(handle, buffer)
+                        if record_length == 0:
+                            break
+                        records_in_batch += 1
+                        record_bound = _json_record_working_set_bytes(record_length)
+                        try:
+                            retained.enter_context(
+                                resource_policy.reserve(
+                                    "source.binance.record",
+                                    record_bound,
+                                )
+                            )
+                        except MemoryError:
+                            if batch:
+                                yield tuple(batch)
+                                batch = []
+                                break
+                            raise
+                        raw = handle.read(record_length)
+                        line_number += 1
+                        if raw.isspace():
+                            continue
+                        yielded = True
+                        text = raw.decode("utf-8", errors="strict")
+                        batch.append(
+                            _validate_envelope(
+                                _loads_json(
+                                    text,
+                                    raw_path,
+                                    line_number=line_number,
+                                )
+                            )
+                        )
+                    if batch:
+                        yield tuple(batch)
+                    if record_length == 0:
+                        break
+    if not yielded:
+        raise ValueError("empty_binance_raw_file")
+
+
+def _next_record_length(handle: Any, buffer: bytearray) -> int:
+    start = handle.tell()
+    length = 0
+    while True:
+        count = handle.readinto(buffer)
+        if count == 0:
+            handle.seek(start)
+            return length
+        newline = buffer.find(b"\n", 0, count)
+        if newline >= 0:
+            length += newline + 1
+            handle.seek(start)
+            return length
+        length += count
+
+
+def _json_record_working_set_bytes(record_bytes: int) -> int:
+    unit = max(
+        sys.getsizeof({}),
+        sys.getsizeof([]),
+        sys.getsizeof(0),
+        sys.getsizeof(""),
+    )
+    raw_and_text = 5 * record_bytes + sys.getsizeof(b"") + sys.getsizeof("")
+    decoded_and_normalized = (record_bytes + 1) * unit
+    return raw_and_text + decoded_and_normalized
 
 
 def _raw_kind_files(root: Path, raw_kind: str) -> tuple[Path, ...]:
@@ -213,7 +321,7 @@ def _validate_depth_payload(payload: dict[str, Any]) -> None:
         side="ask",
         error="invalid_binance_depth_ask",
     )
-    if bids and asks and bids[0][0] >= asks[0][0]:
+    if bids is not None and asks is not None and bids >= asks:
         raise ValueError("crossed_binance_depth_book")
 
 
@@ -222,8 +330,27 @@ def _validate_depth_side(
     *,
     side: str,
     error: str,
-) -> list[tuple[float, float]]:
-    return depth_side_levels(raw_levels, side=side, error=error)
+) -> float | None:
+    if raw_levels is None:
+        return None
+    if side not in {"bid", "ask"} or not isinstance(raw_levels, list | tuple):
+        raise ValueError(error)
+    first_price: float | None = None
+    previous_price: float | None = None
+    for raw_level in raw_levels:
+        if not isinstance(raw_level, list | tuple) or len(raw_level) != 2:
+            raise ValueError(error)
+        price = strict_positive_float(raw_level[0], error=error)
+        strict_non_negative_float(raw_level[1], error=error)
+        if previous_price is not None and (
+            (side == "bid" and price >= previous_price)
+            or (side == "ask" and price <= previous_price)
+        ):
+            raise ValueError(error)
+        if first_price is None:
+            first_price = price
+        previous_price = price
+    return first_price
 
 
 __all__ = ["DATA_ID_BY_RAW_KIND", "dataset_files_by_id", "iter_raw_envelopes"]

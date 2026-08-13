@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from contextlib import ExitStack
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -20,9 +22,11 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.workflows import (
     validate_schema_inventory_summary,
 )
+from quant_research_platform.interfaces import private_cli
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.workflows.diagnostics import schema_inventory
@@ -209,7 +213,7 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
     )
     captures = {"count": 0}
     observed_policies: list[RuntimeResourcePolicy] = []
-    observed_retained_bytes: list[int] = []
+    observed_reserved_bytes: list[int] = []
 
     def capture_policy() -> RuntimeResourcePolicy:
         captures["count"] += 1
@@ -221,12 +225,15 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
         *,
         important_null_count_columns: frozenset[str],
         resource_policy: RuntimeResourcePolicy,
-        retained_payload_bytes: int,
+        retained_items,
     ) -> dict[str, object]:
         assert important_null_count_columns == frozenset()
         assert active_runtime_resource_policy() is resource_policy
         observed_policies.append(resource_policy)
-        observed_retained_bytes.append(retained_payload_bytes)
+        observed_reserved_bytes.append(resource_policy.reserved_memory_bytes)
+        retained_items.enter_context(
+            resource_policy.reserve("schema.inventory.items", 64)
+        )
         return {"logical_relative_root": artifact_root.name}
 
     monkeypatch.setattr(
@@ -245,12 +252,38 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
 
     assert captures["count"] == 1
     assert observed_policies == [policy, policy]
-    assert observed_retained_bytes[0] == 0
-    assert observed_retained_bytes[1] > 0
+    assert observed_reserved_bytes[0] == 0
+    assert observed_reserved_bytes[1] > 0
     assert [item["logical_relative_root"] for item in payload["datasets"]] == [
         "dataset-a",
         "dataset-b",
     ]
+
+
+def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
+    observed: list[RuntimeResourcePolicy] = []
+    monkeypatch.setattr(
+        private_cli.RuntimeResourcePolicy,
+        "capture",
+        staticmethod(lambda: policy),
+    )
+    monkeypatch.setattr(
+        private_cli,
+        "build_schema_inventory_payload",
+        lambda _root: {"schema_id": "qrp-schema-inventory", "datasets": []},
+    )
+
+    def write(_path: Path, _payload: object) -> None:
+        observed.append(active_runtime_resource_policy())
+
+    monkeypatch.setattr(private_cli, "atomic_write_json", write)
+    private_cli.schema_inventory(tmp_path, tmp_path / "inventory.json")
+
+    assert observed == [policy]
 
 
 def test_schema_inventory_rejects_accumulated_items_over_budget(
@@ -270,20 +303,71 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
         "_iter_dataset_artifact_roots",
         lambda _root: (tmp_path / "dataset-a", tmp_path / "dataset-b"),
     )
-    monkeypatch.setattr(
-        schema_inventory,
-        "_inventory_item",
-        lambda _project_root, artifact_root, **_kwargs: {
+    def inventory_item(_project_root, artifact_root, **kwargs):  # noqa: ANN001, ANN202
+        kwargs["retained_items"].enter_context(
+            kwargs["resource_policy"].reserve("schema.inventory.items", 500)
+        )
+        return {
             "logical_relative_root": artifact_root.name,
             "payload": "x" * 500,
-        },
-    )
+        }
+
+    monkeypatch.setattr(schema_inventory, "_inventory_item", inventory_item)
 
     with pytest.raises(
         ValueError,
         match="schema_inventory_payload_exceeds_task_memory_budget",
     ):
         schema_inventory.build_schema_inventory_payload(tmp_path)
+
+
+def test_schema_inventory_item_state_is_admitted_before_aggregation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1024,
+    )
+    artifact_root = (
+        tmp_path / "data" / "processed" / "a_share" / "market_bars" / "demo"
+    )
+    inspection = SimpleNamespace(
+        spec={"primary_key": ["timestamp"], "partition_columns": []},
+        columns=("timestamp", "value"),
+        manifest={"duplicate_primary_key_count": 0},
+        file_count=1,
+        row_count=1,
+        date_min="2026-01-01",
+        date_max="2026-01-01",
+    )
+    monkeypatch.setattr(
+        schema_inventory,
+        "inspect_dataset_session",
+        lambda *_args, **_kwargs: inspection,
+    )
+    monkeypatch.setattr(
+        schema_inventory,
+        "_aggregate_dataset_stats",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("inventory aggregation entered before state admission")
+        ),
+    )
+    session = SimpleNamespace(verify=lambda: None)
+
+    with runtime_resource_policy_scope(policy), ExitStack() as retained:
+        with pytest.raises(
+            ValueError,
+            match="schema_inventory_payload_exceeds_task_memory_budget",
+        ):
+            schema_inventory._inventory_item_from_session(
+                tmp_path,
+                artifact_root,
+                session=session,
+                important_null_count_columns=frozenset(),
+                resource_policy=policy,
+                retained_items=retained,
+            )
 
 
 def test_schema_inventory_rejects_replacement_between_open_and_stats(

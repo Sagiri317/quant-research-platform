@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+import quant_research_platform.research._memory as research_memory
 import quant_research_platform.research.datasets.assembler as assembler_module
 import quant_research_platform.research.datasets.io as research_dataset_io
 import quant_research_platform.research.evaluations.runner as evaluation_runner_module
@@ -85,6 +86,49 @@ from tests.helpers.runtime_resources import (
 from tests.research.prediction_output_helpers import (
     write_prediction_output_and_read,
 )
+
+
+def test_research_spill_materialization_is_exact_and_pre_admitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")], "value": [1.0]})
+    second = pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-02")], "value": [2.0]})
+    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
+
+    with runtime_resource_policy_scope(policy):
+        with research_memory._ResearchFrameSpill(
+            "research.test.exact",
+            resource_policy=policy,
+        ) as spill:
+            spill.append(first)
+            spill.append(second)
+            result = spill.materialize()
+    pd.testing.assert_frame_equal(
+        result,
+        pd.concat([first, second], ignore_index=True),
+    )
+
+    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
+    entered: list[bool] = []
+
+    def reject_read(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        entered.append(True)
+        raise AssertionError("read_all entered before full-overlap admission")
+
+    monkeypatch.setattr(research_memory.pa.ipc, "open_file", reject_read)
+    with runtime_resource_policy_scope(policy):
+        with research_memory._ResearchFrameSpill(
+            "research.test.reject",
+            resource_policy=policy,
+        ) as spill:
+            spill.append(first)
+            with policy.reserve("outer", policy.remaining_memory_bytes):
+                with pytest.raises(
+                    MemoryError,
+                    match="runtime_memory_budget_exceeded",
+                ):
+                    spill.materialize()
+    assert entered == []
 
 
 def test_research_dataset_chunk_wrapper_captures_outer_at_creation(
@@ -330,7 +374,7 @@ def test_research_time_key_scan_uses_payload_target(
     )
 
     assert len(result) == 20
-    assert observed_targets == [policy.payload_target_bytes]
+    assert observed_targets == [policy.remaining_memory_bytes]
 
 
 def test_research_time_key_scan_preserves_single_timestamp(
@@ -607,7 +651,7 @@ def test_research_processed_input_uses_task_budget_for_materialization(
 
     assert observed == {
         "context": context,
-        "target_chunk_bytes": policy.payload_target_bytes,
+        "target_chunk_bytes": policy.remaining_memory_bytes,
         "materialized_budget_bytes": policy.task_memory_budget_bytes - 123,
     }
 

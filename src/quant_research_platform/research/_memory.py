@@ -186,64 +186,6 @@ class _ResearchFrameSpill:
             raise error
 
 
-def _iter_time_sized_frames_with_policy(
-    frame: pd.DataFrame,
-    *,
-    timestamp_column: str,
-    resource_policy: RuntimeResourcePolicy,
-) -> Iterator[pd.DataFrame]:
-
-    if timestamp_column not in frame.columns:
-        raise ValueError("missing_time_chunk_timestamp_column")
-    if frame.empty:
-        yield frame
-        return
-
-    policy = resource_policy
-    operation_bytes = _time_chunk_operation_bytes(
-        frame,
-        timestamp_column=timestamp_column,
-    )
-    if policy.reserved_memory_bytes + operation_bytes > policy.task_memory_budget_bytes:
-        raise ValueError("research_indivisible_time_unit_exceeds_task_memory_budget")
-    with ExitStack() as working:
-        working.enter_context(
-            policy.reserve("research.time.timestamps", operation_bytes)
-        )
-        timestamps = strict_timestamp_series(
-            frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
-        )
-        ordered = frame
-        if not timestamps.is_monotonic_increasing:
-            sort_bytes = _time_sort_working_set_bytes(frame)
-            if (
-                policy.reserved_memory_bytes + sort_bytes
-                > policy.task_memory_budget_bytes
-            ):
-                raise ValueError(
-                    "research_indivisible_time_unit_exceeds_task_memory_budget"
-                )
-            working.enter_context(policy.reserve("research.time.sort", sort_bytes))
-            ordered = frame.sort_values(
-                timestamp_column,
-                kind="mergesort",
-                ignore_index=True,
-            )
-            if _frame_bytes(ordered) > sort_bytes:
-                raise ValueError(
-                    "research_indivisible_time_unit_exceeds_task_memory_budget"
-                )
-            timestamps = strict_timestamp_series(
-                ordered[timestamp_column],
-                error="invalid_time_chunk_timestamp_values",
-            )
-        yield from _iter_contiguous_session_frames(
-            ordered,
-            timestamps=timestamps,
-            resource_policy=policy,
-        )
-
-
 def _iter_contiguous_session_frames(
     frame: pd.DataFrame,
     *,

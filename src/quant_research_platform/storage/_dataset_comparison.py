@@ -323,7 +323,7 @@ def _index_dataset_rows(
             context,
             columns=comparison_columns,
             target_chunk_bytes=min(
-                resource_policy.payload_target_bytes,
+                resource_policy.remaining_memory_bytes,
                 reader_headroom,
             ),
             operation_headroom_bytes=reader_headroom,

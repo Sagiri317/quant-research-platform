@@ -9,6 +9,10 @@ import typer
 
 from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.profiles.research import research_profile
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.workflows.diagnostics.schema_inventory import (
     build_schema_inventory_payload,
@@ -62,11 +66,13 @@ def schema_inventory(
         typer.echo("output_already_exists", err=True)
         raise typer.Exit(code=2)
     try:
-        inventory = build_schema_inventory_payload(project_root)
+        policy = RuntimeResourcePolicy.capture()
+        with runtime_resource_policy_scope(policy):
+            inventory = build_schema_inventory_payload(project_root)
+            atomic_write_json(output, inventory)
     except Exception as exc:
         typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
-    atomic_write_json(output, inventory)
 
 
 @local_verification_app.command("run")

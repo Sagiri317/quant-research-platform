@@ -122,7 +122,7 @@ def _iter_label_chunks(
     if panel_session.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        chunk_target_bytes = resource_policy.payload_target_bytes
+        chunk_target_bytes = resource_policy.remaining_memory_bytes
         buffer = pd.DataFrame()
         active_market_asset: tuple[str, str] | None = None
         order_state = validation.OrderedDependencyState()
@@ -180,7 +180,7 @@ def _iter_label_chunks(
                                 if not finalized.empty:
                                     materialization_resources.require_frame_within_budget(
                                         finalized,
-                                        target_bytes=resource_policy.payload_target_bytes,
+                                        target_bytes=resource_policy.remaining_memory_bytes,
                                         error=(
                                             "crypto_indivisible_reducer_unit_exceeds_payload_target"
                                         ),
@@ -209,7 +209,7 @@ def _iter_label_chunks(
                                 ]
                                 materialization_resources.require_frame_within_budget(
                                     output,
-                                    target_bytes=resource_policy.payload_target_bytes,
+                                    target_bytes=resource_policy.remaining_memory_bytes,
                                     error=(
                                         "crypto_indivisible_reducer_unit_exceeds_payload_target"
                                     ),
@@ -218,7 +218,7 @@ def _iter_label_chunks(
                                 buffer = buffer.loc[~emit_mask].copy()
                             if (
                                 pandas_frame_payload_bytes(buffer)
-                                > resource_policy.payload_target_bytes
+                                > resource_policy.remaining_memory_bytes
                             ):
                                 raise ValueError(
                                     "crypto_indivisible_reducer_unit_exceeds_payload_target"
@@ -228,7 +228,7 @@ def _iter_label_chunks(
                 if not finalized.empty:
                     materialization_resources.require_frame_within_budget(
                         finalized,
-                        target_bytes=resource_policy.payload_target_bytes,
+                        target_bytes=resource_policy.remaining_memory_bytes,
                         error="crypto_indivisible_reducer_unit_exceeds_payload_target",
                     )
                     yield finalized

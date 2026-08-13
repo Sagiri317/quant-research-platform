@@ -9,6 +9,7 @@ from quant_research_platform.workflows.local_verification import run_local_verif
 from quant_research_platform.workflows.local_verification_layout import (
     LocalVerificationLayout,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.workflows.local_verification_fixtures import (
     fake_evaluation_result,
     fake_portfolio_result,
@@ -293,6 +294,70 @@ def test_local_verification_replace_failure_preserves_old_good(
     assert (run_root / "new-good.txt").read_text(encoding="utf-8") == "new-good\n"
     assert tuple(path.name for path in run_root.parent.iterdir()) == ("old_good",)
 
+
+def test_final_rss_rejection_rolls_back_published_replacement(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "rss_old_good")
+    module._prepare_run_root(
+        run_root,
+        run_id="rss_old_good",
+        repo_root=run_root.parents[1],
+    )
+    old_run_json = (run_root / "run.json").read_bytes()
+    marker = run_root / "old-good.txt"
+    marker.write_text("old-good\n", encoding="utf-8")
+    policy = capture_test_policy(
+        available_memory_bytes=1024,
+        rss_bytes=100,
+        explicit_cap_bytes=600,
+    )
+    measurement = policy._measurement  # noqa: SLF001
+    original_payload = measurement._payload  # type: ignore[attr-defined]  # noqa: SLF001
+
+    def failed_evidence() -> dict[str, int | float | str]:
+        payload = original_payload()
+        payload["sampled_peak_rss_bytes"] = 701
+        payload["peak_incremental_rss_bytes"] = 601
+        payload["status"] = "FAIL"
+        return payload
+
+    measurement.evidence = failed_evidence  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        module.RuntimeResourcePolicy,
+        "capture",
+        staticmethod(lambda **_kwargs: policy),
+    )
+
+    def replacement(**kwargs):
+        candidate = kwargs["run_root"]
+        (candidate / "new-good.txt").write_text("new-good\n", encoding="utf-8")
+        return module.LocalVerificationRunResult(
+            status="PASS",
+            run_id="rss_old_good",
+            run_root=candidate.name,
+            summary={},
+        )
+
+    monkeypatch.setattr(module, "_run_local_verification_with_policy", replacement)
+    config = make_local_verification_config(
+        run_root=run_root,
+        run_id="rss_old_good",
+        start_date="2014-01-01",
+        end_date="2014-12-31",
+        replace_output=True,
+        profile=profile_with_empty_prediction_and_portfolio_builders(),
+    )
+
+    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
+        run_local_verification(config)
+
+    assert (run_root / "run.json").read_bytes() == old_run_json
+    assert marker.read_text(encoding="utf-8") == "old-good\n"
+    assert tuple(path.name for path in run_root.parent.iterdir()) == (
+        "rss_old_good",
+    )
 
 def test_local_verification_skips_empty_prediction_and_portfolio_catalogs(
     tmp_path,

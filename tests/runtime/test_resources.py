@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from decimal import Decimal
 from fractions import Fraction
+from pathlib import Path
 
 import pytest
 
@@ -44,8 +49,9 @@ def test_runtime_resource_policy_captures_one_shot_budget_inputs(
         "captured_available_memory_bytes": 10 * GIB,
         "rss0_bytes": 512 * MIB,
         "task_memory_budget_bytes": 2 * GIB,
-        "payload_target_bytes": 256 * MIB,
     }
+    assert not hasattr(policy, "payload_target_bytes")
+    assert policy.remaining_memory_bytes == 2 * GIB
 
 
 def test_runtime_resource_policy_rejects_measurement_overrides(
@@ -141,10 +147,138 @@ def test_runtime_resource_policy_uses_one_shared_reservation_ledger() -> None:
     with runtime_resource_policy_scope(policy):
         with policy.reserve("storage", 400):
             assert policy.reserved_memory_bytes == 400
+            assert policy.remaining_memory_bytes == 200
             with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
                 with policy.reserve("research", 201):
                     pass
         assert policy.reserved_memory_bytes == 0
+        assert policy.remaining_memory_bytes == 600
+
+
+def test_root_scope_records_one_operation_peak_and_fails_over_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Measurement:
+        error = None
+        state = "READY"
+
+        def start(self) -> None:
+            self.state = "ACTIVE"
+
+        def stop(self) -> None:
+            self.state = "RETIRED"
+
+        def evidence(self) -> dict[str, int | float | str]:
+            return {
+                "rss0_bytes": 100,
+                "hard_budget_bytes": 600,
+                "sampled_peak_rss_bytes": 701,
+                "peak_incremental_rss_bytes": 601,
+                "sample_count": 2,
+                "max_sample_interval_ms": 1.0,
+                "cadence_status": "PASS",
+                "status": "FAIL",
+            }
+
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
+    monkeypatch.setattr(
+        resources,
+        "_operation_rss_measurement",
+        lambda *_args: Measurement(),
+    )
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+
+    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
+        with runtime_resource_policy_scope(policy):
+            with runtime_resource_policy_scope(policy):
+                pass
+
+    evidence = policy.memory_evidence()
+    assert evidence["rss0_bytes"] == 100
+    assert evidence["hard_budget_bytes"] == 600
+    assert evidence["sampled_peak_rss_bytes"] == 701
+    assert evidence["peak_incremental_rss_bytes"] == 601
+    assert evidence["sample_count"] >= 2
+    assert evidence["cadence_status"] == "PASS"
+    assert evidence["status"] == "FAIL"
+
+
+def test_windows_hard_rss_backstop_sets_and_restores_exact_limit() -> None:
+    import ctypes
+    import os
+
+    if os.name != "nt":
+        pytest.skip("Windows working-set hard backstop")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.GetProcessWorkingSetSizeEx.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_ulong),
+    )
+    kernel32.GetProcessWorkingSetSizeEx.restype = ctypes.c_int
+
+    def limits() -> tuple[int, int, int]:
+        minimum = ctypes.c_size_t()
+        maximum = ctypes.c_size_t()
+        flags = ctypes.c_ulong()
+        assert kernel32.GetProcessWorkingSetSizeEx(
+            kernel32.GetCurrentProcess(),
+            ctypes.byref(minimum),
+            ctypes.byref(maximum),
+            ctypes.byref(flags),
+        )
+        return minimum.value, maximum.value, flags.value
+
+    before = limits()
+    hard_limit = resources._process_rss_bytes() + 64 * MIB
+    original = resources._set_process_working_set_limit(hard_limit)
+    try:
+        active = limits()
+        assert original == before
+        assert active[1] == hard_limit
+        assert active[2] & 0x00000004
+        assert not active[2] & 0x00000008
+    finally:
+        resources._restore_process_working_set_limit(original)
+    assert limits() == before
+
+
+def test_windows_hard_rss_backstop_keeps_opaque_touch_within_budget() -> None:
+    if os.name != "nt":
+        pytest.skip("Windows working-set hard backstop")
+    code = """
+import json
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
+budget = 64 * 1024 * 1024
+policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=budget)
+with runtime_resource_policy_scope(policy):
+    opaque = bytearray(80 * 1024 * 1024)
+    for offset in range(0, len(opaque), 4096):
+        opaque[offset] = 1
+print(json.dumps(policy.memory_evidence()))
+"""
+
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+    completed = subprocess.run(
+        (sys.executable, "-c", code),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+    evidence = json.loads(completed.stdout)
+
+    assert evidence["status"] == "PASS"
+    assert evidence["peak_incremental_rss_bytes"] <= evidence["hard_budget_bytes"]
+    assert evidence["max_sample_interval_ms"] <= 20
 
 
 def test_reservation_release_preserves_active_primary() -> None:

@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.runtime.resources import current_runtime_resource_policy
 from quant_research_platform.sources.binance import interim
 from quant_research_platform.sources.binance.interim import materialize_interim_data
 from quant_research_platform.storage.datasets import read_dataset
@@ -63,6 +64,23 @@ def test_binance_interim_materializer_writes_source_datasets(tmp_path: Path) -> 
     assert depth["timestamp"].nunique() == 1
 
 
+def test_binance_file_discovery_occurs_inside_one_root_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = []
+
+    def discover(_root: Path):
+        observed.append(current_runtime_resource_policy())
+        return {}
+
+    monkeypatch.setattr(interim, "dataset_files_by_id", discover)
+    result = materialize_interim_data(layout=StorageLayout(project_root=tmp_path))
+
+    assert len(observed) == 1 and observed[0] is not None
+    assert not result.artifact_roots
+
+
 def test_binance_interim_materializer_writes_multiple_batches(
     tmp_path: Path,
     monkeypatch,
@@ -77,7 +95,10 @@ def test_binance_interim_materializer_writes_multiple_batches(
 
     def record_write_dataset(dataset_root, data, *, spec, instance_metadata=None):
         chunks = tuple(data)
-        chunk_lengths.extend(len(chunk) for chunk in chunks)
+        chunk_lengths.extend(
+            len(chunk.frame if isinstance(chunk, interim.DatasetWriteChunk) else chunk)
+            for chunk in chunks
+        )
         from quant_research_platform.storage.datasets import write_dataset
 
         return write_dataset(

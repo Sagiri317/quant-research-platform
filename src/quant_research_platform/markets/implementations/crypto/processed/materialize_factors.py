@@ -117,7 +117,7 @@ def _iter_factor_chunks(
     if panel_session.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        chunk_target_bytes = resource_policy.payload_target_bytes
+        chunk_target_bytes = resource_policy.remaining_memory_bytes
         active_key: tuple[str, str] | None = None
         active_carry: pd.DataFrame | None = None
         order_state = validation.OrderedDependencyState()
@@ -186,7 +186,7 @@ def _iter_factor_chunks(
                             )
                             if (
                                 pandas_frame_payload_bytes(active_carry)
-                                > resource_policy.payload_target_bytes
+                                > resource_policy.remaining_memory_bytes
                             ):
                                 raise ValueError(
                                     "crypto_indivisible_reducer_unit_exceeds_payload_target"
@@ -195,7 +195,7 @@ def _iter_factor_chunks(
                                 result = output.loc[:, spec.required_columns]
                                 materialization_resources.require_frame_within_budget(
                                     result,
-                                    target_bytes=resource_policy.payload_target_bytes,
+                                    target_bytes=resource_policy.remaining_memory_bytes,
                                     error=(
                                         "crypto_indivisible_reducer_unit_exceeds_payload_target"
                                     ),

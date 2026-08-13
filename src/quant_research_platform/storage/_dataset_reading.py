@@ -208,6 +208,8 @@ def read_dataset(
 ) -> pd.DataFrame | Iterator[pd.DataFrame]:
     if mode is DatasetReadMode.CHUNKED:
         captured_policy = current_runtime_resource_policy()
+        if resource_policy is None and captured_policy is not None:
+            raise RuntimeError("runtime_resource_policy_competing_root")
         bound_policy = bind_runtime_resource_policy(resource_policy)
 
         def activate() -> Iterator[pd.DataFrame]:
@@ -223,7 +225,7 @@ def read_dataset(
                         yield from iter_dataset_chunks(
                             context,
                             target_chunk_bytes=(
-                                context.resource_policy.payload_target_bytes
+                                context.resource_policy.remaining_memory_bytes
                             ),
                         )
                 return
@@ -236,7 +238,7 @@ def read_dataset(
             ) as context:
                 yield from iter_dataset_chunks(
                     context,
-                    target_chunk_bytes=context.resource_policy.payload_target_bytes,
+                    target_chunk_bytes=context.resource_policy.remaining_memory_bytes,
                 )
 
         return activate()
@@ -251,7 +253,7 @@ def read_dataset(
     ) as context:
         return materialize_dataset_session(
             context,
-            target_chunk_bytes=context.resource_policy.payload_target_bytes,
+            target_chunk_bytes=context.resource_policy.remaining_memory_bytes,
             materialized_budget_bytes=context.resource_policy.task_memory_budget_bytes,
         )
 

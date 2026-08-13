@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 
 import pandas as pd
 
 from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
 
@@ -50,6 +54,30 @@ class _TradeBarState:
 
 
 @dataclass(slots=True)
+class _QuoteSnapshot:
+    asset_id: str
+    quote_timestamp: pd.Timestamp
+    best_bid: object = pd.NA
+    best_ask: object = pd.NA
+    bid_quantity: object = pd.NA
+    ask_quantity: object = pd.NA
+    bid_depth: object = pd.NA
+    ask_depth: object = pd.NA
+    mid_price: object = pd.NA
+    quote_valid: bool = False
+
+
+@dataclass(slots=True)
+class _DepthSideState:
+    first_level: int
+    best_price: float
+    best_quantity: float
+    previous_price: float
+    depth: float
+    next_level: int
+
+
+@dataclass(slots=True)
 class AggregateTradeContinuityState:
     """Retain ordered aggregate-trade identity across physical bar chunks."""
 
@@ -73,6 +101,19 @@ class AggregateTradeReducer:
         required = ("asset_id", "timestamp")
         if any(column not in bars for column in required):
             raise ValueError("invalid_crypto_trade_bar_targets")
+        self._policy = current_runtime_resource_policy()
+        self._reservations = ExitStack()
+        if self._policy is not None:
+            self._reservations.enter_context(
+                self._policy.reserve(
+                    "crypto.trade.reducer_state",
+                    _target_state_upper_bound(
+                        len(bars),
+                        len(required),
+                        len(_TRADE_AGGREGATE_COLUMNS),
+                    ),
+                )
+            )
         self._target_keys = frozenset(
             (str(asset_id), pd.Timestamp(timestamp))
             for asset_id, timestamp in bars.loc[:, list(required)].itertuples(
@@ -92,7 +133,19 @@ class AggregateTradeReducer:
     def add_chunk(self, trades: pd.DataFrame) -> None:
         if self._finished:
             raise RuntimeError("crypto_trade_reducer_already_finished")
-        normalized = self._normalize_chunk(trades)
+        try:
+            with _next_frame_reservation(
+                self._policy,
+                trades,
+                owner="crypto.trade.normalize",
+            ):
+                normalized = self._normalize_chunk(trades)
+                self._add_normalized(normalized)
+        except BaseException:
+            self.close()
+            raise
+
+    def _add_normalized(self, normalized: pd.DataFrame) -> None:
         columns = (
             "source_asset_id",
             "asset_id",
@@ -162,28 +215,34 @@ class AggregateTradeReducer:
 
     def finish(self) -> pd.DataFrame:
         self._finished = True
-        rows: list[dict[str, object]] = []
-        for asset_id, timestamp in sorted(self._states):
-            state = self._states[(asset_id, timestamp)]
-            rows.append(
-                {
-                    "asset_id": asset_id,
-                    "timestamp": timestamp,
-                    "signed_volume": state.signed_quantity_sum,
-                    "quantity_sum": state.quantity_sum,
-                    "covered_trade_count": state.covered_trade_count,
-                    "first_trade_id": state.first_trade_id,
-                    "last_trade_id": state.last_trade_id,
-                    "first_aggregate_trade_id": state.first_aggregate_trade_id,
-                    "last_aggregate_trade_id": state.last_aggregate_trade_id,
-                    "trade_flow_observed": True,
-                }
-            )
+        keys = sorted(self._states)
         return _payload_checked_output_frame(
-            rows,
+            {
+                "asset_id": [key[0] for key in keys],
+                "timestamp": [key[1] for key in keys],
+                "signed_volume": [
+                    self._states[key].signed_quantity_sum for key in keys
+                ],
+                "quantity_sum": [self._states[key].quantity_sum for key in keys],
+                "covered_trade_count": [
+                    self._states[key].covered_trade_count for key in keys
+                ],
+                "first_trade_id": [self._states[key].first_trade_id for key in keys],
+                "last_trade_id": [self._states[key].last_trade_id for key in keys],
+                "first_aggregate_trade_id": [
+                    self._states[key].first_aggregate_trade_id for key in keys
+                ],
+                "last_aggregate_trade_id": [
+                    self._states[key].last_aggregate_trade_id for key in keys
+                ],
+                "trade_flow_observed": [True] * len(keys),
+            },
             columns=_TRADE_AGGREGATE_COLUMNS,
             payload_target_bytes=self._payload_target_bytes,
         )
+
+    def close(self) -> None:
+        self._reservations.close()
 
 
 class DepthSnapshotReducer:
@@ -199,6 +258,19 @@ class DepthSnapshotReducer:
         required = ("asset_id", "close_time")
         if any(column not in bars for column in required):
             raise ValueError("invalid_crypto_depth_bar_targets")
+        self._policy = current_runtime_resource_policy()
+        self._reservations = ExitStack()
+        if self._policy is not None:
+            self._reservations.enter_context(
+                self._policy.reserve(
+                    "crypto.depth.reducer_state",
+                    _target_state_upper_bound(
+                        len(bars),
+                        len(required),
+                        len(_QUOTE_COLUMNS),
+                    ),
+                )
+            )
         ordered_bars = bars.loc[:, list(required)].sort_values(
             ["asset_id", "close_time"],
             kind="mergesort",
@@ -221,22 +293,30 @@ class DepthSnapshotReducer:
         self._normalize_chunk = normalize_chunk
         self._last_order_key: tuple[str, pd.Timestamp, str, int] | None = None
         self._current_key: tuple[str, str, pd.Timestamp] | None = None
-        self._current_levels: dict[
-            str,
-            dict[int, tuple[float, float]],
-        ] = {}
-        self._latest_snapshot: dict[str, object] | None = None
-        self._latest_snapshot_is_candidate = False
+        self._current_sides: dict[str, _DepthSideState] = {}
+        self._latest_snapshot: _QuoteSnapshot | None = None
         self._candidates: dict[
             tuple[str, pd.Timestamp],
-            dict[str, object],
+            _QuoteSnapshot,
         ] = {}
         self._finished = False
 
     def add_chunk(self, depth: pd.DataFrame) -> None:
         if self._finished:
             raise RuntimeError("crypto_depth_reducer_already_finished")
-        normalized = self._normalize_chunk(depth)
+        try:
+            with _next_frame_reservation(
+                self._policy,
+                depth,
+                owner="crypto.depth.normalize",
+            ):
+                normalized = self._normalize_chunk(depth)
+                self._add_normalized(normalized)
+        except BaseException:
+            self.close()
+            raise
+
+    def _add_normalized(self, normalized: pd.DataFrame) -> None:
         for row in normalized.loc[
             :,
             [
@@ -264,20 +344,33 @@ class DepthSnapshotReducer:
                 if asset_id != previous_asset_id:
                     self._flush_remaining_targets(previous_asset_id)
                     self._latest_snapshot = None
-                    self._latest_snapshot_is_candidate = False
                 else:
                     self._flush_targets_before(asset_id, quote_timestamp)
             if self._current_key is None:
                 self._current_key = snapshot_key
-                self._current_levels = {}
-            levels = self._current_levels.get(side)
-            if levels is None:
-                levels = {}
-                self._current_levels[side] = levels
-            if level in levels:
-                raise ValueError("duplicate_crypto_depth_level")
-            level_value = (float(row[5]), float(row[6]))
-            levels[level] = level_value
+                self._current_sides = {}
+            price = float(row[5])
+            quantity = float(row[6])
+            state = self._current_sides.get(side)
+            if state is None:
+                self._current_sides[side] = _DepthSideState(
+                    first_level=level,
+                    best_price=price,
+                    best_quantity=quantity,
+                    previous_price=price,
+                    depth=quantity,
+                    next_level=level + 1,
+                )
+            else:
+                if level != state.next_level:
+                    raise ValueError("invalid_crypto_depth_level_sequence")
+                if side == "bid" and price >= state.previous_price:
+                    raise ValueError("invalid_crypto_bid_price_order")
+                if side == "ask" and price <= state.previous_price:
+                    raise ValueError("invalid_crypto_ask_price_order")
+                state.previous_price = price
+                state.depth += quantity
+                state.next_level += 1
             self._last_order_key = order_key
 
     def finish(self) -> pd.DataFrame:
@@ -287,27 +380,48 @@ class DepthSnapshotReducer:
                 self._finalize_current_snapshot()
                 self._flush_remaining_targets(active_asset_id)
             self._finished = True
-        rows: list[dict[str, object]] = []
-        for key in sorted(self._candidates):
-            rows.append(self._candidates[key])
+        snapshots = [self._candidates[key] for key in sorted(self._candidates)]
         return _payload_checked_output_frame(
-            rows,
+            {
+                column: [getattr(snapshot, column) for snapshot in snapshots]
+                for column in _QUOTE_COLUMNS
+            },
             columns=_QUOTE_COLUMNS,
             payload_target_bytes=self._payload_target_bytes,
         )
+
+    def close(self) -> None:
+        self._reservations.close()
 
     def _finalize_current_snapshot(self) -> None:
         if self._current_key is None:
             return
         _, asset_id, quote_timestamp = self._current_key
-        self._latest_snapshot = finalize_depth_snapshot(
-            asset_id,
-            quote_timestamp,
-            self._current_levels,
+        snapshot = _QuoteSnapshot(asset_id, quote_timestamp)
+        for side, state in self._current_sides.items():
+            if state.first_level != 1:
+                raise ValueError("invalid_crypto_depth_level_sequence")
+            setattr(snapshot, f"best_{side}", state.best_price)
+            setattr(snapshot, f"{side}_quantity", state.best_quantity)
+            setattr(snapshot, f"{side}_depth", state.depth)
+        required = ("best_bid", "best_ask", "bid_quantity", "ask_quantity")
+        snapshot.quote_valid = all(
+            pd.notna(getattr(snapshot, column)) for column in required
         )
-        self._latest_snapshot_is_candidate = False
+        if snapshot.quote_valid:
+            snapshot.mid_price = (
+                float(snapshot.best_bid) + float(snapshot.best_ask)
+            ) / 2
+            snapshot.quote_valid = bool(
+                float(snapshot.best_bid) > 0
+                and float(snapshot.best_ask) > 0
+                and float(snapshot.bid_quantity) > 0
+                and float(snapshot.ask_quantity) > 0
+                and float(snapshot.best_bid) < float(snapshot.best_ask)
+            )
+        self._latest_snapshot = snapshot
         self._current_key = None
-        self._current_levels = {}
+        self._current_sides = {}
 
     def _flush_targets_before(
         self,
@@ -332,70 +446,9 @@ class DepthSnapshotReducer:
     def _record_latest_candidate(self, asset_id: str) -> None:
         if self._latest_snapshot is None:
             return
-        quote_timestamp = pd.Timestamp(
-            self._latest_snapshot["quote_timestamp"]
-        )
+        quote_timestamp = self._latest_snapshot.quote_timestamp
         key = (asset_id, quote_timestamp)
-        if key not in self._candidates:
-            self._candidates[key] = self._latest_snapshot
-        else:
-            self._candidates[key] = self._latest_snapshot
-        self._latest_snapshot_is_candidate = True
-
-
-def finalize_depth_snapshot(
-    asset_id: str,
-    quote_timestamp: pd.Timestamp,
-    sides: Mapping[str, Mapping[int, tuple[float, float]]],
-) -> dict[str, object]:
-    row: dict[str, object] = {
-        "asset_id": asset_id,
-        "quote_timestamp": quote_timestamp,
-        "best_bid": pd.NA,
-        "best_ask": pd.NA,
-        "bid_quantity": pd.NA,
-        "ask_quantity": pd.NA,
-        "bid_depth": pd.NA,
-        "ask_depth": pd.NA,
-    }
-    for side, levels in sides.items():
-        ordered_levels = sorted(levels)
-        if any(
-            level != position
-            for position, level in enumerate(ordered_levels, start=1)
-        ):
-            raise ValueError("invalid_crypto_depth_level_sequence")
-        previous_price: float | None = None
-        depth = 0.0
-        for level in ordered_levels:
-            price, quantity = levels[level]
-            if previous_price is not None:
-                if side == "bid" and price >= previous_price:
-                    raise ValueError("invalid_crypto_bid_price_order")
-                if side == "ask" and price <= previous_price:
-                    raise ValueError("invalid_crypto_ask_price_order")
-            previous_price = price
-            depth += quantity
-        best_price, best_quantity = levels[1]
-        row[f"best_{side}"] = best_price
-        row[f"{side}_quantity"] = best_quantity
-        row[f"{side}_depth"] = depth
-    required = ("best_bid", "best_ask", "bid_quantity", "ask_quantity")
-    quote_valid = all(pd.notna(row[column]) for column in required)
-    if quote_valid:
-        row["mid_price"] = (float(row["best_bid"]) + float(row["best_ask"])) / 2
-        quote_valid = bool(
-            float(row["best_bid"]) > 0
-            and float(row["best_ask"]) > 0
-            and float(row["bid_quantity"]) > 0
-            and float(row["ask_quantity"]) > 0
-            and float(row["best_bid"]) < float(row["best_ask"])
-        )
-    else:
-        row["mid_price"] = pd.NA
-    row["quote_valid"] = quote_valid
-    return row
-
+        self._candidates[key] = self._latest_snapshot
 
 def _validated_payload_target(value: int, *, error: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -403,13 +456,49 @@ def _validated_payload_target(value: int, *, error: str) -> int:
     return value
 
 
+def _target_state_upper_bound(
+    row_count: int,
+    key_columns: int,
+    output_columns: int,
+) -> int:
+    pointer = sys.getsizeof(None)
+    key = sys.getsizeof(tuple([None] * key_columns))
+    mapping_entry = 4 * pointer
+    row_state = max(
+        sys.getsizeof(_TradeBarState()),
+        sys.getsizeof(_QuoteSnapshot("", pd.Timestamp(0))),
+        2 * sys.getsizeof(_DepthSideState(1, 0.0, 0.0, 0.0, 0.0, 2)),
+    )
+    return sys.getsizeof({}) + sys.getsizeof(frozenset()) + row_count * (
+        key
+        + mapping_entry
+        + row_state
+        + (key_columns + output_columns) * pointer
+    )
+
+
+def _next_frame_reservation(
+    policy: RuntimeResourcePolicy | None,
+    frame: pd.DataFrame,
+    *,
+    owner: str,
+):
+    if policy is None:
+        return ExitStack()
+    diagnostic_bytes = max(1, len(frame.columns)) * sys.getsizeof(0)
+    with policy.reserve(f"{owner}.measure", diagnostic_bytes):
+        frame_bytes = pandas_frame_payload_bytes(frame)
+    scalar_slots = len(frame) * max(1, len(frame.columns)) * sys.getsizeof(None)
+    return policy.reserve(owner, frame_bytes + scalar_slots)
+
+
 def _payload_checked_output_frame(
-    rows: list[dict[str, object]],
+    data: Mapping[str, list[object]],
     *,
     columns: tuple[str, ...],
     payload_target_bytes: int,
 ) -> pd.DataFrame:
-    frame = pd.DataFrame(rows, columns=list(columns))
+    frame = pd.DataFrame(data, columns=list(columns))
     if pandas_frame_payload_bytes(frame) > payload_target_bytes:
         raise ValueError("crypto_indivisible_reducer_unit_exceeds_payload_target")
     return frame

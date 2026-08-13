@@ -20,11 +20,17 @@ from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.binance import ids
 from quant_research_platform.sources.binance.fields import field_role
 from quant_research_platform.sources.binance.raw_exports import (
+    _iter_raw_envelope_batches,
     dataset_files_by_id,
-    iter_raw_envelopes,
 )
 from quant_research_platform.sources.binance.validation import (
     depth_side_levels,
@@ -40,6 +46,7 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_integer,
     strict_symbol,
 )
+from quant_research_platform.storage._dataset_writing import DatasetWriteChunk
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -119,7 +126,8 @@ def iter_interim_frames(
     row_batch_size: int = RAW_ROW_BATCH_SIZE,
     start_date: str | None = None,
     end_date: str | None = None,
-) -> Iterator[pd.DataFrame]:
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
     _strict_data_ids((data_id,))
     strict_positive_integer(
         row_batch_size,
@@ -127,35 +135,48 @@ def iter_interim_frames(
     )
     if isinstance(input_files, str) or not isinstance(input_files, tuple | list):
         raise ValueError("invalid_binance_raw_input_files")
-    yielded = False
-    empty_schema_frame: pd.DataFrame | None = None
-    last_key: tuple[object, ...] | None = None
-    for input_file in sorted(input_files):
-        for batch in _iter_batches(
-            iter_raw_envelopes(input_file),
-            batch_size=row_batch_size,
-        ):
-            normalized = normalize_raw_envelopes(batch, data_id=data_id)
-            last_key = _validate_normalized_order(
-                normalized,
-                data_id=data_id,
-                previous_key=last_key,
+    policy = resource_policy or active_runtime_resource_policy()
+    with runtime_resource_policy_scope(policy):
+        owner_baseline = policy.reserved_memory_bytes
+        yielded = False
+        empty_schema_frame: pd.DataFrame | None = None
+        last_key: tuple[object, ...] | None = None
+        for input_file in sorted(input_files):
+            for batch in _iter_raw_envelope_batches(
+                input_file,
+                batch_size=row_batch_size,
+                resource_policy=policy,
+            ):
+                normalized = normalize_raw_envelopes(batch, data_id=data_id)
+                last_key = _validate_normalized_order(
+                    normalized,
+                    data_id=data_id,
+                    previous_key=last_key,
+                )
+                empty_schema_frame = normalized.iloc[:0].copy()
+                filtered = _filter_time_window(
+                    normalized,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if not filtered.empty:
+                    yielded = True
+                    retained_bytes = policy.reserved_memory_bytes - owner_baseline
+                    if pandas_frame_payload_bytes(filtered) > retained_bytes:
+                        raise RuntimeError("binance_record_envelope_bound_invalid")
+                    yield DatasetWriteChunk(
+                        filtered,
+                        retained_bytes,
+                    )
+        if input_files and not yielded:
+            empty = (
+                empty_schema_frame
+                if empty_schema_frame is not None
+                else _empty_interim_frame(data_id)
             )
-            empty_schema_frame = normalized.iloc[:0].copy()
-            filtered = _filter_time_window(
-                normalized,
-                start_date=start_date,
-                end_date=end_date,
-            )
-            if not filtered.empty:
-                yielded = True
-                yield filtered
-    if input_files and not yielded:
-        yield (
-            empty_schema_frame
-            if empty_schema_frame is not None
-            else _empty_interim_frame(data_id)
-        )
+            empty_bytes = pandas_frame_payload_bytes(empty)
+            with policy.reserve("source.binance.empty", empty_bytes):
+                yield DatasetWriteChunk(empty, empty_bytes)
 
 
 def normalize_raw_envelopes(
@@ -184,32 +205,38 @@ def materialize_interim_data(
     data_ids: tuple[str, ...] = tuple(sorted(INTERIM_COLUMNS_BY_DATA_ID)),
     row_batch_size: int = RAW_ROW_BATCH_SIZE,
 ) -> BinanceInterimImportResult:
-    catalog = interim_catalog()
-    source_raw_root = raw_root or layout.raw_source_root(ids.SOURCE_ID)
-    files_by_data_id = dataset_files_by_id(source_raw_root)
-    written: dict[str, Path] = {}
-    skipped: list[str] = []
-    requested_data_ids = _strict_data_ids(data_ids)
-    for data_id in requested_data_ids:
-        spec = catalog.get(data_id)
-        input_files = files_by_data_id.get(data_id, ())
-        if not input_files:
-            skipped.append(data_id)
-            continue
-        artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
-        write_dataset(
-            artifact_root,
-            iter_interim_frames(
-                data_id=data_id,
-                input_files=input_files,
-                row_batch_size=row_batch_size,
-                start_date=start_date,
-                end_date=end_date,
-            ),
-            spec=spec,
+    policy = active_runtime_resource_policy()
+    with runtime_resource_policy_scope(policy):
+        catalog = interim_catalog()
+        source_raw_root = raw_root or layout.raw_source_root(ids.SOURCE_ID)
+        files_by_data_id = dataset_files_by_id(source_raw_root)
+        written: dict[str, Path] = {}
+        skipped: list[str] = []
+        requested_data_ids = _strict_data_ids(data_ids)
+        for data_id in requested_data_ids:
+            spec = catalog.get(data_id)
+            input_files = files_by_data_id.get(data_id, ())
+            if not input_files:
+                skipped.append(data_id)
+                continue
+            artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
+            write_dataset(
+                artifact_root,
+                iter_interim_frames(
+                    data_id=data_id,
+                    input_files=input_files,
+                    row_batch_size=row_batch_size,
+                    start_date=start_date,
+                    end_date=end_date,
+                    resource_policy=policy,
+                ),
+                spec=spec,
+            )
+            written[data_id] = artifact_root
+        return BinanceInterimImportResult(
+            artifact_roots=written,
+            skipped=tuple(skipped),
         )
-        written[data_id] = artifact_root
-    return BinanceInterimImportResult(artifact_roots=written, skipped=tuple(skipped))
 
 
 def _normalize_klines(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
@@ -487,21 +514,6 @@ def _timestamp_ms(value: object) -> pd.Timestamp:
         value,
         error="invalid_binance_millisecond_timestamp",
     ).tz_localize(None)
-
-
-def _iter_batches(
-    rows: Iterator[dict[str, Any]],
-    *,
-    batch_size: int,
-) -> Iterator[tuple[dict[str, Any], ...]]:
-    batch: list[dict[str, Any]] = []
-    for row in rows:
-        batch.append(row)
-        if len(batch) >= batch_size:
-            yield tuple(batch)
-            batch = []
-    if batch:
-        yield tuple(batch)
 
 
 def _strict_data_ids(data_ids: object) -> tuple[str, ...]:

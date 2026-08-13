@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.sources.binance.raw_exports as raw_exports
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.raw_exports import (
     dataset_files_by_id,
     iter_raw_envelopes,
@@ -13,6 +15,7 @@ from quant_research_platform.sources.binance.raw_exports import (
 from quant_research_platform.sources.binance.validation import (
     strict_millisecond_timestamp,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_binance_dataset_files_by_id_groups_local_raw_jsonl(tmp_path: Path) -> None:
@@ -49,6 +52,31 @@ def test_binance_raw_exports_reads_canonical_envelopes(tmp_path: Path) -> None:
     assert rows[0]["symbol"] == "BTCUSDT"
     assert rows[0]["interval"] == "1m"
     assert isinstance(rows[0]["payload"], list)
+
+
+def test_binance_raw_export_rejects_oversized_record_before_json_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "large.jsonl"
+    envelope = _envelope(data_kind="klines")
+    envelope["padding"] = "x" * 8_000
+    _write_jsonl(path, envelope)
+    policy = capture_test_policy(
+        available_memory_bytes=4096,
+        explicit_cap_bytes=4096,
+    )
+    monkeypatch.setattr(
+        raw_exports,
+        "_loads_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("json_decode_started_before_admission")
+        ),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            tuple(raw_exports.iter_raw_envelopes(path, resource_policy=policy))
 
 
 @pytest.mark.parametrize(

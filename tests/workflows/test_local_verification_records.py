@@ -54,6 +54,13 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
         staticmethod(fake_capture),
     )
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
+    real_publish = module._publish_staged_run_root
+
+    def publish(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        capture_policy()
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_publish_staged_run_root", publish)
     stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
@@ -98,5 +105,49 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
 
     assert result.status == "NOT_RUN"
     assert capture_calls == 1
-    assert snapshots == [policy] * (6 + expected_prediction_count)
+    assert snapshots == [policy] * (7 + expected_prediction_count)
     assert run_config["runtime_resource_policy"] == policy.to_payload()
+
+
+def test_local_verification_failure_cleanup_keeps_the_root_policy_active(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=10 * GIB)
+    observed: list[RuntimeResourcePolicy] = []
+    real_remove = module.remove_owned_scratch
+
+    monkeypatch.setattr(
+        resource_module.RuntimeResourcePolicy,
+        "capture",
+        staticmethod(lambda **_kwargs: policy),
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_local_verification_with_policy",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    def remove(path, identity):  # noqa: ANN001, ANN202
+        observed.append(resource_module.active_runtime_resource_policy())
+        return real_remove(path, identity)
+
+    monkeypatch.setattr(module, "remove_owned_scratch", remove)
+    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "local", "s-cleanup")
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="boom"):
+        run_local_verification(
+            make_local_verification_config(
+                run_root=run_root,
+                start_date="2014-01-01",
+                end_date="2014-12-31",
+                profile=profile_with_materializers(
+                    stub_interim_importer(),
+                    stub_processed_builder(),
+                ),
+            )
+        )
+
+    assert observed == [policy]
