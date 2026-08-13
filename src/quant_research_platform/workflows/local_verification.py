@@ -158,7 +158,7 @@ def run_local_verification(
     staged_identity: os.stat_result | None = None
     backup_root: Path | None = None
     published = False
-    with runtime_resource_policy_scope(resource_policy):
+    with runtime_resource_policy_scope(resource_policy), ExitStack() as retained_state:
         try:
             if replaced_identity is not None:
                 _cleanup_previous_generation(run_root, run_id=run_id)
@@ -176,6 +176,7 @@ def run_local_verification(
                 run_id=run_id,
                 layout=layout,
                 resource_policy=resource_policy,
+                retained_state=retained_state,
             )
             backup_root = _publish_staged_run_root(
                 staged_root,
@@ -243,6 +244,7 @@ def _run_local_verification_with_policy(
     run_id: str,
     layout: LocalVerificationLayout,
     resource_policy: RuntimeResourcePolicy,
+    retained_state: ExitStack,
 ) -> LocalVerificationRunResult:
     recorder = ExecutionMetricsRecorder()
     storage_layout = StorageLayout(project_root=run_root)
@@ -473,6 +475,7 @@ def _run_local_verification_with_policy(
                 )
                 for index, members in validated_outputs
             ),
+            _retained_state=retained_state,
         )
         dataset_count = sum(int(item["dataset_count"]) for item in layer_summaries)
         total_row_count = sum(int(item["total_rows"]) for item in layer_summaries)

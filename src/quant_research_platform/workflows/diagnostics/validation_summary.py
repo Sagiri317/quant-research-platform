@@ -6,7 +6,7 @@ import io
 import os
 import sys
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, cast
@@ -48,6 +48,7 @@ from quant_research_platform.storage._dataset_schema import (
     validate_dataset_manifest_consumable,
     validate_dataset_primary_key_null_summary,
 )
+from quant_research_platform.storage._dataset_types import DatasetInspection
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 
 _LAYER_SUMMARY_KEYS = frozenset(
@@ -74,9 +75,10 @@ def build_validation_summary(
     layer_summaries: tuple[dict[str, object], ...],
     validated_output_members: tuple[tuple[Path, DatasetFileIdentity], ...],
     output_bundle_expectations: tuple[tuple[Path, str, str, str], ...],
+    _retained_state: ExitStack | None = None,
 ) -> dict[str, Any]:
     resource_policy = active_runtime_resource_policy()
-    with runtime_resource_policy_scope(resource_policy):
+    with runtime_resource_policy_scope(resource_policy), ExitStack() as local_state:
         return _build_validation_summary(
             run_id=run_id,
             dataset_roots=dataset_roots,
@@ -84,6 +86,7 @@ def build_validation_summary(
             validated_output_members=validated_output_members,
             output_bundle_expectations=output_bundle_expectations,
             resource_policy=resource_policy,
+            retained_state=_retained_state or local_state,
         )
 
 
@@ -95,6 +98,7 @@ def _build_validation_summary(
     validated_output_members: tuple[tuple[Path, DatasetFileIdentity], ...],
     output_bundle_expectations: tuple[tuple[Path, str, str, str], ...],
     resource_policy: RuntimeResourcePolicy,
+    retained_state: ExitStack,
 ) -> dict[str, Any]:
     if not dataset_roots:
         raise ValueError("validation_summary_dataset_roots_required")
@@ -112,6 +116,75 @@ def _build_validation_summary(
         output_bundle_expectations
     ):
         raise ValueError("validation_summary_output_bundle_declaration_duplicate")
+    inspection_slot_bytes = sys.getsizeof([None] * len(dataset_roots))
+    inspection_slot_bytes += len(dataset_roots) * sys.getsizeof((None, None, None))
+    if inspection_slot_bytes > resource_policy.remaining_memory_bytes:
+        raise ValueError("validation_summary_payload_exceeds_task_memory_budget")
+    inspection_results: list[
+        tuple[Path, DatasetInspection | None, str | None] | None
+    ] = [None] * len(dataset_roots)
+    retained_inspection_bytes = inspection_slot_bytes
+    for index, root in enumerate(dataset_roots):
+        logical_layer = dataset_layer_from_path(root)
+        if logical_layer not in RUN_RESULT_DATASET_LAYERS:
+            raise ValueError("validation_summary_dataset_layer_invalid")
+        try:
+            inspection = inspect_dataset(
+                root,
+                resource_policy=resource_policy,
+                retained_payload_bytes=retained_inspection_bytes,
+            )
+        except (OSError, ValueError):
+            try:
+                manifest = read_dataset_manifest_evidence(root)
+            except FileNotFoundError:
+                inspection_results[index] = (root, None, "missing")
+            except (OSError, ValueError):
+                inspection_results[index] = (root, None, "invalid")
+            else:
+                if manifest:
+                    raise ValueError(
+                        "validation_summary_dataset_inspection_failed"
+                    ) from None
+                inspection_results[index] = (root, None, "invalid")
+            continue
+        inspection_results[index] = (root, inspection, None)
+        retained_inspection_bytes += dataset_inspection_retained_memory_bytes(
+            inspection
+        )
+
+    dataset_inspections = [
+        (root, inspection)
+        for result in inspection_results
+        if result is not None
+        for root, inspection, error in (result,)
+        if error is None and inspection is not None
+    ]
+    summary_headroom = (
+        resource_policy.remaining_memory_bytes - retained_inspection_bytes
+    )
+    if summary_headroom <= 0:
+        raise ValueError("validation_summary_payload_exceeds_task_memory_budget")
+    summary_bound_bytes = _validation_summary_graph_upper_bound_bytes(
+        dataset_roots=dataset_roots,
+        dataset_inspections=dataset_inspections,
+        layer_summaries=layer_summaries,
+        validated_output_members=validated_output_members,
+        output_bundle_expectations=output_bundle_expectations,
+        max_bytes=summary_headroom,
+    )
+    try:
+        retained_state.enter_context(
+            resource_policy.reserve(
+                "workflow.validation.summary",
+                retained_inspection_bytes + summary_bound_bytes,
+            )
+        )
+    except MemoryError:
+        raise ValueError(
+            "validation_summary_payload_exceeds_task_memory_budget"
+        ) from None
+
     dataset_failures: list[str] = []
     null_failures: list[str] = []
     duplicate_failures: list[str] = []
@@ -125,12 +198,10 @@ def _build_validation_summary(
     observed_layer_datasets: dict[str, list[dict[str, object]]] = {}
     observed_layer_missing: dict[str, list[str]] = {}
     observed_layer_invalid: dict[str, list[str]] = {}
-    dataset_inspections = []
-    retained_inspection_bytes = 0
-    for root in dataset_roots:
+    for result in inspection_results:
+        assert result is not None
+        root, inspection, inspection_error = result
         logical_layer = dataset_layer_from_path(root)
-        if logical_layer not in RUN_RESULT_DATASET_LAYERS:
-            raise ValueError("validation_summary_dataset_layer_invalid")
         observed_layer_datasets.setdefault(logical_layer, [])
         observed_layer_missing.setdefault(logical_layer, [])
         observed_layer_invalid.setdefault(logical_layer, [])
@@ -138,35 +209,22 @@ def _build_validation_summary(
             root / "_manifest" / "manifest.json",
             markers=RUN_RESULT_LOGICAL_PATH_MARKERS,
         )
-        try:
-            inspection = inspect_dataset(
-                root,
-                resource_policy=resource_policy,
-                retained_payload_bytes=retained_inspection_bytes,
+        if inspection_error is not None:
+            failures = (
+                missing_dataset_manifests
+                if inspection_error == "missing"
+                else invalid_dataset_manifests
             )
-        except (OSError, ValueError):
-            try:
-                manifest = read_dataset_manifest_evidence(root)
-            except FileNotFoundError:
-                missing_dataset_manifests.append(manifest_logical_path)
-                observed_layer_missing[logical_layer].append(manifest_logical_path)
-            except (OSError, ValueError):
-                invalid_dataset_manifests.append(manifest_logical_path)
-                observed_layer_invalid[logical_layer].append(manifest_logical_path)
-            else:
-                if manifest:
-                    raise ValueError(
-                        "validation_summary_dataset_inspection_failed"
-                    ) from None
-                invalid_dataset_manifests.append(manifest_logical_path)
-                observed_layer_invalid[logical_layer].append(manifest_logical_path)
+            observed = (
+                observed_layer_missing
+                if inspection_error == "missing"
+                else observed_layer_invalid
+            )
+            failures.append(manifest_logical_path)
+            observed[logical_layer].append(manifest_logical_path)
             continue
-        else:
-            dataset_inspections.append((root, inspection))
-            retained_inspection_bytes += dataset_inspection_retained_memory_bytes(
-                inspection
-            )
-            manifest = inspection.manifest
+        assert inspection is not None
+        manifest = inspection.manifest
         data_id = manifest["data_id"]
         try:
             validate_dataset_manifest_consumable(manifest)
@@ -294,28 +352,106 @@ def _build_validation_summary(
         "share_safety_scan": safety,
         "created_at": _utc_now(),
     }
-    retained_summary_bytes = bounded_rendered_qrp_json_object_size(
+    bounded_rendered_qrp_json_object_size(
         summary,
         lazy_arrays={},
-        max_bytes=(
-            resource_policy.task_memory_budget_bytes - retained_inspection_bytes
-        ),
+        max_bytes=summary_bound_bytes,
     )
     for root, initial_inspection in dataset_inspections:
         try:
-            final_inspection = inspect_dataset(
-                root,
-                resource_policy=resource_policy,
-                retained_payload_bytes=(
-                    retained_inspection_bytes + retained_summary_bytes
-                ),
-            )
+            with resource_policy.reserve(
+                "workflow.validation.reinspection",
+                dataset_inspection_retained_memory_bytes(initial_inspection),
+            ):
+                final_inspection = inspect_dataset(
+                    root,
+                    resource_policy=resource_policy,
+                    retained_payload_bytes=0,
+                )
+        except MemoryError:
+            raise ValueError(
+                "validation_summary_payload_exceeds_task_memory_budget"
+            ) from None
         except (OSError, ValueError):
             raise ValueError("validation_summary_dataset_identity_changed") from None
         if final_inspection != initial_inspection:
             raise ValueError("validation_summary_dataset_identity_changed")
         del final_inspection
     return summary
+
+
+def _validation_summary_graph_upper_bound_bytes(
+    *,
+    dataset_roots: tuple[Path, ...],
+    dataset_inspections: list[tuple[Path, DatasetInspection]],
+    layer_summaries: tuple[dict[str, object], ...],
+    validated_output_members: tuple[tuple[Path, DatasetFileIdentity], ...],
+    output_bundle_expectations: tuple[tuple[Path, str, str, str], ...],
+    max_bytes: int,
+) -> int:
+    manifests = tuple(inspection.manifest for _root, inspection in dataset_inspections)
+    layer_bytes = 0
+    for summary in layer_summaries:
+        layer_bytes += bounded_rendered_qrp_json_object_size(
+            summary,
+            lazy_arrays={},
+            max_bytes=max_bytes - layer_bytes,
+        )
+    text_characters = sum(len(os.fspath(root)) for root in dataset_roots)
+    text_characters += len("/_manifest/manifest.json") * len(dataset_roots)
+    text_characters += sum(
+        len(os.fspath(path)) for path, _identity in validated_output_members
+    )
+    text_characters += sum(
+        len(os.fspath(root)) + len(run_id) + len(output_id) + len(definition_id)
+        for root, run_id, output_id, definition_id in output_bundle_expectations
+    )
+    dataset_count = len(dataset_roots)
+    layer_count = len(layer_summaries)
+    member_count = len(validated_output_members)
+    profile_entries = sum(
+        len(cast(Mapping[str, int], manifest.get(profile)))
+        for manifest in manifests
+        for profile in ("factor_nan_profile", "label_nan_profile")
+    )
+    mapping_count = 6 + 3 * dataset_count + layer_count + member_count
+    mapping_entries = (
+        27
+        + 12 * dataset_count
+        + 10 * layer_count
+        + 2 * member_count
+        + profile_entries
+    )
+    list_count = 14 + 3 * layer_count
+    list_slots = (
+        32 + 16 * dataset_count + 12 * layer_count + 4 * member_count
+    )
+    empty_mapping_bytes = sys.getsizeof({})
+    mapping_entry_bytes = sys.getsizeof({"": None}) - empty_mapping_bytes
+    empty_list_bytes = sys.getsizeof([])
+    list_slot_bytes = sys.getsizeof([None]) - empty_list_bytes
+    container_bytes = (
+        mapping_count * empty_mapping_bytes
+        + mapping_entries * mapping_entry_bytes
+        + list_count * empty_list_bytes
+        + list_slots * list_slot_bytes
+    )
+    text_bytes = text_characters * 4 + (
+        len(dataset_roots) + len(validated_output_members)
+    ) * sys.getsizeof("")
+    scalar_size = max(sys.getsizeof(None), sys.getsizeof(0), sys.getsizeof(0.0))
+    scalar_bytes = scalar_size * (27 + 10 * dataset_count + profile_entries)
+    created_at_bytes = sys.getsizeof("0" * 32)
+    total = (
+        layer_bytes
+        + text_bytes
+        + container_bytes
+        + scalar_bytes
+        + created_at_bytes
+    )
+    if total > max_bytes:
+        raise MemoryError("runtime_memory_budget_exceeded")
+    return total
 
 
 def _share_safety_scan(

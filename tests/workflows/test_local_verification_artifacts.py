@@ -38,8 +38,14 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     evaluation_run_ids: list[str] = []
     prediction_ids: list[str] = []
     portfolio_ids: list[str] = []
+    final_reserved_bytes: list[int] = []
     original_write_summary = module.write_markdown_evidence
     original_replace_json = module.replace_qrp_json
+    original_finish_memory = module.RuntimeResourcePolicy.finish_memory_measurement
+
+    def record_final_memory(self, **kwargs):  # noqa: ANN001, ANN003
+        final_reserved_bytes.append(self.reserved_memory_bytes)
+        return original_finish_memory(self, **kwargs)
 
     def track_summary_publish(path, text):
         publish_order.append("summary")
@@ -54,6 +60,11 @@ def test_local_verification_publishes_completed_run_only_after_summary(
 
     monkeypatch.setattr(module, "write_markdown_evidence", track_summary_publish)
     monkeypatch.setattr(module, "replace_qrp_json", track_run_publish)
+    monkeypatch.setattr(
+        module.RuntimeResourcePolicy,
+        "finish_memory_measurement",
+        record_final_memory,
+    )
 
     def assemble_dataset(**kwargs):
         calls.append("research")
@@ -129,6 +140,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
             run_local_verification(config)
         assert not run_root.exists()
         assert publish_order == ["summary"]
+        assert final_reserved_bytes == []
         return
     result = run_local_verification(config)
 
@@ -150,6 +162,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     ]
     assert result.status == "NOT_RUN"
     assert publish_order == ["summary", "completed_run"]
+    assert len(final_reserved_bytes) == 1 and final_reserved_bytes[0] > 0
     assert result.run_id == "s1"
     assert result.run_root == "s1"
     layout = LocalVerificationLayout.from_run_root(run_root)
