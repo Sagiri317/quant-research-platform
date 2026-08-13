@@ -468,32 +468,43 @@ def test_model_max_train_rows_streaming_matches_multi_asset_full_training() -> N
     import quant_research_platform.research.models.fitting as model_fitting
     import quant_research_platform.research.models.validation_split as validation_split
 
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(
-                [
-                    "2024-01-01",
-                    "2024-01-01",
-                    "2024-01-02",
-                    "2024-01-02",
-                    "2024-01-03",
-                    "2024-01-03",
-                    "2024-01-04",
-                    "2024-01-05",
-                ]
-            ),
-            "asset_id": ["asset_a", "asset_b"] * 3 + ["asset_a", "asset_a"],
-            "factor": [1.0, 101.0, 2.0, 102.0, 3.0, 103.0, 4.0, 5.0],
-            "label": [2.0, 202.0, 4.0, 204.0, 6.0, 206.0, 8.0, 10.0],
-            "eligible": True,
-        }
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    chunk_keys = (
+        (
+            (0, "A"),
+            (0, "B"),
+            (0, "D"),
+            (1, "A"),
+            (1, "B"),
+            (1, "D"),
+            (2, "B"),
+            (2, "D"),
+        ),
+        ((3, "A"), (3, "B")),
+        ((4, "A"), (4, "B"), (4, "D")),
     )
+    chunks = tuple(
+        pd.DataFrame.from_records(
+            [
+                {
+                    "timestamp": dates[offset],
+                    "asset_id": asset_id,
+                    "factor": float(ord(asset_id) * 10 + offset),
+                    "label": float(ord(asset_id) * 20 + offset),
+                    "eligible": True,
+                }
+                for offset, asset_id in keys
+            ]
+        )
+        for keys in chunk_keys
+    )
+    frame = pd.concat(chunks, ignore_index=True)
     spec = ModelSpec(
         model_id="linear_streaming_max_rows",
         model_algorithm="linear_regression",
         input_factor_columns=("factor",),
         label_column="label",
-        max_train_rows=2,
+        max_train_rows=6,
         purge_gap_steps=2,
     )
     expected = validation_split.apply_training_controls(
@@ -502,7 +513,7 @@ def test_model_max_train_rows_streaming_matches_multi_asset_full_training() -> N
     ).drop(columns="asset_id")
 
     training, row_counts, _metadata = model_fitting.collect_training_frame(
-        (frame.iloc[:6], frame.iloc[6:]),
+        chunks,
         spec,
     )
 

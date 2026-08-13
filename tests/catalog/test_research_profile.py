@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
@@ -19,8 +20,12 @@ from quant_research_platform.catalog.processed import (
 )
 from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.markets.implementations.a_share import (
     research_scenarios,
+)
+from quant_research_platform.research.portfolios.engine import (
+    construct_portfolio_positions,
 )
 from tests.helpers import frequency_ids
 
@@ -164,6 +169,57 @@ def test_a_share_scenario_adds_prediction_portfolio_and_keeps_factor() -> None:
         assert portfolio.tradability_config.eligibility_column == "eligible"
         assert portfolio.tradability_config.can_enter_column == "can_enter"
         assert portfolio.tradability_config.can_exit_column == "can_exit"
+
+
+def test_a_share_factor_and_prediction_portfolios_apply_formal_masks() -> None:
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03"])
+    frame = pd.DataFrame.from_records(
+        [
+            {
+                "asset_id": asset_id,
+                "timestamp": timestamp,
+                "factor_score": signal,
+                "prediction_score": signal,
+                "forward_return_1d": 0.01,
+                "eligible": asset_id != "b",
+                "can_enter": not (timestamp == dates[1] and asset_id == "a"),
+                "can_exit": not (timestamp == dates[1] and asset_id == "d"),
+                "amount": 1_000_000.0,
+                "float_market_cap": 10_000_000.0,
+                "csrc_2012_industry_code": "demo",
+            }
+            for timestamp, signals in zip(
+                dates,
+                ((1.0, 2.0, 3.0, 4.0), (4.0, 3.0, 2.0, 1.0)),
+                strict=True,
+            )
+            for asset_id, signal in zip(("a", "b", "c", "d"), signals, strict=True)
+        ]
+    )
+    specs = research_scenarios.build_portfolio_specs(
+        signals=(
+            SignalSpec(
+                signal_id="factor",
+                source_kind="factor",
+                source_column="factor_score",
+            ),
+        ),
+        prediction_id="prediction",
+    )
+
+    for spec in specs:
+        result = construct_portfolio_positions(
+            frame,
+            spec,
+            source_columns_by_kind={
+                spec.signals[0].source_kind: (spec.signals[0].source_column,)
+            },
+        )
+        final = result.positions.loc[result.positions["timestamp"].eq(dates[1])]
+        assert dict(zip(final["asset"], final["position"], strict=True)) == {
+            "a": -1.0,
+            "d": 1.0,
+        }
 
 
 def test_catalog_profile_source_interim_catalog_requires_single_source(

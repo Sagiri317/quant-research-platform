@@ -20,11 +20,9 @@ def trim_training_buffer(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:
         spec.purge_gap_steps,
         group_column="asset_id" if "asset_id" in result.columns else None,
     )
-    purge_gap_rows = result.drop(index=training_candidates.index)
-    return pd.concat(
-        [training_candidates.tail(spec.max_train_rows), purge_gap_rows],
-        ignore_index=True,
-    )
+    keep = result.index.isin(training_candidates.tail(spec.max_train_rows).index)
+    keep |= ~result.index.isin(training_candidates.index)
+    return result.loc[keep].reset_index(drop=True)
 
 
 def apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:

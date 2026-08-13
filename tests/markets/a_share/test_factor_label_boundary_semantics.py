@@ -113,6 +113,9 @@ def test_eight_bars_bind_factor_signal_entry_exit_and_return_attribution() -> No
                 "amount",
                 "float_market_cap",
                 "csrc_2012_industry_code",
+                "eligible",
+                "can_enter",
+                "can_exit",
             ],
         ],
         on=["market_id", "asset_id", "timestamp"],
@@ -128,12 +131,12 @@ def test_eight_bars_bind_factor_signal_entry_exit_and_return_attribution() -> No
         return_source_column="forward_return_1d",
     )[0]
 
+    observation = dates[5]
     result = construct_portfolio_positions(
-        frame,
+        frame.loc[frame["timestamp"].le(observation)],
         spec,
         source_columns_by_kind={"factor": ("mom_5d",)},
     )
-    observation = dates[5]
     observed = frame.loc[frame["timestamp"].eq(observation)].set_index("asset_id")
 
     assert observed.loc["long", "mom_5d"] == pytest.approx(106.0 / 101.0 - 1.0)
@@ -161,6 +164,9 @@ def test_default_daily_portfolio_uses_one_day_realized_capital_returns() -> None
                 "amount": 1_000_000.0,
                 "float_market_cap": 10_000_000.0,
                 "csrc_2012_industry_code": "demo",
+                "eligible": True,
+                "can_enter": True,
+                "can_exit": True,
             }
             for timestamp, long_return in zip(dates, (0.01, 0.02), strict=True)
             for asset_id, one_day_return in (
@@ -277,6 +283,9 @@ def _timing_panel(dates: pd.DatetimeIndex) -> pd.DataFrame:
                 "amount": 1_000_000.0,
                 "float_market_cap": 10_000_000.0,
                 "csrc_2012_industry_code": "demo",
+                "eligible": True,
+                "can_enter": True,
+                "can_exit": True,
             }
             for asset_id in ("long", "short")
             for offset, timestamp in enumerate(dates)
