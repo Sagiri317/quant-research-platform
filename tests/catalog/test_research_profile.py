@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -27,7 +28,11 @@ from quant_research_platform.markets.implementations.a_share import (
 from quant_research_platform.research.portfolios.engine import (
     construct_portfolio_positions,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.sources.csmar.interim import InterimImportResult
+from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_research_profile_is_only_public_profile_builder() -> None:
@@ -72,6 +77,60 @@ def test_research_profile_contains_active_catalogs() -> None:
     assert profile.source_id == SourceId("csmar")
     assert callable(profile.materialize_interim_data)
     assert callable(profile.materialize_processed_data)
+
+
+def test_a_share_profile_materializes_exact_processed_dependency_source_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import quant_research_platform.profiles.research as profiles
+
+    calls: list[dict[str, object]] = []
+
+    def materialize(**kwargs):  # noqa: ANN003
+        calls.append(kwargs)
+        data_ids = tuple(kwargs.get("data_ids", ("direct",)))
+        return InterimImportResult(
+            artifact_roots={data_id: tmp_path / data_id for data_id in data_ids},
+            skipped=(),
+            pruning_report_text="",
+        )
+
+    def sessions(*_args, **kwargs):  # noqa: ANN002, ANN003
+        assert kwargs["lookback_sessions"] == 252
+        assert kwargs["lookahead_sessions"] == 121
+        return pd.DatetimeIndex(
+            [
+                *pd.bdate_range(end="2014-01-01", periods=252),
+                pd.Timestamp("2014-01-02"),
+                pd.Timestamp("2014-01-03"),
+                *pd.bdate_range(start="2014-01-06", periods=121),
+            ]
+        )
+
+    monkeypatch.setattr(profiles, "_materialize_csmar_interim_data", materialize)
+    monkeypatch.setattr(
+        profiles.a_share_materialization_planning,
+        "available_trading_sessions",
+        sessions,
+    )
+    profile = profiles.research_profile()
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy):
+        result = profile.materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=tmp_path / "raw",
+            start_date="2014-01-02",
+            end_date="2014-01-03",
+        )
+
+    assert calls[0]["data_ids"] == ("trading_calendar",)
+    assert calls[0]["start_date"] is None
+    assert calls[0]["end_date"] is None
+    assert calls[1]["start_date"] == "2013-01-15"
+    assert calls[1]["end_date"] == "2014-06-23"
+    assert "trading_calendar" in result.artifact_roots
 
 
 def test_research_profile_covers_required_models_predictions_and_signals() -> None:

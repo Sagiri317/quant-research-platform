@@ -15,7 +15,11 @@ from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
 )
-from quant_research_platform.contracts.portfolios import CostConfig, WeightConfig
+from quant_research_platform.contracts.portfolios import (
+    CostConfig,
+    TradabilityConfig,
+    WeightConfig,
+)
 
 
 def _validated_ranking_panel() -> tuple[pd.DataFrame, ComputePanelSpec]:
@@ -82,6 +86,32 @@ def test_validated_stream_keeps_long_only_rows_without_short_leg() -> None:
     assert returns["short_count"].tolist() == [0, 0]
     assert turnover["turnover"].tolist() == [1.0, 2.0]
     assert diagnostics["short_count"].tolist() == [0, 0]
+
+
+def test_validated_stream_rejects_disappeared_held_asset() -> None:
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+    panel = validate_compute_panel(
+        pd.DataFrame(
+            {
+                "timestamp": ["2026-01-01", "2026-01-01", "2026-01-02"],
+                "asset": ["A", "B", "B"],
+                "factor": [2.0, 1.0, 3.0],
+                "forward_return": [0.01, 0.02, 0.03],
+                "can_exit": [True, True, True],
+            }
+        ),
+        spec,
+    )
+
+    with pytest.raises(ValueError, match="held_asset_missing_from_portfolio_frame"):
+        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+            panel,
+            spec,
+            WeightConfig(portfolio_mode="long_only", top_quantile=0.5),
+            tradability_config=TradabilityConfig(can_exit_column="can_exit"),
+            cost_config=CostConfig(sell_cost_bps=10),
+            return_source_column="forward_return",
+        )
 
 
 def test_validated_stream_requires_explicit_return_source_column() -> None:

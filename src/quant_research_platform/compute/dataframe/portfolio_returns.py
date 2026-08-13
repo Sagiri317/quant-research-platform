@@ -113,6 +113,11 @@ def _stream_weighted_portfolio_from_validated_panel(
         )
         for signal in signals:
             previous = signal_previous.get(signal, {})
+            if any(
+                position != 0.0 and asset not in label_lookup
+                for asset, position in previous.items()
+            ):
+                raise ValueError("held_asset_missing_from_portfolio_frame")
             records, diagnostic = build_signal_positions(
                 timestamp_frame=timestamp_frame,
                 spec=spec,
@@ -158,18 +163,18 @@ def _stream_weighted_portfolio_from_validated_panel(
                     **costs,
                 }
             )
-            return_record = _build_portfolio_return_record_from_positions(
-                group_values=base_values,
-                portfolio_mode=weight_config.portfolio_mode,
-                positions=current,
-                label_lookup=label_lookup,
-                return_source_column=return_source_column,
-                turnover=turnover,
-                cost=float(costs["total_cost"]),
-                segment_columns=segment_columns,
+            return_records.append(
+                _build_portfolio_return_record_from_positions(
+                    group_values=base_values,
+                    portfolio_mode=weight_config.portfolio_mode,
+                    positions=current,
+                    label_lookup=label_lookup,
+                    return_source_column=return_source_column,
+                    turnover=turnover,
+                    cost=float(costs["total_cost"]),
+                    segment_columns=segment_columns,
+                )
             )
-            if return_record is not None:
-                return_records.append(return_record)
             signal_previous[signal] = current
 
     position_columns = [*segment_columns, *POSITION_COLUMNS]
@@ -209,7 +214,7 @@ def _build_portfolio_return_record_from_positions(
     turnover: float,
     cost: float,
     segment_columns: tuple[str, ...],
-) -> dict[str, object] | None:
+) -> dict[str, object]:
     long_return = 0.0
     short_return = 0.0
     long_count = 0
@@ -224,8 +229,6 @@ def _build_portfolio_return_record_from_positions(
         elif position < 0:
             short_count += 1
             short_return += -position * label
-    if long_count == 0 or (portfolio_mode == "long_short" and short_count == 0):
-        return None
     gross_return = (
         long_return - short_return if portfolio_mode == "long_short" else long_return
     )

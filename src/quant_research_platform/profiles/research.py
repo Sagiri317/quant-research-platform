@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
+import pandas as pd
+
 from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
@@ -58,6 +60,12 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     diagnostics as processed_diagnostics_module,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_dependencies as a_share_materialization_dependencies,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materialization_planning as a_share_materialization_planning,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
     materializer as processed_materializer_module,
 )
 from quant_research_platform.markets.implementations.crypto import (
@@ -87,6 +95,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.markets.implementations.crypto.processed import (
     materializer as crypto_processed_materializer_module,
 )
+from quant_research_platform.runtime.resources import active_runtime_resource_policy
 from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.sources.binance.catalog import (
     source_definition as binance_source_definition,
@@ -99,6 +108,12 @@ from quant_research_platform.sources.binance.interim import (
 )
 from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.sources.csmar.catalog import source_definition
+from quant_research_platform.sources.csmar.interim import (
+    DEFAULT_INTERIM_DATA_IDS as CSMAR_INTERIM_DATA_IDS,
+)
+from quant_research_platform.sources.csmar.interim import (
+    InterimImportResult,
+)
 from quant_research_platform.sources.csmar.interim import (
     interim_catalog as csmar_interim_catalog,
 )
@@ -200,7 +215,7 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         source_id=csmar_ids.SOURCE_ID,
         build_prediction_catalog=a_share_research_scenarios.build_prediction_catalog,
         build_portfolio_catalog=a_share_research_scenarios.build_portfolio_catalog,
-        materialize_interim_data=_materialize_csmar_interim_data,
+        materialize_interim_data=_materialize_a_share_csmar_interim_data,
         materialize_processed_data=processed_materializer_module.materialize_processed_data,
         schema_inventory_important_columns=(
             processed_diagnostics_module.schema_inventory_important_columns
@@ -268,6 +283,55 @@ def _materialize_crypto_binance_interim_data(
         raw_root=raw_root,
         start_date=_time_bound_to_iso(dependency.start),
         end_date=_time_bound_to_iso(dependency.end),
+    )
+
+
+def _materialize_a_share_csmar_interim_data(
+    layout: StorageLayout,
+    raw_root: Path,
+    start_date: str,
+    end_date: str,
+) -> InterimImportResult:
+    calendar = _materialize_csmar_interim_data(
+        layout=layout,
+        raw_root=raw_root,
+        data_ids=("trading_calendar",),
+        start_date=None,
+        end_date=None,
+    )
+    targets = tuple(processed_catalog_module.processed_catalog().list())
+    lookback_sessions, lookahead_sessions = (
+        a_share_materialization_dependencies.required_session_offsets(targets)
+    )
+    sessions = a_share_materialization_planning.available_trading_sessions(
+        layout,
+        SourceId(csmar_ids.SOURCE_ID),
+        time_window=TimeWindow(start_date, end_date),
+        lookback_sessions=lookback_sessions,
+        lookahead_sessions=lookahead_sessions,
+        resource_policy=active_runtime_resource_policy(),
+    )
+    first = int(sessions.searchsorted(pd.Timestamp(start_date)))
+    stop = int(sessions.searchsorted(pd.Timestamp(end_date), side="right"))
+    if first < lookback_sessions or len(sessions) - stop < lookahead_sessions:
+        raise ValueError("a_share_source_dependency_window_incomplete")
+    source = _materialize_csmar_interim_data(
+        layout=layout,
+        raw_root=raw_root,
+        data_ids=tuple(
+            data_id
+            for data_id in CSMAR_INTERIM_DATA_IDS
+            if data_id != "trading_calendar"
+        ),
+        start_date=sessions[0].date().isoformat(),
+        end_date=sessions[-1].date().isoformat(),
+    )
+    return InterimImportResult(
+        artifact_roots={**calendar.artifact_roots, **source.artifact_roots},
+        skipped=(*calendar.skipped, *source.skipped),
+        pruning_report_text=(
+            calendar.pruning_report_text + source.pruning_report_text
+        ),
     )
 
 

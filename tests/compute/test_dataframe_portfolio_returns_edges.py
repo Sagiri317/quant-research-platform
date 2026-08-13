@@ -14,7 +14,7 @@ def test_dataframe_portfolio_return_record_handles_empty_legs() -> None:
     group_values = {"timestamp": pd.Timestamp("2024-01-02"), "signal": "factor"}
     label_lookup = {"A": 0.01, "B": -0.02}
 
-    assert _build_portfolio_return_record_from_positions(
+    long_short = _build_portfolio_return_record_from_positions(
         group_values=group_values,
         portfolio_mode="long_short",
         positions={"A": 1.0},
@@ -23,7 +23,12 @@ def test_dataframe_portfolio_return_record_handles_empty_legs() -> None:
         turnover=1.0,
         cost=0.0,
         segment_columns=(),
-    ) is None
+    )
+
+    assert long_short is not None
+    assert long_short["long_count"] == 1
+    assert long_short["short_count"] == 0
+    assert long_short["gross_portfolio_return"] == pytest.approx(0.01)
 
     long_only = _build_portfolio_return_record_from_positions(
         group_values=group_values,
@@ -40,6 +45,25 @@ def test_dataframe_portfolio_return_record_handles_empty_legs() -> None:
     assert long_only["long_count"] == 1
     assert long_only["short_count"] == 0
     assert long_only["net_portfolio_return"] == pytest.approx(0.009)
+
+
+def test_dataframe_portfolio_return_keeps_cash_row_and_exit_cost() -> None:
+    record = _build_portfolio_return_record_from_positions(
+        group_values={"timestamp": pd.Timestamp("2024-01-02"), "signal": "factor"},
+        portfolio_mode="long_short",
+        positions={},
+        label_lookup={},
+        return_source_column="label",
+        turnover=1.0,
+        cost=0.001,
+        segment_columns=(),
+    )
+
+    assert record is not None
+    assert record["gross_portfolio_return"] == 0.0
+    assert record["net_portfolio_return"] == pytest.approx(-0.001)
+    assert record["long_count"] == 0
+    assert record["short_count"] == 0
 
 
 @pytest.mark.parametrize(

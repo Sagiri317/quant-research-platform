@@ -136,6 +136,21 @@ def test_model_metadata_records_resolved_parameters_and_backend_version() -> Non
     }
 
 
+def test_model_contract_rejects_conflicting_effective_seed() -> None:
+    with pytest.raises(
+        ValueError,
+        match="model_random_seed_conflicts_with_random_state",
+    ):
+        ModelSpec(
+            model_id="decision_tree_demo",
+            model_algorithm="decision_tree_regressor",
+            input_factor_columns=("factor",),
+            label_column="label",
+            random_seed=11,
+            hyperparameters={"random_state": 99},
+        )
+
+
 @pytest.mark.parametrize(
     ("algorithm", "module_prefix", "package"),
     (

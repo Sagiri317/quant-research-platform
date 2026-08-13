@@ -59,6 +59,12 @@ class ModelSpec:
             raise TypeError("random_seed must be an integer or None")
         if self.random_seed is not None and not isinstance(self.random_seed, int):
             raise TypeError("random_seed must be an integer or None")
+        if (
+            self.random_seed is not None
+            and "random_state" in self.hyperparameters
+            and self.hyperparameters["random_state"] != self.random_seed
+        ):
+            raise ValueError("model_random_seed_conflicts_with_random_state")
         if not isinstance(self.purge_gap_steps, int) or isinstance(
             self.purge_gap_steps, bool
         ):

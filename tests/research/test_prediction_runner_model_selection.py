@@ -4,6 +4,7 @@ import json
 import warnings
 from datetime import timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -117,6 +118,63 @@ def test_prediction_runner_selects_model_using_validation_metric(
     assert model_selection["candidate_model_ids"] == ["base_model", "candidate_model"]
     assert manifest["metadata"]["model_metadata"]["input_columns"] == ["factor_b"]
     assert model_selection["selected_model_input_columns"] == ["factor_b"]
+
+
+def test_model_selection_compares_common_validation_primary_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = make_prediction_frame()
+    frame.loc[frame["timestamp"].eq("2024-01-04"), "factor_a"] = np.nan
+    frame.loc[frame["timestamp"].eq("2024-01-05"), "factor_b"] = np.nan
+    model_catalog = _model_catalog(
+        _model("base_model", ("factor_a",)),
+        _model("candidate_model", ("factor_b",)),
+    )
+    prediction_spec = PredictionSpec(
+        prediction_id="prediction_demo",
+        model_id="base_model",
+        research_dataset_id="research_demo",
+        train_end="2024-01-03",
+        test_start="2024-01-07",
+        test_end="2024-01-08",
+        candidate_model_ids=("candidate_model",),
+        model_selection_metric="validation_mse",
+        model_selection_validation_start="2024-01-04",
+        model_selection_validation_end="2024-01-06",
+    )
+    validation_keys: list[tuple[tuple[pd.Timestamp, str], ...]] = []
+    original_metrics = prediction_runner.evaluate_model_trial_metrics
+
+    def chunks(columns, *, input_columns):  # noqa: ANN001
+        del input_columns
+        return (frame.loc[:, list(columns)],)
+
+    def record_validation_keys(validation, **kwargs):  # noqa: ANN001, ANN003
+        validation_keys.append(
+            tuple(
+                validation[["timestamp", "asset_id"]].itertuples(
+                    index=False,
+                    name=None,
+                )
+            )
+        )
+        return original_metrics(validation, **kwargs)
+
+    monkeypatch.setattr(
+        prediction_runner,
+        "evaluate_model_trial_metrics",
+        record_validation_keys,
+    )
+
+    prediction_runner._select_prediction_model_spec(
+        prediction_spec=prediction_spec,
+        dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
+        model_catalog=model_catalog,
+        chunks=chunks,
+    )
+
+    assert len(validation_keys) == 2
+    assert validation_keys[0] == validation_keys[1]
 
 
 def test_prediction_runner_applies_sample_filter_to_validation_metrics(

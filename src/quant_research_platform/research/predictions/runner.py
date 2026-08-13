@@ -86,7 +86,7 @@ def build_prediction_result_from_research_dataset(
         *,
         input_columns: tuple[str, ...],
     ) -> Iterable[pd.DataFrame]:
-        return _validated_prediction_chunks(
+        yield from _validated_prediction_chunks(
             iter_research_dataset_chunks(
                 layout,
                 market_id=dataset_spec.market_id,
@@ -181,6 +181,12 @@ def _select_prediction_model_spec(
     if len(label_columns) != 1:
         raise ValueError("model_selection_label_column_mismatch")
     label_column = candidate_specs[0].label_column
+    common_validation_input_columns = tuple(
+        dict.fromkeys(
+            column for spec in candidate_specs for column in spec.input_columns
+        )
+    )
+    common_purge_gap_steps = max(spec.purge_gap_steps for spec in candidate_specs)
     validation_start = pd.Timestamp(prediction_spec.model_selection_validation_start)
     validation_end = pd.Timestamp(prediction_spec.model_selection_validation_end)
     trial_metric_records: list[dict[str, object]] = []
@@ -203,7 +209,7 @@ def _select_prediction_model_spec(
             dict.fromkeys(
                 (
                     *dataset_spec.primary_key,
-                    *candidate_spec.input_columns,
+                    *common_validation_input_columns,
                     label_column,
                     *required_filter_columns(prediction_spec.sample_filter_mode),
                 )
@@ -221,13 +227,15 @@ def _select_prediction_model_spec(
             validation_frame = _validation_prediction_frame(
                 chunks(
                     validation_read_columns,
-                    input_columns=candidate_spec.input_columns,
+                    input_columns=common_validation_input_columns,
                 ),
                 prediction_spec=prediction_spec,
                 candidate_spec=candidate_spec,
                 model_result=model_result,
                 validation_start=validation_start,
                 validation_end=validation_end,
+                usable_input_columns=common_validation_input_columns,
+                purge_gap_steps=common_purge_gap_steps,
             )
             trial_metric_records.append(
                 evaluate_model_trial_metrics(
@@ -291,6 +299,8 @@ def _validation_prediction_frame(
     model_result: fitting.ModelFitResult,
     validation_start: pd.Timestamp,
     validation_end: pd.Timestamp,
+    usable_input_columns: tuple[str, ...] | None = None,
+    purge_gap_steps: int | None = None,
 ) -> pd.DataFrame:
     predictor = prediction_callable(
         model_result.coefficients,
@@ -375,7 +385,11 @@ def _validation_prediction_frame(
                         )
                     usable = filtered.dropna(
                         subset=[
-                            *candidate_spec.input_columns,
+                            *(
+                                usable_input_columns
+                                if usable_input_columns is not None
+                                else candidate_spec.input_columns
+                            ),
                             candidate_spec.label_column,
                         ]
                     )
@@ -401,7 +415,11 @@ def _validation_prediction_frame(
             )
         result = validation_split._purge_trailing_timestamps(
             result,
-            candidate_spec.purge_gap_steps,
+            (
+                candidate_spec.purge_gap_steps
+                if purge_gap_steps is None
+                else purge_gap_steps
+            ),
             group_column="asset_id",
         )
         if pandas_frame_payload_bytes(result) > purged_output_bound:
