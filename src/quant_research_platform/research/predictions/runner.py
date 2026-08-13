@@ -20,7 +20,7 @@ from quant_research_platform.contracts.predictions import (
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research._memory import (
-    _ResearchFrameSpill,
+    _ResearchFrameAccumulator,
     _selected_frame_payload_bytes,
 )
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
@@ -308,10 +308,10 @@ def _validation_prediction_frame(
         model_result.prediction_model,
     )
     retained_policy = current_runtime_resource_policy()
-    with _ResearchFrameSpill(
+    with _ResearchFrameAccumulator(
         "research.prediction.validation",
         resource_policy=retained_policy,
-    ) as spill:
+    ) as accumulator:
         for chunk in chunks:
             resource_policy = current_runtime_resource_policy()
             row_count = len(chunk)
@@ -396,13 +396,13 @@ def _validation_prediction_frame(
                     if not usable.empty:
                         output = usable.loc[:, list(output_columns)].copy()
                         output[prediction_spec.prediction_column] = predictor(usable)
-                        spill.append(output)
+                        accumulator.append(output)
                         del output
                     del usable
             del filtered, validation
-        if spill.row_count == 0:
+        if accumulator.row_count == 0:
             raise ValueError("empty_model_selection_validation_window")
-        result = spill.materialize()
+        result = accumulator.materialize()
     input_bytes = pandas_frame_payload_bytes(result)
     purged_output_bound = input_bytes
     with ExitStack() as purge_reservation:

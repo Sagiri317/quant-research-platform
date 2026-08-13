@@ -21,7 +21,7 @@ from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research._memory import (
-    _ResearchFrameSpill,
+    _ResearchFrameAccumulator,
     _selected_frame_payload_bytes,
     _time_sort_working_set_bytes,
     iter_complete_session_frames,
@@ -57,7 +57,10 @@ class PortfolioResult:
 class _PortfolioSummaryState:
     position_stats: dict[str, dict[str, float | int]] = field(default_factory=dict)
     resource_policy: RuntimeResourcePolicy | None = None
-    return_spill: _ResearchFrameSpill | None = field(default=None, repr=False)
+    return_accumulator: _ResearchFrameAccumulator | None = field(
+        default=None,
+        repr=False,
+    )
 
 
 def build_portfolio_result_from_research_dataset(
@@ -661,7 +664,7 @@ def _observe_portfolio_summary_chunks(
         completed = True
     finally:
         if not completed:
-            _close_portfolio_summary_spill(summary_state)
+            _close_portfolio_summary_accumulator(summary_state)
 
 
 def _update_portfolio_summary_state(
@@ -705,12 +708,12 @@ def _update_portfolio_summary_state(
             )
         return_frame = _portfolio_return_summary_frame(portfolio_returns)
         if not return_frame.empty:
-            if summary_state.return_spill is None:
-                summary_state.return_spill = _ResearchFrameSpill(
+            if summary_state.return_accumulator is None:
+                summary_state.return_accumulator = _ResearchFrameAccumulator(
                     "research.portfolio.summary",
                     resource_policy=policy,
                 )
-            summary_state.return_spill.append(return_frame)
+            summary_state.return_accumulator.append(return_frame)
         _update_position_period_summary(summary_state.position_stats, positions)
         del return_frame
 
@@ -838,16 +841,16 @@ def _portfolio_summary_outputs(
             "period_breakdown": period_breakdown,
         }
     finally:
-        _close_portfolio_summary_spill(summary_state)
+        _close_portfolio_summary_accumulator(summary_state)
 
 
 def _portfolio_returns_summary_frame(
     summary_state: _PortfolioSummaryState,
 ) -> pd.DataFrame:
-    spill = summary_state.return_spill
-    if spill is None or spill.row_count == 0:
+    accumulator = summary_state.return_accumulator
+    if accumulator is None or accumulator.row_count == 0:
         return _empty_summary_frame(RETURNS_COLUMNS)
-    frame = spill.materialize()
+    frame = accumulator.materialize()
     policy = summary_state.resource_policy
     input_bytes = pandas_frame_payload_bytes(frame)
     sorted_output_bound = _time_sort_working_set_bytes(frame)
@@ -868,10 +871,12 @@ def _portfolio_returns_summary_frame(
         return output
 
 
-def _close_portfolio_summary_spill(summary_state: _PortfolioSummaryState) -> None:
-    if summary_state.return_spill is not None:
-        summary_state.return_spill.close()
-        summary_state.return_spill = None
+def _close_portfolio_summary_accumulator(
+    summary_state: _PortfolioSummaryState,
+) -> None:
+    if summary_state.return_accumulator is not None:
+        summary_state.return_accumulator.close()
+        summary_state.return_accumulator = None
 
 
 def _portfolio_exposure_summary(

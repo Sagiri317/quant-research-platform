@@ -88,7 +88,7 @@ from tests.research.prediction_output_helpers import (
 )
 
 
-def test_research_spill_materialization_is_exact_and_pre_admitted(
+def test_research_indivisible_result_is_exact_and_pre_admitted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")], "value": [1.0]})
@@ -96,13 +96,13 @@ def test_research_spill_materialization_is_exact_and_pre_admitted(
     policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
 
     with runtime_resource_policy_scope(policy):
-        with research_memory._ResearchFrameSpill(
+        with research_memory._ResearchFrameAccumulator(
             "research.test.exact",
             resource_policy=policy,
-        ) as spill:
-            spill.append(first)
-            spill.append(second)
-            result = spill.materialize()
+        ) as accumulator:
+            accumulator.append(first)
+            accumulator.append(second)
+            result = accumulator.materialize()
     pd.testing.assert_frame_equal(
         result,
         pd.concat([first, second], ignore_index=True),
@@ -111,23 +111,23 @@ def test_research_spill_materialization_is_exact_and_pre_admitted(
     policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
     entered: list[bool] = []
 
-    def reject_read(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+    def reject_concat(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
         entered.append(True)
-        raise AssertionError("read_all entered before full-overlap admission")
+        raise AssertionError("concat entered before full-overlap admission")
 
-    monkeypatch.setattr(research_memory.pa.ipc, "open_file", reject_read)
+    monkeypatch.setattr(research_memory.pd, "concat", reject_concat)
     with runtime_resource_policy_scope(policy):
-        with research_memory._ResearchFrameSpill(
+        with research_memory._ResearchFrameAccumulator(
             "research.test.reject",
             resource_policy=policy,
-        ) as spill:
-            spill.append(first)
+        ) as accumulator:
+            accumulator.append(first)
             with policy.reserve("outer", policy.remaining_memory_bytes):
                 with pytest.raises(
                     MemoryError,
                     match="runtime_memory_budget_exceeded",
                 ):
-                    spill.materialize()
+                    accumulator.materialize()
     assert entered == []
 
 

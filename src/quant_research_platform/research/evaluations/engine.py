@@ -20,7 +20,7 @@ from quant_research_platform.contracts.evaluations import (
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.research._memory import (
-    _ResearchFrameSpill,
+    _ResearchFrameAccumulator,
     _selected_frame_payload_bytes,
     iter_complete_session_frames,
 )
@@ -137,14 +137,14 @@ def _compute_evaluation_frames(
     filter_definition = ""
     retained_policy = current_runtime_resource_policy()
     with (
-        _ResearchFrameSpill(
+        _ResearchFrameAccumulator(
             "research.evaluation.metrics",
             resource_policy=retained_policy,
-        ) as metric_spill,
-        _ResearchFrameSpill(
+        ) as metric_accumulator,
+        _ResearchFrameAccumulator(
             "research.evaluation.grouped",
             resource_policy=retained_policy,
-        ) as grouped_spill,
+        ) as grouped_accumulator,
     ):
         for chunk in _iter_evaluation_work_frames(
             frames,
@@ -225,11 +225,11 @@ def _compute_evaluation_frames(
                     rows_after_dropna += int(
                         strict_non_negative_count_series(metrics["n_obs"]).sum()
                     )
-                    metric_spill.append(metrics)
-                    grouped_spill.append(grouped_label_values)
+                    metric_accumulator.append(metrics)
+                    grouped_accumulator.append(grouped_label_values)
                     del metrics, grouped_label_values
 
-        metrics_result = metric_spill.materialize()
+        metrics_result = metric_accumulator.materialize()
         result_reservation = ExitStack()
         try:
             if retained_policy is not None:
@@ -239,7 +239,7 @@ def _compute_evaluation_frames(
                         pandas_frame_payload_bytes(metrics_result),
                     )
                 )
-            grouped_result = grouped_spill.materialize()
+            grouped_result = grouped_accumulator.materialize()
         finally:
             result_reservation.close()
 

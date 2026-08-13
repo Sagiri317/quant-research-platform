@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 from collections.abc import Iterator
 from contextlib import ExitStack
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
@@ -19,18 +16,13 @@ from quant_research_platform.runtime.resources import (
     bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
-    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 
-_SPILL_NATIVE_BYTES = 64 * 1024
-_SPILL_ARROW_FIXED_BYTES = 4 * 1024
-_SPILL_ARROW_CELL_BYTES = 9
 
-
-class _ResearchFrameSpill:
-    """One owner-local Arrow stream replacing retained Pandas chunk lists."""
+class _ResearchFrameAccumulator:
+    """Pre-admit one required complete research DataFrame result."""
 
     def __init__(
         self,
@@ -40,23 +32,14 @@ class _ResearchFrameSpill:
     ) -> None:
         self._owner = owner
         self._policy = resource_policy
-        scratch_parent = Path(tempfile.gettempdir())
-        require_free_disk_headroom(
-            scratch_parent,
-            reserve_bytes=_SPILL_NATIVE_BYTES,
-        )
-        self._temporary = tempfile.TemporaryDirectory(
-            prefix=f"qrp-{owner.replace('.', '-')}-",
-            dir=scratch_parent,
-        )
-        self._path = Path(self._temporary.name) / "frames.arrow"
-        self._sink: pa.OSFile | None = None
-        self._writer: pa.ipc.RecordBatchFileWriter | None = None
-        self._writer_reservation = ExitStack()
-        self._schema: pa.Schema | None = None
+        self._frames: list[pd.DataFrame] = []
+        self._retained = ExitStack()
+        self._columns: tuple[object, ...] | None = None
+        self._dtypes: tuple[object, ...] | None = None
         self._empty_frame: pd.DataFrame | None = None
-        self._arrow_bytes = 0
-        self._pandas_bytes = 0
+        self._output_data_bytes = 0
+        self._output_index_bytes = 0
+        self._shallow_bytes = 0
         self._row_count = 0
         self._closed = False
 
@@ -66,71 +49,94 @@ class _ResearchFrameSpill:
 
     def append(self, frame: pd.DataFrame) -> None:
         if self._closed:
-            raise RuntimeError("research_frame_spill_closed")
+            raise RuntimeError("research_frame_accumulator_closed")
+        if not isinstance(frame, pd.DataFrame):
+            raise TypeError("invalid_research_frame")
+        columns = tuple(frame.columns)
+        dtypes = tuple(frame.dtypes)
+        if self._columns is None:
+            self._columns = columns
+            self._dtypes = dtypes
+        elif columns != self._columns or dtypes != self._dtypes:
+            raise ValueError("research_frame_accumulator_schema_mismatch")
         if frame.empty:
             if self._empty_frame is None:
-                self._empty_frame = frame.iloc[0:0].copy()
+                self._empty_frame = frame
             return
         frame_bytes = pandas_frame_payload_bytes(frame)
-        require_free_disk_headroom(
-            self._path.parent,
-            reserve_bytes=_SPILL_NATIVE_BYTES + frame_bytes,
+        output_data_bytes = int(
+            frame.memory_usage(index=False, deep=True).sum()
         )
+        output_index_bytes = int(
+            pd.RangeIndex(self._row_count + len(frame)).memory_usage(deep=True)
+        )
+        output_index_delta = max(
+            0,
+            output_index_bytes - self._output_index_bytes,
+        )
+        shallow_bytes = int(frame.memory_usage(index=True, deep=False).sum())
         policy = self._active_policy()
-        if self._writer is None and policy is not None:
-            self._writer_reservation.enter_context(
-                policy.reserve(
-                    f"{self._owner}.spill.native",
-                    _SPILL_NATIVE_BYTES,
+        pending = ExitStack()
+        try:
+            if policy is not None:
+                pending.enter_context(
+                    policy.reserve(
+                        f"{self._owner}.retained",
+                        frame_bytes,
+                    )
                 )
-            )
-        arrow_bound = (
-            _SPILL_ARROW_FIXED_BYTES
-            + frame_bytes
-            + len(frame) * len(frame.columns) * _SPILL_ARROW_CELL_BYTES
-        )
-        reservation = ExitStack()
-        if policy is not None:
-            reservation.enter_context(
-                policy.reserve(f"{self._owner}.spill.append", arrow_bound)
-            )
-        with reservation:
-            table = pa.Table.from_pandas(frame, preserve_index=False)
-            if table.nbytes > arrow_bound:
-                raise ValueError("research_frame_spill_exceeds_task_memory_budget")
-            if self._writer is None:
-                self._sink = pa.OSFile(str(self._path), "wb")
-                self._writer = pa.ipc.new_file(self._sink, table.schema)
-                self._schema = table.schema
-            elif self._schema is None or not table.schema.equals(self._schema):
-                raise ValueError("research_frame_spill_schema_mismatch")
-            self._writer.write_table(table)
-            self._arrow_bytes += int(table.nbytes)
-            self._pandas_bytes += frame_bytes
-            self._row_count += len(frame)
+                pending.enter_context(
+                    policy.reserve(
+                        f"{self._owner}.result",
+                        output_data_bytes,
+                    )
+                )
+                if output_index_delta:
+                    pending.enter_context(
+                        policy.reserve(
+                            f"{self._owner}.result_index",
+                            output_index_delta,
+                        )
+                    )
+            self._retained.enter_context(pending.pop_all())
+        finally:
+            pending.close()
+        self._frames.append(frame)
+        self._output_data_bytes += output_data_bytes
+        self._output_index_bytes = output_index_bytes
+        self._shallow_bytes += shallow_bytes
+        self._row_count += len(frame)
 
     def materialize(self) -> pd.DataFrame:
         if self._closed:
-            raise RuntimeError("research_frame_spill_closed")
-        if self._writer is None:
+            raise RuntimeError("research_frame_accumulator_closed")
+        if not self._frames:
             return (
                 pd.DataFrame()
                 if self._empty_frame is None
                 else self._empty_frame.copy()
             )
-        self._close_writer()
         policy = self._active_policy()
-        read_bound = self._arrow_bytes + self._pandas_bytes + _SPILL_NATIVE_BYTES
-        reservation = ExitStack()
-        if policy is not None:
-            reservation.enter_context(
-                policy.reserve(f"{self._owner}.spill.materialize", read_bound)
-            )
-        with reservation, pa.memory_map(str(self._path), "r") as source:
-            table = pa.ipc.open_file(source).read_all()
-            result = table.to_pandas(use_threads=False)
+        with ExitStack() as workspace:
+            if policy is not None:
+                workspace.enter_context(
+                    policy.reserve(
+                        f"{self._owner}.concat",
+                        self._shallow_bytes,
+                    )
+                )
+            result = pd.concat(self._frames, ignore_index=True)
         if len(result) != self._row_count:
-            raise RuntimeError("research_frame_spill_row_count_mismatch")
+            raise RuntimeError("research_frame_accumulator_row_count_mismatch")
+        if (
+            tuple(result.columns) != self._columns
+            or tuple(result.dtypes) != self._dtypes
+        ):
+            raise RuntimeError("research_frame_accumulator_schema_changed")
+        if pandas_frame_payload_bytes(result) > (
+            self._output_data_bytes + self._output_index_bytes
+        ):
+            raise RuntimeError("research_frame_accumulator_bound_exceeded")
         return result
 
     def close(self) -> None:
@@ -138,17 +144,15 @@ class _ResearchFrameSpill:
             return
         self._closed = True
         primary = sys.exception()
-        error: BaseException | None = None
-        for cleanup in (self._close_writer, self._temporary.cleanup):
-            try:
-                cleanup()
-            except BaseException as exc:
-                if primary is None and error is None:
-                    error = exc
-        if error is not None:
-            raise error
+        self._frames.clear()
+        self._empty_frame = None
+        try:
+            self._retained.close()
+        except BaseException:
+            if primary is None:
+                raise
 
-    def __enter__(self) -> _ResearchFrameSpill:
+    def __enter__(self) -> _ResearchFrameAccumulator:
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -159,31 +163,6 @@ class _ResearchFrameSpill:
         if self._policy is not None and active is not self._policy:
             raise RuntimeError("runtime_resource_policy_conflict")
         return self._policy
-
-    def _close_writer(self) -> None:
-        primary = sys.exception()
-        error: BaseException | None = None
-        if self._writer is not None:
-            try:
-                self._writer.close()
-            except BaseException as exc:
-                if primary is None:
-                    error = exc
-            self._writer = None
-        if self._sink is not None:
-            try:
-                self._sink.close()
-            except BaseException as exc:
-                if primary is None and error is None:
-                    error = exc
-            self._sink = None
-        try:
-            self._writer_reservation.close()
-        except BaseException as exc:
-            if primary is None and error is None:
-                error = exc
-        if error is not None:
-            raise error
 
 
 def _iter_contiguous_session_frames(

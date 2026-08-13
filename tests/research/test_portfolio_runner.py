@@ -148,8 +148,11 @@ def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_g
     )
 
     assert len(chunks) == len(expected_chunks)
-    assert returns["timestamp"].tolist() == [pd.Timestamp("2024-01-02")]
-    assert returns["gross_portfolio_return"].tolist() == pytest.approx([0.20])
+    assert returns["timestamp"].tolist() == [
+        pd.Timestamp("2024-01-01"),
+        pd.Timestamp("2024-01-02"),
+    ]
+    assert returns["gross_portfolio_return"].tolist() == pytest.approx([0.0, 0.20])
     assert summary.keys() == expected_summary.keys()
     for name in summary:
         pd.testing.assert_frame_equal(summary[name], expected_summary[name])
@@ -273,8 +276,8 @@ def test_persisted_prediction_portfolio_uses_bounded_disk_lookup(
         [chunk["portfolio_returns"] for chunk in chunks],
         ignore_index=True,
     )
-    assert returns["gross_portfolio_return"].tolist() == pytest.approx([0.20])
-    assert summary["performance_summary"].iloc[0]["periods"] == 1
+    assert returns["gross_portfolio_return"].tolist() == pytest.approx([0.0, 0.20])
+    assert summary["performance_summary"].iloc[0]["periods"] == 2
 
 
 def test_prediction_bundle_rejects_duplicate_outside_selected_window(
