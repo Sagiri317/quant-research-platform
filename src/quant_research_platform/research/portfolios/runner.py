@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ from quant_research_platform.runtime.resources import (
     bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -72,6 +74,59 @@ def build_portfolio_result_from_research_dataset(
     time_window: TimeWindow | None = None,
     prediction_frame: pd.DataFrame | None = None,
     prediction_metadata: Mapping[str, object] | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> PortfolioResult:
+    policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    ) or RuntimeResourcePolicy.capture()
+    operation = ExitStack()
+    operation.enter_context(runtime_resource_policy_scope(policy))
+    try:
+        result = _build_portfolio_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            portfolio_catalog=portfolio_catalog,
+            portfolio_id=portfolio_id,
+            time_window=time_window,
+            prediction_frame=prediction_frame,
+            prediction_metadata=prediction_metadata,
+        )
+    except BaseException:
+        operation.close()
+        raise
+
+    def output_chunks() -> Iterable[Mapping[str, pd.DataFrame]]:
+        try:
+            yield from result.output_chunks
+        except BaseException:
+            operation.close()
+            raise
+
+    def summary() -> Mapping[str, pd.DataFrame]:
+        try:
+            return result.summary_factory()
+        finally:
+            operation.close()
+
+    owned_result = PortfolioResult(
+        spec=result.spec,
+        output_chunks=output_chunks(),
+        summary_factory=summary,
+    )
+    weakref.finalize(result, operation.close)
+    return owned_result
+
+
+def _build_portfolio_result_from_research_dataset(
+    *,
+    layout: StorageLayout,
+    dataset_catalog: ResearchDatasetCatalog,
+    portfolio_catalog: PortfolioCatalog,
+    portfolio_id: str,
+    time_window: TimeWindow | None,
+    prediction_frame: pd.DataFrame | None,
+    prediction_metadata: Mapping[str, object] | None,
 ) -> PortfolioResult:
     spec = portfolio_catalog.get(portfolio_id)
     dataset_spec = dataset_catalog.get(spec.research_dataset_id)

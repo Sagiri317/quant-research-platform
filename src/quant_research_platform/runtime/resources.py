@@ -436,12 +436,18 @@ def current_runtime_resource_policy() -> RuntimeResourcePolicy | None:
 
 def bind_runtime_resource_policy(
     explicit: RuntimeResourcePolicy | None,
+    *,
+    allow_implicit_active: bool = True,
 ) -> RuntimeResourcePolicy | None:
     """Bind a lazy operation to its exact creation-time policy."""
 
     if explicit is not None and type(explicit) is not RuntimeResourcePolicy:
         raise TypeError("invalid_runtime_resource_policy")
+    if type(allow_implicit_active) is not bool:
+        raise TypeError("invalid_runtime_resource_policy_binding")
     active = current_runtime_resource_policy()
+    if active is not None and explicit is None and not allow_implicit_active:
+        raise RuntimeError("runtime_resource_policy_competing_root")
     if active is not None and explicit is not None and explicit is not active:
         raise RuntimeError("runtime_resource_policy_conflict")
     return active if active is not None else explicit

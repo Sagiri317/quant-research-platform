@@ -1831,6 +1831,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
             model_catalog=model_catalog,
             prediction_catalog=prediction_catalog,
             prediction_id="pred_demo",
+            resource_policy=prediction_policy,
         )
         output_bundle = _write_prediction_result(layout, result)
 
@@ -1962,6 +1963,7 @@ def test_evaluation_runner_streams_research_chunks(
             dataset_catalog=dataset_catalog,
             evaluation_catalog=evaluation_catalog,
             run_id="eval_demo",
+            resource_policy=evaluation_policy,
         )
     output_bundle = _write_evaluation_result(layout, result)
 

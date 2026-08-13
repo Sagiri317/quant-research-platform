@@ -33,9 +33,12 @@ from quant_research_platform.research.signals.materialization import (
     normalize_signal_frame,
 )
 from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
 )
 
 _EVALUATION_RECORD_WORKING_BYTES = 512
@@ -58,6 +61,29 @@ def evaluate_signal_frame_chunks(
     n_groups: int = 5,
     asset_column: str = "asset_id",
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> EvaluationResult:
+    policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    ) or RuntimeResourcePolicy.capture()
+    with runtime_resource_policy_scope(policy):
+        return _evaluate_signal_frame_chunks(
+            frames,
+            spec,
+            n_groups=n_groups,
+            asset_column=asset_column,
+            source_columns_by_kind=source_columns_by_kind,
+        )
+
+
+def _evaluate_signal_frame_chunks(
+    frames: Iterable[pd.DataFrame],
+    spec: EvaluationSpec,
+    *,
+    n_groups: int,
+    asset_column: str,
+    source_columns_by_kind: Mapping[str, Sequence[str]] | None,
 ) -> EvaluationResult:
     owner_policy = current_runtime_resource_policy()
     metrics, grouped_label_values, filter_metadata, rows_after_dropna = (

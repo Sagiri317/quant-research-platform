@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import warnings
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -171,6 +172,19 @@ def test_portfolio_prediction_join_keeps_its_creation_policy(
     )
 
     with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            RuntimeError,
+            match="runtime_resource_policy_competing_root",
+        ):
+            build_portfolio_result_from_research_dataset(
+                layout=layout,
+                dataset_catalog=dataset_catalog,
+                portfolio_catalog=portfolio_catalog,
+                portfolio_id="demo_prediction_portfolio",
+                time_window=TimeWindow("2024-01-01", "2024-01-02"),
+                prediction_frame=prediction,
+                prediction_metadata=manifest["metadata"],
+            )
         result = build_portfolio_result_from_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
@@ -179,6 +193,7 @@ def test_portfolio_prediction_join_keeps_its_creation_policy(
             time_window=TimeWindow("2024-01-01", "2024-01-02"),
             prediction_frame=prediction,
             prediction_metadata=manifest["metadata"],
+            resource_policy=policy,
         )
 
         monkeypatch.setattr(
@@ -200,6 +215,28 @@ def test_portfolio_prediction_join_keeps_its_creation_policy(
             match="portfolio_prediction_join_working_set_exceeds_task_memory_budget",
         ):
             list(result.output_chunks)
+
+
+def test_portfolio_extracted_output_iterator_keeps_operation_root(tmp_path) -> None:
+    layout, dataset_catalog, portfolio_catalog, prediction, manifest, _root = (
+        _prediction_portfolio_inputs(tmp_path)
+    )
+    result = build_portfolio_result_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        portfolio_catalog=portfolio_catalog,
+        portfolio_id="demo_prediction_portfolio",
+        time_window=TimeWindow("2024-01-01", "2024-01-02"),
+        prediction_frame=prediction,
+        prediction_metadata=manifest["metadata"],
+    )
+    output_chunks = result.output_chunks
+    summary_factory = result.summary_factory
+    del result
+    gc.collect()
+
+    assert list(output_chunks)
+    assert summary_factory()
 
 
 @pytest.mark.parametrize(
@@ -268,6 +305,7 @@ def test_persisted_prediction_portfolio_uses_bounded_disk_lookup(
                 time_window=TimeWindow("2024-01-01", "2024-01-02"),
                 prediction_frame=prediction_lookup,
                 prediction_metadata=manifest["metadata"],
+                resource_policy=policy,
             )
             chunks = list(result.output_chunks)
             summary = result.summary_factory()

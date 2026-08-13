@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import replace
@@ -44,8 +45,11 @@ from quant_research_platform.research.predictions.outputs import (
     prediction_callable,
 )
 from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -61,6 +65,64 @@ def build_prediction_result_from_research_dataset(
     prediction_train_end: str | None = None,
     prediction_test_start: str | None = None,
     prediction_test_end: str | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> PredictionResult:
+    policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    ) or RuntimeResourcePolicy.capture()
+    operation = ExitStack()
+    operation.enter_context(runtime_resource_policy_scope(policy))
+    try:
+        result = _build_prediction_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            model_catalog=model_catalog,
+            prediction_catalog=prediction_catalog,
+            prediction_id=prediction_id,
+            time_window=time_window,
+            prediction_train_end=prediction_train_end,
+            prediction_test_start=prediction_test_start,
+            prediction_test_end=prediction_test_end,
+        )
+    except BaseException:
+        operation.close()
+        raise
+
+    def output_chunks() -> Iterable[pd.DataFrame]:
+        try:
+            yield from result.output_chunks
+        except BaseException:
+            operation.close()
+            raise
+
+    def prediction_metadata() -> dict[str, object]:
+        try:
+            return result.prediction_metadata_factory()
+        finally:
+            operation.close()
+
+    owned_result = PredictionResult(
+        spec=result.spec,
+        output_chunks=output_chunks(),
+        model_metadata=result.model_metadata,
+        prediction_metadata_factory=prediction_metadata,
+    )
+    weakref.finalize(result, operation.close)
+    return owned_result
+
+
+def _build_prediction_result_from_research_dataset(
+    *,
+    layout: StorageLayout,
+    dataset_catalog: ResearchDatasetCatalog,
+    model_catalog: ModelCatalog,
+    prediction_catalog: PredictionCatalog,
+    prediction_id: str,
+    time_window: TimeWindow | None,
+    prediction_train_end: str | None,
+    prediction_test_start: str | None,
+    prediction_test_end: str | None,
 ) -> PredictionResult:
     prediction_spec = prediction_catalog.get(prediction_id)
     if (

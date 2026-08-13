@@ -310,6 +310,7 @@ def _run_local_verification_with_policy(
             evaluation_catalog=catalogs.evaluations,
             run_id=evaluation_run_id,
             time_window=evaluation_time_window,
+            resource_policy=resource_policy,
         )
         evaluation_frames = (
             evaluation_result.metrics,
@@ -352,6 +353,7 @@ def _run_local_verification_with_policy(
                 prediction_train_end=effective_windows["prediction_train_end"],
                 prediction_test_start=effective_windows["prediction_test_start"],
                 prediction_test_end=effective_windows["prediction_test_end"],
+                resource_policy=resource_policy,
             )
             prediction_roots_by_id[prediction_spec.prediction_id] = (
                 _write_prediction_result(
@@ -403,6 +405,7 @@ def _run_local_verification_with_policy(
                     time_window=evaluation_time_window,
                     prediction_frame=prediction_frame,
                     prediction_metadata=prediction_metadata,
+                    resource_policy=resource_policy,
                 )
                 portfolio_roots_list.append(
                     write_portfolio_outputs(

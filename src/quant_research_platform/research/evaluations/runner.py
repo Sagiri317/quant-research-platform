@@ -14,6 +14,11 @@ from quant_research_platform.research.evaluations.engine import (
     EvaluationResult,
     evaluate_signal_frame_chunks,
 )
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    bind_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -25,6 +30,33 @@ def build_evaluation_result_from_research_dataset(
     run_id: str,
     time_window: TimeWindow | None = None,
     n_groups: int | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> EvaluationResult:
+    policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    ) or RuntimeResourcePolicy.capture()
+    with runtime_resource_policy_scope(policy):
+        return _build_evaluation_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            evaluation_catalog=evaluation_catalog,
+            run_id=run_id,
+            time_window=time_window,
+            n_groups=n_groups,
+            resource_policy=policy,
+        )
+
+
+def _build_evaluation_result_from_research_dataset(
+    *,
+    layout: StorageLayout,
+    dataset_catalog: ResearchDatasetCatalog,
+    evaluation_catalog: EvaluationCatalog,
+    run_id: str,
+    time_window: TimeWindow | None,
+    n_groups: int | None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> EvaluationResult:
     spec = evaluation_catalog.get(run_id)
     dataset_spec = dataset_catalog.get(spec.research_dataset_id)
@@ -56,6 +88,7 @@ def build_evaluation_result_from_research_dataset(
             "feature": tuple(dataset_spec.feature_columns),
             "prediction": tuple(dataset_spec.context_columns),
         },
+        resource_policy=resource_policy,
     )
 
 
