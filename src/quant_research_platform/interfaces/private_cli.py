@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Annotated
 
@@ -13,6 +14,7 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._scratch_ownership import remove_owned_scratch
 from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.workflows.diagnostics.schema_inventory import (
     open_schema_inventory_payload,
@@ -68,8 +70,19 @@ def schema_inventory(
     try:
         policy = RuntimeResourcePolicy.capture()
         with runtime_resource_policy_scope(policy):
-            with open_schema_inventory_payload(project_root) as inventory:
-                atomic_write_json(output, inventory, finalize_memory=True)
+            with ExitStack() as inventory_stack:
+                inventory = inventory_stack.enter_context(
+                    open_schema_inventory_payload(project_root)
+                )
+                published = atomic_write_json(output, inventory)
+                published_identity = published.lstat()
+                inventory_stack.close()
+                policy.finish_memory_measurement(
+                    on_reject=lambda: remove_owned_scratch(
+                        published,
+                        published_identity,
+                    )
+                )
     except Exception as exc:
         typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc

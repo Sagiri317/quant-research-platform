@@ -287,9 +287,25 @@ def test_local_verification_replace_failure_preserves_old_good(
     assert tuple(path.name for path in run_root.parent.iterdir()) == ("old_good",)
 
     monkeypatch.setattr(module, "move_path_no_replace", original_move)
+    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(
+        module.RuntimeResourcePolicy,
+        "capture",
+        staticmethod(lambda **_kwargs: policy),
+    )
+    cleanup_states: list[str] = []
+    original_remove = module.remove_owned_scratch
+
+    def record_remove(path, identity):  # noqa: ANN001, ANN202
+        if path.name.startswith(".lv-old-"):
+            cleanup_states.append(policy._measurement.state)  # noqa: SLF001
+        return original_remove(path, identity)
+
+    monkeypatch.setattr(module, "remove_owned_scratch", record_remove)
     result = run_local_verification(config)
 
     assert result.run_root == "old_good"
+    assert cleanup_states == ["ACTIVE"]
     assert not marker.exists()
     assert (run_root / "new-good.txt").read_text(encoding="utf-8") == "new-good\n"
     assert tuple(path.name for path in run_root.parent.iterdir()) == ("old_good",)
@@ -323,7 +339,7 @@ def test_final_rss_rejection_rolls_back_published_replacement(
         payload["status"] = "FAIL"
         return payload
 
-    measurement.evidence = failed_evidence  # type: ignore[method-assign]
+    measurement.checkpoint_evidence = failed_evidence  # type: ignore[method-assign]
     monkeypatch.setattr(
         module.RuntimeResourcePolicy,
         "capture",

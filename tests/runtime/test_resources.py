@@ -250,12 +250,15 @@ def test_finish_keeps_hard_backstop_until_root_cleanup_completes(
     )
     policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
 
-    with runtime_resource_policy_scope(policy):
-        policy.finish_memory_measurement()
-        assert events == ["stop_sampler"]
+    def cleanup() -> None:
+        assert policy._measurement.state == "ACTIVE"  # noqa: SLF001
         events.append("cleanup")
 
-    assert events == ["stop_sampler", "cleanup", "restore_backstop"]
+    with runtime_resource_policy_scope(policy):
+        policy.finish_memory_measurement(cleanup=cleanup)
+        assert events == ["cleanup", "stop_sampler"]
+
+    assert events == ["cleanup", "stop_sampler", "restore_backstop"]
 
 
 def test_windows_hard_rss_backstop_sets_and_restores_exact_limit() -> None:

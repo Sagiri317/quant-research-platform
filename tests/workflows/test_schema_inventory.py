@@ -269,6 +269,7 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
     policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
     observed: list[RuntimeResourcePolicy] = []
     observed_reserved: list[int] = []
+    cleanup_states: list[str] = []
     monkeypatch.setattr(
         private_cli.RuntimeResourcePolicy,
         "capture",
@@ -277,25 +278,28 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
     @contextmanager
     def inventory(_root: Path):
         with policy.reserve("test.schema.inventory", 64):
-            yield {"schema_id": "qrp-schema-inventory", "datasets": []}
+            try:
+                yield {"schema_id": "qrp-schema-inventory", "datasets": []}
+            finally:
+                cleanup_states.append(policy._measurement.state)  # noqa: SLF001
 
     monkeypatch.setattr(private_cli, "open_schema_inventory_payload", inventory)
 
     def write(
         _path: Path,
         _payload: object,
-        *,
-        finalize_memory: bool = False,
-    ) -> None:
-        assert finalize_memory
+    ) -> Path:
         observed.append(active_runtime_resource_policy())
         observed_reserved.append(policy.reserved_memory_bytes)
+        _path.write_text("{}", encoding="utf-8")
+        return _path
 
     monkeypatch.setattr(private_cli, "atomic_write_json", write)
     private_cli.schema_inventory(tmp_path, tmp_path / "inventory.json")
 
     assert observed == [policy]
     assert observed_reserved == [64]
+    assert cleanup_states == ["ACTIVE"]
     assert policy.reserved_memory_bytes == 0
 
 

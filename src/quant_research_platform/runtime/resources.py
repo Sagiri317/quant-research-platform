@@ -407,6 +407,7 @@ class RuntimeResourcePolicy:
     def finish_memory_measurement(
         self,
         *,
+        cleanup: Callable[[], None] | None = None,
         on_reject: Callable[[], None] | None = None,
     ) -> dict[str, int | float | str]:
         """Finish and accept the sampler at an owner-controlled publish boundary."""
@@ -419,6 +420,21 @@ class RuntimeResourcePolicy:
             raise RuntimeError("runtime_rss_sampler_not_active")
         try:
             self.assert_memory_within_budget()
+            if cleanup is not None:
+                cleanup()
+            self.assert_memory_within_budget()
+        except BaseException as primary:
+            if on_reject is not None:
+                try:
+                    on_reject()
+                except BaseException as rollback_error:
+                    primary.add_note(
+                        "runtime memory rejection rollback also failed: "
+                        f"{type(rollback_error).__name__}"
+                    )
+            self._measurement.stop()
+            raise
+        try:
             self._measurement.stop()
             evidence = self.memory_evidence()
             _require_memory_acceptance(self._measurement, evidence)

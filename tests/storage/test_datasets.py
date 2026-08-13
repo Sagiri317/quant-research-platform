@@ -9609,7 +9609,7 @@ def test_bounded_metadata_reader_rejects_hardlink_before_open(
         storage_manifests.read_bounded_qrp_json(candidate)
 
 
-def test_private_writer_envelope_reserves_upstream_retained_payload(
+def test_private_writer_declaration_does_not_create_retained_allocation(
     tmp_path: Path,
 ) -> None:
     policy = _writer_test_policy()
@@ -9619,13 +9619,22 @@ def test_private_writer_envelope_reserves_upstream_retained_payload(
         policy.task_memory_budget_bytes,
     )
 
-    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-        dataset_writing.write_dataset(
-            make_dataset_artifact_root(tmp_path, "retained_publication"),
-            iter((envelope,)),
-            spec=make_processed_dataset_spec("retained_publication"),
-            resource_policy=policy,
-        )
+    root = make_dataset_artifact_root(tmp_path, "retained_publication")
+    dataset_writing.write_dataset(
+        root,
+        iter((envelope,)),
+        spec=make_processed_dataset_spec("retained_publication"),
+        resource_policy=policy,
+    )
+
+    key = ["asset_id", "timestamp"]
+    expected = frame.copy()
+    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
+    pd.testing.assert_frame_equal(
+        read_dataset(root).sort_values(key).reset_index(drop=True),
+        expected.sort_values(key).reset_index(drop=True),
+    )
+    assert policy.reserved_memory_bytes == 0
 
 
 def test_writer_input_reservation_ignores_declared_and_unrelated_credit(
@@ -9694,7 +9703,7 @@ def test_private_writer_baseline_rejects_before_input_generation(
     assert not generated
 
 
-def test_writer_final_session_receives_key_index_and_last_external_envelope(
+def test_writer_final_session_ignores_retired_external_declaration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9737,7 +9746,6 @@ def test_writer_final_session_receives_key_index_and_last_external_envelope(
     assert observed == [
         dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
         - dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
-        + external_envelopes[-1]
     ]
 
 

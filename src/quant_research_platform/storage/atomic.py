@@ -41,7 +41,6 @@ def atomic_write_text(
     text: str,
     *,
     encoding: str = "utf-8",
-    finalize_memory: bool = False,
 ) -> Path:
     final_path = Path(path)
     reject_if_exists(final_path)
@@ -75,7 +74,6 @@ def atomic_write_text(
             temp_path,
             final_path,
             source_identity=claimed_temp,
-            finalize_memory=finalize_memory,
         )
     except BaseException:
         if claimed_temp is not None:
@@ -90,14 +88,11 @@ def atomic_write_text(
 def atomic_write_json(
     path: Path,
     payload: object,
-    *,
-    finalize_memory: bool = False,
 ) -> Path:
     return atomic_write_text(
         path,
         render_qrp_json_object(payload) + "\n",
         encoding="utf-8",
-        finalize_memory=finalize_memory,
     )
 
 
@@ -392,13 +387,10 @@ def publish_no_replace(
     target: Path,
     *,
     source_identity: os.stat_result,
-    finalize_memory: bool = False,
 ) -> None:
     source = require_unaliased_path(Path(source), error="invalid_storage_write_path")
     target = require_unaliased_path(Path(target), error="invalid_storage_write_path")
     policy = current_runtime_resource_policy()
-    if finalize_memory and policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
     if policy is not None:
         policy.assert_memory_within_budget()
     for attempt in range(1, 4):
@@ -445,14 +437,6 @@ def publish_no_replace(
                         except BaseException:
                             raise acceptance_error from None
                         raise
-                if finalize_memory:
-                    assert policy is not None
-                    policy.finish_memory_measurement(
-                        on_reject=lambda: remove_owned_scratch(
-                            target,
-                            source_identity,
-                        )
-                    )
                 return
             raise primary
         if primary is not None:

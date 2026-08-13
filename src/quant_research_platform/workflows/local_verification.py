@@ -197,11 +197,14 @@ def run_local_verification(
                     move_path_no_replace(backup_root, run_root)
                 published = False
 
+            def cleanup_old_good() -> None:
+                if backup_root is not None and replaced_identity is not None:
+                    remove_owned_scratch(backup_root, replaced_identity)
+
             resource_policy.finish_memory_measurement(
+                cleanup=cleanup_old_good,
                 on_reject=rollback_final_rejection,
             )
-            if backup_root is not None and replaced_identity is not None:
-                remove_owned_scratch(backup_root, replaced_identity)
         except BaseException as primary:
             if published and staged_identity is not None:
                 try:

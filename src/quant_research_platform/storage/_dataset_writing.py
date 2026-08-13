@@ -579,27 +579,13 @@ def _write_contents(
             break
         if isinstance(publication, DatasetWriteChunk):
             chunk = publication.frame
-            accumulator.retained_payload_bytes = max(
-                minimum_retained_payload_bytes,
-                publication.retained_payload_bytes,
-            )
         else:
             chunk = publication
-            accumulator.retained_payload_bytes = minimum_retained_payload_bytes
+        accumulator.retained_payload_bytes = minimum_retained_payload_bytes
         if type(chunk) is not pd.DataFrame:
             raise TypeError("invalid_dataset_chunk")
         chunk_bytes = pandas_frame_payload_bytes(chunk)
-        declared_retained_bytes = max(
-            0,
-            accumulator.retained_payload_bytes - minimum_retained_payload_bytes,
-        )
         with ExitStack() as publication_state:
-            publication_state.enter_context(
-                resource_policy.reserve(
-                    "storage.dataset.declared_retained",
-                    declared_retained_bytes,
-                )
-            )
             publication_state.enter_context(
                 resource_policy.reserve(
                     "storage.dataset.input",
