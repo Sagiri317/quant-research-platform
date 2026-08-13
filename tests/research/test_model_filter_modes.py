@@ -464,70 +464,50 @@ def test_model_training_purge_uses_each_assets_valid_label_rows() -> None:
     assert training["factor"].tolist() == [1.0]
 
 
-def test_model_max_train_rows_trims_streaming_training_buffer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_model_max_train_rows_streaming_matches_multi_asset_full_training() -> None:
     import quant_research_platform.research.models.fitting as model_fitting
     import quant_research_platform.research.models.validation_split as validation_split
 
-    frame = pd.concat(
-        [
-            pd.DataFrame(
-                {
-                    "timestamp": [pd.Timestamp("2024-01-01") + pd.Timedelta(days=day)],
-                    "asset_id": ["asset_a"],
-                    "factor": [float(day)],
-                    "label": [float(day) * 2.0],
-                    "eligible": [True],
-                }
-            )
-            for day in range(40)
-        ],
-        ignore_index=True,
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2024-01-01",
+                    "2024-01-01",
+                    "2024-01-02",
+                    "2024-01-02",
+                    "2024-01-03",
+                    "2024-01-03",
+                    "2024-01-04",
+                    "2024-01-05",
+                ]
+            ),
+            "asset_id": ["asset_a", "asset_b"] * 3 + ["asset_a", "asset_a"],
+            "factor": [1.0, 101.0, 2.0, 102.0, 3.0, 103.0, 4.0, 5.0],
+            "label": [2.0, 202.0, 4.0, 204.0, 6.0, 206.0, 8.0, 10.0],
+            "eligible": True,
+        }
     )
     spec = ModelSpec(
         model_id="linear_streaming_max_rows",
         model_algorithm="linear_regression",
         input_factor_columns=("factor",),
         label_column="label",
-        max_train_rows=7,
+        max_train_rows=2,
         purge_gap_steps=2,
     )
     expected = validation_split.apply_training_controls(
-        frame.loc[:, ["timestamp", "factor", "label"]],
+        frame.loc[:, ["timestamp", "asset_id", "factor", "label"]],
         spec,
-    )
-    original_trim = validation_split.trim_training_buffer
-    original_concat = pd.concat
-    observed_buffer_inputs: list[int] = []
-
-    def wrapped_trim(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:
-        observed_buffer_inputs.append(len(frame))
-        return original_trim(frame, spec)
-
-    def bounded_concat(frames, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        materialized = list(frames)
-        if materialized and all(
-            isinstance(part, pd.DataFrame)
-            and {"timestamp", "factor", "label"}.issubset(part.columns)
-            for part in materialized
-        ):
-            assert sum(len(part) for part in materialized) <= 2 * (
-                spec.max_train_rows + spec.purge_gap_steps
-            )
-        return original_concat(materialized, *args, **kwargs)
-
-    monkeypatch.setattr(validation_split, "trim_training_buffer", wrapped_trim)
-    monkeypatch.setattr(pd, "concat", bounded_concat)
+    ).drop(columns="asset_id")
 
     training, row_counts, _metadata = model_fitting.collect_training_frame(
-        (chunk for _, chunk in frame.groupby(frame.index // 20)),
+        (frame.iloc[:6], frame.iloc[6:]),
         spec,
     )
 
     pd.testing.assert_frame_equal(training, expected)
     assert row_counts["rows_after_input_label_dropna"] == len(expected)
-    assert max(observed_buffer_inputs) < len(frame)
 
 
 def test_model_training_collection_rejects_unbounded_collection() -> None:

@@ -160,6 +160,10 @@ def test_a_share_scenario_adds_prediction_portfolio_and_keeps_factor() -> None:
         (signal.signal_id, signal.source_column, signal.source_kind)
         for signal in portfolios[1].signals
     ] == [(prediction_id, "prediction_score", "prediction")]
+    for portfolio in portfolios:
+        assert portfolio.tradability_config.eligibility_column == "eligible"
+        assert portfolio.tradability_config.can_enter_column == "can_enter"
+        assert portfolio.tradability_config.can_exit_column == "can_exit"
 
 
 def test_catalog_profile_source_interim_catalog_requires_single_source(

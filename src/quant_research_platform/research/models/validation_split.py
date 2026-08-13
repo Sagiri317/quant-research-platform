@@ -15,12 +15,12 @@ def trim_training_buffer(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:
     result = result.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
     if spec.purge_gap_steps <= 0:
         return result.tail(spec.max_train_rows).reset_index(drop=True)
-    unique_timestamps = tuple(sorted(result["timestamp"].dropna().unique()))
-    if spec.purge_gap_steps >= len(unique_timestamps):
-        return result
-    purge_start = unique_timestamps[-spec.purge_gap_steps]
-    training_candidates = result.loc[result["timestamp"] < purge_start]
-    purge_gap_rows = result.loc[result["timestamp"] >= purge_start]
+    training_candidates = _purge_trailing_timestamps(
+        result,
+        spec.purge_gap_steps,
+        group_column="asset_id" if "asset_id" in result.columns else None,
+    )
+    purge_gap_rows = result.drop(index=training_candidates.index)
     return pd.concat(
         [training_candidates.tail(spec.max_train_rows), purge_gap_rows],
         ignore_index=True,

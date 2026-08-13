@@ -18,6 +18,7 @@ from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnosticsConfig,
     PortfolioSpec,
+    TradabilityConfig,
 )
 from quant_research_platform.contracts.predictions import (
     PREDICTION_SCORE_COLUMN,
@@ -100,6 +101,11 @@ DEFAULT_PORTFOLIO_DIAGNOSTICS_CONFIG = PortfolioDiagnosticsConfig(
     capacity_amount_column="amount",
     capacity_float_market_cap_column="float_market_cap",
     categorical_exposure_columns=("csrc_2012_industry_code",),
+)
+_DEFAULT_PORTFOLIO_TRADABILITY_CONFIG = TradabilityConfig(
+    eligibility_column="eligible",
+    can_enter_column="can_enter",
+    can_exit_column="can_exit",
 )
 
 
@@ -230,6 +236,7 @@ def build_portfolio_specs(
             return_source_column=return_source_column,
             rebalance_frequency=rebalance_frequency,
             execution_lag_steps=execution_lag_steps,
+            tradability_config=_DEFAULT_PORTFOLIO_TRADABILITY_CONFIG,
             diagnostics_config=DEFAULT_PORTFOLIO_DIAGNOSTICS_CONFIG,
         ),
     ]
@@ -249,6 +256,7 @@ def build_portfolio_specs(
                 return_source_column=return_source_column,
                 rebalance_frequency=rebalance_frequency,
                 execution_lag_steps=execution_lag_steps,
+                tradability_config=_DEFAULT_PORTFOLIO_TRADABILITY_CONFIG,
                 diagnostics_config=DEFAULT_PORTFOLIO_DIAGNOSTICS_CONFIG,
             )
         )

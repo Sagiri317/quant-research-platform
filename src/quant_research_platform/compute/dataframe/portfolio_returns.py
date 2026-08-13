@@ -217,7 +217,7 @@ def _build_portfolio_return_record_from_positions(
     for asset, position in positions.items():
         label = label_lookup.get(asset, np.nan)
         if not np.isfinite(label):
-            continue
+            raise ValueError("nonfinite_active_position_return")
         if position > 0:
             long_count += 1
             long_return += position * label
