@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import ExitStack, nullcontext
+from contextlib import nullcontext
 from pathlib import Path
 
 import pandas as pd
@@ -34,10 +34,6 @@ from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
-)
-from quant_research_platform.storage._dataset_physical import (
-    PARQUET_DATA_PAGE_BYTES,
-    PARQUET_WRITER_NATIVE_BYTES,
 )
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
@@ -167,16 +163,7 @@ def _write_portfolio_row_artifact_chunks(
         for artifact_name in row_artifacts
     }
     row_counts = {artifact_name: 0 for artifact_name in PORTFOLIO_ARTIFACTS}
-    policy = current_runtime_resource_policy()
-    writer_reservations = ExitStack()
     try:
-        if policy is not None:
-            writer_reservations.enter_context(
-                policy.reserve(
-                    "artifacts.portfolio.writers",
-                    len(row_artifacts) * PARQUET_WRITER_NATIVE_BYTES,
-                )
-            )
         with closing_dataset_iterator(iter(artifact_chunks)) as active_chunks:
             for artifact_chunk in active_chunks:
                 artifact_chunk = validate_portfolio_artifact_mapping_keys(
@@ -211,7 +198,11 @@ def _write_portfolio_row_artifact_chunks(
                                 temp_paths[artifact_name],
                                 persisted.schema,
                                 compression="zstd",
-                                data_page_size=PARQUET_DATA_PAGE_BYTES,
+                                write_batch_size=batch_rows,
+                                max_rows_per_page=batch_rows,
+                                use_dictionary=False,
+                                write_page_index=False,
+                                write_page_checksum=False,
                             )
                             writers[artifact_name] = writer
                         with table_state:
@@ -242,8 +233,6 @@ def _write_portfolio_row_artifact_chunks(
             except BaseException:
                 pass
         raise
-    finally:
-        writer_reservations.close()
     return row_counts
 
 

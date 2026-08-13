@@ -276,10 +276,15 @@ def _read_prediction_output_bundle(
                 raise MemoryError("runtime_memory_budget_exceeded")
             batch_size = max(
                 1,
-                min(65_536, (batch_headroom - decode_fixed_bytes) // batch_row_bytes),
+                (batch_headroom - decode_fixed_bytes) // batch_row_bytes,
             )
             batch_working_bytes = decode_fixed_bytes + batch_size * batch_row_bytes
-            batches = iter(parquet.iter_batches(batch_size=batch_size))
+            batches = iter(
+                parquet.iter_batches(
+                    batch_size=batch_size,
+                    use_threads=False,
+                )
+            )
             while True:
                 with policy.reserve(
                     "artifacts.prediction.read.batch",

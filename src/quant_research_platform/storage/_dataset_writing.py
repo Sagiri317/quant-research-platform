@@ -51,8 +51,6 @@ from quant_research_platform.storage._dataset_paths import (
     validate_dataset_artifact_root,
 )
 from quant_research_platform.storage._dataset_physical import (
-    PARQUET_DATA_PAGE_BYTES,
-    PARQUET_WRITER_NATIVE_BYTES,
     DatasetPartMetadata,
     dataset_file_identity,
     table_decoded_working_set_bounds,
@@ -821,7 +819,7 @@ def _dataset_write_operator_target_bytes(
 ) -> int:
     if frame.empty:
         return operation_headroom_bytes
-    fixed_bytes = 2 * _ARROW_FRAME_FIXED_BYTES + PARQUET_WRITER_NATIVE_BYTES
+    fixed_bytes = 2 * _ARROW_FRAME_FIXED_BYTES
     available = operation_headroom_bytes - fixed_bytes
     if available <= 0:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget")
@@ -829,7 +827,7 @@ def _dataset_write_operator_target_bytes(
         1,
         (pandas_frame_payload_bytes(frame) + len(frame) - 1) // len(frame),
     )
-    payload_overlaps = 4 if partitioned else 3
+    payload_overlaps = 5 if partitioned else 4
     row_overlap_bytes = (
         timestamp_key_count * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
         + (3 if partitioned else 0)
@@ -962,8 +960,11 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
             persisted,
             path,
             compression="zstd",
-            data_page_size=PARQUET_DATA_PAGE_BYTES,
             row_group_size=batch_rows,
             write_batch_size=batch_rows,
+            max_rows_per_page=batch_rows,
+            use_dictionary=False,
+            write_page_index=False,
+            write_page_checksum=False,
         )
     return path

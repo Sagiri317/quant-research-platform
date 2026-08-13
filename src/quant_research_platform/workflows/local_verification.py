@@ -202,6 +202,7 @@ def run_local_verification(
                     move_path_no_replace(backup_root, run_root)
                 published = False
 
+            retained_state.close()
             resource_policy.finish_memory_measurement(
                 on_reject=rollback_final_rejection,
             )

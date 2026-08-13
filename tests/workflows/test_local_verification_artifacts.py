@@ -162,7 +162,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     ]
     assert result.status == "NOT_RUN"
     assert publish_order == ["summary", "completed_run"]
-    assert len(final_reserved_bytes) == 1 and final_reserved_bytes[0] > 0
+    assert final_reserved_bytes == [0]
     assert result.run_id == "s1"
     assert result.run_root == "s1"
     layout = LocalVerificationLayout.from_run_root(run_root)
@@ -422,6 +422,53 @@ def test_final_rss_rejection_rolls_back_published_replacement(
     assert tuple(path.name for path in run_root.parent.iterdir()) == (
         "rss_old_good",
     )
+
+
+def test_local_retained_state_closes_before_final_memory_measurement(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "cleanup_sampled")
+    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
+    events: list[str] = []
+    original_finish = module.RuntimeResourcePolicy.finish_memory_measurement
+
+    monkeypatch.setattr(
+        module.RuntimeResourcePolicy,
+        "capture",
+        staticmethod(lambda **_kwargs: policy),
+    )
+
+    def replacement(**kwargs):
+        kwargs["retained_state"].callback(events.append, "cleanup")
+        return module.LocalVerificationRunResult(
+            status="PASS",
+            run_id="cleanup_sampled",
+            run_root=kwargs["run_root"].name,
+            summary={},
+        )
+
+    def finish(self, **kwargs):  # noqa: ANN001
+        events.append("finish")
+        return original_finish(self, **kwargs)
+
+    monkeypatch.setattr(module, "_run_local_verification_with_policy", replacement)
+    monkeypatch.setattr(
+        module.RuntimeResourcePolicy,
+        "finish_memory_measurement",
+        finish,
+    )
+    config = make_local_verification_config(
+        run_root=run_root,
+        run_id="cleanup_sampled",
+        start_date="2014-01-01",
+        end_date="2014-12-31",
+        profile=profile_with_empty_prediction_and_portfolio_builders(),
+    )
+
+    run_local_verification(config)
+
+    assert events == ["cleanup", "finish"]
 
 def test_local_verification_skips_empty_prediction_and_portfolio_catalogs(
     tmp_path,

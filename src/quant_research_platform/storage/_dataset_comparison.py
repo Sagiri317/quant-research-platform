@@ -24,9 +24,6 @@ from quant_research_platform.storage._dataset_key_tracking import (
     ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage._dataset_paths import require_artifact_root
-from quant_research_platform.storage._dataset_physical import (
-    PARQUET_READER_NATIVE_BYTES,
-)
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
     iter_dataset_file_batches,
@@ -293,10 +290,8 @@ def _index_dataset_rows(
         headroom -= retained_before_session + context.retained_memory_bytes
         if headroom <= 0:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        exact_payload_target = max(1, headroom - PARQUET_READER_NATIVE_BYTES)
+        exact_payload_target = headroom
         reader_headroom = headroom
-        if reader_headroom <= PARQUET_READER_NATIVE_BYTES:
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         duplicates = 0
 
         def index_batch(batch: pa.RecordBatch, _frame: Any) -> None:

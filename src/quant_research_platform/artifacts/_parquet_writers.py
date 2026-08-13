@@ -29,8 +29,6 @@ from quant_research_platform.storage._dataset_key_tracking import (
 )
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import (
-    PARQUET_DATA_PAGE_BYTES,
-    PARQUET_WRITER_NATIVE_BYTES,
     table_decoded_working_set_bounds,
     table_with_decoded_row_bounds,
 )
@@ -75,7 +73,7 @@ def write_parquet_chunks(
     effective_test_end: str | None = None
     decoded_metadata: dict[bytes, bytes] | None = None
     try:
-        with _artifact_writer_reservation(include_key_index=True):
+        with _artifact_key_index_reservation():
             with closing_dataset_iterator(iter(frames)) as active_frames:
                 try:
                     first_frame = next(active_frames)
@@ -168,9 +166,11 @@ def write_parquet_chunks(
                                                     handle,
                                                     persisted.schema,
                                                     compression=compression,
-                                                    data_page_size=(
-                                                        PARQUET_DATA_PAGE_BYTES
-                                                    ),
+                                                    write_batch_size=batch_rows,
+                                                    max_rows_per_page=batch_rows,
+                                                    use_dictionary=False,
+                                                    write_page_index=False,
+                                                    write_page_checksum=False,
                                                 )
                                             with table_state:
                                                 writer.write_table(
@@ -262,7 +262,7 @@ def write_parquet(
     require_unaliased_path(temp_path, error="invalid_output_write_path")
     claimed_temp: os.stat_result | None = None
     try:
-        with _artifact_writer_reservation(), _artifact_frame_reservation(frame):
+        with _artifact_frame_reservation(frame):
             handle, claimed_temp = scratch_owner.open_owned_scratch_file(temp_path)
             with scratch_owner.handle_preserving_primary(handle):
                 require_owned_scratch(final_path.parent, parent_identity)
@@ -282,9 +282,12 @@ def write_parquet(
                         persisted,
                         handle,
                         compression=compression,
-                        data_page_size=PARQUET_DATA_PAGE_BYTES,
                         row_group_size=batch_rows,
                         write_batch_size=batch_rows,
+                        max_rows_per_page=batch_rows,
+                        use_dictionary=False,
+                        write_page_index=False,
+                        write_page_checksum=False,
                         **options,
                     )
                 handle.flush()
@@ -304,15 +307,14 @@ def write_parquet(
     return final_path
 
 
-def _artifact_writer_reservation(*, include_key_index: bool = False) -> ExitStack:
+def _artifact_key_index_reservation() -> ExitStack:
     stack = ExitStack()
     policy = current_runtime_resource_policy()
     if policy is not None:
         stack.enter_context(
             policy.reserve(
-                "artifacts.parquet.native",
-                PARQUET_WRITER_NATIVE_BYTES
-                + (EXACT_KEY_SQLITE_PAGE_BYTES if include_key_index else 0),
+                "artifacts.parquet.key_index",
+                EXACT_KEY_SQLITE_PAGE_BYTES,
             )
         )
     return stack

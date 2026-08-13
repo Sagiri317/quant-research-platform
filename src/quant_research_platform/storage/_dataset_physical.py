@@ -28,9 +28,6 @@ from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
 _DECODED_ROW_BOUNDS_KEY = b"qrp.decoded-row-bounds"
 _DECODED_ROW_BOUNDS_SCHEMA_ID = "qrp-dataset-part-decoded-row-bounds"
-PARQUET_DATA_PAGE_BYTES = 64 * 1024
-PARQUET_READER_NATIVE_BYTES = 64 * 1024
-PARQUET_WRITER_NATIVE_BYTES = 1024**2
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,23 +474,25 @@ def _maximum_projected_decode_fixed_bytes(
     row_groups: list[int] | tuple[int, ...],
 ) -> int:
     positions = _projected_parquet_leaf_positions(parquet_file, columns)
+    physical_bytes = max(
+        (
+            sum(
+                max(0, int(row_group.column(position).total_compressed_size))
+                + max(0, int(row_group.column(position).total_uncompressed_size))
+                for position in positions
+            )
+            for index in row_groups
+            for row_group in (parquet_file.metadata.row_group(index),)
+        ),
+        default=0,
+    )
     decoded_bounds = _decoded_row_bounds(parquet_file)
     if decoded_bounds is None:
-        return PARQUET_READER_NATIVE_BYTES + max(
-            (
-                sum(
-                    max(0, int(row_group.column(position).total_compressed_size))
-                    + max(0, int(row_group.column(position).total_uncompressed_size))
-                    for position in positions
-                )
-                for index in row_groups
-                for row_group in (parquet_file.metadata.row_group(index),)
-            ),
-            default=0,
-        )
+        return physical_bytes
     try:
-        return PARQUET_READER_NATIVE_BYTES + sum(
-            decoded_bounds[column][1] for column in columns
+        return max(
+            physical_bytes,
+            sum(decoded_bounds[column][1] for column in columns),
         )
     except KeyError:
         raise DatasetReadCapacityExceeded(
@@ -525,7 +524,7 @@ def table_with_decoded_row_bounds(
                 "per_row_bytes": max(previous_per_row, per_row_bytes),
                 "fixed_bytes": max(
                     previous_fixed,
-                    fixed_bytes + per_row_bytes + 2 * PARQUET_DATA_PAGE_BYTES,
+                    fixed_bytes + per_row_bytes,
                 ),
             }
         )

@@ -299,6 +299,129 @@ print(json.dumps(policy.memory_evidence()))
     assert evidence["max_sample_interval_ms"] <= 20
 
 
+def test_operation_rss_evidence_excludes_preexisting_process_children() -> None:
+    code = """
+import json
+import subprocess
+import sys
+import time
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
+baseline = subprocess.Popen(
+    (sys.executable, "-c", "import time; time.sleep(1)"),
+)
+try:
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=256 * 1024 * 1024)
+    with runtime_resource_policy_scope(policy):
+        time.sleep(0.05)
+    print(json.dumps(policy.memory_evidence()))
+finally:
+    baseline.terminate()
+    baseline.wait(timeout=5)
+"""
+
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+    completed = subprocess.run(
+        (sys.executable, "-c", code),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+    evidence = json.loads(completed.stdout)
+
+    assert evidence["status"] == "PASS"
+    assert evidence["peak_incremental_rss_bytes"] < 64 * MIB
+
+
+def test_windows_hard_rss_backstop_counts_sampler_inside_operation_budget() -> None:
+    if os.name != "nt":
+        pytest.skip("Windows working-set RSS backstop")
+    budget = 64 * MIB
+    code = """
+import json
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
+budget = 64 * 1024 * 1024
+policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=budget)
+with runtime_resource_policy_scope(policy):
+    opaque = bytearray(96 * 1024 * 1024)
+    for offset in range(0, len(opaque), 4096):
+        opaque[offset] = 1
+print(json.dumps(policy.memory_evidence()))
+"""
+
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+    completed = subprocess.run(
+        (sys.executable, "-c", code),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+    evidence = json.loads(completed.stdout)
+
+    assert evidence["status"] == "PASS"
+    assert evidence["peak_incremental_rss_bytes"] <= budget
+    assert evidence["max_sample_interval_ms"] <= 20
+
+
+def test_memory_rejection_remains_primary_when_backstop_restore_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Measurement:
+        error = None
+        state = "READY"
+
+        def __init__(self, rss0_bytes: int, hard_budget_bytes: int) -> None:
+            self.rss0_bytes = rss0_bytes
+            self.hard_budget_bytes = hard_budget_bytes
+
+        def start(self) -> None:
+            self.state = "ACTIVE"
+
+        def stop(self) -> None:
+            self.state = "RETIRED"
+
+        def release_backstop(self) -> None:
+            raise OSError("restore failed")
+
+        def evidence(self) -> dict[str, int | float | str]:
+            return {
+                "rss0_bytes": self.rss0_bytes,
+                "hard_budget_bytes": self.hard_budget_bytes,
+                "sampled_peak_rss_bytes": (
+                    self.rss0_bytes + self.hard_budget_bytes + 1
+                ),
+                "peak_incremental_rss_bytes": self.hard_budget_bytes + 1,
+                "sample_count": 2,
+                "max_sample_interval_ms": 1.0,
+                "cadence_status": "PASS",
+                "status": "FAIL",
+            }
+
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
+    monkeypatch.setattr(resources, "_OperationRssMeasurement", Measurement)
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+
+    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded") as raised:
+        with runtime_resource_policy_scope(policy):
+            pass
+
+    assert raised.value.__notes__ == [
+        "runtime RSS backstop restoration also failed: OSError"
+    ]
+
+
 def test_reservation_release_preserves_active_primary() -> None:
     policy = capture_test_policy(
         available_memory_bytes=1000,

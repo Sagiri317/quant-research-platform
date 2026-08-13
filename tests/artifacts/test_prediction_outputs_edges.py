@@ -420,10 +420,7 @@ def test_prediction_model_reservation_precedes_writer_startup(
         explicit_cap_bytes=4 * 1024 * 1024,
     )
     retained_model_bytes = 128 * 1024
-    writer_bytes = (
-        parquet_writers.PARQUET_WRITER_NATIVE_BYTES
-        + parquet_writers.EXACT_KEY_SQLITE_PAGE_BYTES
-    )
+    writer_bytes = parquet_writers.EXACT_KEY_SQLITE_PAGE_BYTES
     original_enter = ExactPrimaryKeyIndex.__enter__
 
     def assert_model_reserved(index):  # noqa: ANN001, ANN202
@@ -444,6 +441,42 @@ def test_prediction_model_reservation_precedes_writer_startup(
             key_columns=("asset_id", "timestamp"),
             compression="zstd",
         )
+
+
+def test_prediction_parquet_writer_disables_retained_dictionary_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = make_artifact_prediction_output_frame()
+    captured: dict[str, object] = {}
+
+    class Writer:
+        def __init__(self, *_args, **kwargs):  # noqa: ANN002, ANN003
+            captured.update(kwargs)
+
+        def write_table(self, _table, **kwargs):  # noqa: ANN001, ANN003, ANN202
+            captured.update(kwargs)
+
+        def add_key_value_metadata(self, _metadata):  # noqa: ANN001, ANN202
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(parquet_writers.pq, "ParquetWriter", Writer)
+    parquet_writers.write_parquet_chunks(
+        (frame,),
+        tmp_path / "prediction.parquet",
+        required=tuple(frame.columns),
+        key_columns=("asset_id", "timestamp"),
+        compression="zstd",
+    )
+
+    assert captured["use_dictionary"] is False
+    assert captured["write_page_index"] is False
+    assert captured["write_page_checksum"] is False
+    assert captured["max_rows_per_page"] == captured["write_batch_size"]
+    assert not hasattr(parquet_writers, "PARQUET_WRITER_NATIVE_BYTES")
 
 
 def test_prediction_outputs_require_standard_metadata_attrs(

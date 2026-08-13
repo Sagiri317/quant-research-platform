@@ -91,7 +91,6 @@ def _writer_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=(
             dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
-            + dataset_writing.PARQUET_WRITER_NATIVE_BYTES
             + working_headroom_bytes
         ),
     )
@@ -8795,6 +8794,59 @@ def test_writer_rejects_before_native_parquet_write(
 
     assert conversions == 1
     assert native_writes == 0
+
+
+def test_parquet_reader_uses_actual_selected_row_group_decode_bytes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "row-groups.parquet"
+    first = pa.table({"value": ["x" * 512] * 100})
+    second = pa.table({"value": ["y" * 16_384] * 100})
+    writer = pq.ParquetWriter(path, first.schema, use_dictionary=False)
+    try:
+        writer.write_table(first)
+        writer.write_table(second)
+    finally:
+        writer.close()
+    parquet = pq.ParquetFile(path)
+    try:
+        position = dataset_physical._projected_parquet_leaf_positions(  # noqa: SLF001
+            parquet,
+            ("value",),
+        )[0]
+        expected = max(
+            parquet.metadata.row_group(index).column(position).total_compressed_size
+            + parquet.metadata.row_group(index).column(position).total_uncompressed_size
+            for index in (0, 1)
+        )
+
+        assert dataset_physical._maximum_projected_decode_fixed_bytes(  # noqa: SLF001
+            parquet,
+            ("value",),
+            row_groups=(0, 1),
+        ) >= expected
+    finally:
+        parquet.close()
+
+
+def test_dataset_parquet_writer_disables_retained_dictionary_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    table = pa.table({"value": ["x", "y"]})
+    captured: dict[str, object] = {}
+
+    def capture_write(*_args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        captured.update(kwargs)
+
+    monkeypatch.setattr(dataset_writing.pq, "write_table", capture_write)
+    dataset_writing.write_parquet_file(table, tmp_path / "part.parquet")
+
+    assert captured["use_dictionary"] is False
+    assert captured["write_page_index"] is False
+    assert captured["write_page_checksum"] is False
+    assert captured["max_rows_per_page"] == captured["write_batch_size"]
+    assert not hasattr(dataset_writing, "PARQUET_WRITER_NATIVE_BYTES")
 
 
 def test_writer_bounded_completes_under_task_wide_copy_and_arrow_headroom(

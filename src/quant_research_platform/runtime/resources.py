@@ -24,6 +24,7 @@ _RSS_SAMPLE_INTERVAL_SECONDS = 0.001
 _MAX_RSS_SAMPLE_INTERVAL_NS = 20_000_000
 _RSS_SAMPLER_START_TIMEOUT_SECONDS = 5.0
 _RSS_SAMPLER_STOP_TIMEOUT_SECONDS = 5.0
+_RSS_STATE_BYTES = 40
 _RSS_SAMPLER_CODE = """
 import mmap
 import pathlib
@@ -33,23 +34,66 @@ import time
 import psutil
 
 process = psutil.Process(int(sys.argv[1]))
+sampler = psutil.Process()
 stop = pathlib.Path(sys.argv[2])
 ready = pathlib.Path(sys.argv[3])
 output = pathlib.Path(sys.argv[4])
 interval = float(sys.argv[5])
 state = pathlib.Path(sys.argv[6])
+baseline_children = {}
+for value in sys.argv[7].split(","):
+    if value:
+        pid, created = value.split(":", 1)
+        baseline_children[int(pid)] = float(created)
 peak = count = max_gap = last = 0
 sequence = 0
 error = ""
 timer = None
+sampler_rss_limit = 0
 try:
     if sys.platform == "win32":
         import ctypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
         kernel32.CreateWaitableTimerExW.restype = ctypes.c_void_p
         kernel32.GetCurrentThread.restype = ctypes.c_void_p
+        kernel32.GetProcessWorkingSetSizeEx.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_ulong),
+        )
+        kernel32.SetProcessWorkingSetSizeEx.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_ulong,
+        )
+        kernel32.GetProcessWorkingSetSizeEx.restype = ctypes.c_int
+        kernel32.SetProcessWorkingSetSizeEx.restype = ctypes.c_int
         kernel32.SetThreadPriority.argtypes = (ctypes.c_void_p, ctypes.c_int)
+        process_handle = kernel32.GetCurrentProcess()
+        minimum = ctypes.c_size_t()
+        maximum = ctypes.c_size_t()
+        flags = ctypes.c_ulong()
+        if not kernel32.GetProcessWorkingSetSizeEx(
+            process_handle,
+            ctypes.byref(minimum),
+            ctypes.byref(maximum),
+            ctypes.byref(flags),
+        ):
+            raise OSError("runtime_rss_sampler_backstop_failed")
+        sampler_rss_limit = psutil.Process().memory_info().rss
+        hard_flags = (flags.value | 0x00000004) & ~0x00000008
+        if not kernel32.SetProcessWorkingSetSizeEx(
+            process_handle,
+            min(minimum.value, sampler_rss_limit),
+            sampler_rss_limit,
+            hard_flags,
+        ):
+            raise OSError("runtime_rss_sampler_backstop_failed")
+        sampler_rss_limit = psutil.Process().memory_info().rss
         timer = kernel32.CreateWaitableTimerExW(None, None, 2, 0x1F0003)
         due = ctypes.c_longlong(-max(1, int(interval * 10_000_000)))
         if not timer or not kernel32.SetWaitableTimer(
@@ -64,14 +108,29 @@ try:
         if not kernel32.SetThreadPriority(kernel32.GetCurrentThread(), 2):
             raise OSError("runtime_rss_sampler_priority_failed")
     with state.open("r+b", buffering=0) as handle:
-        shared = mmap.mmap(handle.fileno(), 32)
+        shared = mmap.mmap(handle.fileno(), 40)
         with shared:
+            if sys.platform == "win32":
+                granularity = mmap.ALLOCATIONGRANULARITY
+                sampler_rss = psutil.Process().memory_info().rss
+                sampler_rss_limit = (
+                    (sampler_rss + granularity - 1) // granularity + 1
+                ) * granularity
+                if not kernel32.SetProcessWorkingSetSizeEx(
+                    process_handle,
+                    min(minimum.value, sampler_rss_limit),
+                    sampler_rss_limit,
+                    hard_flags,
+                ):
+                    raise OSError("runtime_rss_sampler_backstop_failed")
             while True:
                 now = time.monotonic_ns()
                 rss = process.memory_info().rss
                 for child in process.children(recursive=True):
                     try:
-                        rss += child.memory_info().rss
+                        created = baseline_children.get(child.pid)
+                        if created is None or child.create_time() != created:
+                            rss += child.memory_info().rss
                     except psutil.NoSuchProcess:
                         pass
                 peak = max(peak, rss)
@@ -81,7 +140,15 @@ try:
                 last = now
                 sequence += 2
                 struct.pack_into("<Q", shared, 0, sequence - 1)
-                struct.pack_into("<QQQ", shared, 8, peak, count, max_gap)
+                struct.pack_into(
+                    "<QQQQ",
+                    shared,
+                    8,
+                    peak,
+                    count,
+                    max_gap,
+                    sampler_rss_limit,
+                )
                 struct.pack_into("<Q", shared, 0, sequence)
                 if count == 1:
                     ready.touch(exist_ok=True)
@@ -139,6 +206,7 @@ class _OperationRssMeasurement:
     _ready_path: Path | None = None
     _output_path: Path | None = None
     _state_path: Path | None = None
+    _working_set_limit: tuple[int, int, int] | None = None
 
     def start(self) -> None:
         if self.state != "READY":
@@ -156,9 +224,10 @@ class _OperationRssMeasurement:
             0o600,
         )
         try:
-            os.ftruncate(descriptor, 32)
+            os.ftruncate(descriptor, _RSS_STATE_BYTES)
         finally:
             os.close(descriptor)
+        baseline_children = _process_child_identities()
         self._process = subprocess.Popen(
             (
                 sys.executable,
@@ -170,12 +239,17 @@ class _OperationRssMeasurement:
                 str(self._output_path),
                 str(_RSS_SAMPLE_INTERVAL_SECONDS),
                 str(self._state_path),
+                ",".join(
+                    f"{pid}:{created}"
+                    for pid, created in baseline_children
+                ),
             ),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=(
                 getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "DETACHED_PROCESS", 0)
                 | getattr(subprocess, "HIGH_PRIORITY_CLASS", 0)
             ),
         )
@@ -185,6 +259,21 @@ class _OperationRssMeasurement:
                 self.error = RuntimeError("runtime_rss_sampler_start_failed")
                 raise self.error
             sleep(_RSS_SAMPLE_INTERVAL_SECONDS)
+        if os.name == "nt":
+            peak, _count, _max_gap, sampler_rss_limit = self._snapshot()
+            if peak - self.rss0_bytes > self.hard_budget_bytes:
+                raise RuntimeError("runtime_rss_backstop_lower_bound_exceeded")
+            current_parent_rss = _process_rss_bytes()
+            parent_limit = (
+                self.rss0_bytes
+                + self.hard_budget_bytes
+                - sampler_rss_limit
+            )
+            if parent_limit < current_parent_rss:
+                raise RuntimeError("runtime_rss_backstop_lower_bound_exceeded")
+            self._working_set_limit = _set_windows_process_rss_backstop(
+                parent_limit
+            )
 
     def checkpoint_evidence(self) -> dict[str, int | float | str]:
         if self.state != "ACTIVE" or self._state_path is None:
@@ -193,17 +282,7 @@ class _OperationRssMeasurement:
         if process is None or process.poll() is not None:
             self.error = RuntimeError("runtime_rss_sampler_failed")
             raise self.error
-        with self._state_path.open("r+b", buffering=0) as handle:
-            with mmap.mmap(handle.fileno(), 32, access=mmap.ACCESS_READ) as shared:
-                for _ in range(1000):
-                    sequence = struct.unpack_from("<Q", shared, 0)[0]
-                    peak, count, max_gap = struct.unpack_from("<QQQ", shared, 8)
-                    if sequence == struct.unpack_from("<Q", shared, 0)[0] and not (
-                        sequence & 1
-                    ):
-                        break
-                else:
-                    raise RuntimeError("runtime_rss_sampler_snapshot_failed")
+        peak, count, max_gap, _sampler_rss_limit = self._snapshot()
         self.sampled_peak_rss_bytes = max(self.sampled_peak_rss_bytes, peak)
         self.sample_count = max(self.sample_count, count)
         self.max_sample_interval_ns = max(self.max_sample_interval_ns, max_gap)
@@ -238,6 +317,31 @@ class _OperationRssMeasurement:
             self.state = "RETIRED"
             if self._temporary is not None:
                 self._temporary.cleanup()
+
+    def release_backstop(self) -> None:
+        if self._working_set_limit is None:
+            return
+        original = self._working_set_limit
+        self._working_set_limit = None
+        _restore_windows_process_rss_backstop(original)
+
+    def _snapshot(self) -> tuple[int, int, int, int]:
+        if self._state_path is None:
+            raise RuntimeError("runtime_rss_sampler_not_active")
+        with self._state_path.open("r+b", buffering=0) as handle:
+            with mmap.mmap(
+                handle.fileno(),
+                _RSS_STATE_BYTES,
+                access=mmap.ACCESS_READ,
+            ) as shared:
+                for _ in range(1000):
+                    sequence = struct.unpack_from("<Q", shared, 0)[0]
+                    values = struct.unpack_from("<QQQQ", shared, 8)
+                    if sequence == struct.unpack_from("<Q", shared, 0)[0] and not (
+                        sequence & 1
+                    ):
+                        return values
+        raise RuntimeError("runtime_rss_sampler_snapshot_failed")
 
     def evidence(self) -> dict[str, int | float | str]:
         if self.state != "RETIRED":
@@ -490,20 +594,47 @@ def runtime_resource_policy_scope(
         primary = sys.exception()
         leaked = policy.reserved_memory_bytes
         measurement_error: BaseException | None = None
+        backstop_error: BaseException | None = None
         try:
             if policy._measurement.state != "RETIRED":
                 policy._measurement.stop()
         except BaseException as exc:
             measurement_error = exc
+        if type(policy._measurement) is _OperationRssMeasurement:
+            try:
+                policy._measurement.release_backstop()
+            except BaseException as exc:
+                backstop_error = exc
         policy._ledger.state = "RETIRED"
         _ACTIVE_RUNTIME_RESOURCE_POLICY = None
         if primary is None:
+            completion_error: BaseException | None = None
             if leaked:
-                raise RuntimeError("runtime_memory_reservation_leaked")
-            if measurement_error is not None:
-                raise measurement_error
-            evidence = policy.memory_evidence()
-            _require_memory_acceptance(policy._measurement, evidence)
+                completion_error = RuntimeError(
+                    "runtime_memory_reservation_leaked"
+                )
+            elif measurement_error is not None:
+                completion_error = measurement_error
+            else:
+                try:
+                    evidence = policy.memory_evidence()
+                    _require_memory_acceptance(policy._measurement, evidence)
+                except BaseException as exc:
+                    completion_error = exc
+            if completion_error is not None:
+                if backstop_error is not None:
+                    completion_error.add_note(
+                        "runtime RSS backstop restoration also failed: "
+                        f"{type(backstop_error).__name__}"
+                    )
+                raise completion_error
+            if backstop_error is not None:
+                raise backstop_error
+        elif backstop_error is not None:
+            primary.add_note(
+                "runtime RSS backstop restoration also failed: "
+                f"{type(backstop_error).__name__}"
+            )
 
 
 def _require_memory_acceptance(
@@ -566,6 +697,90 @@ def _process_rss_bytes() -> int:
     except Exception:
         raise RuntimeError("runtime_rss_discovery_failed") from None
     return _exact_nonnegative_int(rss, error="invalid_runtime_resource_rss")
+
+
+def _process_child_identities() -> tuple[tuple[int, float], ...]:
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        children: list[tuple[int, float]] = []
+        for child in psutil.Process().children(recursive=True):
+            try:
+                children.append((child.pid, child.create_time()))
+            except psutil.NoSuchProcess:
+                pass
+        return tuple(sorted(children))
+    except Exception:
+        raise RuntimeError("runtime_rss_discovery_failed") from None
+
+
+def _set_windows_process_rss_backstop(
+    limit_bytes: int,
+) -> tuple[int, int, int]:
+    if os.name != "nt":
+        raise RuntimeError("runtime_rss_backstop_unavailable")
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.GetProcessWorkingSetSizeEx.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_ulong),
+    )
+    kernel32.SetProcessWorkingSetSizeEx.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_size_t,
+        ctypes.c_ulong,
+    )
+    kernel32.GetProcessWorkingSetSizeEx.restype = ctypes.c_int
+    kernel32.SetProcessWorkingSetSizeEx.restype = ctypes.c_int
+    handle = kernel32.GetCurrentProcess()
+    minimum = ctypes.c_size_t()
+    maximum = ctypes.c_size_t()
+    flags = ctypes.c_ulong()
+    if not kernel32.GetProcessWorkingSetSizeEx(
+        handle,
+        ctypes.byref(minimum),
+        ctypes.byref(maximum),
+        ctypes.byref(flags),
+    ):
+        raise RuntimeError("runtime_rss_backstop_unavailable")
+    original = (minimum.value, maximum.value, flags.value)
+    hard_flags = (flags.value | 0x00000004) & ~0x00000008
+    if not kernel32.SetProcessWorkingSetSizeEx(
+        handle,
+        min(minimum.value, limit_bytes),
+        limit_bytes,
+        hard_flags,
+    ):
+        raise RuntimeError("runtime_rss_backstop_unavailable")
+    return original
+
+
+def _restore_windows_process_rss_backstop(
+    original: tuple[int, int, int],
+) -> None:
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.SetProcessWorkingSetSizeEx.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_size_t,
+        ctypes.c_ulong,
+    )
+    kernel32.SetProcessWorkingSetSizeEx.restype = ctypes.c_int
+    if not kernel32.SetProcessWorkingSetSizeEx(
+        kernel32.GetCurrentProcess(),
+        original[0],
+        original[1],
+        original[2],
+    ):
+        raise RuntimeError("runtime_rss_backstop_restore_failed")
 
 
 def _exact_positive_int(value: object, *, error: str) -> int:

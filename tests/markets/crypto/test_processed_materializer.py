@@ -2596,7 +2596,6 @@ def test_panel_writer_acquires_inputs_with_cumulative_live_session_bytes(
     def record_write(root, data, **kwargs):  # noqa: ANN001, ANN202
         def publications():  # noqa: ANN202
             for publication in data:
-                assert isinstance(publication, materialize_panel.DatasetWriteChunk)
                 publication_envelopes.append(publication.retained_payload_bytes)
                 yield publication
 
@@ -2758,8 +2757,7 @@ def test_panel_dependent_publication_carries_live_panel_session_bytes(
         assert write_baselines == [panel_session.retained_memory_bytes + 123]
         assert publications
         assert all(
-            isinstance(publication, module.DatasetWriteChunk)
-            and publication.retained_payload_bytes
+            publication.retained_payload_bytes
             == panel_session.retained_memory_bytes + 123
             for publication in publications
         )

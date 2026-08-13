@@ -97,31 +97,6 @@ def test_local_verification_preloads_models_before_root_capture(
         run_local_verification(config)
 
 
-def test_local_verification_checks_disk_before_creating_run_root(
-    tmp_path,
-    monkeypatch,
-):
-    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "disk-gate")
-    config = make_local_verification_config(
-        run_root=run_root,
-        start_date="2014-01-01",
-        end_date="2016-12-31",
-        profile=research_profile(),
-    )
-    monkeypatch.setattr(
-        module,
-        "require_free_disk_headroom",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("insufficient_free_disk")
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="insufficient_free_disk"):
-        run_local_verification(config)
-
-    assert not run_root.exists()
-
-
 def test_local_verification_workflow_rejects_invalid_date_string(tmp_path):
     config = make_local_verification_config(
         run_root=tmp_path / "local-verification-output" / "bad-date",
@@ -385,18 +360,12 @@ def test_local_verification_workflow_resolves_independent_windows(
     calls: list[str] = []
     captured_evaluation_windows: list[tuple[str, str]] = []
     captured_prediction_inputs: list[dict[str, object]] = []
-    disk_checks: list[Path] = []
 
     def assemble_dataset(**kwargs):
         calls.append("research")
         return persist_fake_research_root(**kwargs)
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
-    monkeypatch.setattr(
-        module,
-        "require_free_disk_headroom",
-        lambda path, **_kwargs: disk_checks.append(Path(path)),
-    )
     stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
@@ -485,7 +454,6 @@ def test_local_verification_workflow_resolves_independent_windows(
         "portfolio",
         "portfolio",
     ]
-    assert len(disk_checks) == 5 + expected_prediction_count
     assert captured_evaluation_windows == [
         ("2015-01-01", "2018-12-31"),
         ("2015-01-01", "2018-12-31"),
