@@ -709,7 +709,7 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
     )
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=4 * 1024 * 1024,
+        explicit_cap_bytes=8 * 1024 * 1024,
     )
     events: list[str] = []
     write_reservations: list[int] = []

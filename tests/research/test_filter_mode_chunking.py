@@ -96,8 +96,12 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         "_frame_bytes",
         lambda chunk: 5_000 * original_frame_bytes(chunk),
     )
-    with runtime_resource_policy_scope(policy):
-        result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
+    result = evaluate_signal_frame_chunks(
+        (frame,),
+        spec,
+        n_groups=2,
+        resource_policy=policy,
+    )
 
     assert len(seen_columns) > 1
     pd.testing.assert_frame_equal(
@@ -340,19 +344,20 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
         label_columns=("label",),
     )
     policy = capture_test_policy(
-        available_memory_bytes=1_000,
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024 + 1_000,
     )
 
     with pytest.raises(
         ValueError,
         match="research_time_boundary_payloads_exceed_task_memory_budget",
     ):
-        with runtime_resource_policy_scope(policy):
-            eval_engine.evaluate_signal_frame_chunks(
-                (frame.iloc[:3], frame.iloc[3:]),
-                spec,
-                n_groups=2,
-            )
+        eval_engine.evaluate_signal_frame_chunks(
+            (frame.iloc[:3], frame.iloc[3:]),
+            spec,
+            n_groups=2,
+            resource_policy=policy,
+        )
 
 
 def test_evaluation_output_accumulation_honors_shared_root_headroom() -> None:
@@ -380,7 +385,12 @@ def test_evaluation_output_accumulation_honors_shared_root_headroom() -> None:
                 ValueError,
                 match="task_memory_budget",
             ):
-                evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
+                evaluate_signal_frame_chunks(
+                    (frame,),
+                    spec,
+                    n_groups=2,
+                    resource_policy=policy,
+                )
 
 
 def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
@@ -522,15 +532,15 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
     monkeypatch.setattr(
         memory_owner,
         "_frame_bytes",
-        lambda chunk: 10_000 * original_frame_bytes(chunk),
+        lambda chunk: 5_000 * original_frame_bytes(chunk),
     )
-    with runtime_resource_policy_scope(policy):
-        result = prediction_frame_from_artifact(
-            frame.drop(columns=["label"]),
-            spec,
-            coefficients=np.asarray([0.0, 0.01]),
-            input_columns=("factor",),
-        )
+    result = prediction_frame_from_artifact(
+        frame.drop(columns=["label"]),
+        spec,
+        coefficients=np.asarray([0.0, 0.01]),
+        input_columns=("factor",),
+        resource_policy=policy,
+    )
 
     assert len(filtered_chunk_rows) > 1
     assert max(filtered_chunk_rows) < len(frame)

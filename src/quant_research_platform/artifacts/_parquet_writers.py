@@ -32,6 +32,7 @@ from quant_research_platform.storage._dataset_key_tracking import (
 )
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import (
+    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     _parquet_row_group_footer_upper_bound,
     _parquet_row_group_size,
     _table_parquet_page_working_set_bytes,
@@ -78,9 +79,13 @@ def write_parquet_chunks(
     effective_test_end: str | None = None
     decoded_metadata: dict[bytes, bytes] | None = None
     writer_state = ExitStack()
-    writer_memory = (0, 0)
+    writer_memory = (
+        (_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES, 0)
+        if current_runtime_resource_policy() is not None
+        else (0, 0)
+    )
     try:
-        with _artifact_key_index_reservation():
+        with _artifact_writer_fixed_reservation():
             with closing_dataset_iterator(iter(frames)) as active_frames:
                 try:
                     first_frame = next(active_frames)
@@ -337,14 +342,15 @@ def write_parquet(
     return final_path
 
 
-def _artifact_key_index_reservation() -> ExitStack:
+def _artifact_writer_fixed_reservation() -> ExitStack:
     stack = ExitStack()
     policy = current_runtime_resource_policy()
     if policy is not None:
         stack.enter_context(
             policy.reserve(
-                "artifacts.parquet.key_index",
-                EXACT_KEY_SQLITE_PAGE_BYTES,
+                "artifacts.parquet.fixed",
+                EXACT_KEY_SQLITE_PAGE_BYTES
+                + _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
             )
         )
     return stack
