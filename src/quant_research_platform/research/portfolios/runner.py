@@ -42,6 +42,7 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.layout import StorageLayout
 
 _PORTFOLIO_ROW_WORKING_BYTES = 2048
@@ -53,6 +54,20 @@ class PortfolioResult:
     spec: PortfolioSpec
     output_chunks: Iterable[Mapping[str, pd.DataFrame]]
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]]
+    _close: Callable[[], None] = field(
+        default=lambda: None,
+        repr=False,
+        compare=False,
+    )
+
+    def close(self) -> None:
+        self._close()
+
+    def __enter__(self) -> PortfolioResult:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
 
 @dataclass
@@ -98,20 +113,46 @@ def build_portfolio_result_from_research_dataset(
     except BaseException:
         operation.close()
         raise
+    source_chunks = operation.enter_context(
+        closing_dataset_iterator(iter(result.output_chunks))
+    )
     chunks_complete = False
     summary_value: Mapping[str, pd.DataFrame] | None = None
     terminal_error: BaseException | None = None
+    operation_open = True
+
+    def close_operation(*, suppress_errors: bool = False) -> None:
+        nonlocal operation_open
+        if operation_open:
+            operation_open = False
+            try:
+                operation.close()
+            except BaseException:
+                if not suppress_errors:
+                    raise
+
+    def close_result() -> None:
+        nonlocal terminal_error
+        if terminal_error is not None or not operation_open:
+            return
+        closed = RuntimeError("portfolio_result_closed")
+        try:
+            close_operation()
+        except BaseException as primary:
+            terminal_error = primary
+            raise
+        terminal_error = closed
 
     def output_chunks() -> Iterable[Mapping[str, pd.DataFrame]]:
         nonlocal chunks_complete, terminal_error
         if terminal_error is not None:
             raise terminal_error
         try:
-            yield from result.output_chunks
+            yield from source_chunks
         except BaseException as primary:
             terminal_error = primary
             try:
-                operation.close()
+                close_operation()
             except BaseException as cleanup_error:
                 primary.add_note(
                     "portfolio operation cleanup also failed: "
@@ -133,17 +174,12 @@ def build_portfolio_result_from_research_dataset(
         except BaseException as primary:
             terminal_error = primary
             try:
-                operation.close()
+                close_operation()
             except BaseException as cleanup_error:
                 primary.add_note(
                     "portfolio operation cleanup also failed: "
                     f"{type(cleanup_error).__name__}"
                 )
-            raise
-        try:
-            operation.close()
-        except BaseException as primary:
-            terminal_error = primary
             raise
         summary_value = candidate
         return summary_value
@@ -152,8 +188,9 @@ def build_portfolio_result_from_research_dataset(
         spec=result.spec,
         output_chunks=output_chunks(),
         summary_factory=summary,
+        _close=close_result,
     )
-    weakref.finalize(result, operation.close)
+    weakref.finalize(owned_result, close_operation, suppress_errors=True)
     return owned_result
 
 

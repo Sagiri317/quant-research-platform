@@ -77,7 +77,6 @@ from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
     remove_owned_scratch,
     require_owned_scratch,
-    scratch_identity_matches,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
@@ -160,8 +159,6 @@ def run_local_verification(
     )
     staged_root = run_root.with_name(owned_scratch_name(".lv-", uuid4().hex[:8]))
     staged_identity: os.stat_result | None = None
-    backup_root: Path | None = None
-    published = False
     with runtime_resource_policy_scope(resource_policy), ExitStack() as retained_state:
         try:
             if replaced_identity is not None:
@@ -182,56 +179,31 @@ def run_local_verification(
                 resource_policy=resource_policy,
                 retained_state=retained_state,
             )
-            backup_root = _publish_staged_run_root(
+            retained_state.close()
+            resource_policy.finish_memory_measurement(
+                on_reject=lambda: remove_owned_scratch(
+                    staged_root,
+                    staged_identity,
+                )
+            )
+            _publish_staged_run_root(
                 staged_root,
                 staged_identity=staged_identity,
                 run_root=run_root,
                 replaced_identity=replaced_identity,
                 resource_policy=resource_policy,
             )
-            published = True
-
-            def rollback_final_rejection() -> None:
-                nonlocal published
-                if staged_identity is not None and scratch_identity_matches(
-                    run_root,
-                    staged_identity,
-                ):
-                    remove_owned_scratch(run_root, staged_identity)
-                if (
-                    backup_root is not None
-                    and replaced_identity is not None
-                    and scratch_identity_matches(backup_root, replaced_identity)
-                ):
-                    move_path_no_replace(backup_root, run_root)
-                published = False
-
-            retained_state.close()
-            resource_policy.finish_memory_measurement(
-                on_reject=rollback_final_rejection,
-            )
-        except BaseException as primary:
-            if published and staged_identity is not None:
+        except BaseException:
+            if staged_identity is None:
                 try:
-                    remove_owned_scratch(run_root, staged_identity)
-                    if backup_root is not None:
-                        move_path_no_replace(backup_root, run_root)
-                except BaseException as rollback_error:
-                    primary.add_note(
-                        "local verification rollback also failed: "
-                        f"{type(rollback_error).__name__}"
-                    )
-            else:
-                if staged_identity is None:
-                    try:
-                        staged_identity = staged_root.lstat()
-                    except BaseException:
-                        staged_identity = None
-                if staged_identity is not None:
-                    try:
-                        remove_owned_scratch(staged_root, staged_identity)
-                    except BaseException:
-                        pass
+                    staged_identity = staged_root.lstat()
+                except BaseException:
+                    staged_identity = None
+            if staged_identity is not None:
+                try:
+                    remove_owned_scratch(staged_root, staged_identity)
+                except BaseException:
+                    pass
             raise
     return LocalVerificationRunResult(
         status=result.status,
@@ -352,7 +324,7 @@ def _run_local_verification_with_policy(
     with recorder.record("prediction_generation"):
         prediction_roots_by_id: dict[str, Path] = {}
         for prediction_spec in prediction_specs:
-            prediction_result = build_prediction_result_from_research_dataset(
+            with build_prediction_result_from_research_dataset(
                 layout=storage_layout,
                 dataset_catalog=catalogs.research_datasets,
                 model_catalog=catalogs.models,
@@ -363,18 +335,17 @@ def _run_local_verification_with_policy(
                 prediction_test_start=effective_windows["prediction_test_start"],
                 prediction_test_end=effective_windows["prediction_test_end"],
                 resource_policy=resource_policy,
-            )
-            prediction_roots_by_id[prediction_spec.prediction_id] = (
-                _write_prediction_result(
-                    prediction_result,
-                    layout=storage_layout,
-                    run_id=run_id,
-                    market_id=catalogs.research_datasets.get(
-                        prediction_spec.research_dataset_id
-                    ).market_id,
+            ) as prediction_result:
+                prediction_roots_by_id[prediction_spec.prediction_id] = (
+                    _write_prediction_result(
+                        prediction_result,
+                        layout=storage_layout,
+                        run_id=run_id,
+                        market_id=catalogs.research_datasets.get(
+                            prediction_spec.research_dataset_id
+                        ).market_id,
+                    )
                 )
-            )
-            del prediction_result
         prediction_roots = tuple(prediction_roots_by_id.values())
     with recorder.record("portfolio_generation"):
         portfolio_roots_list: list[Path] = []
@@ -406,7 +377,7 @@ def _run_local_verification_with_policy(
                         )
                     )
                     prediction_metadata = prediction_manifest["metadata"]
-                portfolio_result = build_portfolio_result_from_research_dataset(
+                with build_portfolio_result_from_research_dataset(
                     layout=storage_layout,
                     dataset_catalog=catalogs.research_datasets,
                     portfolio_catalog=portfolio_catalog,
@@ -415,23 +386,23 @@ def _run_local_verification_with_policy(
                     prediction_frame=prediction_frame,
                     prediction_metadata=prediction_metadata,
                     resource_policy=resource_policy,
-                )
-                portfolio_roots_list.append(
-                    write_portfolio_outputs(
-                        output_chunks=portfolio_result.output_chunks,
-                        summary_factory=portfolio_result.summary_factory,
-                        spec=portfolio_result.spec,
-                        output_spec=_output_spec(
-                            output_id=portfolio_result.spec.portfolio_id,
-                            output_definition_id="portfolio_outputs",
-                            run_id=run_id,
-                            market_id=portfolio_result.spec.market_id,
-                            run_type=portfolio_result.spec.run_type,
-                        ),
-                        layout=storage_layout,
+                ) as portfolio_result:
+                    portfolio_roots_list.append(
+                        write_portfolio_outputs(
+                            output_chunks=portfolio_result.output_chunks,
+                            summary_factory=portfolio_result.summary_factory,
+                            spec=portfolio_result.spec,
+                            output_spec=_output_spec(
+                                output_id=portfolio_result.spec.portfolio_id,
+                                output_definition_id="portfolio_outputs",
+                                run_id=run_id,
+                                market_id=portfolio_result.spec.market_id,
+                                run_type=portfolio_result.spec.run_type,
+                            ),
+                            layout=storage_layout,
+                        )
                     )
-                )
-                del portfolio_result, prediction_frame, prediction_metadata
+                del prediction_frame, prediction_metadata
         portfolio_roots = tuple(portfolio_roots_list)
 
     dataset_roots = _dataset_roots(

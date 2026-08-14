@@ -48,10 +48,10 @@ def test_runtime_resource_policy_captures_one_shot_budget_inputs(
     assert policy.to_payload() == {
         "captured_available_memory_bytes": 10 * GIB,
         "rss0_bytes": 512 * MIB,
-        "task_memory_budget_bytes": 2 * GIB,
+        "task_memory_budget_bytes": 15 * GIB // 8,
         "hard_memory_budget_bytes": 2 * GIB,
     }
-    assert policy.remaining_memory_bytes == 2 * GIB
+    assert policy.remaining_memory_bytes == 15 * GIB // 8
 
 
 def test_runtime_resource_policy_rejects_measurement_overrides(
@@ -87,11 +87,14 @@ def test_explicit_cap_can_only_lower_eighty_percent_budget(
 
     uncapped = RuntimeResourcePolicy.capture()
     high_cap = RuntimeResourcePolicy.capture(explicit_cap_bytes=20 * GIB)
+    low_cap = RuntimeResourcePolicy.capture(explicit_cap_bytes=2 * GIB)
 
     assert uncapped.task_memory_budget_bytes == 15 * GIB // 2
     assert uncapped.hard_memory_budget_bytes == 8 * GIB
     assert high_cap.task_memory_budget_bytes == 15 * GIB // 2
     assert high_cap.hard_memory_budget_bytes == 8 * GIB
+    assert low_cap.task_memory_budget_bytes == 15 * GIB // 8
+    assert low_cap.hard_memory_budget_bytes == 2 * GIB
 
 
 def test_planning_target_keeps_margin_below_hard_guard(
@@ -167,12 +170,12 @@ def test_runtime_resource_policy_uses_one_shared_reservation_ledger() -> None:
     with runtime_resource_policy_scope(policy):
         with policy.reserve("storage", 400):
             assert policy.reserved_memory_bytes == 400
-            assert policy.remaining_memory_bytes == 200
+            assert policy.remaining_memory_bytes == 163
             with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-                with policy.reserve("research", 201):
+                with policy.reserve("research", 164):
                     pass
         assert policy.reserved_memory_bytes == 0
-        assert policy.remaining_memory_bytes == 600
+        assert policy.remaining_memory_bytes == 563
 
 
 def test_same_policy_scopes_can_close_non_lifo_without_retiring_root() -> None:
@@ -416,7 +419,7 @@ def test_sampler_stop_failure_still_rolls_back_publication(
     assert events == ["quiesce", "stop_sampler", "rollback_cleanup"]
 
 
-def test_operation_rss_evidence_includes_child_processes() -> None:
+def test_operation_rss_evidence_excludes_unowned_child_processes() -> None:
     code = """
 import json
 import subprocess
@@ -458,69 +461,10 @@ print(json.dumps(policy.memory_evidence()))
     evidence = json.loads(completed.stdout)
 
     assert evidence["status"] == "PASS"
-    assert evidence["peak_incremental_rss_bytes"] >= 32 * MIB
+    assert evidence["peak_incremental_rss_bytes"] < 16 * MIB
     assert evidence["peak_incremental_rss_bytes"] <= evidence["hard_budget_bytes"]
+    assert evidence["measurement_metric"] == "process_rss_incremental"
     assert evidence["max_sample_interval_ms"] >= 0
-
-
-def test_operation_memory_evidence_counts_preexisting_child_growth() -> None:
-    code = """
-import json
-import subprocess
-import sys
-import time
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    runtime_resource_policy_scope,
-)
-baseline = subprocess.Popen(
-    (
-        sys.executable,
-        "-c",
-        "import sys,time; print('ready', flush=True); sys.stdin.readline(); "
-        "payload=bytearray(64*1024*1024); "
-        "[payload.__setitem__(i, 1) for i in range(0, len(payload), 4096)]; "
-        "print('grown', flush=True); time.sleep(0.3)",
-    ),
-    stdin=subprocess.PIPE,
-    stdout=subprocess.PIPE,
-    text=True,
-)
-try:
-    assert baseline.stdout is not None and baseline.stdout.readline().strip() == "ready"
-    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=256 * 1024 * 1024)
-    with runtime_resource_policy_scope(policy):
-        assert baseline.stdin is not None
-        baseline.stdin.write("grow\\n")
-        baseline.stdin.flush()
-        assert baseline.stdout.readline().strip() == "grown"
-        time.sleep(0.05)
-    print(json.dumps(policy.memory_evidence()))
-finally:
-    if baseline.poll() is None:
-        baseline.terminate()
-    baseline.wait(timeout=5)
-"""
-
-    environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
-    completed = subprocess.run(
-        (sys.executable, "-c", code),
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-        timeout=30,
-    )
-    evidence = json.loads(completed.stdout)
-
-    assert evidence["status"] == "PASS"
-    assert evidence["measurement_metric"] in {
-        "process_tree_pss_incremental",
-        "process_tree_uss_incremental",
-        "process_tree_uss_with_rss_fallback_incremental",
-    }
-    assert evidence["peak_incremental_rss_bytes"] >= 48 * MIB
 
 
 def test_quiesce_acknowledges_a_post_request_sample() -> None:
@@ -569,7 +513,7 @@ print(json.dumps(policy.memory_evidence()))
     untouched = measure(touch=False)
     touched = measure(touch=True)
 
-    assert untouched["measurement_metric"] == "process_tree_uss_incremental"
+    assert untouched["measurement_metric"] == "process_rss_incremental"
     assert untouched["peak_incremental_rss_bytes"] < 16 * MIB
     assert touched["peak_incremental_rss_bytes"] >= 48 * MIB
 
@@ -603,59 +547,6 @@ print(json.dumps(policy.memory_evidence()))
 
     assert evidence["status"] == "PASS"
     assert evidence["peak_incremental_rss_bytes"] <= budget
-
-
-@pytest.mark.parametrize("preexisting_child", [False, True])
-def test_access_denied_fallback_uses_matching_rss_baseline(
-    preexisting_child: bool,
-) -> None:
-    code = f"""
-import json
-import subprocess
-import sys
-import time
-import quant_research_platform.runtime.resources as resources
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    runtime_resource_policy_scope,
-)
-resources._RSS_SAMPLER_CODE = '''
-import psutil
-def deny_full_info(self):
-    raise psutil.AccessDenied(pid=self.pid)
-psutil.Process.memory_full_info = deny_full_info
-''' + resources._RSS_SAMPLER_CODE
-child = None
-if {preexisting_child!r}:
-    child_code = "import time; print('ready', flush=True); time.sleep(0.2)"
-    child = subprocess.Popen(
-        (sys.executable, "-c", child_code),
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    assert child.stdout is not None and child.stdout.readline().strip() == "ready"
-policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=4 * 1024 * 1024)
-with runtime_resource_policy_scope(policy):
-    time.sleep(0.03)
-if child is not None:
-    child.wait(timeout=5)
-print(json.dumps(policy.memory_evidence()))
-"""
-
-    environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
-    completed = subprocess.run(
-        (sys.executable, "-c", code),
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-        timeout=30,
-    )
-    evidence = json.loads(completed.stdout)
-
-    assert evidence["status"] == "PASS"
-    assert evidence["fallback_sample_count"] > 0
 
 
 def test_sampler_cadence_is_diagnostic_not_memory_correctness() -> None:

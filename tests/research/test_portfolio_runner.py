@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gc
 import warnings
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -122,6 +121,7 @@ def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_g
     )
     expected_chunks = list(expected_result.output_chunks)
     expected_summary = expected_result.summary_factory()
+    expected_result.close()
 
     original_to_dict = pd.DataFrame.to_dict
 
@@ -157,6 +157,7 @@ def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_g
     assert summary.keys() == expected_summary.keys()
     for name in summary:
         pd.testing.assert_frame_equal(summary[name], expected_summary[name])
+    result.close()
 
 
 def test_portfolio_prediction_join_keeps_its_creation_policy(
@@ -217,7 +218,7 @@ def test_portfolio_prediction_join_keeps_its_creation_policy(
             list(result.output_chunks)
 
 
-def test_portfolio_extracted_output_iterator_keeps_operation_root(tmp_path) -> None:
+def test_portfolio_result_explicit_close_owns_operation_root(tmp_path) -> None:
     layout, dataset_catalog, portfolio_catalog, prediction, manifest, _root = (
         _prediction_portfolio_inputs(tmp_path)
     )
@@ -232,18 +233,14 @@ def test_portfolio_extracted_output_iterator_keeps_operation_root(tmp_path) -> N
         prediction_metadata=manifest["metadata"],
         resource_policy=policy,
     )
-    output_chunks = result.output_chunks
-    summary_factory = result.summary_factory
-    del result
-    gc.collect()
-
-    with pytest.raises(RuntimeError, match="portfolio_summary_before_output_complete"):
-        summary_factory()
     assert portfolio_runner.current_runtime_resource_policy() is policy
-    assert list(output_chunks)
-    assert portfolio_runner.current_runtime_resource_policy() is policy
-    assert summary_factory()
+    result.close()
+    result.close()
     assert portfolio_runner.current_runtime_resource_policy() is None
+    with pytest.raises(RuntimeError, match="portfolio_result_closed"):
+        list(result.output_chunks)
+    with pytest.raises(RuntimeError, match="portfolio_result_closed"):
+        result.summary_factory()
 
 
 def test_portfolio_lazy_result_keeps_final_rejection_terminal(monkeypatch) -> None:
@@ -281,8 +278,9 @@ def test_portfolio_lazy_result_keeps_final_rejection_terminal(monkeypatch) -> No
     )
     assert len(list(result.output_chunks)) == 1
 
+    result.summary_factory()
     with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded") as first:
-        result.summary_factory()
+        result.close()
     with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded") as second:
         result.summary_factory()
 
@@ -360,6 +358,7 @@ def test_persisted_prediction_portfolio_uses_bounded_disk_lookup(
             )
             chunks = list(result.output_chunks)
             summary = result.summary_factory()
+            result.close()
 
     returns = pd.concat(
         [chunk["portfolio_returns"] for chunk in chunks],

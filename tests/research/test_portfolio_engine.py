@@ -7,7 +7,9 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.research.portfolios.runner as portfolio_runner
-from quant_research_platform.artifacts.outputs import write_portfolio_outputs
+from quant_research_platform.artifacts._portfolio_outputs import (
+    write_portfolio_outputs,
+)
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
@@ -452,20 +454,22 @@ def _run_demo_portfolio(project_root) -> Path:
 
 
 def _write_portfolio_result(layout: StorageLayout, result) -> Path:
-    return write_portfolio_outputs(
-        output_chunks=result.output_chunks,
-        summary_factory=result.summary_factory,
-        spec=result.spec,
-        output_spec=OutputSpec(
-            output_id=result.spec.portfolio_id,
-            output_definition_id="portfolio_outputs",
-            run_id="test_run",
-            market_id=result.spec.market_id,
-            run_type=result.spec.run_type,
-            scope=OutputScope.LOCAL_ONLY,
-        ),
-        layout=layout,
-    )
+    with result:
+        return write_portfolio_outputs(
+            output_chunks=result.output_chunks,
+            summary_factory=result.summary_factory,
+            spec=result.spec,
+            output_spec=OutputSpec(
+                output_id=result.spec.portfolio_id,
+                output_definition_id="portfolio_outputs",
+                run_id="test_run",
+                market_id=result.spec.market_id,
+                run_type=result.spec.run_type,
+                scope=OutputScope.LOCAL_ONLY,
+            ),
+            layout=layout,
+            _finalize_memory=True,
+        )
 
 
 def _sorted_artifact_frame(frame: pd.DataFrame) -> pd.DataFrame:

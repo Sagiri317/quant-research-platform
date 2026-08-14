@@ -359,7 +359,7 @@ def test_local_verification_replace_failure_preserves_old_good(
     )
 
 
-def test_final_rss_rejection_rolls_back_published_replacement(
+def test_final_rss_rejection_keeps_replacement_private(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -405,6 +405,15 @@ def test_final_rss_rejection_rolls_back_published_replacement(
         )
 
     monkeypatch.setattr(module, "_run_local_verification_with_policy", replacement)
+
+    def reject_publish(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("run published before final memory acceptance")
+
+    monkeypatch.setattr(
+        module,
+        "_publish_staged_run_root",
+        reject_publish,
+    )
     config = make_local_verification_config(
         run_root=run_root,
         run_id="rss_old_good",

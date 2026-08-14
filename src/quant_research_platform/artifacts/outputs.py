@@ -28,7 +28,6 @@ from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._scratch_ownership import remove_owned_scratch
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -37,12 +36,7 @@ def _write_in_resource_root(writer: Callable[[], Path]) -> Path:
         raise RuntimeError("runtime_resource_policy_competing_root")
     policy = RuntimeResourcePolicy.capture()
     with runtime_resource_policy_scope(policy):
-        target = writer()
-        identity = target.lstat()
-        policy.finish_memory_measurement(
-            on_reject=lambda: remove_owned_scratch(target, identity)
-        )
-        return target
+        return writer()
 
 
 def write_prediction_outputs(
@@ -64,6 +58,7 @@ def write_prediction_outputs(
             output_chunks=output_chunks,
             model_metadata=model_metadata,
             prediction_metadata_factory=prediction_metadata_factory,
+            _finalize_memory=True,
         )
     )
 
@@ -89,6 +84,7 @@ def write_evaluation_outputs(
             spec=spec,
             output_spec=output_spec,
             layout=layout,
+            _finalize_memory=True,
         )
     )
 
@@ -108,6 +104,7 @@ def write_portfolio_outputs(
             spec=spec,
             output_spec=output_spec,
             layout=layout,
+            _finalize_memory=True,
         )
     )
 

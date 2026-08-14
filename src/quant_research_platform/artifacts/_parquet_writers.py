@@ -32,7 +32,7 @@ from quant_research_platform.storage._dataset_key_tracking import (
 )
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import (
-    table_decoded_working_set_bounds,
+    _table_parquet_page_working_set_bytes,
     table_with_decoded_row_bounds,
 )
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
@@ -75,6 +75,8 @@ def write_parquet_chunks(
     row_count = 0
     effective_test_end: str | None = None
     decoded_metadata: dict[bytes, bytes] | None = None
+    writer_state = ExitStack()
+    writer_bound = 0
     try:
         with _artifact_key_index_reservation():
             with closing_dataset_iterator(iter(frames)) as active_frames:
@@ -143,12 +145,19 @@ def write_parquet_chunks(
                                                 selected,
                                                 preserve_index=False,
                                             )
-                                            persisted, table_state, batch_rows = (
+                                            (
+                                                persisted,
+                                                table_state,
+                                                batch_rows,
+                                                writer_bound,
+                                            ) = (
                                                 _artifact_table_write_state(
                                                     table,
                                                     previous_metadata=decoded_metadata,
+                                                    retained_bytes=writer_bound,
                                                 )
                                             )
+                                            writer_state.enter_context(table_state)
                                             decoded_metadata = dict(
                                                 persisted.schema.metadata or {}
                                             )
@@ -172,14 +181,14 @@ def write_parquet_chunks(
                                                     write_batch_size=batch_rows,
                                                     max_rows_per_page=batch_rows,
                                                     use_dictionary=False,
+                                                    write_statistics=False,
                                                     write_page_index=False,
                                                     write_page_checksum=False,
                                                 )
-                                            with table_state:
-                                                writer.write_table(
-                                                    persisted,
-                                                    row_group_size=batch_rows,
-                                                )
+                                            writer.write_table(
+                                                persisted,
+                                                row_group_size=batch_rows,
+                                            )
                                             row_count += len(selected)
                                     finally:
                                         if is_first:
@@ -192,12 +201,14 @@ def write_parquet_chunks(
                                 except BaseException:
                                     pass
                                 writer = None
+                            writer_state.close()
                             raise
                         if writer is not None:
                             writer.add_key_value_metadata(decoded_metadata or {})
                             active_writer = writer
                             writer = None
                             active_writer.close()
+                        writer_state.close()
                         handle.flush()
                         os.fsync(handle.fileno())
         if row_count == 0 or effective_test_end is None:
@@ -212,6 +223,7 @@ def write_parquet_chunks(
                 writer.close()
             except BaseException:
                 pass
+        writer_state.close()
         if claimed_temp is not None:
             try:
                 require_unaliased_path(temp_path, error="invalid_output_write_path")
@@ -285,7 +297,9 @@ def write_parquet(
                     frame,
                     preserve_index=preserve_index,
                 )
-                persisted, table_state, batch_rows = _artifact_table_write_state(table)
+                persisted, table_state, batch_rows, _retained = (
+                    _artifact_table_write_state(table)
+                )
                 with table_state:
                     pq.write_table(
                         persisted,
@@ -295,6 +309,7 @@ def write_parquet(
                         write_batch_size=batch_rows,
                         max_rows_per_page=batch_rows,
                         use_dictionary=False,
+                        write_statistics=False,
                         write_page_index=False,
                         write_page_checksum=False,
                         **options,
@@ -361,31 +376,45 @@ def _artifact_table_write_state(
     table: pa.Table,
     *,
     previous_metadata: dict[bytes, bytes] | None = None,
-) -> tuple[pa.Table, ExitStack, int]:
+    retained_bytes: int = 0,
+) -> tuple[pa.Table, ExitStack, int, int]:
     persisted = table_with_decoded_row_bounds(
         table,
         previous_metadata=previous_metadata,
     )
     stack = ExitStack()
-    row_bytes, fixed_bytes = table_decoded_working_set_bounds(persisted)
     policy = current_runtime_resource_policy()
     if policy is None:
-        return persisted, stack, max(1, persisted.num_rows)
-    remaining = policy.task_memory_budget_bytes - policy.reserved_memory_bytes
+        return persisted, stack, max(1, persisted.num_rows), 0
+    remaining = policy.remaining_memory_bytes + retained_bytes
     minimum_rows = 0 if persisted.num_rows == 0 else 1
-    if fixed_bytes + minimum_rows * row_bytes > remaining:
-        raise MemoryError("runtime_memory_budget_exceeded")
-    batch_rows = max(
-        1,
-        min(
-            table.num_rows,
-            (remaining - fixed_bytes) // row_bytes,
-        ),
+    minimum_bytes = _table_parquet_page_working_set_bytes(
+        persisted,
+        rows=minimum_rows,
     )
+    if minimum_bytes > remaining:
+        raise MemoryError("runtime_memory_budget_exceeded")
+    batch_rows = max(1, persisted.num_rows)
+    working_bytes = minimum_bytes
+    low = 1
+    high = persisted.num_rows
+    while low <= high:
+        candidate = (low + high) // 2
+        candidate_bytes = _table_parquet_page_working_set_bytes(
+            persisted,
+            rows=candidate,
+        )
+        if candidate_bytes <= remaining:
+            batch_rows = candidate
+            working_bytes = candidate_bytes
+            low = candidate + 1
+        else:
+            high = candidate - 1
+    next_retained = max(retained_bytes, working_bytes)
     stack.enter_context(
         policy.reserve(
-            "artifacts.parquet.batch",
-            fixed_bytes + batch_rows * row_bytes,
+            "artifacts.parquet.native",
+            next_retained - retained_bytes,
         )
     )
-    return persisted, stack, batch_rows
+    return persisted, stack, batch_rows, next_retained

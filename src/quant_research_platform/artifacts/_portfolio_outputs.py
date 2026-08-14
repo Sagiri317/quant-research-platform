@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 
 import pandas as pd
@@ -48,6 +48,7 @@ def write_portfolio_outputs(
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
+    _finalize_memory: bool = False,
 ) -> Path:
     """Write local portfolio outputs."""
 
@@ -57,6 +58,7 @@ def write_portfolio_outputs(
         spec=spec,
         output_spec=output_spec,
         layout=layout,
+        finalize_memory=_finalize_memory,
     )
 
 
@@ -67,6 +69,7 @@ def _write_portfolio_output_chunks(
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
+    finalize_memory: bool = False,
 ) -> Path:
     """Write local portfolio row outputs from bounded chunks."""
 
@@ -144,7 +147,11 @@ def _write_portfolio_output_chunks(
             ),
         )
 
-    atomic_write_directory(output_bundle, _write)
+    atomic_write_directory(
+        output_bundle,
+        _write,
+        finalize_memory=finalize_memory,
+    )
     return output_bundle
 
 
@@ -157,6 +164,8 @@ def _write_portfolio_row_artifact_chunks(
     spec: PortfolioSpec,
 ) -> dict[str, int]:
     writers: dict[str, pq.ParquetWriter] = {}
+    writer_states: dict[str, ExitStack] = {}
+    writer_bounds: dict[str, int] = {}
     decoded_metadata: dict[str, dict[bytes, bytes]] = {}
     temp_paths = {
         artifact_name: temp_root / PORTFOLIO_ARTIFACTS[artifact_name]
@@ -183,39 +192,58 @@ def _write_portfolio_row_artifact_chunks(
                         if selected.empty:
                             continue
                         table = pa.Table.from_pandas(selected, preserve_index=False)
-                        persisted, table_state, batch_rows = (
+                        (
+                            persisted,
+                            table_state,
+                            batch_rows,
+                            writer_bounds[artifact_name],
+                        ) = (
                             _artifact_table_write_state(
                                 table,
                                 previous_metadata=decoded_metadata.get(artifact_name),
+                                retained_bytes=writer_bounds.get(artifact_name, 0),
                             )
                         )
+                        writer_state = writer_states.setdefault(
+                            artifact_name,
+                            ExitStack(),
+                        )
+                        writer_state.enter_context(table_state)
                         decoded_metadata[artifact_name] = dict(
                             persisted.schema.metadata or {}
                         )
                         writer = writers.get(artifact_name)
                         if writer is None:
-                            writer = pq.ParquetWriter(
-                                temp_paths[artifact_name],
-                                persisted.schema,
-                                compression="zstd",
-                                write_batch_size=batch_rows,
-                                max_rows_per_page=batch_rows,
-                                use_dictionary=False,
-                                write_page_index=False,
-                                write_page_checksum=False,
-                            )
+                            try:
+                                writer = pq.ParquetWriter(
+                                    temp_paths[artifact_name],
+                                    persisted.schema,
+                                    compression="zstd",
+                                    write_batch_size=batch_rows,
+                                    max_rows_per_page=batch_rows,
+                                    use_dictionary=False,
+                                    write_statistics=False,
+                                    write_page_index=False,
+                                    write_page_checksum=False,
+                                )
+                            except BaseException:
+                                writer_states.pop(artifact_name).close()
+                                writer_bounds.pop(artifact_name)
+                                raise
                             writers[artifact_name] = writer
-                        with table_state:
-                            writer.write_table(
-                                persisted,
-                                row_group_size=batch_rows,
-                            )
+                        writer.write_table(
+                            persisted,
+                            row_group_size=batch_rows,
+                        )
                         row_counts[artifact_name] += len(selected)
             for artifact_name in tuple(writers):
                 writer = writers[artifact_name]
                 writer.add_key_value_metadata(decoded_metadata[artifact_name])
                 active_writer = writers.pop(artifact_name)
-                active_writer.close()
+                try:
+                    active_writer.close()
+                finally:
+                    writer_states.pop(artifact_name).close()
             for artifact_name in row_artifacts:
                 if row_counts[artifact_name] == 0:
                     write_parquet(
@@ -232,6 +260,7 @@ def _write_portfolio_row_artifact_chunks(
                 writer.close()
             except BaseException:
                 pass
+            writer_states.pop(artifact_name).close()
         raise
     return row_counts
 

@@ -52,7 +52,9 @@ def test_atomic_publish_rejects_failed_active_rss_checkpoint(tmp_path: Path) -> 
     assert tuple(tmp_path.iterdir()) == ()
 
 
-def test_atomic_publish_rolls_back_post_rename_rss_rejection(tmp_path: Path) -> None:
+def test_atomic_publish_has_no_rejection_after_irreversible_rename(
+    tmp_path: Path,
+) -> None:
     policy = capture_test_policy(
         available_memory_bytes=1024,
         rss_bytes=100,
@@ -74,13 +76,11 @@ def test_atomic_publish_rolls_back_post_rename_rss_rejection(tmp_path: Path) -> 
     measurement.checkpoint_evidence = reject_after_rename  # type: ignore[method-assign]
     target = tmp_path / "result.txt"
 
-    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
-        with runtime_resource_policy_scope(policy):
-            atomic_write_text(target, "result\n")
+    with runtime_resource_policy_scope(policy):
+        atomic_write_text(target, "result\n")
 
     assert checkpoints == 2
-    assert not target.exists()
-    assert tuple(tmp_path.iterdir()) == ()
+    assert target.read_text(encoding="utf-8") == "result\n"
 
 
 def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -> None:
@@ -895,7 +895,7 @@ def test_atomic_directory_target_identity_normalizes_windows_case_aliases(
     ) == atomic._atomic_directory_scratch_prefix(lower)
 
 
-def test_atomic_directory_marker_cleanup_failure_propagates_after_publication(
+def test_atomic_directory_marker_cleanup_failure_prevents_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -915,7 +915,7 @@ def test_atomic_directory_marker_cleanup_failure_propagates_after_publication(
             lambda root: (root / "done.txt").write_text("ok\n", encoding="utf-8"),
         )
 
-    assert (final_root / "done.txt").read_text(encoding="utf-8") == "ok\n"
+    assert not final_root.exists()
     assert list(tmp_path.glob(".a-*.target"))
 
 

@@ -30,6 +30,7 @@ from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKe
 from quant_research_platform.storage._dataset_physical import (
     parquet_decoded_working_set_bounds,
 )
+from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_manifest
 from tests.artifacts.output_edge_fixtures import (
@@ -93,7 +94,7 @@ def test_public_artifact_writer_rejects_an_unrelated_active_root(
     assert writes == 0
 
 
-def test_public_artifact_final_memory_rejection_removes_new_target(
+def test_public_artifact_final_memory_rejection_keeps_target_private(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -120,8 +121,13 @@ def test_public_artifact_final_memory_rejection_removes_new_target(
         staticmethod(lambda **_kwargs: policy),
     )
 
-    def write(*_args, **_kwargs) -> Path:
-        target.mkdir()
+    def write(*_args, **kwargs) -> Path:
+        assert kwargs.pop("_finalize_memory") is True
+        atomic_write_directory(
+            target,
+            lambda root: (root / "data").write_bytes(b"x"),
+            finalize_memory=True,
+        )
         return target
 
     monkeypatch.setattr(outputs, "_write_prediction_outputs", write)
@@ -634,6 +640,51 @@ def test_prediction_parquet_writer_disables_retained_dictionary_state(
     assert captured["write_page_index"] is False
     assert captured["write_page_checksum"] is False
     assert captured["max_rows_per_page"] == captured["write_batch_size"]
+
+
+def test_prediction_parquet_native_reservation_lives_through_writer_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = make_artifact_prediction_output_frame()
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=4 * 1024 * 1024,
+    )
+    events: list[str] = []
+
+    class Writer:
+        def __init__(self, *_args, **_kwargs):  # noqa: ANN002, ANN003
+            self._observe("create")
+
+        def _observe(self, event: str) -> None:
+            assert (
+                policy.reserved_memory_bytes
+                > parquet_writers.EXACT_KEY_SQLITE_PAGE_BYTES
+            )
+            events.append(event)
+
+        def write_table(self, _table, **_kwargs):  # noqa: ANN001, ANN003
+            self._observe("write")
+
+        def add_key_value_metadata(self, _metadata):  # noqa: ANN001
+            self._observe("metadata")
+
+        def close(self) -> None:
+            self._observe("close")
+
+    monkeypatch.setattr(parquet_writers.pq, "ParquetWriter", Writer)
+    with runtime_resource_policy_scope(policy):
+        parquet_writers.write_parquet_chunks(
+            (frame,),
+            tmp_path / "prediction.parquet",
+            required=tuple(frame.columns),
+            key_columns=("asset_id", "timestamp"),
+            compression="zstd",
+        )
+        assert policy.reserved_memory_bytes == 0
+
+    assert events == ["create", "write", "metadata", "close"]
 
 
 def test_prediction_outputs_require_standard_metadata_attrs(

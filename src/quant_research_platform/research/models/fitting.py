@@ -382,7 +382,11 @@ def fit_estimator_model_result_from_frames(
     policy = current_runtime_resource_policy()
     training_bytes = pandas_frame_payload_bytes(training)
     target_bytes = len(training) * np.dtype(np.float64).itemsize
-    model_state_bytes = _model_state_upper_bound_bytes(training, spec)
+    model_state_bytes = _model_state_upper_bound_bytes(
+        training,
+        spec,
+        estimator=estimator,
+    )
     with ExitStack() as retained_state:
         if policy is not None:
             retained_state.enter_context(
@@ -680,7 +684,11 @@ def fit_predictor(
         threads = supervised.model_thread_count(spec)
         if policy is not None:
             input_bytes = pandas_frame_payload_bytes(training) + int(y.nbytes)
-            state_bytes = _model_state_upper_bound_bytes(training, spec)
+            state_bytes = _model_state_upper_bound_bytes(
+                training,
+                spec,
+                estimator=estimator,
+            )
             if input_bytes + state_bytes > policy.remaining_memory_bytes:
                 raise MemoryError("runtime_memory_budget_exceeded")
             fit_reservation.enter_context(
@@ -963,10 +971,18 @@ def _linear_qr_working_set_bytes(
     )
 
 
-def _model_state_upper_bound_bytes(frame: pd.DataFrame, spec: ModelSpec) -> int:
+def _model_state_upper_bound_bytes(
+    frame: pd.DataFrame,
+    spec: ModelSpec,
+    *,
+    estimator: object | None = None,
+) -> int:
     rows = max(1, len(frame))
     inputs = max(1, len(spec.input_columns))
     params = supervised.resolved_model_hyperparameters(spec)
+    get_params = getattr(estimator, "get_params", None)
+    if callable(get_params):
+        params = dict(get_params(deep=False))
     algorithm = spec.model_algorithm
     if algorithm in {
         "linear_regression",

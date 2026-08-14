@@ -511,7 +511,42 @@ def test_prediction_lazy_root_waits_for_chunks_and_metadata(monkeypatch) -> None
     assert len(list(result.output_chunks)) == 1
     assert prediction_runner.current_runtime_resource_policy() is policy
     assert result.prediction_metadata_factory() == {"rows": 1}
+    assert prediction_runner.current_runtime_resource_policy() is policy
+    result.close()
     assert prediction_runner.current_runtime_resource_policy() is None
+
+
+def test_prediction_result_explicit_close_owns_operation_root(monkeypatch) -> None:
+    policy = capture_test_policy(available_memory_bytes=1024, rss_bytes=100)
+    configured = SimpleNamespace(model_id="model", candidate_model_ids=())
+    monkeypatch.setattr(prediction_runner, "preflight_model_specs", lambda _specs: None)
+    monkeypatch.setattr(
+        prediction_runner,
+        "_build_prediction_result_from_research_dataset",
+        lambda **_kwargs: prediction_runner.PredictionResult(
+            spec=SimpleNamespace(),
+            output_chunks=(pd.DataFrame({"prediction": [1.0]}),),
+            model_metadata={},
+            prediction_metadata_factory=lambda: {"rows": 1},
+        ),
+    )
+    result = build_prediction_result_from_research_dataset(
+        layout=SimpleNamespace(),
+        dataset_catalog=SimpleNamespace(),
+        model_catalog=SimpleNamespace(),
+        prediction_catalog=SimpleNamespace(get=lambda _prediction_id: configured),
+        prediction_id="prediction",
+        resource_policy=policy,
+    )
+
+    assert prediction_runner.current_runtime_resource_policy() is policy
+    result.close()
+    result.close()
+    assert prediction_runner.current_runtime_resource_policy() is None
+    with pytest.raises(RuntimeError, match="prediction_result_closed"):
+        list(result.output_chunks)
+    with pytest.raises(RuntimeError, match="prediction_result_closed"):
+        result.prediction_metadata_factory()
 
 
 def test_prediction_lazy_result_keeps_final_rejection_terminal(monkeypatch) -> None:
@@ -553,8 +588,9 @@ def test_prediction_lazy_result_keeps_final_rejection_terminal(monkeypatch) -> N
     )
     assert len(list(result.output_chunks)) == 1
 
+    assert result.prediction_metadata_factory() == {"rows": 1}
     with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded") as first:
-        result.prediction_metadata_factory()
+        result.close()
     with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded") as second:
         result.prediction_metadata_factory()
 

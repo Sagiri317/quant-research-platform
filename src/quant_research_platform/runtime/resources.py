@@ -2,136 +2,24 @@
 
 from __future__ import annotations
 
-import mmap
-import os
 import shutil
-import struct
-import subprocess
 import sys
-import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from time import monotonic, sleep
+from threading import Event, Lock, Thread
+from time import monotonic_ns
 
 import pandas as pd
 
 MIB = 1024 * 1024
-_TASK_MEMORY_PLANNING_NUMERATOR = 3
-_TASK_MEMORY_PLANNING_DENOMINATOR = 4
 _TASK_MEMORY_CEILING_NUMERATOR = 4
 _TASK_MEMORY_CEILING_DENOMINATOR = 5
+_TASK_MEMORY_MARGIN_DENOMINATOR = 16
 _RSS_SAMPLE_INTERVAL_SECONDS = 0.005
 _RSS_SAMPLER_START_TIMEOUT_SECONDS = 5.0
 _RSS_SAMPLER_STOP_TIMEOUT_SECONDS = 5.0
-_RSS_STATE_BYTES = 40
-_RSS_SAMPLER_CODE = """
-import mmap
-import pathlib
-import struct
-import sys
-import time
-import psutil
-
-process = psutil.Process(int(sys.argv[1]))
-sampler = psutil.Process()
-stop = pathlib.Path(sys.argv[2])
-ready = pathlib.Path(sys.argv[3])
-output = pathlib.Path(sys.argv[4])
-interval = float(sys.argv[5])
-state = pathlib.Path(sys.argv[6])
-metric = sys.argv[7]
-paused = pathlib.Path(sys.argv[9])
-retire = pathlib.Path(sys.argv[10])
-pause_requested = False
-baseline = {}
-for value in sys.argv[8].split(","):
-    if value:
-        pid, created, primary_amount, rss_amount = value.split(":", 3)
-        baseline[(int(pid), float(created))] = (
-            int(primary_amount),
-            int(rss_amount),
-        )
-peak = count = max_gap = last = 0
-fallback_count = 0
-sequence = 0
-error = ""
-try:
-    with state.open("r+b", buffering=0) as handle:
-        shared = mmap.mmap(handle.fileno(), 40)
-        with shared:
-            while True:
-                now = time.monotonic_ns()
-                incremental = 0
-                for owned in (process, *process.children(recursive=True)):
-                    try:
-                        if owned.pid == sampler.pid:
-                            continue
-                        identity = (owned.pid, owned.create_time())
-                        details = owned.memory_full_info()
-                        amount = getattr(details, metric)
-                        initial = baseline.get(identity)
-                        incremental += amount if initial is None else max(
-                            0, amount - initial[0]
-                        )
-                    except psutil.AccessDenied:
-                        try:
-                            amount = owned.memory_info().rss
-                            initial = baseline.get(identity)
-                            incremental += amount if initial is None else max(
-                                0, amount - initial[1]
-                            )
-                            fallback_count += 1
-                        except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                            pass
-                    except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                        pass
-                peak = max(peak, incremental)
-                count += 1
-                if last:
-                    max_gap = max(max_gap, now - last)
-                last = now
-                sequence += 2
-                struct.pack_into("<Q", shared, 0, sequence - 1)
-                struct.pack_into(
-                    "<QQQQ",
-                    shared,
-                    8,
-                    peak,
-                    count,
-                    max_gap,
-                    fallback_count,
-                )
-                struct.pack_into("<Q", shared, 0, sequence)
-                if count == 1:
-                    ready.touch(exist_ok=True)
-                if retire.exists():
-                    break
-                if pause_requested:
-                    paused.write_text(str(sequence), encoding="ascii")
-                    while stop.exists() and not retire.exists():
-                        time.sleep(interval)
-                    paused.unlink(missing_ok=True)
-                    pause_requested = False
-                    if retire.exists():
-                        break
-                if stop.exists():
-                    try:
-                        int(stop.read_text(encoding="ascii"))
-                    except (OSError, ValueError):
-                        time.sleep(interval)
-                        continue
-                    pause_requested = True
-                    continue
-                time.sleep(interval)
-except BaseException as exc:
-    error = type(exc).__name__
-output.write_text(
-    f"{peak},{count},{max_gap},{fallback_count},{error}",
-    encoding="ascii",
-)
-"""
 
 
 @dataclass(slots=True)
@@ -166,198 +54,117 @@ class _OperationRssMeasurement:
     sampled_peak_rss_bytes: int = 0
     sample_count: int = 0
     max_sample_interval_ns: int = 0
-    fallback_sample_count: int = 0
     state: str = "READY"
     error: BaseException | None = None
-    _temporary: tempfile.TemporaryDirectory[str] | None = None
-    _process: subprocess.Popen[bytes] | None = None
-    _stop_path: Path | None = None
-    _ready_path: Path | None = None
-    _output_path: Path | None = None
-    _state_path: Path | None = None
-    _paused_path: Path | None = None
-    _retire_path: Path | None = None
-    _metric: str = field(init=False)
-    _baseline: tuple[tuple[int, float, int, int], ...] = field(init=False)
-
-    def __post_init__(self) -> None:
-        self._metric, self._baseline = _process_tree_memory_baseline()
+    _thread: Thread | None = None
+    _ready: Event = field(default_factory=Event)
+    _pause_requested: Event = field(default_factory=Event)
+    _paused: Event = field(default_factory=Event)
+    _retire: Event = field(default_factory=Event)
+    _lock: Lock = field(default_factory=Lock)
+    _last_sample_ns: int = 0
 
     def start(self) -> None:
         if self.state != "READY":
             raise RuntimeError("runtime_rss_sampler_already_started")
         self.state = "ACTIVE"
-        self._temporary = tempfile.TemporaryDirectory(prefix="qrp-rss-")
-        root = Path(self._temporary.name)
-        self._stop_path = root / "stop"
-        self._ready_path = root / "ready"
-        self._output_path = root / "result"
-        self._state_path = root / "state"
-        self._paused_path = root / "paused"
-        self._retire_path = root / "retire"
-        descriptor = os.open(
-            self._state_path,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            0o600,
+        self._thread = Thread(
+            target=self._sample_loop,
+            name="qrp-rss-sampler",
+            daemon=True,
         )
-        try:
-            os.ftruncate(descriptor, _RSS_STATE_BYTES)
-        finally:
-            os.close(descriptor)
-        self._process = subprocess.Popen(
-            (
-                sys.executable,
-                "-c",
-                _RSS_SAMPLER_CODE,
-                str(os.getpid()),
-                str(self._stop_path),
-                str(self._ready_path),
-                str(self._output_path),
-                str(_RSS_SAMPLE_INTERVAL_SECONDS),
-                str(self._state_path),
-                self._metric,
-                ",".join(
-                    f"{pid}:{created}:{primary_amount}:{rss_amount}"
-                    for pid, created, primary_amount, rss_amount in self._baseline
-                ),
-                str(self._paused_path),
-                str(self._retire_path),
-            ),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=(
-                getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                | getattr(subprocess, "DETACHED_PROCESS", 0)
-            ),
-        )
-        deadline = monotonic() + _RSS_SAMPLER_START_TIMEOUT_SECONDS
-        while not self._ready_path.exists():
-            if self._process.poll() is not None or monotonic() >= deadline:
-                self.error = RuntimeError("runtime_rss_sampler_start_failed")
-                raise self.error
-            sleep(_RSS_SAMPLE_INTERVAL_SECONDS)
+        self._thread.start()
+        if not self._ready.wait(_RSS_SAMPLER_START_TIMEOUT_SECONDS) or self.error:
+            self.error = self.error or RuntimeError("runtime_rss_sampler_start_failed")
+            raise self.error
 
     def quiesce(self) -> dict[str, int | float | str]:
         """Pause after a fresh sample so a publish decision cannot race sampling."""
 
-        if (
-            self.state != "ACTIVE"
-            or self._stop_path is None
-            or self._paused_path is None
-        ):
+        if self.state != "ACTIVE":
             raise RuntimeError("runtime_rss_sampler_not_active")
-        request_sequence = self._snapshot()[4]
-        self._stop_path.write_text(str(request_sequence), encoding="ascii")
-        deadline = monotonic() + _RSS_SAMPLER_STOP_TIMEOUT_SECONDS
-        while True:
-            try:
-                acknowledged_sequence = int(
-                    self._paused_path.read_text(encoding="ascii")
-                )
-            except (FileNotFoundError, OSError, ValueError):
-                acknowledged_sequence = 0
-            if acknowledged_sequence > request_sequence:
-                break
-            process = self._process
-            if process is None or process.poll() is not None or monotonic() >= deadline:
-                self.error = RuntimeError("runtime_rss_sampler_pause_failed")
-                raise self.error
-            sleep(_RSS_SAMPLE_INTERVAL_SECONDS)
+        self._pause_requested.set()
+        if not self._paused.wait(_RSS_SAMPLER_STOP_TIMEOUT_SECONDS):
+            self.error = RuntimeError("runtime_rss_sampler_pause_failed")
+            raise self.error
+        self._record_sample()
         return self.checkpoint_evidence()
 
     def resume(self) -> None:
         """Resume sampling before rejection rollback and cleanup."""
 
-        if (
-            self.state != "ACTIVE"
-            or self._stop_path is None
-            or self._paused_path is None
-            or not self._paused_path.exists()
-        ):
+        if self.state != "ACTIVE" or not self._paused.is_set():
             raise RuntimeError("runtime_rss_sampler_not_paused")
-        self._stop_path.unlink(missing_ok=True)
-        deadline = monotonic() + _RSS_SAMPLER_STOP_TIMEOUT_SECONDS
-        while self._paused_path.exists():
-            process = self._process
-            if process is None or process.poll() is not None or monotonic() >= deadline:
-                self.error = RuntimeError("runtime_rss_sampler_resume_failed")
-                raise self.error
-            sleep(_RSS_SAMPLE_INTERVAL_SECONDS)
+        self._pause_requested.clear()
+        if not self._wait_until_resumed():
+            self.error = RuntimeError("runtime_rss_sampler_resume_failed")
+            raise self.error
 
     def checkpoint_evidence(self) -> dict[str, int | float | str]:
-        if self.state != "ACTIVE" or self._state_path is None:
+        if self.state != "ACTIVE":
             raise RuntimeError("runtime_rss_sampler_not_active")
-        process = self._process
-        if process is None or process.poll() is not None:
+        thread = self._thread
+        if self.error is not None or thread is None or not thread.is_alive():
             self.error = RuntimeError("runtime_rss_sampler_failed")
             raise self.error
-        incremental, count, max_gap, fallback_count, _sequence = self._snapshot()
-        self.sampled_peak_rss_bytes = max(
-            self.sampled_peak_rss_bytes,
-            self.rss0_bytes + incremental,
-        )
-        self.sample_count = max(self.sample_count, count)
-        self.max_sample_interval_ns = max(self.max_sample_interval_ns, max_gap)
-        self.fallback_sample_count = max(
-            self.fallback_sample_count,
-            fallback_count,
-        )
         return self._evidence()
 
     def stop(self) -> None:
         if self.state == "RETIRED":
             return
         try:
-            if self._retire_path is not None:
-                self._retire_path.touch(exist_ok=True)
-            process = self._process
-            if process is None:
+            self._retire.set()
+            self._pause_requested.clear()
+            thread = self._thread
+            if thread is None:
                 raise RuntimeError("runtime_rss_sampler_stop_failed")
-            try:
-                process.wait(timeout=_RSS_SAMPLER_STOP_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=_RSS_SAMPLER_STOP_TIMEOUT_SECONDS)
-                raise RuntimeError("runtime_rss_sampler_stop_failed") from None
-            if process.returncode != 0 or self._output_path is None:
-                raise RuntimeError("runtime_rss_sampler_failed")
-            raw = self._output_path.read_text(encoding="ascii").split(",", 4)
-            if len(raw) != 5:
-                raise RuntimeError("runtime_rss_sampler_failed")
-            if raw[4]:
-                raise RuntimeError(f"runtime_rss_sampler_failed:{raw[4]}")
-            self.sampled_peak_rss_bytes = max(
-                self.sampled_peak_rss_bytes,
-                self.rss0_bytes + int(raw[0]),
-            )
-            self.sample_count = int(raw[1])
-            self.max_sample_interval_ns = int(raw[2])
-            self.fallback_sample_count = int(raw[3])
+            thread.join(_RSS_SAMPLER_STOP_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                raise RuntimeError("runtime_rss_sampler_stop_failed")
+            if self.error is not None:
+                raise RuntimeError("runtime_rss_sampler_failed") from self.error
         except BaseException as exc:
             self.error = exc
         finally:
             self.state = "RETIRED"
-            if self._temporary is not None:
-                self._temporary.cleanup()
 
-    def _snapshot(self) -> tuple[int, int, int, int, int]:
-        if self._state_path is None:
-            raise RuntimeError("runtime_rss_sampler_not_active")
-        with self._state_path.open("r+b", buffering=0) as handle:
-            with mmap.mmap(
-                handle.fileno(),
-                _RSS_STATE_BYTES,
-                access=mmap.ACCESS_READ,
-            ) as shared:
-                for _ in range(1000):
-                    sequence = struct.unpack_from("<Q", shared, 0)[0]
-                    values = struct.unpack_from("<QQQQ", shared, 8)
-                    if sequence == struct.unpack_from("<Q", shared, 0)[0] and not (
-                        sequence & 1
+    def _sample_loop(self) -> None:
+        try:
+            while not self._retire.is_set():
+                if self._pause_requested.is_set():
+                    self._paused.set()
+                    while self._pause_requested.is_set() and not self._retire.wait(
+                        _RSS_SAMPLE_INTERVAL_SECONDS
                     ):
-                        return (*values, sequence)
-        raise RuntimeError("runtime_rss_sampler_snapshot_failed")
+                        pass
+                    self._paused.clear()
+                    continue
+                self._record_sample()
+                self._ready.set()
+                self._retire.wait(_RSS_SAMPLE_INTERVAL_SECONDS)
+        except BaseException as exc:
+            self.error = exc
+            self._ready.set()
+            self._paused.set()
+
+    def _record_sample(self) -> None:
+        rss = _process_rss_bytes()
+        now = monotonic_ns()
+        with self._lock:
+            if self._last_sample_ns:
+                self.max_sample_interval_ns = max(
+                    self.max_sample_interval_ns,
+                    now - self._last_sample_ns,
+                )
+            self._last_sample_ns = now
+            self.sampled_peak_rss_bytes = max(self.sampled_peak_rss_bytes, rss)
+            self.sample_count += 1
+
+    def _wait_until_resumed(self) -> bool:
+        deadline = monotonic_ns() + int(_RSS_SAMPLER_STOP_TIMEOUT_SECONDS * 1e9)
+        while self._paused.is_set() and monotonic_ns() < deadline:
+            self._retire.wait(_RSS_SAMPLE_INTERVAL_SECONDS)
+        return not self._paused.is_set()
 
     def evidence(self) -> dict[str, int | float | str]:
         if self.state != "RETIRED":
@@ -380,13 +187,8 @@ class _OperationRssMeasurement:
             "hard_budget_bytes": self.hard_budget_bytes,
             "sampled_peak_rss_bytes": peak,
             "peak_incremental_rss_bytes": incremental,
-            "measurement_metric": (
-                f"process_tree_{self._metric}_with_rss_fallback_incremental"
-                if self.fallback_sample_count
-                else f"process_tree_{self._metric}_incremental"
-            ),
+            "measurement_metric": "process_rss_incremental",
             "sample_count": self.sample_count,
-            "fallback_sample_count": self.fallback_sample_count,
             "max_sample_interval_ms": self.max_sample_interval_ns / 1_000_000,
             "cadence_status": cadence_status,
             "status": status,
@@ -430,11 +232,6 @@ class RuntimeResourcePolicy:
             _process_rss_bytes(),
             error="invalid_runtime_resource_rss",
         )
-        planning_budget = (
-            available
-            * _TASK_MEMORY_PLANNING_NUMERATOR
-            // _TASK_MEMORY_PLANNING_DENOMINATOR
-        )
         hard_budget = (
             available
             * _TASK_MEMORY_CEILING_NUMERATOR
@@ -445,9 +242,12 @@ class RuntimeResourcePolicy:
                 explicit_cap_bytes,
                 error="invalid_runtime_resource_explicit_cap",
             )
-            planning_budget = min(planning_budget, explicit_cap)
             hard_budget = min(hard_budget, explicit_cap)
-        if hard_budget <= 0:
+        planning_budget = hard_budget - max(
+            1,
+            hard_budget // _TASK_MEMORY_MARGIN_DENOMINATOR,
+        )
+        if planning_budget <= 0:
             raise ValueError("invalid_runtime_resource_available_memory")
         policy = object.__new__(cls)
         object.__setattr__(policy, "captured_available_memory_bytes", available)
@@ -488,7 +288,7 @@ class RuntimeResourcePolicy:
         self._ledger.reserve(
             owner,
             reserve,
-            budget_bytes=self.hard_memory_budget_bytes,
+            budget_bytes=self.task_memory_budget_bytes,
         )
         try:
             yield
@@ -518,7 +318,11 @@ class RuntimeResourcePolicy:
     def assert_memory_within_budget(self) -> None:
         """Reject publication when the active operation has already failed."""
 
-        evidence = self._measurement.checkpoint_evidence()
+        evidence = (
+            self._measurement.evidence()
+            if self._measurement.state == "RETIRED"
+            else self._measurement.checkpoint_evidence()
+        )
         _require_memory_acceptance(self._measurement, evidence)
 
     def finish_memory_measurement(
@@ -535,6 +339,8 @@ class RuntimeResourcePolicy:
         ):
             raise RuntimeError("runtime_rss_sampler_not_active")
         try:
+            if self.reserved_memory_bytes:
+                raise RuntimeError("runtime_memory_reservation_leaked")
             evidence = self._measurement.quiesce()
             _require_memory_acceptance(self._measurement, evidence)
             self._measurement.stop()
@@ -723,35 +529,6 @@ def _process_rss_bytes() -> int:
     except Exception:
         raise RuntimeError("runtime_rss_discovery_failed") from None
     return _exact_nonnegative_int(rss, error="invalid_runtime_resource_rss")
-
-
-def _process_tree_memory_baseline() -> tuple[
-    str,
-    tuple[tuple[int, float, int, int], ...],
-]:
-    try:
-        import psutil  # type: ignore[import-not-found]
-
-        parent = psutil.Process()
-        parent_info = parent.memory_full_info()
-        metric = "pss" if hasattr(parent_info, "pss") else "uss"
-        baseline: list[tuple[int, float, int, int]] = []
-        for owned in (parent, *parent.children(recursive=True)):
-            try:
-                details = owned.memory_full_info()
-                baseline.append(
-                    (
-                        owned.pid,
-                        owned.create_time(),
-                        int(getattr(details, metric)),
-                        int(details.rss),
-                    )
-                )
-            except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                pass
-        return metric, tuple(sorted(baseline))
-    except Exception:
-        raise RuntimeError("runtime_rss_discovery_failed") from None
 
 
 def _exact_positive_int(value: object, *, error: str) -> int:

@@ -37,6 +37,8 @@ from quant_research_platform.markets.implementations.a_share import (
     research_scenarios as a_share_research_scenarios,
 )
 from quant_research_platform.profiles.research import research_profile
+from quant_research_platform.research.portfolios.runner import PortfolioResult
+from quant_research_platform.research.predictions.outputs import PredictionResult
 from quant_research_platform.runtime.resources import current_runtime_resource_policy
 from quant_research_platform.storage._dataset_inspection import (
     inspect_dataset as inspect_dataset_with_policy,
@@ -217,7 +219,7 @@ def fake_evaluation_result(kwargs):
 
 
 def fake_prediction_result(kwargs):
-    return SimpleNamespace(
+    return PredictionResult(
         spec=kwargs["prediction_catalog"].get(kwargs["prediction_id"]),
         output_chunks=(),
         model_metadata={},
@@ -226,7 +228,7 @@ def fake_prediction_result(kwargs):
 
 
 def fake_portfolio_result(kwargs):
-    return SimpleNamespace(
+    return PortfolioResult(
         spec=kwargs["portfolio_catalog"].get(kwargs["portfolio_id"]),
         output_chunks=(),
         summary_factory=lambda: {},

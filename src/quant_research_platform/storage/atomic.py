@@ -136,7 +136,12 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
     return final_path
 
 
-def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
+def atomic_write_directory[T](
+    root: Path,
+    writer: Callable[[Path], T],
+    *,
+    finalize_memory: bool = False,
+) -> T:
     final_root = Path(root)
     require_unaliased_path(final_root.parent, error="invalid_storage_write_path")
     final_root.parent.mkdir(parents=True, exist_ok=True)
@@ -180,6 +185,15 @@ def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
         require_unaliased_path(temp_root, error="invalid_storage_write_path")
         require_owned_scratch(temp_root, claimed_temp)
         require_owned_scratch(target_marker, claimed_marker)
+        _remove_claimed_path(target_marker, claimed_marker)
+        claimed_marker = None
+        if finalize_memory:
+            policy = current_runtime_resource_policy()
+            if policy is None:
+                raise RuntimeError("runtime_resource_policy_not_active")
+            policy.finish_memory_measurement(
+                on_reject=lambda: _remove_claimed_path(temp_root, claimed_temp)
+            )
         try:
             publish_no_replace(temp_root, final_root, source_identity=claimed_temp)
         except FileExistsError as exc:
@@ -194,7 +208,6 @@ def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
             if target_exists:
                 raise OutputAlreadyExistsError() from exc
             raise
-        _remove_claimed_path(target_marker, claimed_marker)
     except BaseException:
         if claimed_temp is not None:
             try:
@@ -428,15 +441,6 @@ def publish_no_replace(
             raise primary or target_probe_error or source_probe_error  # type: ignore[misc]
         if target_exact and not source_exact:
             if primary is None or isinstance(primary, OSError):
-                if policy is not None:
-                    try:
-                        policy.assert_memory_within_budget()
-                    except BaseException as acceptance_error:
-                        try:
-                            remove_owned_scratch(target, source_identity)
-                        except BaseException:
-                            raise acceptance_error from None
-                        raise
                 return
             raise primary
         if primary is not None:

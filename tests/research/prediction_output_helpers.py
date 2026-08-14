@@ -122,14 +122,16 @@ def write_prediction_result(layout: StorageLayout, result) -> Path:
         run_type=result.spec.run_type,
         scope=OutputScope.LOCAL_ONLY,
     )
-    return write_prediction_outputs_in_workflow(
-        spec=result.spec,
-        output_spec=output_spec,
-        layout=layout,
-        output_chunks=result.output_chunks,
-        model_metadata=result.model_metadata,
-        prediction_metadata_factory=result.prediction_metadata_factory,
-    )
+    with result:
+        return write_prediction_outputs_in_workflow(
+            spec=result.spec,
+            output_spec=output_spec,
+            layout=layout,
+            output_chunks=result.output_chunks,
+            model_metadata=result.model_metadata,
+            prediction_metadata_factory=result.prediction_metadata_factory,
+            _finalize_memory=True,
+        )
 
 
 def synthetic_prediction_model_metadata(

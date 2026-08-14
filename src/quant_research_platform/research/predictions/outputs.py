@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,20 @@ class PredictionResult:
     output_chunks: Iterable[pd.DataFrame]
     model_metadata: dict[str, object]
     prediction_metadata_factory: Callable[[], dict[str, object]]
+    _close: Callable[[], None] = field(
+        default=lambda: None,
+        repr=False,
+        compare=False,
+    )
+
+    def close(self) -> None:
+        self._close()
+
+    def __enter__(self) -> PredictionResult:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
 
 def build_prediction_result_from_frames(

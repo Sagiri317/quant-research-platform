@@ -52,6 +52,7 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -102,20 +103,46 @@ def build_prediction_result_from_research_dataset(
     except BaseException:
         operation.close()
         raise
+    source_chunks = operation.enter_context(
+        closing_dataset_iterator(iter(result.output_chunks))
+    )
     chunks_complete = False
     metadata_value: dict[str, object] | None = None
     terminal_error: BaseException | None = None
+    operation_open = True
+
+    def close_operation(*, suppress_errors: bool = False) -> None:
+        nonlocal operation_open
+        if operation_open:
+            operation_open = False
+            try:
+                operation.close()
+            except BaseException:
+                if not suppress_errors:
+                    raise
+
+    def close_result() -> None:
+        nonlocal terminal_error
+        if terminal_error is not None or not operation_open:
+            return
+        closed = RuntimeError("prediction_result_closed")
+        try:
+            close_operation()
+        except BaseException as primary:
+            terminal_error = primary
+            raise
+        terminal_error = closed
 
     def output_chunks() -> Iterable[pd.DataFrame]:
         nonlocal chunks_complete, terminal_error
         if terminal_error is not None:
             raise terminal_error
         try:
-            yield from result.output_chunks
+            yield from source_chunks
         except BaseException as primary:
             terminal_error = primary
             try:
-                operation.close()
+                close_operation()
             except BaseException as cleanup_error:
                 primary.add_note(
                     "prediction operation cleanup also failed: "
@@ -137,17 +164,12 @@ def build_prediction_result_from_research_dataset(
         except BaseException as primary:
             terminal_error = primary
             try:
-                operation.close()
+                close_operation()
             except BaseException as cleanup_error:
                 primary.add_note(
                     "prediction operation cleanup also failed: "
                     f"{type(cleanup_error).__name__}"
                 )
-            raise
-        try:
-            operation.close()
-        except BaseException as primary:
-            terminal_error = primary
             raise
         metadata_value = candidate
         return metadata_value
@@ -157,8 +179,9 @@ def build_prediction_result_from_research_dataset(
         output_chunks=output_chunks(),
         model_metadata=result.model_metadata,
         prediction_metadata_factory=prediction_metadata,
+        _close=close_result,
     )
-    weakref.finalize(result, operation.close)
+    weakref.finalize(owned_result, close_operation, suppress_errors=True)
     return owned_result
 
 

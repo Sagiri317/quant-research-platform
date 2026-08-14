@@ -48,6 +48,7 @@ def write_evaluation_outputs(
     spec: EvaluationSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
+    _finalize_memory: bool = False,
 ) -> Path:
     """Write local evaluation outputs into an output bundle."""
 
@@ -149,7 +150,11 @@ def write_evaluation_outputs(
             ),
         )
 
-    atomic_write_directory(output_bundle, _write)
+    atomic_write_directory(
+        output_bundle,
+        _write,
+        finalize_memory=_finalize_memory,
+    )
     return output_bundle
 
 

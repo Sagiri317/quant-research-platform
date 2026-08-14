@@ -634,6 +634,35 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
             )
 
 
+@pytest.mark.parametrize(
+    ("model_algorithm", "maximum_bytes"),
+    [
+        ("gradient_boosting_regressor", 1024 * 1024),
+        ("hist_gradient_boosting_regressor", 3 * 1024 * 1024),
+    ],
+)
+def test_model_state_bound_uses_real_resolved_estimator_defaults(
+    model_algorithm: str,
+    maximum_bytes: int,
+) -> None:
+    rows = 100_000
+    frame = pd.DataFrame({"factor": np.zeros(rows)})
+    spec = ModelSpec(
+        model_id=f"{model_algorithm}_resolved_defaults",
+        model_algorithm=model_algorithm,
+        input_factor_columns=("factor",),
+        label_column="label",
+        max_train_rows=rows,
+    )
+    estimator = build_estimator_from_model_spec(spec)
+
+    assert model_fitting._model_state_upper_bound_bytes(  # noqa: SLF001
+        frame,
+        spec,
+        estimator=estimator,
+    ) <= maximum_bytes
+
+
 def test_model_fit_envelope_does_not_recharge_preloaded_backend_image() -> None:
     rows = 32
     frame = pd.DataFrame(
@@ -678,7 +707,7 @@ def test_model_fit_envelope_does_not_recharge_preloaded_backend_image() -> None:
     )
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024 * 1024,
-        explicit_cap_bytes=admitted_bytes,
+        explicit_cap_bytes=(admitted_bytes * 16 + 14) // 15,
     )
 
     with runtime_resource_policy_scope(policy):
@@ -752,7 +781,10 @@ def test_model_threads_adapt_to_live_planning_headroom(
     state_bytes = model_fitting._model_state_upper_bound_bytes(frame, spec)  # noqa: SLF001
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024 * 1024,
-        explicit_cap_bytes=input_bytes + state_bytes + base + 2 * (one - base),
+        explicit_cap_bytes=(
+            (input_bytes + state_bytes + base + 2 * (one - base)) * 16 + 14
+        )
+        // 15,
     )
 
     class Estimator:
