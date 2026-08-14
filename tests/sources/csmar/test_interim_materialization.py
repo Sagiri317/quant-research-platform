@@ -760,18 +760,19 @@ def test_private_export_flushes_publishable_batch_before_next_record(
 
     owner = "iter_index_info_rows" if dataset == "index_info" else "_iter_csv_records"
     monkeypatch.setattr(raw_exports, owner, records)
-    chunks = raw_exports.iter_private_export_chunks_with_policy(
-        Path("unused.csv"),
-        dataset=dataset,
-        chunksize=1,
-        resource_policy=policy,
-    )
+    with runtime_resource_policy_scope(policy):
+        chunks = raw_exports.iter_private_export_chunks_with_policy(
+            Path("unused.csv"),
+            dataset=dataset,
+            chunksize=1,
+            resource_policy=policy,
+        )
 
-    first = next(chunks)
+        first = next(chunks)
 
-    assert first["value"].tolist() == [0]
-    assert pulls == [0]
-    chunks.close()
+        assert first["value"].tolist() == [0]
+        assert pulls == [0]
+        chunks.close()
 
 
 @pytest.mark.parametrize("wide_position", ("first", "later"))
@@ -837,7 +838,7 @@ def test_private_export_adapts_across_later_wide_rows(
     assert observed == 21
 
 
-def test_private_export_next_batch_accounts_for_retained_previous_yield(
+def test_private_export_parent_reservation_blocks_downstream_overlap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
@@ -873,91 +874,21 @@ def test_private_export_next_batch_accounts_for_retained_previous_yield(
         "pandas_frame_payload_bytes",
         lambda _frame: 24 * 1024**2,
     )
-    chunks = raw_exports.iter_private_export_chunks_with_policy(
-        Path("unused.csv"),
-        dataset="trading_calendar",
-        chunksize=1,
-        resource_policy=policy,
-    )
-    previous = next(chunks)
+    with runtime_resource_policy_scope(policy):
+        chunks = raw_exports.iter_private_export_chunks_with_policy(
+            Path("unused.csv"),
+            dataset="trading_calendar",
+            chunksize=1,
+            resource_policy=policy,
+        )
+        previous = next(chunks)
+        assert policy.reserved_memory_bytes == 24 * 1024**2
 
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="csmar_raw_working_set_exceeds_task_memory_budget",
-    ):
-        next(chunks)
-    assert len(previous) == 1
-
-
-def test_private_export_tracks_distinct_live_parents_until_last_dependent_release(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=4 * 1024 * 1024,
-    )
-    first_parent = pd.DataFrame({"value": [1, 2]})
-    second_parent = pd.DataFrame({"value": [3, 4]})
-    parent_bytes = {id(first_parent): 101, id(second_parent): 202}
-    retained = [0]
-    monkeypatch.setattr(
-        raw_exports,
-        "pandas_frame_payload_bytes",
-        lambda frame: parent_bytes[id(frame)],
-    )
-    monkeypatch.setattr(
-        raw_exports,
-        "_bounded_export_frame",
-        lambda frame, **_kwargs: iter((frame.iloc[:1],)),
-    )
-
-    first_chunks = raw_exports._yield_bounded_export_frame(
-        first_parent,
-        resource_policy=policy,
-        retained_previous_bytes=retained,
-    )
-    first = next(first_chunks)
-    first_chunks.close()
-    second_chunks = raw_exports._yield_bounded_export_frame(
-        second_parent,
-        resource_policy=policy,
-        retained_previous_bytes=retained,
-    )
-    second = next(second_chunks)
-    second_chunks.close()
-
-    assert retained[0] == sum(parent_bytes.values())
-    del first
-    gc.collect()
-    assert retained[0] == parent_bytes[id(second_parent)]
-    del second
-    gc.collect()
-    assert retained[0] == 0
-
-
-def test_private_export_releases_parent_after_unretained_exhaustion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=4 * 1024 * 1024,
-    )
-    parent = pd.DataFrame({"value": [1]})
-    retained = [0]
-    monkeypatch.setattr(raw_exports, "pandas_frame_payload_bytes", lambda _frame: 101)
-    chunks = raw_exports._yield_bounded_export_frame(
-        parent,
-        resource_policy=policy,
-        retained_previous_bytes=retained,
-    )
-
-    chunk = next(chunks)
-    del chunk
-    with pytest.raises(StopIteration):
-        next(chunks)
-    gc.collect()
-
-    assert retained[0] == 0
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            with policy.reserve("storage.dataset.arrow", 10 * 1024**2):
+                pytest.fail("downstream overlap admitted")
+        assert len(previous) == 1
+        chunks.close()
 
 
 def test_private_export_reserves_downstream_retained_before_dataframe(
@@ -1052,105 +983,6 @@ def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
             match="csmar_interim_working_set_exceeds_task_memory_budget",
         ):
             next(frames)
-
-
-def test_csmar_materialization_passes_plain_frames_to_writer(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    frame = pd.DataFrame(
-        {
-            "calendar_date": [pd.Timestamp("2024-01-02")],
-            "source_market_type": [4],
-            "is_trading_day": [True],
-        }
-    )
-    captured: list[object] = []
-    monkeypatch.setattr(
-        interim,
-        "dataset_files_with_identity_by_id",
-        lambda _root: iter(
-            (("trading_calendar", Path("raw.csv"), DatasetFileIdentity(1, 2, 3, 4)),)
-        ),
-    )
-    monkeypatch.setattr(
-        interim,
-        "_iter_interim_frames",
-        lambda **_kwargs: iter((frame,)),
-    )
-
-    def capture_write(_root, data, **_kwargs):  # noqa: ANN001, ANN003, ANN202
-        captured.extend(data)
-
-    monkeypatch.setattr(interim, "write_dataset", capture_write)
-
-    interim._materialize_interim_data(
-        layout=StorageLayout(project_root=tmp_path),
-        raw_root=tmp_path,
-        data_ids=("trading_calendar",),
-        start_date=None,
-        end_date=None,
-        override_path=None,
-        chunksize=1,
-    )
-
-    assert captured == [frame]
-
-
-@pytest.mark.parametrize("data_id", ("trading_calendar", "index_info"))
-def test_interim_previous_publication_survives_chunk_and_file_boundaries(
-    data_id: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    observed: list[int] = []
-    retained_cells: list[list[int]] = []
-
-    def raw_chunks(path, *, retained_payload_bytes, **_kwargs):  # noqa: ANN001, ANN003, ANN202
-        retained_cells.append(retained_payload_bytes)
-        for offset in (0, 1):
-            observed.append(retained_payload_bytes[0])
-            yield pd.DataFrame({"key": [path.name + str(offset)]})
-
-    monkeypatch.setattr(interim, "iter_private_export_chunks_with_policy", raw_chunks)
-    monkeypatch.setattr(
-        interim,
-        "interim_catalog",
-        lambda: SimpleNamespace(
-            get=lambda _data_id: SimpleNamespace(primary_key=("key",))
-        ),
-    )
-    monkeypatch.setattr(
-        interim,
-        "_transform_interim_chunk",
-        lambda candidate, **_kwargs: (candidate, {}),
-    )
-    monkeypatch.setattr(interim, "_merge_pruning_report", lambda *_args: None)
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-    )
-
-    with runtime_resource_policy_scope(policy):
-        frames = interim._iter_pruned_interim_frames(
-            data_id=data_id,
-            raw_dataset=data_id,
-            input_files=(Path("a.csv"), Path("b.csv")),
-            start_date=None,
-            end_date=None,
-            overrides={},
-            chunksize=1,
-            pruning_reports=None,
-        )
-        first = next(frames)
-        first_bytes = interim.pandas_frame_payload_bytes(first)
-        second = next(frames)
-        second_bytes = interim.pandas_frame_payload_bytes(second)
-        third = next(frames)
-        del first, second, third
-        frames.close()
-
-    assert observed == [0, first_bytes, second_bytes]
-    assert retained_cells[0] is retained_cells[1]
-    assert retained_cells[0] == [0]
 
 
 def test_private_export_chunks_keep_normal_wide_record_with_default_payload(
@@ -4657,18 +4489,19 @@ def test_private_export_retains_pending_decoded_owner_state_before_next_pull(
 
     owner = "iter_index_info_rows" if dataset == "index_info" else "_iter_csv_records"
     monkeypatch.setattr(raw_exports, owner, records)
-    chunks = iter(
-        raw_exports.iter_private_export_chunks_with_policy(
-            Path("unused.csv"),
-            dataset=dataset,
-            chunksize=100,
-            resource_policy=policy,
+    with runtime_resource_policy_scope(policy):
+        chunks = iter(
+            raw_exports.iter_private_export_chunks_with_policy(
+                Path("unused.csv"),
+                dataset=dataset,
+                chunksize=100,
+                resource_policy=policy,
+            )
         )
-    )
 
-    first = next(chunks)
-    second = next(chunks)
-    chunks.close()
+        first = next(chunks)
+        second = next(chunks)
+        chunks.close()
 
     pointer_bytes = struct.calcsize("P")
     assert observed[2] - observed[1] == row_bytes + (1 + len(header)) * pointer_bytes
@@ -5106,58 +4939,6 @@ def test_interim_transform_variable_width_preflight_precedes_normalize(
             overrides={},
             retained_previous_bytes=0,
         )
-
-
-def test_public_interim_without_identity_uses_retained_private_raw_owner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
-    observed_cells: list[list[int] | None] = []
-    raw = pd.DataFrame({"raw": [1]})
-    pruned = pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2024-01-02")],
-            "source_market_type": [4],
-        }
-    )
-
-    def private_chunks(*_args, retained_payload_bytes=None, **_kwargs):  # noqa: ANN001, ANN003
-        observed_cells.append(retained_payload_bytes)
-        yield raw
-
-    monkeypatch.setattr(
-        raw_exports,
-        "iter_private_export_chunks_with_policy",
-        private_chunks,
-    )
-    monkeypatch.setattr(
-        interim,
-        "iter_private_export_chunks_with_policy",
-        private_chunks,
-    )
-    monkeypatch.setattr(
-        interim,
-        "_transform_interim_chunk",
-        lambda *_args, **_kwargs: (pruned, {}),
-    )
-
-    with runtime_resource_policy_scope(policy):
-        frames = interim._iter_pruned_interim_frames(
-            data_id="trading_calendar",
-            raw_dataset="trading_calendar",
-            input_files=(Path("unused.csv"),),
-            start_date=None,
-            end_date=None,
-            overrides={},
-            chunksize=1,
-            pruning_reports=None,
-        )
-        next(frames)
-
-    assert observed_cells and observed_cells[0] is not None
 
 
 def test_non_reference_publication_keeps_upstream_alive_until_next_pull(

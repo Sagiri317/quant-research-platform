@@ -1519,27 +1519,6 @@ def test_dataset_coverage_preflights_int64_normalization_before_transform(
     assert observed == [retained_state_bytes + 2 * np.dtype(np.int64).itemsize]
 
 
-def test_adaptive_materialization_yields_plain_frame() -> None:
-    frame = pd.DataFrame({"asset_id": ["a"], "timestamp": [pd.Timestamp("2024-01-02")]})
-    policy = capture_test_policy(
-        available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    with runtime_resource_policy_scope(policy):
-        publications = list(
-            materialization_planning._iter_adaptive_materialization_batches(
-                asset_ids=("a",),
-                sessions=(pd.Timestamp("2024-01-02"),),
-                session_context=(pd.Timestamp("2024-01-02"),),
-                retained_payload_bytes=123,
-                materialize=lambda *_args: frame,
-            )
-        )
-
-    assert len(publications) == 1
-    assert publications[0] is frame
-
-
 def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
     policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,

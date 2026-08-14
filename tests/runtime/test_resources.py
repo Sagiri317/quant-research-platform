@@ -51,7 +51,6 @@ def test_runtime_resource_policy_captures_one_shot_budget_inputs(
         "task_memory_budget_bytes": 2 * GIB,
         "hard_memory_budget_bytes": 2 * GIB,
     }
-    assert not hasattr(policy, "payload_target_bytes")
     assert policy.remaining_memory_bytes == 2 * GIB
 
 
@@ -198,6 +197,8 @@ def test_same_policy_scopes_can_close_non_lifo_without_retiring_root() -> None:
 def test_root_scope_records_one_operation_peak_and_fails_over_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events: list[str] = []
+
     class Measurement:
         error = None
         state = "READY"
@@ -206,7 +207,12 @@ def test_root_scope_records_one_operation_peak_and_fails_over_budget(
             self.state = "ACTIVE"
 
         def stop(self) -> None:
+            events.append("stop")
             self.state = "RETIRED"
+
+        def quiesce(self) -> dict[str, int | float | str]:
+            events.append("quiesce")
+            return self.evidence()
 
         def evidence(self) -> dict[str, int | float | str]:
             return {
@@ -242,6 +248,7 @@ def test_root_scope_records_one_operation_peak_and_fails_over_budget(
     assert evidence["sample_count"] >= 2
     assert evidence["cadence_status"] == "PASS"
     assert evidence["status"] == "FAIL"
+    assert events == ["quiesce", "stop"]
 
 
 def test_finish_quiesces_before_retiring_the_operation_sampler(
@@ -509,11 +516,62 @@ finally:
 
     assert evidence["status"] == "PASS"
     assert evidence["measurement_metric"] in {
-        "process_tree_private_incremental",
         "process_tree_pss_incremental",
         "process_tree_uss_incremental",
+        "process_tree_uss_with_rss_fallback_incremental",
     }
     assert evidence["peak_incremental_rss_bytes"] >= 48 * MIB
+
+
+def test_quiesce_acknowledges_a_post_request_sample() -> None:
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=64 * MIB)
+
+    with runtime_resource_policy_scope(policy):
+        before = policy._measurement.checkpoint_evidence()["sample_count"]  # noqa: SLF001
+        after = policy._measurement.quiesce()  # noqa: SLF001
+        assert after["sample_count"] > before
+        policy._measurement.resume()  # noqa: SLF001
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows resident metric")
+def test_windows_metric_counts_resident_not_uncommitted_mapping() -> None:
+    def measure(*, touch: bool) -> dict[str, object]:
+        code = f"""
+import json
+import mmap
+import time
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
+size = 64 * 1024 * 1024
+policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=128 * 1024 * 1024)
+with runtime_resource_policy_scope(policy):
+    payload = mmap.mmap(-1, size, access=mmap.ACCESS_COPY)
+    if {touch!r}:
+        for offset in range(0, size, 4096):
+            payload[offset] = 1
+    time.sleep(0.05)
+print(json.dumps(policy.memory_evidence()))
+"""
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+        completed = subprocess.run(
+            (sys.executable, "-c", code),
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=30,
+        )
+        return json.loads(completed.stdout)
+
+    untouched = measure(touch=False)
+    touched = measure(touch=True)
+
+    assert untouched["measurement_metric"] == "process_tree_uss_incremental"
+    assert untouched["peak_incremental_rss_bytes"] < 16 * MIB
+    assert touched["peak_incremental_rss_bytes"] >= 48 * MIB
 
 
 def test_low_cap_empty_operation_does_not_charge_sampler_process() -> None:
@@ -573,6 +631,9 @@ def test_active_primary_is_not_replaced_by_sampler_stop_failure(
         def stop(self) -> None:
             self.state = "RETIRED"
             self.error = OSError("sampler stop failed")
+
+        def quiesce(self) -> dict[str, int | float | str]:
+            return self.evidence()
 
         def evidence(self) -> dict[str, int | float | str]:
             return {

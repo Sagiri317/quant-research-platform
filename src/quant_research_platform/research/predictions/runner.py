@@ -103,36 +103,53 @@ def build_prediction_result_from_research_dataset(
         operation.close()
         raise
     chunks_complete = False
-    metadata_complete = False
     metadata_value: dict[str, object] | None = None
-
-    def close_when_complete() -> None:
-        if chunks_complete and metadata_complete:
-            operation.close()
+    terminal_error: BaseException | None = None
 
     def output_chunks() -> Iterable[pd.DataFrame]:
-        nonlocal chunks_complete
+        nonlocal chunks_complete, terminal_error
+        if terminal_error is not None:
+            raise terminal_error
         try:
             yield from result.output_chunks
-        except BaseException:
-            operation.close()
+        except BaseException as primary:
+            terminal_error = primary
+            try:
+                operation.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "prediction operation cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
             raise
         chunks_complete = True
-        close_when_complete()
 
     def prediction_metadata() -> dict[str, object]:
-        nonlocal metadata_complete, metadata_value
+        nonlocal metadata_value, terminal_error
+        if terminal_error is not None:
+            raise terminal_error
         if not chunks_complete:
             raise RuntimeError("prediction_metadata_before_output_complete")
         if metadata_value is not None:
             return metadata_value
         try:
-            metadata_value = result.prediction_metadata_factory()
-        except BaseException:
-            operation.close()
+            candidate = result.prediction_metadata_factory()
+        except BaseException as primary:
+            terminal_error = primary
+            try:
+                operation.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "prediction operation cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
             raise
-        metadata_complete = True
-        close_when_complete()
+        try:
+            operation.close()
+        except BaseException as primary:
+            terminal_error = primary
+            raise
+        metadata_value = candidate
         return metadata_value
 
     owned_result = PredictionResult(

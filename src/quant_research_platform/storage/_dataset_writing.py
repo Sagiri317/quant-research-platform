@@ -51,9 +51,10 @@ from quant_research_platform.storage._dataset_paths import (
     validate_dataset_artifact_root,
 )
 from quant_research_platform.storage._dataset_physical import (
+    _PHYSICAL_PAGE_ROWS_KEY,
     DatasetPartMetadata,
+    _table_parquet_page_working_set_bytes,
     dataset_file_identity,
-    table_decoded_working_set_bounds,
     table_with_decoded_row_bounds,
 )
 from quant_research_platform.storage._dataset_reading import (
@@ -912,7 +913,6 @@ def _bounded_persisted_tables(
 def write_parquet_file(table: pa.Table, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     persisted = table_with_decoded_row_bounds(table)
-    row_bytes, fixed_bytes = table_decoded_working_set_bounds(persisted)
     policy = current_runtime_resource_policy()
     if policy is None:
         batch_rows = max(1, persisted.num_rows)
@@ -920,20 +920,36 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
     else:
         remaining = policy.task_memory_budget_bytes - policy.reserved_memory_bytes
         minimum_rows = 0 if persisted.num_rows == 0 else 1
-        minimum_bytes = fixed_bytes + minimum_rows * row_bytes
+        minimum_bytes = _table_parquet_page_working_set_bytes(
+            persisted,
+            rows=minimum_rows,
+        )
         if minimum_bytes > remaining:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        batch_rows = max(
-            1,
-            min(
-                persisted.num_rows,
-                (remaining - fixed_bytes) // row_bytes,
-            ),
-        )
+        batch_rows = 1
+        page_working_bytes = minimum_bytes
+        if persisted.num_rows:
+            low = 1
+            high = persisted.num_rows
+            while low <= high:
+                candidate = (low + high) // 2
+                candidate_bytes = _table_parquet_page_working_set_bytes(
+                    persisted,
+                    rows=candidate,
+                )
+                if candidate_bytes <= remaining:
+                    batch_rows = candidate
+                    page_working_bytes = candidate_bytes
+                    low = candidate + 1
+                else:
+                    high = candidate - 1
         reservation = policy.reserve(
             "storage.parquet.native",
-            fixed_bytes + batch_rows * row_bytes,
+            page_working_bytes,
         )
+    metadata = dict(persisted.schema.metadata or {})
+    metadata[_PHYSICAL_PAGE_ROWS_KEY] = str(batch_rows).encode("ascii")
+    persisted = persisted.replace_schema_metadata(metadata)
     with reservation:
         pq.write_table(
             persisted,

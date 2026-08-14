@@ -28,6 +28,7 @@ from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
 _DECODED_ROW_BOUNDS_KEY = b"qrp.decoded-row-bounds"
 _DECODED_ROW_BOUNDS_SCHEMA_ID = "qrp-dataset-part-decoded-row-bounds"
+_PHYSICAL_PAGE_ROWS_KEY = b"qrp.parquet-page-rows"
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +198,14 @@ def iter_dataset_part_batches(
             parquet_file,
             selected_columns,
         )
+        maximum_page_decode_bytes = (
+            maximum_decode_fixed_bytes
+            + _maximum_projected_page_decode_bytes(
+                parquet_file,
+                selected_columns,
+                row_groups=selected_row_groups,
+            )
+        )
         raw_batches = iter(
             parquet_file.iter_batches(
                 batch_size=batch_rows,
@@ -222,15 +231,22 @@ def iter_dataset_part_batches(
             )
             source_batch_bytes = next_batch_rows * maximum_projected_row_bytes
             physical_pull_bytes = (
-                maximum_decode_fixed_bytes
-                + _filter_working_set_bytes(
-                    source_batch_bytes=source_batch_bytes,
-                    row_count=next_batch_rows,
-                    membership=membership,
-                    membership_max_scalar_bytes=membership_max_scalar_bytes,
+                maximum_page_decode_bytes
+                + max(
+                    0,
+                    _filter_working_set_bytes(
+                        source_batch_bytes=source_batch_bytes,
+                        row_count=next_batch_rows,
+                        membership=membership,
+                        membership_max_scalar_bytes=membership_max_scalar_bytes,
+                    )
+                    - source_batch_bytes,
                 )
                 if parquet_filters
-                else maximum_decode_fixed_bytes + source_batch_bytes
+                else max(
+                    maximum_page_decode_bytes,
+                    maximum_decode_fixed_bytes + source_batch_bytes,
+                )
             )
             current_operation_headroom = (
                 operation_headroom_bytes
@@ -377,6 +393,11 @@ def _target_batch_rows(
         parquet_file,
         columns,
     )
+    page_decode_bytes = fixed_decode_bytes + _maximum_projected_page_decode_bytes(
+        parquet_file,
+        columns,
+        row_groups=selected_row_groups,
+    )
     if _decoded_row_bounds(parquet_file) is None:
         legacy_rows = max(
             (
@@ -387,13 +408,17 @@ def _target_batch_rows(
         )
         if operation_headroom_bytes is None:
             return max(1, legacy_rows)
-        legacy_required = fixed_decode_bytes + maximum_row_bytes
+        legacy_required = page_decode_bytes
         if filtered:
-            legacy_required = fixed_decode_bytes + _filter_working_set_bytes(
-                source_batch_bytes=maximum_row_bytes,
-                row_count=1,
-                membership=membership,
-                membership_max_scalar_bytes=membership_max_scalar_bytes,
+            legacy_required += max(
+                0,
+                _filter_working_set_bytes(
+                    source_batch_bytes=maximum_row_bytes,
+                    row_count=1,
+                    membership=membership,
+                    membership_max_scalar_bytes=membership_max_scalar_bytes,
+                )
+                - maximum_row_bytes,
             )
         if legacy_required > operation_headroom_bytes:
             raise DatasetReadCapacityExceeded(
@@ -409,7 +434,7 @@ def _target_batch_rows(
     while low <= high:
         candidate = (low + high) // 2
         source_batch_bytes = candidate * maximum_row_bytes
-        required_bytes = fixed_decode_bytes + (
+        logical_required_bytes = fixed_decode_bytes + (
             _filter_working_set_bytes(
                 source_batch_bytes=source_batch_bytes,
                 row_count=candidate,
@@ -418,6 +443,17 @@ def _target_batch_rows(
             )
             if filtered
             else source_batch_bytes
+        )
+        required_bytes = (
+            page_decode_bytes
+            + max(
+                0,
+                logical_required_bytes
+                - fixed_decode_bytes
+                - source_batch_bytes,
+            )
+            if filtered
+            else max(page_decode_bytes, logical_required_bytes)
         )
         if required_bytes <= operation_headroom_bytes:
             admitted = candidate
@@ -478,6 +514,57 @@ def _maximum_projected_decode_fixed_bytes(
         ) from None
 
 
+def _maximum_projected_page_decode_bytes(
+    parquet_file: pq.ParquetFile,
+    columns: tuple[str, ...],
+    *,
+    row_groups: list[int] | tuple[int, ...],
+) -> int:
+    positions = _projected_parquet_leaf_positions(parquet_file, columns)
+    page_rows = _physical_page_rows(parquet_file)
+    maximum_row_bytes = _maximum_projected_row_bytes(parquet_file, columns)
+    maximum = 0
+    for row_group_index in row_groups:
+        row_group = parquet_file.metadata.row_group(row_group_index)
+        rows = int(row_group.num_rows)
+        if rows <= 0:
+            continue
+        compressed_bytes = sum(
+            max(0, int(row_group.column(index).total_compressed_size))
+            for index in positions
+        )
+        decoded_bytes = (
+            sum(
+                max(0, int(row_group.column(index).total_uncompressed_size))
+                for index in positions
+            )
+            if page_rows is None
+            else min(rows, page_rows) * maximum_row_bytes
+        )
+        maximum = max(maximum, compressed_bytes + decoded_bytes)
+    return maximum
+
+
+def _physical_page_rows(parquet_file: pq.ParquetFile) -> int | None:
+    raw = (parquet_file.metadata.metadata or {}).get(_PHYSICAL_PAGE_ROWS_KEY)
+    if raw is None:
+        raw = (parquet_file.schema_arrow.metadata or {}).get(_PHYSICAL_PAGE_ROWS_KEY)
+    if raw is None:
+        return None
+    try:
+        text = bytes(raw).decode("ascii")
+        if not text.isascii() or not text.isdecimal():
+            raise ValueError
+        value = int(text)
+        if value <= 0:
+            raise ValueError
+        return value
+    except (UnicodeDecodeError, ValueError):
+        raise DatasetReadCapacityExceeded(
+            "dataset_decode_bound_metadata_invalid"
+        ) from None
+
+
 def table_with_decoded_row_bounds(
     table: pa.Table,
     *,
@@ -525,6 +612,31 @@ def table_decoded_working_set_bounds(table: pa.Table) -> tuple[int, int]:
     return (
         max(1, sum(bound[0] for bound in decoded_bounds.values())),
         sum(bound[1] for bound in decoded_bounds.values()),
+    )
+
+
+def _table_parquet_page_working_set_bytes(table: pa.Table, *, rows: int) -> int:
+    if isinstance(rows, bool) or type(rows) is not int or rows < 0:
+        raise ValueError("invalid_parquet_page_rows")
+    decoded_bounds = _parse_decoded_row_bounds(
+        (table.schema.metadata or {}).get(_DECODED_ROW_BOUNDS_KEY),
+        names=table.column_names,
+    )
+    decoded_bytes = sum(
+        fixed + rows * per_row for per_row, fixed in decoded_bounds.values()
+    )
+    compressed_bound = sum(
+        _zstd_compressed_bound(rows * per_row)
+        for per_row, _fixed in decoded_bounds.values()
+    )
+    return decoded_bytes + compressed_bound
+
+
+def _zstd_compressed_bound(source_bytes: int) -> int:
+    """Return the codec's exact ZSTD_COMPRESSBOUND for one page payload."""
+
+    return source_bytes + (source_bytes >> 8) + (
+        ((128 << 10) - source_bytes) >> 11 if source_bytes < 128 << 10 else 0
     )
 
 

@@ -33,15 +33,15 @@ from quant_research_platform.storage.layout import StorageLayout
 
 
 def _write_in_resource_root(writer: Callable[[], Path]) -> Path:
-    active = current_runtime_resource_policy()
-    policy = active or RuntimeResourcePolicy.capture()
+    if current_runtime_resource_policy() is not None:
+        raise RuntimeError("runtime_resource_policy_competing_root")
+    policy = RuntimeResourcePolicy.capture()
     with runtime_resource_policy_scope(policy):
         target = writer()
-        if active is None:
-            identity = target.lstat()
-            policy.finish_memory_measurement(
-                on_reject=lambda: remove_owned_scratch(target, identity)
-            )
+        identity = target.lstat()
+        policy.finish_memory_measurement(
+            on_reject=lambda: remove_owned_scratch(target, identity)
+        )
         return target
 
 

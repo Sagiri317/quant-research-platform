@@ -7,6 +7,9 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.artifacts._prediction_outputs import (
+    write_prediction_outputs as write_prediction_outputs_in_workflow,
+)
 from quant_research_platform.artifacts.outputs import write_prediction_outputs
 from quant_research_platform.contracts.filtering import (
     filter_definition,
@@ -119,7 +122,7 @@ def write_prediction_result(layout: StorageLayout, result) -> Path:
         run_type=result.spec.run_type,
         scope=OutputScope.LOCAL_ONLY,
     )
-    return write_prediction_outputs(
+    return write_prediction_outputs_in_workflow(
         spec=result.spec,
         output_spec=output_spec,
         layout=layout,

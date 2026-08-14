@@ -66,6 +66,33 @@ def test_public_artifact_writer_owns_a_composition_root(
     assert current_runtime_resource_policy() is None
 
 
+def test_public_artifact_writer_rejects_an_unrelated_active_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=1024**2)
+    writes = 0
+
+    def write(*_args, **_kwargs) -> Path:
+        nonlocal writes
+        writes += 1
+        return Path("unreachable")
+
+    monkeypatch.setattr(outputs, "_write_prediction_outputs", write)
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime_resource_policy_competing_root$",
+        ):
+            outputs.write_prediction_outputs(
+                spec=object(),  # type: ignore[arg-type]
+                output_spec=object(),  # type: ignore[arg-type]
+                layout=object(),  # type: ignore[arg-type]
+            )
+
+    assert writes == 0
+
+
 def test_public_artifact_final_memory_rejection_removes_new_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -607,7 +634,6 @@ def test_prediction_parquet_writer_disables_retained_dictionary_state(
     assert captured["write_page_index"] is False
     assert captured["write_page_checksum"] is False
     assert captured["max_rows_per_page"] == captured["write_batch_size"]
-    assert not hasattr(parquet_writers, "PARQUET_WRITER_NATIVE_BYTES")
 
 
 def test_prediction_outputs_require_standard_metadata_attrs(

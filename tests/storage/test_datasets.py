@@ -1375,7 +1375,7 @@ def test_dataset_file_batches_refresh_headroom_after_internal_release(
     )
 
 
-def test_legacy_row_group_does_not_false_reject_before_first_arrow_pull(
+def test_legacy_oversized_row_group_rejects_before_first_arrow_pull(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1404,7 +1404,10 @@ def test_legacy_row_group_does_not_false_reject_before_first_arrow_pull(
 
     monkeypatch.setattr(dataset_physical.pq, "ParquetFile", ObservedParquetFile)
 
-    with pytest.raises(AssertionError, match="Arrow decode ran"):
+    with pytest.raises(
+        storage_errors.DatasetReadCapacityExceeded,
+        match="dataset_working_set_exceeds_task_memory_budget",
+    ):
         list(
             dataset_physical.iter_dataset_part_batches(
                 path,
@@ -1414,7 +1417,7 @@ def test_legacy_row_group_does_not_false_reject_before_first_arrow_pull(
             )
         )
 
-    assert pulled
+    assert not pulled
 
 
 def test_categorical_converter_releases_temporary_codes_after_publication(
@@ -8826,30 +8829,29 @@ def test_writer_rejects_before_native_parquet_write(
     assert native_writes == 0
 
 
-def test_parquet_reader_bounded_completes_without_whole_row_group_admission(
+def test_qrp_parquet_reader_bounded_completes_with_physical_page_admission(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "row-groups.parquet"
-    first = pa.table({"value": ["x" * 512] * 100})
-    second = pa.table({"value": ["y" * 16_384] * 100})
-    writer = pq.ParquetWriter(path, first.schema, use_dictionary=False)
-    try:
-        writer.write_table(first)
-        writer.write_table(second)
-    finally:
-        writer.close()
-    batches = tuple(
-        dataset_physical.iter_dataset_part_batches(
-            path,
-            expected_identity=None,
-            target_chunk_bytes=32 * 1024,
-            operation_headroom_bytes=64 * 1024,
-            columns=("value",),
-            source_batch_rows=1,
-        )
+    table = pa.table({"value": ["x" * 4096] * 100})
+    policy = capture_test_policy(
+        available_memory_bytes=1024**2,
+        explicit_cap_bytes=64 * 1024,
     )
+    with runtime_resource_policy_scope(policy):
+        dataset_writing.write_parquet_file(table, path)
+        batches = tuple(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=None,
+                target_chunk_bytes=32 * 1024,
+                operation_headroom_bytes=64 * 1024,
+                columns=("value",),
+                source_batch_rows=1,
+            )
+        )
 
-    assert sum(batch.num_rows for batch in batches) == 200
+    assert sum(batch.num_rows for batch in batches) == 100
     assert max(batch.num_rows for batch in batches) == 1
 
 
@@ -8870,7 +8872,6 @@ def test_dataset_parquet_writer_disables_retained_dictionary_state(
     assert captured["write_page_index"] is False
     assert captured["write_page_checksum"] is False
     assert captured["max_rows_per_page"] == captured["write_batch_size"]
-    assert not hasattr(dataset_writing, "PARQUET_WRITER_NATIVE_BYTES")
 
 
 def test_writer_bounded_completes_under_task_wide_copy_and_arrow_headroom(

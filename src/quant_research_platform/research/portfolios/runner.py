@@ -99,36 +99,53 @@ def build_portfolio_result_from_research_dataset(
         operation.close()
         raise
     chunks_complete = False
-    summary_complete = False
     summary_value: Mapping[str, pd.DataFrame] | None = None
-
-    def close_when_complete() -> None:
-        if chunks_complete and summary_complete:
-            operation.close()
+    terminal_error: BaseException | None = None
 
     def output_chunks() -> Iterable[Mapping[str, pd.DataFrame]]:
-        nonlocal chunks_complete
+        nonlocal chunks_complete, terminal_error
+        if terminal_error is not None:
+            raise terminal_error
         try:
             yield from result.output_chunks
-        except BaseException:
-            operation.close()
+        except BaseException as primary:
+            terminal_error = primary
+            try:
+                operation.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "portfolio operation cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
             raise
         chunks_complete = True
-        close_when_complete()
 
     def summary() -> Mapping[str, pd.DataFrame]:
-        nonlocal summary_complete, summary_value
+        nonlocal summary_value, terminal_error
+        if terminal_error is not None:
+            raise terminal_error
         if not chunks_complete:
             raise RuntimeError("portfolio_summary_before_output_complete")
         if summary_value is not None:
             return summary_value
         try:
-            summary_value = result.summary_factory()
-        except BaseException:
-            operation.close()
+            candidate = result.summary_factory()
+        except BaseException as primary:
+            terminal_error = primary
+            try:
+                operation.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "portfolio operation cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
             raise
-        summary_complete = True
-        close_when_complete()
+        try:
+            operation.close()
+        except BaseException as primary:
+            terminal_error = primary
+            raise
+        summary_value = candidate
         return summary_value
 
     owned_result = PortfolioResult(

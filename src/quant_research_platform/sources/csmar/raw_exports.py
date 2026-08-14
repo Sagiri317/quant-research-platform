@@ -10,7 +10,6 @@ import stat
 import struct
 import sys
 import tempfile
-import weakref
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -962,7 +961,6 @@ def iter_private_export_chunks_with_policy(
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError("unknown_csmar_dataset")
     export_path = Path(path)
-    previous_yielded_bytes = [0]
     downstream_retained_bytes = (
         retained_payload_bytes if retained_payload_bytes is not None else [0]
     )
@@ -984,8 +982,7 @@ def iter_private_export_chunks_with_policy(
         with closing_dataset_iterator(rows):
             while True:
                 source_retained_bytes[0] = (
-                    previous_yielded_bytes[0]
-                    + downstream_retained_bytes[0]
+                    downstream_retained_bytes[0]
                     + _pending_decoded_owner_known_bytes(
                         payload_bytes=pending_bytes,
                         row_count=len(pending),
@@ -1005,7 +1002,7 @@ def iter_private_export_chunks_with_policy(
                         cell_count=next_pending_cell_count,
                     ),
                     retained_previous_bytes=(
-                        previous_yielded_bytes[0] + downstream_retained_bytes[0]
+                        downstream_retained_bytes[0]
                     ),
                     resource_policy=resource_policy,
                 )
@@ -1020,7 +1017,7 @@ def iter_private_export_chunks_with_policy(
                         logical_bytes=logical_bytes
                         + _raw_frame_owner_known_bytes(pending, header),
                         retained_previous_bytes=(
-                            previous_yielded_bytes[0] + downstream_retained_bytes[0]
+                            downstream_retained_bytes[0]
                         ),
                         resource_policy=resource_policy,
                     )
@@ -1032,14 +1029,13 @@ def iter_private_export_chunks_with_policy(
                     yield from _yield_bounded_export_frame(
                         _clean_index_info_source_codes(frame),
                         resource_policy=resource_policy,
-                        retained_previous_bytes=previous_yielded_bytes,
                     )
                     batch_target_bytes = _next_batch_target_bytes(
                         logical_bytes=logical_bytes,
                         frame_payload_bytes=frame_payload_bytes,
                         resource_policy=resource_policy,
                         retained_payload_bytes=(
-                            previous_yielded_bytes[0] + downstream_retained_bytes[0]
+                            downstream_retained_bytes[0]
                         ),
                     )
                     del frame
@@ -1048,7 +1044,7 @@ def iter_private_export_chunks_with_policy(
                 logical_bytes=pending_bytes
                 + _raw_frame_owner_known_bytes(pending, header),
                 retained_previous_bytes=(
-                    previous_yielded_bytes[0] + downstream_retained_bytes[0]
+                    downstream_retained_bytes[0]
                 ),
                 resource_policy=resource_policy,
             )
@@ -1058,7 +1054,6 @@ def iter_private_export_chunks_with_policy(
             yield from _yield_bounded_export_frame(
                 _clean_index_info_source_codes(frame),
                 resource_policy=resource_policy,
-                retained_previous_bytes=previous_yielded_bytes,
             )
             del frame
         return
@@ -1082,8 +1077,7 @@ def iter_private_export_chunks_with_policy(
     with closing_dataset_iterator(rows):
         while True:
             source_retained_bytes[0] = (
-                previous_yielded_bytes[0]
-                + downstream_retained_bytes[0]
+                downstream_retained_bytes[0]
                 + _pending_decoded_owner_known_bytes(
                     payload_bytes=pending_bytes,
                     row_count=len(pending),
@@ -1103,7 +1097,7 @@ def iter_private_export_chunks_with_policy(
                     cell_count=next_pending_cell_count,
                 ),
                 retained_previous_bytes=(
-                    previous_yielded_bytes[0] + downstream_retained_bytes[0]
+                    downstream_retained_bytes[0]
                 ),
                 resource_policy=resource_policy,
             )
@@ -1116,7 +1110,7 @@ def iter_private_export_chunks_with_policy(
                     logical_bytes=logical_bytes
                     + _raw_frame_owner_known_bytes(pending, header),
                     retained_previous_bytes=(
-                        previous_yielded_bytes[0] + downstream_retained_bytes[0]
+                        downstream_retained_bytes[0]
                     ),
                     resource_policy=resource_policy,
                 )
@@ -1128,14 +1122,13 @@ def iter_private_export_chunks_with_policy(
                 yield from _yield_bounded_export_frame(
                     frame,
                     resource_policy=resource_policy,
-                    retained_previous_bytes=previous_yielded_bytes,
                 )
                 batch_target_bytes = _next_batch_target_bytes(
                     logical_bytes=logical_bytes,
                     frame_payload_bytes=frame_payload_bytes,
                     resource_policy=resource_policy,
                     retained_payload_bytes=(
-                        previous_yielded_bytes[0] + downstream_retained_bytes[0]
+                        downstream_retained_bytes[0]
                     ),
                 )
                 del frame
@@ -1143,7 +1136,7 @@ def iter_private_export_chunks_with_policy(
         _require_raw_conversion_headroom(
             logical_bytes=pending_bytes + _raw_frame_owner_known_bytes(pending, header),
             retained_previous_bytes=(
-                previous_yielded_bytes[0] + downstream_retained_bytes[0]
+                downstream_retained_bytes[0]
             ),
             resource_policy=resource_policy,
         )
@@ -1153,7 +1146,6 @@ def iter_private_export_chunks_with_policy(
         yield from _yield_bounded_export_frame(
             frame,
             resource_policy=resource_policy,
-            retained_previous_bytes=previous_yielded_bytes,
         )
         del frame
 
@@ -1248,7 +1240,7 @@ def _next_batch_target_bytes(
         return 1
     available_bytes = max(
         1,
-        resource_policy.task_memory_budget_bytes - retained_payload_bytes,
+        resource_policy.remaining_memory_bytes - retained_payload_bytes,
     )
     measured_total_bytes = logical_bytes + frame_payload_bytes
     return min(
@@ -1314,11 +1306,16 @@ def _bounded_export_frame(
     frame: pd.DataFrame,
     *,
     resource_policy: RuntimeResourcePolicy,
+    target_chunk_bytes: int | None = None,
 ) -> Iterator[pd.DataFrame]:
     try:
         yield from iter_bounded_frame_chunks(
             frame,
-            target_chunk_bytes=resource_policy.remaining_memory_bytes,
+            target_chunk_bytes=(
+                resource_policy.remaining_memory_bytes
+                if target_chunk_bytes is None
+                else target_chunk_bytes
+            ),
         )
     except ValueError as exc:
         if str(exc) == "dataset_row_exceeds_target_chunk_bytes":
@@ -1330,38 +1327,19 @@ def _yield_bounded_export_frame(
     frame: pd.DataFrame,
     *,
     resource_policy: RuntimeResourcePolicy,
-    retained_previous_bytes: list[int],
 ) -> Iterator[pd.DataFrame]:
     parent_payload_bytes = pandas_frame_payload_bytes(frame)
-    dependent_count = [0]
-    owner_active = [True]
-    parent_is_counted = [True]
-    retained_previous_bytes[0] += parent_payload_bytes
-
-    def release_dependent() -> None:
-        dependent_count[0] -= 1
-        if dependent_count[0] == 0 and not owner_active[0] and parent_is_counted[0]:
-            retained_previous_bytes[0] -= parent_payload_bytes
-            parent_is_counted[0] = False
-
-    chunks = iter(_bounded_export_frame(frame, resource_policy=resource_policy))
-    try:
+    target_chunk_bytes = resource_policy.remaining_memory_bytes
+    with resource_policy.reserve("source.csmar.raw-parent", parent_payload_bytes):
+        chunks = iter(
+            _bounded_export_frame(
+                frame,
+                resource_policy=resource_policy,
+                target_chunk_bytes=target_chunk_bytes,
+            )
+        )
         with closing_dataset_iterator(chunks):
-            while True:
-                try:
-                    chunk = next(chunks)
-                except StopIteration:
-                    break
-                finalizer = weakref.finalize(chunk, release_dependent)
-                finalizer.atexit = False
-                dependent_count[0] += 1
-                yield chunk
-                del chunk, finalizer
-    finally:
-        owner_active[0] = False
-        if dependent_count[0] == 0 and parent_is_counted[0]:
-            retained_previous_bytes[0] -= parent_payload_bytes
-            parent_is_counted[0] = False
+            yield from chunks
 
 
 def _require_raw_conversion_headroom(
@@ -1372,7 +1350,7 @@ def _require_raw_conversion_headroom(
 ) -> None:
     if (
         logical_bytes + retained_previous_bytes
-        > resource_policy.task_memory_budget_bytes
+        > resource_policy.remaining_memory_bytes
     ):
         raise DatasetReadCapacityExceeded(
             "csmar_raw_working_set_exceeds_task_memory_budget"

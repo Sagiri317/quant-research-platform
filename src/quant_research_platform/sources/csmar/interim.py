@@ -750,98 +750,84 @@ def _iter_pruned_interim_frames(
     local_reports: list[dict[str, object]] = []
     primary_key = tuple(interim_catalog().get(data_id).primary_key)
     previous_key: tuple[object, ...] | None = None
-    retained_previous_bytes = 0
-    retained_state = [0]
-    try:
-        for input in input_files:
-            if isinstance(input, tuple):
-                input_file, expected_identity = input
-            else:
-                input_file = input
-                expected_identity = None
-            chunks = iter(
-                iter_private_export_chunks_with_policy(
-                    input_file,
-                    dataset=raw_dataset,
-                    chunksize=chunksize,
-                    resource_policy=active_runtime_resource_policy(),
-                    expected_identity=expected_identity,
-                    retained_payload_bytes=retained_state,
-                )
+    for input in input_files:
+        if isinstance(input, tuple):
+            input_file, expected_identity = input
+        else:
+            input_file = input
+            expected_identity = None
+        chunks = iter(
+            iter_private_export_chunks_with_policy(
+                input_file,
+                dataset=raw_dataset,
+                chunksize=chunksize,
+                resource_policy=active_runtime_resource_policy(),
+                expected_identity=expected_identity,
             )
-            with closing_dataset_iterator(chunks):
-                while True:
+        )
+        with closing_dataset_iterator(chunks):
+            while True:
+                try:
+                    chunk = next(chunks)
+                except StopIteration:
+                    break
+                chunk_bytes = pandas_frame_payload_bytes(chunk)
+                start = 0
+                span = len(chunk)
+                downsized = False
+                while start < len(chunk):
+                    stop = min(len(chunk), start + span)
+                    candidate = (
+                        chunk
+                        if start == 0 and stop == len(chunk)
+                        else chunk.iloc[start:stop]
+                    )
                     try:
-                        chunk = next(chunks)
-                    except StopIteration:
-                        break
-                    chunk_bytes = pandas_frame_payload_bytes(chunk)
-                    start = 0
-                    span = len(chunk)
-                    downsized = False
-                    while start < len(chunk):
-                        stop = min(len(chunk), start + span)
-                        candidate = (
-                            chunk
-                            if start == 0 and stop == len(chunk)
-                            else chunk.iloc[start:stop]
+                        pruned, report = _transform_interim_chunk(
+                            candidate,
+                            data_id=data_id,
+                            start_date=start_date,
+                            end_date=end_date,
+                            overrides=overrides,
+                            retained_previous_bytes=(
+                                0 if candidate is chunk else chunk_bytes
+                            ),
                         )
-                        upstream_retained_bytes = retained_previous_bytes + (
-                            0 if candidate is chunk else chunk_bytes
+                    except _InterimCapacityExceeded as exc:
+                        del candidate
+                        if downsized or stop - start == 1:
+                            raise
+                        available_bytes = exc.budget_bytes - chunk_bytes
+                        if available_bytes <= 0:
+                            raise
+                        span = max(
+                            1,
+                            min(
+                                stop - start - 1,
+                                (stop - start)
+                                * available_bytes
+                                // max(1, exc.required_bytes),
+                            ),
                         )
-                        try:
-                            pruned, report = _transform_interim_chunk(
-                                candidate,
-                                data_id=data_id,
-                                start_date=start_date,
-                                end_date=end_date,
-                                overrides=overrides,
-                                retained_previous_bytes=upstream_retained_bytes,
-                            )
-                        except _InterimCapacityExceeded as exc:
-                            del candidate
-                            if downsized or stop - start == 1:
-                                raise
-                            fixed_bytes = retained_previous_bytes + chunk_bytes
-                            available_bytes = exc.budget_bytes - fixed_bytes
-                            observed_variable_bytes = max(
-                                1,
-                                exc.required_bytes - retained_previous_bytes,
-                            )
-                            if available_bytes <= 0:
-                                raise
-                            span = max(
-                                1,
-                                min(
-                                    stop - start - 1,
-                                    (stop - start)
-                                    * available_bytes
-                                    // observed_variable_bytes,
-                                ),
-                            )
-                            downsized = True
-                            continue
-                        if pruned.empty:
-                            del pruned, report, candidate
-                            start = stop
-                            continue
-                        _merge_pruning_report(local_reports, report)
-                        first_key = tuple(pruned.iloc[0].loc[list(primary_key)])
-                        if previous_key is not None and first_key < previous_key:
-                            raise ValueError("csmar_source_order_regression")
-                        previous_key = tuple(pruned.iloc[-1].loc[list(primary_key)])
-                        del report, candidate
-                        retained_previous_bytes = pandas_frame_payload_bytes(pruned)
-                        retained_state[0] = retained_previous_bytes
-                        yield pruned
-                        del pruned
+                        downsized = True
+                        continue
+                    if pruned.empty:
+                        del pruned, report, candidate
                         start = stop
-                    del chunk
-        if pruning_reports is not None:
-            for report in local_reports:
-                _merge_pruning_report(pruning_reports, report)
-    finally:
-        retained_state[0] = 0
+                        continue
+                    _merge_pruning_report(local_reports, report)
+                    first_key = tuple(pruned.iloc[0].loc[list(primary_key)])
+                    if previous_key is not None and first_key < previous_key:
+                        raise ValueError("csmar_source_order_regression")
+                    previous_key = tuple(pruned.iloc[-1].loc[list(primary_key)])
+                    del report, candidate
+                    yield pruned
+                    del pruned
+                    start = stop
+                del chunk
+    if pruning_reports is not None:
+        for report in local_reports:
+            _merge_pruning_report(pruning_reports, report)
 
 
 def _transform_interim_chunk(
@@ -860,7 +846,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + chunk_bytes + normalization_preallocation_bytes,
-        policy.task_memory_budget_bytes,
+        policy.remaining_memory_bytes,
     )
     normalized = normalize_raw_frame(chunk, data_id)
     normalized_bytes = pandas_frame_payload_bytes(normalized)
@@ -872,7 +858,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + normalized_bytes + filter_preallocation_bytes,
-        policy.task_memory_budget_bytes,
+        policy.remaining_memory_bytes,
     )
     filtered = _filter_normalized_frame(
         normalized,
@@ -883,14 +869,14 @@ def _transform_interim_chunk(
     filtered_bytes = pandas_frame_payload_bytes(filtered)
     _require_interim_transform_headroom(
         retained_previous_bytes + normalized_bytes + filtered_bytes,
-        policy.task_memory_budget_bytes,
+        policy.remaining_memory_bytes,
     )
     del normalized
     if filtered.empty:
         return filtered, {}
     _require_interim_transform_headroom(
         retained_previous_bytes + filtered_bytes + filtered_bytes,
-        policy.task_memory_budget_bytes,
+        policy.remaining_memory_bytes,
     )
     pruned, report = _apply_output_column_rules_validated(
         filtered,
@@ -899,7 +885,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + filtered_bytes + pandas_frame_payload_bytes(pruned),
-        policy.task_memory_budget_bytes,
+        policy.remaining_memory_bytes,
     )
     del filtered
     return pruned, report

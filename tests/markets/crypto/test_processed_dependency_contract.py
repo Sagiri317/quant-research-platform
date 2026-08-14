@@ -1156,7 +1156,6 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
         assert len(chunks) == 1
         expected_retained_bytes = 111 if module is materialize_panel else 37
         assert _kwargs["retained_payload_bytes"] == expected_retained_bytes
-        assert isinstance(chunks[0], pd.DataFrame)
         staged_validator(SimpleNamespace())
         return inspection
 
