@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+import quant_research_platform.research.models.supervised as supervised
 from quant_research_platform.artifacts._output_common_validation import (
     require_finite_metadata_number,
     require_metadata_string,
@@ -200,11 +201,15 @@ def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obje
         )
     except ValueError as exc:
         raise ValueError("invalid_model_metadata") from exc
-    require_metadata_string(metadata, "model_algorithm", "invalid_model_metadata")
-    if any(
-        key not in metadata["resolved_hyperparameters"]
-        or metadata["resolved_hyperparameters"][key] != value
-        for key, value in metadata["hyperparameters"].items()
+    model_algorithm = require_metadata_string(
+        metadata,
+        "model_algorithm",
+        "invalid_model_metadata",
+    )
+    if not supervised._resolved_model_hyperparameters_match(
+        model_algorithm,
+        metadata["hyperparameters"],
+        metadata["resolved_hyperparameters"],
     ):
         raise ValueError("invalid_model_metadata")
     dependency_status = metadata["dependency_status"]

@@ -73,6 +73,31 @@ def model_thread_count(spec: ModelSpec) -> int:
     return int(resolved_model_hyperparameters(spec)["n_jobs"])
 
 
+def _resolved_model_hyperparameters_match(
+    algorithm: str,
+    hyperparameters: dict[str, object],
+    resolved_hyperparameters: dict[str, object],
+) -> bool:
+    try:
+        expected = dict(
+            algorithm_facts.algorithm_facts(algorithm).default_hyperparameters
+        )
+        expected.update(hyperparameters)
+        if algorithm in _PARALLEL_MODEL_ALGORITHMS:
+            actual_threads = resolved_hyperparameters.get("n_jobs")
+            maximum_threads = _resolved_model_thread_count(expected.get("n_jobs"))
+            if (
+                type(actual_threads) is not int
+                or actual_threads <= 0
+                or actual_threads > maximum_threads
+            ):
+                return False
+            expected["n_jobs"] = actual_threads
+    except ValueError:
+        return False
+    return resolved_hyperparameters == expected
+
+
 def physical_core_count() -> int:
     count = psutil.cpu_count(logical=False)
     if type(count) is not int or count <= 0:

@@ -17,6 +17,7 @@ from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
 from quant_research_platform.research.predictions.outputs import (
+    build_prediction_result_from_frames,
     validate_prediction_outputs,
 )
 from tests.research.prediction_output_helpers import (
@@ -134,6 +135,57 @@ def test_model_metadata_records_resolved_parameters_and_backend_version() -> Non
         "package": "sklearn",
         "version": pytest.importorskip("sklearn").__version__,
     }
+
+
+def test_prediction_accepts_actual_bounded_parallel_model_threads() -> None:
+    frame = _model_frame()
+    model_spec = ModelSpec(
+        model_id="extra_trees_demo",
+        model_algorithm="extra_trees_regressor",
+        input_factor_columns=("factor",),
+        input_feature_columns=("feature",),
+        label_column="label",
+        hyperparameters=model_smoke_hyperparameters("extra_trees_regressor"),
+        random_seed=7,
+        max_train_rows=len(frame),
+    )
+    fit = model_fitting.fit_model_result_from_frames(
+        (frame,),
+        model_spec,
+        estimator=build_estimator_from_model_spec(model_spec),
+    )
+    prediction_spec = PredictionSpec(
+        prediction_id="extra_trees_prediction",
+        model_id=model_spec.model_id,
+        research_dataset_id="research_demo",
+        train_end="2024-01-03",
+        test_start="2024-01-04",
+        test_end="2024-01-04",
+    )
+
+    result = build_prediction_result_from_frames(
+        (),
+        prediction_spec,
+        fit.coefficients,
+        model_spec.input_columns,
+        prediction_model=fit.prediction_model,
+        model_metadata=fit.metadata,
+    )
+
+    assert int(result.model_metadata["resolved_hyperparameters"]["n_jobs"]) > 0  # type: ignore[index]
+
+    resolved = dict(fit.metadata["resolved_hyperparameters"])
+    resolved["n_jobs"] = int(resolved["n_jobs"]) + 10_000
+    forged = {**fit.metadata, "resolved_hyperparameters": resolved}
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
+        build_prediction_result_from_frames(
+            (),
+            prediction_spec,
+            fit.coefficients,
+            model_spec.input_columns,
+            prediction_model=fit.prediction_model,
+            model_metadata=forged,
+        )
 
 
 def test_model_contract_rejects_conflicting_effective_seed() -> None:

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+import quant_research_platform.research.models.supervised as supervised
 from quant_research_platform.contracts.filtering import (
     reject_filter_input_columns,
     required_filter_columns,
@@ -100,11 +101,13 @@ def build_prediction_result_from_frames(
         facts = algorithm_facts(model_algorithm)
     except ValueError as exc:
         raise ValueError("invalid_model_metadata") from exc
-    expected_hyperparameters = dict(facts.default_hyperparameters)
     expected_package = facts.dependency_package or "internal"
-    expected_hyperparameters.update(hyperparameters)
     if (
-        resolved_hyperparameters != expected_hyperparameters
+        not supervised._resolved_model_hyperparameters_match(
+            model_algorithm,
+            hyperparameters,
+            resolved_hyperparameters,
+        )
         or dependency_status.get("package") != expected_package
     ):
         raise ValueError("invalid_model_metadata")
