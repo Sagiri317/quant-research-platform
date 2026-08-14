@@ -259,6 +259,67 @@ def test_prediction_output_validation_rejects_bad_frames(
 
 
 @pytest.mark.parametrize(
+    ("column", "value", "error"),
+    (
+        ("prediction_score", np.nan, "invalid_prediction_values"),
+        ("prediction_score", np.inf, "invalid_prediction_values"),
+        ("prediction_score", -np.inf, "invalid_prediction_values"),
+        ("timestamp", pd.NaT, "invalid_prediction_keys"),
+        ("asset_id", None, "invalid_prediction_keys"),
+    ),
+)
+def test_prediction_artifact_rejects_non_finite_values_and_null_keys(
+    tmp_path: Path,
+    column: str,
+    value: object,
+    error: str,
+) -> None:
+    frame = make_artifact_prediction_output_frame()
+    frame.loc[frame.index[0], column] = value
+
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        outputs.write_prediction_outputs(
+            frame,
+            spec=make_output_edge_prediction_spec(),
+            output_spec=make_output_edge_report_spec(
+                "prediction_outputs",
+                "prediction_demo",
+                "prediction",
+            ),
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "error"),
+    (
+        ("prediction_score", np.nan, "invalid_prediction_values"),
+        ("prediction_score", np.inf, "invalid_prediction_values"),
+        ("prediction_score", -np.inf, "invalid_prediction_values"),
+        ("timestamp", pd.NaT, "invalid_prediction_keys"),
+        ("asset_id", None, "invalid_prediction_keys"),
+    ),
+)
+def test_prediction_chunk_writer_rejects_non_finite_values_and_null_keys(
+    tmp_path: Path,
+    column: str,
+    value: object,
+    error: str,
+) -> None:
+    frame = make_artifact_prediction_output_frame()
+    frame.loc[frame.index[0], column] = value
+
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        parquet_writers.write_parquet_chunks(
+            (frame,),
+            tmp_path / "prediction.parquet",
+            required=tuple(frame.columns),
+            key_columns=("timestamp", "asset_id"),
+            compression="zstd",
+        )
+
+
+@pytest.mark.parametrize(
     ("mutation", "error"),
     (
         ("equal_ids", "output_manifest_output_id_invalid"),

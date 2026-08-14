@@ -998,7 +998,7 @@ def test_write_paths_read_processed_inputs_via_helper(
     }
     assert asset_filters == [("asset_a",)] * 3
     assert key_asset_filters == [("asset_a",), ("asset_a",)]
-    assert key_time_windows == [window, window]
+    assert key_time_windows == [None, None]
 
 
 @pytest.mark.parametrize("writer_kind", ("panel", "factor", "label", "annotation"))
@@ -2711,7 +2711,7 @@ def test_valid_bar_index_builds_once_across_adaptive_asset_splits(
         (
             ("asset_id", "timestamp"),
             ("a", "b"),
-            TimeWindow("2024-01-01", "2024-01-03"),
+            None,
         ),
     ]
 
@@ -2810,7 +2810,7 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
     assert retained_bytes == 0
     assert cache_bytes == 2 * expected_cache_bytes
     assert asset_ids == ("a",)
-    assert time_window == TimeWindow("2024-01-02", "2024-01-02")
+    assert time_window is None
     assert active_indexes == []
 
 

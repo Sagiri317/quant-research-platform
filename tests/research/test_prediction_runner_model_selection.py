@@ -220,6 +220,26 @@ def test_model_selection_compares_common_validation_primary_keys(
     assert validation_keys[0] == validation_keys[1]
 
 
+@pytest.mark.parametrize("invalid_prediction", [np.nan, np.inf, -np.inf])
+def test_model_selection_rejects_candidate_specific_non_finite_predictions(
+    invalid_prediction: float,
+) -> None:
+    validation = pd.DataFrame(
+        {
+            "label": [1.0, 2.0, 3.0],
+            "prediction": [1.0, invalid_prediction, 3.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_trial_metric_values"):
+        prediction_runner.evaluate_model_trial_metrics(
+            validation,
+            model_id="candidate_model",
+            label_column="label",
+            prediction_column="prediction",
+        )
+
+
 def test_prediction_runner_applies_sample_filter_to_validation_metrics(
     tmp_path: Path,
 ) -> None:

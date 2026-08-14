@@ -144,9 +144,9 @@ def test_eight_bars_bind_factor_signal_entry_exit_and_return_attribution() -> No
     assert observed.loc["long", "forward_return_1d"] == pytest.approx(0.10)
     assert observed.loc["short", "forward_return_1d"] == pytest.approx(-0.10)
     assert spec.execution_lag_steps == 0
-    assert result.portfolio_returns["timestamp"].tolist() == [observation]
+    assert result.portfolio_returns["timestamp"].tolist() == list(dates[:6])
     assert result.portfolio_returns["gross_portfolio_return"].tolist() == pytest.approx(
-        [0.20]
+        [0.0] * 5 + [0.20]
     )
 
 

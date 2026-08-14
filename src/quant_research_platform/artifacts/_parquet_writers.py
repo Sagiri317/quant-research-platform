@@ -19,6 +19,9 @@ from quant_research_platform.artifacts._output_common_validation import (
     validate_output_frame,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.research.predictions.outputs import (
+    _validate_prediction_output_values,
+)
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
@@ -234,8 +237,14 @@ def _prediction_output_chunk_frame(
         error_name="prediction_output",
     )
     selected = frame.loc[:, list(required)]
-    if bool(selected.duplicated(list(key_columns)).any()):
-        raise ValueError("duplicate_prediction_keys")
+    if not selected.empty:
+        _validate_prediction_output_values(
+            selected,
+            primary_key=key_columns,
+            prediction_column=next(
+                column for column in required if column not in key_columns
+            ),
+        )
     return selected
 
 

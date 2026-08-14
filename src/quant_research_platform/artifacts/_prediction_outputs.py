@@ -33,6 +33,9 @@ from quant_research_platform.artifacts._prediction_output_validation import (
 )
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.research.predictions.outputs import (
+    _validate_prediction_output_values,
+)
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
@@ -75,8 +78,11 @@ def write_prediction_outputs(
         required=required,
         error_name="prediction_output",
     )
-    if bool(frame.duplicated(list(spec.primary_key)).any()):
-        raise ValueError("duplicate_prediction_keys")
+    _validate_prediction_output_values(
+        frame,
+        primary_key=spec.primary_key,
+        prediction_column=spec.prediction_column,
+    )
     model_metadata = validate_model_metadata_shape(
         required_frame_metadata(
             frame,

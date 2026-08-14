@@ -14,7 +14,10 @@ from quant_research_platform.contracts.filtering import (
     required_filter_columns,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
+)
 from quant_research_platform.research._memory import (
     _selected_frame_payload_bytes,
     iter_complete_time_sized_frames,
@@ -258,6 +261,11 @@ def _iter_prediction_output_frames(
                 continue
             output = test_frame.loc[:, list(spec.primary_key)].copy()
             output[spec.prediction_column] = predictor(test_frame)
+            _validate_prediction_output_values(
+                output,
+                primary_key=spec.primary_key,
+                prediction_column=spec.prediction_column,
+            )
         retained_bytes = pandas_frame_payload_bytes(output)
         if policy is not None and (
             policy.reserved_memory_bytes + retained_bytes
@@ -358,6 +366,11 @@ def validate_prediction_outputs(frame: pd.DataFrame, spec: PredictionSpec) -> No
         raise ValueError("misordered_prediction_output_columns")
     if frame.empty:
         raise ValueError("empty_prediction_window")
+    _validate_prediction_output_values(
+        frame,
+        primary_key=spec.primary_key,
+        prediction_column=spec.prediction_column,
+    )
     timestamps = strict_timestamp_series(
         frame["timestamp"], error="invalid_prediction_timestamp_values"
     )
@@ -367,6 +380,22 @@ def validate_prediction_outputs(frame: pd.DataFrame, spec: PredictionSpec) -> No
         (timestamps > pd.Timestamp(spec.test_end)).any()
     ):
         raise ValueError("prediction_output_after_test_end")
+
+
+def _validate_prediction_output_values(
+    frame: pd.DataFrame,
+    *,
+    primary_key: tuple[str, ...],
+    prediction_column: str,
+) -> None:
+    if bool(frame.loc[:, list(primary_key)].isna().any(axis=None)):
+        raise ValueError("invalid_prediction_keys")
+    if bool(frame.duplicated(list(primary_key)).any()):
+        raise ValueError("duplicate_prediction_keys")
+    strict_finite_numeric_series(
+        frame[prediction_column],
+        error="invalid_prediction_values",
+    )
 
 
 def _strict_non_negative_prediction_count(value: object) -> int:

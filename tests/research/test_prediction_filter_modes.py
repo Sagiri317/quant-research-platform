@@ -544,6 +544,54 @@ def test_prediction_outputs_accept_equivalent_timezone_representations() -> None
         warnings.simplefilter("error")
         validate_prediction_outputs(frame, spec)
 
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("nan", "invalid_prediction_values"),
+        ("positive_inf", "invalid_prediction_values"),
+        ("negative_inf", "invalid_prediction_values"),
+        ("null_timestamp", "invalid_prediction_keys"),
+        ("null_asset", "invalid_prediction_keys"),
+        ("duplicate_key", "duplicate_prediction_keys"),
+    ),
+)
+def test_prediction_outputs_require_finite_values_and_complete_unique_keys(
+    mutation: str,
+    error: str,
+) -> None:
+    spec = PredictionSpec(
+        prediction_id="pred_strict_values",
+        model_id="linear_eligible",
+        research_dataset_id="demo_filter",
+        train_end="2024-01-01",
+        test_start="2024-01-02",
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "asset_id": ["asset_a", "asset_b"],
+            PREDICTION_SCORE_COLUMN: [0.1, 0.2],
+        }
+    )
+    if mutation == "nan":
+        frame.loc[0, PREDICTION_SCORE_COLUMN] = np.nan
+    elif mutation == "positive_inf":
+        frame.loc[0, PREDICTION_SCORE_COLUMN] = np.inf
+    elif mutation == "negative_inf":
+        frame.loc[0, PREDICTION_SCORE_COLUMN] = -np.inf
+    elif mutation == "null_timestamp":
+        frame.loc[0, "timestamp"] = pd.NaT
+    elif mutation == "null_asset":
+        frame.loc[0, "asset_id"] = None
+    else:
+        frame.loc[1, ["timestamp", "asset_id"]] = frame.loc[
+            0, ["timestamp", "asset_id"]
+        ]
+
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        validate_prediction_outputs(frame, spec)
+
     with pytest.raises(
         ValueError,
         match="prediction_test_end_must_not_precede_test_start",

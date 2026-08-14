@@ -60,8 +60,8 @@ def select_best_validation_trial(
     if bool(trials[trial_id_column].duplicated().any()):
         raise ValueError("duplicate_trial_id")
     metric_values = pd.to_numeric(trials[selection_metric], errors="coerce")
-    if bool(metric_values.isna().any()):
-        raise ValueError("nan_trial_selection_metric")
+    if bool(metric_values.isna().any()) or not bool(np.isfinite(metric_values).all()):
+        raise ValueError("invalid_trial_selection_metric")
 
     ordered = trials.assign(_selection_metric=metric_values).sort_values(
         ["_selection_metric", trial_id_column],
@@ -102,12 +102,17 @@ def evaluate_model_trial_metrics(
                     + mask_working_bytes,
                 )
             )
-        usable = frame.loc[:, [label_column, prediction_column]].dropna()
+        usable = frame.loc[:, [label_column, prediction_column]]
         if usable.empty:
             raise ValueError("empty_model_selection_validation_window")
         label_values = pd.to_numeric(usable[label_column], errors="coerce")
         prediction_values = pd.to_numeric(usable[prediction_column], errors="coerce")
-        if bool(label_values.isna().any()) or bool(prediction_values.isna().any()):
+        if (
+            bool(label_values.isna().any())
+            or bool(prediction_values.isna().any())
+            or not bool(np.isfinite(label_values).all())
+            or not bool(np.isfinite(prediction_values).all())
+        ):
             raise ValueError("invalid_trial_metric_values")
         errors = prediction_values - label_values
         return {

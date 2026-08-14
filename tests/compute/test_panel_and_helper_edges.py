@@ -211,20 +211,62 @@ def test_dataframe_tradability_helper_edges() -> None:
     )
     assert context["entry_checks_required"] is True
     assert context["exit_checks_required"] is True
-    assert constraints._is_exit_blocked(
-        asset="A",
-        target_position=0.0,
-        previous_position=1.0,
-        can_exit_flags={"A": False},
-        tradability_config=tradability,
+
+
+@pytest.mark.parametrize(
+    ("previous", "target", "can_buy", "can_sell", "expected"),
+    (
+        (0.0, 1.0, False, True, 0.0),
+        (0.0, 1.0, True, False, 1.0),
+        (0.5, 1.0, False, True, 0.5),
+        (1.0, 0.5, True, False, 1.0),
+        (1.0, 0.0, True, False, 1.0),
+        (1.0, 0.0, False, True, 0.0),
+        (0.0, -1.0, True, False, 0.0),
+        (0.0, -1.0, False, True, -1.0),
+        (-0.5, -1.0, True, False, -0.5),
+        (-1.0, -0.5, False, True, -1.0),
+        (-1.0, 0.0, False, True, -1.0),
+        (-1.0, 0.0, True, False, 0.0),
+        (1.0, -1.0, True, False, 1.0),
+        (1.0, -1.0, False, True, -1.0),
+        (-1.0, 1.0, False, True, -1.0),
+        (-1.0, 1.0, True, False, 1.0),
+    ),
+)
+def test_tradability_constraints_apply_real_buy_sell_permissions(
+    previous: float,
+    target: float,
+    can_buy: bool,
+    can_sell: bool,
+    expected: float,
+) -> None:
+    frame = _compute_frame().iloc[[0]].assign(
+        can_enter=can_buy,
+        can_exit=can_sell,
     )
-    assert constraints._is_entry_blocked(
-        asset="B",
-        target_position=1.0,
-        previous_position=0.0,
-        can_enter_flags={"B": False},
-        tradability_config=tradability,
+    spec = ComputePanelSpec(signal_columns=("signal",), label_column="label")
+    config = TradabilityConfig(
+        can_enter_column="can_enter",
+        can_exit_column="can_exit",
+        blocked_exit_policy="carry_forward",
     )
+
+    adjusted = constraints.apply_tradability_constraints(
+        positions={"A": target},
+        timestamp_frame=frame,
+        spec=spec,
+        tradability_config=config,
+        previous_positions={"A": previous},
+        tradability_context={
+            "entry_checks_required": True,
+            "exit_checks_required": True,
+            "can_enter_flags": {"A": can_buy},
+            "can_exit_flags": {"A": can_sell},
+        },
+    )
+
+    assert adjusted == {"A": expected}
 
 
 def test_tradability_constraints_preserve_blocked_positions_and_reject_exit() -> None:
@@ -251,7 +293,7 @@ def test_tradability_constraints_preserve_blocked_positions_and_reject_exit() ->
         tradability_context=context,
     )
 
-    assert adjusted == {"A": 1.0, "B": 0.0, "C": 1.0, "D": 1.0}
+    assert adjusted == {"A": 1.0, "B": 0.0, "C": -1.0, "D": 1.0}
     with pytest.raises(ValueError, match="exit is blocked"):
         constraints.apply_tradability_constraints(
             positions={"A": 0.0},

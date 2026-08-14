@@ -265,17 +265,6 @@ def iter_active_materialization_batches(
         else session_context[first_session:stop_session]
     )
     retained_session_bytes += target_slice_bytes
-    valid_bar_window = (
-        None
-        if valid_bar_offsets is None
-        else session_batch_window(
-            session_context,
-            target_sessions,
-            warmup_sessions=valid_bar_offsets[0],
-            lookahead_sessions=valid_bar_offsets[1],
-        )
-    )
-
     def produce_under_policy() -> Iterator[DatasetWriteChunk]:
         assert bound_policy is not None
         require_artifact_root(root)
@@ -392,7 +381,7 @@ def iter_active_materialization_batches(
                         resource_policy=bound_policy,
                         retained_payload_bytes=valid_retained_bytes,
                         asset_ids=output,
-                        time_window=valid_bar_window,
+                        time_window=None,
                     )
                     yield from _iter_adaptive_materialization_batches(
                         asset_ids=output,

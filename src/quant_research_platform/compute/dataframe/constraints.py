@@ -69,6 +69,14 @@ def apply_tradability_constraints(
     can_exit_flags = context["can_exit_flags"]
     target_assets = positions.keys()
     if (
+        entry_checks_required
+        and isinstance(can_enter_flags, dict)
+        and can_enter_flags is not None
+    ):
+        target_assets = target_assets | (
+            previous_positions.keys() & can_enter_flags.keys()
+        )
+    if (
         exit_checks_required
         and isinstance(can_exit_flags, dict)
         and can_exit_flags is not None
@@ -80,33 +88,26 @@ def apply_tradability_constraints(
         target_position = positions.get(asset, 0.0)
         previous_position = previous_positions.get(asset, 0.0)
         adjusted_position = target_position
-        if exit_checks_required and _is_exit_blocked(
-            asset=asset,
-            target_position=target_position,
-            previous_position=previous_position,
-            can_exit_flags=can_exit_flags,
-            tradability_config=tradability_config,
-        ):
+        trade_delta = target_position - previous_position
+        sell_blocked = (
+            trade_delta < 0.0
+            and exit_checks_required
+            and isinstance(can_exit_flags, dict)
+            and not can_exit_flags[asset]
+            and tradability_config.blocked_exit_policy != "force_exit"
+        )
+        if sell_blocked:
             if tradability_config.blocked_exit_policy == "error":
                 raise ValueError(f"exit is blocked for asset {asset!r}.")
-            if tradability_config.blocked_exit_policy == "carry_forward":
-                adjusted_position = previous_position
-        entry_check_required = (
-            entry_checks_required
-            and adjusted_position != 0.0
-            and not (
-                previous_position != 0.0
-                and np.sign(previous_position) == np.sign(adjusted_position)
-            )
+            adjusted_position = previous_position
+        buy_blocked = (
+            trade_delta > 0.0
+            and entry_checks_required
+            and isinstance(can_enter_flags, dict)
+            and not can_enter_flags[asset]
         )
-        if entry_check_required and _is_entry_blocked(
-            asset=asset,
-            target_position=adjusted_position,
-            previous_position=previous_position,
-            can_enter_flags=can_enter_flags,
-            tradability_config=tradability_config,
-        ):
-            adjusted_position = previous_position if previous_position != 0.0 else 0.0
+        if buy_blocked:
+            adjusted_position = previous_position
         positions[asset] = float(adjusted_position)
     return positions
 
@@ -157,42 +158,6 @@ def _tradability_flag_values(
     if column is None:
         return None
     return timestamp_frame[column].to_numpy(dtype=bool, copy=False)
-
-
-def _is_exit_blocked(
-    *,
-    asset: str,
-    target_position: float,
-    previous_position: float,
-    can_exit_flags: dict[str, bool] | None,
-    tradability_config: TradabilityConfig,
-) -> bool:
-    if (
-        can_exit_flags is None
-        or previous_position == 0.0
-        or target_position == previous_position
-    ):
-        return False
-    if tradability_config.blocked_exit_policy == "force_exit":
-        return False
-    return not can_exit_flags[asset]
-
-
-def _is_entry_blocked(
-    *,
-    asset: str,
-    target_position: float,
-    previous_position: float,
-    can_enter_flags: dict[str, bool] | None,
-    tradability_config: TradabilityConfig,
-) -> bool:
-    if can_enter_flags is None or target_position == 0.0:
-        return False
-    if previous_position != 0.0 and np.sign(previous_position) == np.sign(
-        target_position
-    ):
-        return False
-    return not can_enter_flags[asset]
 
 
 __all__: list[str] = []
