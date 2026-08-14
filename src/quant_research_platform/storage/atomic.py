@@ -187,13 +187,9 @@ def atomic_write_directory[T](
         require_owned_scratch(target_marker, claimed_marker)
         _remove_claimed_path(target_marker, claimed_marker)
         claimed_marker = None
-        if finalize_memory:
-            policy = current_runtime_resource_policy()
-            if policy is None:
-                raise RuntimeError("runtime_resource_policy_not_active")
-            policy.finish_memory_measurement(
-                on_reject=lambda: _remove_claimed_path(temp_root, claimed_temp)
-            )
+        policy = current_runtime_resource_policy() if finalize_memory else None
+        if finalize_memory and policy is None:
+            raise RuntimeError("runtime_resource_policy_not_active")
         try:
             publish_no_replace(temp_root, final_root, source_identity=claimed_temp)
         except FileExistsError as exc:
@@ -208,6 +204,10 @@ def atomic_write_directory[T](
             if target_exists:
                 raise OutputAlreadyExistsError() from exc
             raise
+        if policy is not None:
+            policy.finish_memory_measurement(
+                on_reject=lambda: _remove_claimed_path(final_root, claimed_temp)
+            )
     except BaseException:
         if claimed_temp is not None:
             try:

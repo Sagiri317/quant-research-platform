@@ -359,7 +359,7 @@ def test_local_verification_replace_failure_preserves_old_good(
     )
 
 
-def test_final_rss_rejection_keeps_replacement_private(
+def test_final_rss_rejection_after_publish_restores_old_good(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -382,9 +382,10 @@ def test_final_rss_rejection_keeps_replacement_private(
 
     def failed_evidence() -> dict[str, int | float | str]:
         payload = original_payload()
-        payload["sampled_peak_rss_bytes"] = 701
-        payload["peak_incremental_rss_bytes"] = 601
-        payload["status"] = "FAIL"
+        if (run_root / "new-good.txt").exists():
+            payload["sampled_peak_rss_bytes"] = 701
+            payload["peak_incremental_rss_bytes"] = 601
+            payload["status"] = "FAIL"
         return payload
 
     measurement.checkpoint_evidence = failed_evidence  # type: ignore[method-assign]
@@ -406,14 +407,6 @@ def test_final_rss_rejection_keeps_replacement_private(
 
     monkeypatch.setattr(module, "_run_local_verification_with_policy", replacement)
 
-    def reject_publish(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        raise AssertionError("run published before final memory acceptance")
-
-    monkeypatch.setattr(
-        module,
-        "_publish_staged_run_root",
-        reject_publish,
-    )
     config = make_local_verification_config(
         run_root=run_root,
         run_id="rss_old_good",

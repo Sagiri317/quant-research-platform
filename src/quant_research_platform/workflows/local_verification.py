@@ -180,12 +180,6 @@ def run_local_verification(
                 retained_state=retained_state,
             )
             retained_state.close()
-            resource_policy.finish_memory_measurement(
-                on_reject=lambda: remove_owned_scratch(
-                    staged_root,
-                    staged_identity,
-                )
-            )
             _publish_staged_run_root(
                 staged_root,
                 staged_identity=staged_identity,
@@ -677,6 +671,9 @@ def _publish_staged_run_root(
     resource_policy.assert_memory_within_budget()
     if replaced_identity is None:
         move_path_no_replace(staged_root, run_root)
+        resource_policy.finish_memory_measurement(
+            on_reject=lambda: remove_owned_scratch(run_root, staged_identity)
+        )
         return None
     require_owned_scratch(run_root, replaced_identity)
     backup_root = _previous_generation_root(run_root)
@@ -693,6 +690,11 @@ def _publish_staged_run_root(
                 f"{type(rollback_error).__name__}"
             )
         raise
+    def rollback_published() -> None:
+        remove_owned_scratch(run_root, staged_identity)
+        move_path_no_replace(backup_root, run_root)
+
+    resource_policy.finish_memory_measurement(on_reject=rollback_published)
     return backup_root
 
 
