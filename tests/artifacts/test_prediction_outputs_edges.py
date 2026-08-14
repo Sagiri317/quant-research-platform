@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -581,7 +582,7 @@ def test_prediction_model_reservation_precedes_writer_startup(
     frame = make_artifact_prediction_output_frame()
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=4 * 1024 * 1024,
+        explicit_cap_bytes=8 * 1024 * 1024,
     )
     retained_model_bytes = 128 * 1024
     writer_bytes = parquet_writers.EXACT_KEY_SQLITE_PAGE_BYTES
@@ -605,6 +606,57 @@ def test_prediction_model_reservation_precedes_writer_startup(
             key_columns=("asset_id", "timestamp"),
             compression="zstd",
         )
+
+
+def test_prediction_parquet_rejects_fixed_workspace_before_native_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = make_artifact_prediction_output_frame()
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=4 * 1024 * 1024,
+    )
+    starts = 0
+
+    def forbid_writer(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal starts
+        starts += 1
+        raise AssertionError("native_writer_started_before_admission")
+
+    monkeypatch.setattr(parquet_writers.pq, "ParquetWriter", forbid_writer)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            parquet_writers.write_parquet_chunks(
+                (frame,),
+                tmp_path / "prediction.parquet",
+                required=tuple(frame.columns),
+                key_columns=("asset_id", "timestamp"),
+                compression="zstd",
+            )
+
+    assert starts == 0
+
+
+def test_artifact_parquet_page_bound_allows_two_live_writers() -> None:
+    first = pa.table({"value": pa.nulls(128 * 1024 * 1024)})
+    second = pa.table({"value": pa.nulls(1)})
+    policy = capture_test_policy(
+        available_memory_bytes=512 * 1024**2,
+        explicit_cap_bytes=300 * 1024**2,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        _persisted, first_state, first_rows, _retained = (
+            parquet_writers._artifact_table_write_state(first)
+        )
+        with first_state:
+            _persisted, second_state, second_rows, _retained = (
+                parquet_writers._artifact_table_write_state(second)
+            )
+            with second_state:
+                assert first_rows == 64 * 1024 * 1024
+                assert second_rows == 1
 
 
 def test_prediction_parquet_writer_disables_retained_dictionary_state(

@@ -943,7 +943,7 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
         page_working_bytes = minimum_bytes
         if persisted.num_rows:
             low = 1
-            high = persisted.num_rows
+            high = _parquet_row_group_size(persisted.num_rows)
             while low <= high:
                 candidate = (low + high) // 2
                 candidate_bytes = _table_parquet_page_working_set_bytes(

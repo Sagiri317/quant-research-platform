@@ -411,7 +411,7 @@ def _artifact_table_write_state(
     batch_rows = max(1, persisted.num_rows)
     working_bytes = minimum_bytes
     low = 1
-    high = persisted.num_rows
+    high = _parquet_row_group_size(persisted.num_rows)
     while low <= high:
         candidate = (low + high) // 2
         candidate_bytes = _table_parquet_page_working_set_bytes(

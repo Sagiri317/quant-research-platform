@@ -88,12 +88,14 @@ def _issued_test_policy(task_bytes: int = 16 * 1024**2) -> RuntimeResourcePolicy
 def _writer_test_policy(
     working_headroom_bytes: int = 1024**2,
 ) -> RuntimeResourcePolicy:
+    planning_bytes = (
+        dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+        + dataset_physical._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+        + working_headroom_bytes
+    )
     return capture_test_policy(
         available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=(
-            dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
-            + working_headroom_bytes
-        ),
+        explicit_cap_bytes=(planning_bytes * 16 + 14) // 15,
     )
 
 
@@ -8633,12 +8635,7 @@ def test_writer_checks_actual_arrow_headroom_after_conversion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = _writer_test_policy(
-        working_headroom_bytes=(
-            dataset_physical._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
-            + 5 * 256 * 1024
-        )
-    )
+    policy = _writer_test_policy(working_headroom_bytes=5 * 256 * 1024)
     monkeypatch.setattr(
         dataset_writing,
         "pandas_frame_payload_bytes",
@@ -8839,10 +8836,7 @@ def test_qrp_parquet_reader_bounded_completes_with_physical_page_admission(
 ) -> None:
     path = tmp_path / "row-groups.parquet"
     table = pa.table({"value": ["x" * 4096] * 100})
-    policy = capture_test_policy(
-        available_memory_bytes=1024**2,
-        explicit_cap_bytes=64 * 1024,
-    )
+    policy = _writer_test_policy(working_headroom_bytes=64 * 1024)
     with runtime_resource_policy_scope(policy):
         dataset_writing.write_parquet_file(table, path)
         batches = tuple(
@@ -8915,12 +8909,7 @@ def test_writer_bounded_completes_under_task_wide_copy_and_arrow_headroom(
             "value": ["x" * 1_500] * row_count,
         }
     )
-    policy = _writer_test_policy(
-        working_headroom_bytes=(
-            dataset_physical._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
-            + 2 * 1024**2
-        )
-    )
+    policy = _writer_test_policy(working_headroom_bytes=2 * 1024**2)
     root = make_dataset_artifact_root(tmp_path, "writer_task_headroom")
     result = dataset_writing.write_dataset(
         root,
