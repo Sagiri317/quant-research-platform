@@ -159,12 +159,6 @@ class DatasetSessionInventory:
                 "UNIQUE(device, inode))"
             )
             connection.execute(
-                "CREATE TABLE part_null_columns ("
-                "relative_path TEXT NOT NULL, column_name TEXT NOT NULL, "
-                "PRIMARY KEY(relative_path, column_name), "
-                "FOREIGN KEY(relative_path) REFERENCES parts(relative_path))"
-            )
-            connection.execute(
                 "CREATE TABLE path_selections ("
                 "selection_id INTEGER NOT NULL, relative_path TEXT NOT NULL, "
                 "PRIMARY KEY(selection_id, relative_path))"
@@ -325,11 +319,6 @@ class DatasetSessionInventory:
                     "logical_dtypes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     values,
                 )
-                self._replace_null_columns(
-                    self._require_connection(),
-                    relative,
-                    metadata.null_columns,
-                )
         except sqlite3.IntegrityError as exc:
             raise ValueError("invalid_dataset_part_files") from exc
 
@@ -383,11 +372,6 @@ class DatasetSessionInventory:
                 "file_size_bytes = ?, logical_dtypes = ? "
                 "WHERE relative_path = ?",
                 values,
-            )
-            self._replace_null_columns(
-                self._require_connection(),
-                relative,
-                metadata.null_columns,
             )
 
     def new_path_selection(self) -> int:
@@ -457,10 +441,7 @@ class DatasetSessionInventory:
                 relative = str(row[0])
                 yield (
                     self.data_root / relative,
-                    _metadata_from_row(
-                        row[1:],
-                        null_columns=self._null_columns_for(relative),
-                    ),
+                    _metadata_from_row(row[1:]),
                 )
         finally:
             _close_cursor_preserving_primary(cursor)
@@ -566,10 +547,7 @@ class DatasetSessionInventory:
         )
         if row is None:
             raise ValueError("dataset_part_not_in_session")
-        return _metadata_from_row(
-            row,
-            null_columns=self._null_columns_for(relative),
-        )
+        return _metadata_from_row(row)
 
     def schema_payload_bytes_for(self, path: Path) -> int:
         relative = Path(path).relative_to(self.data_root).as_posix()
@@ -584,33 +562,6 @@ class DatasetSessionInventory:
         if row is None or row[0] is None:
             raise ValueError("dataset_inventory_changed")
         return int(row[0])
-
-    def _replace_null_columns(
-        self,
-        connection: sqlite3.Connection,
-        relative_path: str,
-        null_columns: frozenset[str],
-    ) -> None:
-        connection.execute(
-            "DELETE FROM part_null_columns WHERE relative_path = ?",
-            (relative_path,),
-        )
-        for column_name in sorted(null_columns):
-            values = (relative_path, column_name)
-            self._gate_row_write(values)
-            connection.execute(
-                "INSERT INTO part_null_columns(relative_path, column_name) "
-                "VALUES (?, ?)",
-                values,
-            )
-
-    def _null_columns_for(self, relative_path: str) -> frozenset[str]:
-        rows = self._require_connection().execute(
-            "SELECT column_name FROM part_null_columns "
-            "WHERE relative_path = ? ORDER BY column_name",
-            (relative_path,),
-        )
-        return frozenset(str(row[0]) for row in rows)
 
     def _scan_filesystem(self, spec, *, on_year, on_path) -> None:  # noqa: ANN001
         partition_columns = tuple(
@@ -787,8 +738,6 @@ def _identity_values(identity: DatasetFileIdentity) -> tuple[str, str, str, str]
 
 def _metadata_from_row(
     row: tuple[object, ...],
-    *,
-    null_columns: frozenset[str],
 ) -> DatasetPartMetadata:
     if any(value is None for value in row[4:]):
         raise RuntimeError("dataset_inventory_metadata_missing")
@@ -798,7 +747,6 @@ def _metadata_from_row(
         ),
         schema=pa.ipc.read_schema(pa.BufferReader(bytes(row[4]))),
         row_count=int(row[5]),
-        null_columns=null_columns,
         file_size_bytes=int(row[6]),
         logical_dtype_payload=bytes(row[7]),
     )

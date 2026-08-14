@@ -56,7 +56,6 @@ class DatasetPartMetadata:
     identity: DatasetFileIdentity
     schema: pa.Schema
     row_count: int
-    null_columns: frozenset[str]
     file_size_bytes: int
     logical_dtype_payload: bytes
 
@@ -367,7 +366,6 @@ def _part_metadata(
         identity=identity,
         schema=schema.remove_metadata(),
         row_count=int(parquet_file.metadata.num_rows),
-        null_columns=_parquet_null_columns(parquet_file, tuple(schema.names)),
         file_size_bytes=identity.size,
         logical_dtype_payload=(
             b"" if logical_dtype_payload is None else bytes(logical_dtype_payload)
@@ -818,27 +816,6 @@ def _projected_parquet_leaf_positions(
             raise ValueError("dataset_column_not_found")
         positions.extend(matches)
     return tuple(positions)
-
-
-def _parquet_null_columns(
-    parquet_file: pq.ParquetFile,
-    columns: tuple[str, ...],
-) -> frozenset[str]:
-    result: set[str] = set()
-    for column in columns:
-        positions = _projected_parquet_leaf_positions(parquet_file, (column,))
-        for row_group_index in range(parquet_file.metadata.num_row_groups):
-            row_group = parquet_file.metadata.row_group(row_group_index)
-            statistics = tuple(
-                row_group.column(position).statistics for position in positions
-            )
-            if any(
-                item is None or item.null_count is None or int(item.null_count) > 0
-                for item in statistics
-            ):
-                result.add(column)
-                break
-    return frozenset(result)
 
 
 def _matching_row_groups(

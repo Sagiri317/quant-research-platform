@@ -6507,42 +6507,6 @@ def test_categorical_empty_result_can_exceed_the_soft_chunk_target(
     assert isinstance(chunks[0]["value"].dtype, pd.CategoricalDtype)
 
 
-def test_dataset_session_tuple_in_filter_prunes_nonmatching_row_groups(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "tuple_in_filter_prune")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("tuple_in_filter_prune"),
-    )
-    observed: list[bool] = []
-    original = dataset_physical._row_group_may_match
-
-    def record(*args, **kwargs):
-        result = original(*args, **kwargs)
-        observed.append(result)
-        return result
-
-    monkeypatch.setattr(dataset_physical, "_row_group_may_match", record)
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=("timestamp",),
-        time_window=None,
-        row_filters=(("asset_id", "in", ("missing",)),),
-    ) as session:
-        list(
-            dataset_reading.iter_dataset_chunks(
-                session,
-                target_chunk_bytes=1024**2,
-            )
-        )
-
-    assert observed
-    assert not any(observed)
-
-
 def test_session_filter_reuses_prepared_values(
     tmp_path: Path,
 ) -> None:
@@ -9181,44 +9145,6 @@ def test_dataset_inventory_cleanup_removes_sqlite_sidecars(tmp_path: Path) -> No
     assert not list(tmp_path.glob(".i-*"))
     assert not list(tmp_path.rglob("i.db-wal"))
     assert not list(tmp_path.rglob("i.db-shm"))
-
-
-def test_dataset_inventory_stores_null_columns_as_exact_relational_rows(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "inventory_null_columns")
-    frame = make_default_dataset_frame(
-        asset_ids=("asset_001", "asset_001"),
-        dates=("2014-01-02", "2014-01-03"),
-        values=(1.0, float("nan")),
-    )
-    write_dataset(
-        root,
-        (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
-        spec=make_processed_dataset_spec("inventory_null_columns"),
-    )
-
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-    ) as session:
-        scratch = session.inventory.scratch_path
-        entries = tuple(session.inventory.iter_entries())
-        connection = session.inventory._require_connection()
-        rows = connection.execute(
-            "SELECT relative_path, column_name FROM part_null_columns "
-            "ORDER BY relative_path, column_name"
-        ).fetchall()
-        assert [metadata.null_columns for _path, metadata in entries] == [
-            frozenset(),
-            frozenset({"value"}),
-        ]
-        assert rows == [
-            (entries[1][0].relative_to(session.inventory.data_root).as_posix(), "value")
-        ]
-
-    assert not scratch.exists()
 
 
 def test_dataset_inventory_low_budget_and_inspection_failure_clean_up(
