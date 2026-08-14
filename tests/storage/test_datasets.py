@@ -5031,11 +5031,9 @@ def test_reader_final_verify_does_not_replace_active_primary(
         next(iterator)
 
 
-@pytest.mark.parametrize("iterator_name", ("file_batches", "chunks"))
 @pytest.mark.parametrize("completion", ("exhausted", "early_close"))
 def test_reader_final_verify_failure_propagates_without_external_primary(
     monkeypatch: pytest.MonkeyPatch,
-    iterator_name: str,
     completion: str,
 ) -> None:
     frame = pd.DataFrame({"value": [1]})
@@ -5052,7 +5050,7 @@ def test_reader_final_verify_failure_propagates_without_external_primary(
 
         def __init__(self) -> None:
             self.verify_calls = 0
-            self.verify_fail_after = 1 if iterator_name == "file_batches" else 0
+            self.verify_fail_after = 1
 
         def verify(self) -> None:
             self.verify_calls += 1
@@ -5062,37 +5060,26 @@ def test_reader_final_verify_failure_propagates_without_external_primary(
         def metadata_for(self, _path: Path) -> object:
             return SimpleNamespace(identity=object())
 
+    monkeypatch.setattr(
+        dataset_reading,
+        "pandas_dtype_overrides_from_logical_payload",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def declared(*_args: object, **_kwargs: object):
+        yield frame
+
+    monkeypatch.setattr(
+        dataset_reading,
+        "iter_declared_parquet_member_batches",
+        declared,
+    )
     context = Context()
-    if iterator_name == "file_batches":
-        monkeypatch.setattr(
-            dataset_reading,
-            "pandas_dtype_overrides_from_logical_payload",
-            lambda *_args, **_kwargs: {},
-        )
-
-        def declared(*_args: object, **_kwargs: object):
-            yield frame
-
-        monkeypatch.setattr(
-            dataset_reading,
-            "iter_declared_parquet_member_batches",
-            declared,
-        )
-        iterator = dataset_reading.iter_dataset_file_batches(
-            context,  # type: ignore[arg-type]
-            columns=("value",),
-            target_chunk_bytes=1024,
-        )
-    else:
-
-        def batches(*_args: object, **_kwargs: object):
-            yield Path("part.parquet"), frame
-
-        monkeypatch.setattr(dataset_reading, "iter_dataset_file_batches", batches)
-        iterator = dataset_reading.iter_dataset_chunks(
-            context,  # type: ignore[arg-type]
-            target_chunk_bytes=1024,
-        )
+    iterator = dataset_reading.iter_dataset_file_batches(
+        context,  # type: ignore[arg-type]
+        columns=("value",),
+        target_chunk_bytes=1024,
+    )
 
     if completion == "exhausted":
         with pytest.raises(OSError, match="verify_failure"):

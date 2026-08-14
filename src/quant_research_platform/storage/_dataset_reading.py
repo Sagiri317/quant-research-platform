@@ -1298,21 +1298,26 @@ def _iter_dataset_chunks(
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
 ) -> Iterator[pd.DataFrame]:
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    try:
-        if not context.read_paths:
+    if not context.read_paths:
+        try:
             yield _empty_frame(
                 context,
                 context.logical_columns,
             )
-            return
-        yielded = False
-        for _, frame in iter_dataset_file_batches(
+        finally:
+            _verify_preserving_primary(context)
+        return
+    yielded = False
+    with closing_dataset_iterator(
+        iter_dataset_file_batches(
             context,
             columns=context.physical_columns,
             target_chunk_bytes=target_bytes,
             operation_headroom_bytes=operation_headroom_bytes,
             batch_observer=batch_observer,
-        ):
+        )
+    ) as file_batches:
+        for _, frame in file_batches:
             filtered = frame.loc[:, list(context.logical_columns)]
             for chunk in iter_bounded_frame_chunks(
                 filtered,
@@ -1320,13 +1325,11 @@ def _iter_dataset_chunks(
             ):
                 yielded = True
                 yield chunk
-        if not yielded:
-            yield _empty_frame(
-                context,
-                context.logical_columns,
-            )
-    finally:
-        _verify_preserving_primary(context)
+    if not yielded:
+        yield _empty_frame(
+            context,
+            context.logical_columns,
+        )
 
 
 def iter_declared_parquet_member_batches(
