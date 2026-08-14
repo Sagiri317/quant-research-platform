@@ -134,8 +134,14 @@ def stub_interim_importer(
     on_artifact=None,
     missing_manifest: bool = False,
 ):
-    def materialize_interim(layout, raw_root, start_date, end_date):
-        del raw_root, start_date, end_date
+    def materialize_interim(
+        layout,
+        raw_root,
+        start_date,
+        end_date,
+        resource_policy,
+    ):
+        del raw_root, start_date, end_date, resource_policy
         if on_call is not None:
             on_call()
         artifact_root = (
@@ -165,8 +171,14 @@ def stub_interim_importer(
 
 
 def stub_processed_builder(*, on_call=None, materialize=None):
-    def materialize_processed(layout, source_id, time_window, kinds):
-        del source_id, time_window
+    def materialize_processed(
+        layout,
+        source_id,
+        time_window,
+        kinds,
+        resource_policy,
+    ):
+        del source_id, time_window, resource_policy
         if on_call is not None:
             on_call()
         if materialize is not None:
@@ -186,8 +198,9 @@ def empty_processed_inputs(
     source_id,
     time_window,
     kinds,
+    resource_policy,
 ) -> dict[str, object]:
-    del layout, source_id, time_window, kinds
+    del layout, source_id, time_window, kinds, resource_policy
     return {}
 
 

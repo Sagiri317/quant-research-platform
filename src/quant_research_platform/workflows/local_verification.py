@@ -259,6 +259,7 @@ def _run_local_verification_with_policy(
             raw_root=Path("data") / "raw" / str(source_id),
             start_date=config.start_date,
             end_date=config.end_date,
+            resource_policy=resource_policy,
         )
     with recorder.record("processed_generation", logical_layer="processed") as record:
         processed_result = config.profile.materialize_processed_data(
@@ -273,6 +274,7 @@ def _run_local_verification_with_policy(
                     ProcessedDataKind.LABEL,
                 }
             ),
+            resource_policy=resource_policy,
         )
         record.output_rows = sum(item.row_count for item in processed_result.values())
     with recorder.record("research_generation", logical_layer="research"):

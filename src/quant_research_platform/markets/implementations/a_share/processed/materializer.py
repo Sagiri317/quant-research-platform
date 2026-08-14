@@ -40,6 +40,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    bind_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
@@ -63,7 +64,11 @@ def materialize_processed_data(
 ) -> dict[str, DatasetInspection]:
     """Materialize registered A-share processed datasets."""
 
-    policy = resource_policy or active_runtime_resource_policy()
+    bound_policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
+    policy = bound_policy or active_runtime_resource_policy()
     return _materialize_processed_data_with_policy(
         layout=layout,
         source_id=source_id,

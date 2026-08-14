@@ -250,8 +250,11 @@ def _infer_dataset_from_header(columns: tuple[str, ...]) -> str:
 def require_raw_resource_policy(
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> RuntimeResourcePolicy:
-    policy = resource_policy or active_runtime_resource_policy()
-    return policy
+    bound = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
+    return bound or active_runtime_resource_policy()
 
 
 def logical_record_limit_bytes(policy: RuntimeResourcePolicy) -> int:

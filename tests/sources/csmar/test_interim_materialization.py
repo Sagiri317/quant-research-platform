@@ -802,7 +802,10 @@ def test_private_export_chunks_reject_indivisible_wide_logical_record(
         ):
             list(
                 raw_exports.iter_private_export_chunks(
-                    path, dataset="trading_calendar", chunksize=2
+                    path,
+                    dataset="trading_calendar",
+                    chunksize=2,
+                    resource_policy=policy,
                 )
             )
 
@@ -830,6 +833,7 @@ def test_private_export_adapts_across_later_wide_rows(
             path,
             dataset="trading_calendar",
             chunksize=100,
+            resource_policy=policy,
         )
         for chunk in chunks:
             observed += len(chunk)
@@ -1009,6 +1013,7 @@ def test_private_export_chunks_keep_normal_wide_record_with_default_payload(
                 path,
                 dataset="trading_calendar",
                 chunksize=1,
+                resource_policy=policy,
             )
         )
 
@@ -1031,7 +1036,10 @@ def test_private_export_chunks_small_fit_has_no_hidden_budget_floor(
     with runtime_resource_policy_scope(policy):
         chunks = list(
             raw_exports.iter_private_export_chunks(
-                path, dataset="trading_calendar", chunksize=1
+                path,
+                dataset="trading_calendar",
+                chunksize=1,
+                resource_policy=policy,
             )
         )
     assert len(chunks) == 1
@@ -1070,6 +1078,7 @@ def test_materialize_low_budget_fails_only_on_exact_working_set(
                 layout=StorageLayout(project_root=tmp_path),
                 raw_root=raw_root,
                 data_ids=("trading_calendar",),
+                resource_policy=policy,
             )
 
 
@@ -1084,7 +1093,7 @@ def test_export_header_bounds_logical_record(tmp_path: Path) -> None:
         with pytest.raises(
             ValueError, match="csmar_logical_record_exceeds_source_limit"
         ):
-            raw_schemas.read_export_header(path)
+            raw_schemas.read_export_header(path, resource_policy=policy)
 
 
 @pytest.mark.parametrize("payload", ("", '"unterminated\n'))
@@ -1108,7 +1117,7 @@ def test_header_only_export_has_no_data_chunks(tmp_path: Path) -> None:
     )
 
     with runtime_resource_policy_scope(policy):
-        assert raw_schemas.read_export_header(path) == (
+        assert raw_schemas.read_export_header(path, resource_policy=policy) == (
             "Markettype",
             "Clddt",
             "Daywk",
@@ -1120,6 +1129,7 @@ def test_header_only_export_has_no_data_chunks(tmp_path: Path) -> None:
                     path,
                     dataset="trading_calendar",
                     chunksize=1,
+                    resource_policy=policy,
                 )
             )
             == []
@@ -1205,6 +1215,7 @@ def test_index_info_continuations_join_once_after_linear_accumulation(
                 path,
                 dataset="index_info",
                 chunksize=100,
+                resource_policy=policy,
             ),
             ignore_index=True,
         )
@@ -3693,6 +3704,7 @@ def test_csmar_total_pipeline_materializes_all_rows(
             start_date=None,
             end_date=None,
             chunksize=row_count,
+            resource_policy=policy,
         )
         for frame in frames:
             observed_rows += len(frame)
@@ -3749,6 +3761,7 @@ def test_csmar_direct_reference_iteration_uses_active_policy_target(
                 input_files=[Path("private.csv")],
                 start_date=None,
                 end_date=None,
+                resource_policy=policy,
             )
         )
 
@@ -3764,6 +3777,7 @@ def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
         explicit_cap_bytes=4 * 1024 * 1024,
     )
     policy_calls: list[bool] = []
+    dataset_policies: list[RuntimeResourcePolicy] = []
     observed_targets: list[int] = []
     write_policies: list[RuntimeResourcePolicy] = []
 
@@ -3806,13 +3820,14 @@ def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
         raising=False,
     )
     monkeypatch.setattr(interim, "ExactPrimaryKeyIndex", RecordingIndex)
-    monkeypatch.setattr(
-        interim,
-        "dataset_files_with_identity_by_id",
-        lambda _root: iter(
+
+    def dataset_files(_root, **kwargs):  # noqa: ANN001, ANN003
+        dataset_policies.append(kwargs["resource_policy"])
+        return iter(
             ((raw_dataset, Path("private.csv"), DatasetFileIdentity(1, 2, 3, 4)),)
-        ),
-    )
+        )
+
+    monkeypatch.setattr(interim, "dataset_files_with_identity_by_id", dataset_files)
     monkeypatch.setattr(
         interim,
         "_iter_pruned_interim_frames",
@@ -3838,7 +3853,8 @@ def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
         data_ids=("stock_master",),
     )
 
-    assert policy_calls == [True, True]
+    assert policy_calls == [True]
+    assert dataset_policies == [policy]
     assert observed_targets == [policy.remaining_memory_bytes]
     assert write_policies == [policy]
 
@@ -3888,7 +3904,7 @@ def test_csmar_materializer_closes_prefetched_frames_when_writer_fails(
     monkeypatch.setattr(
         interim,
         "dataset_files_with_identity_by_id",
-        lambda _root: iter(
+        lambda _root, **_kwargs: iter(
             (("stock_master", Path("raw"), DatasetFileIdentity(1, 2, 3, 4)),)
         ),
     )
@@ -3916,7 +3932,7 @@ def test_csmar_materializer_requires_artifact_root_before_frame_pull(
     monkeypatch.setattr(
         interim,
         "dataset_files_with_identity_by_id",
-        lambda _root: iter(
+        lambda _root, **_kwargs: iter(
             ((raw_dataset, Path("raw"), DatasetFileIdentity(1, 2, 3, 4)),)
         ),
     )
@@ -3944,7 +3960,7 @@ def test_csmar_materializer_consumes_spill_order_without_prefetch(
 ) -> None:
     events: list[str] = []
 
-    def indexed_files(_root: Path):  # noqa: ANN202
+    def indexed_files(_root: Path, **_kwargs):  # noqa: ANN003, ANN202
         for index, name in enumerate(("first", "second")):
             events.append(f"inventory:{name}")
             yield (
@@ -4005,7 +4021,7 @@ def test_materializer_releases_prefetched_frame_before_next_writer_chunk(
     monkeypatch.setattr(
         interim,
         "dataset_files_with_identity_by_id",
-        lambda _root: iter(
+        lambda _root, **_kwargs: iter(
             (("stock_master", Path("raw"), DatasetFileIdentity(1, 2, 3, 4)),)
         ),
     )
@@ -4163,9 +4179,14 @@ def test_csmar_market_bars_daily_materializer_streams_chunks_to_storage(
 
     raw_index_calls = 0
 
-    def fake_indexed_files(_: Path):  # noqa: ANN202
+    def fake_indexed_files(
+        _: Path,
+        *,
+        resource_policy: RuntimeResourcePolicy,
+    ):  # noqa: ANN202
         nonlocal raw_index_calls
         raw_index_calls += 1
+        assert isinstance(resource_policy, RuntimeResourcePolicy)
         return iter(
             (
                 (
@@ -5043,7 +5064,12 @@ def test_index_info_rows_bind_creation_policy_before_delayed_consumption(
     monkeypatch.setattr(raw_exports, "_iter_csv_records", records)
 
     with runtime_resource_policy_scope(creation_policy):
-        rows = iter(raw_exports.iter_index_info_rows(Path("index.csv")))
+        rows = iter(
+            raw_exports.iter_index_info_rows(
+                Path("index.csv"),
+                resource_policy=creation_policy,
+            )
+        )
     with runtime_resource_policy_scope(consumer_policy):
         with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
             next(rows)
@@ -5216,6 +5242,7 @@ def test_csmar_nonreference_frames_close_preserves_consumer_generator_exit(
             input_files=[],
             start_date=None,
             end_date=None,
+            resource_policy=policy,
         )
         next(chunks)
         chunks.close()
@@ -5264,6 +5291,7 @@ def test_csmar_index_info_iterator_close_preserves_consumer_generator_exit(
                 Path("index.csv"),
                 dataset="index_info",
                 chunksize=1,
+                resource_policy=policy,
             )
         )
         next(chunks)
@@ -5333,9 +5361,12 @@ def test_csmar_lazy_inventory_policy_is_resolved_only_at_activation(
     gate_hits: list[RuntimeResourcePolicy | None] = []
     real_bind = raw_exports.bind_runtime_resource_policy
 
-    def bind(value: RuntimeResourcePolicy | None) -> RuntimeResourcePolicy | None:
+    def bind(
+        value: RuntimeResourcePolicy | None,
+        **kwargs,
+    ) -> RuntimeResourcePolicy | None:  # noqa: ANN003
         bind_calls.append(value)
-        return real_bind(value)
+        return real_bind(value, **kwargs)
 
     def activate() -> RuntimeResourcePolicy:
         activation_calls.append("active")
@@ -5377,9 +5408,12 @@ def test_csmar_lazy_inventory_abandon_before_activation_has_no_active_owner(
     activation_calls: list[str] = []
     real_bind = raw_exports.bind_runtime_resource_policy
 
-    def bind(value: RuntimeResourcePolicy | None) -> RuntimeResourcePolicy | None:
+    def bind(
+        value: RuntimeResourcePolicy | None,
+        **kwargs,
+    ) -> RuntimeResourcePolicy | None:  # noqa: ANN003
         bind_calls.append(value)
-        return real_bind(value)
+        return real_bind(value, **kwargs)
 
     monkeypatch.setattr(raw_exports, "bind_runtime_resource_policy", bind)
     monkeypatch.setattr(
@@ -5763,6 +5797,10 @@ def test_interim_root_replacement_fails_before_publication(
 
     monkeypatch.setattr(interim, "_iter_interim_frames", frames)
     monkeypatch.setattr(interim, "write_dataset", publish)
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=32 * 1024 * 1024,
+    )
     caught: BaseException | None = None
     try:
         interim._materialize_interim_data(
@@ -5773,6 +5811,7 @@ def test_interim_root_replacement_fails_before_publication(
             end_date=None,
             override_path=None,
             chunksize=1,
+            resource_policy=policy,
         )
     except BaseException as exc:  # pragma: no branch - asserted below
         caught = exc
@@ -5963,6 +6002,10 @@ def test_interim_second_replay_rejects_before_transform_or_publication(
     )
     monkeypatch.setattr(interim, "_iter_interim_frames", frames)
     monkeypatch.setattr(interim, "write_dataset", publish)
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=32 * 1024 * 1024,
+    )
     caught: BaseException | None = None
     try:
         interim._materialize_interim_data(
@@ -5973,6 +6016,7 @@ def test_interim_second_replay_rejects_before_transform_or_publication(
             end_date=None,
             override_path=None,
             chunksize=1,
+            resource_policy=policy,
         )
     except BaseException as exc:  # pragma: no branch - asserted below
         caught = exc

@@ -95,7 +95,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.markets.implementations.crypto.processed import (
     materializer as crypto_processed_materializer_module,
 )
-from quant_research_platform.runtime.resources import active_runtime_resource_policy
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.sources.binance.catalog import (
     source_definition as binance_source_definition,
@@ -143,9 +143,18 @@ class ResearchProfile:
     source_id: SourceId
     build_prediction_catalog: Callable[..., PredictionCatalog]
     build_portfolio_catalog: Callable[..., PortfolioCatalog]
-    materialize_interim_data: Callable[[StorageLayout, Path, str, str], object]
+    materialize_interim_data: Callable[
+        [StorageLayout, Path, str, str, RuntimeResourcePolicy],
+        object,
+    ]
     materialize_processed_data: Callable[
-        [StorageLayout, SourceId, TimeWindow, frozenset[ProcessedDataKind]],
+        [
+            StorageLayout,
+            SourceId,
+            TimeWindow,
+            frozenset[ProcessedDataKind],
+            RuntimeResourcePolicy,
+        ],
         Mapping[str, DatasetInspection],
     ]
     schema_inventory_important_columns: Callable[[], tuple[str, ...]]
@@ -274,6 +283,7 @@ def _materialize_crypto_binance_interim_data(
     raw_root: Path,
     start_date: str,
     end_date: str,
+    resource_policy: RuntimeResourcePolicy,
 ) -> object:
     dependency = crypto_materialization_dependencies.panel_dependency_window(
         TimeWindow(start_date, end_date)
@@ -283,6 +293,7 @@ def _materialize_crypto_binance_interim_data(
         raw_root=raw_root,
         start_date=_time_bound_to_iso(dependency.start),
         end_date=_time_bound_to_iso(dependency.end),
+        resource_policy=resource_policy,
     )
 
 
@@ -291,6 +302,7 @@ def _materialize_a_share_csmar_interim_data(
     raw_root: Path,
     start_date: str,
     end_date: str,
+    resource_policy: RuntimeResourcePolicy,
 ) -> InterimImportResult:
     calendar = _materialize_csmar_interim_data(
         layout=layout,
@@ -298,6 +310,7 @@ def _materialize_a_share_csmar_interim_data(
         data_ids=("trading_calendar",),
         start_date=None,
         end_date=None,
+        resource_policy=resource_policy,
     )
     targets = tuple(processed_catalog_module.processed_catalog().list())
     lookback_sessions, lookahead_sessions = (
@@ -309,7 +322,7 @@ def _materialize_a_share_csmar_interim_data(
         time_window=TimeWindow(start_date, end_date),
         lookback_sessions=lookback_sessions,
         lookahead_sessions=lookahead_sessions,
-        resource_policy=active_runtime_resource_policy(),
+        resource_policy=resource_policy,
     )
     first = int(sessions.searchsorted(pd.Timestamp(start_date)))
     stop = int(sessions.searchsorted(pd.Timestamp(end_date), side="right"))
@@ -325,6 +338,7 @@ def _materialize_a_share_csmar_interim_data(
         ),
         start_date=sessions[0].date().isoformat(),
         end_date=sessions[-1].date().isoformat(),
+        resource_policy=resource_policy,
     )
     return InterimImportResult(
         artifact_roots={**calendar.artifact_roots, **source.artifact_roots},

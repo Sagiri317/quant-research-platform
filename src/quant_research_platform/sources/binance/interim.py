@@ -23,6 +23,7 @@ from quant_research_platform.contracts.time import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
+    bind_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -134,7 +135,11 @@ def iter_interim_frames(
     )
     if isinstance(input_files, str) or not isinstance(input_files, tuple | list):
         raise ValueError("invalid_binance_raw_input_files")
-    policy = resource_policy or active_runtime_resource_policy()
+    bound_policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
+    policy = bound_policy or active_runtime_resource_policy()
     with runtime_resource_policy_scope(policy):
         owner_baseline = policy.reserved_memory_bytes
         yielded = False
@@ -201,8 +206,13 @@ def materialize_interim_data(
     end_date: str | None = None,
     data_ids: tuple[str, ...] = tuple(sorted(INTERIM_COLUMNS_BY_DATA_ID)),
     row_batch_size: int = RAW_ROW_BATCH_SIZE,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> BinanceInterimImportResult:
-    policy = active_runtime_resource_policy()
+    bound_policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
+    policy = bound_policy or active_runtime_resource_policy()
     with runtime_resource_policy_scope(policy):
         catalog = interim_catalog()
         source_raw_root = raw_root or layout.raw_source_root(ids.SOURCE_ID)

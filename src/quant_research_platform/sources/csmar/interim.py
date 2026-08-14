@@ -23,8 +23,9 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.validation import strict_string_series
 from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
     active_runtime_resource_policy,
-    current_runtime_resource_policy,
+    bind_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -539,7 +540,12 @@ def iter_interim_frames(
     overrides: dict[str, dict[str, object]] | None = None,
     chunksize: int = 500_000,
     pruning_reports: list[dict[str, object]] | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
+    bound_policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
     return _iter_interim_frames(
         data_id=data_id,
         input_files=input_files,
@@ -548,6 +554,7 @@ def iter_interim_frames(
         overrides=overrides,
         chunksize=chunksize,
         pruning_reports=pruning_reports,
+        resource_policy=bound_policy,
     )
 
 
@@ -561,8 +568,9 @@ def _iter_interim_frames(
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
     scratch_parent: Path | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
-    bound_policy = current_runtime_resource_policy()
+    bound_policy = bind_runtime_resource_policy(resource_policy)
     validated_overrides = _validated_column_overrides(
         {} if overrides is None else overrides
     )
@@ -621,6 +629,7 @@ def _iter_interim_frames(
                         overrides=validated_overrides,
                         chunksize=chunksize,
                         pruning_reports=operation_reports,
+                        resource_policy=policy,
                     )
                     if data_id in SOURCE_REFERENCE_DATA_IDS:
                         assert selected_scratch_parent is not None
@@ -629,6 +638,7 @@ def _iter_interim_frames(
                             data_id=data_id,
                             pruning_reports=operation_reports,
                             scratch_parent=selected_scratch_parent,
+                            resource_policy=policy,
                         )
                         with closing_dataset_iterator(reference_frames):
                             for item in reference_frames:
@@ -655,8 +665,13 @@ def materialize_interim_data(
     end_date: str | None = "2025-12-31",
     override_path: Path | None = None,
     chunksize: int = 500_000,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> InterimImportResult:
-    policy = current_runtime_resource_policy() or active_runtime_resource_policy()
+    bound_policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
+    policy = bound_policy or active_runtime_resource_policy()
     with runtime_resource_policy_scope(policy):
         return _materialize_interim_data(
             layout=layout,
@@ -666,6 +681,7 @@ def materialize_interim_data(
             end_date=end_date,
             override_path=override_path,
             chunksize=chunksize,
+            resource_policy=policy,
         )
 
 
@@ -678,6 +694,7 @@ def _materialize_interim_data(
     end_date: str | None,
     override_path: Path | None,
     chunksize: int,
+    resource_policy: RuntimeResourcePolicy,
 ) -> InterimImportResult:
     catalog = interim_catalog()
     source_raw_root = raw_root or layout.raw_source_root(SourceId(SOURCE_ID))
@@ -689,7 +706,10 @@ def _materialize_interim_data(
     for data_id in data_ids:
         requested_by_raw[_raw_dataset_for_interim(data_id)] = data_id
     pending = set(data_ids)
-    indexed_files = dataset_files_with_identity_by_id(source_raw_root)
+    indexed_files = dataset_files_with_identity_by_id(
+        source_raw_root,
+        resource_policy=resource_policy,
+    )
     with closing_dataset_iterator(indexed_files):
         for raw_dataset, group in groupby(indexed_files, key=lambda item: item[0]):
             data_id = requested_by_raw.get(raw_dataset)
@@ -710,6 +730,7 @@ def _materialize_interim_data(
                 chunksize=chunksize,
                 pruning_reports=pruning_reports,
                 scratch_parent=artifact_root.parent,
+                resource_policy=resource_policy,
             )
             with closing_dataset_iterator(frames):
                 try:
@@ -723,7 +744,7 @@ def _materialize_interim_data(
                     artifact_root,
                     write_frames,
                     spec=spec,
-                    resource_policy=current_runtime_resource_policy(),
+                    resource_policy=resource_policy,
                 )
                 del write_frames
             written[data_id] = artifact_root
@@ -746,7 +767,9 @@ def _iter_pruned_interim_frames(
     overrides: Mapping[str, Mapping[str, object]],
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
+    policy = resource_policy or active_runtime_resource_policy()
     local_reports: list[dict[str, object]] = []
     primary_key = tuple(interim_catalog().get(data_id).primary_key)
     previous_key: tuple[object, ...] | None = None
@@ -761,7 +784,7 @@ def _iter_pruned_interim_frames(
                 input_file,
                 dataset=raw_dataset,
                 chunksize=chunksize,
-                resource_policy=active_runtime_resource_policy(),
+                resource_policy=policy,
                 expected_identity=expected_identity,
             )
         )
@@ -792,6 +815,7 @@ def _iter_pruned_interim_frames(
                             retained_previous_bytes=(
                                 0 if candidate is chunk else chunk_bytes
                             ),
+                            resource_policy=policy,
                         )
                     except _InterimCapacityExceeded as exc:
                         del candidate
@@ -838,8 +862,9 @@ def _transform_interim_chunk(
     end_date: str | None,
     overrides: Mapping[str, Mapping[str, object]],
     retained_previous_bytes: int,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    policy = active_runtime_resource_policy()
+    policy = resource_policy or active_runtime_resource_policy()
     chunk_bytes = pandas_frame_payload_bytes(chunk)
     normalization_preallocation_bytes = _normalization_preallocation_bytes(
         chunk, data_id=data_id
@@ -956,12 +981,13 @@ def _iter_deduped_reference_frames(
     data_id: str,
     pruning_reports: list[dict[str, object]] | None,
     scratch_parent: Path,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
     spec = interim_catalog().get(data_id)
     primary_key = tuple(spec.primary_key)
     exact_duplicate_count = 0
     completed = False
-    policy = active_runtime_resource_policy()
+    policy = resource_policy or active_runtime_resource_policy()
     comparison_target = policy.remaining_memory_bytes
     task_budget = policy.task_memory_budget_bytes
     with (

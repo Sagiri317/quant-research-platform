@@ -123,6 +123,7 @@ def test_a_share_profile_materializes_exact_processed_dependency_source_window(
             raw_root=tmp_path / "raw",
             start_date="2014-01-02",
             end_date="2014-01-03",
+            resource_policy=policy,
         )
 
     assert calls[0]["data_ids"] == ("trading_calendar",)

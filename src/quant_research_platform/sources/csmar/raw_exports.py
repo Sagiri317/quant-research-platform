@@ -22,7 +22,6 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
     bind_runtime_resource_policy,
-    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
@@ -396,7 +395,10 @@ def iter_raw_export_files(
 ) -> Iterator[Path]:
     """Yield supported raw exports in deterministic spill-backed order."""
 
-    bound_policy = bind_runtime_resource_policy(resource_policy)
+    bound_policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
     raw_root = Path(root)
 
     def iter_files() -> Iterator[Path]:
@@ -460,7 +462,10 @@ def iter_index_info_rows(
     expected_identity: DatasetFileIdentity | None = None,
     retained_payload_bytes: list[int] | None = None,
 ) -> Iterable[tuple[list[str], list[str], int]]:
-    bound_policy = bind_runtime_resource_policy(resource_policy)
+    bound_policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
 
     def activate() -> Iterator[tuple[list[str], list[str], int]]:
         policy = bound_policy or active_runtime_resource_policy()
@@ -927,13 +932,17 @@ def iter_private_export_chunks(
     *,
     dataset: str,
     chunksize: int,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterable[pd.DataFrame]:
     """Yield raw export chunks for large time-series files."""
 
     if type(chunksize) is not int or chunksize <= 0:
         raise ValueError("invalid_csmar_chunksize")
 
-    bound_policy = current_runtime_resource_policy()
+    bound_policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
 
     def activate() -> Iterator[pd.DataFrame]:
         policy = bound_policy or active_runtime_resource_policy()
@@ -1364,7 +1373,10 @@ def dataset_files_with_identity_by_id(
 ) -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
     """Yield inspected files with the identity bound during inspection."""
 
-    bound_policy = bind_runtime_resource_policy(resource_policy)
+    bound_policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
     root = Path(raw_root)
 
     def iter_files() -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
@@ -1525,7 +1537,7 @@ def _raw_export_identity_payload(identity: DatasetFileIdentity) -> bytes:
 def inspect_raw_export_tree(root: Path) -> Iterator[RawExportIntakeResult]:
     """Inspect supported raw exports under a private raw directory."""
 
-    bound_policy = bind_runtime_resource_policy(None)
+    bound_policy = bind_runtime_resource_policy(None, allow_implicit_active=False)
     raw_root = Path(root)
 
     def iter_inspections() -> Iterator[RawExportIntakeResult]:

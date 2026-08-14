@@ -188,3 +188,112 @@ def test_suspended_public_read_rejects_a_second_independent_root(
             )
     finally:
         first.close()  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    "root_name",
+    (
+        "csmar_interim_frames",
+        "csmar_interim_materialize",
+        "csmar_raw_files",
+        "csmar_raw_dataset_files",
+        "csmar_raw_inspect",
+        "csmar_raw_tree",
+        "csmar_raw_chunks",
+        "binance_interim_frames",
+        "binance_interim_materialize",
+        "a_share_processed_materialize",
+        "crypto_processed_materialize",
+    ),
+)
+def test_source_market_public_roots_reject_ambient_policy(
+    root_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.contracts.ids import SourceId
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        materializer as a_share_materializer,
+    )
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        materializer as crypto_materializer,
+    )
+    from quant_research_platform.sources.binance import interim as binance_interim
+    from quant_research_platform.sources.csmar import interim as csmar_interim
+    from quant_research_platform.sources.csmar import raw_exports as csmar_raw
+    from quant_research_platform.sources.csmar.raw_schemas import RAW_TABLE_CONTRACTS
+    from quant_research_platform.storage.layout import StorageLayout
+
+    policy = _policy(8)
+    layout = StorageLayout(project_root=tmp_path)
+    monkeypatch.setattr(
+        csmar_interim,
+        "_materialize_interim_data",
+        lambda **_: object(),
+    )
+    monkeypatch.setattr(
+        a_share_materializer,
+        "_materialize_processed_data_with_policy",
+        lambda **_: {},
+    )
+    monkeypatch.setattr(
+        crypto_materializer,
+        "_materialize_processed_data_with_policy",
+        lambda **_: {},
+    )
+
+    def invoke() -> None:
+        if root_name == "csmar_interim_frames":
+            csmar_interim.iter_interim_frames(
+                data_id=csmar_interim.DEFAULT_INTERIM_DATA_IDS[0],
+                input_files=(),
+                start_date=None,
+                end_date=None,
+            )
+        elif root_name == "csmar_interim_materialize":
+            csmar_interim.materialize_interim_data(layout=layout, data_ids=())
+        elif root_name == "csmar_raw_files":
+            csmar_raw.iter_raw_export_files(tmp_path)
+        elif root_name == "csmar_raw_dataset_files":
+            csmar_raw.dataset_files_with_identity_by_id(tmp_path)
+        elif root_name == "csmar_raw_inspect":
+            csmar_raw.inspect_raw_export(tmp_path / "missing.csv")
+        elif root_name == "csmar_raw_tree":
+            csmar_raw.inspect_raw_export_tree(tmp_path)
+        elif root_name == "csmar_raw_chunks":
+            csmar_raw.iter_private_export_chunks(
+                tmp_path / "missing.csv",
+                dataset=next(iter(RAW_TABLE_CONTRACTS)),
+                chunksize=1,
+            )
+        elif root_name == "binance_interim_frames":
+            next(
+                binance_interim.iter_interim_frames(
+                    data_id=next(iter(binance_interim.INTERIM_COLUMNS_BY_DATA_ID)),
+                    input_files=(),
+                )
+            )
+        elif root_name == "binance_interim_materialize":
+            binance_interim.materialize_interim_data(layout, data_ids=())
+        elif root_name == "a_share_processed_materialize":
+            a_share_materializer.materialize_processed_data(
+                layout=layout,
+                source_id=SourceId("csmar"),
+                time_window=TimeWindow("2024-01-01", "2024-01-02"),
+                data_ids=(),
+            )
+        else:
+            crypto_materializer.materialize_processed_data(
+                layout=layout,
+                source_id=SourceId("binance"),
+                time_window=TimeWindow("2024-01-01", "2024-01-02"),
+                data_ids=(),
+            )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime_resource_policy_competing_root$",
+        ):
+            invoke()
