@@ -605,6 +605,59 @@ print(json.dumps(policy.memory_evidence()))
     assert evidence["peak_incremental_rss_bytes"] <= budget
 
 
+@pytest.mark.parametrize("preexisting_child", [False, True])
+def test_access_denied_fallback_uses_matching_rss_baseline(
+    preexisting_child: bool,
+) -> None:
+    code = f"""
+import json
+import subprocess
+import sys
+import time
+import quant_research_platform.runtime.resources as resources
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
+resources._RSS_SAMPLER_CODE = '''
+import psutil
+def deny_full_info(self):
+    raise psutil.AccessDenied(pid=self.pid)
+psutil.Process.memory_full_info = deny_full_info
+''' + resources._RSS_SAMPLER_CODE
+child = None
+if {preexisting_child!r}:
+    child_code = "import time; print('ready', flush=True); time.sleep(0.2)"
+    child = subprocess.Popen(
+        (sys.executable, "-c", child_code),
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=4 * 1024 * 1024)
+with runtime_resource_policy_scope(policy):
+    time.sleep(0.03)
+if child is not None:
+    child.wait(timeout=5)
+print(json.dumps(policy.memory_evidence()))
+"""
+
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+    completed = subprocess.run(
+        (sys.executable, "-c", code),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+    evidence = json.loads(completed.stdout)
+
+    assert evidence["status"] == "PASS"
+    assert evidence["fallback_sample_count"] > 0
+
+
 def test_sampler_cadence_is_diagnostic_not_memory_correctness() -> None:
     measurement = resources._OperationRssMeasurement(100, 600)
     measurement.state = "RETIRED"

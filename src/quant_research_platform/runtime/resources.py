@@ -48,8 +48,11 @@ pause_requested = False
 baseline = {}
 for value in sys.argv[8].split(","):
     if value:
-        pid, created, amount = value.split(":", 2)
-        baseline[(int(pid), float(created))] = int(amount)
+        pid, created, primary_amount, rss_amount = value.split(":", 3)
+        baseline[(int(pid), float(created))] = (
+            int(primary_amount),
+            int(rss_amount),
+        )
 peak = count = max_gap = last = 0
 fallback_count = 0
 sequence = 0
@@ -70,14 +73,14 @@ try:
                         amount = getattr(details, metric)
                         initial = baseline.get(identity)
                         incremental += amount if initial is None else max(
-                            0, amount - initial
+                            0, amount - initial[0]
                         )
                     except psutil.AccessDenied:
                         try:
                             amount = owned.memory_info().rss
                             initial = baseline.get(identity)
                             incremental += amount if initial is None else max(
-                                0, amount - initial
+                                0, amount - initial[1]
                             )
                             fallback_count += 1
                         except (psutil.NoSuchProcess, psutil.ZombieProcess):
@@ -175,7 +178,7 @@ class _OperationRssMeasurement:
     _paused_path: Path | None = None
     _retire_path: Path | None = None
     _metric: str = field(init=False)
-    _baseline: tuple[tuple[int, float, int], ...] = field(init=False)
+    _baseline: tuple[tuple[int, float, int, int], ...] = field(init=False)
 
     def __post_init__(self) -> None:
         self._metric, self._baseline = _process_tree_memory_baseline()
@@ -214,8 +217,8 @@ class _OperationRssMeasurement:
                 str(self._state_path),
                 self._metric,
                 ",".join(
-                    f"{pid}:{created}:{amount}"
-                    for pid, created, amount in self._baseline
+                    f"{pid}:{created}:{primary_amount}:{rss_amount}"
+                    for pid, created, primary_amount, rss_amount in self._baseline
                 ),
                 str(self._paused_path),
                 str(self._retire_path),
@@ -724,24 +727,26 @@ def _process_rss_bytes() -> int:
 
 def _process_tree_memory_baseline() -> tuple[
     str,
-    tuple[tuple[int, float, int], ...],
+    tuple[tuple[int, float, int, int], ...],
 ]:
     try:
         import psutil  # type: ignore[import-not-found]
 
         parent = psutil.Process()
         parent_info = parent.memory_full_info()
-        metric = (
-            "pss"
-            if hasattr(parent_info, "pss")
-            else "uss"
-        )
-        baseline: list[tuple[int, float, int]] = []
+        metric = "pss" if hasattr(parent_info, "pss") else "uss"
+        baseline: list[tuple[int, float, int, int]] = []
         for owned in (parent, *parent.children(recursive=True)):
             try:
                 details = owned.memory_full_info()
-                amount = getattr(details, metric)
-                baseline.append((owned.pid, owned.create_time(), int(amount)))
+                baseline.append(
+                    (
+                        owned.pid,
+                        owned.create_time(),
+                        int(getattr(details, metric)),
+                        int(details.rss),
+                    )
+                )
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 pass
         return metric, tuple(sorted(baseline))
