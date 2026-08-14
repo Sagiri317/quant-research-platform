@@ -260,7 +260,7 @@ def require_raw_resource_policy(
 def logical_record_limit_bytes(policy: RuntimeResourcePolicy) -> int:
     """Return the source-local limit for one indivisible CSV record."""
 
-    return min(policy.remaining_memory_bytes, MAX_LOGICAL_RECORD_BYTES)
+    return MAX_LOGICAL_RECORD_BYTES
 
 
 @cache

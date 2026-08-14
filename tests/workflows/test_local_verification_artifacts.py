@@ -373,9 +373,9 @@ def test_final_rss_rejection_keeps_replacement_private(
     marker = run_root / "old-good.txt"
     marker.write_text("old-good\n", encoding="utf-8")
     policy = capture_test_policy(
-        available_memory_bytes=1024,
+        available_memory_bytes=1024 * 1024,
         rss_bytes=100,
-        explicit_cap_bytes=600,
+        explicit_cap_bytes=600 * 1024,
     )
     measurement = policy._measurement  # noqa: SLF001
     original_payload = measurement._payload  # type: ignore[attr-defined]  # noqa: SLF001

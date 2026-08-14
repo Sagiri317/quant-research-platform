@@ -202,7 +202,8 @@ def test_source_input_physical_reads_use_owner_resource_policy(
         source_input_data_ids=(MARKET_BARS_DATA_ID, "trading_calendar"),
     )
     policy = capture_test_policy(
-        available_memory_bytes=32 * 1024,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 24_576,
     )
     observed_targets: list[int] = []
 
@@ -590,7 +591,8 @@ def test_invalid_chunk_target_rejection_happens_before_dataset_session_acquisiti
 
 def test_a_share_indivisible_output_rejects_hard_budget() -> None:
     policy = capture_test_policy(
-        available_memory_bytes=100,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 75,
     )
     output = pd.DataFrame({"value": ["x" * 256]})
 

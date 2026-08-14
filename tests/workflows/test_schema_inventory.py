@@ -308,7 +308,8 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1_000,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 750,
     )
     monkeypatch.setattr(
         schema_inventory,
@@ -348,7 +349,7 @@ def test_schema_inventory_item_state_is_admitted_before_aggregation(
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1024,
+        explicit_cap_bytes=64 * 1024 + 960,
     )
     artifact_root = (
         tmp_path / "data" / "processed" / "a_share" / "market_bars" / "demo"

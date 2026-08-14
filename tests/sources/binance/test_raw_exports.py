@@ -63,8 +63,8 @@ def test_binance_raw_export_rejects_oversized_record_before_json_decode(
     envelope["padding"] = "x" * 8_000
     _write_jsonl(path, envelope)
     policy = capture_test_policy(
-        available_memory_bytes=4096,
-        explicit_cap_bytes=4096,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 3072,
     )
     monkeypatch.setattr(
         raw_exports,

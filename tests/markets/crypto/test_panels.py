@@ -502,8 +502,8 @@ def test_trade_reducer_admits_target_and_output_before_constructor_allocation(
         ignore_index=True,
     )
     policy = capture_test_policy(
-        available_memory_bytes=4096,
-        explicit_cap_bytes=4096,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 3072,
     )
     monkeypatch.setattr(
         module.pd,
@@ -603,8 +603,8 @@ def test_market_panel_admits_merge_before_calling_pandas_owner(
         ),
     )
     policy = capture_test_policy(
-        available_memory_bytes=64 * 1024,
-        explicit_cap_bytes=64 * 1024,
+        available_memory_bytes=256 * 1024,
+        explicit_cap_bytes=64 * 1024 + 49_152,
     )
     prepared = pd.DataFrame({"market_id": ["crypto"] * 100})
 
@@ -623,8 +623,8 @@ def test_market_panel_admits_merge_before_calling_pandas_owner(
 def test_depth_reducer_admits_chunk_before_normalization() -> None:
     module = _panel_input_reducers_module()
     policy = capture_test_policy(
-        available_memory_bytes=64 * 1024,
-        explicit_cap_bytes=64 * 1024,
+        available_memory_bytes=256 * 1024,
+        explicit_cap_bytes=64 * 1024 + 49_152,
     )
     depth = pd.concat([_ordered_depth_levels_frame()] * 500, ignore_index=True)
 

@@ -14,7 +14,7 @@ import pandas as pd
 MIB = 1024 * 1024
 _TASK_MEMORY_CEILING_NUMERATOR = 4
 _TASK_MEMORY_CEILING_DENOMINATOR = 5
-_TASK_MEMORY_MARGIN_DENOMINATOR = 16
+_PLANNING_UNCERTAINTY_BYTES = 64 * 1024
 
 
 @dataclass(slots=True)
@@ -147,6 +147,7 @@ class RuntimeResourcePolicy:
     rss0_bytes: int
     task_memory_budget_bytes: int
     hard_memory_budget_bytes: int
+    planning_uncertainty_bytes: int
     _ledger: _ReservationLedger
     _measurement: _OperationRssMeasurement
 
@@ -184,10 +185,7 @@ class RuntimeResourcePolicy:
         )
         if explicit_cap is not None:
             hard_budget = min(hard_budget, explicit_cap)
-        planning_budget = hard_budget - max(
-            1,
-            hard_budget // _TASK_MEMORY_MARGIN_DENOMINATOR,
-        )
+        planning_budget = hard_budget - _PLANNING_UNCERTAINTY_BYTES
         if planning_budget <= 0:
             raise ValueError("invalid_runtime_resource_available_memory")
         measurement = _operation_rss_measurement(rss0, hard_budget)
@@ -196,6 +194,11 @@ class RuntimeResourcePolicy:
         object.__setattr__(policy, "rss0_bytes", rss0)
         object.__setattr__(policy, "task_memory_budget_bytes", planning_budget)
         object.__setattr__(policy, "hard_memory_budget_bytes", hard_budget)
+        object.__setattr__(
+            policy,
+            "planning_uncertainty_bytes",
+            _PLANNING_UNCERTAINTY_BYTES,
+        )
         object.__setattr__(policy, "_ledger", _ReservationLedger())
         object.__setattr__(policy, "_measurement", measurement)
         return policy
@@ -246,6 +249,7 @@ class RuntimeResourcePolicy:
             "rss0_bytes": self.rss0_bytes,
             "task_memory_budget_bytes": self.task_memory_budget_bytes,
             "hard_memory_budget_bytes": self.hard_memory_budget_bytes,
+            "planning_uncertainty_bytes": self.planning_uncertainty_bytes,
         }
 
     def memory_evidence(self) -> dict[str, int | float | str]:

@@ -559,7 +559,8 @@ def test_panel_dependent_validation_includes_prior_written_baseline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1_000,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 750,
     )
     observed: list[int] = []
     receipt = SimpleNamespace(
@@ -1058,7 +1059,8 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=4096,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 3072,
     )
     inspection = _inspection("market_panel_1m")
     observed: list[RuntimeResourcePolicy] = []

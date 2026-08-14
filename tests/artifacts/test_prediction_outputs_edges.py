@@ -101,9 +101,9 @@ def test_public_artifact_final_memory_rejection_keeps_target_private(
 ) -> None:
     target = tmp_path / "artifact"
     policy = capture_test_policy(
-        available_memory_bytes=1024,
+        available_memory_bytes=1024 * 1024,
         rss_bytes=100,
-        explicit_cap_bytes=600,
+        explicit_cap_bytes=600 * 1024,
     )
     measurement = policy._measurement  # noqa: SLF001
     original_payload = measurement._payload  # type: ignore[attr-defined]  # noqa: SLF001

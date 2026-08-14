@@ -246,7 +246,11 @@ def test_portfolio_result_explicit_close_owns_operation_root(tmp_path) -> None:
 def test_portfolio_result_context_preserves_body_primary() -> None:
     primary = ValueError("body_primary")
     closed: list[bool] = []
-    policy = capture_test_policy(available_memory_bytes=1024, rss_bytes=100)
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024,
+        rss_bytes=100,
+        explicit_cap_bytes=64 * 1024 + 768,
+    )
     scope = portfolio_runner.runtime_resource_policy_scope(policy)
     scope.__enter__()
 
@@ -275,9 +279,9 @@ def test_portfolio_result_context_preserves_body_primary() -> None:
 
 def test_portfolio_lazy_result_keeps_final_rejection_terminal(monkeypatch) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1024,
+        available_memory_bytes=1024 * 1024,
         rss_bytes=100,
-        explicit_cap_bytes=600,
+        explicit_cap_bytes=600 * 1024,
     )
     measurement = policy._measurement  # noqa: SLF001
     original_payload = measurement._payload  # type: ignore[attr-defined]  # noqa: SLF001

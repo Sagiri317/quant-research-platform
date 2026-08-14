@@ -81,12 +81,14 @@ def capture_storage_test_policy(
     *,
     working_headroom_bytes: int,
 ) -> RuntimeResourcePolicy:
-    from quant_research_platform.storage import _dataset_writing
+    from quant_research_platform.storage import _dataset_physical, _dataset_writing
 
     return capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=(
             _dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+            + _dataset_physical._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
             + working_headroom_bytes
+            + 64 * 1024
         ),
     )

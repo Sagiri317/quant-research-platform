@@ -227,7 +227,8 @@ def test_complete_time_sized_frames_rejects_single_timestamp_over_budget() -> No
         }
     )
     policy = capture_test_policy(
-        available_memory_bytes=1_000,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 750,
     )
 
     with pytest.raises(
@@ -306,7 +307,7 @@ def test_time_chunk_admission_precedes_timestamp_conversion(
     )
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1,
+        explicit_cap_bytes=64 * 1024 + 1,
     )
 
     def reject_conversion(*_args, **_kwargs):  # noqa: ANN002, ANN003
@@ -373,7 +374,8 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
         }
     )
     policy = capture_test_policy(
-        available_memory_bytes=1_000,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 750,
     )
 
     def reject_concat(*_args, **_kwargs):  # noqa: ANN002, ANN003

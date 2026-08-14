@@ -1155,7 +1155,7 @@ def test_private_export_batch_target_adapts_to_measured_frame_payload() -> None:
     )
 
     assert compact_target == policy.remaining_memory_bytes // 2
-    assert expanded_target == 2 * logical_bytes
+    assert expanded_target == policy.remaining_memory_bytes // 16
     assert expanded_target < compact_target
 
 
@@ -3097,8 +3097,8 @@ def test_csmar_interim_uses_one_observed_downshift_then_fixed_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1000,
-        explicit_cap_bytes=100,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 94,
     )
     frame = pd.DataFrame(
         {

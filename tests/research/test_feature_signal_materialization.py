@@ -100,8 +100,8 @@ def test_feature_transform_admits_before_result_copy(
         output_columns=("factor_rank",),
     )
     policy = capture_test_policy(
-        available_memory_bytes=1024,
-        explicit_cap_bytes=1,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 1,
     )
     monkeypatch.setattr(
         pd.DataFrame,
@@ -153,8 +153,8 @@ def test_signal_materialization_admits_before_result_copy(
         transform="zscore",
     )
     policy = capture_test_policy(
-        available_memory_bytes=1024,
-        explicit_cap_bytes=1,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 1,
     )
 
     monkeypatch.setattr(

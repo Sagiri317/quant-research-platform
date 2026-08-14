@@ -80,8 +80,10 @@ from tests.storage.low_level_fixtures import (
 
 
 def _issued_test_policy(task_bytes: int = 16 * 1024**2) -> RuntimeResourcePolicy:
+    planning_bytes = task_bytes - max(1, task_bytes // 16)
     return capture_test_policy(
-        available_memory_bytes=task_bytes * 5 // 4,
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=64 * 1024 + planning_bytes,
     )
 
 
@@ -95,7 +97,7 @@ def _writer_test_policy(
     )
     return capture_test_policy(
         available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=(planning_bytes * 16 + 14) // 15,
+        explicit_cap_bytes=64 * 1024 + planning_bytes,
     )
 
 
@@ -517,8 +519,8 @@ def test_writer_reserves_complete_fixed_owner_before_sqlite_or_input(
 
     monkeypatch.setattr(dataset_inventory.sqlite3, "connect", reject_connect)
     policy = capture_test_policy(
-        available_memory_bytes=2560,
-        explicit_cap_bytes=2048,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 1920,
     )
 
     with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
@@ -4103,7 +4105,8 @@ def test_fingerprint_reserves_many_partition_counters_before_traversal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=16 * 1024,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 12_288,
     )
     traversals = 0
 

@@ -339,7 +339,8 @@ def test_research_time_key_scan_uses_payload_target(
     observed_targets: list[int] = []
     timestamps = pd.date_range("2026-01-01", periods=20, freq="min")
     policy = capture_test_policy(
-        available_memory_bytes=1024,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 768,
     )
     session = SimpleNamespace(path_selection=None, close=lambda: None)
     monkeypatch.setattr(
@@ -381,7 +382,8 @@ def test_research_time_key_scan_preserves_single_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=320,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 240,
     )
     session = SimpleNamespace(path_selection=None, close=lambda: None)
     monkeypatch.setattr(
@@ -415,7 +417,8 @@ def test_research_time_key_scan_closes_iterator_before_view_cleanup(
 ) -> None:
     events: list[str] = []
     policy = capture_test_policy(
-        available_memory_bytes=1024,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 768,
     )
 
     class Inventory:
@@ -474,7 +477,8 @@ def test_research_view_cleanup_preserves_active_primary(
 ) -> None:
     primary = primary_type("body_primary")
     policy = capture_test_policy(
-        available_memory_bytes=1024,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 768,
     )
     window = TimeWindow("2026-01-01", "2026-01-01")
 
@@ -613,7 +617,8 @@ def test_research_processed_input_uses_task_budget_for_materialization(
     dataset_spec = make_research_dataset_catalog().get("demo")
     processed_spec = processed_catalog.get("demo_factors")
     policy = capture_test_policy(
-        available_memory_bytes=12 * 1024,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 9216,
     )
     observed: dict[str, object] = {}
     columns = assembler_module._processed_input_columns(
@@ -660,7 +665,8 @@ def test_research_join_preflights_merged_output_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1_000,
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 750,
     )
     base = pd.DataFrame({"id": [1], "left": [1]})
     right = pd.DataFrame({"id": [1], "right": [1]})
@@ -703,7 +709,8 @@ def test_research_join_preflights_final_projection_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=50_000,
+        available_memory_bytes=256 * 1024,
+        explicit_cap_bytes=64 * 1024 + 37_500,
     )
     frame = pd.DataFrame({"id": range(1_000), "value": [1.0] * 1_000})
     monkeypatch.setattr(

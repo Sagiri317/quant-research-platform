@@ -480,7 +480,11 @@ def test_prediction_runner_accepts_equivalent_timezone_representations() -> None
 
 
 def test_prediction_lazy_root_waits_for_chunks_and_metadata(monkeypatch) -> None:
-    policy = capture_test_policy(available_memory_bytes=1024, rss_bytes=100)
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024,
+        rss_bytes=100,
+        explicit_cap_bytes=64 * 1024 + 768,
+    )
     configured = SimpleNamespace(model_id="model", candidate_model_ids=())
     monkeypatch.setattr(prediction_runner, "preflight_model_specs", lambda _specs: None)
     monkeypatch.setattr(
@@ -517,7 +521,11 @@ def test_prediction_lazy_root_waits_for_chunks_and_metadata(monkeypatch) -> None
 
 
 def test_prediction_result_explicit_close_owns_operation_root(monkeypatch) -> None:
-    policy = capture_test_policy(available_memory_bytes=1024, rss_bytes=100)
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024,
+        rss_bytes=100,
+        explicit_cap_bytes=64 * 1024 + 768,
+    )
     configured = SimpleNamespace(model_id="model", candidate_model_ids=())
     monkeypatch.setattr(prediction_runner, "preflight_model_specs", lambda _specs: None)
     monkeypatch.setattr(
@@ -552,7 +560,11 @@ def test_prediction_result_explicit_close_owns_operation_root(monkeypatch) -> No
 def test_prediction_result_context_preserves_body_primary() -> None:
     primary = ValueError("body_primary")
     closed: list[bool] = []
-    policy = capture_test_policy(available_memory_bytes=1024, rss_bytes=100)
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024,
+        rss_bytes=100,
+        explicit_cap_bytes=64 * 1024 + 768,
+    )
     scope = prediction_runner.runtime_resource_policy_scope(policy)
     scope.__enter__()
 
@@ -582,9 +594,9 @@ def test_prediction_result_context_preserves_body_primary() -> None:
 
 def test_prediction_lazy_result_keeps_final_rejection_terminal(monkeypatch) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1024,
+        available_memory_bytes=1024 * 1024,
         rss_bytes=100,
-        explicit_cap_bytes=600,
+        explicit_cap_bytes=600 * 1024,
     )
     measurement = policy._measurement  # noqa: SLF001
     original_payload = measurement._payload  # type: ignore[attr-defined]  # noqa: SLF001

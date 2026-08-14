@@ -53,10 +53,11 @@ def test_runtime_resource_policy_captures_one_shot_budget_inputs(
     assert policy.to_payload() == {
         "captured_available_memory_bytes": 10 * GIB,
         "rss0_bytes": 512 * MIB,
-        "task_memory_budget_bytes": 15 * GIB // 8,
+        "task_memory_budget_bytes": 2 * GIB - 64 * 1024,
         "hard_memory_budget_bytes": 2 * GIB,
+        "planning_uncertainty_bytes": 64 * 1024,
     }
-    assert policy.remaining_memory_bytes == 15 * GIB // 8
+    assert policy.remaining_memory_bytes == 2 * GIB - 64 * 1024
 
 
 def test_measurement_is_created_after_one_shot_budget_capture(
@@ -75,7 +76,7 @@ def test_measurement_is_created_after_one_shot_budget_capture(
 
     def build_measurement(rss0_bytes: int, hard_budget_bytes: int) -> Measurement:
         assert events == ["available0", "rss0"]
-        assert (rss0_bytes, hard_budget_bytes) == (100, 600)
+        assert (rss0_bytes, hard_budget_bytes) == (100, 600 * 1024)
         events.append("measurement")
         return measurement
 
@@ -87,7 +88,7 @@ def test_measurement_is_created_after_one_shot_budget_capture(
     monkeypatch.setattr(
         resources,
         "_available_memory_bytes",
-        lambda: events.append("available0") or 1000,
+        lambda: events.append("available0") or MIB,
     )
     monkeypatch.setattr(
         resources,
@@ -95,7 +96,7 @@ def test_measurement_is_created_after_one_shot_budget_capture(
         lambda: events.append("rss0") or 100,
     )
 
-    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)
 
     assert events == ["available0", "rss0", "measurement"]
     assert policy._measurement is measurement  # noqa: SLF001
@@ -136,30 +137,38 @@ def test_explicit_cap_can_only_lower_eighty_percent_budget(
     high_cap = RuntimeResourcePolicy.capture(explicit_cap_bytes=20 * GIB)
     low_cap = RuntimeResourcePolicy.capture(explicit_cap_bytes=2 * GIB)
 
-    assert uncapped.task_memory_budget_bytes == 15 * GIB // 2
+    assert uncapped.task_memory_budget_bytes == 8 * GIB - 64 * 1024
     assert uncapped.hard_memory_budget_bytes == 8 * GIB
-    assert high_cap.task_memory_budget_bytes == 15 * GIB // 2
+    assert high_cap.task_memory_budget_bytes == 8 * GIB - 64 * 1024
     assert high_cap.hard_memory_budget_bytes == 8 * GIB
-    assert low_cap.task_memory_budget_bytes == 15 * GIB // 8
+    assert low_cap.task_memory_budget_bytes == 2 * GIB - 64 * 1024
     assert low_cap.hard_memory_budget_bytes == 2 * GIB
 
 
-def test_planning_target_keeps_margin_below_hard_guard(
+def test_planning_uncertainty_is_fixed_for_small_and_large_hard_guards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
-    monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
-    monkeypatch.setattr(
-        resources,
-        "_operation_rss_measurement",
-        lambda *_args: resources._OperationRssMeasurement(100, 800),
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1024 * GIB)
+    monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 0)
+
+    small = RuntimeResourcePolicy.capture(explicit_cap_bytes=32 * MIB)
+    large = RuntimeResourcePolicy.capture(explicit_cap_bytes=512 * GIB)
+
+    for policy in (small, large):
+        assert policy.planning_uncertainty_bytes == 64 * 1024
+        assert policy.task_memory_budget_bytes == (
+            policy.hard_memory_budget_bytes - policy.planning_uncertainty_bytes
+        )
+        assert policy.task_memory_budget_bytes < policy.hard_memory_budget_bytes
+        assert policy.to_payload()["planning_uncertainty_bytes"] == 64 * 1024
+
+    assert small.hard_memory_budget_bytes == 32 * MIB
+    assert large.hard_memory_budget_bytes == 512 * GIB
+    assert (
+        small.planning_uncertainty_bytes
+        == large.planning_uncertainty_bytes
+        == 64 * 1024
     )
-
-    policy = RuntimeResourcePolicy.capture()
-
-    assert policy.task_memory_budget_bytes == 750
-    assert policy.hard_memory_budget_bytes == 800
-    assert policy.remaining_memory_bytes == 750
 
 
 @pytest.mark.parametrize(
@@ -209,25 +218,25 @@ def test_capture_requires_exact_positive_explicit_cap(value: object) -> None:
 
 def test_runtime_resource_policy_uses_one_shared_reservation_ledger() -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1000,
+        available_memory_bytes=MIB,
         rss_bytes=100,
-        explicit_cap_bytes=600,
+        explicit_cap_bytes=600 * 1024,
     )
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("storage", 400):
-            assert policy.reserved_memory_bytes == 400
-            assert policy.remaining_memory_bytes == 163
+        with policy.reserve("storage", 400 * 1024):
+            assert policy.reserved_memory_bytes == 400 * 1024
+            assert policy.remaining_memory_bytes == 136 * 1024
             with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-                with policy.reserve("research", 164):
+                with policy.reserve("research", 136 * 1024 + 1):
                     pass
         assert policy.reserved_memory_bytes == 0
-        assert policy.remaining_memory_bytes == 563
+        assert policy.remaining_memory_bytes == 536 * 1024
 
 
 def test_same_policy_scopes_can_close_non_lifo_without_retiring_root() -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1000,
+        available_memory_bytes=MIB,
         rss_bytes=100,
     )
     outer = runtime_resource_policy_scope(policy)
@@ -273,14 +282,14 @@ def test_root_scope_records_one_checkpoint_peak_and_fails_over_budget(
                 "status": "FAIL",
             }
 
-    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: MIB)
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
     monkeypatch.setattr(
         resources,
         "_operation_rss_measurement",
         lambda *_args: Measurement(),
     )
-    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)
 
     with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
         with runtime_resource_policy_scope(policy):
@@ -330,14 +339,14 @@ def test_finish_checkpoints_before_retiring_operation_telemetry(
                 "status": "PASS",
             }
 
-    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: MIB)
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
     monkeypatch.setattr(
         resources,
         "_operation_rss_measurement",
         lambda *_args: Measurement(),
     )
-    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)
 
     with runtime_resource_policy_scope(policy):
         policy.finish_memory_measurement()
@@ -380,14 +389,14 @@ def test_final_rejection_samples_through_rollback_cleanup(
             }
 
     measurement = Measurement()
-    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: MIB)
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
     monkeypatch.setattr(
         resources,
         "_operation_rss_measurement",
         lambda *_args: measurement,
     )
-    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)
 
     def rollback() -> None:
         assert measurement.state == "ACTIVE"
@@ -436,14 +445,14 @@ def test_sampler_stop_failure_still_rolls_back_publication(
                 "status": "PASS",
             }
 
-    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: MIB)
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
     monkeypatch.setattr(
         resources,
         "_operation_rss_measurement",
         lambda *_args: Measurement(),
     )
-    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)
 
     with pytest.raises(RuntimeError, match="runtime_rss_sampler_failed"):
         with runtime_resource_policy_scope(policy):
@@ -634,14 +643,14 @@ def test_active_primary_is_not_replaced_by_telemetry_stop_failure(
                 "status": "FAIL",
             }
 
-    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: MIB)
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
     monkeypatch.setattr(
         resources,
         "_operation_rss_measurement",
         lambda *_args: Measurement(),
     )
-    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)
 
     with pytest.raises(KeyboardInterrupt):
         with runtime_resource_policy_scope(policy):
@@ -650,7 +659,7 @@ def test_active_primary_is_not_replaced_by_telemetry_stop_failure(
 
 def test_reservation_release_preserves_active_primary() -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1000,
+        available_memory_bytes=MIB,
         rss_bytes=100,
     )
 
@@ -665,7 +674,7 @@ def test_reservation_release_preserves_active_primary() -> None:
 @pytest.mark.parametrize("owner", ["", None, 1])
 def test_reservation_requires_nonempty_string_owner(owner: object) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1000,
+        available_memory_bytes=MIB,
         rss_bytes=100,
     )
     with runtime_resource_policy_scope(policy):
@@ -679,7 +688,7 @@ def test_reservation_requires_nonempty_string_owner(owner: object) -> None:
 
 def test_reservation_requires_active_policy() -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1000,
+        available_memory_bytes=MIB,
         rss_bytes=100,
     )
 

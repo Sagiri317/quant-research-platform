@@ -28,9 +28,9 @@ _NAMESPACE_PRIMARY_TYPES = (KeyboardInterrupt,)
 
 def test_atomic_publish_rejects_failed_active_rss_checkpoint(tmp_path: Path) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1024,
+        available_memory_bytes=1024 * 1024,
         rss_bytes=100,
-        explicit_cap_bytes=600,
+        explicit_cap_bytes=600 * 1024,
     )
     measurement = policy._measurement  # noqa: SLF001
 
@@ -56,9 +56,9 @@ def test_atomic_publish_has_no_rejection_after_irreversible_rename(
     tmp_path: Path,
 ) -> None:
     policy = capture_test_policy(
-        available_memory_bytes=1024,
+        available_memory_bytes=1024 * 1024,
         rss_bytes=100,
-        explicit_cap_bytes=600,
+        explicit_cap_bytes=600 * 1024,
     )
     measurement = policy._measurement  # noqa: SLF001
     checkpoints = 0
