@@ -31,9 +31,6 @@ from quant_research_platform.storage._dataset_reading import (
     open_dataset_session,
 )
 from quant_research_platform.storage._dataset_writing import (
-    DatasetWriteChunk,
-)
-from quant_research_platform.storage._dataset_writing import (
     write_dataset as _write_dataset,
 )
 from quant_research_platform.storage.datasets import (
@@ -48,7 +45,7 @@ class MaterializationCapacityExceeded(ValueError):
 
 def write_and_inspect(
     spec: ProcessedDataSpec,
-    frame: pd.DataFrame | Iterable[pd.DataFrame | DatasetWriteChunk],
+    frame: pd.DataFrame | Iterable[pd.DataFrame],
     *,
     layout: StorageLayout,
     time_window: TimeWindow,
@@ -131,14 +128,14 @@ def read_processed_inputs_for_spec(
 
 
 def iter_sorted_output_chunks(
-    frame: pd.DataFrame | Iterable[pd.DataFrame | DatasetWriteChunk],
+    frame: pd.DataFrame | Iterable[pd.DataFrame],
     spec: ProcessedDataSpec,
     *,
     resource_policy: RuntimeResourcePolicy,
-) -> Iterable[pd.DataFrame | DatasetWriteChunk]:
+) -> Iterable[pd.DataFrame]:
     bound_policy = bind_runtime_resource_policy(resource_policy)
 
-    def activate() -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+    def activate() -> Iterator[pd.DataFrame]:
         assert bound_policy is not None
         with runtime_resource_policy_scope(bound_policy):
             frames = iter((frame,)) if isinstance(frame, pd.DataFrame) else iter(frame)
@@ -146,24 +143,14 @@ def iter_sorted_output_chunks(
             with closing_dataset_iterator(frames):
                 while True:
                     try:
-                        publication = next(frames)
+                        chunk = next(frames)
                     except StopIteration:
                         break
-                    retained_payload_bytes = (
-                        publication.retained_payload_bytes
-                        if isinstance(publication, DatasetWriteChunk)
-                        else None
-                    )
-                    chunk = (
-                        publication.frame
-                        if isinstance(publication, DatasetWriteChunk)
-                        else publication
-                    )
                     if tuple(chunk.columns) != spec.required_columns:
                         raise ValueError("a_share_output_columns_mismatch")
                     output = chunk
                     if output.empty:
-                        del output, chunk, publication
+                        del output, chunk
                         continue
                     output_bytes = pandas_frame_payload_bytes(output)
                     key_temporary_bytes = len(output) * (
@@ -172,7 +159,6 @@ def iter_sorted_output_chunks(
                     )
                     if (
                         bound_policy.reserved_memory_bytes
-                        + (retained_payload_bytes or 0)
                         + output_bytes
                         + key_temporary_bytes
                         > bound_policy.task_memory_budget_bytes
@@ -216,12 +202,8 @@ def iter_sorted_output_chunks(
                         )
                         del expected, key_arrays, order
                     del chunk
-                    yield (
-                        output
-                        if retained_payload_bytes is None
-                        else DatasetWriteChunk(output, retained_payload_bytes)
-                    )
-                    del output, publication
+                    yield output
+                    del output
 
     return activate()
 

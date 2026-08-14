@@ -104,19 +104,6 @@ class DatasetWriteReceipt:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class DatasetWriteChunk:
-    frame: pd.DataFrame
-    retained_payload_bytes: int
-
-    def __post_init__(self) -> None:
-        if (
-            type(self.retained_payload_bytes) is not int
-            or self.retained_payload_bytes < 0
-        ):
-            raise ValueError("invalid_dataset_retained_payload_bytes")
-
-
 @dataclass
 class _WriteStats:
     spec: DataSpec
@@ -390,7 +377,7 @@ class _WriteStats:
 
 def write_dataset(
     dataset_root: Path,
-    data: pd.DataFrame | Iterable[pd.DataFrame | DatasetWriteChunk],
+    data: pd.DataFrame | Iterable[pd.DataFrame],
     *,
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
@@ -427,7 +414,7 @@ def write_dataset(
 
 def _write_dataset_under_policy(
     final_root: Path,
-    data: pd.DataFrame | Iterable[pd.DataFrame | DatasetWriteChunk],
+    data: pd.DataFrame | Iterable[pd.DataFrame],
     *,
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None,
@@ -546,7 +533,7 @@ def _write_dataset_under_policy(
 
 
 def _write_contents(
-    chunks: Iterator[pd.DataFrame | DatasetWriteChunk],
+    chunks: Iterator[pd.DataFrame],
     root: Path,
     *,
     spec: DataSpec,
@@ -572,13 +559,9 @@ def _write_contents(
     saw_empty_schema = False
     while True:
         try:
-            publication = next(chunks)
+            chunk = next(chunks)
         except StopIteration:
             break
-        if isinstance(publication, DatasetWriteChunk):
-            chunk = publication.frame
-        else:
-            chunk = publication
         accumulator.retained_payload_bytes = minimum_retained_payload_bytes
         if type(chunk) is not pd.DataFrame:
             raise TypeError("invalid_dataset_chunk")
@@ -622,9 +605,7 @@ def _write_contents(
                     arrow_bound = (
                         _ARROW_FRAME_FIXED_BYTES
                         + frame_bytes
-                        + len(frame)
-                        * len(frame.columns)
-                        * _ARROW_CELL_OVERHEAD_BYTES
+                        + len(frame) * len(frame.columns) * _ARROW_CELL_OVERHEAD_BYTES
                     )
                     arrow_cast_bound = arrow_bound
                     with resource_policy.reserve(
@@ -642,7 +623,7 @@ def _write_contents(
                         target_chunk_bytes=metadata_budget,
                     )
                 saw_empty_schema = True
-                del frame, logical_dtypes, declared, chunk, publication
+                del frame, logical_dtypes, declared, chunk
                 continue
             for bounded_frame in iter_bounded_frame_chunks(
                 declared,
@@ -659,8 +640,8 @@ def _write_contents(
                     "storage.dataset.prepare",
                     prepared_bound,
                 ):
-                    prepared_frame, bounded_logical_dtypes = (
-                        accumulator.prepare_frame(bounded_frame)
+                    prepared_frame, bounded_logical_dtypes = accumulator.prepare_frame(
+                        bounded_frame
                     )
                     prepared_frame_bytes = pandas_frame_payload_bytes(prepared_frame)
                     if prepared_frame_bytes > prepared_bound:
@@ -757,7 +738,7 @@ def _write_contents(
                                 del written_paths
                             del partition, partition_frame
                     del prepared_frame, bounded_logical_dtypes, bounded_frame
-            del declared, chunk, publication
+            del declared, chunk
     if accumulator.row_count == 0 and not saw_empty_schema:
         raise ValueError("empty_dataset_schema_missing")
     if saw_empty_schema:
@@ -833,9 +814,7 @@ def _dataset_write_operator_target_bytes(
         + (3 if partitioned else 0)
         + 2 * len(frame.columns) * _ARROW_CELL_OVERHEAD_BYTES
     )
-    rows = available // (
-        payload_overlaps * payload_per_row + row_overlap_bytes
-    )
+    rows = available // (payload_overlaps * payload_per_row + row_overlap_bytes)
     if rows <= 0:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget")
     return rows * payload_per_row

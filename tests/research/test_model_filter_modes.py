@@ -634,11 +634,7 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
             )
 
 
-def test_model_native_fit_workspace_is_admitted_before_backend_fit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from sklearn.ensemble import RandomForestRegressor
-
+def test_model_fit_envelope_does_not_recharge_preloaded_backend_image() -> None:
     rows = 32
     frame = pd.DataFrame(
         {
@@ -656,24 +652,45 @@ def test_model_native_fit_workspace_is_admitted_before_backend_fit(
         max_train_rows=rows,
     )
     estimator = build_estimator_from_model_spec(spec)
-    monkeypatch.setattr(
-        RandomForestRegressor,
-        "fit",
-        lambda *_args, **_kwargs: pytest.fail("backend fit entered before admission"),
+    feature_frame = model_fitting._selected_frame_payload_bytes(  # noqa: SLF001
+        frame,
+        list(spec.input_columns),
+    )
+    dense_features = rows * len(spec.input_columns) * np.dtype(np.float64).itemsize
+    work_bytes = (
+        feature_frame
+        + 2 * dense_features
+        + rows * np.dtype(np.float64).itemsize
+        + rows * np.dtype(np.intp).itemsize
+        + (len(spec.input_columns) + 1) ** 2 * np.dtype(np.float64).itemsize
+        + model_fitting._parallel_estimator_workspace_bytes(  # noqa: SLF001
+            rows=rows,
+            inputs=len(spec.input_columns),
+            spec=spec,
+        )
+    )
+    y = frame["label"].to_numpy()
+    admitted_bytes = (
+        pandas_frame_payload_bytes(frame)
+        + int(y.nbytes)
+        + work_bytes
+        + model_fitting._model_state_upper_bound_bytes(frame, spec)  # noqa: SLF001
     )
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024 * 1024,
-        explicit_cap_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=admitted_bytes,
     )
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+        assert (
             model_fitting.fit_predictor(
                 spec,
                 training=frame,
-                y=frame["label"].to_numpy(),
+                y=y,
                 estimator=estimator,
             )
+            is estimator
+        )
 
 
 def test_model_threads_are_bound_to_physical_cores(
@@ -700,6 +717,65 @@ def test_model_threads_are_bound_to_physical_cores(
     assert build_estimator_from_model_spec(all_core).n_jobs == 2
     with pytest.raises(ValueError, match="model_threads_exceed_physical_cores"):
         build_estimator_from_model_spec(too_many)
+
+
+def test_model_threads_adapt_to_live_planning_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_supervised.psutil, "cpu_count", lambda **_kwargs: 4)
+    rows = 32
+    frame = pd.DataFrame(
+        {
+            "factor": np.linspace(0.0, 1.0, rows),
+            "label": np.linspace(1.0, 2.0, rows),
+        }
+    )
+    spec = ModelSpec(
+        model_id="adaptive_forest",
+        model_algorithm="random_forest_regressor",
+        input_factor_columns=("factor",),
+        label_column="label",
+        hyperparameters={"n_estimators": 1, "n_jobs": -1},
+        max_train_rows=rows,
+    )
+    base = model_fitting._estimator_fit_working_set_bytes(  # noqa: SLF001
+        frame,
+        spec,
+        threads=0,
+    )
+    one = model_fitting._estimator_fit_working_set_bytes(  # noqa: SLF001
+        frame,
+        spec,
+        threads=1,
+    )
+    input_bytes = pandas_frame_payload_bytes(frame) + frame["label"].to_numpy().nbytes
+    state_bytes = model_fitting._model_state_upper_bound_bytes(frame, spec)  # noqa: SLF001
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024 * 1024,
+        explicit_cap_bytes=input_bytes + state_bytes + base + 2 * (one - base),
+    )
+
+    class Estimator:
+        n_jobs = 4
+
+        def set_params(self, **params):  # noqa: ANN003, ANN202
+            self.n_jobs = params["n_jobs"]
+            return self
+
+        def fit(self, *_args):  # noqa: ANN002, ANN202
+            assert self.n_jobs == 2
+
+    estimator = Estimator()
+    with runtime_resource_policy_scope(policy):
+        assert (
+            model_fitting.fit_predictor(
+                spec,
+                training=frame,
+                y=frame["label"].to_numpy(),
+                estimator=estimator,
+            )
+            is estimator
+        )
 
 
 def test_linear_tsqr_reserves_first_frame_across_second_pull(
@@ -786,12 +862,15 @@ def test_estimator_target_and_model_state_stay_reserved_through_metadata(
 
     def admitted_to_numpy(series, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
         dtype = kwargs.get("dtype", args[0] if args else None)
-        if series.name == "label" and dtype is not None and np.dtype(dtype) == np.dtype(
-            "float64"
+        if (
+            series.name == "label"
+            and dtype is not None
+            and np.dtype(dtype) == np.dtype("float64")
         ):
-            assert policy.reserved_memory_bytes >= len(series) * np.dtype(
-                "float64"
-            ).itemsize
+            assert (
+                policy.reserved_memory_bytes
+                >= len(series) * np.dtype("float64").itemsize
+            )
         return original_to_numpy(series, *args, **kwargs)
 
     class Estimator:
@@ -1048,6 +1127,7 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design() -> None:
     )
 
     assert result.coefficients.tolist() == pytest.approx(expected.tolist())
+
 
 def test_model_rejects_tradable_sample_filter_mode() -> None:
     with pytest.raises(ValueError, match="unsupported_model_sample_filter_mode"):

@@ -14,7 +14,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import quant_research_platform.storage._dataset_writing as dataset_writing
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.catalog.labels import LabelCatalog
@@ -103,7 +102,7 @@ FORWARD_RETURN_20D_COLUMN = forward_return_label_column(20)
 def _scoped_active_materialization_batches(
     *args: object,
     **kwargs: object,
-) -> Iterator[dataset_writing.DatasetWriteChunk]:
+) -> Iterator[pd.DataFrame]:
     policy = kwargs["resource_policy"]
     assert isinstance(policy, RuntimeResourcePolicy)
     policy_scope = runtime_resource_policy_scope(policy)
@@ -117,7 +116,7 @@ def _scoped_active_materialization_batches(
         policy_scope.__exit__(*sys.exc_info())
         raise
 
-    def consume() -> Iterator[dataset_writing.DatasetWriteChunk]:
+    def consume() -> Iterator[pd.DataFrame]:
         try:
             yield from batches
         finally:
@@ -1047,9 +1046,7 @@ def test_write_paths_reserve_registered_output_before_transform(
     else:
         live_frames = (panel,)
     retained_bytes = 0
-    live_frame_bytes = sum(
-        pandas_frame_payload_bytes(frame) for frame in live_frames
-    )
+    live_frame_bytes = sum(pandas_frame_payload_bytes(frame) for frame in live_frames)
 
     monkeypatch.setattr(
         materialization_planning,
@@ -1076,6 +1073,7 @@ def test_write_paths_reserve_registered_output_before_transform(
         "iter_active_materialization_batches",
         invoke_materialize,
     )
+
     def consume_frames(_spec, frames, **_kwargs):  # noqa: ANN001, ANN202
         with runtime_resource_policy_scope(policy):
             return tuple(frames)
@@ -1521,7 +1519,7 @@ def test_dataset_coverage_preflights_int64_normalization_before_transform(
     assert observed == [retained_state_bytes + 2 * np.dtype(np.int64).itemsize]
 
 
-def test_adaptive_materialization_publication_carries_upstream_retained_bytes() -> None:
+def test_adaptive_materialization_yields_plain_frame() -> None:
     frame = pd.DataFrame({"asset_id": ["a"], "timestamp": [pd.Timestamp("2024-01-02")]})
     policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
@@ -1539,8 +1537,7 @@ def test_adaptive_materialization_publication_carries_upstream_retained_bytes() 
         )
 
     assert len(publications) == 1
-    assert publications[0].frame is frame
-    assert publications[0].retained_payload_bytes == 123
+    assert publications[0] is frame
 
 
 def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
@@ -1572,50 +1569,6 @@ def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
                 session_context=(pd.Timestamp("2024-01-02"),),
                 retained_payload_bytes=policy.task_memory_budget_bytes - 1,
                 materialize=materialize,
-            )
-        )
-
-
-def test_sorted_publication_reserves_upstream_before_key_temporaries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    spec = _processed_spec(
-        MARKET_PANEL_DATA_ID,
-        kind=ProcessedDataKind.PANEL,
-        columns=(*platform_entity_time_key(), "payload"),
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    frame = pd.DataFrame(
-        {
-            "market_id": ["a_share"],
-            "asset_id": ["asset"],
-            "timestamp": [pd.Timestamp("2024-01-02")],
-            "payload": [1.0],
-        }
-    )
-    publication = dataset_writing.DatasetWriteChunk(
-        frame, policy.task_memory_budget_bytes - 1
-    )
-    monkeypatch.setattr(
-        materialization_io.np,
-        "lexsort",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("key temporaries allocated before retained admission")
-        ),
-    )
-
-    with pytest.raises(
-        materialization_io.MaterializationCapacityExceeded,
-        match="a_share_known_payloads_exceed_task_memory_budget",
-    ):
-        next(
-            iter(
-                materialization_io.iter_sorted_output_chunks(
-                    (publication,), spec, resource_policy=policy
-                )
             )
         )
 
@@ -1827,7 +1780,7 @@ def test_active_materialization_owner_deduplicates_planned_batches_and_closes(
         materialize=materialize,
     )
     result = pd.concat(
-        (publication.frame for publication in publications),
+        publications,
         ignore_index=True,
     )
 
@@ -1900,15 +1853,7 @@ def test_active_materialization_orders_late_discovered_assets_before_publication
         spec,
         resource_policy=policy,
     )
-    result = pd.concat(
-        (
-            publication.frame
-            if isinstance(publication, dataset_writing.DatasetWriteChunk)
-            else publication
-            for publication in ordered
-        ),
-        ignore_index=True,
-    )
+    result = pd.concat(ordered, ignore_index=True)
 
     assert result["asset_id"].tolist() == ["a", "b"]
 
@@ -1971,6 +1916,7 @@ def test_active_materialization_owns_stable_target_sessions_across_capacity_spli
     policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
+
     def mutate_source() -> None:
         replacement = pd.Timestamp("2099-01-03")
         position = original.index(target[-1])
@@ -2006,10 +1952,10 @@ def test_active_materialization_owns_stable_target_sessions_across_capacity_spli
         output_row_bound_bytes=policy.task_memory_budget_bytes // 2,
         materialize=materialize,
     )
-    first = next(output).frame["timestamp"].iloc[0]
+    first = next(output)["timestamp"].iloc[0]
     if mutation_timing == "between_pulls":
         mutate_source()
-    observed = (first, *(item.frame["timestamp"].iloc[0] for item in output))
+    observed = (first, *(item["timestamp"].iloc[0] for item in output))
 
     assert observed == tuple(target)
 
@@ -2190,7 +2136,7 @@ def test_active_materialization_owner_preserves_indexed_target_session_view(
     assert len(callback_sessions) == 1
     assert type(callback_sessions[0]) is tuple
     assert len(callback_sessions[0]) == 2
-    assert publications[0].frame["timestamp"].tolist() == [pd.Timestamp("2024-01-02")]
+    assert publications[0]["timestamp"].tolist() == [pd.Timestamp("2024-01-02")]
 
 
 @pytest.mark.parametrize(
@@ -2523,6 +2469,7 @@ def test_active_asset_discovery_admits_before_string_validation(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
+
     class UnencodableAsset(str):
         def encode(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
             pytest.fail("asset_encoding_before_admission")
@@ -3274,10 +3221,7 @@ def _write_interim_frame(
     )
 
 
-@pytest.mark.parametrize("enveloped", (False, True))
-def test_sorted_output_releases_previous_publication_before_upstream_next(
-    enveloped: bool,
-) -> None:
+def test_sorted_output_releases_previous_publication_before_upstream_next() -> None:
     import weakref
 
     spec = _processed_spec("publication_liveness", kind=ProcessedDataKind.PANEL)
@@ -3290,7 +3234,7 @@ def test_sorted_output_releases_previous_publication_before_upstream_next(
         nonlocal first
         current = first
         first = None
-        yield (dataset_writing.DatasetWriteChunk(current, 0) if enveloped else current)
+        yield current
         del current
         assert first_reference() is None
         yield second

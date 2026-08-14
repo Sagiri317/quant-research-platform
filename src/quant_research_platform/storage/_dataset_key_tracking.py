@@ -112,7 +112,7 @@ class ExactPrimaryKeyIndex:
         require_unaliased_path(
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
-        free_disk_bytes = require_free_disk_headroom(
+        require_free_disk_headroom(
             self._scratch_parent,
             reserve_bytes=_EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES,
         )
@@ -143,7 +143,9 @@ class ExactPrimaryKeyIndex:
             require_owned_scratch(temporary_directory, temporary_identity)
             connection = sqlite3.connect(self.database_path)
             connection.execute("PRAGMA page_size=1024")
-            sqlite_page_limit = free_disk_bytes // EXACT_KEY_SQLITE_PAGE_BYTES
+            sqlite_page_limit = (
+                _EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES // EXACT_KEY_SQLITE_PAGE_BYTES
+            )
             connection.execute(f"PRAGMA main.max_page_count={sqlite_page_limit}")
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
@@ -546,10 +548,7 @@ class ExactPrimaryKeyIndex:
                 reserve_bytes = 2 * (
                     logical_bytes + 4 * EXACT_KEY_SQLITE_PAGE_BYTES * row_count
                 )
-                require_free_disk_headroom(
-                    self._scratch_parent,
-                    reserve_bytes=reserve_bytes,
-                )
+                self._admit_physical_write(reserve_bytes)
             connection.execute(
                 "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
                 "SELECT namespace, payload, MIN(value) FROM comparison_rows "
@@ -777,12 +776,29 @@ class ExactPrimaryKeyIndex:
             )
             if reserve_bytes > admitted_bytes:
                 admitted_bytes = max(_DISK_RESERVE_BATCH_BYTES, reserve_bytes)
-                require_free_disk_headroom(
-                    self._scratch_parent,
-                    reserve_bytes=admitted_bytes,
-                )
+                self._admit_physical_write(admitted_bytes)
             admitted_bytes -= reserve_bytes
             yield namespace, payload, value
+
+    def _admit_physical_write(self, reserve_bytes: int) -> None:
+        schemas = ("main", "temp")
+        require_free_disk_headroom(
+            self._scratch_parent,
+            reserve_bytes=reserve_bytes * len(schemas),
+        )
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("exact_primary_key_index_not_open")
+        growth_pages = (
+            reserve_bytes + EXACT_KEY_SQLITE_PAGE_BYTES - 1
+        ) // EXACT_KEY_SQLITE_PAGE_BYTES
+        for schema in schemas:
+            current_pages = int(
+                connection.execute(f"PRAGMA {schema}.page_count").fetchone()[0]
+            )
+            connection.execute(
+                f"PRAGMA {schema}.max_page_count={current_pages + growth_pages}"
+            )
 
 
 class _BoundedPayloadSink:

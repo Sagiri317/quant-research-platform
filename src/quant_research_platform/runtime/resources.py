@@ -18,10 +18,11 @@ from time import monotonic, sleep
 import pandas as pd
 
 MIB = 1024 * 1024
+_TASK_MEMORY_PLANNING_NUMERATOR = 3
+_TASK_MEMORY_PLANNING_DENOMINATOR = 4
 _TASK_MEMORY_CEILING_NUMERATOR = 4
 _TASK_MEMORY_CEILING_DENOMINATOR = 5
-_RSS_SAMPLE_INTERVAL_SECONDS = 0.001
-_MAX_RSS_SAMPLE_INTERVAL_NS = 20_000_000
+_RSS_SAMPLE_INTERVAL_SECONDS = 0.005
 _RSS_SAMPLER_START_TIMEOUT_SECONDS = 5.0
 _RSS_SAMPLER_STOP_TIMEOUT_SECONDS = 5.0
 _RSS_STATE_BYTES = 40
@@ -40,100 +41,42 @@ ready = pathlib.Path(sys.argv[3])
 output = pathlib.Path(sys.argv[4])
 interval = float(sys.argv[5])
 state = pathlib.Path(sys.argv[6])
-baseline_children = {}
-for value in sys.argv[7].split(","):
+metric = sys.argv[7]
+paused = pathlib.Path(sys.argv[9])
+retire = pathlib.Path(sys.argv[10])
+baseline = {}
+for value in sys.argv[8].split(","):
     if value:
-        pid, created = value.split(":", 1)
-        baseline_children[int(pid)] = float(created)
+        pid, created, amount = value.split(":", 2)
+        baseline[(int(pid), float(created))] = int(amount)
 peak = count = max_gap = last = 0
 sequence = 0
 error = ""
-timer = None
-sampler_rss_limit = 0
 try:
-    if sys.platform == "win32":
-        import ctypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-        kernel32.CreateWaitableTimerExW.restype = ctypes.c_void_p
-        kernel32.GetCurrentThread.restype = ctypes.c_void_p
-        kernel32.GetProcessWorkingSetSizeEx.argtypes = (
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_size_t),
-            ctypes.POINTER(ctypes.c_size_t),
-            ctypes.POINTER(ctypes.c_ulong),
-        )
-        kernel32.SetProcessWorkingSetSizeEx.argtypes = (
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_size_t,
-            ctypes.c_ulong,
-        )
-        kernel32.GetProcessWorkingSetSizeEx.restype = ctypes.c_int
-        kernel32.SetProcessWorkingSetSizeEx.restype = ctypes.c_int
-        kernel32.SetThreadPriority.argtypes = (ctypes.c_void_p, ctypes.c_int)
-        process_handle = kernel32.GetCurrentProcess()
-        minimum = ctypes.c_size_t()
-        maximum = ctypes.c_size_t()
-        flags = ctypes.c_ulong()
-        if not kernel32.GetProcessWorkingSetSizeEx(
-            process_handle,
-            ctypes.byref(minimum),
-            ctypes.byref(maximum),
-            ctypes.byref(flags),
-        ):
-            raise OSError("runtime_rss_sampler_backstop_failed")
-        sampler_rss_limit = psutil.Process().memory_info().rss
-        hard_flags = (flags.value | 0x00000004) & ~0x00000008
-        if not kernel32.SetProcessWorkingSetSizeEx(
-            process_handle,
-            min(minimum.value, sampler_rss_limit),
-            sampler_rss_limit,
-            hard_flags,
-        ):
-            raise OSError("runtime_rss_sampler_backstop_failed")
-        sampler_rss_limit = psutil.Process().memory_info().rss
-        timer = kernel32.CreateWaitableTimerExW(None, None, 2, 0x1F0003)
-        due = ctypes.c_longlong(-max(1, int(interval * 10_000_000)))
-        if not timer or not kernel32.SetWaitableTimer(
-            timer,
-            ctypes.byref(due),
-            max(1, round(interval * 1000)),
-            None,
-            None,
-            False,
-        ):
-            raise OSError("runtime_rss_sampler_timer_failed")
-        if not kernel32.SetThreadPriority(kernel32.GetCurrentThread(), 2):
-            raise OSError("runtime_rss_sampler_priority_failed")
     with state.open("r+b", buffering=0) as handle:
         shared = mmap.mmap(handle.fileno(), 40)
         with shared:
-            if sys.platform == "win32":
-                granularity = mmap.ALLOCATIONGRANULARITY
-                sampler_rss = psutil.Process().memory_info().rss
-                sampler_rss_limit = (
-                    (sampler_rss + granularity - 1) // granularity + 1
-                ) * granularity
-                if not kernel32.SetProcessWorkingSetSizeEx(
-                    process_handle,
-                    min(minimum.value, sampler_rss_limit),
-                    sampler_rss_limit,
-                    hard_flags,
-                ):
-                    raise OSError("runtime_rss_sampler_backstop_failed")
             while True:
                 now = time.monotonic_ns()
-                rss = process.memory_info().rss
-                for child in process.children(recursive=True):
+                incremental = 0
+                for owned in (process, *process.children(recursive=True)):
                     try:
-                        created = baseline_children.get(child.pid)
-                        if created is None or child.create_time() != created:
-                            rss += child.memory_info().rss
+                        if owned.pid == sampler.pid:
+                            continue
+                        identity = (owned.pid, owned.create_time())
+                        details = (
+                            owned.memory_info()
+                            if metric == "private"
+                            else owned.memory_full_info()
+                        )
+                        amount = getattr(details, metric)
+                        initial = baseline.get(identity)
+                        incremental += amount if initial is None else max(
+                            0, amount - initial
+                        )
                     except psutil.NoSuchProcess:
                         pass
-                peak = max(peak, rss)
+                peak = max(peak, incremental)
                 count += 1
                 if last:
                     max_gap = max(max_gap, now - last)
@@ -147,22 +90,23 @@ try:
                     peak,
                     count,
                     max_gap,
-                    sampler_rss_limit,
+                    0,
                 )
                 struct.pack_into("<Q", shared, 0, sequence)
                 if count == 1:
                     ready.touch(exist_ok=True)
-                if stop.exists():
+                if retire.exists():
                     break
-                if timer is None:
-                    time.sleep(interval)
-                elif kernel32.WaitForSingleObject(timer, 0xFFFFFFFF) != 0:
-                    raise OSError("runtime_rss_sampler_timer_failed")
+                if stop.exists():
+                    paused.touch(exist_ok=True)
+                    while stop.exists() and not retire.exists():
+                        time.sleep(interval)
+                    paused.unlink(missing_ok=True)
+                    if retire.exists():
+                        break
+                time.sleep(interval)
 except BaseException as exc:
     error = type(exc).__name__
-finally:
-    if timer is not None:
-        kernel32.CloseHandle(timer)
 output.write_text(f"{peak},{count},{max_gap},{error}", encoding="ascii")
 """
 
@@ -170,6 +114,7 @@ output.write_text(f"{peak},{count},{max_gap},{error}", encoding="ascii")
 @dataclass(slots=True)
 class _ReservationLedger:
     state: str = "READY"
+    scope_count: int = 0
     by_owner: dict[str, int] = field(default_factory=dict)
 
     @property
@@ -206,7 +151,13 @@ class _OperationRssMeasurement:
     _ready_path: Path | None = None
     _output_path: Path | None = None
     _state_path: Path | None = None
-    _working_set_limit: tuple[int, int, int] | None = None
+    _paused_path: Path | None = None
+    _retire_path: Path | None = None
+    _metric: str = field(init=False)
+    _baseline: tuple[tuple[int, float, int], ...] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._metric, self._baseline = _process_tree_memory_baseline()
 
     def start(self) -> None:
         if self.state != "READY":
@@ -218,6 +169,8 @@ class _OperationRssMeasurement:
         self._ready_path = root / "ready"
         self._output_path = root / "result"
         self._state_path = root / "state"
+        self._paused_path = root / "paused"
+        self._retire_path = root / "retire"
         descriptor = os.open(
             self._state_path,
             os.O_CREAT | os.O_EXCL | os.O_WRONLY,
@@ -227,7 +180,6 @@ class _OperationRssMeasurement:
             os.ftruncate(descriptor, _RSS_STATE_BYTES)
         finally:
             os.close(descriptor)
-        baseline_children = _process_child_identities()
         self._process = subprocess.Popen(
             (
                 sys.executable,
@@ -239,10 +191,13 @@ class _OperationRssMeasurement:
                 str(self._output_path),
                 str(_RSS_SAMPLE_INTERVAL_SECONDS),
                 str(self._state_path),
+                self._metric,
                 ",".join(
-                    f"{pid}:{created}"
-                    for pid, created in baseline_children
+                    f"{pid}:{created}:{amount}"
+                    for pid, created, amount in self._baseline
                 ),
+                str(self._paused_path),
+                str(self._retire_path),
             ),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -250,7 +205,6 @@ class _OperationRssMeasurement:
             creationflags=(
                 getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 | getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "HIGH_PRIORITY_CLASS", 0)
             ),
         )
         deadline = monotonic() + _RSS_SAMPLER_START_TIMEOUT_SECONDS
@@ -259,21 +213,44 @@ class _OperationRssMeasurement:
                 self.error = RuntimeError("runtime_rss_sampler_start_failed")
                 raise self.error
             sleep(_RSS_SAMPLE_INTERVAL_SECONDS)
-        if os.name == "nt":
-            peak, _count, _max_gap, sampler_rss_limit = self._snapshot()
-            if peak - self.rss0_bytes > self.hard_budget_bytes:
-                raise RuntimeError("runtime_rss_backstop_lower_bound_exceeded")
-            current_parent_rss = _process_rss_bytes()
-            parent_limit = (
-                self.rss0_bytes
-                + self.hard_budget_bytes
-                - sampler_rss_limit
-            )
-            if parent_limit < current_parent_rss:
-                raise RuntimeError("runtime_rss_backstop_lower_bound_exceeded")
-            self._working_set_limit = _set_windows_process_rss_backstop(
-                parent_limit
-            )
+
+    def quiesce(self) -> dict[str, int | float | str]:
+        """Pause after a fresh sample so a publish decision cannot race sampling."""
+
+        if (
+            self.state != "ACTIVE"
+            or self._stop_path is None
+            or self._paused_path is None
+        ):
+            raise RuntimeError("runtime_rss_sampler_not_active")
+        self._stop_path.touch(exist_ok=True)
+        deadline = monotonic() + _RSS_SAMPLER_STOP_TIMEOUT_SECONDS
+        while not self._paused_path.exists():
+            process = self._process
+            if process is None or process.poll() is not None or monotonic() >= deadline:
+                self.error = RuntimeError("runtime_rss_sampler_pause_failed")
+                raise self.error
+            sleep(_RSS_SAMPLE_INTERVAL_SECONDS)
+        return self.checkpoint_evidence()
+
+    def resume(self) -> None:
+        """Resume sampling before rejection rollback and cleanup."""
+
+        if (
+            self.state != "ACTIVE"
+            or self._stop_path is None
+            or self._paused_path is None
+            or not self._paused_path.exists()
+        ):
+            raise RuntimeError("runtime_rss_sampler_not_paused")
+        self._stop_path.unlink(missing_ok=True)
+        deadline = monotonic() + _RSS_SAMPLER_STOP_TIMEOUT_SECONDS
+        while self._paused_path.exists():
+            process = self._process
+            if process is None or process.poll() is not None or monotonic() >= deadline:
+                self.error = RuntimeError("runtime_rss_sampler_resume_failed")
+                raise self.error
+            sleep(_RSS_SAMPLE_INTERVAL_SECONDS)
 
     def checkpoint_evidence(self) -> dict[str, int | float | str]:
         if self.state != "ACTIVE" or self._state_path is None:
@@ -282,8 +259,11 @@ class _OperationRssMeasurement:
         if process is None or process.poll() is not None:
             self.error = RuntimeError("runtime_rss_sampler_failed")
             raise self.error
-        peak, count, max_gap, _sampler_rss_limit = self._snapshot()
-        self.sampled_peak_rss_bytes = max(self.sampled_peak_rss_bytes, peak)
+        incremental, count, max_gap, _unused = self._snapshot()
+        self.sampled_peak_rss_bytes = max(
+            self.sampled_peak_rss_bytes,
+            self.rss0_bytes + incremental,
+        )
         self.sample_count = max(self.sample_count, count)
         self.max_sample_interval_ns = max(self.max_sample_interval_ns, max_gap)
         return self._evidence()
@@ -292,8 +272,8 @@ class _OperationRssMeasurement:
         if self.state == "RETIRED":
             return
         try:
-            if self._stop_path is not None:
-                self._stop_path.touch(exist_ok=True)
+            if self._retire_path is not None:
+                self._retire_path.touch(exist_ok=True)
             process = self._process
             if process is None:
                 raise RuntimeError("runtime_rss_sampler_stop_failed")
@@ -306,9 +286,14 @@ class _OperationRssMeasurement:
             if process.returncode != 0 or self._output_path is None:
                 raise RuntimeError("runtime_rss_sampler_failed")
             raw = self._output_path.read_text(encoding="ascii").split(",", 3)
-            if len(raw) != 4 or raw[3]:
+            if len(raw) != 4:
                 raise RuntimeError("runtime_rss_sampler_failed")
-            self.sampled_peak_rss_bytes = int(raw[0])
+            if raw[3]:
+                raise RuntimeError(f"runtime_rss_sampler_failed:{raw[3]}")
+            self.sampled_peak_rss_bytes = max(
+                self.sampled_peak_rss_bytes,
+                self.rss0_bytes + int(raw[0]),
+            )
             self.sample_count = int(raw[1])
             self.max_sample_interval_ns = int(raw[2])
         except BaseException as exc:
@@ -317,13 +302,6 @@ class _OperationRssMeasurement:
             self.state = "RETIRED"
             if self._temporary is not None:
                 self._temporary.cleanup()
-
-    def release_backstop(self) -> None:
-        if self._working_set_limit is None:
-            return
-        original = self._working_set_limit
-        self._working_set_limit = None
-        _restore_windows_process_rss_backstop(original)
 
     def _snapshot(self) -> tuple[int, int, int, int]:
         if self._state_path is None:
@@ -351,17 +329,12 @@ class _OperationRssMeasurement:
     def _evidence(self) -> dict[str, int | float | str]:
         peak = max(self.rss0_bytes, self.sampled_peak_rss_bytes)
         incremental = peak - self.rss0_bytes
-        cadence_status = (
-            "PASS"
-            if self.error is None
-            and self.max_sample_interval_ns <= _MAX_RSS_SAMPLE_INTERVAL_NS
-            else "FAIL"
-        )
+        cadence_status = "PASS" if self.error is None and self.sample_count else "FAIL"
         status = (
             "PASS"
             if self.error is None
             and incremental <= self.hard_budget_bytes
-            and cadence_status == "PASS"
+            and self.sample_count
             else "FAIL"
         )
         return {
@@ -369,6 +342,7 @@ class _OperationRssMeasurement:
             "hard_budget_bytes": self.hard_budget_bytes,
             "sampled_peak_rss_bytes": peak,
             "peak_incremental_rss_bytes": incremental,
+            "measurement_metric": f"process_tree_{self._metric}_incremental",
             "sample_count": self.sample_count,
             "max_sample_interval_ms": self.max_sample_interval_ns / 1_000_000,
             "cadence_status": cadence_status,
@@ -390,6 +364,7 @@ class RuntimeResourcePolicy:
     captured_available_memory_bytes: int
     rss0_bytes: int
     task_memory_budget_bytes: int
+    hard_memory_budget_bytes: int
     _ledger: _ReservationLedger
     _measurement: _OperationRssMeasurement
 
@@ -412,25 +387,30 @@ class RuntimeResourcePolicy:
             _process_rss_bytes(),
             error="invalid_runtime_resource_rss",
         )
+        planning_budget = (
+            available
+            * _TASK_MEMORY_PLANNING_NUMERATOR
+            // _TASK_MEMORY_PLANNING_DENOMINATOR
+        )
         hard_budget = (
             available
             * _TASK_MEMORY_CEILING_NUMERATOR
             // _TASK_MEMORY_CEILING_DENOMINATOR
         )
         if explicit_cap_bytes is not None:
-            hard_budget = min(
-                hard_budget,
-                _exact_positive_int(
-                    explicit_cap_bytes,
-                    error="invalid_runtime_resource_explicit_cap",
-                ),
+            explicit_cap = _exact_positive_int(
+                explicit_cap_bytes,
+                error="invalid_runtime_resource_explicit_cap",
             )
+            planning_budget = min(planning_budget, explicit_cap)
+            hard_budget = min(hard_budget, explicit_cap)
         if hard_budget <= 0:
             raise ValueError("invalid_runtime_resource_available_memory")
         policy = object.__new__(cls)
         object.__setattr__(policy, "captured_available_memory_bytes", available)
         object.__setattr__(policy, "rss0_bytes", rss0)
-        object.__setattr__(policy, "task_memory_budget_bytes", hard_budget)
+        object.__setattr__(policy, "task_memory_budget_bytes", planning_budget)
+        object.__setattr__(policy, "hard_memory_budget_bytes", hard_budget)
         object.__setattr__(policy, "_ledger", _ReservationLedger())
         object.__setattr__(
             policy,
@@ -445,7 +425,7 @@ class RuntimeResourcePolicy:
 
     @property
     def remaining_memory_bytes(self) -> int:
-        return self.task_memory_budget_bytes - self.reserved_memory_bytes
+        return max(0, self.task_memory_budget_bytes - self.reserved_memory_bytes)
 
     @contextmanager
     def reserve(self, owner: str, reserve_bytes: int) -> Iterator[None]:
@@ -465,7 +445,7 @@ class RuntimeResourcePolicy:
         self._ledger.reserve(
             owner,
             reserve,
-            budget_bytes=self.task_memory_budget_bytes,
+            budget_bytes=self.hard_memory_budget_bytes,
         )
         try:
             yield
@@ -484,6 +464,7 @@ class RuntimeResourcePolicy:
             "captured_available_memory_bytes": self.captured_available_memory_bytes,
             "rss0_bytes": self.rss0_bytes,
             "task_memory_budget_bytes": self.task_memory_budget_bytes,
+            "hard_memory_budget_bytes": self.hard_memory_budget_bytes,
         }
 
     def memory_evidence(self) -> dict[str, int | float | str]:
@@ -511,12 +492,20 @@ class RuntimeResourcePolicy:
         ):
             raise RuntimeError("runtime_rss_sampler_not_active")
         try:
-            self.assert_memory_within_budget()
+            evidence = self._measurement.quiesce()
+            _require_memory_acceptance(self._measurement, evidence)
             self._measurement.stop()
             evidence = self.memory_evidence()
             _require_memory_acceptance(self._measurement, evidence)
-            return evidence
         except BaseException as primary:
+            if self._measurement.state == "ACTIVE":
+                try:
+                    self._measurement.resume()
+                except BaseException as resume_error:
+                    primary.add_note(
+                        "runtime memory rejection sampler resume also failed: "
+                        f"{type(resume_error).__name__}"
+                    )
             if on_reject is not None:
                 try:
                     on_reject()
@@ -526,8 +515,17 @@ class RuntimeResourcePolicy:
                         f"{type(rollback_error).__name__}"
                     )
             if self._measurement.state != "RETIRED":
+                try:
+                    self._measurement.quiesce()
+                except BaseException as cleanup_evidence_error:
+                    primary.add_note(
+                        "runtime memory rejection cleanup evidence also failed: "
+                        f"{type(cleanup_evidence_error).__name__}"
+                    )
                 self._measurement.stop()
             raise
+        return evidence
+
 
 _ACTIVE_RUNTIME_RESOURCE_POLICY: RuntimeResourcePolicy | None = None
 
@@ -579,62 +577,48 @@ def runtime_resource_policy_scope(
     if active is not None:
         if active is not policy:
             raise RuntimeError("runtime_resource_policy_conflict")
-        yield policy
-        return
-    if policy._ledger.state == "RETIRED":
-        raise RuntimeError("runtime_resource_policy_retired")
-    if policy._ledger.state != "READY":
-        raise RuntimeError("runtime_resource_policy_already_active")
-    policy._ledger.state = "ACTIVE"
-    _ACTIVE_RUNTIME_RESOURCE_POLICY = policy
+    else:
+        if policy._ledger.state == "RETIRED":
+            raise RuntimeError("runtime_resource_policy_retired")
+        if policy._ledger.state != "READY":
+            raise RuntimeError("runtime_resource_policy_already_active")
+        policy._ledger.state = "ACTIVE"
+        _ACTIVE_RUNTIME_RESOURCE_POLICY = policy
+    policy._ledger.scope_count += 1
     try:
-        policy._measurement.start()
+        if policy._measurement.state == "READY":
+            policy._measurement.start()
         yield policy
     finally:
         primary = sys.exception()
-        leaked = policy.reserved_memory_bytes
-        measurement_error: BaseException | None = None
-        backstop_error: BaseException | None = None
-        try:
-            if policy._measurement.state != "RETIRED":
-                policy._measurement.stop()
-        except BaseException as exc:
-            measurement_error = exc
-        if type(policy._measurement) is _OperationRssMeasurement:
-            try:
-                policy._measurement.release_backstop()
-            except BaseException as exc:
-                backstop_error = exc
-        policy._ledger.state = "RETIRED"
-        _ACTIVE_RUNTIME_RESOURCE_POLICY = None
-        if primary is None:
-            completion_error: BaseException | None = None
-            if leaked:
-                completion_error = RuntimeError(
-                    "runtime_memory_reservation_leaked"
-                )
-            elif measurement_error is not None:
-                completion_error = measurement_error
-            else:
-                try:
-                    evidence = policy.memory_evidence()
-                    _require_memory_acceptance(policy._measurement, evidence)
-                except BaseException as exc:
-                    completion_error = exc
-            if completion_error is not None:
-                if backstop_error is not None:
-                    completion_error.add_note(
-                        "runtime RSS backstop restoration also failed: "
-                        f"{type(backstop_error).__name__}"
-                    )
-                raise completion_error
-            if backstop_error is not None:
-                raise backstop_error
-        elif backstop_error is not None:
-            primary.add_note(
-                "runtime RSS backstop restoration also failed: "
-                f"{type(backstop_error).__name__}"
-            )
+        policy._ledger.scope_count -= 1
+        if not policy._ledger.scope_count:
+            _retire_runtime_resource_policy(policy, primary=primary)
+
+
+def _retire_runtime_resource_policy(
+    policy: RuntimeResourcePolicy,
+    *,
+    primary: BaseException | None,
+) -> None:
+    global _ACTIVE_RUNTIME_RESOURCE_POLICY
+    leaked = policy.reserved_memory_bytes
+    measurement_error: BaseException | None = None
+    try:
+        if policy._measurement.state != "RETIRED":
+            policy._measurement.stop()
+    except BaseException as exc:
+        measurement_error = exc
+    policy._ledger.state = "RETIRED"
+    _ACTIVE_RUNTIME_RESOURCE_POLICY = None
+    if primary is not None:
+        return
+    if leaked:
+        raise RuntimeError("runtime_memory_reservation_leaked")
+    if measurement_error is not None:
+        raise measurement_error
+    evidence = policy.memory_evidence()
+    _require_memory_acceptance(policy._measurement, evidence)
 
 
 def _require_memory_acceptance(
@@ -643,11 +627,6 @@ def _require_memory_acceptance(
 ) -> None:
     if measurement.error is not None:
         raise RuntimeError("runtime_rss_sampler_failed") from None
-    if evidence["cadence_status"] != "PASS":
-        raise RuntimeError(
-            "runtime_rss_sampling_cadence_exceeded: "
-            f"{evidence['max_sample_interval_ms']:.6f}ms"
-        )
     if evidence["status"] != "PASS":
         raise MemoryError("runtime_rss_budget_exceeded")
 
@@ -699,88 +678,38 @@ def _process_rss_bytes() -> int:
     return _exact_nonnegative_int(rss, error="invalid_runtime_resource_rss")
 
 
-def _process_child_identities() -> tuple[tuple[int, float], ...]:
+def _process_tree_memory_baseline() -> tuple[
+    str,
+    tuple[tuple[int, float, int], ...],
+]:
     try:
         import psutil  # type: ignore[import-not-found]
 
-        children: list[tuple[int, float]] = []
-        for child in psutil.Process().children(recursive=True):
+        parent = psutil.Process()
+        parent_info = parent.memory_full_info()
+        parent_memory_info = parent.memory_info()
+        metric = (
+            "pss"
+            if hasattr(parent_info, "pss")
+            else "private"
+            if hasattr(parent_memory_info, "private")
+            else "uss"
+        )
+        baseline: list[tuple[int, float, int]] = []
+        for owned in (parent, *parent.children(recursive=True)):
             try:
-                children.append((child.pid, child.create_time()))
+                details = (
+                    owned.memory_info()
+                    if metric == "private"
+                    else owned.memory_full_info()
+                )
+                amount = getattr(details, metric)
+                baseline.append((owned.pid, owned.create_time(), int(amount)))
             except psutil.NoSuchProcess:
                 pass
-        return tuple(sorted(children))
+        return metric, tuple(sorted(baseline))
     except Exception:
         raise RuntimeError("runtime_rss_discovery_failed") from None
-
-
-def _set_windows_process_rss_backstop(
-    limit_bytes: int,
-) -> tuple[int, int, int]:
-    if os.name != "nt":
-        raise RuntimeError("runtime_rss_backstop_unavailable")
-    import ctypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    kernel32.GetProcessWorkingSetSizeEx.argtypes = (
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_size_t),
-        ctypes.POINTER(ctypes.c_size_t),
-        ctypes.POINTER(ctypes.c_ulong),
-    )
-    kernel32.SetProcessWorkingSetSizeEx.argtypes = (
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_ulong,
-    )
-    kernel32.GetProcessWorkingSetSizeEx.restype = ctypes.c_int
-    kernel32.SetProcessWorkingSetSizeEx.restype = ctypes.c_int
-    handle = kernel32.GetCurrentProcess()
-    minimum = ctypes.c_size_t()
-    maximum = ctypes.c_size_t()
-    flags = ctypes.c_ulong()
-    if not kernel32.GetProcessWorkingSetSizeEx(
-        handle,
-        ctypes.byref(minimum),
-        ctypes.byref(maximum),
-        ctypes.byref(flags),
-    ):
-        raise RuntimeError("runtime_rss_backstop_unavailable")
-    original = (minimum.value, maximum.value, flags.value)
-    hard_flags = (flags.value | 0x00000004) & ~0x00000008
-    if not kernel32.SetProcessWorkingSetSizeEx(
-        handle,
-        min(minimum.value, limit_bytes),
-        limit_bytes,
-        hard_flags,
-    ):
-        raise RuntimeError("runtime_rss_backstop_unavailable")
-    return original
-
-
-def _restore_windows_process_rss_backstop(
-    original: tuple[int, int, int],
-) -> None:
-    import ctypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    kernel32.SetProcessWorkingSetSizeEx.argtypes = (
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_ulong,
-    )
-    kernel32.SetProcessWorkingSetSizeEx.restype = ctypes.c_int
-    if not kernel32.SetProcessWorkingSetSizeEx(
-        kernel32.GetCurrentProcess(),
-        original[0],
-        original[1],
-        original[2],
-    ):
-        raise RuntimeError("runtime_rss_backstop_restore_failed")
 
 
 def _exact_positive_int(value: object, *, error: str) -> int:

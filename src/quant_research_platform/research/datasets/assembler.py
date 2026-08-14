@@ -44,7 +44,6 @@ from quant_research_platform.storage._dataset_reading import (
 )
 from quant_research_platform.storage._dataset_schema import dataset_identity_payload
 from quant_research_platform.storage._dataset_writing import (
-    DatasetWriteChunk,
     DatasetWriteReceipt,
     write_dataset,
 )
@@ -154,7 +153,7 @@ def _iter_joined_processed_chunks(
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-) -> Iterator[DatasetWriteChunk]:
+) -> Iterator[pd.DataFrame]:
     policy = resource_policy
     base_data_id = _base_input_data_id(dataset_spec)
     time_keys = _time_keys_from_base_input(
@@ -164,8 +163,7 @@ def _iter_joined_processed_chunks(
         resource_policy=policy,
         retained_payload_bytes=max(
             0,
-            policy.reserved_memory_bytes
-            - sessions[base_data_id].retained_memory_bytes,
+            policy.reserved_memory_bytes - sessions[base_data_id].retained_memory_bytes,
         ),
     )
     if not time_keys:
@@ -203,12 +201,7 @@ def _iter_joined_processed_chunks(
                     raise ValueError(
                         "research_known_join_payloads_exceed_task_memory_budget"
                     )
-                yield DatasetWriteChunk(
-                    output,
-                    sum(
-                        session.retained_memory_bytes for session in sessions.values()
-                    ),
-                )
+                yield output
 
 
 def _join_processed_inputs(
@@ -310,9 +303,9 @@ def _join_processed_inputs(
                             dataset_spec=dataset_spec,
                             input_data_id=input_data_id,
                         )
-                    join_index_bytes = (
-                        len(assembled) + len(input_frame)
-                    ) * np.dtype(np.intp).itemsize
+                    join_index_bytes = (len(assembled) + len(input_frame)) * np.dtype(
+                        np.intp
+                    ).itemsize
                     with resource_policy.reserve(
                         "research.assembly.merge.workspace",
                         base_key_bytes + input_bytes + join_index_bytes,

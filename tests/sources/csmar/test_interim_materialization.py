@@ -19,7 +19,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-import quant_research_platform.storage._dataset_writing as dataset_writing
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -1055,7 +1054,7 @@ def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
             next(frames)
 
 
-def test_csmar_materialization_publishes_retained_upstream_state(
+def test_csmar_materialization_passes_plain_frames_to_writer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1077,14 +1076,7 @@ def test_csmar_materialization_publishes_retained_upstream_state(
     monkeypatch.setattr(
         interim,
         "_iter_interim_frames",
-        lambda **_kwargs: iter(
-            (
-                dataset_writing.DatasetWriteChunk(
-                    frame,
-                    interim.pandas_frame_payload_bytes(frame),
-                ),
-            )
-        ),
+        lambda **_kwargs: iter((frame,)),
     )
 
     def capture_write(_root, data, **_kwargs):  # noqa: ANN001, ANN003, ANN202
@@ -1102,10 +1094,7 @@ def test_csmar_materialization_publishes_retained_upstream_state(
         chunksize=1,
     )
 
-    assert isinstance(captured[0], dataset_writing.DatasetWriteChunk)
-    assert captured[0].retained_payload_bytes >= interim.pandas_frame_payload_bytes(
-        frame
-    )
+    assert captured == [frame]
 
 
 @pytest.mark.parametrize("data_id", ("trading_calendar", "index_info"))
@@ -3198,7 +3187,7 @@ def test_csmar_reference_dedup_delegates_typed_classification_to_storage(
     assert observed[0][1] == ("stock_name",)
 
 
-def test_csmar_reference_arrow_retry_precedes_exact_index_mutation(
+def test_csmar_reference_opaque_arrow_overrun_fails_before_index_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     classified_sizes: list[int] = []
@@ -3245,17 +3234,68 @@ def test_csmar_reference_arrow_retry_precedes_exact_index_mutation(
     )
 
     with runtime_resource_policy_scope(policy):
-        result = list(
-            interim._iter_deduped_reference_frames(
-                iter((frame,)),
+        with pytest.raises(
+            ValueError,
+            match="csmar_reference_working_set_exceeds_task_memory_budget",
+        ):
+            list(
+                interim._iter_deduped_reference_frames(
+                    iter((frame,)),
+                    data_id="stock_master",
+                    pruning_reports=[],
+                    scratch_parent=Path("."),
+                )
+            )
+
+    assert classified_sizes == []
+
+
+def test_csmar_interim_uses_one_observed_downshift_then_fixed_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=1000,
+        explicit_cap_bytes=100,
+    )
+    frame = pd.DataFrame(
+        {
+            "source_asset_id": [f"{position:06d}" for position in range(8)],
+            "timestamp": pd.date_range("2020-01-01", periods=8),
+        }
+    )
+    calls: list[int] = []
+
+    monkeypatch.setattr(
+        interim,
+        "iter_private_export_chunks_with_policy",
+        lambda *_args, **_kwargs: iter((frame,)),
+    )
+    monkeypatch.setattr(interim, "pandas_frame_payload_bytes", lambda _frame: 10)
+
+    def transform(candidate, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        calls.append(len(candidate))
+        if len(candidate) == len(frame):
+            raise interim._InterimCapacityExceeded(200, 100)  # noqa: SLF001
+        return candidate.copy(), {}
+
+    monkeypatch.setattr(interim, "_transform_interim_chunk", transform)
+
+    with runtime_resource_policy_scope(policy):
+        output = tuple(
+            interim._iter_pruned_interim_frames(
                 data_id="stock_master",
-                pruning_reports=[],
-                scratch_parent=Path("."),
+                raw_dataset="stock_master",
+                input_files=(Path("unused.csv"),),
+                start_date=None,
+                end_date=None,
+                overrides={},
+                chunksize=8,
+                pruning_reports=None,
             )
         )
 
-    assert classified_sizes == [1, 1, 1, 1]
-    assert sum(map(len, result)) == 4
+    assert calls == [8, 3, 3, 2]
+    assert sum(map(len, output)) == len(frame)
 
 
 def test_csmar_direct_lazy_iteration_captures_policy_before_first_raw_decode(
@@ -5068,55 +5108,6 @@ def test_interim_transform_variable_width_preflight_precedes_normalize(
         )
 
 
-def test_reference_dedup_admits_upstream_before_arrow(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
-    frame = pd.DataFrame(
-        {
-            "source_asset_id": ["000001"],
-            "timestamp": [pd.Timestamp("2020-01-01")],
-            "stock_name": ["demo"],
-        }
-    )
-    monkeypatch.setattr(
-        interim,
-        "pa",
-        SimpleNamespace(
-            Table=SimpleNamespace(
-                from_pandas=lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                    AssertionError("Arrow allocated before upstream admission")
-                )
-            )
-        ),
-    )
-
-    with (
-        runtime_resource_policy_scope(policy),
-        pytest.raises(
-            ValueError, match="csmar_reference_working_set_exceeds_task_memory_budget"
-        ),
-    ):
-        next(
-            interim._iter_deduped_reference_frames(
-                iter(
-                    (
-                        dataset_writing.DatasetWriteChunk(
-                            frame, policy.task_memory_budget_bytes
-                        ),
-                    )
-                ),
-                data_id="stock_master",
-                pruning_reports=None,
-                publication=True,
-                scratch_parent=Path("."),
-            )
-        )
-
-
 def test_public_interim_without_identity_uses_retained_private_raw_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5169,7 +5160,7 @@ def test_public_interim_without_identity_uses_retained_private_raw_owner(
     assert observed_cells and observed_cells[0] is not None
 
 
-def test_non_reference_publication_reports_additional_upstream_state(
+def test_non_reference_publication_keeps_upstream_alive_until_next_pull(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw = pd.DataFrame({"raw": ["owner"]})
@@ -5212,13 +5203,11 @@ def test_non_reference_publication_reports_additional_upstream_state(
             overrides={},
             chunksize=1,
             pruning_reports=None,
-            publication=True,
         )
         publication = next(publications)
 
-    assert isinstance(publication, dataset_writing.DatasetWriteChunk)
+    assert publication is pruned
     assert raw_reference() is not None
-    assert publication.retained_payload_bytes == raw_bytes
 
 
 @pytest.mark.parametrize(

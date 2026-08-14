@@ -30,6 +30,7 @@ import quant_research_platform.storage._dataset_comparison as dataset_comparison
 import quant_research_platform.storage._dataset_fingerprinting as dataset_fingerprinting
 import quant_research_platform.storage._dataset_inspection as dataset_inspection
 import quant_research_platform.storage._dataset_inventory as dataset_inventory
+import quant_research_platform.storage._dataset_key_tracking as dataset_key_tracking
 import quant_research_platform.storage._dataset_observation as dataset_observation
 import quant_research_platform.storage._dataset_physical as dataset_physical
 import quant_research_platform.storage._dataset_reading as dataset_reading
@@ -883,8 +884,8 @@ def test_converter_rejects_before_pandas_allocation_when_bound_exceeds_headroom(
         "_arrow_slice_to_pandas",
         reject_conversion,
     )
-    row_bytes, fixed_bytes = (
-        dataset_physical.record_batch_decoded_working_set_bounds(batch)
+    row_bytes, fixed_bytes = dataset_physical.record_batch_decoded_working_set_bounds(
+        batch
     )
     conversion_bound = (
         fixed_bytes
@@ -933,8 +934,8 @@ def test_converter_accounts_for_parent_buffers_and_previous_output(
     )
     output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
     target_chunk_bytes = max(output_bytes)
-    row_bytes, fixed_bytes = (
-        dataset_physical.record_batch_decoded_working_set_bounds(batch)
+    row_bytes, fixed_bytes = dataset_physical.record_batch_decoded_working_set_bounds(
+        batch
     )
     conversion_row_bytes = (
         row_bytes
@@ -1192,8 +1193,7 @@ def test_dataset_file_batches_do_not_double_count_reserved_previous_output(
 ) -> None:
     path = tmp_path / "part.parquet"
     batches = tuple(
-        pa.record_batch([pa.array([index])], names=["value"])
-        for index in range(2)
+        pa.record_batch([pa.array([index])], names=["value"]) for index in range(2)
     )
     expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
     output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
@@ -1281,9 +1281,7 @@ def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
     with dataset_reading.closing_dataset_iterator(converted):
         next(converted)
         with runtime_resource_policy_scope(policy):
-            remaining = (
-                policy.task_memory_budget_bytes - policy.reserved_memory_bytes
-            )
+            remaining = policy.task_memory_budget_bytes - policy.reserved_memory_bytes
             assert remaining > 0
             with policy.reserve(
                 "research.time.pending",
@@ -1377,7 +1375,7 @@ def test_dataset_file_batches_refresh_headroom_after_internal_release(
     )
 
 
-def test_variable_width_decode_rejects_before_first_arrow_pull(
+def test_legacy_row_group_does_not_false_reject_before_first_arrow_pull(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1406,10 +1404,7 @@ def test_variable_width_decode_rejects_before_first_arrow_pull(
 
     monkeypatch.setattr(dataset_physical.pq, "ParquetFile", ObservedParquetFile)
 
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
+    with pytest.raises(AssertionError, match="Arrow decode ran"):
         list(
             dataset_physical.iter_dataset_part_batches(
                 path,
@@ -1419,7 +1414,7 @@ def test_variable_width_decode_rejects_before_first_arrow_pull(
             )
         )
 
-    assert not pulled
+    assert pulled
 
 
 def test_categorical_converter_releases_temporary_codes_after_publication(
@@ -4286,6 +4281,38 @@ def test_public_storage_operations_delegate_admission_to_storage_owner(
     assert delegated_policies == [None] * len(calls)
 
 
+def test_independent_public_storage_operations_reject_an_unrelated_active_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("competing root reached storage owner")
+
+    for name in (
+        "_write_dataset",
+        "_read_dataset",
+        "_inspect_dataset",
+        "_fingerprint_dataset",
+        "_compare_datasets",
+    ):
+        monkeypatch.setattr(datasets, name, forbidden)
+    spec = make_processed_dataset_spec("independent_public")
+    calls = (
+        lambda: datasets.write_dataset(Path("ignored"), pd.DataFrame(), spec=spec),
+        lambda: datasets.read_dataset(Path("ignored")),
+        lambda: datasets.inspect_dataset(Path("ignored")),
+        lambda: datasets.fingerprint_dataset(Path("ignored")),
+        lambda: datasets.compare_datasets(Path("left"), Path("right")),
+    )
+
+    with runtime_resource_policy_scope(_issued_test_policy()):
+        for call in calls:
+            with pytest.raises(
+                RuntimeError,
+                match="^runtime_resource_policy_competing_root$",
+            ):
+                call()
+
+
 def test_storage_operations_propagate_the_captured_payload_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4361,10 +4388,11 @@ def test_storage_operations_propagate_the_captured_payload_target(
     )
 
     with runtime_resource_policy_scope(policy):
-        write_dataset(
+        dataset_writing.write_dataset(
             root,
             frame,
             spec=make_processed_dataset_spec("policy_propagation"),
+            resource_policy=policy,
         )
         dataset_reading.read_dataset(
             root,
@@ -4378,11 +4406,12 @@ def test_storage_operations_propagate_the_captured_payload_target(
                 resource_policy=policy,
             )
         )
-        inspect_dataset(
+        dataset_inspection.inspect_dataset(
             root,
             time_window=TimeWindow("2014-01-01", "2015-12-31"),
+            resource_policy=policy,
         )
-        fingerprint_dataset(root)
+        dataset_fingerprinting.fingerprint_dataset(root, resource_policy=policy)
 
     assert writer_targets and all(
         0 < target <= policy.task_memory_budget_bytes for target in writer_targets
@@ -4391,8 +4420,7 @@ def test_storage_operations_propagate_the_captured_payload_target(
         0 < target <= policy.task_memory_budget_bytes for target in read_targets
     )
     assert inspection_targets and all(
-        0 < target <= policy.task_memory_budget_bytes
-        for target in inspection_targets
+        0 < target <= policy.task_memory_budget_bytes for target in inspection_targets
     )
     assert fingerprint_physical_targets and all(
         0 < target <= policy.task_memory_budget_bytes
@@ -4448,7 +4476,9 @@ def test_file_batch_default_derives_converter_headroom_from_session_owner_state(
     assert len(batches) == 1
     assert batches[0][0] == path
     pd.testing.assert_frame_equal(batches[0][1], frame)
-    assert observed_headroom == [3072]
+    assert observed_headroom == [
+        context.resource_policy.task_memory_budget_bytes - context.retained_memory_bytes
+    ]
 
 
 def test_compare_reuses_one_policy_for_both_fingerprints(
@@ -8453,10 +8483,10 @@ def test_physical_owner_releases_raw_batch_before_bounded_yield(
     monkeypatch.setattr(dataset_physical, "_filter_arrow_batch", replace_raw)
 
     batches = dataset_physical.iter_dataset_part_batches(
-            path,
-            expected_identity=dataset_physical.dataset_file_identity(path),
-            target_chunk_bytes=1024,
-        )
+        path,
+        expected_identity=dataset_physical.dataset_file_identity(path),
+        target_chunk_bytes=1024,
+    )
     try:
         first = next(batches)
         assert raw_reference is not None and raw_reference() is None
@@ -8796,7 +8826,7 @@ def test_writer_rejects_before_native_parquet_write(
     assert native_writes == 0
 
 
-def test_parquet_reader_uses_actual_selected_row_group_decode_bytes(
+def test_parquet_reader_bounded_completes_without_whole_row_group_admission(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "row-groups.parquet"
@@ -8808,25 +8838,19 @@ def test_parquet_reader_uses_actual_selected_row_group_decode_bytes(
         writer.write_table(second)
     finally:
         writer.close()
-    parquet = pq.ParquetFile(path)
-    try:
-        position = dataset_physical._projected_parquet_leaf_positions(  # noqa: SLF001
-            parquet,
-            ("value",),
-        )[0]
-        expected = max(
-            parquet.metadata.row_group(index).column(position).total_compressed_size
-            + parquet.metadata.row_group(index).column(position).total_uncompressed_size
-            for index in (0, 1)
+    batches = tuple(
+        dataset_physical.iter_dataset_part_batches(
+            path,
+            expected_identity=None,
+            target_chunk_bytes=32 * 1024,
+            operation_headroom_bytes=64 * 1024,
+            columns=("value",),
+            source_batch_rows=1,
         )
+    )
 
-        assert dataset_physical._maximum_projected_decode_fixed_bytes(  # noqa: SLF001
-            parquet,
-            ("value",),
-            row_groups=(0, 1),
-        ) >= expected
-    finally:
-        parquet.close()
+    assert sum(batch.num_rows for batch in batches) == 200
+    assert max(batch.num_rows for batch in batches) == 1
 
 
 def test_dataset_parquet_writer_disables_retained_dictionary_state(
@@ -9226,9 +9250,7 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
         columns=None,
         time_window=None,
     ) as session:
-        expected = [
-            f"part-{part_index}.parquet" for part_index in part_indices
-        ]
+        expected = [f"part-{part_index}.parquet" for part_index in part_indices]
         assert [path.name for path in session.all_paths] == expected
         selection = session.inventory.new_path_selection()
         for path in reversed(tuple(session.all_paths)):
@@ -9280,6 +9302,10 @@ def test_dataset_inventory_selected_count_is_selection_index_driven(
     ) as inventory:
         connection = inventory._require_connection()
         with connection:
+            inventory._gate_physical_write(
+                logical_bytes=500_000,
+                row_count=5_000,
+            )
             connection.executemany(
                 "INSERT INTO parts(relative_path, partition_kind, partition_year, "
                 "part_index, selected, device, inode, size, modified_ns) "
@@ -9312,10 +9338,13 @@ def test_dataset_inventory_selected_count_is_selection_index_driven(
         connection.set_trace_callback(statements.append)
         connection.set_progress_handler(count_vm_step, 1)
         try:
-            assert inventory.path_count(
-                selected=True,
-                path_selection=selection,
-            ) == 1
+            assert (
+                inventory.path_count(
+                    selected=True,
+                    path_selection=selection,
+                )
+                == 1
+            )
         finally:
             connection.set_progress_handler(None, 0)
             connection.set_trace_callback(None)
@@ -9337,7 +9366,7 @@ def test_dataset_inventory_selected_count_is_selection_index_driven(
         assert vm_steps < 200
 
 
-def test_dataset_inventory_sets_cumulative_main_page_limit(
+def test_dataset_inventory_does_not_claim_all_free_disk_at_startup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9359,14 +9388,69 @@ def test_dataset_inventory_sets_cumulative_main_page_limit(
         task_memory_budget_bytes=1024,
     ) as inventory:
         assert inventory._connection is not None
-        assert inventory._connection.execute(
+        page_limit = inventory._connection.execute(
             "PRAGMA main.max_page_count"
-        ).fetchone() == (
-            available // dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES,
+        ).fetchone()[0]
+        assert page_limit == (
+            dataset_inventory._DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES
+            // dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
+        )
+        assert (
+            page_limit < available // dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
         )
 
     assert reserve_calls[0] >= 32 * dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
     assert len(reserve_calls) == 1
+
+
+def test_exact_key_index_does_not_claim_all_free_disk_at_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    available = 64 * dataset_key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES
+    monkeypatch.setattr(
+        dataset_key_tracking,
+        "require_free_disk_headroom",
+        lambda *_args, **_kwargs: available,
+    )
+
+    with dataset_key_tracking.ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        assert index._connection is not None
+        page_limit = index._connection.execute("PRAGMA main.max_page_count").fetchone()[
+            0
+        ]
+        assert page_limit == (
+            dataset_key_tracking._EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES
+            // dataset_key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES
+        )
+        assert (
+            page_limit < available // dataset_key_tracking.EXACT_KEY_SQLITE_PAGE_BYTES
+        )
+
+
+def test_exact_key_index_admits_combined_main_and_temp_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reserve_calls: list[int] = []
+    monkeypatch.setattr(
+        dataset_key_tracking,
+        "require_free_disk_headroom",
+        lambda _path, *, reserve_bytes: reserve_calls.append(reserve_bytes),
+    )
+
+    with dataset_key_tracking.ExactPrimaryKeyIndex(
+        primary_key=("asset_id",),
+        timestamp_columns=(),
+        scratch_parent=tmp_path,
+    ) as index:
+        index._admit_physical_write(4096)
+
+    assert reserve_calls[-1] == 8192
 
 
 def test_dataset_inventory_release_gates_before_selection_mutation(
@@ -9399,19 +9483,23 @@ def test_dataset_inventory_release_gates_before_selection_mutation(
         )
         with pytest.raises(OSError, match="selection_release_disk_full"):
             session.inventory.release_path_selection(selection)
-        assert tuple(
-            session.inventory.iter_paths(selected=True, path_selection=selection)
-        ) == paths
+        assert (
+            tuple(session.inventory.iter_paths(selected=True, path_selection=selection))
+            == paths
+        )
         monkeypatch.setattr(
             dataset_inventory,
             "require_free_disk_headroom",
             lambda *_args, **_kwargs: None,
         )
         session.inventory.release_path_selection(selection)
-        assert session.inventory.path_count(
-            selected=True,
-            path_selection=selection,
-        ) == 0
+        assert (
+            session.inventory.path_count(
+                selected=True,
+                path_selection=selection,
+            )
+            == 0
+        )
 
 
 def test_dataset_inventory_insert_disk_failure_cleans_scratch(
@@ -9664,74 +9752,6 @@ def test_bounded_metadata_reader_rejects_hardlink_before_open(
         storage_manifests.read_bounded_qrp_json(candidate)
 
 
-def test_private_writer_declaration_does_not_create_retained_allocation(
-    tmp_path: Path,
-) -> None:
-    policy = _writer_test_policy()
-    frame = make_default_dataset_frame()
-    envelope = dataset_writing.DatasetWriteChunk(
-        frame,
-        policy.task_memory_budget_bytes,
-    )
-
-    root = make_dataset_artifact_root(tmp_path, "retained_publication")
-    dataset_writing.write_dataset(
-        root,
-        iter((envelope,)),
-        spec=make_processed_dataset_spec("retained_publication"),
-        resource_policy=policy,
-    )
-
-    key = ["asset_id", "timestamp"]
-    expected = frame.copy()
-    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
-    pd.testing.assert_frame_equal(
-        read_dataset(root).sort_values(key).reset_index(drop=True),
-        expected.sort_values(key).reset_index(drop=True),
-    )
-    assert policy.reserved_memory_bytes == 0
-
-
-def test_writer_input_reservation_ignores_declared_and_unrelated_credit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = _writer_test_policy(8 * 1024**2)
-    frame = make_default_dataset_frame()
-    parts = tuple(frame.iloc[index : index + 1].copy() for index in range(3))
-    declarations = (4096, 4096, 8192)
-    observed_input_reserves: list[int] = []
-    original_reserve = RuntimeResourcePolicy.reserve
-
-    @contextmanager
-    def record_reserve(self, owner: str, reserve_bytes: int):  # noqa: ANN001
-        if owner == "storage.dataset.input":
-            observed_input_reserves.append(reserve_bytes)
-        with original_reserve(self, owner, reserve_bytes):
-            yield
-
-    monkeypatch.setattr(RuntimeResourcePolicy, "reserve", record_reserve)
-
-    def publications():
-        yield dataset_writing.DatasetWriteChunk(parts[0], declarations[0])
-        with policy.reserve("test.unrelated", declarations[1]):
-            yield dataset_writing.DatasetWriteChunk(parts[1], declarations[1])
-        with policy.reserve("test.producer", declarations[2]):
-            yield dataset_writing.DatasetWriteChunk(parts[2], declarations[2])
-
-    dataset_writing.write_dataset(
-        make_dataset_artifact_root(tmp_path, "producer_credit"),
-        publications(),
-        spec=make_processed_dataset_spec("producer_credit"),
-        resource_policy=policy,
-    )
-
-    assert observed_input_reserves == [
-        pandas_frame_payload_bytes(part) for part in parts
-    ]
-    assert policy.reserved_memory_bytes == 0
-
-
 def test_private_writer_baseline_rejects_before_input_generation(
     tmp_path: Path,
 ) -> None:
@@ -9756,52 +9776,6 @@ def test_private_writer_baseline_rejects_before_input_generation(
         )
 
     assert not generated
-
-
-def test_writer_final_session_ignores_retired_external_declaration(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    frame = make_default_dataset_frame()
-    external_envelopes = (123, 456)
-    observed: list[int] = []
-    key_index_bytes: list[int] = []
-    real_session = dataset_writing.dataset_session_from_inventory
-
-    def record_session(*args, retained_payload_bytes, **kwargs):  # noqa: ANN002, ANN003
-        observed.append(retained_payload_bytes)
-        return real_session(
-            *args,
-            retained_payload_bytes=retained_payload_bytes,
-            **kwargs,
-        )
-
-    monkeypatch.setattr(
-        dataset_writing,
-        "dataset_session_from_inventory",
-        record_session,
-    )
-    dataset_writing.write_dataset(
-        make_dataset_artifact_root(tmp_path, "final_session_envelope"),
-        (
-            dataset_writing.DatasetWriteChunk(part.copy(), retained)
-            for part, retained in zip(
-                (frame.iloc[:1], frame.iloc[1:]),
-                external_envelopes,
-                strict=True,
-            )
-        ),
-        spec=make_processed_dataset_spec("final_session_envelope"),
-        staged_validator=lambda receipt: key_index_bytes.append(
-            receipt.exact_primary_key_index.retained_memory_bytes
-        ),
-        resource_policy=None,
-    )
-
-    assert observed == [
-        dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
-        - dataset_inventory.DATASET_INVENTORY_RESERVE_BYTES
-    ]
 
 
 def test_string_filter_grammar_precedes_capacity_for_surrogate(
@@ -9852,10 +9826,8 @@ def test_string_filter_compact_utf8_sizing_matches_arrow(
     assert prepared.values.to_pylist() == sorted(set(values))
 
 
-@pytest.mark.parametrize("enveloped", (False, True))
 def test_writer_releases_previous_publication_before_requesting_next(
     tmp_path: Path,
-    enveloped: bool,
 ) -> None:
     first = make_default_dataset_frame().iloc[:1].copy()
     second = make_default_dataset_frame().iloc[1:2].copy()
@@ -9865,12 +9837,12 @@ def test_writer_releases_previous_publication_before_requesting_next(
         nonlocal first
         current = first
         first = None
-        yield (dataset_writing.DatasetWriteChunk(current, 0) if enveloped else current)
+        yield current
         del current
         assert first_reference() is None
         yield second
 
-    name = f"publication_liveness_{enveloped}"
+    name = "publication_liveness"
     write_dataset(
         make_dataset_artifact_root(tmp_path, name),
         publications(),

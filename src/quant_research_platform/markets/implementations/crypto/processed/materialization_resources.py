@@ -8,17 +8,13 @@ import pandas as pd
 
 from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
-from quant_research_platform.storage._dataset_writing import DatasetWriteChunk
 
 
 def iter_write_chunks(
     chunks: Iterable[pd.DataFrame],
-    *,
-    retained_payload_bytes: int,
-) -> Iterator[DatasetWriteChunk]:
+) -> Iterator[pd.DataFrame]:
     with closing_dataset_iterator(iter(chunks)) as source_chunks:
-        for chunk in source_chunks:
-            yield DatasetWriteChunk(chunk, retained_payload_bytes)
+        yield from source_chunks
 
 
 def require_frame_within_budget(

@@ -76,9 +76,6 @@ def write_labels(
                 resource_policy=resource_policy,
                 retained_payload_bytes=retained_payload_bytes,
             ),
-            retained_payload_bytes=(
-                retained_payload_bytes + panel_session.retained_memory_bytes
-            ),
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:
@@ -150,11 +147,9 @@ def _iter_label_chunks(
                             error="out_of_order_crypto_label_dependency",
                         )
                         panel = panel.copy()
-                        panel[_CORE_ROW] = (
-                            validation.core_time_window_mask(
-                                panel,
-                                time_window,
-                            )
+                        panel[_CORE_ROW] = validation.core_time_window_mask(
+                            panel,
+                            time_window,
                         )
                         for (
                             segment_market_id,
@@ -191,9 +186,9 @@ def _iter_label_chunks(
                             positions = buffer.groupby(
                                 "asset_id", sort=False
                             ).cumcount()
-                            group_sizes = buffer.groupby(
-                                "asset_id", sort=False
-                            )["asset_id"].transform("size")
+                            group_sizes = buffer.groupby("asset_id", sort=False)[
+                                "asset_id"
+                            ].transform("size")
                             emit_mask = positions.lt(
                                 group_sizes - LABEL_LOOKAHEAD_BARS
                             ) & buffer[_CORE_ROW].astype("boolean")

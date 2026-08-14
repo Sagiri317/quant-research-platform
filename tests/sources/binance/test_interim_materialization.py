@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.runtime.resources import current_runtime_resource_policy
-from quant_research_platform.sources.binance import interim
+from quant_research_platform.sources.binance import interim, raw_exports
 from quant_research_platform.sources.binance.interim import materialize_interim_data
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -93,19 +93,24 @@ def test_binance_interim_materializer_writes_multiple_batches(
         )
     chunk_lengths: list[int] = []
 
-    def record_write_dataset(dataset_root, data, *, spec, instance_metadata=None):
+    def record_write_dataset(
+        dataset_root,
+        data,
+        *,
+        spec,
+        instance_metadata=None,
+        resource_policy,
+    ):
         chunks = tuple(data)
-        chunk_lengths.extend(
-            len(chunk.frame if isinstance(chunk, interim.DatasetWriteChunk) else chunk)
-            for chunk in chunks
-        )
-        from quant_research_platform.storage.datasets import write_dataset
+        chunk_lengths.extend(len(chunk) for chunk in chunks)
+        from quant_research_platform.storage._dataset_writing import write_dataset
 
         return write_dataset(
             dataset_root,
             chunks,
             spec=spec,
             instance_metadata=instance_metadata,
+            resource_policy=resource_policy,
         )
 
     monkeypatch.setattr(
@@ -122,6 +127,52 @@ def test_binance_interim_materializer_writes_multiple_batches(
 
     assert chunk_lengths == [2, 2, 1]
     assert len(market_bars) == 5
+
+
+def test_binance_depth_interim_parses_and_validates_order_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "depth.jsonl"
+    _append_jsonl(path, _depth_envelope(0))
+    raw_validations = 0
+    side_parses = 0
+    order_validations = 0
+    raw_validate = raw_exports._validate_depth_payload
+    parse_side = interim.depth_side_levels
+    validate_order = interim._validate_normalized_order
+
+    def count_raw(payload):  # noqa: ANN001, ANN202
+        nonlocal raw_validations
+        raw_validations += 1
+        return raw_validate(payload)
+
+    def count_side(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal side_parses
+        side_parses += 1
+        return parse_side(*args, **kwargs)
+
+    def count_order(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal order_validations
+        order_validations += 1
+        return validate_order(*args, **kwargs)
+
+    monkeypatch.setattr(raw_exports, "_validate_depth_payload", count_raw)
+    monkeypatch.setattr(interim, "depth_side_levels", count_side)
+    monkeypatch.setattr(interim, "_validate_normalized_order", count_order)
+
+    chunks = tuple(
+        interim.iter_interim_frames(
+            data_id="depth_levels_tick",
+            input_files=(path,),
+            row_batch_size=1,
+        )
+    )
+
+    assert chunks
+    assert raw_validations == 0
+    assert side_parses == 2
+    assert order_validations == 1
 
 
 @pytest.mark.parametrize(
@@ -148,9 +199,7 @@ def test_binance_interim_rejects_global_order_reversal_independent_of_batch_size
     row_batch_size: int,
 ) -> None:
     path = tmp_path.joinpath(*path_parts)
-    envelope_factory = (
-        _trade_envelope if envelope_kind == "trade" else _depth_envelope
-    )
+    envelope_factory = _trade_envelope if envelope_kind == "trade" else _depth_envelope
     _append_jsonl(path, envelope_factory(1))
     _append_jsonl(path, envelope_factory(0))
 
@@ -221,9 +270,10 @@ def test_binance_datetime_interim_end_filters_precisely(tmp_path: Path) -> None:
     assert read_dataset(result.artifact_roots["aggregate_trades_tick"])[
         "timestamp"
     ].tolist() == [pd.Timestamp("2026-07-06 00:01:01")]
-    assert read_dataset(result.artifact_roots["depth_levels_tick"])[
-        "timestamp"
-    ].nunique() == 1
+    assert (
+        read_dataset(result.artifact_roots["depth_levels_tick"])["timestamp"].nunique()
+        == 1
+    )
 
 
 def test_binance_interim_materializer_writes_empty_schema_after_filtering(
@@ -244,9 +294,10 @@ def test_binance_interim_materializer_writes_empty_schema_after_filtering(
 
     trades = read_dataset(result.artifact_roots["aggregate_trades_tick"])
     assert trades.empty
-    assert tuple(trades.columns) == interim.INTERIM_COLUMNS_BY_DATA_ID[
-        "aggregate_trades_tick"
-    ]
+    assert (
+        tuple(trades.columns)
+        == interim.INTERIM_COLUMNS_BY_DATA_ID["aggregate_trades_tick"]
+    )
 
 
 def _append_jsonl(path: Path, row: dict[str, object]) -> None:

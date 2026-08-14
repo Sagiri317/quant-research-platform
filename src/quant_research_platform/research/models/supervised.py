@@ -28,10 +28,7 @@ def build_estimator_from_model_spec(spec: ModelSpec) -> object:
         if not dependencies.model_dependency_preflighted(facts.algorithm):
             if current_runtime_resource_policy() is not None:
                 raise RuntimeError("model_dependency_not_preflighted")
-            dependencies.preflight_model_dependency_native_image(facts.algorithm)
-        estimator._qrp_native_image_bytes = (  # type: ignore[attr-defined]
-            dependencies.model_dependency_native_image_bytes(facts.algorithm)
-        )
+            dependencies.preflight_model_dependency(facts.algorithm)
     return estimator
 
 
@@ -48,7 +45,7 @@ def preflight_model_specs(specs: Iterable[ModelSpec]) -> None:
         _build_estimator(spec)
     for algorithm in dict.fromkeys(spec.model_algorithm for spec in selected):
         if algorithm_facts.algorithm_facts(algorithm).dependency_package is not None:
-            dependencies.preflight_model_dependency_native_image(algorithm)
+            dependencies.preflight_model_dependency(algorithm)
 
 
 def _build_estimator(spec: ModelSpec) -> object:
@@ -81,17 +78,6 @@ def physical_core_count() -> int:
     if type(count) is not int or count <= 0:
         raise RuntimeError("physical_core_count_unavailable")
     return count
-
-
-def estimator_native_image_bytes(spec: ModelSpec, estimator: object) -> int:
-    facts = algorithm_facts.algorithm_facts(spec.model_algorithm)
-    package = facts.dependency_package
-    if package is None or type(estimator).__module__.split(".", 1)[0] != package:
-        return 0
-    value = getattr(estimator, "_qrp_native_image_bytes", None)
-    if type(value) is not int or value <= 0:
-        raise RuntimeError("model_dependency_not_preflighted")
-    return value
 
 
 def _resolved_model_thread_count(value: object) -> int:

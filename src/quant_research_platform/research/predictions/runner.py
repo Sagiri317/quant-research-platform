@@ -78,10 +78,13 @@ def build_prediction_result_from_research_dataset(
             )
         )
     )
-    policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    ) or RuntimeResourcePolicy.capture()
+    policy = (
+        bind_runtime_resource_policy(
+            resource_policy,
+            allow_implicit_active=False,
+        )
+        or RuntimeResourcePolicy.capture()
+    )
     operation = ExitStack()
     operation.enter_context(runtime_resource_policy_scope(policy))
     try:
@@ -99,19 +102,38 @@ def build_prediction_result_from_research_dataset(
     except BaseException:
         operation.close()
         raise
+    chunks_complete = False
+    metadata_complete = False
+    metadata_value: dict[str, object] | None = None
+
+    def close_when_complete() -> None:
+        if chunks_complete and metadata_complete:
+            operation.close()
 
     def output_chunks() -> Iterable[pd.DataFrame]:
+        nonlocal chunks_complete
         try:
             yield from result.output_chunks
         except BaseException:
             operation.close()
             raise
+        chunks_complete = True
+        close_when_complete()
 
     def prediction_metadata() -> dict[str, object]:
+        nonlocal metadata_complete, metadata_value
+        if not chunks_complete:
+            raise RuntimeError("prediction_metadata_before_output_complete")
+        if metadata_value is not None:
+            return metadata_value
         try:
-            return result.prediction_metadata_factory()
-        finally:
+            metadata_value = result.prediction_metadata_factory()
+        except BaseException:
             operation.close()
+            raise
+        metadata_complete = True
+        close_when_complete()
+        return metadata_value
 
     owned_result = PredictionResult(
         spec=result.spec,

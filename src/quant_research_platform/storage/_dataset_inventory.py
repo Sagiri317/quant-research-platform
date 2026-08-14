@@ -34,9 +34,7 @@ from quant_research_platform.storage._scratch_ownership import (
 _PREFIX = ".i-"
 _PART_FILE_PATTERN = re.compile(r"^part-(\d+)\.parquet$")
 DATASET_INVENTORY_RESERVE_BYTES = 1024
-_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES = (
-    32 * DATASET_INVENTORY_RESERVE_BYTES
-)
+_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES = 32 * DATASET_INVENTORY_RESERVE_BYTES
 
 
 class DatasetInventoryPaths:
@@ -101,7 +99,7 @@ class DatasetSessionInventory:
         require_unaliased_path(
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
-        free_disk_bytes = require_free_disk_headroom(
+        require_free_disk_headroom(
             self._scratch_parent,
             reserve_bytes=_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
         )
@@ -135,7 +133,10 @@ class DatasetSessionInventory:
             require_owned_scratch(temporary_directory, temporary_identity)
             connection = sqlite3.connect(temporary_directory / "i.db")
             connection.execute(f"PRAGMA page_size={DATASET_INVENTORY_RESERVE_BYTES}")
-            sqlite_page_limit = free_disk_bytes // DATASET_INVENTORY_RESERVE_BYTES
+            sqlite_page_limit = (
+                _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES
+                // DATASET_INVENTORY_RESERVE_BYTES
+            )
             connection.execute(f"PRAGMA main.max_page_count={sqlite_page_limit}")
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
@@ -746,13 +747,18 @@ class DatasetSessionInventory:
             return
         # Worst-case parts row: table plus three indexes, doubled for journal.
         reserve_bytes = 2 * (
-            4 * logical_bytes
-            + 8 * DATASET_INVENTORY_RESERVE_BYTES * row_count
+            4 * logical_bytes + 8 * DATASET_INVENTORY_RESERVE_BYTES * row_count
         )
         require_free_disk_headroom(
             self._scratch_parent,
             reserve_bytes=reserve_bytes,
         )
+        connection = self._require_connection()
+        current_pages = int(connection.execute("PRAGMA main.page_count").fetchone()[0])
+        growth_pages = (
+            reserve_bytes + DATASET_INVENTORY_RESERVE_BYTES - 1
+        ) // DATASET_INVENTORY_RESERVE_BYTES
+        connection.execute(f"PRAGMA main.max_page_count={current_pages + growth_pages}")
 
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:

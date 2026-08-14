@@ -84,9 +84,7 @@ def write_panel(
                     + retained_payload_bytes,
                 )
             )
-        input_identities = validation.input_dataset_identities(
-            input_sessions
-        )
+        input_identities = validation.input_dataset_identities(input_sessions)
         retained_input_bytes = sum(
             session.retained_memory_bytes for session in input_sessions.values()
         )
@@ -98,7 +96,6 @@ def write_panel(
                 resource_policy=resource_policy,
                 retained_payload_bytes=retained_payload_bytes,
             ),
-            retained_payload_bytes=retained_payload_bytes + retained_input_bytes,
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:

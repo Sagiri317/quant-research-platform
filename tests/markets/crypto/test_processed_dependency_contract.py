@@ -227,11 +227,8 @@ def test_write_chunk_owner_closes_source_chunks_on_early_close() -> None:
         finally:
             closed.append(True)
 
-    iterator = materialization_resources.iter_write_chunks(
-        source_chunks(),
-        retained_payload_bytes=7,
-    )
-    assert next(iterator).retained_payload_bytes == 7
+    iterator = materialization_resources.iter_write_chunks(source_chunks())
+    assert next(iterator).to_dict("list") == {"value": [1]}
     iterator.close()
     assert closed == [True]
 
@@ -1106,23 +1103,6 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
     assert observed == [policy]
 
 
-def test_crypto_write_chunk_owner_retains_declared_state() -> None:
-    frames = (
-        pd.DataFrame({"value": [1]}),
-        pd.DataFrame({"value": [2, 3]}),
-    )
-
-    result = list(
-        materialization_resources.iter_write_chunks(
-            frames,
-            retained_payload_bytes=13,
-        )
-    )
-
-    assert [len(chunk.frame) for chunk in result] == [1, 2]
-    assert [chunk.retained_payload_bytes for chunk in result] == [13, 13]
-
-
 @pytest.mark.parametrize(
     ("module", "function_name", "iterator_name", "data_id"),
     [
@@ -1176,7 +1156,7 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
         assert len(chunks) == 1
         expected_retained_bytes = 111 if module is materialize_panel else 37
         assert _kwargs["retained_payload_bytes"] == expected_retained_bytes
-        assert chunks[0].retained_payload_bytes == expected_retained_bytes
+        assert isinstance(chunks[0], pd.DataFrame)
         staged_validator(SimpleNamespace())
         return inspection
 

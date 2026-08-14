@@ -46,8 +46,7 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_integer,
     strict_symbol,
 )
-from quant_research_platform.storage._dataset_writing import DatasetWriteChunk
-from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage._dataset_writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
 RAW_ROW_BATCH_SIZE = 100_000
@@ -127,7 +126,7 @@ def iter_interim_frames(
     start_date: str | None = None,
     end_date: str | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
-) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+) -> Iterator[pd.DataFrame]:
     _strict_data_ids((data_id,))
     strict_positive_integer(
         row_batch_size,
@@ -146,9 +145,10 @@ def iter_interim_frames(
                 input_file,
                 batch_size=row_batch_size,
                 resource_policy=policy,
+                validate_depth_payload=False,
             ):
                 normalized = normalize_raw_envelopes(batch, data_id=data_id)
-                last_key = _validate_normalized_order(
+                last_key = _validate_normalized_boundary(
                     normalized,
                     data_id=data_id,
                     previous_key=last_key,
@@ -164,10 +164,7 @@ def iter_interim_frames(
                     retained_bytes = policy.reserved_memory_bytes - owner_baseline
                     if pandas_frame_payload_bytes(filtered) > retained_bytes:
                         raise RuntimeError("binance_record_envelope_bound_invalid")
-                    yield DatasetWriteChunk(
-                        filtered,
-                        retained_bytes,
-                    )
+                    yield filtered
         if input_files and not yielded:
             empty = (
                 empty_schema_frame
@@ -176,7 +173,7 @@ def iter_interim_frames(
             )
             empty_bytes = pandas_frame_payload_bytes(empty)
             with policy.reserve("source.binance.empty", empty_bytes):
-                yield DatasetWriteChunk(empty, empty_bytes)
+                yield empty
 
 
 def normalize_raw_envelopes(
@@ -231,6 +228,7 @@ def materialize_interim_data(
                     resource_policy=policy,
                 ),
                 spec=spec,
+                resource_policy=policy,
             )
             written[data_id] = artifact_root
         return BinanceInterimImportResult(
@@ -415,16 +413,20 @@ def _normalize_depth(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
             error="invalid_binance_raw_envelope_captured_at",
         ).tz_localize(None)
         symbol = strict_symbol(envelope["symbol"])
+        best_prices: dict[str, float] = {}
         for side, raw_levels in (
             ("ask", payload.get("asks", ())),
             ("bid", payload.get("bids", ())),
         ):
+            levels = depth_side_levels(
+                raw_levels,
+                side=side,
+                error=f"invalid_binance_depth_{side}",
+            )
+            if levels:
+                best_prices[side] = levels[0][0]
             for level, (price, quantity) in enumerate(
-                depth_side_levels(
-                    raw_levels,
-                    side=side,
-                    error=f"invalid_binance_depth_{side}",
-                ),
+                levels,
                 start=1,
             ):
                 normalized.append(
@@ -440,6 +442,12 @@ def _normalize_depth(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
                         ),
                     }
                 )
+        if (
+            "bid" in best_prices
+            and "ask" in best_prices
+            and best_prices["bid"] >= best_prices["ask"]
+        ):
+            raise ValueError("crossed_binance_depth_book")
     return _interim_frame(
         normalized,
         DEPTH_LEVELS_COLUMNS,
@@ -497,6 +505,21 @@ def _validate_normalized_order(
             raise ValueError("out_of_order_binance_interim_dependency")
         last_key = key
     return last_key
+
+
+def _validate_normalized_boundary(
+    frame: pd.DataFrame,
+    *,
+    data_id: str,
+    previous_key: tuple[object, ...] | None,
+) -> tuple[object, ...] | None:
+    if frame.empty:
+        return previous_key
+    primary_key = _interim_primary_key(data_id)
+    first = tuple(frame.iloc[0].loc[list(primary_key)])
+    if previous_key is not None and first <= previous_key:
+        raise ValueError("out_of_order_binance_interim_dependency")
+    return tuple(frame.iloc[-1].loc[list(primary_key)])
 
 
 def _interim_primary_key(data_id: str) -> tuple[str, ...]:

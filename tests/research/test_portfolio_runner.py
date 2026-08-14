@@ -221,6 +221,7 @@ def test_portfolio_extracted_output_iterator_keeps_operation_root(tmp_path) -> N
     layout, dataset_catalog, portfolio_catalog, prediction, manifest, _root = (
         _prediction_portfolio_inputs(tmp_path)
     )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024 * 1024)
     result = build_portfolio_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -229,14 +230,20 @@ def test_portfolio_extracted_output_iterator_keeps_operation_root(tmp_path) -> N
         time_window=TimeWindow("2024-01-01", "2024-01-02"),
         prediction_frame=prediction,
         prediction_metadata=manifest["metadata"],
+        resource_policy=policy,
     )
     output_chunks = result.output_chunks
     summary_factory = result.summary_factory
     del result
     gc.collect()
 
+    with pytest.raises(RuntimeError, match="portfolio_summary_before_output_complete"):
+        summary_factory()
+    assert portfolio_runner.current_runtime_resource_policy() is policy
     assert list(output_chunks)
+    assert portfolio_runner.current_runtime_resource_policy() is policy
     assert summary_factory()
+    assert portfolio_runner.current_runtime_resource_policy() is None
 
 
 @pytest.mark.parametrize(

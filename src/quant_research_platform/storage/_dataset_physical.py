@@ -165,9 +165,7 @@ def iter_dataset_part_batches(
             if initial_operation_headroom is None
             else initial_operation_headroom - previous_output_bytes[0]
         )
-        membership = any(
-            operator == "in" for _, operator, _ in parquet_filters or ()
-        )
+        membership = any(operator == "in" for _, operator, _ in parquet_filters or ())
         membership_max_scalar_bytes = max(
             (
                 _membership_max_scalar_bytes(value)
@@ -198,7 +196,6 @@ def iter_dataset_part_batches(
         maximum_decode_fixed_bytes = _maximum_projected_decode_fixed_bytes(
             parquet_file,
             selected_columns,
-            row_groups=selected_row_groups,
         )
         raw_batches = iter(
             parquet_file.iter_batches(
@@ -379,7 +376,6 @@ def _target_batch_rows(
     fixed_decode_bytes = _maximum_projected_decode_fixed_bytes(
         parquet_file,
         columns,
-        row_groups=selected_row_groups,
     )
     if _decoded_row_bounds(parquet_file) is None:
         legacy_rows = max(
@@ -462,7 +458,7 @@ def _maximum_projected_row_bytes(
         )
         maximum_row_bytes = max(
             maximum_row_bytes,
-            projected_bytes,
+            (projected_bytes + int(row_group.num_rows) - 1) // int(row_group.num_rows),
         )
     return maximum_row_bytes
 
@@ -470,30 +466,12 @@ def _maximum_projected_row_bytes(
 def _maximum_projected_decode_fixed_bytes(
     parquet_file: pq.ParquetFile,
     columns: tuple[str, ...],
-    *,
-    row_groups: list[int] | tuple[int, ...],
 ) -> int:
-    positions = _projected_parquet_leaf_positions(parquet_file, columns)
-    physical_bytes = max(
-        (
-            sum(
-                max(0, int(row_group.column(position).total_compressed_size))
-                + max(0, int(row_group.column(position).total_uncompressed_size))
-                for position in positions
-            )
-            for index in row_groups
-            for row_group in (parquet_file.metadata.row_group(index),)
-        ),
-        default=0,
-    )
     decoded_bounds = _decoded_row_bounds(parquet_file)
     if decoded_bounds is None:
-        return physical_bytes
+        return 0
     try:
-        return max(
-            physical_bytes,
-            sum(decoded_bounds[column][1] for column in columns),
-        )
+        return sum(decoded_bounds[column][1] for column in columns)
     except KeyError:
         raise DatasetReadCapacityExceeded(
             "dataset_decode_bound_metadata_invalid"
@@ -507,8 +485,7 @@ def table_with_decoded_row_bounds(
 ) -> pa.Table:
     previous_bounds = (
         {}
-        if previous_metadata is None
-        or _DECODED_ROW_BOUNDS_KEY not in previous_metadata
+        if previous_metadata is None or _DECODED_ROW_BOUNDS_KEY not in previous_metadata
         else _parse_decoded_row_bounds(
             previous_metadata[_DECODED_ROW_BOUNDS_KEY],
             names=table.column_names,
@@ -555,13 +532,11 @@ def parquet_decoded_working_set_bounds(
     parquet_file: pq.ParquetFile,
     columns: tuple[str, ...],
 ) -> tuple[int, int]:
-    row_groups = list(range(parquet_file.metadata.num_row_groups))
     return (
         _maximum_projected_row_bytes(parquet_file, columns),
         _maximum_projected_decode_fixed_bytes(
             parquet_file,
             columns,
-            row_groups=row_groups,
         ),
     )
 
@@ -584,9 +559,7 @@ def record_batch_decoded_working_set_bounds(
         _column_decoded_row_bound(pa.chunked_array([column]))
         for column in batch.columns
     )
-    return max(1, sum(bound[0] for bound in bounds)), sum(
-        bound[1] for bound in bounds
-    )
+    return max(1, sum(bound[0] for bound in bounds)), sum(bound[1] for bound in bounds)
 
 
 def _column_decoded_row_bound(column: pa.ChunkedArray) -> tuple[int, int]:
@@ -649,9 +622,10 @@ def _parse_decoded_row_bounds(
         raise DatasetReadCapacityExceeded("dataset_decode_bound_metadata_invalid")
     try:
         payload = parse_qrp_json_object(bytes(raw))
-        if set(payload) != {"schema_id", "columns"} or payload.get(
-            "schema_id"
-        ) != _DECODED_ROW_BOUNDS_SCHEMA_ID:
+        if (
+            set(payload) != {"schema_id", "columns"}
+            or payload.get("schema_id") != _DECODED_ROW_BOUNDS_SCHEMA_ID
+        ):
             raise ValueError
         items = payload["columns"]
         if type(items) is not list:

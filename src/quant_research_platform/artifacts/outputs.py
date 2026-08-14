@@ -23,7 +23,26 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
+from quant_research_platform.storage._scratch_ownership import remove_owned_scratch
 from quant_research_platform.storage.layout import StorageLayout
+
+
+def _write_in_resource_root(writer: Callable[[], Path]) -> Path:
+    active = current_runtime_resource_policy()
+    policy = active or RuntimeResourcePolicy.capture()
+    with runtime_resource_policy_scope(policy):
+        target = writer()
+        if active is None:
+            identity = target.lstat()
+            policy.finish_memory_measurement(
+                on_reject=lambda: remove_owned_scratch(target, identity)
+            )
+        return target
 
 
 def write_prediction_outputs(
@@ -36,14 +55,16 @@ def write_prediction_outputs(
     model_metadata: Mapping[str, object] | None = None,
     prediction_metadata_factory: Callable[[], Mapping[str, object]] | None = None,
 ) -> Path:
-    return _write_prediction_outputs(
-        frame,
-        spec=spec,
-        output_spec=output_spec,
-        layout=layout,
-        output_chunks=output_chunks,
-        model_metadata=model_metadata,
-        prediction_metadata_factory=prediction_metadata_factory,
+    return _write_in_resource_root(
+        lambda: _write_prediction_outputs(
+            frame,
+            spec=spec,
+            output_spec=output_spec,
+            layout=layout,
+            output_chunks=output_chunks,
+            model_metadata=model_metadata,
+            prediction_metadata_factory=prediction_metadata_factory,
+        )
     )
 
 
@@ -58,15 +79,17 @@ def write_evaluation_outputs(
     output_spec: OutputSpec,
     layout: StorageLayout,
 ) -> Path:
-    return _write_evaluation_outputs(
-        metrics,
-        grouped_label_values,
-        ic_summary=ic_summary,
-        group_spread_summary=group_spread_summary,
-        evaluation_diagnostics=evaluation_diagnostics,
-        spec=spec,
-        output_spec=output_spec,
-        layout=layout,
+    return _write_in_resource_root(
+        lambda: _write_evaluation_outputs(
+            metrics,
+            grouped_label_values,
+            ic_summary=ic_summary,
+            group_spread_summary=group_spread_summary,
+            evaluation_diagnostics=evaluation_diagnostics,
+            spec=spec,
+            output_spec=output_spec,
+            layout=layout,
+        )
     )
 
 
@@ -78,12 +101,14 @@ def write_portfolio_outputs(
     output_spec: OutputSpec,
     layout: StorageLayout,
 ) -> Path:
-    return _write_portfolio_outputs(
-        output_chunks=output_chunks,
-        summary_factory=summary_factory,
-        spec=spec,
-        output_spec=output_spec,
-        layout=layout,
+    return _write_in_resource_root(
+        lambda: _write_portfolio_outputs(
+            output_chunks=output_chunks,
+            summary_factory=summary_factory,
+            spec=spec,
+            output_spec=output_spec,
+            layout=layout,
+        )
     )
 
 

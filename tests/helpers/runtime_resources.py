@@ -19,8 +19,12 @@ class _TestOperationRssMeasurement:
     def stop(self) -> None:
         self.state = "RETIRED"
 
-    def restore_backstop(self) -> None:
-        pass
+    def quiesce(self) -> dict[str, int | float | str]:
+        return self.checkpoint_evidence()
+
+    def resume(self) -> None:
+        if self.state != "ACTIVE":
+            raise RuntimeError("runtime_rss_sampler_not_active")
 
     def checkpoint_evidence(self) -> dict[str, int | float | str]:
         if self.state != "ACTIVE":
@@ -36,6 +40,7 @@ class _TestOperationRssMeasurement:
             "hard_budget_bytes": self.hard_budget_bytes,
             "sampled_peak_rss_bytes": self.rss0_bytes,
             "peak_incremental_rss_bytes": 0,
+            "measurement_metric": "test_process_tree_incremental",
             "sample_count": 2,
             "max_sample_interval_ms": 1.0,
             "cadence_status": "PASS",

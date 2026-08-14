@@ -50,7 +50,6 @@ from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     closing_dataset_iterator,
 )
-from quant_research_platform.storage._dataset_writing import DatasetWriteChunk
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -66,9 +65,9 @@ def filter_output_sessions(
 ) -> pd.DataFrame:
     selected_columns = tuple(frame.columns) if columns is None else tuple(columns)
     filter_state_bytes = len(frame) * np.dtype(np.bool_).itemsize
-    output_bound = pandas_frame_payload_bytes(frame) + len(frame) * np.dtype(
-        np.intp
-    ).itemsize
+    output_bound = (
+        pandas_frame_payload_bytes(frame) + len(frame) * np.dtype(np.intp).itemsize
+    )
     require_known_materialization_payload_bound(
         frames=(*retained_frames, frame),
         output=None,
@@ -218,7 +217,7 @@ def iter_active_materialization_batches(
     output_row_bound_bytes: int | None = None,
     retained_payload_bytes: int = 0,
     materialize: Callable[..., pd.DataFrame],
-) -> Iterator[DatasetWriteChunk]:
+) -> Iterator[pd.DataFrame]:
     bound_policy = bind_runtime_resource_policy(resource_policy)
     if current_runtime_resource_policy() is not bound_policy:
         raise RuntimeError("a_share_materialization_policy_scope_required")
@@ -265,7 +264,8 @@ def iter_active_materialization_batches(
         else session_context[first_session:stop_session]
     )
     retained_session_bytes += target_slice_bytes
-    def produce_under_policy() -> Iterator[DatasetWriteChunk]:
+
+    def produce_under_policy() -> Iterator[pd.DataFrame]:
         assert bound_policy is not None
         require_artifact_root(root)
         pointer_bytes = np.dtype(object).itemsize
@@ -338,16 +338,14 @@ def iter_active_materialization_batches(
                             encoded = value.encode("utf-8")
                             yield "active-assets", encoded, encoded
 
-                    index.add_identity_payload_rows(
-                        rows=active_asset_rows()
-                    )
+                    index.add_identity_payload_rows(rows=active_asset_rows())
                     del source_values, chunk
 
             batch_state_bytes = sys.getsizeof([]) + sys.getsizeof(())
 
             def emit_asset_batch(
                 output: tuple[str, ...],
-            ) -> Iterator[DatasetWriteChunk]:
+            ) -> Iterator[pd.DataFrame]:
                 if valid_bar_offsets is None:
                     yield from _iter_adaptive_materialization_batches(
                         asset_ids=output,
@@ -449,7 +447,7 @@ def iter_active_materialization_batches(
             finally:
                 asset_reservations.close()
 
-    def activate_under_policy() -> Iterator[DatasetWriteChunk]:
+    def activate_under_policy() -> Iterator[pd.DataFrame]:
         assert bound_policy is not None
         if (
             bound_policy.reserved_memory_bytes
@@ -466,7 +464,7 @@ def iter_active_materialization_batches(
         ):
             yield from produce_under_policy()
 
-    def activate() -> Iterator[DatasetWriteChunk]:
+    def activate() -> Iterator[pd.DataFrame]:
         assert bound_policy is not None
         with runtime_resource_policy_scope(bound_policy):
             yield from activate_under_policy()
@@ -528,7 +526,7 @@ def _iter_adaptive_materialization_batches(
     valid_bar_offsets: tuple[int, int] | None = None,
     output_row_bound_bytes: int | None = None,
     materialize: Callable[..., pd.DataFrame],
-) -> Iterator[DatasetWriteChunk]:
+) -> Iterator[pd.DataFrame]:
     """Pack assets then sessions from one immutable soft throughput target."""
     policy = active_runtime_resource_policy()
     pointer_bytes = np.dtype(object).itemsize
@@ -546,8 +544,7 @@ def _iter_adaptive_materialization_batches(
         if output_row_bound_bytes is None
         else max(
             1,
-            remaining
-            // output_row_bound_bytes,
+            remaining // output_row_bound_bytes,
         )
     )
     asset_start = 0
@@ -632,7 +629,7 @@ def _iter_adaptive_materialization_batches(
                     ) from None
                 finally:
                     del current_assets, current_sessions, current_keys
-            yield DatasetWriteChunk(frame, retained_payload_bytes)
+            yield frame
             del frame
             session_start = session_stop
         asset_start = asset_stop
@@ -784,9 +781,7 @@ def bounded_valid_bar_key_coverage(
     first_core = core_sessions[0].value
     last_core = core_sessions[-1].value
     slot_count = lookback_bars + 2 + lookahead_bars
-    boundary_state_bytes = int(
-        len(asset_ids) * slot_count * np.dtype("int64").itemsize
-    )
+    boundary_state_bytes = int(len(asset_ids) * slot_count * np.dtype("int64").itemsize)
     if (
         resource_policy.reserved_memory_bytes
         + retained_payload_bytes
@@ -851,8 +846,7 @@ def bounded_valid_bar_key_coverage(
         flat_boundaries = boundary_timestamps.reshape(-1)
         output_count = sum(value != missing_value for value in flat_boundaries)
         output_state_bytes = int(
-            output_count
-            * (np.dtype(np.int64).itemsize + np.dtype(object).itemsize)
+            output_count * (np.dtype(np.int64).itemsize + np.dtype(object).itemsize)
         )
         if (
             resource_policy.reserved_memory_bytes

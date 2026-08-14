@@ -76,10 +76,13 @@ def build_portfolio_result_from_research_dataset(
     prediction_metadata: Mapping[str, object] | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> PortfolioResult:
-    policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    ) or RuntimeResourcePolicy.capture()
+    policy = (
+        bind_runtime_resource_policy(
+            resource_policy,
+            allow_implicit_active=False,
+        )
+        or RuntimeResourcePolicy.capture()
+    )
     operation = ExitStack()
     operation.enter_context(runtime_resource_policy_scope(policy))
     try:
@@ -95,19 +98,38 @@ def build_portfolio_result_from_research_dataset(
     except BaseException:
         operation.close()
         raise
+    chunks_complete = False
+    summary_complete = False
+    summary_value: Mapping[str, pd.DataFrame] | None = None
+
+    def close_when_complete() -> None:
+        if chunks_complete and summary_complete:
+            operation.close()
 
     def output_chunks() -> Iterable[Mapping[str, pd.DataFrame]]:
+        nonlocal chunks_complete
         try:
             yield from result.output_chunks
         except BaseException:
             operation.close()
             raise
+        chunks_complete = True
+        close_when_complete()
 
     def summary() -> Mapping[str, pd.DataFrame]:
+        nonlocal summary_complete, summary_value
+        if not chunks_complete:
+            raise RuntimeError("portfolio_summary_before_output_complete")
+        if summary_value is not None:
+            return summary_value
         try:
-            return result.summary_factory()
-        finally:
+            summary_value = result.summary_factory()
+        except BaseException:
             operation.close()
+            raise
+        summary_complete = True
+        close_when_complete()
+        return summary_value
 
     owned_result = PortfolioResult(
         spec=result.spec,
@@ -856,9 +878,7 @@ def _portfolio_summary_outputs(
                 summary_reservation.enter_context(
                     policy.reserve(
                         "research.portfolio.summary.outputs",
-                        returns_bytes
-                        + aggregation_state_bytes
-                        + summary_output_bound,
+                        returns_bytes + aggregation_state_bytes + summary_output_bound,
                     )
                 )
             cumulative_returns = compute_cumulative_returns(portfolio_returns)

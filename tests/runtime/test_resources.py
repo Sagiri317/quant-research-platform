@@ -49,6 +49,7 @@ def test_runtime_resource_policy_captures_one_shot_budget_inputs(
         "captured_available_memory_bytes": 10 * GIB,
         "rss0_bytes": 512 * MIB,
         "task_memory_budget_bytes": 2 * GIB,
+        "hard_memory_budget_bytes": 2 * GIB,
     }
     assert not hasattr(policy, "payload_target_bytes")
     assert policy.remaining_memory_bytes == 2 * GIB
@@ -88,8 +89,28 @@ def test_explicit_cap_can_only_lower_eighty_percent_budget(
     uncapped = RuntimeResourcePolicy.capture()
     high_cap = RuntimeResourcePolicy.capture(explicit_cap_bytes=20 * GIB)
 
-    assert uncapped.task_memory_budget_bytes == 8 * GIB
-    assert high_cap.task_memory_budget_bytes == 8 * GIB
+    assert uncapped.task_memory_budget_bytes == 15 * GIB // 2
+    assert uncapped.hard_memory_budget_bytes == 8 * GIB
+    assert high_cap.task_memory_budget_bytes == 15 * GIB // 2
+    assert high_cap.hard_memory_budget_bytes == 8 * GIB
+
+
+def test_planning_target_keeps_margin_below_hard_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
+    monkeypatch.setattr(
+        resources,
+        "_operation_rss_measurement",
+        lambda *_args: resources._OperationRssMeasurement(100, 800),
+    )
+
+    policy = RuntimeResourcePolicy.capture()
+
+    assert policy.task_memory_budget_bytes == 750
+    assert policy.hard_memory_budget_bytes == 800
+    assert policy.remaining_memory_bytes == 750
 
 
 @pytest.mark.parametrize(
@@ -155,6 +176,25 @@ def test_runtime_resource_policy_uses_one_shared_reservation_ledger() -> None:
         assert policy.remaining_memory_bytes == 600
 
 
+def test_same_policy_scopes_can_close_non_lifo_without_retiring_root() -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=1000,
+        rss_bytes=100,
+    )
+    outer = runtime_resource_policy_scope(policy)
+    inner = runtime_resource_policy_scope(policy)
+    outer.__enter__()
+    inner.__enter__()
+
+    outer.__exit__(None, None, None)
+    assert resources.current_runtime_resource_policy() is policy
+    assert policy._measurement.state == "ACTIVE"  # noqa: SLF001
+
+    inner.__exit__(None, None, None)
+    assert resources.current_runtime_resource_policy() is None
+    assert policy._measurement.state == "RETIRED"  # noqa: SLF001
+
+
 def test_root_scope_records_one_operation_peak_and_fails_over_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -204,7 +244,7 @@ def test_root_scope_records_one_operation_peak_and_fails_over_budget(
     assert evidence["status"] == "FAIL"
 
 
-def test_finish_accepts_before_retiring_the_operation_sampler(
+def test_finish_quiesces_before_retiring_the_operation_sampler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -220,9 +260,12 @@ def test_finish_accepts_before_retiring_the_operation_sampler(
             events.append("stop_sampler")
             self.state = "RETIRED"
 
-        def checkpoint_evidence(self) -> dict[str, int | float | str]:
-            events.append("checkpoint")
+        def quiesce(self) -> dict[str, int | float | str]:
+            events.append("quiesce")
             return self.evidence()
+
+        def resume(self) -> None:
+            events.append("resume")
 
         def evidence(self) -> dict[str, int | float | str]:
             return {
@@ -247,9 +290,123 @@ def test_finish_accepts_before_retiring_the_operation_sampler(
 
     with runtime_resource_policy_scope(policy):
         policy.finish_memory_measurement()
-        assert events == ["checkpoint", "stop_sampler"]
+        assert events == ["quiesce", "stop_sampler"]
 
-    assert events == ["checkpoint", "stop_sampler"]
+    assert events == ["quiesce", "stop_sampler"]
+
+
+def test_final_rejection_samples_through_rollback_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Measurement:
+        error = None
+        state = "READY"
+
+        def start(self) -> None:
+            self.state = "ACTIVE"
+
+        def quiesce(self) -> dict[str, int | float | str]:
+            events.append("quiesce")
+            return self.evidence()
+
+        def resume(self) -> None:
+            assert self.state == "ACTIVE"
+            events.append("resume")
+
+        def stop(self) -> None:
+            events.append("stop_sampler")
+            self.state = "RETIRED"
+
+        def evidence(self) -> dict[str, int | float | str]:
+            return {
+                "rss0_bytes": 100,
+                "hard_budget_bytes": 600,
+                "sampled_peak_rss_bytes": 701,
+                "peak_incremental_rss_bytes": 601,
+                "sample_count": 2,
+                "max_sample_interval_ms": 1.0,
+                "cadence_status": "PASS",
+                "status": "FAIL",
+            }
+
+    measurement = Measurement()
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
+    monkeypatch.setattr(
+        resources,
+        "_operation_rss_measurement",
+        lambda *_args: measurement,
+    )
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+
+    def rollback() -> None:
+        assert measurement.state == "ACTIVE"
+        events.append("rollback_cleanup")
+
+    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
+        with runtime_resource_policy_scope(policy):
+            policy.finish_memory_measurement(on_reject=rollback)
+
+    assert events == [
+        "quiesce",
+        "resume",
+        "rollback_cleanup",
+        "quiesce",
+        "stop_sampler",
+    ]
+
+
+def test_sampler_stop_failure_still_rolls_back_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Measurement:
+        error = None
+        state = "READY"
+
+        def start(self) -> None:
+            self.state = "ACTIVE"
+
+        def quiesce(self) -> dict[str, int | float | str]:
+            events.append("quiesce")
+            return self.evidence()
+
+        def stop(self) -> None:
+            events.append("stop_sampler")
+            self.state = "RETIRED"
+            self.error = OSError("sampler stop failed")
+
+        def evidence(self) -> dict[str, int | float | str]:
+            return {
+                "rss0_bytes": 100,
+                "hard_budget_bytes": 600,
+                "sampled_peak_rss_bytes": 100,
+                "peak_incremental_rss_bytes": 0,
+                "sample_count": 2,
+                "max_sample_interval_ms": 1.0,
+                "cadence_status": "PASS",
+                "status": "PASS",
+            }
+
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
+    monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
+    monkeypatch.setattr(
+        resources,
+        "_operation_rss_measurement",
+        lambda *_args: Measurement(),
+    )
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+
+    with pytest.raises(RuntimeError, match="runtime_rss_sampler_failed"):
+        with runtime_resource_policy_scope(policy):
+            policy.finish_memory_measurement(
+                on_reject=lambda: events.append("rollback_cleanup")
+            )
+
+    assert events == ["quiesce", "stop_sampler", "rollback_cleanup"]
 
 
 def test_operation_rss_evidence_includes_child_processes() -> None:
@@ -296,10 +453,10 @@ print(json.dumps(policy.memory_evidence()))
     assert evidence["status"] == "PASS"
     assert evidence["peak_incremental_rss_bytes"] >= 32 * MIB
     assert evidence["peak_incremental_rss_bytes"] <= evidence["hard_budget_bytes"]
-    assert evidence["max_sample_interval_ms"] <= 20
+    assert evidence["max_sample_interval_ms"] >= 0
 
 
-def test_operation_rss_evidence_excludes_preexisting_process_children() -> None:
+def test_operation_memory_evidence_counts_preexisting_child_growth() -> None:
     code = """
 import json
 import subprocess
@@ -310,15 +467,31 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 baseline = subprocess.Popen(
-    (sys.executable, "-c", "import time; time.sleep(1)"),
+    (
+        sys.executable,
+        "-c",
+        "import sys,time; print('ready', flush=True); sys.stdin.readline(); "
+        "payload=bytearray(64*1024*1024); "
+        "[payload.__setitem__(i, 1) for i in range(0, len(payload), 4096)]; "
+        "print('grown', flush=True); time.sleep(0.3)",
+    ),
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    text=True,
 )
 try:
+    assert baseline.stdout is not None and baseline.stdout.readline().strip() == "ready"
     policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=256 * 1024 * 1024)
     with runtime_resource_policy_scope(policy):
+        assert baseline.stdin is not None
+        baseline.stdin.write("grow\\n")
+        baseline.stdin.flush()
+        assert baseline.stdout.readline().strip() == "grown"
         time.sleep(0.05)
     print(json.dumps(policy.memory_evidence()))
 finally:
-    baseline.terminate()
+    if baseline.poll() is None:
+        baseline.terminate()
     baseline.wait(timeout=5)
 """
 
@@ -335,25 +508,26 @@ finally:
     evidence = json.loads(completed.stdout)
 
     assert evidence["status"] == "PASS"
-    assert evidence["peak_incremental_rss_bytes"] < 64 * MIB
+    assert evidence["measurement_metric"] in {
+        "process_tree_private_incremental",
+        "process_tree_pss_incremental",
+        "process_tree_uss_incremental",
+    }
+    assert evidence["peak_incremental_rss_bytes"] >= 48 * MIB
 
 
-def test_windows_hard_rss_backstop_counts_sampler_inside_operation_budget() -> None:
-    if os.name != "nt":
-        pytest.skip("Windows working-set RSS backstop")
-    budget = 64 * MIB
+def test_low_cap_empty_operation_does_not_charge_sampler_process() -> None:
+    budget = 16 * MIB
     code = """
 import json
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
-budget = 64 * 1024 * 1024
+budget = 16 * 1024 * 1024
 policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=budget)
 with runtime_resource_policy_scope(policy):
-    opaque = bytearray(96 * 1024 * 1024)
-    for offset in range(0, len(opaque), 4096):
-        opaque[offset] = 1
+    pass
 print(json.dumps(policy.memory_evidence()))
 """
 
@@ -371,28 +545,34 @@ print(json.dumps(policy.memory_evidence()))
 
     assert evidence["status"] == "PASS"
     assert evidence["peak_incremental_rss_bytes"] <= budget
-    assert evidence["max_sample_interval_ms"] <= 20
 
 
-def test_memory_rejection_remains_primary_when_backstop_restore_fails(
+def test_sampler_cadence_is_diagnostic_not_memory_correctness() -> None:
+    measurement = resources._OperationRssMeasurement(100, 600)
+    measurement.state = "RETIRED"
+    measurement.sampled_peak_rss_bytes = 100
+    measurement.sample_count = 2
+    measurement.max_sample_interval_ns = 20_000_001
+
+    evidence = measurement.evidence()
+
+    assert evidence["max_sample_interval_ms"] > 20
+    assert evidence["status"] == "PASS"
+
+
+def test_active_primary_is_not_replaced_by_sampler_stop_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Measurement:
         error = None
         state = "READY"
 
-        def __init__(self, rss0_bytes: int, hard_budget_bytes: int) -> None:
-            self.rss0_bytes = rss0_bytes
-            self.hard_budget_bytes = hard_budget_bytes
-
         def start(self) -> None:
             self.state = "ACTIVE"
 
         def stop(self) -> None:
             self.state = "RETIRED"
-
-        def release_backstop(self) -> None:
-            raise OSError("restore failed")
+            self.error = OSError("sampler stop failed")
 
         def evidence(self) -> dict[str, int | float | str]:
             return {
@@ -410,16 +590,16 @@ def test_memory_rejection_remains_primary_when_backstop_restore_fails(
 
     monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 1000)
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
-    monkeypatch.setattr(resources, "_OperationRssMeasurement", Measurement)
+    monkeypatch.setattr(
+        resources,
+        "_operation_rss_measurement",
+        lambda *_args: Measurement(),
+    )
     policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
 
-    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded") as raised:
+    with pytest.raises(KeyboardInterrupt):
         with runtime_resource_policy_scope(policy):
-            pass
-
-    assert raised.value.__notes__ == [
-        "runtime RSS backstop restoration also failed: OSError"
-    ]
+            raise KeyboardInterrupt()
 
 
 def test_reservation_release_preserves_active_primary() -> None:

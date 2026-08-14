@@ -37,7 +37,13 @@ from quant_research_platform.markets.implementations.a_share import (
     research_scenarios as a_share_research_scenarios,
 )
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
+from quant_research_platform.runtime.resources import current_runtime_resource_policy
+from quant_research_platform.storage._dataset_inspection import (
+    inspect_dataset as inspect_dataset_with_policy,
+)
+from quant_research_platform.storage._dataset_writing import (
+    write_dataset as write_dataset_with_policy,
+)
 from quant_research_platform.workflows import local_verification as module
 from quant_research_platform.workflows.local_verification import (
     LocalVerificationRunConfig,
@@ -89,10 +95,18 @@ def persist_fake_artifact(
     logical_layer: str,
 ) -> None:
     frame = _interim_frame() if logical_layer == "interim" else _dataset_frame()
-    write_dataset(
+    write_dataset_with_policy(
         artifact_root,
         frame,
         spec=_dataset_spec(dataset_id, logical_layer),
+        resource_policy=current_runtime_resource_policy(),
+    )
+
+
+def inspect_fake_artifact(artifact_root: Path):
+    return inspect_dataset_with_policy(
+        artifact_root,
+        resource_policy=current_runtime_resource_policy(),
     )
 
 
@@ -138,7 +152,9 @@ def stub_interim_importer(
                 "interim",
             )
             if on_artifact is not None:
-                on_artifact(artifact_root, inspect_dataset(artifact_root).manifest)
+                on_artifact(
+                    artifact_root, inspect_fake_artifact(artifact_root).manifest
+                )
         return SimpleNamespace(
             artifact_roots={frequency_ids.MARKET_BARS_DATA_ID: artifact_root}
         )
@@ -158,7 +174,7 @@ def stub_processed_builder(*, on_call=None, materialize=None):
             layout.project_root / "data" / "processed" / "a_share" / "factor"
         ) / "price_volume"
         persist_fake_artifact(artifact_root, "price_volume", "processed")
-        return {"price_volume": inspect_dataset(artifact_root)}
+        return {"price_volume": inspect_fake_artifact(artifact_root)}
 
     return materialize_processed
 
@@ -354,12 +370,13 @@ def persist_tiny_a_share_processed_inputs(
     for data_id in dataset_spec.input_data_ids:
         spec = profile.processed.get(data_id)
         root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-        write_dataset(
+        write_dataset_with_policy(
             root,
             _tiny_a_share_processed_frame(spec, training_periods=training_periods),
             spec=spec,
+            resource_policy=current_runtime_resource_policy(),
         )
-        inspections[data_id] = inspect_dataset(root)
+        inspections[data_id] = inspect_fake_artifact(root)
     return inspections
 
 

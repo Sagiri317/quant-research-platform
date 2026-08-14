@@ -2573,7 +2573,7 @@ def test_panel_writer_acquires_inputs_with_cumulative_live_session_bytes(
     live_sessions: list[object] = []
     acquisitions: list[int] = []
     opened_retained: list[int] = []
-    publication_envelopes: list[int] = []
+    publication_rows: list[int] = []
 
     @contextmanager
     def record_open(*args, retained_payload_bytes=0, **kwargs):  # noqa: ANN002, ANN003
@@ -2596,7 +2596,7 @@ def test_panel_writer_acquires_inputs_with_cumulative_live_session_bytes(
     def record_write(root, data, **kwargs):  # noqa: ANN001, ANN202
         def publications():  # noqa: ANN202
             for publication in data:
-                publication_envelopes.append(publication.retained_payload_bytes)
+                publication_rows.append(len(publication))
                 yield publication
 
         return real_write(root, publications(), **kwargs)
@@ -2613,8 +2613,7 @@ def test_panel_writer_acquires_inputs_with_cumulative_live_session_bytes(
     )
 
     assert len(acquisitions) == 3
-    assert publication_envelopes
-    assert set(publication_envelopes) == {sum(opened_retained)}
+    assert publication_rows
 
 
 def test_panel_chunk_keeps_output_admitted_through_consumer_yield(
@@ -2722,7 +2721,7 @@ def test_panel_dependent_publication_carries_live_panel_session_bytes(
     source_id = SourceId("synthetic_crypto")
     _write_existing_panel_dependency(layout, source_id, _panel_frame(minutes=3))
     panel_spec = processed_catalog().get("market_panel_1m")
-    publications: list[object] = []
+    publications: list[pd.DataFrame] = []
     write_baselines: list[int] = []
     monkeypatch.setattr(
         module,
@@ -2757,9 +2756,7 @@ def test_panel_dependent_publication_carries_live_panel_session_bytes(
         assert write_baselines == [panel_session.retained_memory_bytes + 123]
         assert publications
         assert all(
-            publication.retained_payload_bytes
-            == panel_session.retained_memory_bytes + 123
-            for publication in publications
+            isinstance(publication, pd.DataFrame) for publication in publications
         )
 
 

@@ -10,6 +10,7 @@ import pandas as pd
 
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.runtime.resources import bind_runtime_resource_policy
 from quant_research_platform.storage._dataset_comparison import (
     compare_datasets as _compare_datasets,
 )
@@ -33,6 +34,10 @@ from quant_research_platform.storage._dataset_writing import (
 )
 
 
+def _reject_unrelated_active_root() -> None:
+    bind_runtime_resource_policy(None, allow_implicit_active=False)
+
+
 def write_dataset(
     dataset_root: Path,
     data: pd.DataFrame | Iterable[pd.DataFrame],
@@ -40,6 +45,7 @@ def write_dataset(
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
 ) -> None:
+    _reject_unrelated_active_root()
     _write_dataset(
         dataset_root,
         data,
@@ -56,6 +62,7 @@ def read_dataset(
     time_window: TimeWindow | None = None,
     mode: DatasetReadMode = DatasetReadMode.MATERIALIZED,
 ) -> pd.DataFrame | Iterator[pd.DataFrame]:
+    _reject_unrelated_active_root()
     return _read_dataset(
         dataset_root,
         columns=columns,
@@ -70,6 +77,7 @@ def inspect_dataset(
     *,
     time_window: TimeWindow | None = None,
 ) -> DatasetInspection:
+    _reject_unrelated_active_root()
     return _inspect_dataset(
         dataset_root,
         time_window=time_window,
@@ -83,6 +91,7 @@ def fingerprint_dataset(
     columns: tuple[str, ...] | list[str] | None = None,
     time_window: TimeWindow | None = None,
 ) -> DatasetFingerprint:
+    _reject_unrelated_active_root()
     return _fingerprint_dataset(
         dataset_root,
         columns=columns,
@@ -98,6 +107,7 @@ def compare_datasets(
     columns: tuple[str, ...] | list[str] | None = None,
     time_window: TimeWindow | None = None,
 ) -> DatasetComparison:
+    _reject_unrelated_active_root()
     return _compare_datasets(
         left_root,
         right_root,

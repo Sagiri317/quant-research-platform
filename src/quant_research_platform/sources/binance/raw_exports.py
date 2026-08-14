@@ -64,6 +64,7 @@ def iter_raw_envelopes(
                 path,
                 batch_size=1,
                 resource_policy=policy,
+                validate_depth_payload=True,
             ):
                 yield batch[0]
 
@@ -75,6 +76,7 @@ def _iter_raw_envelope_batches(
     *,
     batch_size: int,
     resource_policy: RuntimeResourcePolicy,
+    validate_depth_payload: bool = True,
 ) -> Iterator[tuple[dict[str, Any], ...]]:
     raw_path = Path(path)
     if not raw_path.is_file():
@@ -129,7 +131,8 @@ def _iter_raw_envelope_batches(
                                     text,
                                     raw_path,
                                     line_number=line_number,
-                                )
+                                ),
+                                validate_depth_payload=validate_depth_payload,
                             )
                         )
                     if batch:
@@ -194,7 +197,11 @@ def _loads_json(text: str, path: Path, *, line_number: int | None = None) -> Any
         raise ValueError(f"malformed_binance_raw_row: {path.name}{location}") from exc
 
 
-def _validate_envelope(envelope: Any) -> dict[str, Any]:
+def _validate_envelope(
+    envelope: Any,
+    *,
+    validate_depth_payload: bool = True,
+) -> dict[str, Any]:
     if not isinstance(envelope, dict):
         raise ValueError("binance_raw_envelope_required")
     required = {
@@ -234,7 +241,8 @@ def _validate_envelope(envelope: Any) -> dict[str, Any]:
             raise ValueError("unexpected_binance_interval")
         if not isinstance(payload, dict):
             raise ValueError("invalid_binance_depth_payload")
-        _validate_depth_payload(payload)
+        if validate_depth_payload:
+            _validate_depth_payload(payload)
     return envelope
 
 

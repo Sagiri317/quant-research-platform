@@ -71,9 +71,6 @@ def write_factors(
                 resource_policy=resource_policy,
                 retained_payload_bytes=retained_payload_bytes,
             ),
-            retained_payload_bytes=(
-                retained_payload_bytes + panel_session.retained_memory_bytes
-            ),
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:
@@ -145,11 +142,9 @@ def _iter_factor_chunks(
                             error="out_of_order_crypto_factor_dependency",
                         )
                         panel = panel.copy()
-                        panel[_CORE_ROW] = (
-                            validation.core_time_window_mask(
-                                panel,
-                                time_window,
-                            )
+                        panel[_CORE_ROW] = validation.core_time_window_mask(
+                            panel,
+                            time_window,
                         )
                         for (
                             segment_market_id,

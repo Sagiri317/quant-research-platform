@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -117,6 +116,7 @@ def model_metadata(
     coefficient_count: int,
     feature_importance: dict[str, float] | None = None,
     feature_importance_status: str | None = None,
+    resolved_hyperparameters: dict[str, object] | None = None,
 ) -> dict[str, object]:
     metadata: dict[str, object] = {
         "model_algorithm": spec.model_algorithm,
@@ -144,7 +144,11 @@ def model_metadata(
         "input_count": len(spec.input_columns),
         "label_column": spec.label_column,
         "hyperparameters": dict(spec.hyperparameters),
-        "resolved_hyperparameters": supervised.resolved_model_hyperparameters(spec),
+        "resolved_hyperparameters": (
+            supervised.resolved_model_hyperparameters(spec)
+            if resolved_hyperparameters is None
+            else resolved_hyperparameters
+        ),
         "random_seed": spec.random_seed,
         "max_train_rows": spec.max_train_rows,
         "purge_gap_steps": spec.purge_gap_steps,
@@ -294,10 +298,11 @@ def fit_linear_coefficients(
                         else:
                             stacked_design = np.vstack([r_factor, chunk_design])
                             stacked_y = np.concatenate([qt_y, y])
-                        q_factor, next_r_factor = np.linalg.qr(
-                            stacked_design, mode="reduced"
-                        )
-                        next_qt_y = q_factor.T @ stacked_y
+                        with threadpool_limits(limits=1, user_api="blas"):
+                            q_factor, next_r_factor = np.linalg.qr(
+                                stacked_design, mode="reduced"
+                            )
+                            next_qt_y = q_factor.T @ stacked_y
                         del (
                             chunk_design,
                             q_factor,
@@ -391,10 +396,15 @@ def fit_estimator_model_result_from_frames(
                 target_state.enter_context(
                     policy.reserve("research.model.target", target_bytes)
                 )
-            y = training.loc[:, spec.label_column].to_numpy(
-                dtype="float64", copy=False
-            )
+            y = training.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
             with ExitStack() as fit_work:
+                threads = _effective_model_thread_count(
+                    training,
+                    spec,
+                    available_bytes=(
+                        None if policy is None else policy.remaining_memory_bytes
+                    ),
+                )
                 if policy is not None:
                     fit_work.enter_context(
                         policy.reserve(
@@ -402,7 +412,7 @@ def fit_estimator_model_result_from_frames(
                             _estimator_fit_working_set_bytes(
                                 training,
                                 spec,
-                                estimator,
+                                threads=threads,
                             ),
                         )
                     )
@@ -411,11 +421,18 @@ def fit_estimator_model_result_from_frames(
                     training=training,
                     y=y,
                     estimator=estimator,
+                    threads=threads,
                 )
             del y
         coefficient_count = int(
             getattr(predictor, "coefficient_count", len(spec.input_columns))
         )
+        resolved_hyperparameters = supervised.resolved_model_hyperparameters(spec)
+        if spec.model_algorithm in supervised._PARALLEL_MODEL_ALGORITHMS:  # noqa: SLF001
+            fitted_threads = getattr(predictor, "n_jobs", None)
+            if type(fitted_threads) is not int or fitted_threads <= 0:
+                raise RuntimeError("invalid_fitted_model_thread_count")
+            resolved_hyperparameters["n_jobs"] = fitted_threads
         metadata = model_metadata(
             spec,
             filter_metadata=filter_metadata,
@@ -425,6 +442,7 @@ def fit_estimator_model_result_from_frames(
                 spec,
                 predictor,
             ),
+            resolved_hyperparameters=resolved_hyperparameters,
         )
         coefficients = np.asarray(
             getattr(predictor, "coefficients", np.full(coefficient_count, np.nan)),
@@ -500,9 +518,7 @@ def collect_training_frame(
                             pandas_frame_payload_bytes(filtered),
                         )
                     )
-                usable_bound = _selected_frame_payload_bytes(
-                    filtered, selected_columns
-                )
+                usable_bound = _selected_frame_payload_bytes(filtered, selected_columns)
                 if resource_policy is not None:
                     chunk_work.enter_context(
                         resource_policy.reserve(
@@ -547,8 +563,7 @@ def collect_training_frame(
                         )
                     continue
                 combined_payload_bytes = (
-                    pandas_frame_payload_bytes(capped_training)
-                    + usable_payload_bytes
+                    pandas_frame_payload_bytes(capped_training) + usable_payload_bytes
                 )
                 with ExitStack() as concat_work:
                     if resource_policy is not None:
@@ -662,23 +677,37 @@ def fit_predictor(
 ) -> object:
     policy = current_runtime_resource_policy()
     with ExitStack() as fit_reservation:
+        threads = supervised.model_thread_count(spec)
         if policy is not None:
+            input_bytes = pandas_frame_payload_bytes(training) + int(y.nbytes)
+            state_bytes = _model_state_upper_bound_bytes(training, spec)
+            if input_bytes + state_bytes > policy.remaining_memory_bytes:
+                raise MemoryError("runtime_memory_budget_exceeded")
             fit_reservation.enter_context(
                 policy.reserve(
                     "research.model.fit_input",
-                    pandas_frame_payload_bytes(training) + int(y.nbytes),
-                )
-            )
-            fit_reservation.enter_context(
-                policy.reserve(
-                    "research.model.fit_work",
-                    _estimator_fit_working_set_bytes(training, spec, estimator),
+                    input_bytes,
                 )
             )
             fit_reservation.enter_context(
                 policy.reserve(
                     "research.model.fit_state",
-                    _model_state_upper_bound_bytes(training, spec),
+                    state_bytes,
+                )
+            )
+            threads = _effective_model_thread_count(
+                training,
+                spec,
+                available_bytes=policy.remaining_memory_bytes,
+            )
+            fit_reservation.enter_context(
+                policy.reserve(
+                    "research.model.fit_work",
+                    _estimator_fit_working_set_bytes(
+                        training,
+                        spec,
+                        threads=threads,
+                    ),
                 )
             )
         return _fit_predictor(
@@ -686,6 +715,7 @@ def fit_predictor(
             training=training,
             y=y,
             estimator=estimator,
+            threads=threads,
         )
 
 
@@ -695,20 +725,29 @@ def _fit_predictor(
     training: pd.DataFrame,
     y: np.ndarray,
     estimator: object,
+    threads: int,
 ) -> object:
     fit_training_frame = getattr(estimator, "fit_training_frame", None)
     if callable(fit_training_frame):
         return fit_training_frame(training)
     if not hasattr(estimator, "fit"):
         return estimator
+    if spec.model_algorithm in supervised._PARALLEL_MODEL_ALGORITHMS:  # noqa: SLF001
+        set_params = getattr(estimator, "set_params", None)
+        if not callable(set_params):
+            raise RuntimeError("model_thread_configuration_unavailable")
+        set_params(n_jobs=threads)
     openmp_threads = (
-        supervised.model_thread_count(spec)
+        threads
         if spec.model_algorithm in {"xgboost_regressor", "lightgbm_regressor"}
         else 1
     )
-    with threadpool_limits(limits=1, user_api="blas"), threadpool_limits(
-        limits=openmp_threads,
-        user_api="openmp",
+    with (
+        threadpool_limits(limits=1, user_api="blas"),
+        threadpool_limits(
+            limits=openmp_threads,
+            user_api="openmp",
+        ),
     ):
         estimator.fit(training.loc[:, spec.input_columns], y)
     return estimator
@@ -734,10 +773,9 @@ def fit_linear_coefficients_exact(
                 )
             )
         design = linear_design_matrix(frame, spec)
-        y = frame.loc[:, spec.label_column].to_numpy(
-            dtype="float64", copy=False
-        )
-        beta, *_ = np.linalg.lstsq(design, y, rcond=None)
+        y = frame.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
+        with threadpool_limits(limits=1, user_api="blas"):
+            beta, *_ = np.linalg.lstsq(design, y, rcond=None)
         return beta
 
 
@@ -784,7 +822,8 @@ def linear_design_matrix(
 def _estimator_fit_working_set_bytes(
     frame: pd.DataFrame,
     spec: ModelSpec,
-    estimator: object,
+    *,
+    threads: int | None = None,
 ) -> int:
     rows = len(frame)
     inputs = len(spec.input_columns)
@@ -794,17 +833,11 @@ def _estimator_fit_working_set_bytes(
     label_copy = rows * np.dtype(np.float64).itemsize
     row_index = rows * np.dtype(np.intp).itemsize
     coefficient_workspace = (inputs + 1) ** 2 * np.dtype(np.float64).itemsize
-    native_image = supervised.estimator_native_image_bytes(spec, estimator)
-    if native_image:
-        native_thread_pool = (
-            supervised.physical_core_count() * _native_thread_stack_bytes()
-        )
-    else:
-        native_thread_pool = 0
     parallel_workspace = _parallel_estimator_workspace_bytes(
         rows=rows,
         inputs=inputs,
         spec=spec,
+        threads=supervised.model_thread_count(spec) if threads is None else threads,
     )
     return (
         feature_frame
@@ -813,8 +846,6 @@ def _estimator_fit_working_set_bytes(
         + label_copy
         + row_index
         + coefficient_workspace
-        + native_image
-        + native_thread_pool
         + parallel_workspace
     )
 
@@ -824,20 +855,21 @@ def _parallel_estimator_workspace_bytes(
     rows: int,
     inputs: int,
     spec: ModelSpec,
+    threads: int | None = None,
 ) -> int:
     algorithm = spec.model_algorithm
-    threads = supervised.model_thread_count(spec)
+    thread_count = supervised.model_thread_count(spec) if threads is None else threads
     integer = np.dtype(np.intp).itemsize
     floating = np.dtype(np.float64).itemsize
     if algorithm in {"random_forest_regressor", "extra_trees_regressor"}:
-        return threads * (rows * (integer + floating) + inputs * floating)
+        return thread_count * (rows * (integer + floating) + inputs * floating)
     if algorithm == "xgboost_regressor":
         params = supervised.resolved_model_hyperparameters(spec)
         bins = _positive_model_int(params.get("max_bin"), default=256)
         quantized = rows * inputs * np.dtype(np.uint32).itemsize
         gradients = 2 * rows * floating
-        histograms = threads * inputs * bins * 2 * floating
-        row_positions = threads * rows * integer
+        histograms = thread_count * inputs * bins * 2 * floating
+        row_positions = thread_count * rows * integer
         return quantized + gradients + histograms + row_positions
     if algorithm == "lightgbm_regressor":
         params = supervised.resolved_model_hyperparameters(spec)
@@ -845,34 +877,33 @@ def _parallel_estimator_workspace_bytes(
         bin_itemsize = 1 if bins <= 255 else 2 if bins <= 65_535 else 4
         quantized = rows * inputs * bin_itemsize
         gradients = 2 * rows * floating
-        histograms = threads * inputs * bins * 2 * floating
-        row_positions = threads * rows * integer
+        histograms = thread_count * inputs * bins * 2 * floating
+        row_positions = thread_count * rows * integer
         return quantized + gradients + histograms + row_positions
     return 0
 
 
-def _native_thread_stack_bytes() -> int:
-    if sys.platform == "win32":
-        import ctypes
-
-        low = ctypes.c_size_t()
-        high = ctypes.c_size_t()
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        get_limits = kernel32.GetCurrentThreadStackLimits
-        get_limits.argtypes = (
-            ctypes.POINTER(ctypes.c_size_t),
-            ctypes.POINTER(ctypes.c_size_t),
-        )
-        get_limits.restype = None
-        get_limits(ctypes.byref(low), ctypes.byref(high))
-        stack_bytes = high.value - low.value
-    else:
-        import resource
-
-        stack_bytes = resource.getrlimit(resource.RLIMIT_STACK)[0]
-    if type(stack_bytes) is not int or stack_bytes <= 0:
-        raise RuntimeError("native_thread_stack_size_unavailable")
-    return stack_bytes
+def _effective_model_thread_count(
+    frame: pd.DataFrame,
+    spec: ModelSpec,
+    *,
+    available_bytes: int | None,
+) -> int:
+    requested = supervised.model_thread_count(spec)
+    if available_bytes is None:
+        return requested
+    if requested == 1:
+        if _estimator_fit_working_set_bytes(frame, spec, threads=1) > available_bytes:
+            raise MemoryError("runtime_memory_budget_exceeded")
+        return 1
+    base = _estimator_fit_working_set_bytes(frame, spec, threads=0)
+    per_thread = _estimator_fit_working_set_bytes(frame, spec, threads=1) - base
+    if per_thread <= 0:
+        return requested
+    effective = min(requested, max(1, (available_bytes - base) // per_thread))
+    if base + effective * per_thread > available_bytes:
+        raise MemoryError("runtime_memory_budget_exceeded")
+    return effective
 
 
 def _linear_exact_working_set_bytes(frame: pd.DataFrame, spec: ModelSpec) -> int:
@@ -884,7 +915,7 @@ def _linear_exact_working_set_bytes(frame: pd.DataFrame, spec: ModelSpec) -> int
     right_singular_vectors = columns * columns * np.dtype(np.float64).itemsize
     label_copy = rows * np.dtype(np.float64).itemsize
     solver_vectors = 2 * columns * np.dtype(np.float64).itemsize
-    native_workspace = 64 * 1024
+    native_workspace = design + right_singular_vectors + solver_vectors
     return (
         design
         + solver_input_copy
@@ -912,15 +943,13 @@ def _linear_qr_working_set_bytes(
         else 0
     )
     stacked_label = (
-        stacked_rows * np.dtype(np.float64).itemsize
-        if has_retained_factor
-        else 0
+        stacked_rows * np.dtype(np.float64).itemsize if has_retained_factor else 0
     )
     qr_input_copy = stacked_rows * columns * np.dtype(np.float64).itemsize
     q_factor = qr_input_copy
     r_factor = columns * columns * np.dtype(np.float64).itemsize
     projected_label = columns * np.dtype(np.float64).itemsize
-    native_workspace = 64 * 1024 + r_factor
+    native_workspace = qr_input_copy + r_factor + projected_label
     return (
         chunk_design
         + timestamp_values
@@ -988,9 +1017,7 @@ def _model_state_upper_bound_bytes(frame: pd.DataFrame, spec: ModelSpec) -> int:
         leaves = _bounded_tree_nodes(
             rows,
             depth=(
-                0
-                if depth_value == 0
-                else _positive_model_int(depth_value, default=6)
+                0 if depth_value == 0 else _positive_model_int(depth_value, default=6)
             ),
         )
     elif algorithm == "lightgbm_regressor":
@@ -1022,20 +1049,22 @@ def fit_linear_coefficients_from_tsqr(
         if policy is not None:
             columns = len(qt_y)
             solver_input_copy = int(r_factor.nbytes + qt_y.nbytes)
-            right_singular_vectors = (
-                columns * columns * np.dtype(np.float64).itemsize
-            )
+            right_singular_vectors = columns * columns * np.dtype(np.float64).itemsize
             solver_vectors = 2 * columns * np.dtype(np.float64).itemsize
+            native_workspace = (
+                solver_input_copy + right_singular_vectors + solver_vectors
+            )
             solve_reservation.enter_context(
                 policy.reserve(
                     "research.model.qr_solve",
                     solver_input_copy
                     + right_singular_vectors
                     + solver_vectors
-                    + 64 * 1024,
+                    + native_workspace,
                 )
             )
-        beta, *_ = np.linalg.lstsq(r_factor, qt_y, rcond=None)
+        with threadpool_limits(limits=1, user_api="blas"):
+            beta, *_ = np.linalg.lstsq(r_factor, qt_y, rcond=None)
         return beta
 
 

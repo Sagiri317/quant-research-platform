@@ -33,6 +33,7 @@ from tests.helpers.research_specs import (
     make_demo_research_dataset_spec,
     make_research_dataset_catalog,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.prediction_output_helpers import write_prediction_result
 
 
@@ -398,8 +399,7 @@ def test_model_selection_purges_each_assets_validation_tail_before_test_window(
         horizons=(1,),
     )
     sparse_validation_label = labeled.loc[
-        labeled["asset_id"].eq("sparse")
-        & labeled["timestamp"].eq(dates[1]),
+        labeled["asset_id"].eq("sparse") & labeled["timestamp"].eq(dates[1]),
         "forward_return_1d",
     ].item()
     assert sparse_validation_label == pytest.approx(60.0 / 50.0 - 1.0)
@@ -449,8 +449,7 @@ def test_model_selection_purges_each_assets_validation_tail_before_test_window(
         return
     validation = validation_frame()
     assert list(validation[["asset_id", "timestamp"]].itertuples(index=False)) == [
-        (asset_id, dates[date_position])
-        for asset_id, date_position in expected_keys
+        (asset_id, dates[date_position]) for asset_id, date_position in expected_keys
     ]
 
 
@@ -478,6 +477,41 @@ def test_prediction_runner_accepts_equivalent_timezone_representations() -> None
         pd.Timestamp("2024-01-15T17:00:00"),
         pd.Timestamp("2024-01-15T17:01:00"),
     ]
+
+
+def test_prediction_lazy_root_waits_for_chunks_and_metadata(monkeypatch) -> None:
+    policy = capture_test_policy(available_memory_bytes=1024, rss_bytes=100)
+    configured = SimpleNamespace(model_id="model", candidate_model_ids=())
+    monkeypatch.setattr(prediction_runner, "preflight_model_specs", lambda _specs: None)
+    monkeypatch.setattr(
+        prediction_runner,
+        "_build_prediction_result_from_research_dataset",
+        lambda **_kwargs: prediction_runner.PredictionResult(
+            spec=SimpleNamespace(),
+            output_chunks=(pd.DataFrame({"prediction": [1.0]}),),
+            model_metadata={},
+            prediction_metadata_factory=lambda: {"rows": 1},
+        ),
+    )
+
+    result = build_prediction_result_from_research_dataset(
+        layout=SimpleNamespace(),
+        dataset_catalog=SimpleNamespace(),
+        model_catalog=SimpleNamespace(),
+        prediction_catalog=SimpleNamespace(get=lambda _prediction_id: configured),
+        prediction_id="prediction",
+        resource_policy=policy,
+    )
+
+    with pytest.raises(
+        RuntimeError, match="prediction_metadata_before_output_complete"
+    ):
+        result.prediction_metadata_factory()
+    assert prediction_runner.current_runtime_resource_policy() is policy
+    assert len(list(result.output_chunks)) == 1
+    assert prediction_runner.current_runtime_resource_policy() is policy
+    assert result.prediction_metadata_factory() == {"rows": 1}
+    assert prediction_runner.current_runtime_resource_policy() is None
 
 
 def _model_catalog(*models: ModelSpec) -> ModelCatalog:

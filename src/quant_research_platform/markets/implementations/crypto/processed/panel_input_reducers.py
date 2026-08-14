@@ -101,6 +101,15 @@ class AggregateTradeReducer:
         required = ("asset_id", "timestamp")
         if any(column not in bars for column in required):
             raise ValueError("invalid_crypto_trade_bar_targets")
+        self._payload_target_bytes = _validated_payload_target(
+            payload_target_bytes,
+            error="invalid_crypto_trade_payload_target",
+        )
+        _require_output_frame_admission(
+            bars,
+            output_columns=len(_TRADE_AGGREGATE_COLUMNS),
+            payload_target_bytes=self._payload_target_bytes,
+        )
         self._policy = current_runtime_resource_policy()
         self._reservations = ExitStack()
         if self._policy is not None:
@@ -132,10 +141,6 @@ class AggregateTradeReducer:
                 name=None,
             )
         }
-        self._payload_target_bytes = _validated_payload_target(
-            payload_target_bytes,
-            error="invalid_crypto_trade_payload_target",
-        )
         self._normalize_chunk = normalize_chunk
         self._continuity_state = continuity_state or AggregateTradeContinuityState()
         self._finished = False
@@ -223,9 +228,7 @@ class AggregateTradeReducer:
     def finish(self) -> pd.DataFrame:
         self._finished = True
         keys = sorted(
-            key
-            for key, state in self._states.items()
-            if state.covered_trade_count
+            key for key, state in self._states.items() if state.covered_trade_count
         )
         return _payload_checked_output_frame(
             {
@@ -269,6 +272,15 @@ class DepthSnapshotReducer:
         required = ("asset_id", "close_time")
         if any(column not in bars for column in required):
             raise ValueError("invalid_crypto_depth_bar_targets")
+        self._payload_target_bytes = _validated_payload_target(
+            payload_target_bytes,
+            error="invalid_crypto_depth_payload_target",
+        )
+        _require_output_frame_admission(
+            bars,
+            output_columns=len(_QUOTE_COLUMNS),
+            payload_target_bytes=self._payload_target_bytes,
+        )
         self._policy = current_runtime_resource_policy()
         self._reservations = ExitStack()
         if self._policy is not None:
@@ -286,9 +298,7 @@ class DepthSnapshotReducer:
                         + 7 * sys.getsizeof(0.0)
                         + 2
                         * (
-                            sys.getsizeof(
-                                _DepthSideState(1, 0.0, 0.0, 0.0, 0.0, 2)
-                            )
+                            sys.getsizeof(_DepthSideState(1, 0.0, 0.0, 0.0, 0.0, 2))
                             + 4 * sys.getsizeof(0.0)
                             + 2 * sys.getsizeof(0)
                         )
@@ -312,13 +322,7 @@ class DepthSnapshotReducer:
                 dropna=False,
             )
         }
-        self._target_positions = {
-            asset_id: 0 for asset_id in self._targets_by_asset
-        }
-        self._payload_target_bytes = _validated_payload_target(
-            payload_target_bytes,
-            error="invalid_crypto_depth_payload_target",
-        )
+        self._target_positions = {asset_id: 0 for asset_id in self._targets_by_asset}
         self._normalize_chunk = normalize_chunk
         self._last_order_key: tuple[str, pd.Timestamp, str, int] | None = None
         self._current_key: tuple[str, str, pd.Timestamp] | None = None
@@ -479,6 +483,7 @@ class DepthSnapshotReducer:
         key = (asset_id, quote_timestamp)
         self._candidates[key] = self._latest_snapshot
 
+
 def _validated_payload_target(value: int, *, error: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(error)
@@ -500,19 +505,35 @@ def _target_state_upper_bound(
     timestamp = sys.getsizeof(pd.Timestamp(0))
     asset_text = int(bars["asset_id"].memory_usage(index=False, deep=True))
     key_graph = (
-        sys.getsizeof({})
-        + asset_text
-        + row_count * (key + mapping_entry + timestamp)
+        sys.getsizeof({}) + asset_text + row_count * (key + mapping_entry + timestamp)
     )
-    output_overlap = (
-        row_count * (output_columns * (pointer + 8) + 3 * pointer)
-        + output_columns * (sys.getsizeof([]) + 1024)
+    output_overlap = _output_frame_upper_bound(
+        row_count,
+        output_columns=output_columns,
     )
     return (
-        retained_key_graphs * key_graph
-        + row_count * row_state_bytes
-        + output_overlap
+        retained_key_graphs * key_graph + row_count * row_state_bytes + output_overlap
     )
+
+
+def _output_frame_upper_bound(row_count: int, *, output_columns: int) -> int:
+    pointer = sys.getsizeof(None)
+    return row_count * (output_columns * (pointer + 8) + 3 * pointer) + (
+        output_columns * (sys.getsizeof([]) + 1024)
+    )
+
+
+def _require_output_frame_admission(
+    bars: pd.DataFrame,
+    *,
+    output_columns: int,
+    payload_target_bytes: int,
+) -> None:
+    if (
+        _output_frame_upper_bound(len(bars), output_columns=output_columns)
+        > payload_target_bytes
+    ):
+        raise ValueError("crypto_indivisible_reducer_unit_exceeds_payload_target")
 
 
 def _next_frame_reservation(

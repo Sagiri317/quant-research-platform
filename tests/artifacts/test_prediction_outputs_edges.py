@@ -22,7 +22,10 @@ from quant_research_platform.artifacts._output_manifest import (
     prediction_output_metadata,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage._dataset_physical import (
     parquet_decoded_working_set_bounds,
@@ -37,6 +40,73 @@ from tests.helpers.report_output_frames import (
     make_artifact_prediction_output_frame,
 )
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+def test_public_artifact_writer_owns_a_composition_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "artifact"
+
+    def write(*_args, **_kwargs) -> Path:
+        assert current_runtime_resource_policy() is not None
+        target.mkdir()
+        return target
+
+    monkeypatch.setattr(outputs, "_write_prediction_outputs", write)
+
+    assert (
+        outputs.write_prediction_outputs(
+            spec=object(),  # type: ignore[arg-type]
+            output_spec=object(),  # type: ignore[arg-type]
+            layout=object(),  # type: ignore[arg-type]
+        )
+        == target
+    )
+    assert current_runtime_resource_policy() is None
+
+
+def test_public_artifact_final_memory_rejection_removes_new_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "artifact"
+    policy = capture_test_policy(
+        available_memory_bytes=1024,
+        rss_bytes=100,
+        explicit_cap_bytes=600,
+    )
+    measurement = policy._measurement  # noqa: SLF001
+    original_payload = measurement._payload  # type: ignore[attr-defined]  # noqa: SLF001
+
+    def failed_evidence() -> dict[str, int | float | str]:
+        payload = original_payload()
+        payload["sampled_peak_rss_bytes"] = 701
+        payload["peak_incremental_rss_bytes"] = 601
+        payload["status"] = "FAIL"
+        return payload
+
+    measurement.checkpoint_evidence = failed_evidence  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        outputs.RuntimeResourcePolicy,
+        "capture",
+        staticmethod(lambda **_kwargs: policy),
+    )
+
+    def write(*_args, **_kwargs) -> Path:
+        target.mkdir()
+        return target
+
+    monkeypatch.setattr(outputs, "_write_prediction_outputs", write)
+
+    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
+        outputs.write_prediction_outputs(
+            spec=object(),  # type: ignore[arg-type]
+            output_spec=object(),  # type: ignore[arg-type]
+            layout=object(),  # type: ignore[arg-type]
+        )
+
+    assert not target.exists()
 
 
 def _valid_prediction_output_metadata_with_selection() -> dict[str, object]:

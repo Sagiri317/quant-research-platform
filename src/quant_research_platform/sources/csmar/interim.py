@@ -45,13 +45,18 @@ from quant_research_platform.storage._dataset_paths import (
 )
 from quant_research_platform.storage._dataset_physical import DatasetFileIdentity
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
-from quant_research_platform.storage._dataset_writing import (
-    DatasetWriteChunk,
-    write_dataset,
-)
+from quant_research_platform.storage._dataset_writing import write_dataset
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
+
+
+class _InterimCapacityExceeded(DatasetReadCapacityExceeded):
+    def __init__(self, required_bytes: int, budget_bytes: int) -> None:
+        super().__init__("csmar_interim_working_set_exceeds_task_memory_budget")
+        self.required_bytes = required_bytes
+        self.budget_bytes = budget_bytes
+
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
@@ -462,9 +467,9 @@ def normalize_raw_frame(
         result = mapped
         for column in ("listing_date", "delisting_date", "status_change_date"):
             if column in result.columns:
-                result[column] = pd.to_datetime(
-                    result[column], errors="coerce"
-                ).astype("datetime64[ns]")
+                result[column] = pd.to_datetime(result[column], errors="coerce").astype(
+                    "datetime64[ns]"
+                )
         status_change = (
             result["status_change_date"]
             if "status_change_date" in result.columns
@@ -543,7 +548,6 @@ def iter_interim_frames(
         overrides=overrides,
         chunksize=chunksize,
         pruning_reports=pruning_reports,
-        publication=False,
     )
 
 
@@ -556,15 +560,14 @@ def _iter_interim_frames(
     overrides: dict[str, dict[str, object]] | None,
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
-    publication: bool,
     scratch_parent: Path | None = None,
-) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+) -> Iterator[pd.DataFrame]:
     bound_policy = current_runtime_resource_policy()
     validated_overrides = _validated_column_overrides(
         {} if overrides is None else overrides
     )
 
-    def activate() -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+    def activate() -> Iterator[pd.DataFrame]:
         policy = bound_policy or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
             operation_reports: list[dict[str, object]] = []
@@ -618,7 +621,6 @@ def _iter_interim_frames(
                         overrides=validated_overrides,
                         chunksize=chunksize,
                         pruning_reports=operation_reports,
-                        publication=True,
                     )
                     if data_id in SOURCE_REFERENCE_DATA_IDS:
                         assert selected_scratch_parent is not None
@@ -626,29 +628,16 @@ def _iter_interim_frames(
                             frames,
                             data_id=data_id,
                             pruning_reports=operation_reports,
-                            publication=True,
                             scratch_parent=selected_scratch_parent,
                         )
                         with closing_dataset_iterator(reference_frames):
                             for item in reference_frames:
-                                yield (
-                                    item
-                                    if publication
-                                    else item.frame
-                                    if isinstance(item, DatasetWriteChunk)
-                                    else item
-                                )
+                                yield item
                                 del item
                     else:
                         with closing_dataset_iterator(frames):
                             for item in frames:
-                                yield (
-                                    item
-                                    if publication
-                                    else item.frame
-                                    if isinstance(item, DatasetWriteChunk)
-                                    else item
-                                )
+                                yield item
                                 del item
             if pruning_reports is not None:
                 for report in operation_reports:
@@ -720,7 +709,6 @@ def _materialize_interim_data(
                 overrides=overrides,
                 chunksize=chunksize,
                 pruning_reports=pruning_reports,
-                publication=True,
                 scratch_parent=artifact_root.parent,
             )
             with closing_dataset_iterator(frames):
@@ -758,8 +746,7 @@ def _iter_pruned_interim_frames(
     overrides: Mapping[str, Mapping[str, object]],
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
-    publication: bool = False,
-) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+) -> Iterator[pd.DataFrame]:
     local_reports: list[dict[str, object]] = []
     primary_key = tuple(interim_catalog().get(data_id).primary_key)
     previous_key: tuple[object, ...] | None = None
@@ -791,6 +778,7 @@ def _iter_pruned_interim_frames(
                     chunk_bytes = pandas_frame_payload_bytes(chunk)
                     start = 0
                     span = len(chunk)
+                    downsized = False
                     while start < len(chunk):
                         stop = min(len(chunk), start + span)
                         candidate = (
@@ -810,16 +798,32 @@ def _iter_pruned_interim_frames(
                                 overrides=overrides,
                                 retained_previous_bytes=upstream_retained_bytes,
                             )
-                        except DatasetReadCapacityExceeded:
+                        except _InterimCapacityExceeded as exc:
                             del candidate
-                            if stop - start == 1:
+                            if downsized or stop - start == 1:
                                 raise
-                            span = max(1, (stop - start) // 2)
+                            fixed_bytes = retained_previous_bytes + chunk_bytes
+                            available_bytes = exc.budget_bytes - fixed_bytes
+                            observed_variable_bytes = max(
+                                1,
+                                exc.required_bytes - retained_previous_bytes,
+                            )
+                            if available_bytes <= 0:
+                                raise
+                            span = max(
+                                1,
+                                min(
+                                    stop - start - 1,
+                                    (stop - start)
+                                    * available_bytes
+                                    // observed_variable_bytes,
+                                ),
+                            )
+                            downsized = True
                             continue
                         if pruned.empty:
                             del pruned, report, candidate
                             start = stop
-                            span = len(chunk) - start
                             continue
                         _merge_pruning_report(local_reports, report)
                         first_key = tuple(pruned.iloc[0].loc[list(primary_key)])
@@ -829,17 +833,9 @@ def _iter_pruned_interim_frames(
                         del report, candidate
                         retained_previous_bytes = pandas_frame_payload_bytes(pruned)
                         retained_state[0] = retained_previous_bytes
-                        yield (
-                            DatasetWriteChunk(
-                                pruned,
-                                chunk_bytes,
-                            )
-                            if publication
-                            else pruned
-                        )
+                        yield pruned
                         del pruned
                         start = stop
-                        span = len(chunk) - start
                     del chunk
         if pruning_reports is not None:
             for report in local_reports:
@@ -911,9 +907,7 @@ def _transform_interim_chunk(
 
 def _require_interim_transform_headroom(required_bytes: int, budget_bytes: int) -> None:
     if required_bytes > budget_bytes:
-        raise DatasetReadCapacityExceeded(
-            "csmar_interim_working_set_exceeds_task_memory_budget"
-        )
+        raise _InterimCapacityExceeded(required_bytes, budget_bytes)
 
 
 def _normalization_preallocation_bytes(frame: pd.DataFrame, *, data_id: str) -> int:
@@ -962,22 +956,21 @@ def _merge_pruning_report(
 
 
 def _iter_with_first(
-    first_frame: pd.DataFrame | DatasetWriteChunk,
-    frames: Iterator[pd.DataFrame | DatasetWriteChunk],
-) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+    first_frame: pd.DataFrame,
+    frames: Iterator[pd.DataFrame],
+) -> Iterator[pd.DataFrame]:
     yield first_frame
     del first_frame
     yield from frames
 
 
 def _iter_deduped_reference_frames(
-    frames: Iterator[pd.DataFrame | DatasetWriteChunk],
+    frames: Iterator[pd.DataFrame],
     *,
     data_id: str,
     pruning_reports: list[dict[str, object]] | None,
-    publication: bool = False,
     scratch_parent: Path,
-) -> Iterator[pd.DataFrame | DatasetWriteChunk]:
+) -> Iterator[pd.DataFrame]:
     spec = interim_catalog().get(data_id)
     primary_key = tuple(spec.primary_key)
     exact_duplicate_count = 0
@@ -995,17 +988,8 @@ def _iter_deduped_reference_frames(
             scratch_parent=scratch_parent,
         ) as index,
     ):
-        for source_item in frames:
-            source_frame = (
-                source_item.frame
-                if isinstance(source_item, DatasetWriteChunk)
-                else source_item
-            )
-            upstream_retained_bytes = (
-                source_item.retained_payload_bytes
-                if isinstance(source_item, DatasetWriteChunk)
-                else 0
-            )
+        for source_frame in frames:
+            upstream_retained_bytes = 0
             missing = [
                 column for column in primary_key if column not in source_frame.columns
             ]
@@ -1022,7 +1006,26 @@ def _iter_deduped_reference_frames(
             )
             source_frame_bytes = pandas_frame_payload_bytes(source_frame)
             start = 0
-            span = len(source_frame)
+            fixed_bytes = (
+                upstream_retained_bytes
+                + source_frame_bytes
+                + index.retained_memory_bytes
+            )
+            variable_bytes = (
+                2 * source_frame_bytes + len(source_frame) * array("Q").itemsize
+            )
+            per_row_bytes = (variable_bytes + max(1, len(source_frame)) - 1) // max(
+                1, len(source_frame)
+            )
+            available_bytes = task_budget - fixed_bytes
+            if source_frame.empty:
+                span = 1
+            elif available_bytes < per_row_bytes:
+                raise ValueError(
+                    "csmar_reference_working_set_exceeds_task_memory_budget"
+                )
+            else:
+                span = min(len(source_frame), available_bytes // per_row_bytes)
             while start < len(source_frame):
                 stop = min(len(source_frame), start + span)
                 frame = source_frame.iloc[start:stop]
@@ -1035,12 +1038,9 @@ def _iter_deduped_reference_frames(
                     + (stop - start) * array("Q").itemsize
                 )
                 if preflight_bytes > task_budget:
-                    if stop - start <= 1:
-                        raise ValueError(
-                            "csmar_reference_working_set_exceeds_task_memory_budget"
-                        )
-                    span = max(1, (stop - start) // 2)
-                    continue
+                    raise ValueError(
+                        "csmar_reference_working_set_exceeds_task_memory_budget"
+                    )
                 table = pa.Table.from_pandas(frame, preserve_index=False)
                 retained_with_worst_output = (
                     upstream_retained_bytes
@@ -1051,13 +1051,10 @@ def _iter_deduped_reference_frames(
                     + (stop - start) * array("Q").itemsize
                 )
                 if retained_with_worst_output > task_budget:
-                    if stop - start <= 1:
-                        raise ValueError(
-                            "csmar_reference_working_set_exceeds_task_memory_budget"
-                        )
                     del table
-                    span = max(1, (stop - start) // 2)
-                    continue
+                    raise ValueError(
+                        "csmar_reference_working_set_exceeds_task_memory_budget"
+                    )
                 try:
                     keep_positions, duplicate_count = index.classify_comparison_table(
                         table,
@@ -1100,22 +1097,12 @@ def _iter_deduped_reference_frames(
                             "csmar_reference_working_set_exceeds_task_memory_budget"
                         )
                     del frame, keep_positions
-                    yield (
-                        DatasetWriteChunk(
-                            output,
-                            upstream_retained_bytes
-                            + source_frame_bytes
-                            + index.retained_memory_bytes,
-                        )
-                        if publication
-                        else output
-                    )
+                    yield output
                     del output
                 else:
                     del frame, keep_positions
                 start = stop
-                span = len(source_frame) - start
-            del source_frame, source_item
+            del source_frame
         completed = True
     if completed and pruning_reports is not None:
         _append_reference_duplicate_summary(

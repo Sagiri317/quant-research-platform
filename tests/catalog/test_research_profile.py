@@ -200,11 +200,11 @@ def test_a_share_scenario_has_distinct_default_and_smoke_model_parameters() -> N
         hyperparameter_preset="smoke",
     )[0]
 
-    assert dict(default.hyperparameters) == {"n_estimators": 20, "n_jobs": 1}
+    assert dict(default.hyperparameters) == {"n_estimators": 20, "n_jobs": -1}
     assert dict(smoke.hyperparameters) == {
         "n_estimators": 5,
         "max_depth": 3,
-        "n_jobs": 1,
+        "n_jobs": -1,
     }
 
 

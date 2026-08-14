@@ -493,7 +493,6 @@ def test_depth_reducer_merges_snapshot_across_chunks() -> None:
     assert quotes.loc[0, "ask_depth"] == 2.0
 
 
-
 def test_trade_reducer_admits_target_and_output_before_constructor_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -515,12 +514,59 @@ def test_trade_reducer_admits_target_and_output_before_constructor_allocation(
     )
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+        with pytest.raises(
+            ValueError,
+            match="crypto_indivisible_reducer_unit_exceeds_payload_target",
+        ):
             module.AggregateTradeReducer(
                 bars=bars,
                 payload_target_bytes=policy.remaining_memory_bytes,
                 normalize_chunk=panels.normalize_trade_chunk,
             )
+
+
+def test_trade_reducer_rejects_indivisible_output_before_state_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _panel_input_reducers_module()
+    monkeypatch.setattr(
+        module,
+        "_TradeBarState",
+        lambda: (_ for _ in ()).throw(AssertionError("state allocated before output")),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="crypto_indivisible_reducer_unit_exceeds_payload_target",
+    ):
+        module.AggregateTradeReducer(
+            bars=panels.prepare_panel_bars(_bars_frame()),
+            payload_target_bytes=1,
+            normalize_chunk=panels.normalize_trade_chunk,
+        )
+
+
+def test_depth_reducer_rejects_indivisible_output_before_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _panel_input_reducers_module()
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "sort_values",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bar keys sorted before output admission")
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="crypto_indivisible_reducer_unit_exceeds_payload_target",
+    ):
+        module.DepthSnapshotReducer(
+            bars=panels.prepare_panel_bars(_bars_frame()),
+            payload_target_bytes=1,
+            normalize_chunk=panels.normalize_depth_chunk,
+        )
 
 
 def test_market_panel_admits_merge_before_calling_pandas_owner(

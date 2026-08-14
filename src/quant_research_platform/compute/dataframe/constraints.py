@@ -68,19 +68,11 @@ def apply_tradability_constraints(
     can_enter_flags = context["can_enter_flags"]
     can_exit_flags = context["can_exit_flags"]
     target_assets = positions.keys()
-    if (
-        entry_checks_required
-        and isinstance(can_enter_flags, dict)
-        and can_enter_flags is not None
-    ):
+    if entry_checks_required and isinstance(can_enter_flags, dict):
         target_assets = target_assets | (
             previous_positions.keys() & can_enter_flags.keys()
         )
-    if (
-        exit_checks_required
-        and isinstance(can_exit_flags, dict)
-        and can_exit_flags is not None
-    ):
+    if exit_checks_required and isinstance(can_exit_flags, dict):
         target_assets = target_assets | (
             previous_positions.keys() & can_exit_flags.keys()
         )
