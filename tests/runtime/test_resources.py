@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-import mmap
 import os
 import subprocess
 import sys
-import time
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -26,13 +24,6 @@ GIB = 1024 * MIB
 class _PreparedMeasurement:
     error = None
     state = "READY"
-
-    def prepare(self) -> None:
-        pass
-
-    def bind_baseline(self, rss0_bytes: int, hard_budget_bytes: int) -> None:
-        self.rss0_bytes = rss0_bytes
-        self.hard_budget_bytes = hard_budget_bytes
 
 
 def test_runtime_resource_policy_direct_construction_fails_closed() -> None:
@@ -68,7 +59,7 @@ def test_runtime_resource_policy_captures_one_shot_budget_inputs(
     assert policy.remaining_memory_bytes == 15 * GIB // 8
 
 
-def test_sampler_stabilizes_before_one_shot_budget_capture(
+def test_measurement_is_created_after_one_shot_budget_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -77,21 +68,21 @@ def test_sampler_stabilizes_before_one_shot_budget_capture(
         state = "READY"
         error = None
 
-        def prepare(self) -> None:
-            events.append("sampler_ready")
-
-        def bind_baseline(self, rss0_bytes: int, hard_budget_bytes: int) -> None:
-            assert events == ["sampler_ready", "available0", "rss0"]
-            assert (rss0_bytes, hard_budget_bytes) == (100, 600)
-
         def stop(self) -> None:
             self.state = "RETIRED"
 
     measurement = Measurement()
+
+    def build_measurement(rss0_bytes: int, hard_budget_bytes: int) -> Measurement:
+        assert events == ["available0", "rss0"]
+        assert (rss0_bytes, hard_budget_bytes) == (100, 600)
+        events.append("measurement")
+        return measurement
+
     monkeypatch.setattr(
         resources,
         "_operation_rss_measurement",
-        lambda *_args: measurement,
+        build_measurement,
     )
     monkeypatch.setattr(
         resources,
@@ -106,6 +97,7 @@ def test_sampler_stabilizes_before_one_shot_budget_capture(
 
     policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
 
+    assert events == ["available0", "rss0", "measurement"]
     assert policy._measurement is measurement  # noqa: SLF001
 
 
@@ -252,7 +244,7 @@ def test_same_policy_scopes_can_close_non_lifo_without_retiring_root() -> None:
     assert policy._measurement.state == "RETIRED"  # noqa: SLF001
 
 
-def test_root_scope_records_one_operation_peak_and_fails_over_budget(
+def test_root_scope_records_one_checkpoint_peak_and_fails_over_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -306,7 +298,7 @@ def test_root_scope_records_one_operation_peak_and_fails_over_budget(
     assert events == ["quiesce", "stop"]
 
 
-def test_finish_quiesces_before_retiring_the_operation_sampler(
+def test_finish_checkpoints_before_retiring_operation_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -506,7 +498,10 @@ print(json.dumps(policy.memory_evidence()))
     assert evidence["status"] == "PASS"
     assert evidence["peak_incremental_rss_bytes"] < 16 * MIB
     assert evidence["peak_incremental_rss_bytes"] <= evidence["hard_budget_bytes"]
-    assert evidence["measurement_metric"] == "process_rss_incremental"
+    assert evidence["measurement_metric"] == "process_rss_checkpoint_incremental"
+    assert evidence["sampling_mode"] == "owner_boundary_checkpoint"
+    assert evidence["actual_peak_proven"] == "NO"
+    assert evidence["cadence_status"] == "NOT_APPLICABLE"
     assert evidence["max_sample_interval_ms"] >= 0
 
 
@@ -556,12 +551,14 @@ print(json.dumps(policy.memory_evidence()))
     untouched = measure(touch=False)
     touched = measure(touch=True)
 
-    assert untouched["measurement_metric"] == "process_rss_incremental"
+    assert untouched["measurement_metric"] == "process_rss_checkpoint_incremental"
+    assert untouched["sampling_mode"] == "owner_boundary_checkpoint"
+    assert untouched["actual_peak_proven"] == "NO"
     assert untouched["peak_incremental_rss_bytes"] < 16 * MIB
     assert touched["peak_incremental_rss_bytes"] >= 48 * MIB
 
 
-def test_low_cap_empty_operation_does_not_charge_sampler_process() -> None:
+def test_low_cap_empty_operation_has_only_checkpoint_telemetry() -> None:
     budget = 16 * MIB
     code = """
 import json
@@ -590,54 +587,26 @@ print(json.dumps(policy.memory_evidence()))
 
     assert evidence["status"] == "PASS"
     assert evidence["peak_incremental_rss_bytes"] <= budget
+    assert evidence["sampling_mode"] == "owner_boundary_checkpoint"
+    assert evidence["actual_peak_proven"] == "NO"
 
 
-@pytest.mark.parametrize(
-    ("interval_ns", "expected_status"),
-    ((20_000_000, "PASS"), (20_000_001, "FAIL")),
-)
-def test_sampler_cadence_is_an_authoritative_memory_gate(
-    interval_ns: int,
-    expected_status: str,
-) -> None:
+def test_checkpoint_telemetry_does_not_claim_or_enforce_polling_cadence() -> None:
     measurement = resources._OperationRssMeasurement(100, 600)
     measurement.state = "RETIRED"
     measurement.sampled_peak_rss_bytes = 100
     measurement.sample_count = 2
-    measurement.max_sample_interval_ns = interval_ns
 
     evidence = measurement.evidence()
 
-    assert evidence["cadence_status"] == expected_status
-    assert evidence["status"] == expected_status
+    assert evidence["measurement_metric"] == "process_rss_checkpoint_incremental"
+    assert evidence["sampling_mode"] == "owner_boundary_checkpoint"
+    assert evidence["actual_peak_proven"] == "NO"
+    assert evidence["cadence_status"] == "NOT_APPLICABLE"
+    assert evidence["status"] == "PASS"
 
 
-def test_sampler_arms_after_prebaseline_transient(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    original_available = resources._available_memory_bytes
-
-    def available_after_transient() -> int:
-        with mmap.mmap(-1, 64 * MIB, access=mmap.ACCESS_COPY) as transient:
-            for offset in range(0, 64 * MIB, 4096):
-                transient[offset] = 1
-            time.sleep(0.02)
-        return original_available()
-
-    monkeypatch.setattr(
-        resources,
-        "_available_memory_bytes",
-        available_after_transient,
-    )
-    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=32 * MIB)
-
-    with runtime_resource_policy_scope(policy):
-        pass
-
-    assert policy.memory_evidence()["status"] == "PASS"
-
-
-def test_active_primary_is_not_replaced_by_sampler_stop_failure(
+def test_active_primary_is_not_replaced_by_telemetry_stop_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Measurement(_PreparedMeasurement):
