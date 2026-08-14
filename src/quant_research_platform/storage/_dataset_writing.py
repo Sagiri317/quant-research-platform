@@ -51,9 +51,11 @@ from quant_research_platform.storage._dataset_paths import (
     validate_dataset_artifact_root,
 )
 from quant_research_platform.storage._dataset_physical import (
+    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     _PHYSICAL_PAGE_ROWS_KEY,
     DatasetPartMetadata,
     _parquet_row_group_footer_upper_bound,
+    _parquet_row_group_size,
     _table_parquet_page_working_set_bytes,
     dataset_file_identity,
     table_with_decoded_row_bounds,
@@ -802,7 +804,9 @@ def _dataset_write_operator_target_bytes(
 ) -> int:
     if frame.empty:
         return operation_headroom_bytes
-    fixed_bytes = 2 * _ARROW_FRAME_FIXED_BYTES
+    fixed_bytes = (
+        2 * _ARROW_FRAME_FIXED_BYTES + _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+    )
     available = operation_headroom_bytes - fixed_bytes
     if available <= 0:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget")
@@ -923,7 +927,10 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
         reservation = nullcontext()
     else:
         remaining = policy.task_memory_budget_bytes - policy.reserved_memory_bytes
-        footer_bytes = _parquet_row_group_footer_upper_bound(persisted.schema)
+        footer_bytes = _parquet_row_group_footer_upper_bound(
+            persisted.schema,
+            rows=persisted.num_rows,
+        )
         page_headroom = remaining - footer_bytes
         minimum_rows = 0 if persisted.num_rows == 0 else 1
         minimum_bytes = _table_parquet_page_working_set_bytes(
@@ -961,7 +968,7 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
             persisted,
             path,
             compression="zstd",
-            row_group_size=max(1, persisted.num_rows),
+            row_group_size=_parquet_row_group_size(persisted.num_rows),
             write_batch_size=batch_rows,
             max_rows_per_page=batch_rows,
             use_dictionary=False,

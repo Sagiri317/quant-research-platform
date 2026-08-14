@@ -29,6 +29,8 @@ from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 _DECODED_ROW_BOUNDS_KEY = b"qrp.decoded-row-bounds"
 _DECODED_ROW_BOUNDS_SCHEMA_ID = "qrp-dataset-part-decoded-row-bounds"
 _PHYSICAL_PAGE_ROWS_KEY = b"qrp.parquet-page-rows"
+_PARQUET_MAX_ROW_GROUP_ROWS = 64 * 1024 * 1024
+_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES = 2 * 1024 * 1024
 _PARQUET_NATIVE_METADATA_PAGE_BYTES = 4096
 
 
@@ -630,17 +632,30 @@ def _table_parquet_page_working_set_bytes(table: pa.Table, *, rows: int) -> int:
         _zstd_compressed_bound(rows * per_row)
         for per_row, _fixed in decoded_bounds.values()
     )
-    return decoded_bytes + compressed_bound
+    return _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES + decoded_bytes + compressed_bound
 
 
-def _parquet_row_group_footer_upper_bound(schema: pa.Schema) -> int:
-    """Bound one row group's footer state with statistics and indexes disabled."""
+def _parquet_row_group_size(rows: int) -> int:
+    if isinstance(rows, bool) or type(rows) is not int or rows < 0:
+        raise ValueError("invalid_parquet_row_group_rows")
+    return max(1, min(rows, _PARQUET_MAX_ROW_GROUP_ROWS))
 
+
+def _parquet_row_group_footer_upper_bound(
+    schema: pa.Schema,
+    *,
+    rows: int,
+) -> int:
+    """Bound retained footer state with statistics and indexes disabled."""
+
+    group_rows = _parquet_row_group_size(rows)
+    group_count = max(1, (rows + group_rows - 1) // group_rows)
     variable_bytes = sum(
         len(field.name.encode("utf-8")) + len(str(field.type).encode("utf-8"))
         for field in schema
     ) + sum(len(key) + len(value) for key, value in (schema.metadata or {}).items())
-    return _PARQUET_NATIVE_METADATA_PAGE_BYTES * (len(schema) + 1) + variable_bytes
+    per_group = _PARQUET_NATIVE_METADATA_PAGE_BYTES * (len(schema) + 1) + variable_bytes
+    return group_count * per_group
 
 
 def _zstd_compressed_bound(source_bytes: int) -> int:
@@ -713,6 +728,8 @@ def _column_decoded_row_bound(column: pa.ChunkedArray) -> tuple[int, int]:
             else 4
         )
         return maximum + offset_bytes + 1, offset_bytes
+    if pa.types.is_null(data_type):
+        return 2, 0
     if pa.types.is_boolean(data_type):
         return 2, 0
     try:

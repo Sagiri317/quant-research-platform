@@ -33,6 +33,7 @@ from quant_research_platform.storage._dataset_key_tracking import (
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import (
     _parquet_row_group_footer_upper_bound,
+    _parquet_row_group_size,
     _table_parquet_page_working_set_bytes,
     table_with_decoded_row_bounds,
 )
@@ -188,9 +189,10 @@ def write_parquet_chunks(
                                                 )
                                             writer.write_table(
                                                 persisted,
-                                                row_group_size=max(
-                                                    1,
-                                                    persisted.num_rows,
+                                                row_group_size=(
+                                                    _parquet_row_group_size(
+                                                        persisted.num_rows
+                                                    )
                                                 ),
                                             )
                                             row_count += len(selected)
@@ -309,7 +311,7 @@ def write_parquet(
                         persisted,
                         handle,
                         compression=compression,
-                        row_group_size=max(1, persisted.num_rows),
+                        row_group_size=_parquet_row_group_size(persisted.num_rows),
                         write_batch_size=batch_rows,
                         max_rows_per_page=batch_rows,
                         use_dictionary=False,
@@ -392,7 +394,10 @@ def _artifact_table_write_state(
         return persisted, stack, max(1, persisted.num_rows), (0, 0)
     retained_page_bytes, retained_footer_bytes = retained_memory
     retained_bytes = retained_page_bytes + retained_footer_bytes
-    footer_increment = _parquet_row_group_footer_upper_bound(persisted.schema)
+    footer_increment = _parquet_row_group_footer_upper_bound(
+        persisted.schema,
+        rows=persisted.num_rows,
+    )
     page_headroom = (
         policy.remaining_memory_bytes + retained_page_bytes - footer_increment
     )

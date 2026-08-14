@@ -8633,7 +8633,12 @@ def test_writer_checks_actual_arrow_headroom_after_conversion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = _writer_test_policy()
+    policy = _writer_test_policy(
+        working_headroom_bytes=(
+            dataset_physical._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+            + 5 * 256 * 1024
+        )
+    )
     monkeypatch.setattr(
         dataset_writing,
         "pandas_frame_payload_bytes",
@@ -8855,26 +8860,23 @@ def test_qrp_parquet_reader_bounded_completes_with_physical_page_admission(
     assert max(batch.num_rows for batch in batches) == 1
 
 
-def test_dataset_parquet_writer_disables_retained_dictionary_state(
+def test_dataset_parquet_writer_bounds_native_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    table = pa.table({"value": ["x"] * 8})
+    table = pa.table({"value": pa.nulls(64 * 1024 * 1024 + 1)})
     captured: dict[str, object] = {}
     policy = capture_test_policy(
-        available_memory_bytes=1024**2,
-        explicit_cap_bytes=256 * 1024,
+        available_memory_bytes=32 * 1024**2,
+        explicit_cap_bytes=8 * 1024**2,
     )
 
     def capture_write(*_args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         captured.update(kwargs)
+        captured["table"] = _args[0]
+        captured["reserved_memory_bytes"] = policy.reserved_memory_bytes
 
     monkeypatch.setattr(dataset_writing.pq, "write_table", capture_write)
-    monkeypatch.setattr(
-        dataset_writing,
-        "_table_parquet_page_working_set_bytes",
-        lambda _table, *, rows: rows * 64 * 1024,
-    )
     with runtime_resource_policy_scope(policy):
         dataset_writing.write_parquet_file(table, tmp_path / "part.parquet")
 
@@ -8884,7 +8886,21 @@ def test_dataset_parquet_writer_disables_retained_dictionary_state(
     assert captured["write_statistics"] is False
     assert captured["max_rows_per_page"] == captured["write_batch_size"]
     assert captured["write_batch_size"] < table.num_rows
-    assert captured["row_group_size"] == table.num_rows
+    assert captured["row_group_size"] == 64 * 1024 * 1024
+    assert captured["write_batch_size"] <= 3 * 1024**2 // 2
+    persisted = captured["table"]
+    assert isinstance(persisted, pa.Table)
+    batch_rows = captured["write_batch_size"]
+    assert type(batch_rows) is int
+    page_bytes = dataset_physical._table_parquet_page_working_set_bytes(
+        persisted,
+        rows=batch_rows,
+    )
+    footer_bytes = dataset_physical._parquet_row_group_footer_upper_bound(
+        persisted.schema,
+        rows=1,
+    )
+    assert captured["reserved_memory_bytes"] >= page_bytes + 2 * footer_bytes
 
 
 def test_writer_bounded_completes_under_task_wide_copy_and_arrow_headroom(
@@ -8899,7 +8915,12 @@ def test_writer_bounded_completes_under_task_wide_copy_and_arrow_headroom(
             "value": ["x" * 1_500] * row_count,
         }
     )
-    policy = _writer_test_policy()
+    policy = _writer_test_policy(
+        working_headroom_bytes=(
+            dataset_physical._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+            + 2 * 1024**2
+        )
+    )
     root = make_dataset_artifact_root(tmp_path, "writer_task_headroom")
     result = dataset_writing.write_dataset(
         root,

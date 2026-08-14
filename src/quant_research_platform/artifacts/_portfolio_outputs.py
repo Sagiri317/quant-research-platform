@@ -35,6 +35,9 @@ from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
+from quant_research_platform.storage._dataset_physical import (
+    _parquet_row_group_size,
+)
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
@@ -237,7 +240,9 @@ def _write_portfolio_row_artifact_chunks(
                             writers[artifact_name] = writer
                         writer.write_table(
                             persisted,
-                            row_group_size=max(1, persisted.num_rows),
+                            row_group_size=_parquet_row_group_size(
+                                persisted.num_rows
+                            ),
                         )
                         row_counts[artifact_name] += len(selected)
             for artifact_name in tuple(writers):
