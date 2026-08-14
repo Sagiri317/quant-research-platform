@@ -21,6 +21,18 @@ MIB = 1024 * 1024
 GIB = 1024 * MIB
 
 
+class _PreparedMeasurement:
+    error = None
+    state = "READY"
+
+    def prepare(self) -> None:
+        pass
+
+    def bind_baseline(self, rss0_bytes: int, hard_budget_bytes: int) -> None:
+        self.rss0_bytes = rss0_bytes
+        self.hard_budget_bytes = hard_budget_bytes
+
+
 def test_runtime_resource_policy_direct_construction_fails_closed() -> None:
     with pytest.raises(TypeError, match="runtime_resource_policy_capture_required"):
         RuntimeResourcePolicy()
@@ -52,6 +64,47 @@ def test_runtime_resource_policy_captures_one_shot_budget_inputs(
         "hard_memory_budget_bytes": 2 * GIB,
     }
     assert policy.remaining_memory_bytes == 15 * GIB // 8
+
+
+def test_sampler_stabilizes_before_one_shot_budget_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Measurement:
+        state = "READY"
+        error = None
+
+        def prepare(self) -> None:
+            events.append("sampler_ready")
+
+        def bind_baseline(self, rss0_bytes: int, hard_budget_bytes: int) -> None:
+            assert events == ["sampler_ready", "available0", "rss0"]
+            assert (rss0_bytes, hard_budget_bytes) == (100, 600)
+
+        def stop(self) -> None:
+            self.state = "RETIRED"
+
+    measurement = Measurement()
+    monkeypatch.setattr(
+        resources,
+        "_operation_rss_measurement",
+        lambda *_args: measurement,
+    )
+    monkeypatch.setattr(
+        resources,
+        "_available_memory_bytes",
+        lambda: events.append("available0") or 1000,
+    )
+    monkeypatch.setattr(
+        resources,
+        "_process_rss_bytes",
+        lambda: events.append("rss0") or 100,
+    )
+
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600)
+
+    assert policy._measurement is measurement  # noqa: SLF001
 
 
 def test_runtime_resource_policy_rejects_measurement_overrides(
@@ -202,10 +255,7 @@ def test_root_scope_records_one_operation_peak_and_fails_over_budget(
 ) -> None:
     events: list[str] = []
 
-    class Measurement:
-        error = None
-        state = "READY"
-
+    class Measurement(_PreparedMeasurement):
         def start(self) -> None:
             self.state = "ACTIVE"
 
@@ -259,10 +309,7 @@ def test_finish_quiesces_before_retiring_the_operation_sampler(
 ) -> None:
     events: list[str] = []
 
-    class Measurement:
-        error = None
-        state = "READY"
-
+    class Measurement(_PreparedMeasurement):
         def start(self) -> None:
             self.state = "ACTIVE"
 
@@ -310,10 +357,7 @@ def test_final_rejection_samples_through_rollback_cleanup(
 ) -> None:
     events: list[str] = []
 
-    class Measurement:
-        error = None
-        state = "READY"
-
+    class Measurement(_PreparedMeasurement):
         def start(self) -> None:
             self.state = "ACTIVE"
 
@@ -373,10 +417,7 @@ def test_sampler_stop_failure_still_rolls_back_publication(
 ) -> None:
     events: list[str] = []
 
-    class Measurement:
-        error = None
-        state = "READY"
-
+    class Measurement(_PreparedMeasurement):
         def start(self) -> None:
             self.state = "ACTIVE"
 
@@ -549,26 +590,30 @@ print(json.dumps(policy.memory_evidence()))
     assert evidence["peak_incremental_rss_bytes"] <= budget
 
 
-def test_sampler_cadence_is_diagnostic_not_memory_correctness() -> None:
+@pytest.mark.parametrize(
+    ("interval_ns", "expected_status"),
+    ((20_000_000, "PASS"), (20_000_001, "FAIL")),
+)
+def test_sampler_cadence_is_an_authoritative_memory_gate(
+    interval_ns: int,
+    expected_status: str,
+) -> None:
     measurement = resources._OperationRssMeasurement(100, 600)
     measurement.state = "RETIRED"
     measurement.sampled_peak_rss_bytes = 100
     measurement.sample_count = 2
-    measurement.max_sample_interval_ns = 20_000_001
+    measurement.max_sample_interval_ns = interval_ns
 
     evidence = measurement.evidence()
 
-    assert evidence["max_sample_interval_ms"] > 20
-    assert evidence["status"] == "PASS"
+    assert evidence["cadence_status"] == expected_status
+    assert evidence["status"] == expected_status
 
 
 def test_active_primary_is_not_replaced_by_sampler_stop_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Measurement:
-        error = None
-        state = "READY"
-
+    class Measurement(_PreparedMeasurement):
         def start(self) -> None:
             self.state = "ACTIVE"
 

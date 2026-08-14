@@ -39,6 +39,8 @@ from quant_research_platform.storage._dataset_reading import closing_dataset_ite
 from quant_research_platform.storage._scratch_ownership import require_owned_scratch
 from quant_research_platform.storage.atomic import publish_no_replace, reject_if_exists
 
+_PARQUET_NATIVE_METADATA_PAGE_BYTES = 4096
+
 
 @dataclass(frozen=True)
 class _PredictionOutputWriteSummary:
@@ -76,7 +78,7 @@ def write_parquet_chunks(
     effective_test_end: str | None = None
     decoded_metadata: dict[bytes, bytes] | None = None
     writer_state = ExitStack()
-    writer_bound = 0
+    writer_memory = (0, 0)
     try:
         with _artifact_key_index_reservation():
             with closing_dataset_iterator(iter(frames)) as active_frames:
@@ -149,12 +151,12 @@ def write_parquet_chunks(
                                                 persisted,
                                                 table_state,
                                                 batch_rows,
-                                                writer_bound,
+                                                writer_memory,
                                             ) = (
                                                 _artifact_table_write_state(
                                                     table,
                                                     previous_metadata=decoded_metadata,
-                                                    retained_bytes=writer_bound,
+                                                    retained_memory=writer_memory,
                                                 )
                                             )
                                             writer_state.enter_context(table_state)
@@ -376,8 +378,8 @@ def _artifact_table_write_state(
     table: pa.Table,
     *,
     previous_metadata: dict[bytes, bytes] | None = None,
-    retained_bytes: int = 0,
-) -> tuple[pa.Table, ExitStack, int, int]:
+    retained_memory: tuple[int, int] = (0, 0),
+) -> tuple[pa.Table, ExitStack, int, tuple[int, int]]:
     persisted = table_with_decoded_row_bounds(
         table,
         previous_metadata=previous_metadata,
@@ -385,14 +387,19 @@ def _artifact_table_write_state(
     stack = ExitStack()
     policy = current_runtime_resource_policy()
     if policy is None:
-        return persisted, stack, max(1, persisted.num_rows), 0
-    remaining = policy.remaining_memory_bytes + retained_bytes
+        return persisted, stack, max(1, persisted.num_rows), (0, 0)
+    retained_page_bytes, retained_footer_bytes = retained_memory
+    retained_bytes = retained_page_bytes + retained_footer_bytes
+    footer_increment = _parquet_row_group_footer_upper_bound(persisted.schema)
+    page_headroom = (
+        policy.remaining_memory_bytes + retained_page_bytes - footer_increment
+    )
     minimum_rows = 0 if persisted.num_rows == 0 else 1
     minimum_bytes = _table_parquet_page_working_set_bytes(
         persisted,
         rows=minimum_rows,
     )
-    if minimum_bytes > remaining:
+    if minimum_bytes > page_headroom:
         raise MemoryError("runtime_memory_budget_exceeded")
     batch_rows = max(1, persisted.num_rows)
     working_bytes = minimum_bytes
@@ -404,17 +411,31 @@ def _artifact_table_write_state(
             persisted,
             rows=candidate,
         )
-        if candidate_bytes <= remaining:
+        if candidate_bytes <= page_headroom:
             batch_rows = candidate
             working_bytes = candidate_bytes
             low = candidate + 1
         else:
             high = candidate - 1
-    next_retained = max(retained_bytes, working_bytes)
+    next_memory = (
+        max(retained_page_bytes, working_bytes),
+        retained_footer_bytes + footer_increment,
+    )
+    next_retained = sum(next_memory)
     stack.enter_context(
         policy.reserve(
             "artifacts.parquet.native",
             next_retained - retained_bytes,
         )
     )
-    return persisted, stack, batch_rows, next_retained
+    return persisted, stack, batch_rows, next_memory
+
+
+def _parquet_row_group_footer_upper_bound(schema: pa.Schema) -> int:
+    """Bound retained footer state with statistics and indexes disabled."""
+
+    variable_bytes = sum(
+        len(field.name.encode("utf-8")) + len(str(field.type).encode("utf-8"))
+        for field in schema
+    ) + sum(len(key) + len(value) for key, value in (schema.metadata or {}).items())
+    return _PARQUET_NATIVE_METADATA_PAGE_BYTES * (len(schema) + 1) + variable_bytes

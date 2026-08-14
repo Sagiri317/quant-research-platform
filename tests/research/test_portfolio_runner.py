@@ -243,6 +243,36 @@ def test_portfolio_result_explicit_close_owns_operation_root(tmp_path) -> None:
         result.summary_factory()
 
 
+def test_portfolio_result_context_preserves_body_primary() -> None:
+    primary = ValueError("body_primary")
+    closed: list[bool] = []
+    policy = capture_test_policy(available_memory_bytes=1024, rss_bytes=100)
+    scope = portfolio_runner.runtime_resource_policy_scope(policy)
+    scope.__enter__()
+
+    def close() -> None:
+        closed.append(True)
+        scope.__exit__(None, None, None)
+        raise MemoryError("cleanup_secondary")
+
+    result = portfolio_runner.PortfolioResult(
+        spec=object(),  # type: ignore[arg-type]
+        output_chunks=(),
+        summary_factory=dict,
+        _close=close,
+    )
+    with pytest.raises(ValueError) as raised:
+        with result:
+            raise primary
+
+    assert raised.value is primary
+    assert raised.value.__notes__ == [
+        "portfolio result cleanup also failed: MemoryError"
+    ]
+    assert closed == [True]
+    assert portfolio_runner.current_runtime_resource_policy() is None
+
+
 def test_portfolio_lazy_result_keeps_final_rejection_terminal(monkeypatch) -> None:
     policy = capture_test_policy(
         available_memory_bytes=1024,

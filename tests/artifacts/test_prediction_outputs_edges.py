@@ -647,11 +647,18 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = make_artifact_prediction_output_frame()
+    frames = tuple(
+        frame.assign(timestamp=frame["timestamp"] + pd.Timedelta(days=offset))
+        for offset in range(3)
+    )
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
     events: list[str] = []
+    write_reservations: list[int] = []
+    metadata_reservations: list[int] = []
+    close_reservations: list[int] = []
 
     class Writer:
         def __init__(self, *_args, **_kwargs):  # noqa: ANN002, ANN003
@@ -666,17 +673,20 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
 
         def write_table(self, _table, **_kwargs):  # noqa: ANN001, ANN003
             self._observe("write")
+            write_reservations.append(policy.reserved_memory_bytes)
 
         def add_key_value_metadata(self, _metadata):  # noqa: ANN001
             self._observe("metadata")
+            metadata_reservations.append(policy.reserved_memory_bytes)
 
         def close(self) -> None:
             self._observe("close")
+            close_reservations.append(policy.reserved_memory_bytes)
 
     monkeypatch.setattr(parquet_writers.pq, "ParquetWriter", Writer)
     with runtime_resource_policy_scope(policy):
         parquet_writers.write_parquet_chunks(
-            (frame,),
+            frames,
             tmp_path / "prediction.parquet",
             required=tuple(frame.columns),
             key_columns=("asset_id", "timestamp"),
@@ -684,7 +694,9 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
         )
         assert policy.reserved_memory_bytes == 0
 
-    assert events == ["create", "write", "metadata", "close"]
+    assert events == ["create", "write", "write", "write", "metadata", "close"]
+    assert write_reservations[0] < write_reservations[1] < write_reservations[2]
+    assert close_reservations == metadata_reservations
 
 
 def test_prediction_outputs_require_standard_metadata_attrs(

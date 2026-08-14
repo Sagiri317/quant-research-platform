@@ -165,7 +165,7 @@ def _write_portfolio_row_artifact_chunks(
 ) -> dict[str, int]:
     writers: dict[str, pq.ParquetWriter] = {}
     writer_states: dict[str, ExitStack] = {}
-    writer_bounds: dict[str, int] = {}
+    writer_memory: dict[str, tuple[int, int]] = {}
     decoded_metadata: dict[str, dict[bytes, bytes]] = {}
     temp_paths = {
         artifact_name: temp_root / PORTFOLIO_ARTIFACTS[artifact_name]
@@ -196,14 +196,18 @@ def _write_portfolio_row_artifact_chunks(
                             persisted,
                             table_state,
                             batch_rows,
-                            writer_bounds[artifact_name],
+                            next_writer_memory,
                         ) = (
                             _artifact_table_write_state(
                                 table,
                                 previous_metadata=decoded_metadata.get(artifact_name),
-                                retained_bytes=writer_bounds.get(artifact_name, 0),
+                                retained_memory=writer_memory.get(
+                                    artifact_name,
+                                    (0, 0),
+                                ),
                             )
                         )
+                        writer_memory[artifact_name] = next_writer_memory
                         writer_state = writer_states.setdefault(
                             artifact_name,
                             ExitStack(),
@@ -228,7 +232,7 @@ def _write_portfolio_row_artifact_chunks(
                                 )
                             except BaseException:
                                 writer_states.pop(artifact_name).close()
-                                writer_bounds.pop(artifact_name)
+                                writer_memory.pop(artifact_name)
                                 raise
                             writers[artifact_name] = writer
                         writer.write_table(

@@ -100,8 +100,14 @@ def build_prediction_result_from_research_dataset(
             prediction_test_start=prediction_test_start,
             prediction_test_end=prediction_test_end,
         )
-    except BaseException:
-        operation.close()
+    except BaseException as primary:
+        try:
+            operation.close()
+        except BaseException as cleanup_error:
+            primary.add_note(
+                "prediction operation cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
         raise
     source_chunks = operation.enter_context(
         closing_dataset_iterator(iter(result.output_chunks))

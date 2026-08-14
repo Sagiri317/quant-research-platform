@@ -54,8 +54,21 @@ class PredictionResult:
     def __enter__(self) -> PredictionResult:
         return self
 
-    def __exit__(self, *_exc: object) -> None:
-        self.close()
+    def __exit__(
+        self,
+        _exception_type: object,
+        primary: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.close()
+        except BaseException as cleanup_error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "prediction result cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
 
 
 def build_prediction_result_from_frames(

@@ -66,8 +66,21 @@ class PortfolioResult:
     def __enter__(self) -> PortfolioResult:
         return self
 
-    def __exit__(self, *_exc: object) -> None:
-        self.close()
+    def __exit__(
+        self,
+        _exception_type: object,
+        primary: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.close()
+        except BaseException as cleanup_error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "portfolio result cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
 
 
 @dataclass
@@ -110,8 +123,14 @@ def build_portfolio_result_from_research_dataset(
             prediction_frame=prediction_frame,
             prediction_metadata=prediction_metadata,
         )
-    except BaseException:
-        operation.close()
+    except BaseException as primary:
+        try:
+            operation.close()
+        except BaseException as cleanup_error:
+            primary.add_note(
+                "portfolio operation cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
         raise
     source_chunks = operation.enter_context(
         closing_dataset_iterator(iter(result.output_chunks))

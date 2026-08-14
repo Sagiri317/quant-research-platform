@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
 import sys
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Event, Lock, Thread
-from time import monotonic_ns
+from queue import Empty, Queue
+from threading import Thread
 
 import pandas as pd
 
@@ -18,8 +21,68 @@ _TASK_MEMORY_CEILING_NUMERATOR = 4
 _TASK_MEMORY_CEILING_DENOMINATOR = 5
 _TASK_MEMORY_MARGIN_DENOMINATOR = 16
 _RSS_SAMPLE_INTERVAL_SECONDS = 0.005
+_RSS_MAX_SAMPLE_INTERVAL_NS = 20_000_000
 _RSS_SAMPLER_START_TIMEOUT_SECONDS = 5.0
 _RSS_SAMPLER_STOP_TIMEOUT_SECONDS = 5.0
+_RSS_SAMPLER_CODE = r"""
+import queue
+import sys
+import threading
+import time
+
+import psutil
+
+commands = queue.SimpleQueue()
+
+def read_commands():
+    for line in sys.stdin:
+        commands.put(line.strip())
+
+threading.Thread(target=read_commands, daemon=True).start()
+process = psutil.Process(int(sys.argv[1]))
+interval = float(sys.argv[2])
+peak = count = max_gap = last = 0
+paused = False
+
+def sample():
+    global peak, count, max_gap, last
+    now = time.monotonic_ns()
+    peak = max(peak, process.memory_info().rss)
+    count += 1
+    if last:
+        max_gap = max(max_gap, now - last)
+    last = now
+
+def emit(tag):
+    print(f"{tag},{peak},{count},{max_gap}", flush=True)
+
+sample()
+emit("READY")
+while True:
+    try:
+        command = commands.get_nowait()
+    except queue.Empty:
+        command = ""
+    if command == "Q":
+        sample()
+        paused = True
+        emit("Q")
+    elif command == "R":
+        last = 0
+        paused = False
+        emit("R")
+    elif command == "S":
+        sample()
+        emit("S")
+    elif command == "X":
+        if not paused:
+            sample()
+        emit("X")
+        break
+    elif not paused:
+        sample()
+    time.sleep(interval)
+"""
 
 
 @dataclass(slots=True)
@@ -56,115 +119,149 @@ class _OperationRssMeasurement:
     max_sample_interval_ns: int = 0
     state: str = "READY"
     error: BaseException | None = None
-    _thread: Thread | None = None
-    _ready: Event = field(default_factory=Event)
-    _pause_requested: Event = field(default_factory=Event)
-    _paused: Event = field(default_factory=Event)
-    _retire: Event = field(default_factory=Event)
-    _lock: Lock = field(default_factory=Lock)
-    _last_sample_ns: int = 0
+    _process: subprocess.Popen[str] | None = None
+    _reader: Thread | None = None
+    _responses: Queue[str] = field(default_factory=Queue)
+    _paused: bool = False
+
+    def prepare(self) -> None:
+        """Stabilize the evidence helper before the operation baseline capture."""
+
+        if self._process is not None:
+            raise RuntimeError("runtime_rss_sampler_already_started")
+        try:
+            self._process = subprocess.Popen(
+                (
+                    sys.executable,
+                    "-u",
+                    "-c",
+                    _RSS_SAMPLER_CODE,
+                    str(os.getpid()),
+                    str(_RSS_SAMPLE_INTERVAL_SECONDS),
+                ),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="ascii",
+                bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self._reader = Thread(
+                target=self._read_responses,
+                name="qrp-rss-sampler-reader",
+                daemon=True,
+            )
+            self._reader.start()
+            self._receive("READY")
+        except BaseException as exc:
+            self.error = exc
+            self._terminate()
+            raise RuntimeError("runtime_rss_sampler_start_failed") from exc
+
+    def bind_baseline(self, rss0_bytes: int, hard_budget_bytes: int) -> None:
+        if self._process is None or self.state != "READY":
+            raise RuntimeError("runtime_rss_sampler_not_ready")
+        self.rss0_bytes = rss0_bytes
+        self.hard_budget_bytes = hard_budget_bytes
 
     def start(self) -> None:
-        if self.state != "READY":
+        if self.state != "READY" or self._process is None:
             raise RuntimeError("runtime_rss_sampler_already_started")
         self.state = "ACTIVE"
-        self._thread = Thread(
-            target=self._sample_loop,
-            name="qrp-rss-sampler",
-            daemon=True,
-        )
-        self._thread.start()
-        if not self._ready.wait(_RSS_SAMPLER_START_TIMEOUT_SECONDS) or self.error:
-            self.error = self.error or RuntimeError("runtime_rss_sampler_start_failed")
-            raise self.error
 
     def quiesce(self) -> dict[str, int | float | str]:
         """Pause after a fresh sample so a publish decision cannot race sampling."""
 
-        if self.state != "ACTIVE":
+        if self.state != "ACTIVE" or self._paused:
             raise RuntimeError("runtime_rss_sampler_not_active")
-        self._pause_requested.set()
-        if not self._paused.wait(_RSS_SAMPLER_STOP_TIMEOUT_SECONDS):
-            self.error = RuntimeError("runtime_rss_sampler_pause_failed")
-            raise self.error
-        self._record_sample()
-        return self.checkpoint_evidence()
+        self._command("Q")
+        self._paused = True
+        return self._evidence()
 
     def resume(self) -> None:
         """Resume sampling before rejection rollback and cleanup."""
 
-        if self.state != "ACTIVE" or not self._paused.is_set():
+        if self.state != "ACTIVE" or not self._paused:
             raise RuntimeError("runtime_rss_sampler_not_paused")
-        self._pause_requested.clear()
-        if not self._wait_until_resumed():
-            self.error = RuntimeError("runtime_rss_sampler_resume_failed")
-            raise self.error
+        self._command("R")
+        self._paused = False
 
     def checkpoint_evidence(self) -> dict[str, int | float | str]:
         if self.state != "ACTIVE":
             raise RuntimeError("runtime_rss_sampler_not_active")
-        thread = self._thread
-        if self.error is not None or thread is None or not thread.is_alive():
+        process = self._process
+        if self.error is not None or process is None or process.poll() is not None:
             self.error = RuntimeError("runtime_rss_sampler_failed")
             raise self.error
+        if not self._paused:
+            self._command("S")
         return self._evidence()
 
     def stop(self) -> None:
         if self.state == "RETIRED":
             return
         try:
-            self._retire.set()
-            self._pause_requested.clear()
-            thread = self._thread
-            if thread is None:
+            process = self._process
+            if process is None:
                 raise RuntimeError("runtime_rss_sampler_stop_failed")
-            thread.join(_RSS_SAMPLER_STOP_TIMEOUT_SECONDS)
-            if thread.is_alive():
-                raise RuntimeError("runtime_rss_sampler_stop_failed")
-            if self.error is not None:
-                raise RuntimeError("runtime_rss_sampler_failed") from self.error
+            self._command("X")
+            process.wait(timeout=_RSS_SAMPLER_STOP_TIMEOUT_SECONDS)
+            if process.returncode != 0:
+                raise RuntimeError("runtime_rss_sampler_failed")
         except BaseException as exc:
             self.error = exc
         finally:
+            self._terminate()
             self.state = "RETIRED"
 
-    def _sample_loop(self) -> None:
+    def _command(self, command: str) -> None:
+        process = self._process
+        if process is None or process.poll() is not None or process.stdin is None:
+            raise RuntimeError("runtime_rss_sampler_failed")
         try:
-            while not self._retire.is_set():
-                if self._pause_requested.is_set():
-                    self._paused.set()
-                    while self._pause_requested.is_set() and not self._retire.wait(
-                        _RSS_SAMPLE_INTERVAL_SECONDS
-                    ):
-                        pass
-                    self._paused.clear()
-                    continue
-                self._record_sample()
-                self._ready.set()
-                self._retire.wait(_RSS_SAMPLE_INTERVAL_SECONDS)
+            process.stdin.write(command + "\n")
+            process.stdin.flush()
+            self._receive(command)
         except BaseException as exc:
             self.error = exc
-            self._ready.set()
-            self._paused.set()
+            raise RuntimeError("runtime_rss_sampler_failed") from exc
 
-    def _record_sample(self) -> None:
-        rss = _process_rss_bytes()
-        now = monotonic_ns()
-        with self._lock:
-            if self._last_sample_ns:
-                self.max_sample_interval_ns = max(
-                    self.max_sample_interval_ns,
-                    now - self._last_sample_ns,
-                )
-            self._last_sample_ns = now
-            self.sampled_peak_rss_bytes = max(self.sampled_peak_rss_bytes, rss)
-            self.sample_count += 1
+    def _receive(self, expected: str) -> None:
+        try:
+            raw = self._responses.get(timeout=_RSS_SAMPLER_START_TIMEOUT_SECONDS)
+            tag, peak, count, max_gap = raw.split(",", 3)
+            values = tuple(int(value) for value in (peak, count, max_gap))
+        except (Empty, ValueError) as exc:
+            raise RuntimeError("runtime_rss_sampler_failed") from exc
+        if tag != expected or any(value < 0 for value in values):
+            raise RuntimeError("runtime_rss_sampler_failed")
+        self.sampled_peak_rss_bytes = max(self.sampled_peak_rss_bytes, values[0])
+        self.sample_count = max(self.sample_count, values[1])
+        self.max_sample_interval_ns = max(self.max_sample_interval_ns, values[2])
 
-    def _wait_until_resumed(self) -> bool:
-        deadline = monotonic_ns() + int(_RSS_SAMPLER_STOP_TIMEOUT_SECONDS * 1e9)
-        while self._paused.is_set() and monotonic_ns() < deadline:
-            self._retire.wait(_RSS_SAMPLE_INTERVAL_SECONDS)
-        return not self._paused.is_set()
+    def _read_responses(self) -> None:
+        process = self._process
+        if process is None or process.stdout is None:
+            return
+        for line in process.stdout:
+            self._responses.put(line.rstrip("\r\n"))
+
+    def _terminate(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=_RSS_SAMPLER_STOP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=_RSS_SAMPLER_STOP_TIMEOUT_SECONDS)
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.stdout is not None:
+            process.stdout.close()
 
     def evidence(self) -> dict[str, int | float | str]:
         if self.state != "RETIRED":
@@ -174,12 +271,16 @@ class _OperationRssMeasurement:
     def _evidence(self) -> dict[str, int | float | str]:
         peak = max(self.rss0_bytes, self.sampled_peak_rss_bytes)
         incremental = peak - self.rss0_bytes
-        cadence_status = "PASS" if self.error is None and self.sample_count else "FAIL"
-        status = (
+        cadence_status = (
             "PASS"
             if self.error is None
-            and incremental <= self.hard_budget_bytes
             and self.sample_count
+            and self.max_sample_interval_ns <= _RSS_MAX_SAMPLE_INTERVAL_NS
+            else "FAIL"
+        )
+        status = (
+            "PASS"
+            if cadence_status == "PASS" and incremental <= self.hard_budget_bytes
             else "FAIL"
         )
         return {
@@ -202,7 +303,7 @@ def _operation_rss_measurement(
     return _OperationRssMeasurement(rss0_bytes, hard_budget_bytes)
 
 
-@dataclass(frozen=True, init=False, eq=False, slots=True)
+@dataclass(frozen=True, init=False, eq=False, slots=True, weakref_slot=True)
 class RuntimeResourcePolicy:
     """Immutable one-shot resource admission shared by one root operation."""
 
@@ -224,42 +325,50 @@ class RuntimeResourcePolicy:
     ) -> RuntimeResourcePolicy:
         """Capture available memory and RSS exactly once before root allocation."""
 
-        available = _exact_positive_int(
-            _available_memory_bytes(),
-            error="invalid_runtime_resource_available_memory",
-        )
-        rss0 = _exact_nonnegative_int(
-            _process_rss_bytes(),
-            error="invalid_runtime_resource_rss",
-        )
-        hard_budget = (
-            available
-            * _TASK_MEMORY_CEILING_NUMERATOR
-            // _TASK_MEMORY_CEILING_DENOMINATOR
-        )
-        if explicit_cap_bytes is not None:
-            explicit_cap = _exact_positive_int(
+        explicit_cap = (
+            None
+            if explicit_cap_bytes is None
+            else _exact_positive_int(
                 explicit_cap_bytes,
                 error="invalid_runtime_resource_explicit_cap",
             )
-            hard_budget = min(hard_budget, explicit_cap)
-        planning_budget = hard_budget - max(
-            1,
-            hard_budget // _TASK_MEMORY_MARGIN_DENOMINATOR,
         )
-        if planning_budget <= 0:
-            raise ValueError("invalid_runtime_resource_available_memory")
+        measurement = _operation_rss_measurement(0, 0)
+        measurement.prepare()
+        try:
+            available = _exact_positive_int(
+                _available_memory_bytes(),
+                error="invalid_runtime_resource_available_memory",
+            )
+            rss0 = _exact_nonnegative_int(
+                _process_rss_bytes(),
+                error="invalid_runtime_resource_rss",
+            )
+            hard_budget = (
+                available
+                * _TASK_MEMORY_CEILING_NUMERATOR
+                // _TASK_MEMORY_CEILING_DENOMINATOR
+            )
+            if explicit_cap is not None:
+                hard_budget = min(hard_budget, explicit_cap)
+            planning_budget = hard_budget - max(
+                1,
+                hard_budget // _TASK_MEMORY_MARGIN_DENOMINATOR,
+            )
+            if planning_budget <= 0:
+                raise ValueError("invalid_runtime_resource_available_memory")
+            measurement.bind_baseline(rss0, hard_budget)
+        except BaseException:
+            measurement.stop()
+            raise
         policy = object.__new__(cls)
         object.__setattr__(policy, "captured_available_memory_bytes", available)
         object.__setattr__(policy, "rss0_bytes", rss0)
         object.__setattr__(policy, "task_memory_budget_bytes", planning_budget)
         object.__setattr__(policy, "hard_memory_budget_bytes", hard_budget)
         object.__setattr__(policy, "_ledger", _ReservationLedger())
-        object.__setattr__(
-            policy,
-            "_measurement",
-            _operation_rss_measurement(rss0, hard_budget),
-        )
+        object.__setattr__(policy, "_measurement", measurement)
+        weakref.finalize(policy, measurement.stop)
         return policy
 
     @property
