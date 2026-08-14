@@ -29,6 +29,7 @@ from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 _DECODED_ROW_BOUNDS_KEY = b"qrp.decoded-row-bounds"
 _DECODED_ROW_BOUNDS_SCHEMA_ID = "qrp-dataset-part-decoded-row-bounds"
 _PHYSICAL_PAGE_ROWS_KEY = b"qrp.parquet-page-rows"
+_PARQUET_NATIVE_METADATA_PAGE_BYTES = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -630,6 +631,16 @@ def _table_parquet_page_working_set_bytes(table: pa.Table, *, rows: int) -> int:
         for per_row, _fixed in decoded_bounds.values()
     )
     return decoded_bytes + compressed_bound
+
+
+def _parquet_row_group_footer_upper_bound(schema: pa.Schema) -> int:
+    """Bound one row group's footer state with statistics and indexes disabled."""
+
+    variable_bytes = sum(
+        len(field.name.encode("utf-8")) + len(str(field.type).encode("utf-8"))
+        for field in schema
+    ) + sum(len(key) + len(value) for key, value in (schema.metadata or {}).items())
+    return _PARQUET_NATIVE_METADATA_PAGE_BYTES * (len(schema) + 1) + variable_bytes
 
 
 def _zstd_compressed_bound(source_bytes: int) -> int:

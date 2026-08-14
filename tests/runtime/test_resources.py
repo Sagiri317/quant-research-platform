@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import mmap
 import os
 import subprocess
 import sys
+import time
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -608,6 +610,31 @@ def test_sampler_cadence_is_an_authoritative_memory_gate(
 
     assert evidence["cadence_status"] == expected_status
     assert evidence["status"] == expected_status
+
+
+def test_sampler_arms_after_prebaseline_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_available = resources._available_memory_bytes
+
+    def available_after_transient() -> int:
+        with mmap.mmap(-1, 64 * MIB, access=mmap.ACCESS_COPY) as transient:
+            for offset in range(0, 64 * MIB, 4096):
+                transient[offset] = 1
+            time.sleep(0.02)
+        return original_available()
+
+    monkeypatch.setattr(
+        resources,
+        "_available_memory_bytes",
+        available_after_transient,
+    )
+    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=32 * MIB)
+
+    with runtime_resource_policy_scope(policy):
+        pass
+
+    assert policy.memory_evidence()["status"] == "PASS"
 
 
 def test_active_primary_is_not_replaced_by_sampler_stop_failure(

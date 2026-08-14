@@ -32,14 +32,13 @@ from quant_research_platform.storage._dataset_key_tracking import (
 )
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import (
+    _parquet_row_group_footer_upper_bound,
     _table_parquet_page_working_set_bytes,
     table_with_decoded_row_bounds,
 )
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage._scratch_ownership import require_owned_scratch
 from quant_research_platform.storage.atomic import publish_no_replace, reject_if_exists
-
-_PARQUET_NATIVE_METADATA_PAGE_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -189,7 +188,10 @@ def write_parquet_chunks(
                                                 )
                                             writer.write_table(
                                                 persisted,
-                                                row_group_size=batch_rows,
+                                                row_group_size=max(
+                                                    1,
+                                                    persisted.num_rows,
+                                                ),
                                             )
                                             row_count += len(selected)
                                     finally:
@@ -307,7 +309,7 @@ def write_parquet(
                         persisted,
                         handle,
                         compression=compression,
-                        row_group_size=batch_rows,
+                        row_group_size=max(1, persisted.num_rows),
                         write_batch_size=batch_rows,
                         max_rows_per_page=batch_rows,
                         use_dictionary=False,
@@ -429,13 +431,3 @@ def _artifact_table_write_state(
         )
     )
     return persisted, stack, batch_rows, next_memory
-
-
-def _parquet_row_group_footer_upper_bound(schema: pa.Schema) -> int:
-    """Bound retained footer state with statistics and indexes disabled."""
-
-    variable_bytes = sum(
-        len(field.name.encode("utf-8")) + len(str(field.type).encode("utf-8"))
-        for field in schema
-    ) + sum(len(key) + len(value) for key, value in (schema.metadata or {}).items())
-    return _PARQUET_NATIVE_METADATA_PAGE_BYTES * (len(schema) + 1) + variable_bytes

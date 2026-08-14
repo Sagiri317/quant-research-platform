@@ -237,7 +237,7 @@ def _write_portfolio_row_artifact_chunks(
                             writers[artifact_name] = writer
                         writer.write_table(
                             persisted,
-                            row_group_size=batch_rows,
+                            row_group_size=max(1, persisted.num_rows),
                         )
                         row_counts[artifact_name] += len(selected)
             for artifact_name in tuple(writers):

@@ -53,6 +53,7 @@ from quant_research_platform.storage._dataset_paths import (
 from quant_research_platform.storage._dataset_physical import (
     _PHYSICAL_PAGE_ROWS_KEY,
     DatasetPartMetadata,
+    _parquet_row_group_footer_upper_bound,
     _table_parquet_page_working_set_bytes,
     dataset_file_identity,
     table_with_decoded_row_bounds,
@@ -913,18 +914,23 @@ def _bounded_persisted_tables(
 def write_parquet_file(table: pa.Table, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     persisted = table_with_decoded_row_bounds(table)
+    metadata = dict(persisted.schema.metadata or {})
+    metadata[_PHYSICAL_PAGE_ROWS_KEY] = str(max(1, persisted.num_rows)).encode("ascii")
+    persisted = persisted.replace_schema_metadata(metadata)
     policy = current_runtime_resource_policy()
     if policy is None:
         batch_rows = max(1, persisted.num_rows)
         reservation = nullcontext()
     else:
         remaining = policy.task_memory_budget_bytes - policy.reserved_memory_bytes
+        footer_bytes = _parquet_row_group_footer_upper_bound(persisted.schema)
+        page_headroom = remaining - footer_bytes
         minimum_rows = 0 if persisted.num_rows == 0 else 1
         minimum_bytes = _table_parquet_page_working_set_bytes(
             persisted,
             rows=minimum_rows,
         )
-        if minimum_bytes > remaining:
+        if minimum_bytes > page_headroom:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         batch_rows = 1
         page_working_bytes = minimum_bytes
@@ -937,7 +943,7 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
                     persisted,
                     rows=candidate,
                 )
-                if candidate_bytes <= remaining:
+                if candidate_bytes <= page_headroom:
                     batch_rows = candidate
                     page_working_bytes = candidate_bytes
                     low = candidate + 1
@@ -945,7 +951,7 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
                     high = candidate - 1
         reservation = policy.reserve(
             "storage.parquet.native",
-            page_working_bytes,
+            page_working_bytes + footer_bytes,
         )
     metadata = dict(persisted.schema.metadata or {})
     metadata[_PHYSICAL_PAGE_ROWS_KEY] = str(batch_rows).encode("ascii")
@@ -955,10 +961,11 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
             persisted,
             path,
             compression="zstd",
-            row_group_size=batch_rows,
+            row_group_size=max(1, persisted.num_rows),
             write_batch_size=batch_rows,
             max_rows_per_page=batch_rows,
             use_dictionary=False,
+            write_statistics=False,
             write_page_index=False,
             write_page_checksum=False,
         )

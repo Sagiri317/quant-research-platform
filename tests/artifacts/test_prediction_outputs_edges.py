@@ -647,9 +647,13 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = make_artifact_prediction_output_frame()
-    frames = tuple(
-        frame.assign(timestamp=frame["timestamp"] + pd.Timedelta(days=offset))
-        for offset in range(3)
+    first = pd.concat([frame] * 8, ignore_index=True).assign(
+        asset_id=[f"asset_{index}" for index in range(8)]
+    )
+    frames = (
+        first,
+        frame.assign(timestamp=frame["timestamp"] + pd.Timedelta(days=1)),
+        frame.assign(timestamp=frame["timestamp"] + pd.Timedelta(days=2)),
     )
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
@@ -659,6 +663,7 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
     write_reservations: list[int] = []
     metadata_reservations: list[int] = []
     close_reservations: list[int] = []
+    row_groups: list[tuple[int, int]] = []
 
     class Writer:
         def __init__(self, *_args, **_kwargs):  # noqa: ANN002, ANN003
@@ -671,9 +676,10 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
             )
             events.append(event)
 
-        def write_table(self, _table, **_kwargs):  # noqa: ANN001, ANN003
+        def write_table(self, table, **kwargs):  # noqa: ANN001, ANN003
             self._observe("write")
             write_reservations.append(policy.reserved_memory_bytes)
+            row_groups.append((table.num_rows, kwargs["row_group_size"]))
 
         def add_key_value_metadata(self, _metadata):  # noqa: ANN001
             self._observe("metadata")
@@ -684,6 +690,11 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
             close_reservations.append(policy.reserved_memory_bytes)
 
     monkeypatch.setattr(parquet_writers.pq, "ParquetWriter", Writer)
+    monkeypatch.setattr(
+        parquet_writers,
+        "_table_parquet_page_working_set_bytes",
+        lambda _table, *, rows: rows * 1024**2,
+    )
     with runtime_resource_policy_scope(policy):
         parquet_writers.write_parquet_chunks(
             frames,
@@ -697,6 +708,7 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
     assert events == ["create", "write", "write", "write", "metadata", "close"]
     assert write_reservations[0] < write_reservations[1] < write_reservations[2]
     assert close_reservations == metadata_reservations
+    assert row_groups == [(rows, rows) for rows, _row_group_size in row_groups]
 
 
 def test_prediction_outputs_require_standard_metadata_attrs(

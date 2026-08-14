@@ -67,6 +67,10 @@ while True:
         sample()
         paused = True
         emit("Q")
+    elif command == "A":
+        peak = count = max_gap = last = 0
+        sample()
+        emit("A")
     elif command == "R":
         last = 0
         paused = False
@@ -145,7 +149,10 @@ class _OperationRssMeasurement:
                 text=True,
                 encoding="ascii",
                 bufsize=1,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                creationflags=(
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    | getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0)
+                ),
             )
             self._reader = Thread(
                 target=self._read_responses,
@@ -164,6 +171,10 @@ class _OperationRssMeasurement:
             raise RuntimeError("runtime_rss_sampler_not_ready")
         self.rss0_bytes = rss0_bytes
         self.hard_budget_bytes = hard_budget_bytes
+        self.sampled_peak_rss_bytes = 0
+        self.sample_count = 0
+        self.max_sample_interval_ns = 0
+        self._command("A")
 
     def start(self) -> None:
         if self.state != "READY" or self._process is None:

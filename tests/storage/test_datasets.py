@@ -8859,19 +8859,32 @@ def test_dataset_parquet_writer_disables_retained_dictionary_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    table = pa.table({"value": ["x", "y"]})
+    table = pa.table({"value": ["x"] * 8})
     captured: dict[str, object] = {}
+    policy = capture_test_policy(
+        available_memory_bytes=1024**2,
+        explicit_cap_bytes=256 * 1024,
+    )
 
     def capture_write(*_args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         captured.update(kwargs)
 
     monkeypatch.setattr(dataset_writing.pq, "write_table", capture_write)
-    dataset_writing.write_parquet_file(table, tmp_path / "part.parquet")
+    monkeypatch.setattr(
+        dataset_writing,
+        "_table_parquet_page_working_set_bytes",
+        lambda _table, *, rows: rows * 64 * 1024,
+    )
+    with runtime_resource_policy_scope(policy):
+        dataset_writing.write_parquet_file(table, tmp_path / "part.parquet")
 
     assert captured["use_dictionary"] is False
     assert captured["write_page_index"] is False
     assert captured["write_page_checksum"] is False
+    assert captured["write_statistics"] is False
     assert captured["max_rows_per_page"] == captured["write_batch_size"]
+    assert captured["write_batch_size"] < table.num_rows
+    assert captured["row_group_size"] == table.num_rows
 
 
 def test_writer_bounded_completes_under_task_wide_copy_and_arrow_headroom(
