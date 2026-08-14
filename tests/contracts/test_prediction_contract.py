@@ -5,6 +5,18 @@ import pytest
 from quant_research_platform.contracts.predictions import PredictionSpec
 
 
+def test_prediction_mode_rejects_unimplemented_smoke_alias() -> None:
+    with pytest.raises(ValueError, match="unsupported_prediction_mode"):
+        PredictionSpec(
+            prediction_id="prediction_demo",
+            model_id="linear_model",
+            research_dataset_id="research_demo",
+            train_end="2024-01-31",
+            test_start="2024-03-01",
+            prediction_mode="oos_smoke",
+        )
+
+
 def test_prediction_spec_accepts_model_selection_contract_fields() -> None:
     spec = PredictionSpec(
         prediction_id="prediction_demo",

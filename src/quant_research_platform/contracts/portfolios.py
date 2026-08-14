@@ -25,7 +25,7 @@ WEIGHT_METHODS = {
     "inverse_vol_scaled_quantile",
 }
 PORTFOLIO_MODES = {"long_short", "long_only"}
-BLOCKED_ENTRY_POLICIES = {"skip", "hold_cash", "redistribute"}
+BLOCKED_ENTRY_POLICIES = {"hold_cash", "redistribute"}
 BLOCKED_EXIT_POLICIES = {"carry_forward", "force_exit", "error"}
 SUPPORTED_REBALANCE_FREQUENCIES = {data_frequency_slug(DataFrequency.DAILY)}
 PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS = (
@@ -104,7 +104,7 @@ class TradabilityConfig:
     eligibility_column: str | None = None
     can_enter_column: str | None = None
     can_exit_column: str | None = None
-    blocked_entry_policy: str = "skip"
+    blocked_entry_policy: str = "hold_cash"
     blocked_exit_policy: str = "carry_forward"
 
     def __post_init__(self) -> None:

@@ -68,7 +68,7 @@ def test_select_best_validation_trial_fails_closed_on_bad_inputs() -> None:
     with pytest.raises(ValueError, match="missing_trial_selection_columns"):
         select_best_validation_trial(pd.DataFrame({"trial_id": ["a"]}), **kwargs)
 
-    with pytest.raises(ValueError, match="nan_trial_selection_metric"):
+    with pytest.raises(ValueError, match="invalid_trial_selection_metric"):
         select_best_validation_trial(
             pd.DataFrame({"trial_id": ["a"], "validation_loss": [float("nan")]}),
             **kwargs,

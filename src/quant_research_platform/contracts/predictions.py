@@ -50,7 +50,7 @@ class PredictionSpec:
             or self.primary_key != PREDICTION_PRIMARY_KEY
         ):
             raise ValueError("prediction_output_columns_must_be_fixed")
-        if self.prediction_mode not in {"minimal_oos", "oos_smoke"}:
+        if self.prediction_mode != "minimal_oos":
             raise ValueError("unsupported_prediction_mode")
         validate_sample_filter_mode(self.sample_filter_mode, owner="prediction")
         if not self.is_oos:

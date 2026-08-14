@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from quant_research_platform.contracts.portfolios import (
+    BLOCKED_ENTRY_POLICIES,
     CostConfig,
     TradabilityConfig,
     WeightConfig,
@@ -63,6 +64,13 @@ def test_tradability_config_validation_errors(
 ) -> None:
     with pytest.raises(ValueError, match=error):
         TradabilityConfig(**kwargs)
+
+
+def test_blocked_entry_policy_names_have_distinct_contracts() -> None:
+    assert BLOCKED_ENTRY_POLICIES == {"hold_cash", "redistribute"}
+    assert TradabilityConfig().blocked_entry_policy == "hold_cash"
+    with pytest.raises(ValueError, match="blocked_entry_policy must be"):
+        TradabilityConfig(blocked_entry_policy="skip")
 
 
 @pytest.mark.parametrize(

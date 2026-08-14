@@ -243,10 +243,11 @@ def test_portfolio_engine_applies_execution_lag_steps_to_signal_scores() -> None
     result = construct_portfolio_positions(frame, spec)
 
     assert result.portfolio_returns["timestamp"].tolist() == [
-        pd.Timestamp("2024-01-03")
+        pd.Timestamp("2024-01-02"),
+        pd.Timestamp("2024-01-03"),
     ]
     assert result.portfolio_returns["gross_portfolio_return"].tolist() == pytest.approx(
-        [0.06]
+        [0.0, 0.06]
     )
 
 
