@@ -15,10 +15,10 @@ import quant_research_platform.research.evaluations.runner as evaluation_runner_
 import quant_research_platform.research.models.fitting as model_fitting
 import quant_research_platform.research.predictions.runner as prediction_runner_module
 import quant_research_platform.storage._dataset_reading as dataset_reading
-from quant_research_platform.artifacts.outputs import (
-    write_evaluation_outputs,
+from quant_research_platform.artifacts._prediction_outputs import (
     write_prediction_outputs,
 )
+from quant_research_platform.artifacts.outputs import write_evaluation_outputs
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
@@ -1645,14 +1645,14 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
         )
     )
 
-    result = build_prediction_result_from_research_dataset(
+    with build_prediction_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
         prediction_catalog=prediction_catalog,
         prediction_id="pred_demo",
-    )
-    output_bundle = _write_prediction_result(layout, result)
+    ) as result:
+        output_bundle = _write_prediction_result(layout, result)
 
     assert output_bundle.as_posix().endswith("outputs/pred_demo")
     assert (output_bundle / "prediction.parquet").is_file()
@@ -1714,14 +1714,14 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
         )
     )
 
-    result = build_prediction_result_from_research_dataset(
+    with build_prediction_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
         prediction_catalog=prediction_catalog,
         prediction_id="pred_demo",
-    )
-    output_bundle = _write_prediction_result(layout, result)
+    ) as result:
+        output_bundle = _write_prediction_result(layout, result)
 
     assert (output_bundle / "prediction.parquet").is_file()
 
@@ -1826,21 +1826,19 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         wrapped_write,
     )
 
-    prediction_policy = capture_test_policy(
-        available_memory_bytes=8 * 1024**2,
-        rss_bytes=0,
-        explicit_cap_bytes=4 * 1024**2,
+    prediction_policy = capture_storage_test_policy(
+        working_headroom_bytes=4 * 1024**2,
     )
     with runtime_resource_policy_scope(prediction_policy):
-        result = build_prediction_result_from_research_dataset(
+        with build_prediction_result_from_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
             model_catalog=model_catalog,
             prediction_catalog=prediction_catalog,
             prediction_id="pred_demo",
             resource_policy=prediction_policy,
-        )
-        output_bundle = _write_prediction_result(layout, result)
+        ) as result:
+            output_bundle = _write_prediction_result(layout, result)
 
     assert (output_bundle / "prediction.parquet").is_file()
     assert len([rows for rows in read_chunk_rows if rows]) > 1
