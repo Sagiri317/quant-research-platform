@@ -13,6 +13,7 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.runtime.resources import current_runtime_resource_policy
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import local_verification as module
@@ -63,6 +64,28 @@ def test_local_verification_workflow_preserves_dataset_manifests(
         lambda **kwargs: fake_portfolio_result(kwargs),
     )
 
+    interim = stub_interim_importer(
+        on_artifact=lambda _root, manifest: captured_manifests.append(manifest)
+    )
+
+    def legacy_interim(layout, raw_root, start_date, end_date):  # noqa: ANN001, ANN202
+        return interim(
+            layout,
+            raw_root,
+            start_date,
+            end_date,
+            current_runtime_resource_policy(),
+        )
+
+    def legacy_processed(layout, source_id, time_window, kinds):  # noqa: ANN001, ANN202
+        return empty_processed_inputs(
+            layout,
+            source_id,
+            time_window,
+            kinds,
+            current_runtime_resource_policy(),
+        )
+
     run_root = repo_run_root(tmp_path, monkeypatch, ".run", "s8")
     result = run_local_verification(
         make_local_verification_config(
@@ -70,12 +93,8 @@ def test_local_verification_workflow_preserves_dataset_manifests(
             start_date="2014-01-01",
             end_date="2016-12-31",
             profile=profile_with_materializers(
-                stub_interim_importer(
-                    on_artifact=lambda _root, manifest: captured_manifests.append(
-                        manifest
-                    )
-                ),
-                empty_processed_inputs,
+                legacy_interim,
+                legacy_processed,
             ),
         )
     )

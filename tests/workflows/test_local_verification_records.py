@@ -78,9 +78,20 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
         lambda **kwargs: capture_policy() or fake_portfolio_result(kwargs),
     )
 
+    interim = stub_interim_importer(on_call=capture_policy)
+    processed = stub_processed_builder(on_call=capture_policy)
+
+    def policy_aware_interim(*args, resource_policy, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        assert resource_policy is policy
+        return interim(*args, resource_policy=resource_policy, **kwargs)
+
+    def policy_aware_processed(*args, resource_policy, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        assert resource_policy is policy
+        return processed(*args, resource_policy=resource_policy, **kwargs)
+
     profile = profile_with_materializers(
-        stub_interim_importer(on_call=capture_policy),
-        stub_processed_builder(on_call=capture_policy),
+        policy_aware_interim,
+        policy_aware_processed,
     )
     expected_prediction_count = len(tuple(smoke_prediction_specs()))
     run_root = repo_run_root(

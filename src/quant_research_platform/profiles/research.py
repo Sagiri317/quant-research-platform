@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from inspect import signature
 from pathlib import Path
 
 import pandas as pd
@@ -154,6 +155,21 @@ class ResearchProfile:
         Mapping[str, DatasetInspection],
     ]
     schema_inventory_important_columns: Callable[[], tuple[str, ...]]
+
+
+def _invoke_profile_materializer(
+    materializer: Callable[..., object],
+    *,
+    resource_policy: RuntimeResourcePolicy,
+    **arguments: object,
+) -> object:
+    callback_signature = signature(materializer)
+    try:
+        callback_signature.bind(**arguments, resource_policy=resource_policy)
+    except TypeError:
+        callback_signature.bind(**arguments)
+        return materializer(**arguments)
+    return materializer(**arguments, resource_policy=resource_policy)
 
 
 def research_profile_id(
