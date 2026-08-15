@@ -39,12 +39,12 @@ from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
 from .raw_schemas import (
     LOGICAL_RECORD_LIMIT_ERROR,
+    MAX_LOGICAL_RECORD_BYTES,
     RAW_TABLE_CONTRACTS,
     BoundedCsvRecord,
     RawExportInspection,
     inspect_raw_export_file,
     iter_export_csv_records,
-    logical_record_limit_bytes,
     materialize_header_record,
     raw_export_file_identity,
     require_raw_resource_policy,
@@ -488,7 +488,7 @@ def _iter_index_info_rows_under_policy(
     retained_payload_bytes: list[int] | None,
 ) -> Iterator[tuple[list[str], list[str], int]]:
     policy = resource_policy
-    record_limit_bytes = logical_record_limit_bytes(policy)
+    record_limit_bytes = MAX_LOGICAL_RECORD_BYTES
     downstream_retained_bytes = (
         retained_payload_bytes if retained_payload_bytes is not None else [0]
     )

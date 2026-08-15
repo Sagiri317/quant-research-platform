@@ -257,12 +257,6 @@ def require_raw_resource_policy(
     return bound or active_runtime_resource_policy()
 
 
-def logical_record_limit_bytes(policy: RuntimeResourcePolicy) -> int:
-    """Return the source-local limit for one indivisible CSV record."""
-
-    return MAX_LOGICAL_RECORD_BYTES
-
-
 @cache
 def _legal_provider_field_count_bound() -> int:
     """Return the largest current legal provider header width."""
@@ -850,7 +844,7 @@ def iter_export_csv_records(
             try:
                 records = _BoundedCsvRecords(
                     Path(path),
-                    limit_bytes=logical_record_limit_bytes(bound_policy),
+                    limit_bytes=MAX_LOGICAL_RECORD_BYTES,
                     resource_policy=bound_policy,
                     retained_payload_bytes=(
                         retained_payload_bytes
