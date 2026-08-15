@@ -28,7 +28,7 @@ compute 只提供数值计算核心，不持有 market session domain 工具，�
 
 `research/factors/price_volume/` 是量价因子的当前 owner。`columns.py` 负责列集合，`presets.py` 负责 preset，`requirements.py` 负责输入需求，`windows.py` 负责读取窗口，`definitions.py` 负责因子定义，`calculations.py`、`rolling.py` 和 `safety.py` 负责数值计算。package `__init__.py` 只保留当前公共面。
 
-`research/models/algorithm_facts.py` 是模型算法事实源。`estimators.py` 负责 estimator factories，`fitting.py` 负责 fit result、训练 frame 收集、线性拟合与 estimator fitting，`prediction.py` 负责预测输出 frame，`feature_importance.py` 负责特征重要性 payload，`rank_ensemble.py` 负责 rank ensemble predictor，`dependencies.py` 负责可选依赖状态，`validation_split.py` 负责训练 buffer 与 purge controls。`research/models/supervised.py` 保留当前 public boundary 并委派到这些 owner modules。单个算法字段使用 `model_algorithm`，算法 ID 集合使用 `model_algorithm_ids`。
+`contracts/models.py` 是模型算法 ID、default/smoke 参数、dependency package、input kind 和 parallel classification 的 portable 事实源。`research/models/algorithm_facts.py` 由这些合同事实派生 runtime estimator bindings；`estimators.py` 负责 estimator factories，`fitting.py` 负责 fit result、训练 frame 收集、线性拟合与 estimator fitting，`prediction.py` 负责预测输出 frame，`feature_importance.py` 负责特征重要性 payload，`rank_ensemble.py` 负责 rank ensemble predictor，`dependencies.py` 负责可选依赖状态，`validation_split.py` 负责训练 buffer 与 purge controls。`research/models/supervised.py` 保留当前 public boundary 并委派到这些 owner modules。单个算法字段使用 `model_algorithm`，算法 ID 集合使用 `model_algorithm_ids`。
 
 公共 package surface 由 current contract 管理；内部 helper 只在真实 caller 需要时保留，不以名称、可见性或 re-export 形状作为 gate。
 
