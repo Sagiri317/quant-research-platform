@@ -238,9 +238,9 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
         return {"logical_relative_root": artifact_root.name}, 64
 
     monkeypatch.setattr(
-        schema_inventory,
-        "active_runtime_resource_policy",
-        capture_policy,
+        schema_inventory.RuntimeResourcePolicy,
+        "capture",
+        staticmethod(capture_policy),
     )
     monkeypatch.setattr(
         schema_inventory,
@@ -276,7 +276,8 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
         staticmethod(lambda: policy),
     )
     @contextmanager
-    def inventory(_root: Path):
+    def inventory(_root: Path, *, resource_policy=None):  # type: ignore[no-untyped-def]
+        assert resource_policy is policy
         with policy.reserve("test.schema.inventory", 64):
             try:
                 yield {"schema_id": "qrp-schema-inventory", "datasets": []}
@@ -312,9 +313,9 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
         explicit_cap_bytes=64 * 1024 + 750,
     )
     monkeypatch.setattr(
-        schema_inventory,
-        "active_runtime_resource_policy",
-        lambda: policy,
+        schema_inventory.RuntimeResourcePolicy,
+        "capture",
+        staticmethod(lambda: policy),
     )
     monkeypatch.setattr(
         schema_inventory,

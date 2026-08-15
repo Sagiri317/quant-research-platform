@@ -272,6 +272,7 @@ def _build_prediction_result_from_research_dataset(
             ),
             model_spec,
             estimator=build_estimator_from_model_spec(model_spec),
+            resource_policy=current_runtime_resource_policy(),
         )
     except ValueError as exc:
         if str(exc) == "model_training_sample_empty":
@@ -345,6 +346,7 @@ def _select_prediction_model_spec(
             ),
             candidate_spec,
             estimator=build_estimator_from_model_spec(candidate_spec),
+            resource_policy=current_runtime_resource_policy(),
         )
         validation_read_columns = tuple(
             dict.fromkeys(

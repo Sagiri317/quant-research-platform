@@ -33,7 +33,14 @@ def test_bind_runtime_resource_policy_truth_table() -> None:
     assert bind_runtime_resource_policy(None) is None
     assert bind_runtime_resource_policy(active) is active
     with runtime_resource_policy_scope(active):
-        assert bind_runtime_resource_policy(None) is active
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime_resource_policy_competing_root$",
+        ):
+            bind_runtime_resource_policy(None)
+        assert (
+            bind_runtime_resource_policy(None, allow_implicit_active=True) is active
+        )
         assert bind_runtime_resource_policy(active) is active
         with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
             bind_runtime_resource_policy(different)
@@ -297,6 +304,173 @@ def test_source_market_public_roots_reject_ambient_policy(
             match="^runtime_resource_policy_competing_root$",
         ):
             invoke()
+
+
+@pytest.mark.parametrize(
+    "root_name",
+    (
+        "research_dataset",
+        "model_fit",
+        "validation_summary",
+        "schema_inventory",
+    ),
+)
+def test_non_source_public_roots_reject_ambient_policy_before_work(
+    root_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.research.datasets import assembler
+    from quant_research_platform.research.models import fitting
+    from quant_research_platform.workflows.diagnostics import (
+        schema_inventory,
+        validation_summary,
+    )
+
+    work: list[str] = []
+
+    def invoke() -> None:
+        if root_name == "research_dataset":
+            monkeypatch.setattr(
+                assembler,
+                "_assemble_research_dataset_with_policy",
+                lambda **_: work.append("assemble"),
+            )
+            assembler.assemble_research_dataset(
+                layout=object(),  # type: ignore[arg-type]
+                dataset_catalog=object(),  # type: ignore[arg-type]
+                processed_catalog=object(),  # type: ignore[arg-type]
+                dataset_id="dataset",
+                time_window=object(),  # type: ignore[arg-type]
+            )
+        elif root_name == "model_fit":
+            fitting.fit_model_result_from_frames(
+                (),
+                object(),  # type: ignore[arg-type]
+                estimator=SimpleNamespace(
+                    fit_model_result_from_frames=lambda *_: work.append("fit")
+                ),
+            )
+        elif root_name == "validation_summary":
+            monkeypatch.setattr(
+                validation_summary,
+                "_build_validation_summary",
+                lambda **_: work.append("summary"),
+            )
+            validation_summary.build_validation_summary(
+                run_id="run",
+                dataset_roots=(),
+                layer_summaries=(),
+                validated_output_members=(),
+                output_bundle_expectations=(),
+            )
+        else:
+            monkeypatch.setattr(
+                schema_inventory,
+                "require_unaliased_path",
+                lambda *_args, **_kwargs: work.append("path"),
+            )
+            with schema_inventory.open_schema_inventory_payload(tmp_path):
+                pass
+
+    with runtime_resource_policy_scope(_policy(8)):
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime_resource_policy_competing_root$",
+        ):
+            invoke()
+
+    assert work == []
+
+
+def _prediction_result_for_scope_test(
+    monkeypatch: pytest.MonkeyPatch,
+    observed: list[RuntimeResourcePolicy | None],
+    *,
+    resource_policy: RuntimeResourcePolicy | None = None,
+    retained_model_bytes: int = 0,
+):  # type: ignore[no-untyped-def]
+    from quant_research_platform.research.predictions import outputs
+
+    monkeypatch.setattr(
+        outputs,
+        "algorithm_facts",
+        lambda _algorithm: SimpleNamespace(dependency_package=None),
+    )
+    monkeypatch.setattr(
+        outputs,
+        "_resolved_model_hyperparameters_match",
+        lambda *_args: True,
+    )
+
+    def output_frames(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        observed.append(current_runtime_resource_policy())
+        yield object()
+
+    monkeypatch.setattr(outputs, "_iter_prediction_output_frames", output_frames)
+    spec = SimpleNamespace(
+        primary_key=("timestamp", "asset_id"),
+        prediction_column="prediction",
+        train_end="2024-01-01",
+        test_start="2024-01-02",
+        test_end=None,
+        sample_filter_mode="unfiltered",
+    )
+    return outputs.build_prediction_result_from_frames(
+        (),
+        spec,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        ("feature",),
+        model_metadata={
+            "model_algorithm": "linear_regression",
+            "hyperparameters": {},
+            "resolved_hyperparameters": {},
+            "dependency_status": {"package": "internal"},
+        },
+        retained_model_bytes=retained_model_bytes,
+        resource_policy=resource_policy,
+    )
+
+
+def test_lazy_prediction_root_rejects_unrelated_consumer_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[RuntimeResourcePolicy | None] = []
+    result = _prediction_result_for_scope_test(monkeypatch, observed)
+
+    with runtime_resource_policy_scope(_policy(8)):
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime_resource_policy_competing_root$",
+        ):
+            next(iter(result.output_chunks))
+
+    assert observed == []
+
+
+def test_lazy_prediction_root_keeps_explicit_policy_and_abandonment_is_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[RuntimeResourcePolicy | None] = []
+    captures: list[bool] = []
+    policy = _policy(8)
+    monkeypatch.setattr(
+        RuntimeResourcePolicy,
+        "capture",
+        classmethod(lambda _cls, **_kwargs: captures.append(True)),
+    )
+    abandoned = _prediction_result_for_scope_test(monkeypatch, observed)
+    abandoned.close()
+    assert captures == []
+
+    explicit = _prediction_result_for_scope_test(
+        monkeypatch,
+        observed,
+        retained_model_bytes=1,
+        resource_policy=policy,
+    )
+    assert len(list(explicit.output_chunks)) == 1
+    assert observed == [policy]
 
 
 def _lazy_source_root(

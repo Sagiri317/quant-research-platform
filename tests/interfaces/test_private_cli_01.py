@@ -257,7 +257,8 @@ def test_qrp_private_schema_inventory_sanitizes_unexpected_failures(
     output = tmp_path / "inventory.json"
 
     @contextmanager
-    def fail_with_private_context(project_root):
+    def fail_with_private_context(project_root, *, resource_policy=None):
+        assert resource_policy is not None
         raise RuntimeError(
             "boom at " + str(project_root / "data" / "research" / "a_share" / "demo")
         )

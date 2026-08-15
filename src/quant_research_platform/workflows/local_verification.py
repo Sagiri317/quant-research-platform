@@ -453,6 +453,7 @@ def _run_local_verification_with_policy(
                 for index, members in validated_outputs
             ),
             _retained_state=retained_state,
+            resource_policy=resource_policy,
         )
         dataset_count = sum(int(item["dataset_count"]) for item in layer_summaries)
         total_row_count = sum(int(item["total_rows"]) for item in layer_summaries)
@@ -468,6 +469,7 @@ def _run_local_verification_with_policy(
                 important_null_count_columns=(
                     config.profile.schema_inventory_important_columns()
                 ),
+                resource_policy=resource_policy,
             ) as schema_inventory:
                 schema_inventory_summary = summarize_schema_inventory_payload(
                     schema_inventory

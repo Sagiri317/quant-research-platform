@@ -22,7 +22,8 @@ from quant_research_platform.research._memory import (
 )
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.runtime.resources import (
-    active_runtime_resource_policy,
+    RuntimeResourcePolicy,
+    bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -43,8 +44,11 @@ def fit_model_result_from_frames(
     spec: ModelSpec,
     *,
     estimator: object,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> ModelFitResult:
-    policy = active_runtime_resource_policy()
+    policy = (
+        bind_runtime_resource_policy(resource_policy) or RuntimeResourcePolicy.capture()
+    )
     with runtime_resource_policy_scope(policy):
         fit_model_result = getattr(estimator, "fit_model_result_from_frames", None)
         if callable(fit_model_result):
@@ -796,6 +800,7 @@ def iter_model_work_frames(
     for frame in iter_complete_time_sized_frames(
         iter(frames),
         timestamp_column="timestamp",
+        resource_policy=current_runtime_resource_policy(),
     ):
         missing = sorted(required.difference(frame.columns))
         if missing:

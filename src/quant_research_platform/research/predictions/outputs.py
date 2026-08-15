@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 
@@ -85,6 +85,7 @@ def build_prediction_result_from_frames(
     retained_model_bytes: int = 0,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> PredictionResult:
+    bound_policy = bind_runtime_resource_policy(resource_policy)
     if type(model_metadata) is not dict:
         raise ValueError("invalid_model_metadata")
     model_algorithm = model_metadata.get("model_algorithm")
@@ -138,16 +139,14 @@ def build_prediction_result_from_frames(
         predictor=prediction_callable(coefficients, input_columns, prediction_model),
         build_state=build_state,
     )
-    bound_policy = bind_runtime_resource_policy(resource_policy)
-    if retained_model_bytes and bound_policy is not None:
-        output_frames = _reserved_prediction_output_frames(
-            output_frames,
-            resource_policy=bound_policy,
-            retained_model_bytes=retained_model_bytes,
-        )
+    scoped_output_frames = _scoped_prediction_output_frames(
+        output_frames,
+        bound_policy=bound_policy,
+        retained_model_bytes=retained_model_bytes,
+    )
     return PredictionResult(
         spec=spec,
-        output_chunks=output_frames,
+        output_chunks=scoped_output_frames,
         model_metadata={
             **model_metadata,
             "test_start": spec.test_start,
@@ -158,22 +157,27 @@ def build_prediction_result_from_frames(
             spec=spec,
             input_columns=input_columns,
         ),
+        _close=scoped_output_frames.close,
     )
 
 
-def _reserved_prediction_output_frames(
+def _scoped_prediction_output_frames(
     frames: Iterable[pd.DataFrame],
     *,
-    resource_policy: RuntimeResourcePolicy,
+    bound_policy: RuntimeResourcePolicy | None,
     retained_model_bytes: int,
-) -> Iterable[pd.DataFrame]:
-    with runtime_resource_policy_scope(resource_policy), ExitStack() as retained:
-        retained.enter_context(
-            resource_policy.reserve(
-                "research.model.fitted_state",
-                retained_model_bytes,
+) -> Iterator[pd.DataFrame]:
+    policy = (
+        bind_runtime_resource_policy(bound_policy) or RuntimeResourcePolicy.capture()
+    )
+    with runtime_resource_policy_scope(policy), ExitStack() as retained:
+        if retained_model_bytes:
+            retained.enter_context(
+                policy.reserve(
+                    "research.model.fitted_state",
+                    retained_model_bytes,
+                )
             )
-        )
         yield from frames
 
 
@@ -361,6 +365,7 @@ def _iter_prediction_work_frames(
     for frame in iter_complete_time_sized_frames(
         iter(frames),
         timestamp_column="timestamp",
+        resource_policy=current_runtime_resource_policy(),
     ):
         missing = sorted(required.difference(frame.columns))
         if missing:

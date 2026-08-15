@@ -72,7 +72,10 @@ def schema_inventory(
         with runtime_resource_policy_scope(policy):
             with ExitStack() as inventory_stack:
                 inventory = inventory_stack.enter_context(
-                    open_schema_inventory_payload(project_root)
+                    open_schema_inventory_payload(
+                        project_root,
+                        resource_policy=policy,
+                    )
                 )
                 published = atomic_write_json(output, inventory)
                 published_identity = published.lstat()

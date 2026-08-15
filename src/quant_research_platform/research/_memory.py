@@ -220,7 +220,10 @@ def iter_complete_time_sized_frames(
 
     with ExitStack() as pending_capture_cleanup:
         pending_capture_cleanup.enter_context(closing_dataset_iterator(frames))
-        bound_policy = bind_runtime_resource_policy(resource_policy)
+        bound_policy = bind_runtime_resource_policy(
+            resource_policy,
+            allow_implicit_active=True,
+        )
         activation_cleanup = pending_capture_cleanup.pop_all()
 
     def activate() -> Iterator[pd.DataFrame]:

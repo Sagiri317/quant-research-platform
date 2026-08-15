@@ -28,7 +28,7 @@ from quant_research_platform.research.features.transforms import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
+    bind_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -61,7 +61,9 @@ def assemble_research_dataset(
 ) -> Path:
     """Assemble one registered research dataset from processed inputs."""
 
-    policy = resource_policy or active_runtime_resource_policy()
+    policy = (
+        bind_runtime_resource_policy(resource_policy) or RuntimeResourcePolicy.capture()
+    )
     return _assemble_research_dataset_with_policy(
         layout=layout,
         dataset_catalog=dataset_catalog,

@@ -18,7 +18,7 @@ from quant_research_platform.contracts._json import (
 from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAYERS
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
+    bind_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
@@ -64,9 +64,13 @@ def open_schema_inventory_payload(
     project_root: Path,
     *,
     important_null_count_columns: Collection[str] | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Retain sanitized schema metadata through its one consumer."""
 
+    policy = (
+        bind_runtime_resource_policy(resource_policy) or RuntimeResourcePolicy.capture()
+    )
     root = Path(project_root)
     declared_important_columns = (
         () if important_null_count_columns is None else important_null_count_columns
@@ -83,8 +87,7 @@ def open_schema_inventory_payload(
         *(data_root / layer for layer in sorted(RUN_RESULT_DATASET_LAYERS)),
     ):
         require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
-    resource_policy = active_runtime_resource_policy()
-    with runtime_resource_policy_scope(resource_policy), ExitStack() as retained:
+    with runtime_resource_policy_scope(policy), ExitStack() as retained:
         items: list[dict[str, Any]] = []
         retained_item_bytes = 0
         for artifact_root in _iter_dataset_artifact_roots(root):
@@ -93,7 +96,7 @@ def open_schema_inventory_payload(
                     root,
                     artifact_root,
                     important_null_count_columns=important_columns,
-                    resource_policy=resource_policy,
+                    resource_policy=policy,
                     retained_items=retained,
                 )
             except MemoryError:
@@ -107,7 +110,7 @@ def open_schema_inventory_payload(
         render_bound = 128 + retained_item_bytes + 2 * len(items)
         try:
             retained.enter_context(
-                resource_policy.reserve(
+                policy.reserve(
                     "schema.inventory.consumer_overlap",
                     render_bound + len(items) * sys.getsizeof(None),
                 )

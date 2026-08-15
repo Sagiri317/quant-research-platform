@@ -323,7 +323,7 @@ def current_runtime_resource_policy() -> RuntimeResourcePolicy | None:
 def bind_runtime_resource_policy(
     explicit: RuntimeResourcePolicy | None,
     *,
-    allow_implicit_active: bool = True,
+    allow_implicit_active: bool = False,
 ) -> RuntimeResourcePolicy | None:
     """Bind a lazy operation to its exact creation-time policy."""
 

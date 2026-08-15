@@ -313,6 +313,7 @@ def _iter_evaluation_work_frames(
     for frame in iter_complete_session_frames(
         iter(frames),
         timestamp_column="timestamp",
+        resource_policy=current_runtime_resource_policy(),
     ):
         missing = sorted(required.difference(frame.columns))
         if missing:

@@ -663,6 +663,7 @@ def _portfolio_input_chunks(
             columns=columns,
         ),
         timestamp_column="timestamp",
+        resource_policy=current_runtime_resource_policy(),
     )
 
 

@@ -1791,10 +1791,15 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
             read_chunk_rows.append(len(chunk))
             yield chunk
 
-    def wrapped_fit(frames, spec, *, estimator):
+    def wrapped_fit(frames, spec, *, estimator, resource_policy=None):
         chunks = list(frames)
         fit_chunk_rows.extend(len(chunk) for chunk in chunks)
-        return original_fit(iter(chunks), spec, estimator=estimator)
+        return original_fit(
+            iter(chunks),
+            spec,
+            estimator=estimator,
+            resource_policy=resource_policy,
+        )
 
     def wrapped_write(frames, spec, coefficients, input_columns, **kwargs):
         def counted_frames():

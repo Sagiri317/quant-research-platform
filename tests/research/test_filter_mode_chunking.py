@@ -467,7 +467,10 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     )
     with runtime_resource_policy_scope(policy):
         result = model_fitting.fit_model_result_from_frames(
-            (frame,), spec, estimator=build_estimator_from_model_spec(spec)
+            (frame,),
+            spec,
+            estimator=build_estimator_from_model_spec(spec),
+            resource_policy=policy,
         )
 
     assert len(filtered_chunk_rows) > 1
