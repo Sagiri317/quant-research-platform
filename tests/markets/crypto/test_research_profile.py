@@ -10,6 +10,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 )
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_crypto_binance_1m_profile_builds_with_empty_prediction_and_portfolio() -> None:
@@ -51,13 +52,19 @@ def test_crypto_binance_profile_imports_processed_dependency_window(
     )
     core = TimeWindow("2026-07-06", "2026-07-06")
     dependency = materialization_dependencies.panel_dependency_window(core)
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024 * 1024,
+    )
 
     research_profiles._materialize_crypto_binance_interim_data(
         layout=StorageLayout(project_root=tmp_path),
         raw_root=tmp_path / "raw",
         start_date="2026-07-06",
         end_date="2026-07-06",
+        resource_policy=policy,
     )
 
     assert captured["start_date"] == dependency.start.isoformat(timespec="seconds")
     assert captured["end_date"] == dependency.end.isoformat(timespec="seconds")
+    assert captured["resource_policy"] is policy
