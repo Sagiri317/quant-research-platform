@@ -386,39 +386,6 @@ def _iter_prediction_work_frames(
             yield frame.loc[:, selected]
 
 
-def validate_prediction_outputs(frame: pd.DataFrame, spec: PredictionSpec) -> None:
-    expected = (*spec.primary_key, spec.prediction_column)
-    observed = tuple(frame.columns)
-    if any(type(column) is not str or not column for column in observed):
-        raise ValueError("invalid_prediction_output_columns")
-    if len(observed) != len(set(observed)):
-        raise ValueError("duplicate_prediction_output_columns")
-    missing = [column for column in expected if column not in observed]
-    if missing:
-        raise ValueError("missing_prediction_output_columns: " + ", ".join(missing))
-    extra = sorted(set(observed).difference(expected))
-    if extra:
-        raise ValueError("unregistered_prediction_output_columns: " + ", ".join(extra))
-    if observed != expected:
-        raise ValueError("misordered_prediction_output_columns")
-    if frame.empty:
-        raise ValueError("empty_prediction_window")
-    _validate_prediction_output_values(
-        frame,
-        primary_key=spec.primary_key,
-        prediction_column=spec.prediction_column,
-    )
-    timestamps = strict_timestamp_series(
-        frame["timestamp"], error="invalid_prediction_timestamp_values"
-    )
-    if bool((timestamps < pd.Timestamp(spec.test_start)).any()):
-        raise ValueError("prediction_output_before_test_start")
-    if spec.test_end is not None and bool(
-        (timestamps > pd.Timestamp(spec.test_end)).any()
-    ):
-        raise ValueError("prediction_output_after_test_end")
-
-
 def _strict_non_negative_prediction_count(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError("invalid_prediction_metadata_count")
@@ -428,5 +395,4 @@ def _strict_non_negative_prediction_count(value: object) -> int:
 __all__ = [
     "PredictionResult",
     "build_prediction_result_from_frames",
-    "validate_prediction_outputs",
 ]

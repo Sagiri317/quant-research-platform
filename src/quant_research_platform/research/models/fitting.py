@@ -676,61 +676,6 @@ def _training_control_working_set_bytes(frame_bytes: int, row_count: int) -> int
     return copied_frame + sorted_frame + timestamp_values + sort_index
 
 
-def fit_predictor(
-    spec: ModelSpec,
-    *,
-    training: pd.DataFrame,
-    y: np.ndarray,
-    estimator: object,
-) -> object:
-    policy = current_runtime_resource_policy()
-    with ExitStack() as fit_reservation:
-        threads = supervised.model_thread_count(spec)
-        if policy is not None:
-            input_bytes = pandas_frame_payload_bytes(training) + int(y.nbytes)
-            state_bytes = _model_state_upper_bound_bytes(
-                training,
-                spec,
-                estimator=estimator,
-            )
-            if input_bytes + state_bytes > policy.remaining_memory_bytes:
-                raise MemoryError("runtime_memory_budget_exceeded")
-            fit_reservation.enter_context(
-                policy.reserve(
-                    "research.model.fit_input",
-                    input_bytes,
-                )
-            )
-            fit_reservation.enter_context(
-                policy.reserve(
-                    "research.model.fit_state",
-                    state_bytes,
-                )
-            )
-            threads = _effective_model_thread_count(
-                training,
-                spec,
-                available_bytes=policy.remaining_memory_bytes,
-            )
-            fit_reservation.enter_context(
-                policy.reserve(
-                    "research.model.fit_work",
-                    _estimator_fit_working_set_bytes(
-                        training,
-                        spec,
-                        threads=threads,
-                    ),
-                )
-            )
-        return _fit_predictor(
-            spec,
-            training=training,
-            y=y,
-            estimator=estimator,
-            threads=threads,
-        )
-
-
 def _fit_predictor(
     spec: ModelSpec,
     *,
@@ -1104,5 +1049,4 @@ __all__ = [
     "collect_training_frame",
     "fit_linear_model_result_from_frames",
     "fit_model_result_from_frames",
-    "fit_predictor",
 ]

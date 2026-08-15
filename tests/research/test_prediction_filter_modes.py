@@ -10,12 +10,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts._output_common_validation import (
+    validate_output_frame,
+)
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import (
     PREDICTION_SCORE_COLUMN,
     PredictionSpec,
+    _validate_prediction_output_values,
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets.assembler import (
@@ -23,7 +27,6 @@ from quant_research_platform.research.datasets.assembler import (
 )
 from quant_research_platform.research.predictions.outputs import (
     build_prediction_result_from_frames,
-    validate_prediction_outputs,
 )
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
@@ -542,7 +545,11 @@ def test_prediction_outputs_accept_equivalent_timezone_representations() -> None
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        validate_prediction_outputs(frame, spec)
+        _validate_prediction_output_values(
+            frame,
+            primary_key=spec.primary_key,
+            prediction_column=spec.prediction_column,
+        )
 
 
 @pytest.mark.parametrize(
@@ -590,7 +597,11 @@ def test_prediction_outputs_require_finite_values_and_complete_unique_keys(
         ]
 
     with pytest.raises(ValueError, match=f"^{error}$"):
-        validate_prediction_outputs(frame, spec)
+        _validate_prediction_output_values(
+            frame,
+            primary_key=spec.primary_key,
+            prediction_column=spec.prediction_column,
+        )
 
     with pytest.raises(
         ValueError,
@@ -672,7 +683,11 @@ def test_prediction_outputs_require_exact_ordered_unique_columns(
         frame = frame.loc[:, ["asset_id", "timestamp", PREDICTION_SCORE_COLUMN]]
 
     with pytest.raises(ValueError, match=f"^{error}$"):
-        validate_prediction_outputs(frame, spec)
+        validate_output_frame(
+            frame,
+            required=(*spec.primary_key, spec.prediction_column),
+            error_name="prediction_output",
+        )
 
 
 def test_prediction_builder_outputs_canonical_columns_for_validation() -> None:
@@ -695,7 +710,11 @@ def test_prediction_builder_outputs_canonical_columns_for_validation() -> None:
     output = pd.concat(tuple(result.output_chunks), ignore_index=True)
 
     assert tuple(output.columns) == (*spec.primary_key, spec.prediction_column)
-    validate_prediction_outputs(output, spec)
+    validate_output_frame(
+        output,
+        required=(*spec.primary_key, spec.prediction_column),
+        error_name="prediction_output",
+    )
 
 
 def test_prediction_handoff_empty_training_window_fails_closed(

@@ -18,7 +18,6 @@ from quant_research_platform.research.models.supervised import (
 )
 from quant_research_platform.research.predictions.outputs import (
     build_prediction_result_from_frames,
-    validate_prediction_outputs,
 )
 from tests.research.prediction_output_helpers import (
     prediction_frame_from_artifact,
@@ -306,8 +305,6 @@ def test_prediction_output_helpers_do_not_export_bundle_semantics() -> None:
         model_spec.input_columns,
         prediction_model=fit.prediction_model,
     )
-    validate_prediction_outputs(prediction, spec)
-
     assert spec.primary_key == ("timestamp", "asset_id")
     assert spec.prediction_column == "prediction_score"
     assert list(prediction.columns) == ["timestamp", "asset_id", "prediction_score"]

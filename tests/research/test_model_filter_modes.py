@@ -553,7 +553,7 @@ def test_model_training_collection_rejects_unbounded_collection() -> None:
         )
 
 
-def test_model_matrix_admission_precedes_linear_and_estimator_allocation(
+def test_linear_matrix_admission_precedes_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import quant_research_platform.research.models.fitting as model_fitting
@@ -574,29 +574,15 @@ def test_model_matrix_admission_precedes_linear_and_estimator_allocation(
         entered.append("linear")
         raise AssertionError("linear matrix allocated before admission")
 
-    class Estimator:
-        def fit(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
-            entered.append("estimator")
-            raise AssertionError("estimator fit entered before admission")
-
     monkeypatch.setattr(model_fitting, "linear_design_matrix", reject_linear_matrix)
-    for operation in ("linear", "estimator"):
-        policy = capture_test_policy(
-            available_memory_bytes=16 * 1024 * 1024,
-            explicit_cap_bytes=1 * 1024 * 1024,
-        )
-        with runtime_resource_policy_scope(policy):
-            with policy.reserve("outer_owner", policy.task_memory_budget_bytes):
-                with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-                    if operation == "linear":
-                        model_fitting.fit_linear_coefficients_exact(frame, spec)
-                    else:
-                        model_fitting.fit_predictor(
-                            spec,
-                            training=frame,
-                            y=frame["label"].to_numpy(),
-                            estimator=Estimator(),
-                        )
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    )
+    with runtime_resource_policy_scope(policy):
+        with policy.reserve("outer_owner", policy.task_memory_budget_bytes):
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                model_fitting.fit_linear_coefficients_exact(frame, spec)
 
     assert entered == []
 
@@ -612,6 +598,7 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
         model_algorithm="random_forest_regressor",
         input_factor_columns=("factor",),
         label_column="label",
+        sample_filter_mode="unfiltered",
         hyperparameters={"n_estimators": 100_000, "n_jobs": 1},
         max_train_rows=len(frame),
     )
@@ -626,10 +613,9 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
     )
     with runtime_resource_policy_scope(policy):
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            model_fitting.fit_predictor(
+            model_fitting.fit_estimator_model_result_from_frames(
+                (frame,),
                 spec,
-                training=frame,
-                y=frame["label"].to_numpy(),
                 estimator=Estimator(),
             )
 
@@ -677,6 +663,7 @@ def test_model_fit_envelope_does_not_recharge_preloaded_backend_image() -> None:
         model_algorithm="random_forest_regressor",
         input_factor_columns=("factor",),
         label_column="label",
+        sample_filter_mode="unfiltered",
         hyperparameters={"n_estimators": 1, "max_depth": 2, "n_jobs": 1},
         max_train_rows=rows,
     )
@@ -698,10 +685,9 @@ def test_model_fit_envelope_does_not_recharge_preloaded_backend_image() -> None:
             spec=spec,
         )
     )
-    y = frame["label"].to_numpy()
     admitted_bytes = (
         pandas_frame_payload_bytes(frame)
-        + int(y.nbytes)
+        + int(frame["label"].to_numpy().nbytes)
         + work_bytes
         + model_fitting._model_state_upper_bound_bytes(frame, spec)  # noqa: SLF001
     )
@@ -712,12 +698,11 @@ def test_model_fit_envelope_does_not_recharge_preloaded_backend_image() -> None:
 
     with runtime_resource_policy_scope(policy):
         assert (
-            model_fitting.fit_predictor(
+            model_fitting.fit_estimator_model_result_from_frames(
+                (frame,),
                 spec,
-                training=frame,
-                y=y,
                 estimator=estimator,
-            )
+            ).prediction_model
             is estimator
         )
 
@@ -755,6 +740,7 @@ def test_model_threads_adapt_to_live_planning_headroom(
     rows = 32
     frame = pd.DataFrame(
         {
+            "timestamp": pd.date_range("2024-01-01", periods=rows, freq="min"),
             "factor": np.linspace(0.0, 1.0, rows),
             "label": np.linspace(1.0, 2.0, rows),
         }
@@ -764,6 +750,7 @@ def test_model_threads_adapt_to_live_planning_headroom(
         model_algorithm="random_forest_regressor",
         input_factor_columns=("factor",),
         label_column="label",
+        sample_filter_mode="unfiltered",
         hyperparameters={"n_estimators": 1, "n_jobs": -1},
         max_train_rows=rows,
     )
@@ -799,12 +786,11 @@ def test_model_threads_adapt_to_live_planning_headroom(
     estimator = Estimator()
     with runtime_resource_policy_scope(policy):
         assert (
-            model_fitting.fit_predictor(
+            model_fitting.fit_estimator_model_result_from_frames(
+                (frame,),
                 spec,
-                training=frame,
-                y=frame["label"].to_numpy(),
                 estimator=estimator,
-            )
+            ).prediction_model
             is estimator
         )
 
@@ -963,6 +949,7 @@ def test_unbounded_tree_sentinels_reject_before_estimator_fit(
         model_algorithm=model_algorithm,
         input_factor_columns=("factor",),
         label_column="label",
+        sample_filter_mode="unfiltered",
         hyperparameters=hyperparameters,
         max_train_rows=rows,
     )
@@ -979,10 +966,9 @@ def test_unbounded_tree_sentinels_reject_before_estimator_fit(
     )
     with runtime_resource_policy_scope(policy):
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            model_fitting.fit_predictor(
+            model_fitting.fit_estimator_model_result_from_frames(
+                (frame,),
                 spec,
-                training=frame,
-                y=frame["label"].to_numpy(),
                 estimator=Estimator(),
             )
 
