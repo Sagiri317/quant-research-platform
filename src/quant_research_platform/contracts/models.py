@@ -18,7 +18,6 @@ from quant_research_platform.contracts.validation import _validate_column_tuple
 
 @dataclass(frozen=True)
 class _ModelAlgorithmFacts:
-    algorithm: str
     dependency_package: str | None = None
     default_hyperparameters: Mapping[str, object] = field(default_factory=dict)
     smoke_hyperparameters: Mapping[str, object] = field(default_factory=dict)
@@ -27,19 +26,16 @@ class _ModelAlgorithmFacts:
 
 
 _MODEL_ALGORITHM_FACTS = {
-    "linear_regression": _ModelAlgorithmFacts("linear_regression"),
+    "linear_regression": _ModelAlgorithmFacts(),
     "ridge_regression": _ModelAlgorithmFacts(
-        "ridge_regression",
         "sklearn",
         default_hyperparameters={"alpha": 1.0},
     ),
     "lasso_regression": _ModelAlgorithmFacts(
-        "lasso_regression",
         "sklearn",
         default_hyperparameters={"alpha": 0.001, "max_iter": 10_000},
     ),
     "elastic_net": _ModelAlgorithmFacts(
-        "elastic_net",
         "sklearn",
         default_hyperparameters={
             "alpha": 0.001,
@@ -48,40 +44,33 @@ _MODEL_ALGORITHM_FACTS = {
         },
     ),
     "huber_regression": _ModelAlgorithmFacts(
-        "huber_regression",
         "sklearn",
         default_hyperparameters={"max_iter": 1_000},
     ),
     "decision_tree_regressor": _ModelAlgorithmFacts(
-        "decision_tree_regressor",
         "sklearn",
     ),
     "random_forest_regressor": _ModelAlgorithmFacts(
-        "random_forest_regressor",
         "sklearn",
         default_hyperparameters={"n_estimators": 20, "n_jobs": -1},
         smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": -1},
         parallel=True,
     ),
     "extra_trees_regressor": _ModelAlgorithmFacts(
-        "extra_trees_regressor",
         "sklearn",
         default_hyperparameters={"n_estimators": 20, "n_jobs": -1},
         smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": -1},
         parallel=True,
     ),
     "gradient_boosting_regressor": _ModelAlgorithmFacts(
-        "gradient_boosting_regressor",
         "sklearn",
         smoke_hyperparameters={"n_estimators": 5, "max_depth": 2},
     ),
     "hist_gradient_boosting_regressor": _ModelAlgorithmFacts(
-        "hist_gradient_boosting_regressor",
         "sklearn",
         smoke_hyperparameters={"max_iter": 5, "max_leaf_nodes": 7},
     ),
     "xgboost_regressor": _ModelAlgorithmFacts(
-        "xgboost_regressor",
         "xgboost",
         default_hyperparameters={
             "n_estimators": 20,
@@ -95,7 +84,6 @@ _MODEL_ALGORITHM_FACTS = {
         parallel=True,
     ),
     "lightgbm_regressor": _ModelAlgorithmFacts(
-        "lightgbm_regressor",
         "lightgbm",
         default_hyperparameters={
             "n_estimators": 20,
@@ -112,15 +100,12 @@ _MODEL_ALGORITHM_FACTS = {
         parallel=True,
     ),
     "single_factor_baseline": _ModelAlgorithmFacts(
-        "single_factor_baseline",
         input_kind="single_factor_input",
     ),
     "equal_weight_rank_ensemble": _ModelAlgorithmFacts(
-        "equal_weight_rank_ensemble",
         input_kind="rank_ensemble_inputs",
     ),
     "ic_weighted_rank_ensemble": _ModelAlgorithmFacts(
-        "ic_weighted_rank_ensemble",
         input_kind="rank_ensemble_inputs",
     ),
 }
