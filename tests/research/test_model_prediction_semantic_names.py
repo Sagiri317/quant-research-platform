@@ -174,18 +174,57 @@ def test_prediction_accepts_actual_bounded_parallel_model_threads() -> None:
 
     assert int(result.model_metadata["resolved_hyperparameters"]["n_jobs"]) > 0  # type: ignore[index]
 
-    resolved = dict(fit.metadata["resolved_hyperparameters"])
-    resolved["n_jobs"] = int(resolved["n_jobs"]) + 10_000
-    forged = {**fit.metadata, "resolved_hyperparameters": resolved}
-    with pytest.raises(ValueError, match="invalid_model_metadata"):
-        build_prediction_result_from_frames(
-            (),
-            prediction_spec,
-            fit.coefficients,
-            model_spec.input_columns,
-            prediction_model=fit.prediction_model,
-            model_metadata=forged,
-        )
+    for invalid_threads in (0, -1, True, 1.0):
+        resolved = {
+            **fit.metadata["resolved_hyperparameters"],
+            "n_jobs": invalid_threads,
+        }
+        forged = {**fit.metadata, "resolved_hyperparameters": resolved}
+        with pytest.raises(ValueError, match="invalid_model_metadata"):
+            build_prediction_result_from_frames(
+                (),
+                prediction_spec,
+                fit.coefficients,
+                model_spec.input_columns,
+                prediction_model=fit.prediction_model,
+                model_metadata=forged,
+            )
+
+
+@pytest.mark.parametrize("physical_cores", (16, 4))
+def test_persisted_parallel_model_threads_are_reader_host_independent(
+    monkeypatch: pytest.MonkeyPatch,
+    physical_cores: int,
+) -> None:
+    hyperparameters = model_smoke_hyperparameters("extra_trees_regressor")
+    resolved_hyperparameters = {**hyperparameters, "n_jobs": 8}
+    monkeypatch.setattr(
+        "quant_research_platform.contracts.models.psutil.cpu_count",
+        lambda *, logical: physical_cores,
+    )
+
+    result = build_prediction_result_from_frames(
+        (),
+        PredictionSpec(
+            prediction_id="portable_extra_trees_prediction",
+            model_id="extra_trees_demo",
+            research_dataset_id="research_demo",
+            train_end="2024-01-03",
+            test_start="2024-01-04",
+        ),
+        np.array([0.0, 0.0]),
+        ("factor", "feature"),
+        model_metadata={
+            "model_algorithm": "extra_trees_regressor",
+            "hyperparameters": hyperparameters,
+            "resolved_hyperparameters": resolved_hyperparameters,
+            "dependency_status": {"package": "sklearn"},
+        },
+    )
+
+    assert result.model_metadata["resolved_hyperparameters"] == (
+        resolved_hyperparameters
+    )
 
 
 def test_model_contract_rejects_conflicting_effective_seed() -> None:
