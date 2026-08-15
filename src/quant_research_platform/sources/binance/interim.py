@@ -140,45 +140,49 @@ def iter_interim_frames(
         allow_implicit_active=False,
     )
     policy = bound_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(policy):
-        owner_baseline = policy.reserved_memory_bytes
-        yielded = False
-        empty_schema_frame: pd.DataFrame | None = None
-        last_key: tuple[object, ...] | None = None
-        for input_file in sorted(input_files):
-            for batch in _iter_raw_envelope_batches(
-                input_file,
-                batch_size=row_batch_size,
-                resource_policy=policy,
-                validate_depth_payload=False,
-            ):
-                normalized = normalize_raw_envelopes(batch, data_id=data_id)
-                last_key = _validate_normalized_boundary(
-                    normalized,
-                    data_id=data_id,
-                    previous_key=last_key,
+
+    def activate() -> Iterator[pd.DataFrame]:
+        with runtime_resource_policy_scope(policy):
+            owner_baseline = policy.reserved_memory_bytes
+            yielded = False
+            empty_schema_frame: pd.DataFrame | None = None
+            last_key: tuple[object, ...] | None = None
+            for input_file in sorted(input_files):
+                for batch in _iter_raw_envelope_batches(
+                    input_file,
+                    batch_size=row_batch_size,
+                    resource_policy=policy,
+                    validate_depth_payload=False,
+                ):
+                    normalized = normalize_raw_envelopes(batch, data_id=data_id)
+                    last_key = _validate_normalized_boundary(
+                        normalized,
+                        data_id=data_id,
+                        previous_key=last_key,
+                    )
+                    empty_schema_frame = normalized.iloc[:0].copy()
+                    filtered = _filter_time_window(
+                        normalized,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                    if not filtered.empty:
+                        yielded = True
+                        retained_bytes = policy.reserved_memory_bytes - owner_baseline
+                        if pandas_frame_payload_bytes(filtered) > retained_bytes:
+                            raise RuntimeError("binance_record_envelope_bound_invalid")
+                        yield filtered
+            if input_files and not yielded:
+                empty = (
+                    empty_schema_frame
+                    if empty_schema_frame is not None
+                    else _empty_interim_frame(data_id)
                 )
-                empty_schema_frame = normalized.iloc[:0].copy()
-                filtered = _filter_time_window(
-                    normalized,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-                if not filtered.empty:
-                    yielded = True
-                    retained_bytes = policy.reserved_memory_bytes - owner_baseline
-                    if pandas_frame_payload_bytes(filtered) > retained_bytes:
-                        raise RuntimeError("binance_record_envelope_bound_invalid")
-                    yield filtered
-        if input_files and not yielded:
-            empty = (
-                empty_schema_frame
-                if empty_schema_frame is not None
-                else _empty_interim_frame(data_id)
-            )
-            empty_bytes = pandas_frame_payload_bytes(empty)
-            with policy.reserve("source.binance.empty", empty_bytes):
-                yield empty
+                empty_bytes = pandas_frame_payload_bytes(empty)
+                with policy.reserve("source.binance.empty", empty_bytes):
+                    yield empty
+
+    return activate()
 
 
 def normalize_raw_envelopes(

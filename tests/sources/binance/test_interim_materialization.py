@@ -6,11 +6,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_research_platform.runtime.resources import current_runtime_resource_policy
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.binance import interim, raw_exports
 from quant_research_platform.sources.binance.interim import materialize_interim_data
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_binance_interim_materializer_writes_source_datasets(tmp_path: Path) -> None:
@@ -79,6 +83,44 @@ def test_binance_file_discovery_occurs_inside_one_root_policy(
 
     assert len(observed) == 1 and observed[0] is not None
     assert not result.artifact_roots
+
+
+def test_binance_interim_iterator_rejects_competing_root_at_creation() -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            RuntimeError,
+            match="runtime_resource_policy_competing_root",
+        ):
+            interim.iter_interim_frames(
+                data_id="market_bars_1m",
+                input_files=(),
+            )
+
+
+def test_binance_interim_iterator_keeps_explicit_root_during_delayed_consumption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    observed = []
+
+    def batches(*_args: object, resource_policy, **_kwargs: object):  # noqa: ANN001
+        observed.append((resource_policy, current_runtime_resource_policy()))
+        return iter(())
+
+    monkeypatch.setattr(interim, "_iter_raw_envelope_batches", batches)
+    iterator = interim.iter_interim_frames(
+        data_id="market_bars_1m",
+        input_files=(tmp_path / "unused.jsonl",),
+        resource_policy=policy,
+    )
+
+    assert current_runtime_resource_policy() is None
+    assert len(tuple(iterator)) == 1
+    assert observed == [(policy, policy)]
+    assert current_runtime_resource_policy() is None
 
 
 def test_binance_interim_materializer_writes_multiple_batches(
