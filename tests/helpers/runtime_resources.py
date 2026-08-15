@@ -13,13 +13,6 @@ class _TestOperationRssMeasurement:
         self.state = "READY"
         self.error = None
 
-    def prepare(self) -> None:
-        pass
-
-    def bind_baseline(self, rss0_bytes: int, hard_budget_bytes: int) -> None:
-        self.rss0_bytes = rss0_bytes
-        self.hard_budget_bytes = hard_budget_bytes
-
     def start(self) -> None:
         self.state = "ACTIVE"
 
