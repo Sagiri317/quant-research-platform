@@ -68,3 +68,29 @@ def test_crypto_binance_profile_imports_processed_dependency_window(
     assert captured["start_date"] == dependency.start.isoformat(timespec="seconds")
     assert captured["end_date"] == dependency.end.isoformat(timespec="seconds")
     assert captured["resource_policy"] is policy
+
+    captured.clear()
+    standalone_policy = capture_test_policy(
+        available_memory_bytes=128 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024 * 1024,
+    )
+    captures: list[object] = []
+
+    def capture_policy():
+        captures.append(standalone_policy)
+        return standalone_policy
+
+    monkeypatch.setattr(
+        research_profiles,
+        "active_runtime_resource_policy",
+        capture_policy,
+    )
+    research_profile("crypto_binance_1m").materialize_interim_data(
+        StorageLayout(project_root=tmp_path),
+        tmp_path / "raw",
+        "2026-07-06",
+        "2026-07-06",
+    )
+
+    assert captures == [standalone_policy]
+    assert captured["resource_policy"] is standalone_policy

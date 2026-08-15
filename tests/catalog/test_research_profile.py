@@ -126,12 +126,56 @@ def test_a_share_profile_materializes_exact_processed_dependency_source_window(
             resource_policy=policy,
         )
 
+    assert all(call["resource_policy"] is policy for call in calls)
     assert calls[0]["data_ids"] == ("trading_calendar",)
     assert calls[0]["start_date"] is None
     assert calls[0]["end_date"] is None
     assert calls[1]["start_date"] == "2013-01-15"
     assert calls[1]["end_date"] == "2014-06-23"
     assert "trading_calendar" in result.artifact_roots
+
+    calls.clear()
+    standalone_policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    captures: list[object] = []
+
+    def capture_policy():
+        captures.append(standalone_policy)
+        return standalone_policy
+
+    monkeypatch.setattr(profiles, "active_runtime_resource_policy", capture_policy)
+    legacy_result = profile.materialize_interim_data(
+        StorageLayout(project_root=tmp_path),
+        tmp_path / "raw",
+        "2014-01-02",
+        "2014-01-03",
+    )
+
+    assert captures == [standalone_policy]
+    assert all(call["resource_policy"] is standalone_policy for call in calls)
+    assert "trading_calendar" in legacy_result.artifact_roots
+
+
+@pytest.mark.parametrize("profile_id", (None, "crypto_binance_1m"))
+def test_profile_interim_legacy_call_rejects_ambient_root(
+    tmp_path: Path,
+    profile_id: str | None,
+) -> None:
+    from quant_research_platform.profiles.research import research_profile
+
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    profile = research_profile(profile_id)
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime_resource_policy_competing_root$",
+        ):
+            profile.materialize_interim_data(
+                StorageLayout(project_root=tmp_path),
+                tmp_path / "raw",
+                "2024-01-02",
+                "2024-01-03",
+            )
 
 
 def test_research_profile_covers_required_models_predictions_and_signals() -> None:
