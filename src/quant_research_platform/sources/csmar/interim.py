@@ -576,7 +576,10 @@ def _iter_interim_frames(
     )
 
     def activate() -> Iterator[pd.DataFrame]:
-        policy = bound_policy or active_runtime_resource_policy()
+        policy = bind_runtime_resource_policy(
+            bound_policy,
+            allow_implicit_active=False,
+        ) or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
             operation_reports: list[dict[str, object]] = []
             raw_dataset = _raw_dataset_for_interim(data_id)

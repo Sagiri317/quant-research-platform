@@ -402,7 +402,10 @@ def iter_raw_export_files(
     raw_root = Path(root)
 
     def iter_files() -> Iterator[Path]:
-        policy = bound_policy or active_runtime_resource_policy()
+        policy = bind_runtime_resource_policy(
+            bound_policy,
+            allow_implicit_active=False,
+        ) or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
             with _raw_export_path_session(raw_root) as (paths, verify_root):
                 with ExactPrimaryKeyIndex(
@@ -468,7 +471,10 @@ def iter_index_info_rows(
     )
 
     def activate() -> Iterator[tuple[list[str], list[str], int]]:
-        policy = bound_policy or active_runtime_resource_policy()
+        policy = bind_runtime_resource_policy(
+            bound_policy,
+            allow_implicit_active=False,
+        ) or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
             yield from _iter_index_info_rows_under_policy(
                 export_path,
@@ -945,7 +951,10 @@ def iter_private_export_chunks(
     )
 
     def activate() -> Iterator[pd.DataFrame]:
-        policy = bound_policy or active_runtime_resource_policy()
+        policy = bind_runtime_resource_policy(
+            bound_policy,
+            allow_implicit_active=False,
+        ) or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
             yield from iter_private_export_chunks_with_policy(
                 path,
@@ -1380,7 +1389,10 @@ def dataset_files_with_identity_by_id(
     root = Path(raw_root)
 
     def iter_files() -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
-        policy = bound_policy or active_runtime_resource_policy()
+        policy = bind_runtime_resource_policy(
+            bound_policy,
+            allow_implicit_active=False,
+        ) or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
             with _raw_export_path_session(root) as (paths, verify_root):
                 with ExactPrimaryKeyIndex(
@@ -1541,7 +1553,10 @@ def inspect_raw_export_tree(root: Path) -> Iterator[RawExportIntakeResult]:
     raw_root = Path(root)
 
     def iter_inspections() -> Iterator[RawExportIntakeResult]:
-        policy = bound_policy or active_runtime_resource_policy()
+        policy = bind_runtime_resource_policy(
+            bound_policy,
+            allow_implicit_active=False,
+        ) or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
             with _raw_export_path_session(raw_root) as (paths, verify_root):
                 with ExactPrimaryKeyIndex(

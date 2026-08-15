@@ -297,3 +297,137 @@ def test_source_market_public_roots_reject_ambient_policy(
             match="^runtime_resource_policy_competing_root$",
         ):
             invoke()
+
+
+def _lazy_source_root(
+    root_name: str,
+    tmp_path: Path,
+    *,
+    resource_policy: RuntimeResourcePolicy | None = None,
+):  # type: ignore[no-untyped-def]
+    from quant_research_platform.sources.binance import raw_exports as binance_raw
+    from quant_research_platform.sources.csmar import interim as csmar_interim
+    from quant_research_platform.sources.csmar import raw_exports as csmar_raw
+    from quant_research_platform.sources.csmar.raw_schemas import RAW_TABLE_CONTRACTS
+
+    if root_name == "csmar_interim_frames":
+        return csmar_interim.iter_interim_frames(
+            data_id=csmar_interim.DEFAULT_INTERIM_DATA_IDS[0],
+            input_files=(),
+            start_date=None,
+            end_date=None,
+            resource_policy=resource_policy,
+        )
+    if root_name == "csmar_raw_files":
+        return csmar_raw.iter_raw_export_files(
+            tmp_path,
+            resource_policy=resource_policy,
+        )
+    if root_name == "csmar_index_rows":
+        return csmar_raw.iter_index_info_rows(
+            tmp_path / "missing.csv",
+            resource_policy=resource_policy,
+        )
+    if root_name == "csmar_raw_chunks":
+        return csmar_raw.iter_private_export_chunks(
+            tmp_path / "missing.csv",
+            dataset=next(iter(RAW_TABLE_CONTRACTS)),
+            chunksize=1,
+            resource_policy=resource_policy,
+        )
+    if root_name == "csmar_dataset_files":
+        return csmar_raw.dataset_files_with_identity_by_id(
+            tmp_path,
+            resource_policy=resource_policy,
+        )
+    if root_name == "csmar_inspect_tree":
+        assert resource_policy is None
+        return csmar_raw.inspect_raw_export_tree(tmp_path)
+    if root_name == "binance_raw_envelopes":
+        return binance_raw.iter_raw_envelopes(
+            tmp_path / "missing.jsonl",
+            resource_policy=resource_policy,
+        )
+    raise AssertionError(root_name)
+
+
+@pytest.mark.parametrize(
+    "root_name",
+    (
+        "csmar_interim_frames",
+        "csmar_raw_files",
+        "csmar_index_rows",
+        "csmar_raw_chunks",
+        "csmar_dataset_files",
+        "csmar_inspect_tree",
+        "binance_raw_envelopes",
+    ),
+)
+def test_lazy_source_root_rejects_unrelated_consumer_policy(
+    root_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_policy = _policy(4)
+    consumer_policy = _policy(8)
+    monkeypatch.setattr(
+        RuntimeResourcePolicy,
+        "capture",
+        classmethod(lambda _cls, **_kwargs: created_policy),
+    )
+    lazy = _lazy_source_root(root_name, tmp_path)
+
+    with runtime_resource_policy_scope(consumer_policy):
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime_resource_policy_competing_root$",
+        ):
+            next(iter(lazy))
+
+
+@pytest.mark.parametrize(
+    "root_name",
+    (
+        "csmar_interim_frames",
+        "csmar_raw_files",
+        "csmar_index_rows",
+        "csmar_raw_chunks",
+        "csmar_dataset_files",
+        "binance_raw_envelopes",
+    ),
+)
+def test_lazy_source_root_keeps_explicit_policy_for_delayed_consumption(
+    root_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.sources.binance import raw_exports as binance_raw
+    from quant_research_platform.sources.csmar import interim as csmar_interim
+    from quant_research_platform.sources.csmar import raw_exports as csmar_raw
+
+    class ScopeObserved(Exception):
+        pass
+
+    observed: list[RuntimeResourcePolicy] = []
+
+    @contextmanager
+    def observe_scope(policy: RuntimeResourcePolicy):
+        observed.append(policy)
+        raise ScopeObserved
+        yield  # pragma: no cover
+
+    module = (
+        csmar_interim
+        if root_name == "csmar_interim_frames"
+        else binance_raw
+        if root_name == "binance_raw_envelopes"
+        else csmar_raw
+    )
+    monkeypatch.setattr(module, "runtime_resource_policy_scope", observe_scope)
+    policy = _policy(8)
+    lazy = _lazy_source_root(root_name, tmp_path, resource_policy=policy)
+
+    with pytest.raises(ScopeObserved):
+        next(iter(lazy))
+
+    assert observed == [policy]

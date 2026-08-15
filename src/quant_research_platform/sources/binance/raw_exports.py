@@ -15,7 +15,6 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
     bind_runtime_resource_policy,
-    current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.validation import (
@@ -52,13 +51,16 @@ def iter_raw_envelopes(
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[dict[str, Any]]:
-    captured_policy = current_runtime_resource_policy()
-    if resource_policy is None and captured_policy is not None:
-        raise RuntimeError("runtime_resource_policy_competing_root")
-    bound_policy = bind_runtime_resource_policy(resource_policy)
+    bound_policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    )
 
     def activate() -> Iterator[dict[str, Any]]:
-        policy = bound_policy or active_runtime_resource_policy()
+        policy = bind_runtime_resource_policy(
+            bound_policy,
+            allow_implicit_active=False,
+        ) or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
             for batch in _iter_raw_envelope_batches(
                 path,
