@@ -18,10 +18,10 @@ import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.artifacts._output_common_validation import (
     validate_output_frame,
 )
-from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.research.predictions.outputs import (
+from quant_research_platform.contracts.predictions import (
     _validate_prediction_output_values,
 )
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,

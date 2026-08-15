@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
+import pandas as pd
+
 from quant_research_platform.contracts.filtering import (
     SampleFilterMode,
     validate_sample_filter_mode,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
+from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 PREDICTION_SCORE_COLUMN = "prediction_score"
 PREDICTION_PRIMARY_KEY = ("timestamp", "asset_id")
@@ -64,6 +67,22 @@ class PredictionSpec:
     @property
     def model_selection_enabled(self) -> bool:
         return bool(self.candidate_model_ids)
+
+
+def _validate_prediction_output_values(
+    frame: pd.DataFrame,
+    *,
+    primary_key: tuple[str, ...],
+    prediction_column: str,
+) -> None:
+    if bool(frame.loc[:, list(primary_key)].isna().any(axis=None)):
+        raise ValueError("invalid_prediction_keys")
+    if bool(frame.duplicated(list(primary_key)).any()):
+        raise ValueError("duplicate_prediction_keys")
+    strict_finite_numeric_series(
+        frame[prediction_column],
+        error="invalid_prediction_values",
+    )
 
 
 def _validate_model_selection_contract(spec: PredictionSpec) -> None:

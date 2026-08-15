@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.contracts.models as model_contracts
 import quant_research_platform.research.models.fitting as model_fitting
-import quant_research_platform.research.models.supervised as model_supervised
 from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
@@ -725,7 +725,7 @@ def test_model_fit_envelope_does_not_recharge_preloaded_backend_image() -> None:
 def test_model_threads_are_bound_to_physical_cores(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(model_supervised.psutil, "cpu_count", lambda **_kwargs: 2)
+    monkeypatch.setattr(model_contracts.psutil, "cpu_count", lambda **_kwargs: 2)
     all_core = ModelSpec(
         model_id="forest_all_physical_cores",
         model_algorithm="random_forest_regressor",
@@ -751,7 +751,7 @@ def test_model_threads_are_bound_to_physical_cores(
 def test_model_threads_adapt_to_live_planning_headroom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(model_supervised.psutil, "cpu_count", lambda **_kwargs: 4)
+    monkeypatch.setattr(model_contracts.psutil, "cpu_count", lambda **_kwargs: 4)
     rows = 32
     frame = pd.DataFrame(
         {

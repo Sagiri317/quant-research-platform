@@ -32,8 +32,8 @@ from quant_research_platform.artifacts._prediction_output_validation import (
     validate_prediction_metadata_shape,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
-from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.research.predictions.outputs import (
+from quant_research_platform.contracts.predictions import (
+    PredictionSpec,
     _validate_prediction_output_values,
 )
 from quant_research_platform.storage.atomic import atomic_write_directory

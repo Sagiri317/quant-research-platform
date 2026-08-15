@@ -6,7 +6,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 import quant_research_platform.research.models.estimators as estimators
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.models import (
+    ModelSpec,
+    _model_algorithm_facts,
+    _model_algorithm_ids,
+    _model_default_hyperparameters,
+    _model_smoke_hyperparameters,
+)
 
 
 @dataclass(frozen=True)
@@ -19,121 +25,32 @@ class AlgorithmFacts:
     input_kind: str = "feature_inputs"
 
 
+_ESTIMATOR_FACTORY_NAME_EXCEPTIONS = {
+    "linear_regression": "linear_regression_estimator",
+    "ridge_regression": "ridge_regression_estimator",
+    "lasso_regression": "lasso_regression_estimator",
+    "elastic_net": "elastic_net_estimator",
+    "huber_regression": "huber_regression_estimator",
+}
 _MODEL_ALGORITHM_FACTS = {
-    "linear_regression": AlgorithmFacts(
-        "linear_regression",
-        estimator_factory=estimators.linear_regression_estimator,
-    ),
-    "ridge_regression": AlgorithmFacts(
-        "ridge_regression",
-        "sklearn",
-        estimator_factory=estimators.ridge_regression_estimator,
-        default_hyperparameters={"alpha": 1.0},
-    ),
-    "lasso_regression": AlgorithmFacts(
-        "lasso_regression",
-        "sklearn",
-        estimator_factory=estimators.lasso_regression_estimator,
-        default_hyperparameters={"alpha": 0.001, "max_iter": 10_000},
-    ),
-    "elastic_net": AlgorithmFacts(
-        "elastic_net",
-        "sklearn",
-        estimator_factory=estimators.elastic_net_estimator,
-        default_hyperparameters={
-            "alpha": 0.001,
-            "l1_ratio": 0.5,
-            "max_iter": 10_000,
-        },
-    ),
-    "huber_regression": AlgorithmFacts(
-        "huber_regression",
-        "sklearn",
-        estimator_factory=estimators.huber_regression_estimator,
-        default_hyperparameters={"max_iter": 1_000},
-    ),
-    "decision_tree_regressor": AlgorithmFacts(
-        "decision_tree_regressor",
-        "sklearn",
-        estimator_factory=estimators.decision_tree_regressor,
-    ),
-    "random_forest_regressor": AlgorithmFacts(
-        "random_forest_regressor",
-        "sklearn",
-        estimator_factory=estimators.random_forest_regressor,
-        default_hyperparameters={"n_estimators": 20, "n_jobs": -1},
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": -1},
-    ),
-    "extra_trees_regressor": AlgorithmFacts(
-        "extra_trees_regressor",
-        "sklearn",
-        estimator_factory=estimators.extra_trees_regressor,
-        default_hyperparameters={"n_estimators": 20, "n_jobs": -1},
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": -1},
-    ),
-    "gradient_boosting_regressor": AlgorithmFacts(
-        "gradient_boosting_regressor",
-        "sklearn",
-        estimator_factory=estimators.gradient_boosting_regressor,
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 2},
-    ),
-    "hist_gradient_boosting_regressor": AlgorithmFacts(
-        "hist_gradient_boosting_regressor",
-        "sklearn",
-        estimator_factory=estimators.hist_gradient_boosting_regressor,
-        smoke_hyperparameters={"max_iter": 5, "max_leaf_nodes": 7},
-    ),
-    "xgboost_regressor": AlgorithmFacts(
-        "xgboost_regressor",
-        "xgboost",
-        estimator_factory=estimators.xgboost_regressor,
-        default_hyperparameters={
-            "n_estimators": 20,
-            "max_depth": 3,
-            "learning_rate": 0.1,
-            "objective": "reg:squarederror",
-            "device": "cpu",
-            "n_jobs": -1,
-        },
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 2, "n_jobs": -1},
-    ),
-    "lightgbm_regressor": AlgorithmFacts(
-        "lightgbm_regressor",
-        "lightgbm",
-        estimator_factory=estimators.lightgbm_regressor,
-        default_hyperparameters={
-            "n_estimators": 20,
-            "learning_rate": 0.1,
-            "verbosity": -1,
-            "n_jobs": -1,
-        },
-        smoke_hyperparameters={
-            "n_estimators": 5,
-            "num_leaves": 7,
-            "n_jobs": -1,
-            "verbosity": -1,
-        },
-    ),
-    "single_factor_baseline": AlgorithmFacts(
-        "single_factor_baseline",
-        estimator_factory=estimators.single_factor_baseline,
-        input_kind="single_factor_input",
-    ),
-    "equal_weight_rank_ensemble": AlgorithmFacts(
-        "equal_weight_rank_ensemble",
-        estimator_factory=estimators.equal_weight_rank_ensemble,
-        input_kind="rank_ensemble_inputs",
-    ),
-    "ic_weighted_rank_ensemble": AlgorithmFacts(
-        "ic_weighted_rank_ensemble",
-        estimator_factory=estimators.ic_weighted_rank_ensemble,
-        input_kind="rank_ensemble_inputs",
-    ),
+    algorithm: AlgorithmFacts(
+        algorithm=algorithm,
+        dependency_package=contract.dependency_package,
+        estimator_factory=getattr(
+            estimators,
+            _ESTIMATOR_FACTORY_NAME_EXCEPTIONS.get(algorithm, algorithm),
+        ),
+        default_hyperparameters=contract.default_hyperparameters,
+        smoke_hyperparameters=contract.smoke_hyperparameters,
+        input_kind=contract.input_kind,
+    )
+    for algorithm in _model_algorithm_ids()
+    for contract in (_model_algorithm_facts(algorithm),)
 }
 
 
 def model_algorithm_ids() -> tuple[str, ...]:
-    return tuple(sorted(_MODEL_ALGORITHM_FACTS))
+    return _model_algorithm_ids()
 
 
 def algorithm_facts(algorithm: str) -> AlgorithmFacts:
@@ -144,11 +61,11 @@ def algorithm_facts(algorithm: str) -> AlgorithmFacts:
 
 
 def model_default_hyperparameters(algorithm: str) -> dict[str, object]:
-    return dict(algorithm_facts(algorithm).default_hyperparameters)
+    return _model_default_hyperparameters(algorithm)
 
 
 def model_smoke_hyperparameters(algorithm: str) -> dict[str, object]:
-    return dict(algorithm_facts(algorithm).smoke_hyperparameters)
+    return _model_smoke_hyperparameters(algorithm)
 
 
 __all__ = [

@@ -9,16 +9,18 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-import quant_research_platform.research.models.supervised as supervised
 from quant_research_platform.contracts.filtering import (
     reject_filter_input_columns,
     required_filter_columns,
 )
-from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.validation import (
-    strict_finite_numeric_series,
-    strict_timestamp_series,
+from quant_research_platform.contracts.models import (
+    _resolved_model_hyperparameters_match,
 )
+from quant_research_platform.contracts.predictions import (
+    PredictionSpec,
+    _validate_prediction_output_values,
+)
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research._memory import (
     _selected_frame_payload_bytes,
     iter_complete_time_sized_frames,
@@ -103,7 +105,7 @@ def build_prediction_result_from_frames(
         raise ValueError("invalid_model_metadata") from exc
     expected_package = facts.dependency_package or "internal"
     if (
-        not supervised._resolved_model_hyperparameters_match(
+        not _resolved_model_hyperparameters_match(
             model_algorithm,
             hyperparameters,
             resolved_hyperparameters,
@@ -410,22 +412,6 @@ def validate_prediction_outputs(frame: pd.DataFrame, spec: PredictionSpec) -> No
         (timestamps > pd.Timestamp(spec.test_end)).any()
     ):
         raise ValueError("prediction_output_after_test_end")
-
-
-def _validate_prediction_output_values(
-    frame: pd.DataFrame,
-    *,
-    primary_key: tuple[str, ...],
-    prediction_column: str,
-) -> None:
-    if bool(frame.loc[:, list(primary_key)].isna().any(axis=None)):
-        raise ValueError("invalid_prediction_keys")
-    if bool(frame.duplicated(list(primary_key)).any()):
-        raise ValueError("duplicate_prediction_keys")
-    strict_finite_numeric_series(
-        frame[prediction_column],
-        error="invalid_prediction_values",
-    )
 
 
 def _strict_non_negative_prediction_count(value: object) -> int:

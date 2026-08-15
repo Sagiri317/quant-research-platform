@@ -6,12 +6,183 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+import psutil
+
 from quant_research_platform.contracts.filtering import (
     SampleFilterMode,
     reject_filter_input_columns,
     validate_sample_filter_mode,
 )
 from quant_research_platform.contracts.validation import _validate_column_tuple
+
+
+@dataclass(frozen=True)
+class _ModelAlgorithmFacts:
+    algorithm: str
+    dependency_package: str | None = None
+    default_hyperparameters: Mapping[str, object] = field(default_factory=dict)
+    smoke_hyperparameters: Mapping[str, object] = field(default_factory=dict)
+    input_kind: str = "feature_inputs"
+    parallel: bool = False
+
+
+_MODEL_ALGORITHM_FACTS = {
+    "linear_regression": _ModelAlgorithmFacts("linear_regression"),
+    "ridge_regression": _ModelAlgorithmFacts(
+        "ridge_regression",
+        "sklearn",
+        default_hyperparameters={"alpha": 1.0},
+    ),
+    "lasso_regression": _ModelAlgorithmFacts(
+        "lasso_regression",
+        "sklearn",
+        default_hyperparameters={"alpha": 0.001, "max_iter": 10_000},
+    ),
+    "elastic_net": _ModelAlgorithmFacts(
+        "elastic_net",
+        "sklearn",
+        default_hyperparameters={
+            "alpha": 0.001,
+            "l1_ratio": 0.5,
+            "max_iter": 10_000,
+        },
+    ),
+    "huber_regression": _ModelAlgorithmFacts(
+        "huber_regression",
+        "sklearn",
+        default_hyperparameters={"max_iter": 1_000},
+    ),
+    "decision_tree_regressor": _ModelAlgorithmFacts(
+        "decision_tree_regressor",
+        "sklearn",
+    ),
+    "random_forest_regressor": _ModelAlgorithmFacts(
+        "random_forest_regressor",
+        "sklearn",
+        default_hyperparameters={"n_estimators": 20, "n_jobs": -1},
+        smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": -1},
+        parallel=True,
+    ),
+    "extra_trees_regressor": _ModelAlgorithmFacts(
+        "extra_trees_regressor",
+        "sklearn",
+        default_hyperparameters={"n_estimators": 20, "n_jobs": -1},
+        smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": -1},
+        parallel=True,
+    ),
+    "gradient_boosting_regressor": _ModelAlgorithmFacts(
+        "gradient_boosting_regressor",
+        "sklearn",
+        smoke_hyperparameters={"n_estimators": 5, "max_depth": 2},
+    ),
+    "hist_gradient_boosting_regressor": _ModelAlgorithmFacts(
+        "hist_gradient_boosting_regressor",
+        "sklearn",
+        smoke_hyperparameters={"max_iter": 5, "max_leaf_nodes": 7},
+    ),
+    "xgboost_regressor": _ModelAlgorithmFacts(
+        "xgboost_regressor",
+        "xgboost",
+        default_hyperparameters={
+            "n_estimators": 20,
+            "max_depth": 3,
+            "learning_rate": 0.1,
+            "objective": "reg:squarederror",
+            "device": "cpu",
+            "n_jobs": -1,
+        },
+        smoke_hyperparameters={"n_estimators": 5, "max_depth": 2, "n_jobs": -1},
+        parallel=True,
+    ),
+    "lightgbm_regressor": _ModelAlgorithmFacts(
+        "lightgbm_regressor",
+        "lightgbm",
+        default_hyperparameters={
+            "n_estimators": 20,
+            "learning_rate": 0.1,
+            "verbosity": -1,
+            "n_jobs": -1,
+        },
+        smoke_hyperparameters={
+            "n_estimators": 5,
+            "num_leaves": 7,
+            "n_jobs": -1,
+            "verbosity": -1,
+        },
+        parallel=True,
+    ),
+    "single_factor_baseline": _ModelAlgorithmFacts(
+        "single_factor_baseline",
+        input_kind="single_factor_input",
+    ),
+    "equal_weight_rank_ensemble": _ModelAlgorithmFacts(
+        "equal_weight_rank_ensemble",
+        input_kind="rank_ensemble_inputs",
+    ),
+    "ic_weighted_rank_ensemble": _ModelAlgorithmFacts(
+        "ic_weighted_rank_ensemble",
+        input_kind="rank_ensemble_inputs",
+    ),
+}
+_PARALLEL_MODEL_ALGORITHMS = frozenset(
+    algorithm for algorithm, facts in _MODEL_ALGORITHM_FACTS.items() if facts.parallel
+)
+
+
+def _model_algorithm_facts(algorithm: str) -> _ModelAlgorithmFacts:
+    try:
+        return _MODEL_ALGORITHM_FACTS[algorithm]
+    except KeyError as exc:
+        raise ValueError("unsupported_model_algorithm") from exc
+
+
+def _model_algorithm_ids() -> tuple[str, ...]:
+    return tuple(sorted(_MODEL_ALGORITHM_FACTS))
+
+
+def _model_default_hyperparameters(algorithm: str) -> dict[str, object]:
+    return dict(_model_algorithm_facts(algorithm).default_hyperparameters)
+
+
+def _model_smoke_hyperparameters(algorithm: str) -> dict[str, object]:
+    return dict(_model_algorithm_facts(algorithm).smoke_hyperparameters)
+
+
+def _resolved_model_hyperparameters_match(
+    algorithm: str,
+    hyperparameters: dict[str, object],
+    resolved_hyperparameters: dict[str, object],
+) -> bool:
+    try:
+        expected = _model_default_hyperparameters(algorithm)
+        expected.update(hyperparameters)
+        if algorithm in _PARALLEL_MODEL_ALGORITHMS:
+            actual_threads = resolved_hyperparameters.get("n_jobs")
+            maximum_threads = _resolved_model_thread_count(expected.get("n_jobs"))
+            if (
+                type(actual_threads) is not int
+                or actual_threads <= 0
+                or actual_threads > maximum_threads
+            ):
+                return False
+            expected["n_jobs"] = actual_threads
+    except ValueError:
+        return False
+    return resolved_hyperparameters == expected
+
+
+def _resolved_model_thread_count(value: object) -> int:
+    if type(value) is not int or value == 0:
+        raise ValueError("invalid_model_thread_count")
+    physical = psutil.cpu_count(logical=False)
+    if type(physical) is not int or physical <= 0:
+        raise RuntimeError("physical_core_count_unavailable")
+    resolved = value if value > 0 else physical + 1 + value
+    if resolved <= 0:
+        raise ValueError("invalid_model_thread_count")
+    if resolved > physical:
+        raise ValueError("model_threads_exceed_physical_cores")
+    return resolved
 
 
 @dataclass(frozen=True, kw_only=True)

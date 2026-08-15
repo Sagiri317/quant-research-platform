@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-import quant_research_platform.research.models.supervised as supervised
 from quant_research_platform.artifacts._output_common_validation import (
     require_finite_metadata_number,
     require_metadata_string,
@@ -15,7 +14,10 @@ from quant_research_platform.artifacts._output_common_validation import (
     validate_metadata_row_count_chain,
 )
 from quant_research_platform.contracts._json import render_qrp_json_object
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.models import (
+    ModelSpec,
+    _resolved_model_hyperparameters_match,
+)
 from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
     PredictionSpec,
@@ -206,7 +208,7 @@ def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obje
         "model_algorithm",
         "invalid_model_metadata",
     )
-    if not supervised._resolved_model_hyperparameters_match(
+    if not _resolved_model_hyperparameters_match(
         model_algorithm,
         metadata["hyperparameters"],
         metadata["resolved_hyperparameters"],
