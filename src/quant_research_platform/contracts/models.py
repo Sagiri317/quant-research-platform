@@ -142,8 +142,15 @@ def _resolved_model_hyperparameters_match(
         expected = _model_default_hyperparameters(algorithm)
         expected.update(hyperparameters)
         if algorithm in _PARALLEL_MODEL_ALGORITHMS:
+            requested_threads = expected.get("n_jobs")
             actual_threads = resolved_hyperparameters.get("n_jobs")
-            if type(actual_threads) is not int or actual_threads <= 0:
+            if (
+                type(requested_threads) is not int
+                or requested_threads == 0
+                or type(actual_threads) is not int
+                or actual_threads <= 0
+                or (requested_threads > 0 and actual_threads > requested_threads)
+            ):
                 return False
             expected["n_jobs"] = actual_threads
     except ValueError:

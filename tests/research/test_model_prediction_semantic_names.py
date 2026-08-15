@@ -173,6 +173,49 @@ def test_prediction_accepts_actual_bounded_parallel_model_threads() -> None:
 
     assert int(result.model_metadata["resolved_hyperparameters"]["n_jobs"]) > 0  # type: ignore[index]
 
+    bounded_request = {
+        **fit.metadata["hyperparameters"],
+        "n_jobs": 4,
+    }
+    bounded_resolved = {
+        **fit.metadata["resolved_hyperparameters"],
+        "n_jobs": 2,
+    }
+    bounded = {
+        **fit.metadata,
+        "hyperparameters": bounded_request,
+        "resolved_hyperparameters": bounded_resolved,
+    }
+    assert (
+        build_prediction_result_from_frames(
+            (),
+            prediction_spec,
+            fit.coefficients,
+            model_spec.input_columns,
+            prediction_model=fit.prediction_model,
+            model_metadata=bounded,
+        ).model_metadata["resolved_hyperparameters"]
+        == bounded_resolved
+    )
+
+    forged = {
+        **fit.metadata,
+        "hyperparameters": {**fit.metadata["hyperparameters"], "n_jobs": 1},
+        "resolved_hyperparameters": {
+            **fit.metadata["resolved_hyperparameters"],
+            "n_jobs": 999_999,
+        },
+    }
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
+        build_prediction_result_from_frames(
+            (),
+            prediction_spec,
+            fit.coefficients,
+            model_spec.input_columns,
+            prediction_model=fit.prediction_model,
+            model_metadata=forged,
+        )
+
     for invalid_threads in (0, -1, True, 1.0):
         resolved = {
             **fit.metadata["resolved_hyperparameters"],

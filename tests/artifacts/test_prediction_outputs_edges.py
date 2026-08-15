@@ -23,6 +23,9 @@ from quant_research_platform.artifacts._output_manifest import (
     prediction_output_metadata,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.research.models.algorithm_facts import (
+    model_smoke_hyperparameters,
+)
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
@@ -801,6 +804,35 @@ def test_prediction_outputs_require_standard_metadata_attrs(
             output_spec=report_spec,
             layout=layout,
         )
+
+
+@pytest.mark.parametrize(
+    ("requested_threads", "resolved_threads"),
+    ((1, 999_999), (0, 1), (True, 1), (1.0, 1)),
+)
+def test_prediction_artifact_rejects_invalid_parallel_thread_contract(
+    requested_threads: object,
+    resolved_threads: int,
+) -> None:
+    metadata = make_artifact_prediction_output_frame().attrs["model_metadata"]
+    requested = {
+        **model_smoke_hyperparameters("extra_trees_regressor"),
+        "n_jobs": requested_threads,
+    }
+    forged = {
+        **metadata,
+        "model_algorithm": "extra_trees_regressor",
+        "hyperparameters": requested,
+        "resolved_hyperparameters": {**requested, "n_jobs": resolved_threads},
+        "dependency_status": {
+            "status": "available",
+            "package": "sklearn",
+            "version": "test",
+        },
+    }
+
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
+        validation.validate_model_metadata_shape(forged)
 
 
 def test_prediction_outputs_require_prediction_metadata_attrs(
