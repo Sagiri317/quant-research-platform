@@ -21,6 +21,7 @@ from quant_research_platform.artifacts._output_manifest import (
 from quant_research_platform.artifacts._parquet_writers import (
     _artifact_frame_reservation,
     _artifact_table_write_state,
+    _artifact_writer_fixed_reservation,
     write_parquet,
 )
 from quant_research_platform.artifacts._portfolio_output_validation import (
@@ -36,6 +37,7 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
 )
 from quant_research_platform.storage._dataset_physical import (
+    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     _parquet_row_group_size,
 )
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
@@ -168,13 +170,24 @@ def _write_portfolio_row_artifact_chunks(
 ) -> dict[str, int]:
     writers: dict[str, pq.ParquetWriter] = {}
     writer_states: dict[str, ExitStack] = {}
-    writer_memory: dict[str, tuple[int, int]] = {}
+    writer_memory = (
+        {
+            artifact_name: (_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES, 0)
+            for artifact_name in row_artifacts
+        }
+        if current_runtime_resource_policy() is not None
+        else {}
+    )
     decoded_metadata: dict[str, dict[bytes, bytes]] = {}
     temp_paths = {
         artifact_name: temp_root / PORTFOLIO_ARTIFACTS[artifact_name]
         for artifact_name in row_artifacts
     }
     row_counts = {artifact_name: 0 for artifact_name in PORTFOLIO_ARTIFACTS}
+    fixed_state = _artifact_writer_fixed_reservation(
+        writer_count=len(row_artifacts),
+        index_bytes=0,
+    )
     try:
         with closing_dataset_iterator(iter(artifact_chunks)) as active_chunks:
             for artifact_chunk in active_chunks:
@@ -253,15 +266,6 @@ def _write_portfolio_row_artifact_chunks(
                     active_writer.close()
                 finally:
                     writer_states.pop(artifact_name).close()
-            for artifact_name in row_artifacts:
-                if row_counts[artifact_name] == 0:
-                    write_parquet(
-                        pd.DataFrame(columns=list(required_columns[artifact_name])),
-                        temp_paths[artifact_name],
-                        engine="pyarrow",
-                        compression="zstd",
-                        index=False,
-                    )
     except BaseException:
         for artifact_name in tuple(writers):
             writer = writers.pop(artifact_name)
@@ -271,6 +275,17 @@ def _write_portfolio_row_artifact_chunks(
                 pass
             writer_states.pop(artifact_name).close()
         raise
+    finally:
+        fixed_state.close()
+    for artifact_name in row_artifacts:
+        if row_counts[artifact_name] == 0:
+            write_parquet(
+                pd.DataFrame(columns=list(required_columns[artifact_name])),
+                temp_paths[artifact_name],
+                engine="pyarrow",
+                compression="zstd",
+                index=False,
+            )
     return row_counts
 
 

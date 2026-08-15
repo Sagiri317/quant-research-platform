@@ -85,7 +85,10 @@ def write_parquet_chunks(
         else (0, 0)
     )
     try:
-        with _artifact_writer_fixed_reservation():
+        with _artifact_writer_fixed_reservation(
+            writer_count=1,
+            index_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
+        ):
             with closing_dataset_iterator(iter(frames)) as active_frames:
                 try:
                     first_frame = next(active_frames)
@@ -342,15 +345,19 @@ def write_parquet(
     return final_path
 
 
-def _artifact_writer_fixed_reservation() -> ExitStack:
+def _artifact_writer_fixed_reservation(
+    *,
+    writer_count: int,
+    index_bytes: int,
+) -> ExitStack:
     stack = ExitStack()
     policy = current_runtime_resource_policy()
     if policy is not None:
         stack.enter_context(
             policy.reserve(
                 "artifacts.parquet.fixed",
-                EXACT_KEY_SQLITE_PAGE_BYTES
-                + _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
+                index_bytes
+                + writer_count * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
             )
         )
     return stack

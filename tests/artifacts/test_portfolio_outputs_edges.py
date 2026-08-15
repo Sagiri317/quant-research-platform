@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.artifacts._parquet_writers as parquet_writers
 import quant_research_platform.artifacts._portfolio_output_validation as validation
 import quant_research_platform.artifacts._portfolio_outputs as portfolio_outputs
 from quant_research_platform.artifacts._output_manifest import (
@@ -15,6 +16,7 @@ from quant_research_platform.artifacts._output_manifest import (
 from quant_research_platform.artifacts._portfolio_output_validation import (
     validate_portfolio_artifact_membership_columns,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.layout import StorageLayout
 from tests.artifacts.output_edge_fixtures import (
     make_output_edge_portfolio_artifacts,
@@ -23,6 +25,7 @@ from tests.artifacts.output_edge_fixtures import (
     output_edge_portfolio_row_artifact_names,
     write_output_edge_portfolio_chunks,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_portfolio_outputs_write_manifest_and_local_scope(
@@ -124,6 +127,127 @@ def test_portfolio_outputs_write_row_artifacts_from_chunks(
     assert manifest["metadata"]["row_counts"]["turnover"] == 1
     assert len(pd.read_parquet(output_bundle / "positions.parquet")) == 2
     assert len(pd.read_parquet(output_bundle / "portfolio_returns.parquet")) == 1
+
+
+def test_portfolio_row_writers_reject_fixed_workspace_before_first_pull(
+    tmp_path: Path,
+) -> None:
+    row_artifacts = output_edge_portfolio_row_artifact_names()
+    fixed_bytes = (
+        len(row_artifacts) * parquet_writers._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=fixed_bytes,
+    )
+    pulls = 0
+
+    class Input:
+        def __iter__(self) -> Input:
+            return self
+
+        def __next__(self) -> object:
+            nonlocal pulls
+            pulls += 1
+            raise AssertionError("portfolio_input_pulled_before_fixed_admission")
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            portfolio_outputs._write_portfolio_row_artifact_chunks(
+                Input(),  # type: ignore[arg-type]
+                temp_root=tmp_path,
+                row_artifacts=row_artifacts,
+                required_columns={name: ("value",) for name in row_artifacts},
+                spec=object(),  # type: ignore[arg-type]
+            )
+
+    assert pulls == 0
+
+
+def test_portfolio_row_writer_fixed_reservation_covers_close_without_double_charge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    row_artifacts = output_edge_portfolio_row_artifact_names()
+    fixed_one = parquet_writers._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+    fixed_bytes = len(row_artifacts) * fixed_one
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=fixed_bytes + 2 * 64 * 1024,
+    )
+    frame = pd.DataFrame({"value": [1.0]})
+    pull_reservations: list[int] = []
+    close_reservations: list[int] = []
+    metadata_reservations: list[int] = []
+    input_close_reservations: list[int] = []
+
+    class Input:
+        yielded = False
+
+        def __iter__(self) -> Input:
+            return self
+
+        def __next__(self) -> dict[str, pd.DataFrame]:
+            pull_reservations.append(policy.reserved_memory_bytes)
+            if self.yielded:
+                raise StopIteration
+            self.yielded = True
+            return {name: frame for name in row_artifacts}
+
+        def close(self) -> None:
+            input_close_reservations.append(policy.reserved_memory_bytes)
+
+    class Writer:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def write_table(self, _table: object, **_kwargs: object) -> None:
+            pass
+
+        def add_key_value_metadata(self, _metadata: object) -> None:
+            metadata_reservations.append(policy.reserved_memory_bytes)
+
+        def close(self) -> None:
+            close_reservations.append(policy.reserved_memory_bytes)
+
+    monkeypatch.setattr(
+        portfolio_outputs,
+        "validate_portfolio_artifact_mapping_keys",
+        lambda value, **_kwargs: value,
+    )
+    monkeypatch.setattr(
+        portfolio_outputs,
+        "_portfolio_output_chunk_frame",
+        lambda value, **_kwargs: value,
+    )
+    monkeypatch.setattr(portfolio_outputs.pq, "ParquetWriter", Writer)
+    monkeypatch.setattr(
+        parquet_writers,
+        "_table_parquet_page_working_set_bytes",
+        lambda _table, *, rows: fixed_one + 1,
+    )
+    monkeypatch.setattr(
+        parquet_writers,
+        "_parquet_row_group_footer_upper_bound",
+        lambda _schema, *, rows: 0,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        portfolio_outputs._write_portfolio_row_artifact_chunks(
+            Input(),
+            temp_root=tmp_path,
+            row_artifacts=row_artifacts,
+            required_columns={name: ("value",) for name in row_artifacts},
+            spec=object(),  # type: ignore[arg-type]
+        )
+        assert policy.reserved_memory_bytes == 0
+
+    assert pull_reservations == [fixed_bytes, fixed_bytes + len(row_artifacts)]
+    assert metadata_reservations == [
+        fixed_bytes + remaining for remaining in range(len(row_artifacts), 0, -1)
+    ]
+    assert close_reservations == metadata_reservations
+    assert input_close_reservations == [fixed_bytes]
 
 
 def test_portfolio_outputs_reject_bad_frames(tmp_path: Path) -> None:
