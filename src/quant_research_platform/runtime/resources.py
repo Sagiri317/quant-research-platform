@@ -132,13 +132,6 @@ class _OperationRssMeasurement:
         }
 
 
-def _operation_rss_measurement(
-    rss0_bytes: int,
-    hard_budget_bytes: int,
-) -> _OperationRssMeasurement:
-    return _OperationRssMeasurement(rss0_bytes, hard_budget_bytes)
-
-
 @dataclass(frozen=True, init=False, eq=False, slots=True)
 class RuntimeResourcePolicy:
     """Immutable one-shot resource admission shared by one root operation."""
@@ -188,7 +181,7 @@ class RuntimeResourcePolicy:
         planning_budget = hard_budget - _PLANNING_UNCERTAINTY_BYTES
         if planning_budget <= 0:
             raise ValueError("invalid_runtime_resource_available_memory")
-        measurement = _operation_rss_measurement(rss0, hard_budget)
+        measurement = _OperationRssMeasurement(rss0, hard_budget)
         policy = object.__new__(cls)
         object.__setattr__(policy, "captured_available_memory_bytes", available)
         object.__setattr__(policy, "rss0_bytes", rss0)

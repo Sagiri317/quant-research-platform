@@ -82,7 +82,7 @@ def test_measurement_is_created_after_one_shot_budget_capture(
 
     monkeypatch.setattr(
         resources,
-        "_operation_rss_measurement",
+        "_OperationRssMeasurement",
         build_measurement,
     )
     monkeypatch.setattr(
@@ -286,7 +286,7 @@ def test_root_scope_records_one_checkpoint_peak_and_fails_over_budget(
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
     monkeypatch.setattr(
         resources,
-        "_operation_rss_measurement",
+        "_OperationRssMeasurement",
         lambda *_args: Measurement(),
     )
     policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)
@@ -343,7 +343,7 @@ def test_finish_checkpoints_before_retiring_operation_telemetry(
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
     monkeypatch.setattr(
         resources,
-        "_operation_rss_measurement",
+        "_OperationRssMeasurement",
         lambda *_args: Measurement(),
     )
     policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)
@@ -393,7 +393,7 @@ def test_final_rejection_samples_through_rollback_cleanup(
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
     monkeypatch.setattr(
         resources,
-        "_operation_rss_measurement",
+        "_OperationRssMeasurement",
         lambda *_args: measurement,
     )
     policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)
@@ -449,7 +449,7 @@ def test_sampler_stop_failure_still_rolls_back_publication(
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
     monkeypatch.setattr(
         resources,
-        "_operation_rss_measurement",
+        "_OperationRssMeasurement",
         lambda *_args: Measurement(),
     )
     policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)
@@ -647,7 +647,7 @@ def test_active_primary_is_not_replaced_by_telemetry_stop_failure(
     monkeypatch.setattr(resources, "_process_rss_bytes", lambda: 100)
     monkeypatch.setattr(
         resources,
-        "_operation_rss_measurement",
+        "_OperationRssMeasurement",
         lambda *_args: Measurement(),
     )
     policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=600 * 1024)

@@ -70,7 +70,7 @@ def capture_test_policy(
         patch.object(resources, "_process_rss_bytes", return_value=rss_bytes),
         patch.object(
             resources,
-            "_operation_rss_measurement",
+            "_OperationRssMeasurement",
             side_effect=_TestOperationRssMeasurement,
         ),
     ):
