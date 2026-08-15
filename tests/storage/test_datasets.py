@@ -5086,7 +5086,8 @@ def test_reader_final_verify_failure_propagates_without_external_primary(
             list(iterator)
     else:
         next(iterator)
-        iterator.close()  # type: ignore[attr-defined]
+        with pytest.raises(OSError, match="verify_failure"):
+            iterator.close()  # type: ignore[attr-defined]
         assert context.verify_calls > context.verify_fail_after
 
 
@@ -6466,6 +6467,69 @@ def test_dataset_session_tuple_in_filter_empty_result_preserves_projected_dtypes
         "timestamp": np.dtype("datetime64[ns]"),
         "value": make_default_dataset_frame()["value"].dtype,
     }
+
+
+@pytest.mark.parametrize("completion", ("close", "exhaust"))
+def test_filtered_empty_chunk_rechecks_identity_after_yield(
+    tmp_path: Path,
+    completion: str,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, f"filtered_empty_{completion}")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec(f"filtered_empty_{completion}"),
+    )
+    with dataset_reading.open_dataset_session(
+        root,
+        columns=("timestamp", "value"),
+        time_window=None,
+        row_filters=(("asset_id", "in", ("missing",)),),
+    ) as session:
+        iterator = dataset_reading.iter_dataset_chunks(
+            session,
+            target_chunk_bytes=1024**2,
+        )
+        assert next(iterator).empty
+        part = session.all_paths[0]
+        replacement = tmp_path / f"replacement-{completion}.parquet"
+        replacement.write_bytes(part.read_bytes())
+        os.replace(replacement, part)
+
+        with pytest.raises(ValueError, match="dataset_file_identity_changed"):
+            if completion == "close":
+                iterator.close()  # type: ignore[attr-defined]
+            else:
+                next(iterator)
+
+
+def test_filtered_empty_chunk_final_verify_preserves_caller_primary(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "filtered_empty_primary")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("filtered_empty_primary"),
+    )
+    with dataset_reading.open_dataset_session(
+        root,
+        columns=("timestamp", "value"),
+        time_window=None,
+        row_filters=(("asset_id", "in", ("missing",)),),
+    ) as session:
+        iterator = dataset_reading.iter_dataset_chunks(
+            session,
+            target_chunk_bytes=1024**2,
+        )
+        with pytest.raises(RuntimeError, match="primary_failure"):
+            with dataset_reading.closing_dataset_iterator(iterator):
+                assert next(iterator).empty
+                part = session.all_paths[0]
+                replacement = tmp_path / "replacement-primary.parquet"
+                replacement.write_bytes(part.read_bytes())
+                os.replace(replacement, part)
+                raise RuntimeError("primary_failure")
 
 
 def test_categorical_empty_result_can_exceed_the_soft_chunk_target(

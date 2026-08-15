@@ -1326,10 +1326,13 @@ def _iter_dataset_chunks(
                 yielded = True
                 yield chunk
     if not yielded:
-        yield _empty_frame(
-            context,
-            context.logical_columns,
-        )
+        try:
+            yield _empty_frame(
+                context,
+                context.logical_columns,
+            )
+        finally:
+            _verify_preserving_primary(context)
 
 
 def iter_declared_parquet_member_batches(
@@ -1497,7 +1500,7 @@ def _iter_dataset_file_batches(
 
 def _verify_preserving_primary(context: DatasetSession) -> None:
     active = sys.exception()
-    if active is None:
+    if active is None or isinstance(active, GeneratorExit):
         context.verify()
         return
     try:
