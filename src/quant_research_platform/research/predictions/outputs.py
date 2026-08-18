@@ -167,10 +167,10 @@ def _scoped_prediction_output_frames(
     bound_policy: RuntimeResourcePolicy | None,
     retained_model_bytes: int,
 ) -> Iterator[pd.DataFrame]:
-    policy = (
-        bind_runtime_resource_policy(bound_policy) or RuntimeResourcePolicy.capture()
-    )
-    with runtime_resource_policy_scope(policy), ExitStack() as retained:
+    with (
+        runtime_resource_policy_scope(bound_policy) as policy,
+        ExitStack() as retained,
+    ):
         if retained_model_bytes:
             retained.enter_context(
                 policy.reserve(

@@ -98,8 +98,6 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
-    bind_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance import ids as binance_ids
@@ -297,15 +295,10 @@ def _materialize_crypto_binance_interim_data(
     end_date: str,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> object:
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
-    policy = bound_policy or active_runtime_resource_policy()
-    dependency = crypto_materialization_dependencies.panel_dependency_window(
-        TimeWindow(start_date, end_date)
-    )
-    with runtime_resource_policy_scope(policy):
+    with runtime_resource_policy_scope(resource_policy) as policy:
+        dependency = crypto_materialization_dependencies.panel_dependency_window(
+            TimeWindow(start_date, end_date)
+        )
         return _materialize_binance_interim_data(
             layout=layout,
             raw_root=raw_root,
@@ -322,12 +315,7 @@ def _materialize_a_share_csmar_interim_data(
     end_date: str,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> InterimImportResult:
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
-    policy = bound_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(policy):
+    with runtime_resource_policy_scope(resource_policy) as policy:
         calendar = _materialize_csmar_interim_data(
             layout=layout,
             raw_root=raw_root,

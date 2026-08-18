@@ -28,7 +28,10 @@ from quant_research_platform.markets.implementations.a_share import (
 from quant_research_platform.research.portfolios.engine import (
     construct_portfolio_positions,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
@@ -138,11 +141,15 @@ def test_a_share_profile_materializes_exact_processed_dependency_source_window(
     standalone_policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     captures: list[object] = []
 
-    def capture_policy():
+    def capture_policy(**_kwargs):
         captures.append(standalone_policy)
         return standalone_policy
 
-    monkeypatch.setattr(profiles, "active_runtime_resource_policy", capture_policy)
+    monkeypatch.setattr(
+        RuntimeResourcePolicy,
+        "capture",
+        staticmethod(capture_policy),
+    )
     legacy_result = profile.materialize_interim_data(
         StorageLayout(project_root=tmp_path),
         tmp_path / "raw",
