@@ -146,79 +146,46 @@ Allowlist 外编辑前必须停止并在 Ledger 写明：具体 caller、失败�
 
 不得新增 tracked `governance/`、`status/`、`audit/`、`review/`、`handoff/`、`freeze/`、`receipt/`、`code-flow/`、control generator 或 evidence archive。动态 Goal/Ledger/Reviewer 只存在于 ignored `.run/`。
 
-## 5. One-shot local memory contract
+## 5. One-shot local resource contract
 
-### 5.1 Root definition
+Composition root 仅指能够独立启动 data-scale work 的已批准 CLI/public
+entrypoint 或现有 profile/workflow root。普通 helper、tests-only harness、
+只能在父 root 内调用的 stage 不是 root。
 
-Composition root 仅指能够独立启动 data-scale work 的已批准 CLI/public entrypoint 或现有 profile/workflow root。普通 helper、tests-only harness、只能在父 root 内调用的 stage 不是 root。
-
-每次 top-level resource-bearing operation，在第一次 data-scale read/decode/allocation 前，由 canonical Runtime admission owner 只读取一次：
-
-```python
-available0 = psutil.virtual_memory().available
-rss0 = psutil.Process().memory_info().rss
-hard_budget = (available0 * 80) // 100
-if explicit_cap_bytes is not None:
-    hard_budget = min(hard_budget, explicit_cap_bytes)
-```
-
-`explicit_cap_bytes` 必须是正整数 bytes，`bool` 不合法。Provider 失败、`available0 <= 0`、非法 cap 或最终 `hard_budget <= 0` 时，在首次 data-scale action 前稳定失败。
-
-随后：
+每个 data-scale root 在任何 data-scale read/decode/allocation 前：
 
 ```text
-available0 immutable
-rss0 immutable
-hard_budget immutable
+1. nonblocking acquire host-local cross-process data-scale lock
+2. capture available0 exactly once
+3. memory_budget_bytes = min((available0 * 70) // 100, explicit_cap_bytes)
+4. create one explicit RuntimeResourcePolicy + RAM lease ledger
 ```
 
-运行中不得再次读取 available memory 作预算规划，不得因其变化上调、下调或重建 root。只有 canonical Runtime owner 可以创建 root budget；其他模块不得独立计算新的 80% 预算。
+`explicit_cap_bytes` 必须是正整数 bytes，`bool` 不合法，且只能降低预算。
+Provider failure、`available0 <= 0`、非法 cap 或最终 budget `<= 0` 必须在
+data-scale action 前稳定失败。生产 memory facts 只允许：
+`captured_available_memory_bytes`、`memory_budget_bytes`、
+`used_memory_bytes`、`available_memory_bytes`。
 
-### 5.2 Shared budget
+一次 operation 只有一个 immutable root identity/ledger，贯穿
+source、dataset、research、model、prediction、portfolio、publication 和
+cleanup。每个 logical live RAM payload/workspace 只有一个 transferable
+`MemoryLease`；producer 在 allocation 前 acquire/grow，在 conservative actual
+bound 后 shrink，跨边界只 transfer，不重复收费，最终 close。Root 创建前已
+存在的 public DataFrame/ndarray 是 borrowed baseline，只计 operation 内新
+copy/workspace/output。
 
-一次 operation 只有一个显式 root identity/ledger，贯穿：
+默认本地 single-process + native threads，只允许一层主要并行。私有
+data-scale helper 必须显式接收 policy；不得通过 ambient discovery 创建或继承
+root。Root state 只有 `ACTIVE`、`CLOSED`、`POISONED`。每个 exit 都 LIFO close
+registry，验证 RAM/disk/thread/child/publication state 为零，并保留 primary
+`BaseException`；不可清理资源使 root/process `POISONED` 并阻止第二个
+data-scale root。
 
-```text
-source -> decode -> normalization -> materialization
--> evaluation -> model -> prediction -> portfolio -> writer/artifact
-```
-
-Nested stage 继承同一 root，不得再次乘 80%。Reader、transformer、model、writer 不得各获一套完整预算。
-
-默认本地 single-process，只允许一层主要并行。没有真实 production caller 时，不建立 ContextVar/thread/task/fork authority 系统；不自动解析 cgroup、RLIMIT 或 Windows Job Object。受限部署由用户另行批准，或用 explicit cap 表达。
-
-Allocation 前使用 owner-local conservative upper bound，覆盖 native/allocator overhead 与同时存活的 old/new overlap。Reservation 粒度是 logical operator 或 owner-held buffer group，不是每个 Python object/scalar 或第三方库内部 allocation。不建立逐对象账本、universal deep-size、Pandas private backing graph。
-
-预算不足时按固定顺序：
-
-```text
-projection / predicate / partition pushdown
--> bounded batch and readahead
--> release stale overlap
--> incremental accumulator/writer
--> owner-local spill/external sort/join
--> bounded model matrix/window with unchanged approved semantics
--> only truly indivisible object: fail before full allocation
-```
-
-单个 operator 最多一次观测性 batch 下调；随后进入预定义 spill path 或稳定失败。Spill 前必须用 conservative upper bound 检查 approved scratch root 的 free space；spill 文件必须 owner-qualified、数量/大小有界、异常可清理。禁止无限 retry/halve、丢行、降采样、Float32、近似指标、缩短 approved output/window、删除模型或静默近似。
-
-### 5.3 Measurement
-
-权威验收使用 operation-scoped RSS sampler：
-
-```text
-start: rss0 capture 后、首次 data-scale action 前
-cadence: <= 20 ms
-end: publication/cleanup 完成后最后一次采样
-peak_incremental_rss = max(0, sampled_peak_rss - rss0)
-acceptance: peak_incremental_rss <= hard_budget
-等价报告: sampled_peak_rss <= rss0 + hard_budget
-```
-
-Resource benchmark 必须在 fresh child process 中运行。Process-lifetime high-watermark 只作补充证据；除非平台支持 reset/operation-scoped peak，且 admission 发生在非平凡 QRP/native allocation 前，否则不得直接用 lifetime peak 减 `rss0` 冒充 operation peak。
-
-Reservation 是规划合同，不是 Python/native allocator 的逐字节形式证明；必须用 representative process RSS evidence 验收。
+生产 safety authority 是 admission、gross simultaneous-live bound、lease
+lifetime 和 machine lock。RSS 只属于 repository-external fresh-child release
+evidence：以 `available0` 为分母，`<=80%` 为 PASS candidate，`80%-82%` 为
+AT_RISK，`>82%` default FAIL；这些阈值不得进入 production planning。
 
 ## 6. Quant semantic discipline
 

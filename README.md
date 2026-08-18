@@ -35,7 +35,7 @@ data/        本地数据占位；不提交 private data
 
 ## 核心合同
 
-一个 resource-bearing operation 只捕获一次有效 available memory，预算不高于其 80%，并在一个 root policy、execution lease 与 total reservation ledger 下覆盖全部 Python/native/input/output/overlap state。每次数据规模 allocation 前先 reserve；无法证明安全上限时 fail closed。
+一个 data-scale operation 先取得 host-local cross-process lock，再只捕获一次 available memory，生产预算为其 70% 与 explicit cap 的较小值。整个 operation 共享一个 explicit root policy、RAM lease ledger、transferable ownership 和 cleanup registry；每次数据规模 allocation 前先 acquire/grow lease，跨 producer/consumer 边界只 transfer，最终 close。RSS 只由外部 fresh-child release evidence 观测，80%-82% 是 release 阈值，不是生产预算。
 
 Dataset identity 由 persisted schema、dtype、PK、logical window 与 exact content 定义。Fingerprint 只用于 quick reject；只有 exact compare 可以产生 `MATCH`。Publication 必须 atomic、保留 old-good，cleanup 只处理 owner-qualified resources，active `BaseException` primary 不被 secondary failure 覆盖。
 
