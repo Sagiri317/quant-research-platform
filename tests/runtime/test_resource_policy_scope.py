@@ -65,7 +65,7 @@ def test_retired_policy_cannot_start_a_second_root() -> None:
     with runtime_resource_policy_scope(retired):
         assert current_runtime_resource_policy() is retired
 
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         with runtime_resource_policy_scope(retired):
             pass
 

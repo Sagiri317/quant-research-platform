@@ -1,148 +1,134 @@
-"""Runtime-owned resource policy and payload diagnostics."""
+"""Runtime-owned local resource admission and lifetime ownership."""
 
 from __future__ import annotations
 
+import hashlib
+import os
 import shutil
 import sys
+import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pandas as pd
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 MIB = 1024 * 1024
-_TASK_MEMORY_CEILING_NUMERATOR = 4
-_TASK_MEMORY_CEILING_DENOMINATOR = 5
-_PLANNING_UNCERTAINTY_BYTES = 64 * 1024
+_MEMORY_BUDGET_NUMERATOR = 70
+_MEMORY_BUDGET_DENOMINATOR = 100
 
 
 @dataclass(slots=True)
-class _ReservationLedger:
-    state: str = "READY"
-    scope_count: int = 0
-    by_owner: dict[str, int] = field(default_factory=dict)
+class _MachineLock:
+    fd: int
+    closed: bool = False
 
-    @property
-    def total_bytes(self) -> int:
-        return sum(self.by_owner.values())
-
-    def reserve(self, owner: str, reserve_bytes: int, *, budget_bytes: int) -> None:
-        if self.total_bytes + reserve_bytes > budget_bytes:
-            raise MemoryError("runtime_memory_budget_exceeded")
-        self.by_owner[owner] = self.by_owner.get(owner, 0) + reserve_bytes
-
-    def release(self, owner: str, reserve_bytes: int) -> None:
-        remaining = self.by_owner.get(owner, 0) - reserve_bytes
-        if remaining < 0:
-            raise RuntimeError("runtime_memory_reservation_underflow")
-        if remaining:
-            self.by_owner[owner] = remaining
-        else:
-            self.by_owner.pop(owner, None)
-
-
-@dataclass(slots=True)
-class _OperationRssMeasurement:
-    rss0_bytes: int
-    hard_budget_bytes: int
-    sampled_peak_rss_bytes: int = 0
-    sample_count: int = 0
-    state: str = "READY"
-    error: BaseException | None = None
-    _paused: bool = False
-
-    def start(self) -> None:
-        if self.state != "READY":
-            raise RuntimeError("runtime_rss_sampler_already_started")
-        self.state = "ACTIVE"
-
-    def quiesce(self) -> dict[str, int | float | str]:
-        """Pause after a fresh sample so a publish decision cannot race sampling."""
-
-        if self.state != "ACTIVE" or self._paused:
-            raise RuntimeError("runtime_rss_sampler_not_active")
-        self._sample()
-        self._paused = True
-        return self._evidence()
-
-    def resume(self) -> None:
-        """Resume sampling before rejection rollback and cleanup."""
-
-        if self.state != "ACTIVE" or not self._paused:
-            raise RuntimeError("runtime_rss_sampler_not_paused")
-        self._paused = False
-
-    def checkpoint_evidence(self) -> dict[str, int | float | str]:
-        if self.state != "ACTIVE":
-            raise RuntimeError("runtime_rss_sampler_not_active")
-        if not self._paused:
-            self._sample()
-        return self._evidence()
-
-    def stop(self) -> None:
-        if self.state == "RETIRED":
-            return
-        if self.state == "ACTIVE" and not self._paused:
-            self._sample()
-        self.state = "RETIRED"
-
-    def _sample(self) -> None:
+    @classmethod
+    def acquire(cls) -> _MachineLock:
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
         try:
-            rss = _exact_nonnegative_int(
-                _process_rss_bytes(),
-                error="invalid_runtime_resource_rss",
-            )
-        except BaseException as exc:
-            self.error = exc
+            fd = os.open(_machine_lock_path(), flags, 0o600)
+        except OSError:
+            raise RuntimeError("runtime_data_scale_lock_failed") from None
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            if os.name == "nt":
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            raise RuntimeError("runtime_data_scale_lock_busy") from None
+        return cls(fd=fd)
+
+    def close(self) -> None:
+        if self.closed:
             return
-        self.sampled_peak_rss_bytes = max(self.sampled_peak_rss_bytes, rss)
-        self.sample_count += 1
+        unlock_error: BaseException | None = None
+        try:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            if os.name == "nt":
+                msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+        except BaseException as exc:
+            unlock_error = exc
+        finally:
+            try:
+                os.close(self.fd)
+            except BaseException as close_error:
+                if unlock_error is None:
+                    unlock_error = close_error
+            self.closed = True
+        if unlock_error is not None:
+            raise RuntimeError(
+                "runtime_data_scale_lock_release_failed"
+            ) from unlock_error
 
-    def evidence(self) -> dict[str, int | float | str]:
-        if self.state != "RETIRED":
-            raise RuntimeError("runtime_rss_measurement_incomplete")
-        return self._evidence()
 
-    def _evidence(self) -> dict[str, int | float | str]:
-        peak = max(self.rss0_bytes, self.sampled_peak_rss_bytes)
-        incremental = peak - self.rss0_bytes
-        telemetry_status = (
-            "AVAILABLE" if self.error is None and self.sample_count else "UNAVAILABLE"
+@dataclass(slots=True, eq=False)
+class MemoryLease:
+    owner: str
+    reserved_bytes: int
+    active: bool
+    _root: RuntimeResourcePolicy = field(repr=False)
+
+    def transfer(self, new_owner: str) -> None:
+        self._root._require_lease_owner(self)
+        self.owner = _required_owner(new_owner)
+
+    def grow(self, additional_bytes: int) -> None:
+        self._root._require_lease_owner(self)
+        additional = _exact_nonnegative_int(
+            additional_bytes,
+            error="invalid_runtime_memory_lease_bytes",
         )
-        status = (
-            "PASS"
-            if telemetry_status == "AVAILABLE"
-            and incremental <= self.hard_budget_bytes
-            else "FAIL"
+        self._root._grow_lease(self, additional)
+
+    def shrink_to(self, actual_bytes: int) -> None:
+        self._root._require_lease_owner(self)
+        actual = _exact_nonnegative_int(
+            actual_bytes,
+            error="invalid_runtime_memory_lease_bytes",
         )
-        return {
-            "rss0_bytes": self.rss0_bytes,
-            "hard_budget_bytes": self.hard_budget_bytes,
-            "sampled_peak_rss_bytes": peak,
-            "peak_incremental_rss_bytes": incremental,
-            "measurement_metric": "process_rss_checkpoint_incremental",
-            "sampling_mode": "owner_boundary_checkpoint",
-            "actual_peak_proven": "NO",
-            "sample_count": self.sample_count,
-            "max_sample_interval_ms": 0.0,
-            "cadence_status": "NOT_APPLICABLE",
-            "telemetry_status": telemetry_status,
-            "status": status,
-        }
+        if actual > self.reserved_bytes:
+            raise ValueError("invalid_runtime_memory_lease_bytes")
+        self.reserved_bytes = actual
+
+    def close(self) -> None:
+        if not self.active:
+            return
+        self._root._close_lease(self)
+
+
+@dataclass(slots=True)
+class _OwnedValue[T]:
+    value: T
+    lease: MemoryLease
+
+
+type _OwnedFrame = _OwnedValue[pd.DataFrame]
 
 
 @dataclass(frozen=True, init=False, eq=False, slots=True)
 class RuntimeResourcePolicy:
-    """Immutable one-shot resource admission shared by one root operation."""
+    """One immutable data-scale root budget and mutable lease ledger."""
 
     captured_available_memory_bytes: int
-    rss0_bytes: int
-    task_memory_budget_bytes: int
-    hard_memory_budget_bytes: int
-    planning_uncertainty_bytes: int
-    _ledger: _ReservationLedger
-    _measurement: _OperationRssMeasurement
+    memory_budget_bytes: int
+    state: str
+    _lock: _MachineLock
+    _leases: set[MemoryLease] = field(default_factory=set, repr=False)
+    _cleanups: list[Callable[[], None]] = field(default_factory=list, repr=False)
+    _scope_depth: int = field(default=0, repr=False)
 
     def __new__(cls) -> RuntimeResourcePolicy:
         raise TypeError("runtime_resource_policy_capture_required")
@@ -153,169 +139,166 @@ class RuntimeResourcePolicy:
         *,
         explicit_cap_bytes: int | None = None,
     ) -> RuntimeResourcePolicy:
-        """Capture available memory and RSS exactly once before root allocation."""
+        """Acquire the data-scale lock, then capture available memory once."""
 
-        explicit_cap = (
-            None
-            if explicit_cap_bytes is None
-            else _exact_positive_int(
-                explicit_cap_bytes,
-                error="invalid_runtime_resource_explicit_cap",
+        if _PROCESS_POISONED:
+            raise RuntimeError("runtime_data_scale_process_poisoned")
+        lock = _acquire_machine_lock()
+        try:
+            explicit_cap = (
+                None
+                if explicit_cap_bytes is None
+                else _exact_positive_int(
+                    explicit_cap_bytes,
+                    error="invalid_runtime_resource_explicit_cap",
+                )
             )
-        )
-        available = _exact_positive_int(
-            _available_memory_bytes(),
-            error="invalid_runtime_resource_available_memory",
-        )
-        rss0 = _exact_nonnegative_int(
-            _process_rss_bytes(),
-            error="invalid_runtime_resource_rss",
-        )
-        hard_budget = (
-            available
-            * _TASK_MEMORY_CEILING_NUMERATOR
-            // _TASK_MEMORY_CEILING_DENOMINATOR
-        )
-        if explicit_cap is not None:
-            hard_budget = min(hard_budget, explicit_cap)
-        planning_budget = hard_budget - _PLANNING_UNCERTAINTY_BYTES
-        if planning_budget <= 0:
-            raise ValueError("invalid_runtime_resource_available_memory")
-        measurement = _OperationRssMeasurement(rss0, hard_budget)
-        policy = object.__new__(cls)
-        object.__setattr__(policy, "captured_available_memory_bytes", available)
-        object.__setattr__(policy, "rss0_bytes", rss0)
-        object.__setattr__(policy, "task_memory_budget_bytes", planning_budget)
-        object.__setattr__(policy, "hard_memory_budget_bytes", hard_budget)
-        object.__setattr__(
-            policy,
-            "planning_uncertainty_bytes",
-            _PLANNING_UNCERTAINTY_BYTES,
-        )
-        object.__setattr__(policy, "_ledger", _ReservationLedger())
-        object.__setattr__(policy, "_measurement", measurement)
-        return policy
+            available = _exact_positive_int(
+                _available_memory_bytes(),
+                error="invalid_runtime_resource_available_memory",
+            )
+            budget = (
+                available * _MEMORY_BUDGET_NUMERATOR
+                // _MEMORY_BUDGET_DENOMINATOR
+            )
+            if explicit_cap is not None:
+                budget = min(budget, explicit_cap)
+            if budget <= 0:
+                raise ValueError("invalid_runtime_resource_memory_budget")
+            policy = object.__new__(cls)
+            object.__setattr__(
+                policy,
+                "captured_available_memory_bytes",
+                available,
+            )
+            object.__setattr__(policy, "memory_budget_bytes", budget)
+            object.__setattr__(policy, "state", "ACTIVE")
+            object.__setattr__(policy, "_lock", lock)
+            object.__setattr__(policy, "_leases", set())
+            object.__setattr__(policy, "_cleanups", [])
+            object.__setattr__(policy, "_scope_depth", 0)
+            return policy
+        except BaseException as primary:
+            try:
+                lock.close()
+            except BaseException as release_error:
+                primary.add_note(
+                    "runtime machine-lock release also failed: "
+                    f"{type(release_error).__name__}"
+                )
+            raise
+
+    @property
+    def used_memory_bytes(self) -> int:
+        return sum(lease.reserved_bytes for lease in self._leases)
+
+    @property
+    def available_memory_bytes(self) -> int:
+        return self.memory_budget_bytes - self.used_memory_bytes
+
+    @property
+    def task_memory_budget_bytes(self) -> int:
+        return self.memory_budget_bytes
 
     @property
     def reserved_memory_bytes(self) -> int:
-        return self._ledger.total_bytes
+        return self.used_memory_bytes
 
     @property
     def remaining_memory_bytes(self) -> int:
-        return max(0, self.task_memory_budget_bytes - self.reserved_memory_bytes)
+        return self.available_memory_bytes
+
+    def lease(self, owner: str, reserved_bytes: int) -> MemoryLease:
+        self._require_active_root()
+        valid_owner = _required_owner(owner)
+        reserved = _exact_nonnegative_int(
+            reserved_bytes,
+            error="invalid_runtime_memory_lease_bytes",
+        )
+        if self.used_memory_bytes + reserved > self.memory_budget_bytes:
+            raise MemoryError("runtime_memory_budget_exceeded")
+        leased = MemoryLease(valid_owner, reserved, True, self)
+        self._leases.add(leased)
+        return leased
 
     @contextmanager
     def reserve(self, owner: str, reserve_bytes: int) -> Iterator[None]:
-        """Reserve one owner-local upper bound against this root budget."""
+        """Temporary bridge for callers not yet migrated to MemoryLease."""
 
-        if not isinstance(owner, str) or not owner:
-            raise ValueError("invalid_runtime_memory_reservation_owner")
-        reserve = _exact_nonnegative_int(
-            reserve_bytes,
-            error="invalid_runtime_memory_reservation",
-        )
-        if (
-            _ACTIVE_RUNTIME_RESOURCE_POLICY is not self
-            or self._ledger.state != "ACTIVE"
-        ):
-            raise RuntimeError("runtime_resource_policy_not_active")
-        self._ledger.reserve(
-            owner,
-            reserve,
-            budget_bytes=self.task_memory_budget_bytes,
-        )
+        leased = self.lease(owner, reserve_bytes)
         try:
             yield
         finally:
             primary = sys.exception()
             try:
-                self._ledger.release(owner, reserve)
-            except BaseException:
+                leased.close()
+            except BaseException as release_error:
                 if primary is None:
                     raise
+                primary.add_note(
+                    "runtime memory reservation release also failed: "
+                    f"{type(release_error).__name__}"
+                )
+
+    def register_cleanup(self, close: Callable[[], None]) -> None:
+        self._require_active_root()
+        self._cleanups.append(close)
 
     def to_payload(self) -> dict[str, int]:
-        """Return the exact private runtime resource payload."""
-
         return {
             "captured_available_memory_bytes": self.captured_available_memory_bytes,
-            "rss0_bytes": self.rss0_bytes,
-            "task_memory_budget_bytes": self.task_memory_budget_bytes,
-            "hard_memory_budget_bytes": self.hard_memory_budget_bytes,
-            "planning_uncertainty_bytes": self.planning_uncertainty_bytes,
+            "memory_budget_bytes": self.memory_budget_bytes,
+            "used_memory_bytes": self.used_memory_bytes,
+            "available_memory_bytes": self.available_memory_bytes,
         }
 
-    def memory_evidence(self) -> dict[str, int | float | str]:
-        """Return final operation-scoped RSS acceptance evidence."""
+    def memory_evidence(self) -> dict[str, str]:
+        """Temporary bridge; release evidence is collected externally."""
 
-        return self._measurement.evidence()
+        return {"evidence_scope": "external_release_only"}
 
     def assert_memory_within_budget(self) -> None:
-        """Reject publication when the active operation has already failed."""
-
-        evidence = (
-            self._measurement.evidence()
-            if self._measurement.state == "RETIRED"
-            else self._measurement.checkpoint_evidence()
-        )
-        _require_memory_acceptance(self._measurement, evidence)
+        """Temporary bridge; production safety is structural admission."""
 
     def finish_memory_measurement(
         self,
         *,
         on_reject: Callable[[], None] | None = None,
-    ) -> dict[str, int | float | str]:
-        """Finish and accept the sampler at an owner-controlled publish boundary."""
+    ) -> dict[str, str]:
+        """Temporary bridge; external evidence has no publish authority."""
 
-        if (
-            _ACTIVE_RUNTIME_RESOURCE_POLICY is not self
-            or self._ledger.state != "ACTIVE"
-            or self._measurement.state != "ACTIVE"
-        ):
-            raise RuntimeError("runtime_rss_sampler_not_active")
-        try:
-            if self.reserved_memory_bytes:
-                raise RuntimeError("runtime_memory_reservation_leaked")
-            evidence = self._measurement.quiesce()
-            _require_memory_acceptance(self._measurement, evidence)
-            self._measurement.stop()
-            evidence = self.memory_evidence()
-            _require_memory_acceptance(self._measurement, evidence)
-        except BaseException as primary:
-            if self._measurement.state == "ACTIVE":
-                try:
-                    self._measurement.resume()
-                except BaseException as resume_error:
-                    primary.add_note(
-                        "runtime memory rejection sampler resume also failed: "
-                        f"{type(resume_error).__name__}"
-                    )
-            if on_reject is not None:
-                try:
-                    on_reject()
-                except BaseException as rollback_error:
-                    primary.add_note(
-                        "runtime memory rejection rollback also failed: "
-                        f"{type(rollback_error).__name__}"
-                    )
-            if self._measurement.state != "RETIRED":
-                try:
-                    self._measurement.quiesce()
-                except BaseException as cleanup_evidence_error:
-                    primary.add_note(
-                        "runtime memory rejection cleanup evidence also failed: "
-                        f"{type(cleanup_evidence_error).__name__}"
-                    )
-                self._measurement.stop()
-            raise
-        return evidence
+        del on_reject
+        return self.memory_evidence()
+
+    def _require_active_root(self) -> None:
+        if self.state != "ACTIVE" or _ACTIVE_RUNTIME_RESOURCE_POLICY is not self:
+            raise RuntimeError("runtime_resource_policy_not_active")
+
+    def _require_lease_owner(self, lease: MemoryLease) -> None:
+        if lease._root is not self or not lease.active:
+            raise RuntimeError("runtime_memory_lease_not_active")
+
+    def _grow_lease(self, lease: MemoryLease, additional_bytes: int) -> None:
+        self._require_active_root()
+        if self.used_memory_bytes + additional_bytes > self.memory_budget_bytes:
+            raise MemoryError("runtime_memory_budget_exceeded")
+        lease.reserved_bytes += additional_bytes
+
+    def _close_lease(self, lease: MemoryLease) -> None:
+        if self.state == "CLOSED":
+            raise RuntimeError("runtime_memory_lease_not_active")
+        if self.state == "ACTIVE":
+            self._require_active_root()
+        self._leases.discard(lease)
+        lease.active = False
 
 
 _ACTIVE_RUNTIME_RESOURCE_POLICY: RuntimeResourcePolicy | None = None
+_PROCESS_POISONED = False
 
 
 def current_runtime_resource_policy() -> RuntimeResourcePolicy | None:
-    """Return the active policy without admitting a new root operation."""
+    """Temporary bridge for callers not yet migrated to explicit roots."""
 
     return _ACTIVE_RUNTIME_RESOURCE_POLICY
 
@@ -325,7 +308,7 @@ def bind_runtime_resource_policy(
     *,
     allow_implicit_active: bool = False,
 ) -> RuntimeResourcePolicy | None:
-    """Bind a lazy operation to its exact creation-time policy."""
+    """Temporary bridge for creation-time explicit policy binding."""
 
     if explicit is not None and type(explicit) is not RuntimeResourcePolicy:
         raise TypeError("invalid_runtime_resource_policy")
@@ -340,7 +323,7 @@ def bind_runtime_resource_policy(
 
 
 def active_runtime_resource_policy() -> RuntimeResourcePolicy:
-    """Return the active snapshot or discover one for the caller to capture."""
+    """Temporary bridge that captures a root only when none is active."""
 
     policy = current_runtime_resource_policy()
     if policy is None:
@@ -352,75 +335,78 @@ def active_runtime_resource_policy() -> RuntimeResourcePolicy:
 def runtime_resource_policy_scope(
     policy: RuntimeResourcePolicy,
 ) -> Iterator[RuntimeResourcePolicy]:
-    """Expose one explicit process-local root policy to nested synchronous stages."""
-
     global _ACTIVE_RUNTIME_RESOURCE_POLICY
     if type(policy) is not RuntimeResourcePolicy:
         raise TypeError("invalid_runtime_resource_policy")
     active = current_runtime_resource_policy()
-    if active is not None:
-        if active is not policy:
-            raise RuntimeError("runtime_resource_policy_conflict")
-    else:
-        if policy._ledger.state == "RETIRED":
-            raise RuntimeError("runtime_resource_policy_retired")
-        if policy._ledger.state != "READY":
-            raise RuntimeError("runtime_resource_policy_already_active")
-        policy._ledger.state = "ACTIVE"
+    if active is not None and active is not policy:
+        raise RuntimeError("runtime_resource_policy_conflict")
+    if policy.state != "ACTIVE":
+        raise RuntimeError("runtime_resource_policy_not_active")
+    object.__setattr__(policy, "_scope_depth", policy._scope_depth + 1)
+    if active is None:
         _ACTIVE_RUNTIME_RESOURCE_POLICY = policy
-    policy._ledger.scope_count += 1
     try:
-        if policy._measurement.state == "READY":
-            policy._measurement.start()
         yield policy
     finally:
         primary = sys.exception()
-        policy._ledger.scope_count -= 1
-        if not policy._ledger.scope_count:
-            _retire_runtime_resource_policy(policy, primary=primary)
+        object.__setattr__(policy, "_scope_depth", policy._scope_depth - 1)
+        if policy._scope_depth == 0:
+            _close_runtime_resource_policy(policy, primary=primary)
 
 
-def _retire_runtime_resource_policy(
+def _close_runtime_resource_policy(
     policy: RuntimeResourcePolicy,
     *,
     primary: BaseException | None,
 ) -> None:
-    global _ACTIVE_RUNTIME_RESOURCE_POLICY
-    leaked = policy.reserved_memory_bytes
-    measurement_error: BaseException | None = None
-    try:
-        if policy._measurement.state != "RETIRED":
-            try:
-                policy._measurement.quiesce()
-            finally:
-                if policy._measurement.state != "RETIRED":
-                    policy._measurement.stop()
-    except BaseException as exc:
-        measurement_error = exc
-    policy._ledger.state = "RETIRED"
-    _ACTIVE_RUNTIME_RESOURCE_POLICY = None
-    if primary is not None:
+    global _ACTIVE_RUNTIME_RESOURCE_POLICY, _PROCESS_POISONED
+    if _ACTIVE_RUNTIME_RESOURCE_POLICY is policy:
+        _ACTIVE_RUNTIME_RESOURCE_POLICY = None
+
+    cleanup_error: BaseException | None = None
+    while policy._cleanups:
+        close = policy._cleanups.pop()
+        try:
+            close()
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+            if primary is not None:
+                primary.add_note(
+                    "runtime cleanup also failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+    outstanding = policy.used_memory_bytes
+    if cleanup_error is not None or outstanding:
+        object.__setattr__(policy, "state", "POISONED")
+        _PROCESS_POISONED = True
+        if primary is None:
+            if cleanup_error is not None:
+                raise cleanup_error
+            raise RuntimeError("runtime_memory_lease_leaked")
         return
-    if leaked:
-        raise RuntimeError("runtime_memory_reservation_leaked")
-    if measurement_error is not None:
-        raise measurement_error
-    evidence = policy.memory_evidence()
-    _require_memory_acceptance(policy._measurement, evidence)
 
-
-def _require_memory_acceptance(
-    measurement: _OperationRssMeasurement,
-    evidence: dict[str, int | float | str],
-) -> None:
-    if measurement.error is not None:
-        raise RuntimeError("runtime_rss_sampler_failed") from None
-    if evidence["status"] != "PASS":
-        raise MemoryError("runtime_rss_budget_exceeded")
+    try:
+        policy._lock.close()
+    except BaseException as exc:
+        object.__setattr__(policy, "state", "POISONED")
+        _PROCESS_POISONED = True
+        if primary is not None:
+            primary.add_note(
+                "runtime machine-lock release also failed: "
+                f"{type(exc).__name__}"
+            )
+            return
+        raise RuntimeError("runtime_machine_lock_release_failed") from exc
+    object.__setattr__(policy, "state", "CLOSED")
 
 
 def pandas_frame_payload_bytes(frame: pd.DataFrame) -> int:
-    """Return the sole Runtime-approved Pandas payload diagnostic."""
+    """Return the Runtime-approved Pandas payload diagnostic."""
+
+    import pandas as pd
 
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("invalid_pandas_frame_payload")
@@ -443,6 +429,16 @@ def require_free_disk_headroom(path: Path, *, reserve_bytes: int) -> int:
     return free
 
 
+def _acquire_machine_lock() -> _MachineLock:
+    return _MachineLock.acquire()
+
+
+def _machine_lock_path() -> Path:
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+    user_hash = hashlib.sha256(user.encode("utf-8")).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f".qrp-data-scale-{user_hash}.lock"
+
+
 def _available_memory_bytes() -> int:
     try:
         import psutil  # type: ignore[import-not-found]
@@ -456,14 +452,10 @@ def _available_memory_bytes() -> int:
     )
 
 
-def _process_rss_bytes() -> int:
-    try:
-        import psutil  # type: ignore[import-not-found]
-
-        rss = psutil.Process().memory_info().rss
-    except Exception:
-        raise RuntimeError("runtime_rss_discovery_failed") from None
-    return _exact_nonnegative_int(rss, error="invalid_runtime_resource_rss")
+def _required_owner(owner: object) -> str:
+    if not isinstance(owner, str) or not owner:
+        raise ValueError("invalid_runtime_memory_lease_owner")
+    return owner
 
 
 def _exact_positive_int(value: object, *, error: str) -> int:
@@ -479,6 +471,7 @@ def _exact_nonnegative_int(value: object, *, error: str) -> int:
 
 
 __all__ = [
+    "MemoryLease",
     "RuntimeResourcePolicy",
     "active_runtime_resource_policy",
     "pandas_frame_payload_bytes",

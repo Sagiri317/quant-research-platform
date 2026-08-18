@@ -17,7 +17,6 @@ from quant_research_platform.runtime.resources import (
     ("owner", "error"),
     [
         ("_available_memory_bytes", "runtime_available_memory_discovery_failed"),
-        ("_process_rss_bytes", "runtime_rss_discovery_failed"),
     ],
 )
 def test_capture_fails_closed_when_required_probe_fails(
