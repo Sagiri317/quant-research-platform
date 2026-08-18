@@ -117,7 +117,19 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
     assert result.status == "NOT_RUN"
     assert capture_calls == 1
     assert snapshots == [policy] * (7 + expected_prediction_count)
-    assert run_config["runtime_resource_policy"] == policy.to_payload()
+    policy_payload = run_config["runtime_resource_policy"]
+    assert set(policy_payload) == {
+        "captured_available_memory_bytes",
+        "memory_budget_bytes",
+        "used_memory_bytes",
+        "available_memory_bytes",
+    }
+    assert policy_payload["memory_budget_bytes"] == explicit_cap
+    assert (
+        policy_payload["used_memory_bytes"]
+        + policy_payload["available_memory_bytes"]
+        == policy_payload["memory_budget_bytes"]
+    )
 
 
 def test_local_verification_failure_cleanup_keeps_the_root_policy_active(

@@ -238,9 +238,9 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
         return {"logical_relative_root": artifact_root.name}, 64
 
     monkeypatch.setattr(
-        schema_inventory.RuntimeResourcePolicy,
+        RuntimeResourcePolicy,
         "capture",
-        staticmethod(capture_policy),
+        staticmethod(lambda **_kwargs: capture_policy()),
     )
     monkeypatch.setattr(
         schema_inventory,
@@ -271,10 +271,11 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
     observed_reserved: list[int] = []
     cleanup_states: list[str] = []
     monkeypatch.setattr(
-        private_cli.RuntimeResourcePolicy,
+        RuntimeResourcePolicy,
         "capture",
-        staticmethod(lambda: policy),
+        staticmethod(lambda **_kwargs: policy),
     )
+
     @contextmanager
     def inventory(_root: Path, *, resource_policy=None):  # type: ignore[no-untyped-def]
         assert resource_policy is policy
@@ -282,7 +283,7 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
             try:
                 yield {"schema_id": "qrp-schema-inventory", "datasets": []}
             finally:
-                cleanup_states.append(policy._measurement.state)  # noqa: SLF001
+                cleanup_states.append(policy.state)
 
     monkeypatch.setattr(private_cli, "open_schema_inventory_payload", inventory)
 
@@ -313,9 +314,9 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
         explicit_cap_bytes=64 * 1024 + 750,
     )
     monkeypatch.setattr(
-        schema_inventory.RuntimeResourcePolicy,
+        RuntimeResourcePolicy,
         "capture",
-        staticmethod(lambda: policy),
+        staticmethod(lambda **_kwargs: policy),
     )
     monkeypatch.setattr(
         schema_inventory,
@@ -350,7 +351,7 @@ def test_schema_inventory_item_state_is_admitted_before_aggregation(
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=64 * 1024 + 960,
+        explicit_cap_bytes=16 * 1024,
     )
     artifact_root = (
         tmp_path / "data" / "processed" / "a_share" / "market_bars" / "demo"
@@ -360,6 +361,7 @@ def test_schema_inventory_item_state_is_admitted_before_aggregation(
         columns=("timestamp", "value"),
         manifest={"duplicate_primary_key_count": 0},
         file_count=1,
+        partitions=(),
         row_count=1,
         date_min="2026-01-01",
         date_max="2026-01-01",

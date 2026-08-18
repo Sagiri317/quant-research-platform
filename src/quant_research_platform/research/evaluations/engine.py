@@ -34,9 +34,6 @@ from quant_research_platform.research.signals.materialization import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
-    bind_runtime_resource_policy,
-    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -63,17 +60,14 @@ def evaluate_signal_frame_chunks(
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> EvaluationResult:
-    policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    ) or RuntimeResourcePolicy.capture()
-    with runtime_resource_policy_scope(policy):
+    with runtime_resource_policy_scope(resource_policy) as policy:
         return _evaluate_signal_frame_chunks(
             frames,
             spec,
             n_groups=n_groups,
             asset_column=asset_column,
             source_columns_by_kind=source_columns_by_kind,
+            resource_policy=policy,
         )
 
 
@@ -84,8 +78,8 @@ def _evaluate_signal_frame_chunks(
     n_groups: int,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> EvaluationResult:
-    owner_policy = current_runtime_resource_policy()
     metrics, grouped_label_values, filter_metadata, rows_after_dropna = (
         _compute_evaluation_frames(
             frames,
@@ -95,6 +89,7 @@ def _evaluate_signal_frame_chunks(
             n_groups=n_groups,
             asset_column=asset_column,
             source_columns_by_kind=source_columns_by_kind,
+            resource_policy=resource_policy,
         )
     )
     retained_bytes = pandas_frame_payload_bytes(metrics) + pandas_frame_payload_bytes(
@@ -103,12 +98,15 @@ def _evaluate_signal_frame_chunks(
     aggregation_state_bytes = (len(metrics) + len(grouped_label_values)) * 8 * 8
     summary_output_bound = retained_bytes + 64 * 1024
     with ExitStack() as retained_outputs:
-        if owner_policy is not None:
+        if resource_policy is not None:
             retained_outputs.enter_context(
-                owner_policy.reserve("research.evaluation.result", retained_bytes)
+                resource_policy.reserve(
+                    "research.evaluation.result",
+                    retained_bytes,
+                )
             )
             retained_outputs.enter_context(
-                owner_policy.reserve(
+                resource_policy.reserve(
                     "research.evaluation.summary",
                     aggregation_state_bytes + summary_output_bound,
                 )
@@ -152,6 +150,7 @@ def _compute_evaluation_frames(
     label_columns: tuple[str, ...],
     n_groups: int,
     asset_column: str,
+    resource_policy: RuntimeResourcePolicy,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object], int]:
     from quant_research_platform.research.filtering import apply_filter_mode
@@ -161,15 +160,14 @@ def _compute_evaluation_frames(
     rows_after_dropna = 0
     filter_columns_used: list[str] = []
     filter_definition = ""
-    retained_policy = current_runtime_resource_policy()
     with (
         _ResearchFrameAccumulator(
             "research.evaluation.metrics",
-            resource_policy=retained_policy,
+            resource_policy=resource_policy,
         ) as metric_accumulator,
         _ResearchFrameAccumulator(
             "research.evaluation.grouped",
-            resource_policy=retained_policy,
+            resource_policy=resource_policy,
         ) as grouped_accumulator,
     ):
         for chunk in _iter_evaluation_work_frames(
@@ -179,6 +177,7 @@ def _compute_evaluation_frames(
             label_columns=label_columns,
             asset_column=asset_column,
             source_columns_by_kind=source_columns_by_kind,
+            resource_policy=resource_policy,
         ):
             filtered, metadata = apply_filter_mode(
                 chunk,
@@ -192,7 +191,6 @@ def _compute_evaluation_frames(
             filter_columns_used = list(metadata["filter_columns_used"])
             filter_definition = str(metadata["filter_definition"])
             for label_column in label_columns:
-                policy = active_runtime_resource_policy()
                 compute_spec = ComputePanelSpec(
                     signal_columns=signal_columns,
                     label_column=label_column,
@@ -236,7 +234,10 @@ def _compute_evaluation_frames(
                     + numeric_kernel_bytes
                     + output_record_bytes
                 )
-                with policy.reserve("research.evaluation.kernel", kernel_bytes):
+                with resource_policy.reserve(
+                    "research.evaluation.kernel",
+                    kernel_bytes,
+                ):
                     usable = filtered.loc[:, list(compute_columns)].copy()
                     metrics, grouped_label_values = compute_ic_and_grouped_label_values(
                         usable,
@@ -247,7 +248,10 @@ def _compute_evaluation_frames(
                 output_bytes = pandas_frame_payload_bytes(
                     metrics
                 ) + pandas_frame_payload_bytes(grouped_label_values)
-                with policy.reserve("research.evaluation.output", output_bytes):
+                with resource_policy.reserve(
+                    "research.evaluation.output",
+                    output_bytes,
+                ):
                     rows_after_dropna += int(
                         strict_non_negative_count_series(metrics["n_obs"]).sum()
                     )
@@ -258,9 +262,9 @@ def _compute_evaluation_frames(
         metrics_result = metric_accumulator.materialize()
         result_reservation = ExitStack()
         try:
-            if retained_policy is not None:
+            if resource_policy is not None:
                 result_reservation.enter_context(
-                    retained_policy.reserve(
+                    resource_policy.reserve(
                         "research.evaluation.concat",
                         pandas_frame_payload_bytes(metrics_result),
                     )
@@ -291,6 +295,7 @@ def _iter_evaluation_work_frames(
     signal_columns: tuple[str, ...],
     label_columns: tuple[str, ...],
     asset_column: str,
+    resource_policy: RuntimeResourcePolicy,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
 ) -> Iterator[pd.DataFrame]:
     required = {
@@ -313,18 +318,20 @@ def _iter_evaluation_work_frames(
     for frame in iter_complete_session_frames(
         iter(frames),
         timestamp_column="timestamp",
-        resource_policy=current_runtime_resource_policy(),
+        resource_policy=resource_policy,
     ):
         missing = sorted(required.difference(frame.columns))
         if missing:
             raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
         selected = [column for column in work_columns if column in frame.columns]
-        policy = current_runtime_resource_policy()
         projection_bytes = _selected_frame_payload_bytes(frame, selected)
         with ExitStack() as working:
-            if policy is not None:
+            if resource_policy is not None:
                 working.enter_context(
-                    policy.reserve("research.evaluation.projection", projection_bytes)
+                    resource_policy.reserve(
+                        "research.evaluation.projection",
+                        projection_bytes,
+                    )
                 )
             selected_frame = frame.loc[:, selected]
             normalized = selected_frame.pipe(
@@ -335,17 +342,20 @@ def _iter_evaluation_work_frames(
             )
             del selected_frame
         normalized_bytes = pandas_frame_payload_bytes(normalized)
-        if policy is not None and (
-            policy.reserved_memory_bytes + normalized_bytes
-            > policy.task_memory_budget_bytes
+        if resource_policy is not None and (
+            resource_policy.reserved_memory_bytes + normalized_bytes
+            > resource_policy.task_memory_budget_bytes
         ):
             raise ValueError(
                 "research_evaluation_working_set_exceeds_task_memory_budget"
             )
         with ExitStack() as retained:
-            if policy is not None:
+            if resource_policy is not None:
                 retained.enter_context(
-                    policy.reserve("research.evaluation.input", normalized_bytes)
+                    resource_policy.reserve(
+                        "research.evaluation.input",
+                        normalized_bytes,
+                    )
                 )
             yield normalized
 

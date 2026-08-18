@@ -16,7 +16,6 @@ from quant_research_platform.research.evaluations.engine import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    bind_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -32,11 +31,7 @@ def build_evaluation_result_from_research_dataset(
     n_groups: int | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> EvaluationResult:
-    policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    ) or RuntimeResourcePolicy.capture()
-    with runtime_resource_policy_scope(policy):
+    with runtime_resource_policy_scope(resource_policy) as policy:
         return _build_evaluation_result_from_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,

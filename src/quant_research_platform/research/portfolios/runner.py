@@ -37,7 +37,6 @@ from quant_research_platform.research.portfolios.engine import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -104,15 +103,8 @@ def build_portfolio_result_from_research_dataset(
     prediction_metadata: Mapping[str, object] | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> PortfolioResult:
-    policy = (
-        bind_runtime_resource_policy(
-            resource_policy,
-            allow_implicit_active=False,
-        )
-        or RuntimeResourcePolicy.capture()
-    )
     operation = ExitStack()
-    operation.enter_context(runtime_resource_policy_scope(policy))
+    policy = operation.enter_context(runtime_resource_policy_scope(resource_policy))
     try:
         result = _build_portfolio_result_from_research_dataset(
             layout=layout,
@@ -122,6 +114,7 @@ def build_portfolio_result_from_research_dataset(
             time_window=time_window,
             prediction_frame=prediction_frame,
             prediction_metadata=prediction_metadata,
+            resource_policy=policy,
         )
     except BaseException as primary:
         try:
@@ -222,6 +215,7 @@ def _build_portfolio_result_from_research_dataset(
     time_window: TimeWindow | None,
     prediction_frame: pd.DataFrame | None,
     prediction_metadata: Mapping[str, object] | None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> PortfolioResult:
     spec = portfolio_catalog.get(portfolio_id)
     dataset_spec = dataset_catalog.get(spec.research_dataset_id)
@@ -258,7 +252,7 @@ def _build_portfolio_result_from_research_dataset(
         "prediction": tuple(signal.source_column for signal in prediction_signals),
     }
     summary_state = _PortfolioSummaryState(
-        resource_policy=current_runtime_resource_policy()
+        resource_policy=resource_policy
     )
     input_chunks = _portfolio_input_chunks(
         layout=layout,
@@ -464,7 +458,7 @@ def _iter_prediction_joined_chunks(
     sample_filter_mode: str,
     test_start: str,
     test_end: str | None,
-    resource_policy: RuntimeResourcePolicy | None,
+    resource_policy: RuntimeResourcePolicy,
 ):
     if not isinstance(prediction_frame, pd.DataFrame):
         yield from _iter_prediction_lookup_joined_chunks(
@@ -477,7 +471,6 @@ def _iter_prediction_joined_chunks(
             test_end=test_end,
         )
         return
-    policy = bind_runtime_resource_policy(resource_policy)
     prediction_bytes = pandas_frame_payload_bytes(prediction_frame)
     prediction_rows = len(prediction_frame)
     prediction_key_bytes = _selected_frame_payload_bytes(
@@ -489,10 +482,10 @@ def _iter_prediction_joined_chunks(
     )
     matched_bytes = prediction_rows
     with ExitStack() as prediction_state:
-        if policy is not None:
+        if resource_policy is not None:
             try:
                 prediction_state.enter_context(
-                    policy.reserve(
+                    resource_policy.reserve(
                         "research.portfolio.prediction.input",
                         prediction_bytes + prediction_index_bytes + matched_bytes,
                     )
@@ -531,9 +524,9 @@ def _iter_prediction_joined_chunks(
                 + joined_output_bytes
             )
             with ExitStack() as chunk_state:
-                if policy is not None:
+                if resource_policy is not None:
                     chunk_state.enter_context(
-                        policy.reserve(
+                        resource_policy.reserve(
                             "research.portfolio.prediction.join",
                             chunk_working_bytes,
                         )

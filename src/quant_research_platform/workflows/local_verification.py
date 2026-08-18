@@ -157,12 +157,12 @@ def run_local_verification(
         replace_output=config.replace_output,
     )
     preflight_model_specs(config.profile.models.list())
-    resource_policy = RuntimeResourcePolicy.capture(
-        explicit_cap_bytes=config.explicit_memory_cap_bytes
-    )
     staged_root = run_root.with_name(owned_scratch_name(".lv-", uuid4().hex[:8]))
     staged_identity: os.stat_result | None = None
-    with runtime_resource_policy_scope(resource_policy), ExitStack() as retained_state:
+    with runtime_resource_policy_scope(
+        None,
+        explicit_cap_bytes=config.explicit_memory_cap_bytes,
+    ) as resource_policy, ExitStack() as retained_state:
         try:
             if replaced_identity is not None:
                 _cleanup_previous_generation(run_root, run_id=run_id)

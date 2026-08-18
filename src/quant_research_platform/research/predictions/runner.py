@@ -47,7 +47,6 @@ from quant_research_platform.research.predictions.outputs import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -79,15 +78,8 @@ def build_prediction_result_from_research_dataset(
             )
         )
     )
-    policy = (
-        bind_runtime_resource_policy(
-            resource_policy,
-            allow_implicit_active=False,
-        )
-        or RuntimeResourcePolicy.capture()
-    )
     operation = ExitStack()
-    operation.enter_context(runtime_resource_policy_scope(policy))
+    operation.enter_context(runtime_resource_policy_scope(resource_policy))
     try:
         result = _build_prediction_result_from_research_dataset(
             layout=layout,

@@ -11,7 +11,6 @@ import typer
 from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._scratch_ownership import remove_owned_scratch
@@ -68,8 +67,7 @@ def schema_inventory(
         typer.echo("output_already_exists", err=True)
         raise typer.Exit(code=2)
     try:
-        policy = RuntimeResourcePolicy.capture()
-        with runtime_resource_policy_scope(policy):
+        with runtime_resource_policy_scope(None) as policy:
             with ExitStack() as inventory_stack:
                 inventory = inventory_stack.enter_context(
                     open_schema_inventory_payload(

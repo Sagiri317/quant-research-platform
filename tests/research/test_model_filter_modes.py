@@ -769,7 +769,7 @@ def test_model_threads_adapt_to_live_planning_headroom(
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024 * 1024,
         explicit_cap_bytes=(
-            input_bytes + state_bytes + base + 2 * (one - base) + 64 * 1024
+            input_bytes + state_bytes + base + 2 * (one - base)
         ),
     )
 

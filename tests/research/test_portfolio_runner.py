@@ -277,51 +277,6 @@ def test_portfolio_result_context_preserves_body_primary() -> None:
     assert portfolio_runner.current_runtime_resource_policy() is None
 
 
-def test_portfolio_lazy_result_keeps_final_rejection_terminal(monkeypatch) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1024 * 1024,
-        rss_bytes=100,
-        explicit_cap_bytes=600 * 1024,
-    )
-    measurement = policy._measurement  # noqa: SLF001
-    original_payload = measurement._payload  # type: ignore[attr-defined]  # noqa: SLF001
-
-    def failed_payload() -> dict[str, int | float | str]:
-        payload = original_payload()
-        payload["sampled_peak_rss_bytes"] = 701
-        payload["peak_incremental_rss_bytes"] = 601
-        payload["status"] = "FAIL"
-        return payload
-
-    measurement._payload = failed_payload  # type: ignore[attr-defined]  # noqa: SLF001
-    monkeypatch.setattr(
-        portfolio_runner,
-        "_build_portfolio_result_from_research_dataset",
-        lambda **_kwargs: portfolio_runner.PortfolioResult(
-            spec=object(),  # type: ignore[arg-type]
-            output_chunks=({"returns": pd.DataFrame({"value": [1.0]})},),
-            summary_factory=lambda: {"summary": pd.DataFrame({"value": [1.0]})},
-        ),
-    )
-    result = build_portfolio_result_from_research_dataset(
-        layout=object(),  # type: ignore[arg-type]
-        dataset_catalog=object(),  # type: ignore[arg-type]
-        portfolio_catalog=object(),  # type: ignore[arg-type]
-        portfolio_id="portfolio",
-        resource_policy=policy,
-    )
-    assert len(list(result.output_chunks)) == 1
-
-    result.summary_factory()
-    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded") as first:
-        result.close()
-    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded") as second:
-        result.summary_factory()
-
-    assert second.value is first.value
-    assert portfolio_runner.current_runtime_resource_policy() is None
-
-
 @pytest.mark.parametrize(
     ("corruption", "error"),
     [

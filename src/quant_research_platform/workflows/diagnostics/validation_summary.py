@@ -32,7 +32,6 @@ from quant_research_platform.runtime.logical_paths import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    bind_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
@@ -78,10 +77,10 @@ def build_validation_summary(
     _retained_state: ExitStack | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> dict[str, Any]:
-    policy = (
-        bind_runtime_resource_policy(resource_policy) or RuntimeResourcePolicy.capture()
-    )
-    with runtime_resource_policy_scope(policy), ExitStack() as local_state:
+    with (
+        runtime_resource_policy_scope(resource_policy) as policy,
+        ExitStack() as local_state,
+    ):
         return _build_validation_summary(
             run_id=run_id,
             dataset_roots=dataset_roots,

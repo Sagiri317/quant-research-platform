@@ -18,7 +18,6 @@ from quant_research_platform.contracts._json import (
 from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAYERS
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    bind_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
@@ -68,72 +67,75 @@ def open_schema_inventory_payload(
 ) -> Iterator[dict[str, Any]]:
     """Retain sanitized schema metadata through its one consumer."""
 
-    policy = (
-        bind_runtime_resource_policy(resource_policy) or RuntimeResourcePolicy.capture()
-    )
-    root = Path(project_root)
-    declared_important_columns = (
-        () if important_null_count_columns is None else important_null_count_columns
-    )
-    if any(
-        type(column) is not str or not column for column in declared_important_columns
-    ):
-        raise ValueError("schema_inventory_important_columns_invalid")
-    important_columns = frozenset(declared_important_columns)
-    data_root = root / "data"
-    for candidate in (
-        root,
-        data_root,
-        *(data_root / layer for layer in sorted(RUN_RESULT_DATASET_LAYERS)),
-    ):
-        require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
-    with runtime_resource_policy_scope(policy), ExitStack() as retained:
-        items: list[dict[str, Any]] = []
-        retained_item_bytes = 0
-        for artifact_root in _iter_dataset_artifact_roots(root):
+    with runtime_resource_policy_scope(resource_policy) as policy:
+        root = Path(project_root)
+        declared_important_columns = (
+            () if important_null_count_columns is None else important_null_count_columns
+        )
+        if any(
+            type(column) is not str
+            or not column
+            for column in declared_important_columns
+        ):
+            raise ValueError("schema_inventory_important_columns_invalid")
+        important_columns = frozenset(declared_important_columns)
+        data_root = root / "data"
+        for candidate in (
+            root,
+            data_root,
+            *(data_root / layer for layer in sorted(RUN_RESULT_DATASET_LAYERS)),
+        ):
+            require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
+        with ExitStack() as retained:
+            items: list[dict[str, Any]] = []
+            retained_item_bytes = 0
+            for artifact_root in _iter_dataset_artifact_roots(root):
+                try:
+                    item, item_bytes = _inventory_item(
+                        root,
+                        artifact_root,
+                        important_null_count_columns=important_columns,
+                        resource_policy=policy,
+                        retained_items=retained,
+                    )
+                except MemoryError:
+                    raise ValueError(
+                        "schema_inventory_payload_exceeds_task_memory_budget"
+                    ) from None
+                items.append(item)
+                retained_item_bytes += item_bytes
+            if not items:
+                raise ValueError("schema_inventory_no_datasets_found")
+            render_bound = 128 + retained_item_bytes + 2 * len(items)
             try:
-                item, item_bytes = _inventory_item(
-                    root,
-                    artifact_root,
-                    important_null_count_columns=important_columns,
-                    resource_policy=policy,
-                    retained_items=retained,
+                retained.enter_context(
+                    policy.reserve(
+                        "schema.inventory.consumer_overlap",
+                        render_bound + len(items) * sys.getsizeof(None),
+                    )
                 )
             except MemoryError:
                 raise ValueError(
                     "schema_inventory_payload_exceeds_task_memory_budget"
                 ) from None
-            items.append(item)
-            retained_item_bytes += item_bytes
-        if not items:
-            raise ValueError("schema_inventory_no_datasets_found")
-        render_bound = 128 + retained_item_bytes + 2 * len(items)
-        try:
-            retained.enter_context(
-                policy.reserve(
-                    "schema.inventory.consumer_overlap",
-                    render_bound + len(items) * sys.getsizeof(None),
+            payload = {
+                "schema_id": "qrp-schema-inventory",
+                "datasets": sorted(
+                    items,
+                    key=lambda item: item["logical_relative_root"],
+                ),
+            }
+            try:
+                bounded_rendered_qrp_json_object_size(
+                    payload,
+                    lazy_arrays={},
+                    max_bytes=render_bound,
                 )
-            )
-        except MemoryError:
-            raise ValueError(
-                "schema_inventory_payload_exceeds_task_memory_budget"
-            ) from None
-        payload = {
-            "schema_id": "qrp-schema-inventory",
-            "datasets": sorted(items, key=lambda item: item["logical_relative_root"]),
-        }
-        try:
-            bounded_rendered_qrp_json_object_size(
-                payload,
-                lazy_arrays={},
-                max_bytes=render_bound,
-            )
-        except (MemoryError, ValueError):
-            raise ValueError(
-                "schema_inventory_payload_exceeds_task_memory_budget"
-            ) from None
-        yield payload
+            except (MemoryError, ValueError):
+                raise ValueError(
+                    "schema_inventory_payload_exceeds_task_memory_budget"
+                ) from None
+            yield payload
 
 
 def summarize_schema_inventory_payload(

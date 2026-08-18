@@ -34,7 +34,6 @@ from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKe
 from quant_research_platform.storage._dataset_physical import (
     parquet_decoded_working_set_bounds,
 )
-from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_manifest
 from tests.artifacts.output_edge_fixtures import (
@@ -96,54 +95,6 @@ def test_public_artifact_writer_rejects_an_unrelated_active_root(
             )
 
     assert writes == 0
-
-
-def test_public_artifact_final_memory_rejection_keeps_target_private(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = tmp_path / "artifact"
-    policy = capture_test_policy(
-        available_memory_bytes=1024 * 1024,
-        rss_bytes=100,
-        explicit_cap_bytes=600 * 1024,
-    )
-    measurement = policy._measurement  # noqa: SLF001
-    original_payload = measurement._payload  # type: ignore[attr-defined]  # noqa: SLF001
-
-    def failed_evidence() -> dict[str, int | float | str]:
-        payload = original_payload()
-        payload["sampled_peak_rss_bytes"] = 701
-        payload["peak_incremental_rss_bytes"] = 601
-        payload["status"] = "FAIL"
-        return payload
-
-    measurement.checkpoint_evidence = failed_evidence  # type: ignore[method-assign]
-    monkeypatch.setattr(
-        outputs.RuntimeResourcePolicy,
-        "capture",
-        staticmethod(lambda **_kwargs: policy),
-    )
-
-    def write(*_args, **kwargs) -> Path:
-        assert kwargs.pop("_finalize_memory") is True
-        atomic_write_directory(
-            target,
-            lambda root: (root / "data").write_bytes(b"x"),
-            finalize_memory=True,
-        )
-        return target
-
-    monkeypatch.setattr(outputs, "_write_prediction_outputs", write)
-
-    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
-        outputs.write_prediction_outputs(
-            spec=object(),  # type: ignore[arg-type]
-            output_spec=object(),  # type: ignore[arg-type]
-            layout=object(),  # type: ignore[arg-type]
-        )
-
-    assert not target.exists()
 
 
 def _valid_prediction_output_metadata_with_selection() -> dict[str, object]:

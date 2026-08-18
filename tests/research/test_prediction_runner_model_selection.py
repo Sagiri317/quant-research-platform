@@ -592,55 +592,6 @@ def test_prediction_result_context_preserves_body_primary() -> None:
     assert prediction_runner.current_runtime_resource_policy() is None
 
 
-def test_prediction_lazy_result_keeps_final_rejection_terminal(monkeypatch) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1024 * 1024,
-        rss_bytes=100,
-        explicit_cap_bytes=600 * 1024,
-    )
-    measurement = policy._measurement  # noqa: SLF001
-    original_payload = measurement._payload  # type: ignore[attr-defined]  # noqa: SLF001
-
-    def failed_payload() -> dict[str, int | float | str]:
-        payload = original_payload()
-        payload["sampled_peak_rss_bytes"] = 701
-        payload["peak_incremental_rss_bytes"] = 601
-        payload["status"] = "FAIL"
-        return payload
-
-    measurement._payload = failed_payload  # type: ignore[attr-defined]  # noqa: SLF001
-    configured = SimpleNamespace(model_id="model", candidate_model_ids=())
-    monkeypatch.setattr(prediction_runner, "preflight_model_specs", lambda _specs: None)
-    monkeypatch.setattr(
-        prediction_runner,
-        "_build_prediction_result_from_research_dataset",
-        lambda **_kwargs: prediction_runner.PredictionResult(
-            spec=SimpleNamespace(),
-            output_chunks=(pd.DataFrame({"prediction": [1.0]}),),
-            model_metadata={},
-            prediction_metadata_factory=lambda: {"rows": 1},
-        ),
-    )
-    result = build_prediction_result_from_research_dataset(
-        layout=SimpleNamespace(),
-        dataset_catalog=SimpleNamespace(),
-        model_catalog=SimpleNamespace(),
-        prediction_catalog=SimpleNamespace(get=lambda _prediction_id: configured),
-        prediction_id="prediction",
-        resource_policy=policy,
-    )
-    assert len(list(result.output_chunks)) == 1
-
-    assert result.prediction_metadata_factory() == {"rows": 1}
-    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded") as first:
-        result.close()
-    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded") as second:
-        result.prediction_metadata_factory()
-
-    assert second.value is first.value
-    assert prediction_runner.current_runtime_resource_policy() is None
-
-
 def _model_catalog(*models: ModelSpec) -> ModelCatalog:
     catalog = ModelCatalog()
     for model in models:

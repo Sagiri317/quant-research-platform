@@ -24,18 +24,13 @@ from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
 
 def _write_in_resource_root(writer: Callable[[], Path]) -> Path:
-    if current_runtime_resource_policy() is not None:
-        raise RuntimeError("runtime_resource_policy_competing_root")
-    policy = RuntimeResourcePolicy.capture()
-    with runtime_resource_policy_scope(policy):
+    with runtime_resource_policy_scope(None):
         return writer()
 
 
