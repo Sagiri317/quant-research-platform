@@ -333,11 +333,22 @@ def active_runtime_resource_policy() -> RuntimeResourcePolicy:
 
 @contextmanager
 def runtime_resource_policy_scope(
-    policy: RuntimeResourcePolicy,
+    policy: RuntimeResourcePolicy | None,
+    *,
+    explicit_cap_bytes: int | None = None,
 ) -> Iterator[RuntimeResourcePolicy]:
     global _ACTIVE_RUNTIME_RESOURCE_POLICY
-    if type(policy) is not RuntimeResourcePolicy:
-        raise TypeError("invalid_runtime_resource_policy")
+    if policy is None:
+        if current_runtime_resource_policy() is not None:
+            raise RuntimeError("runtime_resource_policy_competing_root")
+        policy = RuntimeResourcePolicy.capture(
+            explicit_cap_bytes=explicit_cap_bytes,
+        )
+    else:
+        if explicit_cap_bytes is not None:
+            raise ValueError("invalid_runtime_resource_explicit_cap")
+        if type(policy) is not RuntimeResourcePolicy:
+            raise TypeError("invalid_runtime_resource_policy")
     active = current_runtime_resource_policy()
     if active is not None and active is not policy:
         raise RuntimeError("runtime_resource_policy_conflict")

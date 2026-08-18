@@ -60,6 +60,67 @@ def test_scope_is_same_object_reentrant_and_rejects_other_root() -> None:
     assert current_runtime_resource_policy() is None
 
 
+def test_scope_none_is_the_sole_new_root_opener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[int | None] = []
+    original_capture = RuntimeResourcePolicy.capture
+
+    def capture(
+        cls: type[RuntimeResourcePolicy],
+        *,
+        explicit_cap_bytes: int | None = None,
+    ) -> RuntimeResourcePolicy:
+        captured.append(explicit_cap_bytes)
+        return original_capture(
+            explicit_cap_bytes=1 * 1024 * 1024,
+        )
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "capture", classmethod(capture))
+    with runtime_resource_policy_scope(
+        None,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    ) as policy:
+        assert current_runtime_resource_policy() is policy
+    assert current_runtime_resource_policy() is None
+    assert captured == [1 * 1024 * 1024]
+
+
+def test_scope_none_rejects_active_root_without_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_capture(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("scope(None) must not capture under an active root")
+
+    active = _policy(1)
+    monkeypatch.setattr(RuntimeResourcePolicy, "capture", classmethod(fail_capture))
+    with runtime_resource_policy_scope(active):
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime_resource_policy_competing_root$",
+        ):
+            with runtime_resource_policy_scope(None):
+                pass
+
+
+def test_explicit_scope_validates_without_capturing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_capture(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("explicit scope must not capture")
+
+    policy = _policy(1)
+    monkeypatch.setattr(RuntimeResourcePolicy, "capture", classmethod(fail_capture))
+    with pytest.raises(ValueError, match="invalid_runtime_resource_explicit_cap"):
+        with runtime_resource_policy_scope(
+            policy,
+            explicit_cap_bytes=1 * 1024 * 1024,
+        ):
+            pass
+    with runtime_resource_policy_scope(policy) as scoped:
+        assert scoped is policy
+
+
 def test_retired_policy_cannot_start_a_second_root() -> None:
     retired = _policy(1)
     with runtime_resource_policy_scope(retired):
