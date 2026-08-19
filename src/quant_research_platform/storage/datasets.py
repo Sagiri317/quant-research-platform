@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -40,11 +40,19 @@ def _reject_unrelated_active_root() -> None:
 
 def write_dataset(
     dataset_root: Path,
-    data: pd.DataFrame | Iterable[pd.DataFrame],
+    data: pd.DataFrame | list[pd.DataFrame] | tuple[pd.DataFrame, ...],
     *,
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
 ) -> None:
+    if not (
+        type(data) is pd.DataFrame
+        or (
+            type(data) in (list, tuple)
+            and all(type(frame) is pd.DataFrame for frame in data)
+        )
+    ):
+        raise TypeError("invalid_dataset_write_input")
     _reject_unrelated_active_root()
     _write_dataset(
         dataset_root,

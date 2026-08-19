@@ -69,26 +69,77 @@ def _write_arrow_value_artifact(
 def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(
     tmp_path: Path,
 ) -> None:
-    iterated = False
-
-    def chunks():
-        nonlocal iterated
-        iterated = True
-        yield make_default_dataset_frame(
-            asset_ids=("asset_001",),
-            dates=("2014-01-02",),
-            values=(1.0,),
-        )
+    frame = make_default_dataset_frame(
+        asset_ids=("asset_001",),
+        dates=("2014-01-02",),
+        values=(1.0,),
+    )
 
     with pytest.raises(ValueError, match="outside_local_only_boundary"):
         write_dataset(
             tmp_path / "outside-local-only" / "x",
-            chunks(),
+            frame,
             spec=make_processed_dataset_spec(),
         )
 
-    assert not iterated
     assert not (tmp_path / "public" / "x").exists()
+
+
+def test_public_dataset_writer_rejects_lazy_input_before_iteration(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "lazy_input")
+
+    class DangerousLazyInput:
+        iter_called = False
+
+        def __iter__(self) -> DangerousLazyInput:
+            self.iter_called = True
+            return self
+
+    data = DangerousLazyInput()
+    with pytest.raises(TypeError, match="invalid_dataset_write_input"):
+        write_dataset(root, data, spec=make_processed_dataset_spec("lazy_input"))  # type: ignore[arg-type]
+
+    assert data.iter_called is False
+    assert not root.exists()
+
+
+def test_public_dataset_writer_validates_concrete_sequence_elements(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "invalid_sequence")
+
+    with pytest.raises(TypeError, match="invalid_dataset_write_input"):
+        write_dataset(
+            root,
+            [make_default_dataset_frame(), object()],  # type: ignore[list-item]
+            spec=make_processed_dataset_spec("invalid_sequence"),
+        )
+
+    assert not root.exists()
+
+
+def test_public_dataset_writer_accepts_exact_frame_sequences(
+    tmp_path: Path,
+) -> None:
+    frame = make_default_dataset_frame()
+    roots = (
+        make_dataset_artifact_root(tmp_path, "list_input"),
+        make_dataset_artifact_root(tmp_path, "tuple_input"),
+    )
+
+    for root, data in zip(
+        roots,
+        ([frame.iloc[:2], frame.iloc[2:]], (frame.iloc[:2], frame.iloc[2:])),
+        strict=True,
+    ):
+        write_dataset(root, data, spec=make_processed_dataset_spec(root.name))
+
+    assert (
+        fingerprint_dataset(roots[0]).content_hash
+        == fingerprint_dataset(roots[1]).content_hash
+    )
 
 
 def test_dataset_writer_accepts_private_processed_artifact_root(tmp_path: Path) -> None:

@@ -928,7 +928,7 @@ def test_panel_dependencies_remain_asset_major_across_year_partitions(
     )
     write_dataset(
         panel_root,
-        iter((asset_a, asset_b)),
+        (asset_a, asset_b),
         spec=processed_catalog().get("market_panel_1m"),
     )
 

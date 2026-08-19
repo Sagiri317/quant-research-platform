@@ -480,7 +480,7 @@ def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) ->
     )
     write_dataset(
         chunked_root,
-        (chunk for chunk in [frame.iloc[:1].copy(), frame.iloc[1:].copy()]),
+        (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
         spec=make_processed_dataset_spec("chunked"),
     )
 
@@ -703,7 +703,7 @@ def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None
     empty_chunk = make_default_dataset_frame().iloc[:0].copy()
 
     write_dataset(
-        root, iter([empty_chunk]), spec=make_processed_dataset_spec("empty_schema")
+        root, [empty_chunk], spec=make_processed_dataset_spec("empty_schema")
     )
 
     manifest = json.loads(
@@ -721,17 +721,17 @@ def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None
 
 
 def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> None:
-    with pytest.raises(TypeError, match="invalid_dataset_chunk"):
+    with pytest.raises(TypeError, match="invalid_dataset_write_input"):
         write_dataset(
             make_dataset_artifact_root(tmp_path, "invalid"),
-            iter([make_default_dataset_frame().iloc[:1], {"not": "a frame"}]),
+            [make_default_dataset_frame().iloc[:1], {"not": "a frame"}],
             spec=make_processed_dataset_spec("invalid"),
         )
 
     with pytest.raises(ValueError, match="empty_dataset_schema_missing"):
         write_dataset(
             make_dataset_artifact_root(tmp_path, "empty_iterable"),
-            iter(()),
+            (),
             spec=make_processed_dataset_spec("empty_iterable"),
         )
 
@@ -2752,7 +2752,7 @@ def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
     with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
         write_dataset(
             root,
-            iter((frame, frame.iloc[[0]].copy())),
+            (frame, frame.iloc[[0]].copy()),
             spec=make_processed_dataset_spec("duplicate_across_chunks"),
         )
 
@@ -3247,11 +3247,9 @@ def test_compare_datasets_statuses_for_semantic_and_schema_differences(
     )
     write_dataset(
         right_root,
-        iter(
-            [
-                make_default_dataset_frame().iloc[:1],
-                make_default_dataset_frame().iloc[1:],
-            ]
+        (
+            make_default_dataset_frame().iloc[:1],
+            make_default_dataset_frame().iloc[1:],
         ),
         spec=make_processed_dataset_spec("right"),
     )
@@ -4621,7 +4619,7 @@ def test_compare_treats_partition_and_file_boundaries_as_layout_only(
     frame = make_default_dataset_frame()
     write_dataset(
         left,
-        iter((frame.iloc[:1], frame.iloc[1:])),
+        (frame.iloc[:1], frame.iloc[1:]),
         spec=make_processed_dataset_spec("layout_left"),
     )
     write_dataset(
@@ -9730,6 +9728,7 @@ def test_string_filter_compact_utf8_sizing_matches_arrow(
 def test_writer_releases_previous_publication_before_requesting_next(
     tmp_path: Path,
 ) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     first = make_default_dataset_frame().iloc[:1].copy()
     second = make_default_dataset_frame().iloc[1:2].copy()
     first_reference = weakref.ref(first)
@@ -9744,8 +9743,9 @@ def test_writer_releases_previous_publication_before_requesting_next(
         yield second
 
     name = "publication_liveness"
-    write_dataset(
+    dataset_writing.write_dataset(
         make_dataset_artifact_root(tmp_path, name),
         publications(),
         spec=make_processed_dataset_spec(name),
+        resource_policy=policy,
     )

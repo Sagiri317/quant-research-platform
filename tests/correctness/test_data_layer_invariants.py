@@ -47,7 +47,7 @@ def test_storage_chunked_write_read_keeps_schema_keys_and_sort_stable(
     frame = make_correctness_dataset_frame(value_column="factor_value")
     write_dataset(
         root,
-        (chunk for chunk in (frame.iloc[:2], frame.iloc[2:])),
+        (frame.iloc[:2], frame.iloc[2:]),
         spec=make_processed_dataset_spec(
             "correctness_demo",
             value_column="factor_value",
