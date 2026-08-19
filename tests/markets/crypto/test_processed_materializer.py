@@ -207,7 +207,7 @@ def test_existing_panel_validation_keeps_policy_active_across_both_iterators(
         ("panel", 0, True),
         ("panel", 1, True),
     ]
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         with runtime_resource_policy_scope(policy):
             pass
 
@@ -264,7 +264,7 @@ def test_existing_panel_validation_retires_policy_after_every_primary(
             retained_payload_bytes=0,
         )
     assert raised.value is primary
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         with runtime_resource_policy_scope(policy):
             pass
 
@@ -2558,7 +2558,7 @@ def _write_existing_panel_dependency(
     )
 
 
-def test_panel_writer_acquires_inputs_with_cumulative_live_session_bytes(
+def test_panel_writer_keeps_all_input_sessions_live_through_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2571,29 +2571,22 @@ def test_panel_writer_acquires_inputs_with_cumulative_live_session_bytes(
     real_open = materialize_panel.open_dataset_session
     real_write = materialize_panel.write_dataset
     live_sessions: list[object] = []
-    acquisitions: list[int] = []
-    opened_retained: list[int] = []
+    opened_sessions = 0
     publication_rows: list[int] = []
 
     @contextmanager
-    def record_open(*args, retained_payload_bytes=0, **kwargs):  # noqa: ANN002, ANN003
-        acquisitions.append(retained_payload_bytes)
-        assert retained_payload_bytes == sum(
-            session.retained_memory_bytes for session in live_sessions
-        )
-        with real_open(
-            *args,
-            retained_payload_bytes=retained_payload_bytes,
-            **kwargs,
-        ) as session:
+    def record_open(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal opened_sessions
+        with real_open(*args, **kwargs) as session:
+            opened_sessions += 1
             live_sessions.append(session)
-            opened_retained.append(session.retained_memory_bytes)
             try:
                 yield session
             finally:
                 live_sessions.remove(session)
 
     def record_write(root, data, **kwargs):  # noqa: ANN001, ANN202
+        assert len(live_sessions) == 3
         def publications():  # noqa: ANN202
             for publication in data:
                 publication_rows.append(len(publication))
@@ -2612,7 +2605,7 @@ def test_panel_writer_acquires_inputs_with_cumulative_live_session_bytes(
         retained_payload_bytes=0,
     )
 
-    assert len(acquisitions) == 3
+    assert opened_sessions == 3
     assert publication_rows
 
 
@@ -2638,11 +2631,12 @@ def test_panel_chunk_keeps_output_admitted_through_consumer_yield(
             retained_payload_bytes=0,
         )
         output = next(chunks)
-        assert policy._ledger.by_owner["crypto.panel.output"] >= (  # noqa: SLF001
-            materialize_panel.pandas_frame_payload_bytes(output)
-        )
+        used_before_close = policy.used_memory_bytes
         chunks.close()
-        assert "crypto.panel.output" not in policy._ledger.by_owner  # noqa: SLF001
+        assert (
+            used_before_close - policy.used_memory_bytes
+            >= materialize_panel.pandas_frame_payload_bytes(output)
+        )
 
 
 def test_existing_panel_dependency_acquires_panel_after_all_live_inputs(
@@ -2660,16 +2654,9 @@ def test_existing_panel_dependency_acquires_panel_after_all_live_inputs(
     acquisitions: list[int] = []
 
     @contextmanager
-    def record_open(*args, retained_payload_bytes=0, **kwargs):  # noqa: ANN002, ANN003
-        acquisitions.append(retained_payload_bytes)
-        assert retained_payload_bytes == sum(
-            session.retained_memory_bytes for session in live_sessions
-        )
-        with real_open(
-            *args,
-            retained_payload_bytes=retained_payload_bytes,
-            **kwargs,
-        ) as session:
+    def record_open(*args, **kwargs):  # noqa: ANN002, ANN003
+        acquisitions.append(len(live_sessions))
+        with real_open(*args, **kwargs) as session:
             live_sessions.append(session)
             try:
                 yield session
@@ -2689,7 +2676,7 @@ def test_existing_panel_dependency_acquires_panel_after_all_live_inputs(
         )
         assert panel_session.retained_memory_bytes > 0
 
-    assert len(acquisitions) == 4
+    assert acquisitions == [0, 1, 2, 3]
 
 
 @pytest.mark.parametrize(

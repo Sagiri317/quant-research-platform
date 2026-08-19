@@ -505,11 +505,6 @@ def _write_dataset_under_policy(
                     columns=None,
                     time_window=None,
                     resource_policy=resource_policy,
-                    retained_payload_bytes=(
-                        _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
-                        - inventory.retained_memory_bytes
-                        + accumulator.retained_payload_bytes
-                    ),
                 )
                 if staged_validator is not None:
                     staged_validator(

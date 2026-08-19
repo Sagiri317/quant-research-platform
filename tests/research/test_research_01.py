@@ -183,7 +183,7 @@ def test_research_dataset_chunk_wrapper_rejects_delayed_consumption(
             dataset_id="dataset",
         )
 
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         next(chunks)
 
 
@@ -692,17 +692,24 @@ def test_research_join_preflights_merged_output_allocation(
     )
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            assembler_module._join_processed_inputs(
-                dataset_spec=SimpleNamespace(primary_key=("id",)),
-                processed_catalog=SimpleNamespace(get=lambda _key: object()),
-                sessions={
-                    "left": SimpleNamespace(retained_memory_bytes=0),
-                    "right": SimpleNamespace(retained_memory_bytes=0),
-                },
-                time_window=object(),
-                resource_policy=policy,
-            )
+        blocking_lease = policy.lease(
+            "test.research.merge.capacity",
+            policy.memory_budget_bytes - 700,
+        )
+        try:
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                assembler_module._join_processed_inputs(
+                    dataset_spec=SimpleNamespace(primary_key=("id",)),
+                    processed_catalog=SimpleNamespace(get=lambda _key: object()),
+                    sessions={
+                        "left": SimpleNamespace(retained_memory_bytes=0),
+                        "right": SimpleNamespace(retained_memory_bytes=0),
+                    },
+                    time_window=object(),
+                    resource_policy=policy,
+                )
+        finally:
+            blocking_lease.close()
 
 
 def test_research_join_preflights_final_projection_allocation(
@@ -765,8 +772,16 @@ def test_research_join_preflights_final_projection_allocation(
     )
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            next(chunks)
+        blocking_lease = policy.lease(
+            "test.research.projection.capacity",
+            policy.memory_budget_bytes
+            - (2 * assembler_module._frame_bytes(frame) + 1),
+        )
+        try:
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                next(chunks)
+        finally:
+            blocking_lease.close()
 
 
 def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:

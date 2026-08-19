@@ -784,7 +784,6 @@ def _open_input_dataset_sessions(
                     columns=columns,
                     time_window=time_window,
                     resource_policy=resource_policy,
-                    retained_payload_bytes=resource_policy.reserved_memory_bytes,
                 ),
             )
         except ValueError as exc:

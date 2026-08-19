@@ -4591,36 +4591,6 @@ def test_compare_requires_exact_proof_after_forced_fingerprint_collision(
         changed,
         spec=make_processed_dataset_spec("collision_right"),
     )
-    real_open = dataset_comparison.open_dataset_session
-    real_index = dataset_comparison.ExactPrimaryKeyIndex
-    active_indexes: list[dataset_comparison.ExactPrimaryKeyIndex] = []
-    acquisitions: list[tuple[int, int | None]] = []
-
-    class RecordingIndex(real_index):
-        def __enter__(self):  # noqa: ANN204
-            opened = super().__enter__()
-            active_indexes.append(self)
-            return opened
-
-        def __exit__(self, exc_type, exc_value, traceback):  # noqa: ANN001, ANN204
-            try:
-                return super().__exit__(exc_type, exc_value, traceback)
-            finally:
-                active_indexes.remove(self)
-
-    @contextmanager
-    def record_open(*args, retained_payload_bytes=0, **kwargs):  # noqa: ANN002, ANN003
-        expected = active_indexes[-1].retained_memory_bytes if active_indexes else None
-        acquisitions.append((retained_payload_bytes, expected))
-        with real_open(
-            *args,
-            retained_payload_bytes=retained_payload_bytes,
-            **kwargs,
-        ) as session:
-            yield session
-
-    monkeypatch.setattr(dataset_comparison, "ExactPrimaryKeyIndex", RecordingIndex)
-    monkeypatch.setattr(dataset_comparison, "open_dataset_session", record_open)
     collision = fingerprint_dataset(left)
     monkeypatch.setattr(
         dataset_comparison,
@@ -4640,10 +4610,6 @@ def test_compare_requires_exact_proof_after_forced_fingerprint_collision(
         "extra_row_count": 0,
         "changed_row_count": 1,
     }
-    exact_acquisitions = [pair for pair in acquisitions if pair[1] is not None]
-    assert len(exact_acquisitions) == 4
-    assert all(retained > expected for retained, expected in exact_acquisitions)
-    assert len({retained - expected for retained, expected in exact_acquisitions}) == 1
 
 
 def test_compare_treats_partition_and_file_boundaries_as_layout_only(
@@ -5438,7 +5404,6 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
         root,
         columns=None,
         time_window=None,
-        retained_payload_bytes=dataset_comparison.EXACT_KEY_SQLITE_PAGE_BYTES,
     ) as session:
         session_retained_bytes = session.retained_memory_bytes
 
@@ -5814,7 +5779,6 @@ def test_session_from_inventory_admits_lease_before_metadata_decode(
                         columns=None,
                         time_window=None,
                         resource_policy=policy,
-                        retained_payload_bytes=0,
                     )
             finally:
                 blocking_lease.close()
@@ -5924,7 +5888,6 @@ def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
                         columns=None,
                         time_window=None,
                         resource_policy=policy,
-                        retained_payload_bytes=policy.task_memory_budget_bytes - 1,
                     ):
                         pass
                 else:
@@ -5934,11 +5897,6 @@ def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
                         columns=None,
                         time_window=None,
                         resource_policy=policy,
-                        retained_payload_bytes=(
-                            policy.task_memory_budget_bytes
-                            - source.inventory.retained_memory_bytes
-                            - 1
-                        ),
                     )
 
     assert metadata_reads == 0
@@ -6516,7 +6474,6 @@ def test_session_filter_reuses_prepared_values(
             ("asset_id", "in", values),
         ),
         resource_policy=policy,
-        retained_payload_bytes=0,
     ) as session:
         chunks = list(
             dataset_reading.iter_dataset_chunks(session, target_chunk_bytes=512)

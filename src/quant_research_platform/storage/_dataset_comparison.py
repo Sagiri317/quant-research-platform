@@ -90,7 +90,6 @@ def _compare_datasets_under_policy(
             columns=columns,
             time_window=time_window,
             resource_policy=issued_policy,
-            retained_payload_bytes=0,
         ) as left_context:
             left = fingerprint_dataset_session(
                 left_context, resource_policy=issued_policy
@@ -109,7 +108,6 @@ def _compare_datasets_under_policy(
             columns=columns,
             time_window=time_window,
             resource_policy=issued_policy,
-            retained_payload_bytes=left_retained_bytes,
         ) as right_context:
             right = fingerprint_dataset_session(
                 right_context,
@@ -242,9 +240,6 @@ def _exact_comparison_counts(
                 columns=columns,
                 time_window=time_window,
                 resource_policy=resource_policy,
-                retained_payload_bytes=(
-                    retained_payload_bytes + index.retained_memory_bytes
-                ),
             ) as context:
                 if _session_identity_token(context) != expected_identity:
                     raise ValueError("dataset_identity_changed_during_comparison")
@@ -275,7 +270,6 @@ def _index_dataset_rows(
         columns=columns,
         time_window=time_window,
         resource_policy=resource_policy,
-        retained_payload_bytes=(retained_payload_bytes + index.retained_memory_bytes),
     ) as context:
         if _session_identity_token(context) != expected_identity:
             raise ValueError("dataset_identity_changed_during_comparison")

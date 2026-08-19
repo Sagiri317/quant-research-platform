@@ -46,7 +46,6 @@ def inspect_dataset(
         time_window=time_window,
         require_consumable=False,
         resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
     ) as context:
         return inspect_dataset_session(
             context,

@@ -284,7 +284,6 @@ def read_materialized_dataset(
         columns=None if columns is None else tuple(columns),
         time_window=time_window,
         resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
         row_filters=(() if asset_ids is None else ((asset_column, "in", asset_ids),)),
     ) as session:
         return materialize_dataset_session(
@@ -338,7 +337,6 @@ def iter_dataset_chunks_with_policy(
             columns=None if columns is None else tuple(columns),
             time_window=time_window,
             resource_policy=bound_policy,
-            retained_payload_bytes=retained_payload_bytes,
             row_filters=(
                 () if asset_ids is None else ((asset_column, "in", asset_ids),)
             ),

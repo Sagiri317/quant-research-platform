@@ -26,8 +26,6 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
-    bind_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
@@ -56,19 +54,15 @@ def materialize_processed_data(
 ) -> dict[str, DatasetInspection]:
     """Materialize registered crypto processed datasets from local interim data."""
 
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
-    policy = bound_policy or active_runtime_resource_policy()
-    return _materialize_processed_data_with_policy(
-        layout=layout,
-        source_id=source_id,
-        time_window=time_window,
-        data_ids=data_ids,
-        kinds=kinds,
-        resource_policy=policy,
-    )
+    with runtime_resource_policy_scope(resource_policy) as policy:
+        return _materialize_processed_data_with_policy(
+            layout=layout,
+            source_id=source_id,
+            time_window=time_window,
+            data_ids=data_ids,
+            kinds=kinds,
+            resource_policy=policy,
+        )
 
 
 def _materialize_processed_data_with_policy(
@@ -179,10 +173,6 @@ def _materialize_requested_specs(
                     columns=None,
                     time_window=target_time_window,
                     resource_policy=resource_policy,
-                    retained_payload_bytes=sum(
-                        dataset_inspection_retained_memory_bytes(inspection)
-                        for inspection in written.values()
-                    ),
                 ),
             )
     return written
@@ -216,11 +206,6 @@ def _inspect_existing_dependency(
                     columns=None,
                     time_window=time_window,
                     resource_policy=resource_policy,
-                    retained_payload_bytes=sum(
-                        session.retained_memory_bytes
-                        for session in input_sessions.values()
-                    )
-                    + retained_payload_bytes,
                 ),
             )
         expected_input_identities = materialization_validation.input_dataset_identities(
@@ -235,7 +220,6 @@ def _inspect_existing_dependency(
                 columns=None,
                 time_window=time_window,
                 resource_policy=resource_policy,
-                retained_payload_bytes=retained_input_bytes + retained_payload_bytes,
             ),
         )
         inspection = inspect_dataset_session(

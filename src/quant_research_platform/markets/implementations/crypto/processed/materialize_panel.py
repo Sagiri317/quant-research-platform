@@ -77,11 +77,6 @@ def write_panel(
                     columns=None,
                     time_window=input_time_window,
                     resource_policy=resource_policy,
-                    retained_payload_bytes=sum(
-                        session.retained_memory_bytes
-                        for session in input_sessions.values()
-                    )
-                    + retained_payload_bytes,
                 )
             )
         input_identities = validation.input_dataset_identities(input_sessions)

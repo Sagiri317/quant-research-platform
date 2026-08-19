@@ -408,7 +408,6 @@ def _inventory_item(
         time_window=None,
         require_consumable=False,
         resource_policy=resource_policy,
-        retained_payload_bytes=0,
     ) as session:
         return _inventory_item_from_session(
             project_root,

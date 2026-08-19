@@ -47,7 +47,6 @@ def fingerprint_dataset(
         columns=columns,
         time_window=time_window,
         resource_policy=resource_policy,
-        retained_payload_bytes=0,
     ) as context:
         return fingerprint_dataset_session(
             context,

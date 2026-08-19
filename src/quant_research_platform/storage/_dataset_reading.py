@@ -230,7 +230,6 @@ def read_dataset(
                         columns=columns,
                         time_window=time_window,
                         resource_policy=bound_policy,
-                        retained_payload_bytes=0,
                     ) as context:
                         yield from iter_dataset_chunks(
                             context,
@@ -244,7 +243,6 @@ def read_dataset(
                 columns=columns,
                 time_window=time_window,
                 resource_policy=bound_policy,
-                retained_payload_bytes=0,
             ) as context:
                 yield from iter_dataset_chunks(
                     context,
@@ -261,7 +259,6 @@ def read_dataset(
         columns=columns,
         time_window=time_window,
         resource_policy=resource_policy,
-        retained_payload_bytes=0,
     ) as context:
         return materialize_dataset_session(
             context,
@@ -718,7 +715,6 @@ def open_dataset_session(
     row_filters: tuple[tuple[str, str, Any], ...] = (),
     require_consumable: bool = True,
     resource_policy: RuntimeResourcePolicy | None = None,
-    retained_payload_bytes: int = 0,
 ) -> Iterator[DatasetSession]:
     root = require_artifact_root(Path(dataset_root))
     spec_path = root / "spec.json"
@@ -739,8 +735,6 @@ def open_dataset_session(
     except (OSError, ValueError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
     issued_policy = resource_policy or active_runtime_resource_policy()
-    if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
-        raise ValueError("invalid_dataset_session_retained_payload_bytes")
     with runtime_resource_policy_scope(issued_policy):
         spec_stat_span_bytes = spec_identity.size
         manifest_stat_span_bytes = manifest_identity.size
@@ -816,7 +810,6 @@ def open_dataset_session(
                 row_filters=row_filters,
                 require_consumable=require_consumable,
                 resource_policy=issued_policy,
-                retained_payload_bytes=retained_payload_bytes,
                 owns_inventory=True,
                 session_lease=session_lease,
             )
@@ -837,12 +830,9 @@ def dataset_session_from_inventory(
     columns: tuple[str, ...] | list[str] | None,
     time_window: TimeWindow | None,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
 ) -> DatasetSession:
     """Freeze a writer receipt without reopening already observed Parquet parts."""
 
-    if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
-        raise ValueError("invalid_dataset_session_retained_payload_bytes")
     root = require_artifact_root(Path(dataset_root))
     data_root = root / "data"
     spec_path = root / "spec.json"
@@ -895,7 +885,6 @@ def dataset_session_from_inventory(
         row_filters=(),
         require_consumable=True,
         resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
         owns_inventory=False,
         session_lease=session_lease,
     )
@@ -917,7 +906,6 @@ def _build_dataset_session(
     row_filters: tuple[tuple[str, str, Any], ...],
     require_consumable: bool,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
     owns_inventory: bool,
     session_lease: MemoryLease,
 ) -> DatasetSession:
