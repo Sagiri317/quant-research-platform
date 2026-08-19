@@ -58,6 +58,16 @@ _STALE_SWEEP_FAILURE_TYPES = (
 _NAMESPACE_PRIMARY_TYPES = (OSError, KeyboardInterrupt)
 
 
+def _open_inventory_for_failure(data_root: Path, scratch_parent: Path):
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    with runtime_resource_policy_scope(policy):
+        return inventory_owner.DatasetSessionInventory(
+            data_root=data_root,
+            scratch_parent=scratch_parent,
+            resource_policy=policy,
+        )
+
+
 def test_owned_file_stale_sweep_attempts_all_and_preserves_first_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -378,10 +388,9 @@ def test_creator_rechecks_parent_reference_before_payload_use(
                 scratch_parent=parent,
             ).__enter__()
         else:
-            operation = lambda: inventory_owner.DatasetSessionInventory(  # noqa: E731
-                data_root=tmp_path / "data",
-                scratch_parent=parent,
-                task_memory_budget_bytes=1024,
+            operation = lambda: _open_inventory_for_failure(  # noqa: E731
+                tmp_path / "data",
+                parent,
             )
 
     caught: BaseException | None = None
@@ -417,10 +426,9 @@ def test_creator_rechecks_parent_reference_before_payload_use(
         (
             inventory_owner,
             ".i-",
-            lambda scratch, root: inventory_owner.DatasetSessionInventory(
-                data_root=root / "data",
-                scratch_parent=scratch,
-                task_memory_budget_bytes=1024,
+            lambda scratch, root: _open_inventory_for_failure(
+                root / "data",
+                scratch,
             ),
         ),
     ),
@@ -494,11 +502,7 @@ def test_write_and_scratch_owners_reject_aliased_parent_before_access(
             timestamp_columns=(),
             scratch_parent=alias,
         ).__enter__(),
-        lambda: inventory_owner.DatasetSessionInventory(
-            data_root=tmp_path / "data",
-            scratch_parent=alias,
-            task_memory_budget_bytes=1024,
-        ),
+        lambda: _open_inventory_for_failure(tmp_path / "data", alias),
     )
 
     for operation in operations:
@@ -520,10 +524,9 @@ def test_write_and_scratch_owners_reject_aliased_parent_before_access(
         ),
         (
             inventory_owner,
-            lambda scratch: inventory_owner.DatasetSessionInventory(
-                data_root=scratch.parent / "data",
-                scratch_parent=scratch,
-                task_memory_budget_bytes=1024,
+            lambda scratch: _open_inventory_for_failure(
+                scratch.parent / "data",
+                scratch,
             ),
         ),
     ),
@@ -576,10 +579,9 @@ def test_scratch_owner_cleans_retained_temp_after_post_create_gate_failure(
         ),
         (
             inventory_owner,
-            lambda scratch: inventory_owner.DatasetSessionInventory(
-                data_root=scratch.parent / "data",
-                scratch_parent=scratch,
-                task_memory_budget_bytes=1024,
+            lambda scratch: _open_inventory_for_failure(
+                scratch.parent / "data",
+                scratch,
             ),
         ),
     ),
@@ -1501,10 +1503,9 @@ def test_file_creator_does_not_delete_post_claim_replacement(
         (
             inventory_owner,
             inventory_owner.DatasetSessionInventory,
-            lambda scratch: inventory_owner.DatasetSessionInventory(
-                data_root=scratch.parent / "data",
-                scratch_parent=scratch,
-                task_memory_budget_bytes=1024,
+            lambda scratch: _open_inventory_for_failure(
+                scratch.parent / "data",
+                scratch,
             ),
         ),
     ),
@@ -1552,10 +1553,9 @@ def test_scratch_creator_is_cleanup_owned_before_instance_assignment(
             timestamp_columns=(),
             scratch_parent=scratch,
         ).__enter__(),
-        lambda scratch: inventory_owner.DatasetSessionInventory(
-            data_root=scratch.parent / "data",
-            scratch_parent=scratch,
-            task_memory_budget_bytes=1024,
+        lambda scratch: _open_inventory_for_failure(
+            scratch.parent / "data",
+            scratch,
         ),
     ),
     ids=("exact-primary-key-index", "dataset-session-inventory"),
@@ -1794,10 +1794,9 @@ def test_directory_callers_stop_before_foreign_file_side_effect(
             lambda path: replace_after_create(real_create, path),
         )
         monkeypatch.setattr(inventory_owner.sqlite3, "connect", connect)
-        operation = lambda: inventory_owner.DatasetSessionInventory(  # noqa: E731
-            data_root=tmp_path / "data",
-            scratch_parent=scratch_parent,
-            task_memory_budget_bytes=1024,
+        operation = lambda: _open_inventory_for_failure(  # noqa: E731
+            tmp_path / "data",
+            scratch_parent,
         )
     else:
         real_create = atomic.create_owned_scratch
@@ -1960,7 +1959,7 @@ def test_chunked_read_rejects_delayed_consumption_after_outer_exit(
             resource_policy=policy,
         )
 
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         next(chunks)
 
 
@@ -2200,39 +2199,38 @@ class _BodyAndCloseFailingHandle:
         raise OSError("close_secondary")
 
 
+@contextmanager
 def _inventory_with_failing_connection(
     tmp_path: Path,
-) -> inventory_owner.DatasetSessionInventory:
+):
     class FailingConnection:
         def close(self) -> None:
             raise RuntimeError("close_failed")
 
-    inventory = inventory_owner.DatasetSessionInventory(
-        data_root=tmp_path / "data",
-        scratch_parent=tmp_path / "scratch",
-        task_memory_budget_bytes=1024,
-    )
-    assert inventory._connection is not None
-    inventory._connection.close()
-    inventory._connection = FailingConnection()  # type: ignore[assignment]
-    return inventory
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    with runtime_resource_policy_scope(policy):
+        with inventory_owner.DatasetSessionInventory(
+            data_root=tmp_path / "data",
+            scratch_parent=tmp_path / "scratch",
+            resource_policy=policy,
+        ) as inventory:
+            assert inventory._connection is not None
+            inventory._connection.close()
+            inventory._connection = FailingConnection()  # type: ignore[assignment]
+            yield inventory
 
 
 def test_inventory_exit_preserves_generator_exit_primary(tmp_path: Path) -> None:
-    inventory = _inventory_with_failing_connection(tmp_path)
-
     with pytest.raises(GeneratorExit):
-        with inventory:
+        with _inventory_with_failing_connection(tmp_path):
             raise GeneratorExit()
 
 
 def test_inventory_exit_propagates_cleanup_failure_without_primary(
     tmp_path: Path,
 ) -> None:
-    inventory = _inventory_with_failing_connection(tmp_path)
-
     with pytest.raises(RuntimeError, match="close_failed"):
-        with inventory:
+        with _inventory_with_failing_connection(tmp_path):
             pass
 
 

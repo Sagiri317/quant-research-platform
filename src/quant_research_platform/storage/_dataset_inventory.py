@@ -13,7 +13,10 @@ from uuid import uuid4
 
 import pyarrow as pa
 
-from quant_research_platform.runtime.resources import require_free_disk_headroom
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    require_free_disk_headroom,
+)
 from quant_research_platform.storage._dataset_paths import (
     parse_year_partition_label,
     require_unaliased_path,
@@ -83,13 +86,13 @@ class DatasetSessionInventory:
         *,
         data_root: Path,
         scratch_parent: Path,
-        task_memory_budget_bytes: int,
+        resource_policy: RuntimeResourcePolicy,
     ) -> None:
-        if (
-            type(task_memory_budget_bytes) is not int
-            or task_memory_budget_bytes < DATASET_INVENTORY_RESERVE_BYTES
-        ):
-            raise ValueError("dataset_inventory_budget_too_small")
+        self._lease = resource_policy.lease(
+            "storage.dataset.inventory",
+            _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
+        )
+        resource_policy.register_cleanup(self._lease.close)
         self.data_root = Path(data_root)
         self._scratch_parent = Path(scratch_parent)
         require_unaliased_path(
@@ -166,6 +169,7 @@ class DatasetSessionInventory:
             self._connection = connection
             self._next_selection_id = 0
         except BaseException:
+            self._lease.close()
             if connection is not None:
                 try:
                     connection.close()
@@ -179,24 +183,26 @@ class DatasetSessionInventory:
             self._temporary_directory = None
             self._temporary_identity = None
             raise
+        self._lease.shrink_to(DATASET_INVENTORY_RESERVE_BYTES)
 
     def __enter__(self) -> DatasetSessionInventory:
         return self
 
-    def __exit__(self, *_: object) -> None:
-        if _[0] is None:
-            self.close()
-            return
+    def __exit__(
+        self,
+        _exception_type: object,
+        primary: BaseException | None,
+        _traceback: object,
+    ) -> None:
         try:
             self.close()
-        except BaseException:
-            pass
-
-    def __del__(self) -> None:
-        try:
-            self.close()
-        except (AttributeError, OSError, ValueError, sqlite3.Error):
-            pass
+        except BaseException as cleanup_error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "dataset inventory cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
 
     def close(self) -> None:
         connection = getattr(self, "_connection", None)
@@ -205,19 +211,32 @@ class DatasetSessionInventory:
         self._connection = None
         self._temporary_directory = None
         self._temporary_identity = None
+        primary = sys.exception()
         try:
-            if connection is not None:
-                connection.close()
-        except BaseException:
-            if temporary is not None and temporary_identity is not None:
-                try:
+            try:
+                if connection is not None:
+                    connection.close()
+            except BaseException:
+                if temporary is not None and temporary_identity is not None:
+                    try:
+                        remove_owned_scratch(temporary, temporary_identity)
+                    except BaseException:
+                        pass
+                raise
+            else:
+                if temporary is not None and temporary_identity is not None:
                     remove_owned_scratch(temporary, temporary_identity)
-                except BaseException:
-                    pass
+        except BaseException:
+            try:
+                self._lease.close()
+            except BaseException as lease_error:
+                if primary is not None:
+                    primary.add_note(
+                        "dataset inventory lease release also failed: "
+                        f"{type(lease_error).__name__}"
+                    )
             raise
-        else:
-            if temporary is not None and temporary_identity is not None:
-                remove_owned_scratch(temporary, temporary_identity)
+        self._lease.close()
 
     @property
     def scratch_path(self) -> Path:
@@ -227,9 +246,9 @@ class DatasetSessionInventory:
 
     @property
     def retained_memory_bytes(self) -> int:
-        """Return the exact Storage-controlled SQLite cache reserve."""
+        """Return the live root lease for the SQLite cache."""
 
-        return DATASET_INVENTORY_RESERVE_BYTES
+        return self._lease.reserved_bytes
 
     def discover(self, spec: Mapping[str, Any]) -> None:
         """Stream the physical tree into the sole exact inventory owner."""

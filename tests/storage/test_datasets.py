@@ -520,7 +520,11 @@ def test_writer_reserves_complete_fixed_owner_before_sqlite_or_input(
     monkeypatch.setattr(dataset_inventory.sqlite3, "connect", reject_connect)
     policy = capture_test_policy(
         available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 1920,
+        explicit_cap_bytes=(
+            dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+            + dataset_inventory._DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES
+            - 1
+        ),
     )
 
     with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
@@ -1155,7 +1159,10 @@ def test_dataset_file_batches_do_not_credit_implicit_live_reservations(
     exact_headroom = batch.get_total_buffer_size() + pandas_frame_payload_bytes(
         expected
     )
-    policy = _issued_test_policy(exact_headroom + retained_bytes)
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=exact_headroom + retained_bytes,
+    )
     monkeypatch.setattr(
         dataset_reading,
         "iter_dataset_part_batches",
@@ -4106,7 +4113,7 @@ def test_fingerprint_reserves_many_partition_counters_before_traversal(
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 12_288,
+        explicit_cap_bytes=28_000,
     )
     traversals = 0
 
@@ -5715,7 +5722,7 @@ def test_open_dataset_session_owns_and_closes_inventory(tmp_path: Path) -> None:
     assert not scratch.exists()
 
 
-def test_open_dataset_session_counts_caller_retained_before_inventory(
+def test_open_dataset_session_admits_metadata_before_decode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5729,57 +5736,41 @@ def test_open_dataset_session_counts_caller_retained_before_inventory(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
-    retained = 1234
-    spec_bytes, _ = storage_manifests.read_bounded_qrp_json(root / "spec.json")
-    manifest_bytes, _ = storage_manifests.read_bounded_qrp_json(
-        root / "_manifest" / "manifest.json"
-    )
-    observed: list[int] = []
+    metadata_reads = 0
 
-    class StopAfterInventoryBudget:
-        def __init__(self, *, task_memory_budget_bytes, **_kwargs):  # noqa: ANN001, ANN003
-            observed.append(task_memory_budget_bytes)
-            raise RuntimeError("inventory_budget_observed")
+    def reject_metadata_read(*_args: object, **_kwargs: object) -> None:
+        nonlocal metadata_reads
+        metadata_reads += 1
+        raise AssertionError("metadata decode ran before session admission")
 
     monkeypatch.setattr(
-        dataset_reading, "DatasetSessionInventory", StopAfterInventoryBudget
+        dataset_reading,
+        "read_bounded_qrp_json",
+        reject_metadata_read,
     )
 
-    with pytest.raises(RuntimeError, match="inventory_budget_observed"):
-        with dataset_reading.open_dataset_session(
-            root,
-            columns=None,
-            time_window=None,
-            resource_policy=policy,
-            retained_payload_bytes=retained,
-        ):
-            pass
-
-    assert observed == [
-        policy.task_memory_budget_bytes
-        - retained
-        - len(spec_bytes)
-        - len(manifest_bytes)
-        - len(
-            dataset_reading._dataset_file_identity_bytes(
-                dataset_physical.dataset_file_identity(root / "spec.json")
-            )
+    with runtime_resource_policy_scope(policy):
+        blocking_lease = policy.lease(
+            "test.dataset.session.capacity",
+            policy.available_memory_bytes,
         )
-        - len(
-            dataset_reading._dataset_file_identity_bytes(
-                dataset_physical.dataset_file_identity(
-                    root / "_manifest" / "manifest.json"
-                )
-            )
-        )
-    ]
+        try:
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                with dataset_reading.open_dataset_session(
+                    root,
+                    columns=None,
+                    time_window=None,
+                    resource_policy=policy,
+                ):
+                    pass
+        finally:
+            blocking_lease.close()
+    assert metadata_reads == 0
 
 
-@pytest.mark.parametrize("remaining_bytes", (0, 1))
-def test_session_from_inventory_rejects_live_caller_overlap_before_build(
+def test_session_from_inventory_admits_lease_before_metadata_decode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    remaining_bytes: int,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "writer_session_overlap")
     write_dataset(
@@ -5798,24 +5789,12 @@ def test_session_from_inventory_rejects_live_caller_overlap_before_build(
         time_window=None,
         resource_policy=policy,
     ) as source:
-        monkeypatch.setattr(
-            dataset_reading,
-            "_build_dataset_session",
-            lambda **_kwargs: (_ for _ in ()).throw(
-                AssertionError("session build ran before overlap admission")
-            ),
-        )
-        retained = (
-            policy.task_memory_budget_bytes
-            - source.inventory.retained_memory_bytes
-            - remaining_bytes
-        )
         metadata_reads = 0
 
-        def reject_metadata_read(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        def reject_metadata_read(*_args: object, **_kwargs: object) -> None:
             nonlocal metadata_reads
             metadata_reads += 1
-            raise AssertionError("metadata read ran before overlap admission")
+            raise AssertionError("metadata decode ran before session admission")
 
         with monkeypatch.context() as admission_patch:
             admission_patch.setattr(
@@ -5823,73 +5802,24 @@ def test_session_from_inventory_rejects_live_caller_overlap_before_build(
                 "read_bounded_qrp_json",
                 reject_metadata_read,
             )
-            with pytest.raises(
-                storage_errors.DatasetReadCapacityExceeded,
-                match="dataset_session_acquisition_exceeds_task_memory_budget",
-            ):
-                dataset_reading.dataset_session_from_inventory(
-                    root,
-                    inventory=source.inventory,
-                    columns=None,
-                    time_window=None,
-                    resource_policy=policy,
-                    retained_payload_bytes=retained,
-                )
+            blocking_lease = policy.lease(
+                "test.dataset.session.capacity",
+                policy.available_memory_bytes,
+            )
+            try:
+                with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                    dataset_reading.dataset_session_from_inventory(
+                        root,
+                        inventory=source.inventory,
+                        columns=None,
+                        time_window=None,
+                        resource_policy=policy,
+                        retained_payload_bytes=0,
+                    )
+            finally:
+                blocking_lease.close()
 
         assert metadata_reads == 0
-
-
-@pytest.mark.parametrize("remaining_bytes", (0, 1))
-def test_open_dataset_session_rejects_live_caller_overlap_before_build(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    remaining_bytes: int,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "owned_session_overlap")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("owned_session_overlap"),
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=4 * 1024 * 1024,
-    )
-    monkeypatch.setattr(
-        dataset_reading,
-        "_build_dataset_session",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("session build ran before overlap admission")
-        ),
-    )
-    metadata_reads = 0
-
-    def reject_metadata_read(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
-        nonlocal metadata_reads
-        metadata_reads += 1
-        raise AssertionError("metadata read ran before overlap admission")
-
-    monkeypatch.setattr(
-        dataset_reading,
-        "read_bounded_qrp_json",
-        reject_metadata_read,
-    )
-    retained = policy.task_memory_budget_bytes - 1024 - remaining_bytes
-
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="dataset_session_acquisition_exceeds_task_memory_budget",
-    ):
-        with dataset_reading.open_dataset_session(
-            root,
-            columns=None,
-            time_window=None,
-            resource_policy=policy,
-            retained_payload_bytes=retained,
-        ):
-            pass
-
-    assert metadata_reads == 0
 
 
 def test_open_dataset_session_preserves_missing_manifest_preflight(
@@ -6734,7 +6664,6 @@ def test_dataset_filter_preflight_rejects_before_bulk_arrow_array(
             pa.field("asset_id", pa.string()),
             values,
             resource_policy=policy,
-            retained_filter_bytes=0,
         )
     assert bulk_array_called is False
     assert scalar_called is False
@@ -6767,7 +6696,6 @@ def test_dataset_filter_preparation_subtracts_shared_reservations_before_sort(
             pa.field("value", pa.int64()),
             values,
             resource_policy=policy,
-            retained_filter_bytes=0,
         )
 
 
@@ -6796,7 +6724,6 @@ def test_dataset_prepared_in_filter_compacts_sorted_duplicates_without_arrow_uni
         pa.field("value", pa.int64()),
         (2, 1, 1),
         resource_policy=policy,
-        retained_filter_bytes=0,
     )
 
     assert prepared.values.to_pylist() == [1, 2]
@@ -6821,7 +6748,6 @@ def test_dataset_prepared_in_filter_payload_gate_uses_compact_values(
         pa.field("value", data_type),
         values,
         resource_policy=policy,
-        retained_filter_bytes=0,
     )
 
     assert prepared.values.to_pylist() == [value]
@@ -6844,7 +6770,6 @@ def test_dataset_prepared_in_filter_rejects_distinct_equal_string_payloads() -> 
             pa.field("value", pa.string()),
             values,
             resource_policy=policy,
-            retained_filter_bytes=0,
         )
 
 
@@ -6868,7 +6793,6 @@ def test_dataset_prepared_in_filter_accepts_arrow_time_values(
         pa.field("value", data_type),
         values,
         resource_policy=policy,
-        retained_filter_bytes=0,
     )
 
     assert prepared.values.to_pylist() == list(values)
@@ -6899,7 +6823,6 @@ def test_persisted_arrow_time_filters_support_equal_and_membership(
         pa.field("value", data_type),
         (values[0], values[-1]),
         resource_policy=policy,
-        retained_filter_bytes=0,
     )
 
     equal = list(
@@ -6940,7 +6863,6 @@ def test_dataset_prepared_in_filter_rejects_unsupported_arrow_family() -> None:
             pa.field("value", pa.list_(pa.int64())),
             ((1,),),
             resource_policy=policy,
-            retained_filter_bytes=0,
         )
 
 
@@ -6953,7 +6875,6 @@ def test_dataset_prepared_in_filter_accepts_fixed_size_binary() -> None:
         pa.field("value", pa.binary(2)),
         (b"ab", b"cd"),
         resource_policy=policy,
-        retained_filter_bytes=0,
     )
 
     assert prepared.values.to_pylist() == [b"ab", b"cd"]
@@ -6978,7 +6899,6 @@ def test_dataset_filter_preflight_rejects_surrogate_before_arrow(
             pa.field("asset_id", pa.string()),
             ("valid\ud800suffix",),
             resource_policy=policy,
-            retained_filter_bytes=0,
         )
 
 
@@ -7017,7 +6937,6 @@ def test_dataset_binary_filter_preflight_rejects_before_arrow(
             pa.field("payload", data_type),
             values,
             resource_policy=policy,
-            retained_filter_bytes=0,
         )
 
 
@@ -8259,7 +8178,6 @@ def test_physical_membership_preserves_generic_exact_scalar_semantics(
         pa.field("value", data_type),
         members,
         resource_policy=policy,
-        retained_filter_bytes=0,
     )
     batch = pa.RecordBatch.from_arrays(
         [pa.array(source, type=data_type)],
@@ -8286,7 +8204,6 @@ def test_physical_membership_rejects_null_filter_member_before_sort() -> None:
             pa.field("value", pa.int64()),
             (1, None),
             resource_policy=policy,
-            retained_filter_bytes=0,
         )
 
 
@@ -9083,9 +9000,12 @@ def test_chunked_read_defers_session_inventory_until_activation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+    )
 
     class Session:
-        resource_policy = active_runtime_resource_policy()
+        resource_policy = policy
 
         def __enter__(self):  # noqa: ANN204
             return self
@@ -9106,7 +9026,7 @@ def test_chunked_read_defers_session_inventory_until_activation(
     chunks = dataset_reading.read_dataset(
         Path("unused"),
         mode=DatasetReadMode.CHUNKED,
-        resource_policy=active_runtime_resource_policy(),
+        resource_policy=policy,
     )
     assert events == []
     next(chunks, None)
@@ -9181,17 +9101,20 @@ def test_chunked_session_inventory_is_removed_on_early_close(tmp_path: Path) -> 
 def test_dataset_inventory_cleanup_removes_sqlite_sidecars(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
-    inventory = dataset_inventory.DatasetSessionInventory(
-        data_root=data_root,
-        scratch_parent=tmp_path,
-        task_memory_budget_bytes=1024,
-    )
-    scratch = inventory.scratch_path
-    assert (scratch / "i.db").is_file()
-    assert inventory.retained_memory_bytes == 1024
-    assert inventory._connection is not None
-    assert inventory._connection.execute("PRAGMA cache_size").fetchone() == (-1,)
-    inventory.close()
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    with runtime_resource_policy_scope(policy):
+        inventory = dataset_inventory.DatasetSessionInventory(
+            data_root=data_root,
+            scratch_parent=tmp_path,
+            resource_policy=policy,
+        )
+        scratch = inventory.scratch_path
+        assert (scratch / "i.db").is_file()
+        assert inventory.retained_memory_bytes == 1024
+        assert inventory._connection is not None
+        assert inventory._connection.execute("PRAGMA cache_size").fetchone() == (-1,)
+        inventory.close()
+        assert policy.used_memory_bytes == 0
     assert not scratch.exists()
     assert not list(tmp_path.glob(".i-*"))
     assert not list(tmp_path.rglob("i.db-wal"))
@@ -9204,11 +9127,18 @@ def test_dataset_inventory_low_budget_and_inspection_failure_clean_up(
 ) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
-    with pytest.raises(ValueError, match="dataset_inventory_budget_too_small"):
+    low_policy = capture_test_policy(
+        available_memory_bytes=64 * 1024,
+        explicit_cap_bytes=1024,
+    )
+    with (
+        runtime_resource_policy_scope(low_policy),
+        pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"),
+    ):
         dataset_inventory.DatasetSessionInventory(
             data_root=data_root,
             scratch_parent=tmp_path,
-            task_memory_budget_bytes=1023,
+            resource_policy=low_policy,
         )
     assert not list(tmp_path.glob(".i-*"))
 
@@ -9299,11 +9229,15 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
 def test_dataset_inventory_selected_count_is_selection_index_driven(
     tmp_path: Path,
 ) -> None:
-    with dataset_inventory.DatasetSessionInventory(
-        data_root=tmp_path / "data",
-        scratch_parent=tmp_path,
-        task_memory_budget_bytes=1024,
-    ) as inventory:
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    with (
+        runtime_resource_policy_scope(policy),
+        dataset_inventory.DatasetSessionInventory(
+            data_root=tmp_path / "data",
+            scratch_parent=tmp_path,
+            resource_policy=policy,
+        ) as inventory,
+    ):
         connection = inventory._require_connection()
         with connection:
             inventory._gate_physical_write(
@@ -9386,11 +9320,15 @@ def test_dataset_inventory_does_not_claim_all_free_disk_at_startup(
         "require_free_disk_headroom",
         free_bytes,
     )
-    with dataset_inventory.DatasetSessionInventory(
-        data_root=tmp_path / "data",
-        scratch_parent=tmp_path,
-        task_memory_budget_bytes=1024,
-    ) as inventory:
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    with (
+        runtime_resource_policy_scope(policy),
+        dataset_inventory.DatasetSessionInventory(
+            data_root=tmp_path / "data",
+            scratch_parent=tmp_path,
+            resource_policy=policy,
+        ) as inventory,
+    ):
         assert inventory._connection is not None
         page_limit = inventory._connection.execute(
             "PRAGMA main.max_page_count"
@@ -9560,12 +9498,16 @@ def test_dataset_inventory_init_failure_closes_local_connection_and_scratch(
     data_root = tmp_path / "data"
     data_root.mkdir()
     monkeypatch.setattr(dataset_inventory.sqlite3, "connect", lambda _path: connection)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
 
-    with pytest.raises(RuntimeError, match="inventory_init_failed"):
+    with (
+        runtime_resource_policy_scope(policy),
+        pytest.raises(RuntimeError, match="inventory_init_failed"),
+    ):
         dataset_inventory.DatasetSessionInventory(
             data_root=data_root,
             scratch_parent=tmp_path,
-            task_memory_budget_bytes=1024,
+            resource_policy=policy,
         )
 
     assert connection.closed
@@ -9802,7 +9744,6 @@ def test_string_filter_grammar_precedes_capacity_for_surrogate(
             pa.field("value", pa.large_string()),
             ("\ud800",),
             resource_policy=policy,
-            retained_filter_bytes=0,
         )
 
 
@@ -9825,7 +9766,6 @@ def test_string_filter_compact_utf8_sizing_matches_arrow(
         field,
         values,
         resource_policy=policy,
-        retained_filter_bytes=0,
     )
     assert prepared.values.to_pylist() == sorted(set(values))
 

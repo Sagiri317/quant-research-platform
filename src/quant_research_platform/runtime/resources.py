@@ -372,8 +372,6 @@ def _close_runtime_resource_policy(
     primary: BaseException | None,
 ) -> None:
     global _ACTIVE_RUNTIME_RESOURCE_POLICY, _PROCESS_POISONED
-    if _ACTIVE_RUNTIME_RESOURCE_POLICY is policy:
-        _ACTIVE_RUNTIME_RESOURCE_POLICY = None
 
     cleanup_error: BaseException | None = None
     while policy._cleanups:
@@ -393,6 +391,8 @@ def _close_runtime_resource_policy(
     if cleanup_error is not None or outstanding:
         object.__setattr__(policy, "state", "POISONED")
         _PROCESS_POISONED = True
+        if _ACTIVE_RUNTIME_RESOURCE_POLICY is policy:
+            _ACTIVE_RUNTIME_RESOURCE_POLICY = None
         if primary is None:
             if cleanup_error is not None:
                 raise cleanup_error
@@ -404,6 +404,8 @@ def _close_runtime_resource_policy(
     except BaseException as exc:
         object.__setattr__(policy, "state", "POISONED")
         _PROCESS_POISONED = True
+        if _ACTIVE_RUNTIME_RESOURCE_POLICY is policy:
+            _ACTIVE_RUNTIME_RESOURCE_POLICY = None
         if primary is not None:
             primary.add_note(
                 "runtime machine-lock release also failed: "
@@ -412,6 +414,8 @@ def _close_runtime_resource_policy(
             return
         raise RuntimeError("runtime_machine_lock_release_failed") from exc
     object.__setattr__(policy, "state", "CLOSED")
+    if _ACTIVE_RUNTIME_RESOURCE_POLICY is policy:
+        _ACTIVE_RUNTIME_RESOURCE_POLICY = None
 
 
 def pandas_frame_payload_bytes(frame: pd.DataFrame) -> int:

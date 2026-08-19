@@ -29,6 +29,7 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
     bind_runtime_resource_policy,
@@ -52,6 +53,7 @@ from quant_research_platform.storage._dataset_paths import (
     timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage._dataset_physical import (
+    _PARQUET_NATIVE_METADATA_PAGE_BYTES,
     DatasetFileIdentity,
     DatasetPartMetadata,
     PreparedMembershipValues,
@@ -101,24 +103,14 @@ class DatasetSession:
     parquet_filters: tuple[tuple[str, str, Any], ...] | None
     resource_policy: RuntimeResourcePolicy
     owns_inventory: bool
+    _lease: MemoryLease
     plan_base_retained_bytes: int
     prepared_filter_bytes: int = 0
     path_selection: int | None = None
 
     @property
     def retained_memory_bytes(self) -> int:
-        return _dataset_session_retained_memory_bytes(
-            inventory_retained_bytes=self.inventory.retained_memory_bytes,
-            spec_bytes=self.spec_bytes,
-            spec_identity_bytes=self.spec_identity_bytes,
-            manifest_bytes=self.manifest_bytes,
-            manifest_identity_bytes=self.manifest_identity_bytes,
-            logical_dtype_bytes=self.logical_dtype_bytes,
-            plan_base_retained_bytes=self.plan_base_retained_bytes,
-            time_window=self.time_window,
-            parquet_filters=self.parquet_filters,
-            prepared_filter_bytes=self.prepared_filter_bytes,
-        )
+        return self._lease.reserved_bytes + self.inventory.retained_memory_bytes
 
     @property
     def all_paths(self) -> DatasetInventoryPaths:
@@ -152,8 +144,21 @@ class DatasetSession:
         return self.inventory.metadata_for(path)
 
     def close(self) -> None:
-        if self.owns_inventory:
-            self.inventory.close()
+        primary = sys.exception()
+        try:
+            if self.owns_inventory:
+                self.inventory.close()
+        except BaseException:
+            try:
+                self._lease.close()
+            except BaseException as lease_error:
+                if primary is not None:
+                    primary.add_note(
+                        "dataset session lease release also failed: "
+                        f"{type(lease_error).__name__}"
+                    )
+            raise
+        self._lease.close()
 
     def __enter__(self) -> DatasetSession:
         return self
@@ -164,13 +169,15 @@ class DatasetSession:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if exc_type is None:
-            self.close()
-            return
         try:
             self.close()
-        except BaseException:
-            pass
+        except BaseException as cleanup_error:
+            if exc_value is None:
+                raise
+            exc_value.add_note(
+                "dataset session cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
 
     def verify(self) -> None:
         spec_identity = dataset_file_identity(self.root / "spec.json")
@@ -735,24 +742,23 @@ def open_dataset_session(
     if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
         raise ValueError("invalid_dataset_session_retained_payload_bytes")
     with runtime_resource_policy_scope(issued_policy):
-        try:
-            spec_stat_span_bytes = spec_identity.size
-            manifest_stat_span_bytes = manifest_identity.size
-        except OSError as exc:
-            raise ValueError("dataset_metadata_file_invalid") from exc
+        spec_stat_span_bytes = spec_identity.size
+        manifest_stat_span_bytes = manifest_identity.size
         spec_identity_bytes = _dataset_file_identity_bytes(spec_identity)
         manifest_identity_bytes = _dataset_file_identity_bytes(manifest_identity)
         metadata_identity_span_bytes = len(spec_identity_bytes) + len(
             manifest_identity_bytes
         )
-        _require_dataset_session_headroom(
-            resource_policy=issued_policy,
-            retained_payload_bytes=retained_payload_bytes,
-            inventory_retained_bytes=0,
-            spec_span_bytes=spec_stat_span_bytes,
-            manifest_span_bytes=manifest_stat_span_bytes,
-            metadata_identity_span_bytes=metadata_identity_span_bytes,
+        metadata_bound = (
+            spec_stat_span_bytes
+            + manifest_stat_span_bytes
+            + metadata_identity_span_bytes
         )
+        session_lease = issued_policy.lease(
+            "storage.dataset.session",
+            metadata_bound,
+        )
+        issued_policy.register_cleanup(session_lease.close)
         spec_bytes, spec_payload = read_bounded_qrp_json(
             spec_path, expected_identity=spec_identity
         )
@@ -761,14 +767,6 @@ def open_dataset_session(
         if spec_payload.get("schema_id") != "qrp-dataset-spec":
             raise ValueError("dataset_spec_schema_id_invalid")
         validate_dataset_spec_payload(spec_payload)
-        _require_dataset_session_headroom(
-            resource_policy=issued_policy,
-            retained_payload_bytes=retained_payload_bytes,
-            inventory_retained_bytes=0,
-            spec_span_bytes=len(spec_bytes),
-            manifest_span_bytes=manifest_stat_span_bytes,
-            metadata_identity_span_bytes=metadata_identity_span_bytes,
-        )
         manifest_bytes, manifest = read_bounded_qrp_json(
             manifest_path, expected_identity=manifest_identity
         )
@@ -781,18 +779,10 @@ def open_dataset_session(
             validate_dataset_manifest_consumable(manifest)
         if not manifest_has_runtime_metadata(manifest):
             raise ValueError("manifest_runtime_metadata_missing")
-        acquisition_budget_bytes = _require_dataset_session_headroom(
-            resource_policy=issued_policy,
-            retained_payload_bytes=retained_payload_bytes,
-            inventory_retained_bytes=0,
-            spec_span_bytes=len(spec_bytes),
-            manifest_span_bytes=len(manifest_bytes),
-            metadata_identity_span_bytes=metadata_identity_span_bytes,
-        )
         inventory = DatasetSessionInventory(
             data_root=data_root,
             scratch_parent=root.parent,
-            task_memory_budget_bytes=acquisition_budget_bytes,
+            resource_policy=issued_policy,
         )
         try:
             inventory.discover(spec_payload)
@@ -802,19 +792,15 @@ def open_dataset_session(
                 selected = path in prune_paths_for_time_window(
                     data_root, (path,), spec=spec_payload, time_window=time_window
                 )
+                session_lease.grow(_PARQUET_NATIVE_METADATA_PAGE_BYTES)
                 inventory.observe(
                     path,
                     inspect_dataset_part(path),
                     selected=selected,
                 )
-            _require_dataset_session_headroom(
-                resource_policy=issued_policy,
-                retained_payload_bytes=retained_payload_bytes,
-                inventory_retained_bytes=inventory.retained_memory_bytes,
-                spec_span_bytes=len(spec_bytes),
-                manifest_span_bytes=len(manifest_bytes),
-                metadata_identity_span_bytes=metadata_identity_span_bytes,
-            )
+                session_lease.shrink_to(metadata_bound)
+            if session_lease.reserved_bytes < metadata_bound:
+                session_lease.grow(metadata_bound - session_lease.reserved_bytes)
             session = _build_dataset_session(
                 root=root,
                 data_root=data_root,
@@ -832,6 +818,7 @@ def open_dataset_session(
                 resource_policy=issued_policy,
                 retained_payload_bytes=retained_payload_bytes,
                 owns_inventory=True,
+                session_lease=session_lease,
             )
         except BaseException:
             try:
@@ -856,13 +843,6 @@ def dataset_session_from_inventory(
 
     if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
         raise ValueError("invalid_dataset_session_retained_payload_bytes")
-    _require_dataset_session_headroom(
-        resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
-        inventory_retained_bytes=inventory.retained_memory_bytes,
-        spec_span_bytes=0,
-        manifest_span_bytes=0,
-    )
     root = require_artifact_root(Path(dataset_root))
     data_root = root / "data"
     spec_path = root / "spec.json"
@@ -882,40 +862,23 @@ def dataset_session_from_inventory(
     metadata_identity_span_bytes = len(spec_identity_bytes) + len(
         manifest_identity_bytes
     )
-    _require_dataset_session_headroom(
-        resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
-        inventory_retained_bytes=inventory.retained_memory_bytes,
-        spec_span_bytes=spec_stat_span_bytes,
-        manifest_span_bytes=manifest_stat_span_bytes,
-        metadata_identity_span_bytes=metadata_identity_span_bytes,
+    session_lease = resource_policy.lease(
+        "storage.dataset.session",
+        spec_stat_span_bytes
+        + manifest_stat_span_bytes
+        + metadata_identity_span_bytes,
     )
+    resource_policy.register_cleanup(session_lease.close)
     spec_bytes, spec_payload = read_bounded_qrp_json(
         spec_path, expected_identity=spec_identity
     )
     if len(spec_bytes) != spec_stat_span_bytes:
         raise ValueError("dataset_metadata_file_identity_changed")
-    _require_dataset_session_headroom(
-        resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
-        inventory_retained_bytes=inventory.retained_memory_bytes,
-        spec_span_bytes=len(spec_bytes),
-        manifest_span_bytes=manifest_stat_span_bytes,
-        metadata_identity_span_bytes=metadata_identity_span_bytes,
-    )
     manifest_bytes, manifest = read_bounded_qrp_json(
         manifest_path, expected_identity=manifest_identity
     )
     if len(manifest_bytes) != manifest_stat_span_bytes:
         raise ValueError("dataset_metadata_file_identity_changed")
-    _require_dataset_session_headroom(
-        resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
-        inventory_retained_bytes=inventory.retained_memory_bytes,
-        spec_span_bytes=len(spec_bytes),
-        manifest_span_bytes=len(manifest_bytes),
-        metadata_identity_span_bytes=metadata_identity_span_bytes,
-    )
     inventory.verify_filesystem(spec_payload)
     return _build_dataset_session(
         root=root,
@@ -934,6 +897,7 @@ def dataset_session_from_inventory(
         resource_policy=resource_policy,
         retained_payload_bytes=retained_payload_bytes,
         owns_inventory=False,
+        session_lease=session_lease,
     )
 
 
@@ -955,6 +919,7 @@ def _build_dataset_session(
     resource_policy: RuntimeResourcePolicy,
     retained_payload_bytes: int,
     owns_inventory: bool,
+    session_lease: MemoryLease,
 ) -> DatasetSession:
     if spec_payload.get("schema_id") != "qrp-dataset-spec":
         raise ValueError("dataset_spec_schema_id_invalid")
@@ -975,6 +940,7 @@ def _build_dataset_session(
     observed_rows = 0
     observed_file_bytes = 0
     observed_partition_rows: dict[str, int] = {}
+    session_lease.grow(_PARQUET_NATIVE_METADATA_PAGE_BYTES)
     for path, metadata in inventory.iter_entries():
         if physical_schema_from_schema(metadata.schema) != schema:
             raise ValueError("dataset_schema_mismatch")
@@ -1014,17 +980,6 @@ def _build_dataset_session(
     if manifest["logical_dtypes"] != logical_dtypes:
         raise ValueError("manifest_logical_dtypes_mismatch")
     logical_dtype_bytes = logical_dtype_metadata_bytes(logical_dtypes)
-    _require_dataset_session_headroom(
-        resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
-        inventory_retained_bytes=inventory.retained_memory_bytes,
-        spec_span_bytes=len(spec_bytes),
-        manifest_span_bytes=len(manifest_bytes),
-        metadata_identity_span_bytes=(
-            len(spec_identity_bytes) + len(manifest_identity_bytes)
-        ),
-        logical_dtype_span_bytes=len(logical_dtype_bytes),
-    )
     if tuple(str(column) for column in manifest["columns"]) != schema_columns:
         raise ValueError("manifest_columns_mismatch")
     if manifest["physical_schema"] != schema:
@@ -1075,21 +1030,7 @@ def _build_dataset_session(
                 field,
                 value,
                 resource_policy=resource_policy,
-                retained_filter_bytes=(
-                    retained_payload_bytes
-                    + _dataset_session_retained_memory_bytes(
-                        inventory_retained_bytes=inventory.retained_memory_bytes,
-                        spec_bytes=spec_bytes,
-                        spec_identity_bytes=spec_identity_bytes,
-                        manifest_bytes=manifest_bytes,
-                        manifest_identity_bytes=manifest_identity_bytes,
-                        logical_dtype_bytes=logical_dtype_bytes,
-                        plan_base_retained_bytes=plan_base_retained_bytes,
-                        time_window=time_window,
-                        parquet_filters=tuple(physical_filters) or None,
-                        prepared_filter_bytes=prepared_filter_bytes,
-                    )
-                ),
+                session_lease=session_lease,
             )
             prepared_filter_bytes += validated_value.retained_memory_bytes
         else:
@@ -1123,16 +1064,26 @@ def _build_dataset_session(
         or None,
         resource_policy=resource_policy,
         owns_inventory=owns_inventory,
+        _lease=session_lease,
         plan_base_retained_bytes=plan_base_retained_bytes,
         prepared_filter_bytes=prepared_filter_bytes,
     )
-    _require_dataset_session_headroom(
-        resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
+    session_live_bytes = _dataset_session_retained_memory_bytes(
         inventory_retained_bytes=0,
-        spec_span_bytes=session.retained_memory_bytes,
-        manifest_span_bytes=0,
+        spec_bytes=spec_bytes,
+        spec_identity_bytes=spec_identity_bytes,
+        manifest_bytes=manifest_bytes,
+        manifest_identity_bytes=manifest_identity_bytes,
+        logical_dtype_bytes=logical_dtype_bytes,
+        plan_base_retained_bytes=plan_base_retained_bytes,
+        time_window=time_window,
+        parquet_filters=tuple(physical_filters) or None,
+        prepared_filter_bytes=prepared_filter_bytes,
     )
+    if session_live_bytes > session_lease.reserved_bytes:
+        session_lease.grow(session_live_bytes - session_lease.reserved_bytes)
+    else:
+        session_lease.shrink_to(session_live_bytes)
     session.verify()
     return session
 
@@ -1247,31 +1198,6 @@ def _dataset_file_identity_bytes(identity: DatasetFileIdentity) -> bytes:
             identity.modified_ns,
         )
     )
-
-
-def _require_dataset_session_headroom(
-    *,
-    resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
-    inventory_retained_bytes: int,
-    spec_span_bytes: int,
-    manifest_span_bytes: int,
-    metadata_identity_span_bytes: int = 0,
-    logical_dtype_span_bytes: int = 0,
-) -> int:
-    remaining = resource_policy.task_memory_budget_bytes - retained_payload_bytes
-    remaining -= (
-        inventory_retained_bytes
-        + spec_span_bytes
-        + manifest_span_bytes
-        + metadata_identity_span_bytes
-        + logical_dtype_span_bytes
-    )
-    if remaining <= 0:
-        raise DatasetReadCapacityExceeded(
-            "dataset_session_acquisition_exceeds_task_memory_budget"
-        )
-    return remaining
 
 
 def iter_dataset_chunks(
@@ -1599,7 +1525,7 @@ def _prepare_in_filter(
     values: tuple[Any, ...],
     *,
     resource_policy: RuntimeResourcePolicy,
-    retained_filter_bytes: int,
+    session_lease: MemoryLease | None = None,
 ) -> PreparedMembershipValues:
     data_type = field.type
     is_string = pa.types.is_string(data_type) or pa.types.is_large_string(data_type)
@@ -1662,7 +1588,6 @@ def _prepare_in_filter(
         sort_state_bytes=sort_state_bytes,
         timsort_scratch_bytes=timsort_scratch_bytes,
         resource_policy=resource_policy,
-        retained_filter_bytes=retained_filter_bytes,
     )
     with (
         runtime_resource_policy_scope(resource_policy),
@@ -1698,9 +1623,14 @@ def _prepare_in_filter(
             sort_state_bytes=0,
             timsort_scratch_bytes=0,
             resource_policy=resource_policy,
-            retained_filter_bytes=retained_filter_bytes,
         )
-        with resource_policy.reserve("storage.filter.arrow", arrow_bound):
+        with ExitStack() as arrow_state:
+            if session_lease is not None:
+                session_lease.grow(arrow_bound)
+            else:
+                arrow_state.enter_context(
+                    resource_policy.reserve("storage.filter.arrow", arrow_bound)
+                )
             try:
                 acquired = pa.array(sorted_values, type=data_type)
             except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
@@ -1719,11 +1649,9 @@ def _require_filter_preparation_overlap(
     sort_state_bytes: int,
     timsort_scratch_bytes: int,
     resource_policy: RuntimeResourcePolicy,
-    retained_filter_bytes: int,
 ) -> None:
     if (
         resource_policy.reserved_memory_bytes
-        + retained_filter_bytes
         + input_state_bytes
         + preflight_bytes
         + sort_state_bytes

@@ -457,17 +457,17 @@ def _write_dataset_under_policy(
                 if spec.column_roles.get(column) is ColumnRole.TIMESTAMP
             )
             with (
+                DatasetSessionInventory(
+                    data_root=temp_root / "data",
+                    scratch_parent=temp_root,
+                    resource_policy=resource_policy,
+                ) as inventory,
                 ExactPrimaryKeyIndex(
                     primary_key=spec.primary_key,
                     timestamp_columns=timestamp_columns,
                     scratch_parent=temp_root,
                     sqlite_cache_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
                 ) as key_tracker,
-                DatasetSessionInventory(
-                    data_root=temp_root / "data",
-                    scratch_parent=temp_root,
-                    task_memory_budget_bytes=resource_policy.task_memory_budget_bytes,
-                ) as inventory,
             ):
                 accumulator = _write_contents(
                     input_chunks,

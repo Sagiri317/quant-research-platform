@@ -29,6 +29,9 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage import datasets
 from quant_research_platform.storage._dataset_inventory import DatasetSessionInventory
 from quant_research_platform.storage._dataset_key_tracking import (
@@ -56,6 +59,7 @@ from quant_research_platform.storage._dataset_schema import (
 )
 from quant_research_platform.storage._dataset_writing import _WriteStats
 from tests.helpers.research_specs import make_demo_research_dataset_spec
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_helper_edges_dataset_frame,
@@ -65,13 +69,88 @@ from tests.storage.low_level_fixtures import (
 
 
 def _discovered_paths(data_root: Path, *, spec: dict[str, object]) -> list[Path]:
-    with DatasetSessionInventory(
-        data_root=data_root,
-        scratch_parent=data_root.parent,
-        task_memory_budget_bytes=1024,
-    ) as inventory:
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    with (
+        runtime_resource_policy_scope(policy),
+        DatasetSessionInventory(
+            data_root=data_root,
+            scratch_parent=data_root.parent,
+            resource_policy=policy,
+        ) as inventory,
+    ):
         inventory.discover(spec)
         return list(inventory.iter_candidate_paths())
+
+
+def test_dataset_inventory_lease_admits_shrinks_and_closes(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    low_policy = capture_test_policy(
+        available_memory_bytes=64 * 1024,
+        explicit_cap_bytes=1024,
+    )
+
+    with runtime_resource_policy_scope(low_policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            DatasetSessionInventory(
+                data_root=data_root,
+                scratch_parent=tmp_path,
+                resource_policy=low_policy,
+            )
+    assert not list(tmp_path.glob(".i-*"))
+
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024,
+        explicit_cap_bytes=64 * 1024,
+    )
+    with runtime_resource_policy_scope(policy):
+        inventory = DatasetSessionInventory(
+            data_root=data_root,
+            scratch_parent=tmp_path,
+            resource_policy=policy,
+        )
+        assert inventory.retained_memory_bytes == 1024
+        assert policy.used_memory_bytes == 1024
+        inventory.close()
+        assert policy.used_memory_bytes == 0
+    assert not list(tmp_path.glob(".i-*"))
+    assert not hasattr(DatasetSessionInventory, "__del__")
+
+
+def test_dataset_inventory_failure_and_primary_cleanup_release_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+
+    def fail_connect(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("sqlite_start_failed")
+
+    with runtime_resource_policy_scope(policy):
+        with monkeypatch.context() as sqlite_failure:
+            sqlite_failure.setattr(
+                "quant_research_platform.storage._dataset_inventory.sqlite3.connect",
+                fail_connect,
+            )
+            with pytest.raises(RuntimeError, match="sqlite_start_failed"):
+                DatasetSessionInventory(
+                    data_root=data_root,
+                    scratch_parent=tmp_path,
+                    resource_policy=policy,
+                )
+        assert policy.used_memory_bytes == 0
+
+        with pytest.raises(KeyboardInterrupt):
+            with DatasetSessionInventory(
+                data_root=data_root,
+                scratch_parent=tmp_path,
+                resource_policy=policy,
+            ):
+                raise KeyboardInterrupt
+        assert policy.used_memory_bytes == 0
+    assert not list(tmp_path.glob(".i-*"))
 
 
 def test_exact_key_index_classifies_typed_exact_duplicates_and_conflicts(
@@ -1640,7 +1719,9 @@ def test_dataset_comparison_failure_summary_does_not_expose_local_path(
 
 def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
     with (
+        runtime_resource_policy_scope(policy),
         ExactPrimaryKeyIndex(
             primary_key=spec.primary_key,
             timestamp_columns=("timestamp",),
@@ -1649,7 +1730,7 @@ def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
         DatasetSessionInventory(
             data_root=Path("data"),
             scratch_parent=tmp_path,
-            task_memory_budget_bytes=1024,
+            resource_policy=policy,
         ) as inventory,
     ):
         stats = _WriteStats(
@@ -1717,7 +1798,9 @@ def test_exact_index_preserves_unclaimed_key_scratch_directory(
 
 def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
     with (
+        runtime_resource_policy_scope(policy),
         ExactPrimaryKeyIndex(
             primary_key=spec.primary_key,
             timestamp_columns=("timestamp",),
@@ -1726,7 +1809,7 @@ def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
         DatasetSessionInventory(
             data_root=Path("data"),
             scratch_parent=tmp_path,
-            task_memory_budget_bytes=1024,
+            resource_policy=policy,
         ) as inventory,
     ):
         with pytest.raises(ValueError, match="invalid_dataset_timestamp_value"):
