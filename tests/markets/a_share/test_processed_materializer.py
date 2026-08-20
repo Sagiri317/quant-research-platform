@@ -633,25 +633,26 @@ def test_write_and_inspect_activates_explicit_policy(
     )
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
     inspection = object()
-    observed: list[tuple[RuntimeResourcePolicy, int]] = []
+    observed: list[tuple[RuntimeResourcePolicy, bool]] = []
 
     def capture_write(*_args: object, **kwargs: object) -> None:
-        observed.append(
-            (active_runtime_resource_policy(), kwargs["retained_payload_bytes"])
-        )
+        assert "retained_payload_bytes" not in kwargs
+        observed.append((active_runtime_resource_policy(), True))
 
     def capture_inspection(*_args: object, **kwargs: object) -> object:
-        observed.append(
-            (active_runtime_resource_policy(), kwargs["retained_payload_bytes"])
+        assert "retained_payload_bytes" not in kwargs
+        lease = active_runtime_resource_policy().lease(
+            "test.a_share.inspection",
+            123,
         )
-        return inspection
+        observed.append((active_runtime_resource_policy(), True))
+        return _OwnedValue(inspection, lease)
 
     monkeypatch.setattr(materialization_io, "_write_dataset", capture_write)
-    monkeypatch.setattr(materialization_io, "inspect_dataset", capture_inspection)
     monkeypatch.setattr(
         materialization_io,
-        "dataset_inspection_retained_memory_bytes",
-        lambda _inspection: 123,
+        "_inspect_dataset_owned",
+        capture_inspection,
     )
     monkeypatch.setattr(
         materialization_io,
@@ -670,7 +671,7 @@ def test_write_and_inspect_activates_explicit_policy(
         resource_policy=policy,
     )
 
-    assert observed == [(policy, 123), (policy, 123)]
+    assert observed == [(policy, True), (policy, True)]
     assert result is inspection
     assert written == {"prior": prior, spec.data_id: inspection}
 
@@ -715,7 +716,7 @@ def test_panel_materializer_reuses_market_bar_inspection(
         MARKET_BARS_DATA_ID,
     )
     calls = 0
-    original = materialize_panel.inspect_dataset
+    original = materialize_panel._inspect_dataset_owned
 
     def spy_inspect_dataset(*args, **kwargs):
         nonlocal calls
@@ -723,7 +724,11 @@ def test_panel_materializer_reuses_market_bar_inspection(
             calls += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(materialize_panel, "inspect_dataset", spy_inspect_dataset)
+    monkeypatch.setattr(
+        materialize_panel,
+        "_inspect_dataset_owned",
+        spy_inspect_dataset,
+    )
 
     materializer.materialize_processed_data(
         layout=layout,

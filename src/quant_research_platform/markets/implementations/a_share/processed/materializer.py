@@ -42,8 +42,9 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
+    _inspect_dataset_owned,
+    _release_owned_value,
     dataset_inspection_retained_memory_bytes,
-    inspect_dataset,
 )
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
@@ -169,12 +170,23 @@ def _materialize_one(
             resource_policy=policy,
             retained_payload_bytes=retained_written_bytes,
         )
-        return inspect_dataset(
+        owned = _inspect_dataset_owned(
             root,
             time_window=time_window,
             resource_policy=policy,
-            retained_payload_bytes=retained_written_bytes,
         )
+        inspection = owned.value
+
+        def release_inspection() -> None:
+            nonlocal inspection
+            inspection = None
+            _release_owned_value(
+                owned,
+                owner="a_share.materializer.inspection.result",
+            )
+
+        policy.register_cleanup(release_inspection)
+        return inspection
     catalog = processed_catalog()
     materialization_dependencies.ensure_processed_dependencies(
         spec,

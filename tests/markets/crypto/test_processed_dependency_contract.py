@@ -920,7 +920,7 @@ def test_panel_dependent_writer_rejects_policy_mismatch_before_input_identity(
     )
     monkeypatch.setattr(
         module,
-        "write_dataset",
+        "_write_dataset_owned",
         lambda *_args, **_kwargs: pytest.fail("write reached"),
     )
 
@@ -1599,10 +1599,16 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
         "open_dataset_session",
         lambda *_args, **_kwargs: nullcontext(_dataset_session_stub(policy)),
     )
+    def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
+        return _OwnedValue(
+            inspection,
+            resource_policy.lease("test.crypto.inspection", 0),
+        )
+
     monkeypatch.setattr(
         materializer,
-        "inspect_dataset_session",
-        lambda *_args, **_kwargs: inspection,
+        "_inspect_dataset_session_owned",
+        owned_inspection,
     )
     monkeypatch.setattr(
         materialization_validation,
@@ -1619,7 +1625,7 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
         record_validation,
     )
 
-    with ExitStack() as session_stack:
+    with runtime_resource_policy_scope(policy), ExitStack() as session_stack:
         result, panel_session = materializer._inspect_existing_dependency(
             StorageLayout(project_root=tmp_path),
             processed_catalog().get("market_panel_1m"),
@@ -1686,10 +1692,12 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
         observed.append(active_runtime_resource_policy())
         chunks = list(_args[1])
         assert len(chunks) == 1
-        expected_retained_bytes = 111 if module is materialize_panel else 37
-        assert _kwargs["retained_payload_bytes"] == expected_retained_bytes
+        assert "retained_payload_bytes" not in _kwargs
         staged_validator(SimpleNamespace())
-        return inspection
+        return _OwnedValue(
+            inspection,
+            resource_policy.lease("test.crypto.writer.result", 0),
+        )
 
     monkeypatch.setattr(
         materialization_validation,
@@ -1711,7 +1719,7 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
         iterator_name,
         lambda *_args, **_kwargs: iter((pd.DataFrame({"value": [1]}),)),
     )
-    monkeypatch.setattr(module, "write_dataset", capture_write)
+    monkeypatch.setattr(module, "_write_dataset_owned", capture_write)
     kwargs = {
         "layout": StorageLayout(project_root=tmp_path),
         "time_window": TimeWindow("2026-07-06", "2026-07-06"),

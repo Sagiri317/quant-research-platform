@@ -25,6 +25,7 @@ from quant_research_platform.contracts.workflows import (
 from quant_research_platform.interfaces import private_cli
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _OwnedValue,
     active_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -192,13 +193,12 @@ def test_schema_inventory_closes_chunks_on_retained_consumer_error(
 
     with pytest.raises(KeyError) as retained:
         schema_inventory._aggregate_dataset_stats(
-            object(),
+            SimpleNamespace(retained_memory_bytes=0),
             ("timestamp",),
             (),
             important_null_count_columns=frozenset(),
             exact_duplicate_count=0,
             resource_policy=policy,
-            retained_payload_bytes=0,
         )
 
     assert retained.value.__traceback__ is not None
@@ -366,10 +366,16 @@ def test_schema_inventory_item_state_is_admitted_before_aggregation(
         date_min="2026-01-01",
         date_max="2026-01-01",
     )
+    def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
+        return _OwnedValue(
+            inspection,
+            resource_policy.lease("test.schema.inspection", 0),
+        )
+
     monkeypatch.setattr(
         schema_inventory,
-        "inspect_dataset_session",
-        lambda *_args, **_kwargs: inspection,
+        "_inspect_dataset_session_owned",
+        owned_inspection,
     )
     monkeypatch.setattr(
         schema_inventory,

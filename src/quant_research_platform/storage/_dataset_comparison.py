@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import struct
+import sys
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +19,12 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_fingerprinting import (
+    _fingerprint_dataset_session_owned,
     dataset_fingerprint_retained_memory_bytes,
-    fingerprint_dataset_session,
+)
+from quant_research_platform.storage._dataset_inspection import (
+    _close_lease_preserving_primary,
+    _release_owned_value,
 )
 from quant_research_platform.storage._dataset_key_tracking import (
     EXACT_KEY_SQLITE_PAGE_BYTES,
@@ -85,112 +92,193 @@ def _compare_datasets_under_policy(
         if not right_path.exists():
             return _comparison("MISSING_RIGHT")
         issued_policy = resource_policy
-        with open_dataset_session(
-            left_path,
-            columns=columns,
-            time_window=time_window,
-            resource_policy=issued_policy,
-        ) as left_context:
-            left = fingerprint_dataset_session(
-                left_context, resource_policy=issued_policy
-            )
-            left_identity = _session_identity_token(left_context)
-            left_retained_bytes = dataset_fingerprint_retained_memory_bytes(left) + len(
-                left_identity
-            )
-            if (
-                left_context.retained_memory_bytes + left_retained_bytes
-                > issued_policy.task_memory_budget_bytes
-            ):
-                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        with open_dataset_session(
-            right_path,
-            columns=columns,
-            time_window=time_window,
-            resource_policy=issued_policy,
-        ) as right_context:
-            right = fingerprint_dataset_session(
-                right_context,
+        with ExitStack() as retained:
+            with open_dataset_session(
+                left_path,
+                columns=columns,
+                time_window=time_window,
                 resource_policy=issued_policy,
-                retained_payload_bytes=left_retained_bytes,
+            ) as left_context:
+                left_owned = _fingerprint_dataset_session_owned(
+                    left_context,
+                    resource_policy=issued_policy,
+                )
+                left = left_owned.value
+                def release_left() -> None:
+                    nonlocal left
+                    left = None
+                    _release_owned_value(
+                        left_owned,
+                        owner="storage.dataset.comparison.left.fingerprint",
+                    )
+
+                retained.callback(release_left)
+                left_identity_lease = issued_policy.lease(
+                    "storage.dataset.comparison.left.identity",
+                    hashlib.sha256().digest_size,
+                )
+                left_identity = b""
+                try:
+                    left_identity = _session_identity_token(left_context)
+                except BaseException:
+                    left_identity = b""
+                    _close_lease_preserving_primary(
+                        left_identity_lease,
+                        owner="storage.dataset.comparison.left.identity",
+                    )
+                    raise
+
+                def release_left_identity() -> None:
+                    nonlocal left_identity
+                    left_identity = b""
+                    _close_lease_preserving_primary(
+                        left_identity_lease,
+                        owner="storage.dataset.comparison.left.identity",
+                    )
+
+                retained.callback(release_left_identity)
+            with open_dataset_session(
+                right_path,
+                columns=columns,
+                time_window=time_window,
+                resource_policy=issued_policy,
+            ) as right_context:
+                right_owned = _fingerprint_dataset_session_owned(
+                    right_context,
+                    resource_policy=issued_policy,
+                )
+                right = right_owned.value
+                def release_right() -> None:
+                    nonlocal right
+                    right = None
+                    _release_owned_value(
+                        right_owned,
+                        owner="storage.dataset.comparison.right.fingerprint",
+                    )
+
+                retained.callback(release_right)
+                right_identity_lease = issued_policy.lease(
+                    "storage.dataset.comparison.right.identity",
+                    hashlib.sha256().digest_size,
+                )
+                right_identity = b""
+                try:
+                    right_identity = _session_identity_token(right_context)
+                except BaseException:
+                    right_identity = b""
+                    _close_lease_preserving_primary(
+                        right_identity_lease,
+                        owner="storage.dataset.comparison.right.identity",
+                    )
+                    raise
+
+                def release_right_identity() -> None:
+                    nonlocal right_identity
+                    right_identity = b""
+                    _close_lease_preserving_primary(
+                        right_identity_lease,
+                        owner="storage.dataset.comparison.right.identity",
+                    )
+
+                retained.callback(release_right_identity)
+            comparison_result_lease = issued_policy.lease(
+                "storage.dataset.comparison.result",
+                _comparison_result_bound(left, right),
             )
-            right_identity = _session_identity_token(right_context)
-            right_retained_bytes = dataset_fingerprint_retained_memory_bytes(
-                right
-            ) + len(right_identity)
+            layout_delta: dict[str, Any] | None = None
+            summary: dict[str, Any] | None = None
+
+            def release_comparison_result() -> None:
+                if sys.exception() is not None:
+                    if summary is not None:
+                        summary.clear()
+                    if layout_delta is not None:
+                        layout_delta.clear()
+                _close_lease_preserving_primary(
+                    comparison_result_lease,
+                    owner="storage.dataset.comparison.result",
+                )
+
+            retained.callback(release_comparison_result)
+            layout_delta = {
+                "file_count": {"left": left.file_count, "right": right.file_count},
+                "partitions": {
+                    "left": tuple(
+                        {
+                            "partition": partition["partition"],
+                            "row_count": partition["row_count"],
+                        }
+                        for partition in left.partition_fingerprints
+                    ),
+                    "right": tuple(
+                        {
+                            "partition": partition["partition"],
+                            "row_count": partition["row_count"],
+                        }
+                        for partition in right.partition_fingerprints
+                    ),
+                },
+            }
+            summary = {
+                "schema_hash": {"left": left.schema_hash, "right": right.schema_hash},
+                "row_count": {"left": left.row_count, "right": right.row_count},
+                "key_columns": {
+                    "left": left.key_columns,
+                    "right": right.key_columns,
+                },
+                "content_hash": {
+                    "left": left.content_hash,
+                    "right": right.content_hash,
+                },
+            }
             if (
-                left_retained_bytes
-                + right_context.retained_memory_bytes
-                + right_retained_bytes
-                > issued_policy.task_memory_budget_bytes
+                left.schema_hash != right.schema_hash
+                or left.column_names != right.column_names
             ):
-                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-    except (OSError, ValueError, sqlite3.Error):
+                status = "SCHEMA_MISMATCH"
+            elif left.row_count != right.row_count:
+                status = "ROW_COUNT_MISMATCH"
+            elif left.key_columns != right.key_columns:
+                status = "KEY_MISMATCH"
+            elif left.content_hash != right.content_hash:
+                status = "CONTENT_MISMATCH"
+            else:
+                try:
+                    exact = _exact_comparison_counts(
+                        left_path,
+                        right_path,
+                        columns=columns,
+                        time_window=time_window,
+                        resource_policy=issued_policy,
+                        primary_key=left.key_columns,
+                        left_identity=left_identity,
+                        right_identity=right_identity,
+                    )
+                except (MemoryError, OSError, ValueError, sqlite3.Error):
+                    return _comparison(
+                        "INSPECTION_FAILED",
+                        summary={"error": "dataset_inspection_failed"},
+                    )
+                summary["exact"] = exact
+                status = "CONTENT_MISMATCH" if any(exact.values()) else "MATCH"
+            assert summary is not None
+            assert layout_delta is not None
+            return _comparison(status, summary=summary, layout_delta=layout_delta)
+    except (MemoryError, OSError, ValueError, sqlite3.Error):
         return _comparison(
             "INSPECTION_FAILED",
             summary={"error": "dataset_inspection_failed"},
         )
 
-    layout_delta = {
-        "file_count": {"left": left.file_count, "right": right.file_count},
-        "partitions": {
-            "left": tuple(
-                {
-                    "partition": partition["partition"],
-                    "row_count": partition["row_count"],
-                }
-                for partition in left.partition_fingerprints
-            ),
-            "right": tuple(
-                {
-                    "partition": partition["partition"],
-                    "row_count": partition["row_count"],
-                }
-                for partition in right.partition_fingerprints
-            ),
-        },
-    }
-    summary = {
-        "schema_hash": {"left": left.schema_hash, "right": right.schema_hash},
-        "row_count": {"left": left.row_count, "right": right.row_count},
-        "key_columns": {"left": left.key_columns, "right": right.key_columns},
-        "content_hash": {"left": left.content_hash, "right": right.content_hash},
-    }
-    comparison_retained_bytes = 2 * (left_retained_bytes + right_retained_bytes)
-    if comparison_retained_bytes > issued_policy.task_memory_budget_bytes:
-        return _comparison(
-            "INSPECTION_FAILED",
-            summary={"error": "dataset_inspection_failed"},
-        )
-    if left.schema_hash != right.schema_hash or left.column_names != right.column_names:
-        status = "SCHEMA_MISMATCH"
-    elif left.row_count != right.row_count:
-        status = "ROW_COUNT_MISMATCH"
-    elif left.key_columns != right.key_columns:
-        status = "KEY_MISMATCH"
-    elif left.content_hash != right.content_hash:
-        status = "CONTENT_MISMATCH"
-    else:
-        try:
-            exact = _exact_comparison_counts(
-                left_path,
-                right_path,
-                columns=columns,
-                time_window=time_window,
-                resource_policy=issued_policy,
-                primary_key=left.key_columns,
-                left_identity=left_identity,
-                right_identity=right_identity,
-                retained_payload_bytes=comparison_retained_bytes,
-            )
-        except (OSError, ValueError, sqlite3.Error):
-            return _comparison(
-                "INSPECTION_FAILED",
-                summary={"error": "dataset_inspection_failed"},
-            )
-        summary["exact"] = exact
-        status = "CONTENT_MISMATCH" if any(exact.values()) else "MATCH"
-    return _comparison(status, summary=summary, layout_delta=layout_delta)
+
+def _comparison_result_bound(left: Any, right: Any) -> int:
+    pointer_bytes = struct.calcsize("P")
+    return (
+        dataset_fingerprint_retained_memory_bytes(left)
+        + dataset_fingerprint_retained_memory_bytes(right)
+        + pointer_bytes * 32
+        + 1024
+    )
 
 
 def _exact_comparison_counts(
@@ -203,50 +291,51 @@ def _exact_comparison_counts(
     primary_key: tuple[str, ...],
     left_identity: bytes,
     right_identity: bytes,
-    retained_payload_bytes: int,
 ) -> dict[str, int]:
-    with ExactPrimaryKeyIndex(
-        primary_key=primary_key,
-        timestamp_columns=(),
-        scratch_parent=left_root.parent,
-        sqlite_cache_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
-    ) as index:
-        _index_dataset_rows(
-            left_root,
-            columns=columns,
-            time_window=time_window,
-            resource_policy=resource_policy,
-            index=index,
-            namespace="left",
-            expected_identity=left_identity,
-            retained_payload_bytes=retained_payload_bytes,
-        )
-        _index_dataset_rows(
-            right_root,
-            columns=columns,
-            time_window=time_window,
-            resource_policy=resource_policy,
-            index=index,
-            namespace="right",
-            expected_identity=right_identity,
-            retained_payload_bytes=retained_payload_bytes,
-        )
-        for root, expected_identity in (
-            (left_root, left_identity),
-            (right_root, right_identity),
-        ):
-            with open_dataset_session(
-                root,
+    with resource_policy.reserve(
+        "storage.dataset.comparison.index",
+        EXACT_KEY_SQLITE_PAGE_BYTES,
+    ):
+        with ExactPrimaryKeyIndex(
+            primary_key=primary_key,
+            timestamp_columns=(),
+            scratch_parent=left_root.parent,
+            sqlite_cache_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
+        ) as index:
+            _index_dataset_rows(
+                left_root,
                 columns=columns,
                 time_window=time_window,
                 resource_policy=resource_policy,
-            ) as context:
-                if _session_identity_token(context) != expected_identity:
-                    raise ValueError("dataset_identity_changed_during_comparison")
-        missing, extra, changed = index.comparison_counts(
-            expected_namespace="left",
-            actual_namespace="right",
-        )
+                index=index,
+                namespace="left",
+                expected_identity=left_identity,
+            )
+            _index_dataset_rows(
+                right_root,
+                columns=columns,
+                time_window=time_window,
+                resource_policy=resource_policy,
+                index=index,
+                namespace="right",
+                expected_identity=right_identity,
+            )
+            for root, expected_identity in (
+                (left_root, left_identity),
+                (right_root, right_identity),
+            ):
+                with open_dataset_session(
+                    root,
+                    columns=columns,
+                    time_window=time_window,
+                    resource_policy=resource_policy,
+                ) as context:
+                    if _session_identity_token(context) != expected_identity:
+                        raise ValueError("dataset_identity_changed_during_comparison")
+            missing, extra, changed = index.comparison_counts(
+                expected_namespace="left",
+                actual_namespace="right",
+            )
     return {
         "missing_row_count": missing,
         "extra_row_count": extra,
@@ -263,7 +352,6 @@ def _index_dataset_rows(
     index: ExactPrimaryKeyIndex,
     namespace: str,
     expected_identity: bytes,
-    retained_payload_bytes: int,
 ) -> None:
     with open_dataset_session(
         root,
@@ -279,9 +367,9 @@ def _index_dataset_rows(
             if column not in index.primary_key
         )
         comparison_columns = (*index.primary_key, *value_columns)
-        retained_before_session = retained_payload_bytes + index.retained_memory_bytes
         headroom = resource_policy.task_memory_budget_bytes
-        headroom -= retained_before_session + context.retained_memory_bytes
+        headroom -= resource_policy.reserved_memory_bytes
+        headroom += context.retained_memory_bytes
         if headroom <= 0:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         exact_payload_target = headroom

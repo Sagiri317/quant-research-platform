@@ -21,8 +21,8 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
-    dataset_inspection_retained_memory_bytes,
-    inspect_dataset_session,
+    _inspect_dataset_session_owned,
+    _release_owned_value,
 )
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_reading import (
@@ -427,13 +427,12 @@ def _inventory_item_from_session(
     important_null_count_columns: frozenset[str],
     resource_policy: RuntimeResourcePolicy,
     retained_items: ExitStack,
-    retained_payload_bytes: int = 0,
 ) -> tuple[dict[str, Any], int]:
-    inspection = inspect_dataset_session(
+    owned = _inspect_dataset_session_owned(
         session,
         resource_policy=resource_policy,
-        retained_payload_bytes=retained_payload_bytes,
     )
+    inspection = owned.value
     logical_root = artifact_root.relative_to(project_root).as_posix()
     spec_payload = inspection.spec
     warnings: list[str] = []
@@ -466,10 +465,6 @@ def _inventory_item_from_session(
             resource_policy=resource_policy,
             exact_duplicate_count=int(
                 inspection.manifest["duplicate_primary_key_count"]
-            ),
-            retained_payload_bytes=(
-                retained_payload_bytes
-                + dataset_inspection_retained_memory_bytes(inspection)
             ),
         )
         session.verify()
@@ -516,6 +511,12 @@ def _inventory_item_from_session(
         raise ValueError(
             "schema_inventory_payload_exceeds_task_memory_budget"
         ) from None
+    finally:
+        inspection = None
+        _release_owned_value(
+            owned,
+            owner="workflow.schema_inventory.inspection.result",
+        )
 
 
 def _inventory_item_upper_bound_bytes(
@@ -551,7 +552,6 @@ def _aggregate_dataset_stats(
     important_null_count_columns: frozenset[str],
     exact_duplicate_count: int,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
 ) -> dict[str, Any]:
     dtypes: dict[str, str] = {}
     row_count = 0
@@ -568,7 +568,7 @@ def _aggregate_dataset_stats(
         session,
         target_chunk_bytes=resource_policy.remaining_memory_bytes,
         operation_headroom_bytes=(
-            resource_policy.task_memory_budget_bytes - retained_payload_bytes
+            resource_policy.remaining_memory_bytes + session.retained_memory_bytes
         ),
     )
     with closing_dataset_iterator(chunks):

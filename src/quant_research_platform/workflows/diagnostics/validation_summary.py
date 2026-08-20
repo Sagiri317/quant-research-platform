@@ -35,14 +35,15 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
-    dataset_inspection_retained_memory_bytes,
-    inspect_dataset,
+    _inspect_dataset_session_owned,
+    _release_owned_value,
 )
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
     dataset_file_identity,
     dataset_file_identity_from_stat,
 )
+from quant_research_platform.storage._dataset_reading import open_dataset_session
 from quant_research_platform.storage._dataset_schema import (
     validate_dataset_manifest_consumable,
     validate_dataset_primary_key_null_summary,
@@ -118,24 +119,54 @@ def _build_validation_summary(
         output_bundle_expectations
     ):
         raise ValueError("validation_summary_output_bundle_declaration_duplicate")
-    inspection_slot_bytes = sys.getsizeof([None] * len(dataset_roots))
+    inspection_slot_bytes = sys.getsizeof([]) + len(dataset_roots) * sys.getsizeof(None)
     inspection_slot_bytes += len(dataset_roots) * sys.getsizeof((None, None, None))
-    if inspection_slot_bytes > resource_policy.remaining_memory_bytes:
-        raise ValueError("validation_summary_payload_exceeds_task_memory_budget")
+    inspection_slot_bytes += sys.getsizeof([])
+    inspection_slot_bytes += len(dataset_roots) * sys.getsizeof(None)
+    inspection_slot_bytes += len(dataset_roots) * sys.getsizeof((None, None))
+    try:
+        retained_state.enter_context(
+            resource_policy.reserve(
+                "workflow.validation.inspection_slots",
+                inspection_slot_bytes,
+            )
+        )
+    except MemoryError:
+        raise ValueError(
+            "validation_summary_payload_exceeds_task_memory_budget"
+        ) from None
     inspection_results: list[
         tuple[Path, DatasetInspection | None, str | None] | None
     ] = [None] * len(dataset_roots)
-    retained_inspection_bytes = inspection_slot_bytes
+    inspection: DatasetInspection | None = None
     for index, root in enumerate(dataset_roots):
         logical_layer = dataset_layer_from_path(root)
         if logical_layer not in RUN_RESULT_DATASET_LAYERS:
             raise ValueError("validation_summary_dataset_layer_invalid")
         try:
-            inspection = inspect_dataset(
+            with open_dataset_session(
                 root,
+                columns=None,
+                time_window=None,
+                require_consumable=False,
                 resource_policy=resource_policy,
-                retained_payload_bytes=retained_inspection_bytes,
-            )
+            ) as context:
+                owned = _inspect_dataset_session_owned(
+                    context,
+                    resource_policy=resource_policy,
+                )
+            inspection = owned.value
+
+            def release_inspection(owned=owned, index=index) -> None:  # noqa: ANN001
+                nonlocal inspection
+                inspection = None
+                inspection_results[index] = None
+                _release_owned_value(
+                    owned,
+                    owner="workflow.validation.inspection.result",
+                )
+
+            retained_state.callback(release_inspection)
         except (OSError, ValueError):
             try:
                 manifest = read_dataset_manifest_evidence(root)
@@ -151,9 +182,6 @@ def _build_validation_summary(
                 inspection_results[index] = (root, None, "invalid")
             continue
         inspection_results[index] = (root, inspection, None)
-        retained_inspection_bytes += dataset_inspection_retained_memory_bytes(
-            inspection
-        )
 
     dataset_inspections = [
         (root, inspection)
@@ -162,9 +190,7 @@ def _build_validation_summary(
         for root, inspection, error in (result,)
         if error is None and inspection is not None
     ]
-    summary_headroom = (
-        resource_policy.remaining_memory_bytes - retained_inspection_bytes
-    )
+    summary_headroom = resource_policy.remaining_memory_bytes
     if summary_headroom <= 0:
         raise ValueError("validation_summary_payload_exceeds_task_memory_budget")
     summary_bound_bytes = _validation_summary_graph_upper_bound_bytes(
@@ -179,7 +205,7 @@ def _build_validation_summary(
         retained_state.enter_context(
             resource_policy.reserve(
                 "workflow.validation.summary",
-                retained_inspection_bytes + summary_bound_bytes,
+                summary_bound_bytes,
             )
         )
     except MemoryError:
@@ -360,25 +386,47 @@ def _build_validation_summary(
         max_bytes=summary_bound_bytes,
     )
     for root, initial_inspection in dataset_inspections:
+        owned_final = None
+        final_inspection = None
         try:
-            with resource_policy.reserve(
-                "workflow.validation.reinspection",
-                dataset_inspection_retained_memory_bytes(initial_inspection),
-            ):
-                final_inspection = inspect_dataset(
+            try:
+                with open_dataset_session(
                     root,
+                    columns=None,
+                    time_window=None,
+                    require_consumable=False,
                     resource_policy=resource_policy,
-                    retained_payload_bytes=0,
-                )
+                ) as context:
+                    owned_final = _inspect_dataset_session_owned(
+                        context,
+                        resource_policy=resource_policy,
+                    )
+                    final_inspection = owned_final.value
+                    unchanged = final_inspection == initial_inspection
+            except BaseException:
+                if owned_final is not None:
+                    final_inspection = None
+                    _release_owned_value(
+                        owned_final,
+                        owner="workflow.validation.reinspection.result",
+                    )
+                raise
         except MemoryError:
             raise ValueError(
                 "validation_summary_payload_exceeds_task_memory_budget"
             ) from None
         except (OSError, ValueError):
             raise ValueError("validation_summary_dataset_identity_changed") from None
-        if final_inspection != initial_inspection:
-            raise ValueError("validation_summary_dataset_identity_changed")
-        del final_inspection
+        else:
+            final_inspection = None
+            _release_owned_value(
+                owned_final,
+                owner="workflow.validation.reinspection.result",
+            )
+            if not unchanged:
+                raise ValueError(
+                    "validation_summary_dataset_identity_changed"
+                )
     return summary
 
 

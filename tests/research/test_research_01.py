@@ -1378,9 +1378,7 @@ def test_research_assembly_verifies_every_input_inside_staged_boundary(
     def record_write(root, data, *, staged_validator, **kwargs):  # noqa: ANN001
         nonlocal inside_staged_validator, writer_returned
         assert staged_validator is not None
-        assert kwargs["retained_payload_bytes"] == sum(
-            session.retained_memory_bytes for session in opened_sessions
-        )
+        assert "retained_payload_bytes" not in kwargs
 
         def record_staged(receipt) -> None:  # noqa: ANN001
             nonlocal inside_staged_validator

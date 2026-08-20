@@ -4119,58 +4119,68 @@ def test_fingerprint_accounts_for_live_arrow_and_nested_pandas_payloads(
         inventory=SimpleNamespace(retained_memory_bytes=0),
         retained_memory_bytes=0,
     )
-    partition_state_bytes = dataset_reading.dataset_partition_state_reserve_bytes(
-        context
-    )
-    local_state_bytes = 3 * (struct.calcsize("P") + len(b"nested"))
     operation_headroom = aggregate_bytes + headroom_delta
+    result_bound = dataset_fingerprinting._fingerprint_operation_bound(context)
     retained_memory_bytes = policy.task_memory_budget_bytes - (
-        operation_headroom + partition_state_bytes + local_state_bytes
+        operation_headroom + result_bound
     )
     assert retained_memory_bytes > 0
     context.inventory.retained_memory_bytes = retained_memory_bytes
     context.retained_memory_bytes = retained_memory_bytes
 
-    if should_fail:
-        with pytest.raises(
-            ValueError,
-            match="dataset_fingerprint_value_exceeds_target_bytes",
-        ):
-            dataset_fingerprinting.fingerprint_dataset_session(
-                context,
-                resource_policy=policy,
-            )
-    else:
-        fingerprint = dataset_fingerprinting.fingerprint_dataset_session(
-            context,
-            resource_policy=policy,
+    with runtime_resource_policy_scope(policy):
+        retained_lease = policy.lease(
+            "test.fingerprint.context",
+            retained_memory_bytes,
         )
-        hashes = pd.util.hash_pandas_object(canonical, index=False).to_numpy("uint64")
-        expected_sum = int(hashes.sum(dtype=np.uint64))
-        expected_xor = int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0)))
-        assert fingerprint.content_hash == canonical_json_hash(
-            {
-                "row_hash_sum": expected_sum,
-                "row_hash_xor": expected_xor,
-                "row_count": 1,
-                "columns": ["nested"],
-                "hash_columns": ["nested"],
-            }
-        )
-        assert fingerprint.partition_fingerprints == (
-            {
-                "partition": "year=2026",
-                "row_count": 1,
-                "content_hash": canonical_json_hash(
+        try:
+            if should_fail:
+                with pytest.raises(
+                    ValueError,
+                    match="dataset_fingerprint_value_exceeds_target_bytes",
+                ):
+                    dataset_fingerprinting.fingerprint_dataset_session(
+                        context,
+                        resource_policy=policy,
+                    )
+            else:
+                fingerprint = dataset_fingerprinting.fingerprint_dataset_session(
+                    context,
+                    resource_policy=policy,
+                )
+                hashes = pd.util.hash_pandas_object(
+                    canonical,
+                    index=False,
+                ).to_numpy("uint64")
+                expected_sum = int(hashes.sum(dtype=np.uint64))
+                expected_xor = int(
+                    np.bitwise_xor.reduce(hashes, initial=np.uint64(0))
+                )
+                assert fingerprint.content_hash == canonical_json_hash(
                     {
                         "row_hash_sum": expected_sum,
                         "row_hash_xor": expected_xor,
                         "row_count": 1,
+                        "columns": ["nested"],
                         "hash_columns": ["nested"],
                     }
-                ),
-            },
-        )
+                )
+                assert fingerprint.partition_fingerprints == (
+                    {
+                        "partition": "year=2026",
+                        "row_count": 1,
+                        "content_hash": canonical_json_hash(
+                            {
+                                "row_hash_sum": expected_sum,
+                                "row_hash_xor": expected_xor,
+                                "row_count": 1,
+                                "hash_columns": ["nested"],
+                            }
+                        ),
+                    },
+                )
+        finally:
+            retained_lease.close()
 
     assert observed_headroom == [operation_headroom + retained_memory_bytes]
     assert observer_calls == 1
@@ -4286,7 +4296,10 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
         for observed in dataset_reading._arrow_batch_to_bounded_pandas(
             arrow_batch,
             target_chunk_bytes=kwargs["target_chunk_bytes"],
-            operation_headroom_bytes=kwargs["operation_headroom_bytes"],
+            operation_headroom_bytes=(
+                kwargs["operation_headroom_bytes"]
+                - _args[0].retained_memory_bytes
+            ),
             batch_observer=observe_batch,
         ):
             yield path, observed
@@ -4317,10 +4330,19 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
         context.retained_memory_bytes = retained
         return context
 
-    fingerprint = dataset_fingerprinting.fingerprint_dataset_session(
-        context_for(exact_headroom + 4096),
-        resource_policy=policy,
-    )
+    context = context_for(12 * 1024 * 1024)
+    with runtime_resource_policy_scope(policy):
+        retained_lease = policy.lease(
+            "test.fingerprint.context",
+            context.retained_memory_bytes,
+        )
+        try:
+            fingerprint = dataset_fingerprinting.fingerprint_dataset_session(
+                context,
+                resource_policy=policy,
+            )
+        finally:
+            retained_lease.close()
     assert fingerprint.row_count == len(frame)
     assert len(observed_slices) > 1
     assert set(observed_slices) == {arrow_batch.get_total_buffer_size()}
@@ -4351,16 +4373,25 @@ def test_fingerprint_rejects_exhausted_operation_headroom_before_traversal(
             retained_memory_bytes=policy.task_memory_budget_bytes
         ),
         retained_memory_bytes=policy.task_memory_budget_bytes,
+        read_paths=(),
     )
 
-    with pytest.raises(
-        ValueError,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
-        dataset_fingerprinting.fingerprint_dataset_session(
-            context,
-            resource_policy=policy,
+    with runtime_resource_policy_scope(policy):
+        retained_lease = policy.lease(
+            "test.fingerprint.retained",
+            policy.task_memory_budget_bytes,
         )
+        try:
+            with pytest.raises(
+                ValueError,
+                match="dataset_working_set_exceeds_task_memory_budget",
+            ):
+                dataset_fingerprinting.fingerprint_dataset_session(
+                    context,
+                    resource_policy=policy,
+                )
+        finally:
+            retained_lease.close()
 
     assert traversals == 0
 
@@ -4453,16 +4484,24 @@ def test_fingerprint_rejects_many_partition_output_overlap_after_traversal(
         partition_state_bytes + local_state_bytes + 1024
     )
 
-    with pytest.raises(
-        ValueError,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
-        dataset_fingerprinting.fingerprint_dataset_session(
-            context,
-            resource_policy=policy,
+    with runtime_resource_policy_scope(policy):
+        retained_lease = policy.lease(
+            "test.fingerprint.retained",
+            context.retained_memory_bytes,
         )
+        try:
+            with pytest.raises(
+                ValueError,
+                match="dataset_working_set_exceeds_task_memory_budget",
+            ):
+                dataset_fingerprinting.fingerprint_dataset_session(
+                    context,
+                    resource_policy=policy,
+                )
+        finally:
+            retained_lease.close()
 
-    assert traversals == len(paths)
+    assert traversals == 0
 
 
 def test_iter_bounded_frame_chunks_reuses_bounded_frame_storage() -> None:
@@ -4772,14 +4811,17 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
     def fake_fingerprint(*_args, resource_policy, **_kwargs):
         assert active_contexts == 1
         observed.append(resource_policy)
-        return SimpleNamespace(
-            schema_hash="schema",
-            column_names=("value",),
-            row_count=0,
-            key_columns=("value",),
-            content_hash="content",
-            partition_fingerprints=(),
-            file_count=1,
+        return runtime_resources._OwnedValue(
+            SimpleNamespace(
+                schema_hash="schema",
+                column_names=("value",),
+                row_count=0,
+                key_columns=("value",),
+                content_hash="content",
+                partition_fingerprints=(),
+                file_count=1,
+            ),
+            resource_policy.lease("test.compare.fingerprint", 0),
         )
 
     class Context:
@@ -4805,7 +4847,7 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
     )
     monkeypatch.setattr(
         dataset_comparison,
-        "fingerprint_dataset_session",
+        "_fingerprint_dataset_session_owned",
         fake_fingerprint,
     )
     monkeypatch.setattr(dataset_comparison, "_session_identity_token", lambda _: b"id")
@@ -4850,10 +4892,21 @@ def test_compare_requires_exact_proof_after_forced_fingerprint_collision(
         spec=make_processed_dataset_spec("collision_right"),
     )
     collision = fingerprint_dataset(left)
+    def owned_collision(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
+        return runtime_resources._OwnedValue(
+            collision,
+            resource_policy.lease(
+                "test.compare.collision",
+                dataset_fingerprinting.dataset_fingerprint_retained_memory_bytes(
+                    collision
+                ),
+            ),
+        )
+
     monkeypatch.setattr(
         dataset_comparison,
-        "fingerprint_dataset_session",
-        lambda *_args, **_kwargs: collision,
+        "_fingerprint_dataset_session_owned",
+        owned_collision,
     )
 
     comparison = dataset_comparison.compare_datasets(
@@ -4900,10 +4953,17 @@ def test_compare_treats_partition_and_file_boundaries_as_layout_only(
         file_count=1,
     )
     fingerprints = iter((fingerprint, right_fingerprint))
+
+    def owned_fingerprint(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
+        return runtime_resources._OwnedValue(
+            next(fingerprints),
+            resource_policy.lease("test.compare.fingerprint", 0),
+        )
+
     monkeypatch.setattr(
         dataset_comparison,
-        "fingerprint_dataset_session",
-        lambda *_args, **_kwargs: next(fingerprints),
+        "_fingerprint_dataset_session_owned",
+        owned_fingerprint,
     )
 
     comparison = compare_datasets(left, right)
@@ -5106,7 +5166,7 @@ def test_compare_cleanup_does_not_replace_programmer_primary(
     if stage == "fingerprint":
         monkeypatch.setattr(
             dataset_comparison,
-            "fingerprint_dataset_session",
+            "_fingerprint_dataset_session_owned",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 RuntimeError("programmer_primary")
             ),
@@ -5126,6 +5186,185 @@ def test_compare_cleanup_does_not_replace_programmer_primary(
     finally:
         if policy is not None and policy.state == "POISONED":
             policy._lock.close()  # noqa: SLF001
+
+
+def test_owned_result_release_clears_payload_before_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    original_close = runtime_resources.MemoryLease.close
+    observed: list[object | None] = []
+    frame = pd.DataFrame({"value": [1, 2, 3]})
+    frame_ref = weakref.ref(frame)
+
+    with runtime_resource_policy_scope(policy):
+        lease = policy.lease("storage.dataset.inspection.result", 4096)
+        owned = runtime_resources._OwnedValue(frame, lease)
+        del frame
+
+        def close_with_failure(current: runtime_resources.MemoryLease) -> None:
+            if current is lease:
+                observed.append(frame_ref())
+                raise OSError("result_lease_close_failure")
+            original_close(current)
+
+        monkeypatch.setattr(
+            runtime_resources.MemoryLease,
+            "close",
+            close_with_failure,
+        )
+        primary = RuntimeError("result_primary")
+        try:
+            raise primary
+        except RuntimeError as active:
+            dataset_inspection._release_owned_value(
+                owned,
+                owner="test.result",
+            )
+            assert active is primary
+
+        assert owned.value is None
+        assert observed == [None]
+        assert any(
+            "OSError" in note and "result_lease_close_failure" not in note
+            for note in primary.__notes__
+        )
+        monkeypatch.setattr(runtime_resources.MemoryLease, "close", original_close)
+        lease.close()
+
+    assert policy.reserved_memory_bytes == 0
+
+
+def test_compare_identity_lease_close_failure_preserves_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
+    root = make_dataset_artifact_root(tmp_path, "compare_identity_close_failure")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("compare_identity_close_failure"),
+    )
+    policy = _issued_test_policy()
+    original_close = runtime_resources.MemoryLease.close
+    failed_leases: list[runtime_resources.MemoryLease] = []
+
+    def close_with_failure(current: runtime_resources.MemoryLease) -> None:
+        if (
+            current.owner == "storage.dataset.comparison.left.identity"
+            and not failed_leases
+        ):
+            failed_leases.append(current)
+            raise OSError("identity_lease_close_failure")
+        original_close(current)
+
+    monkeypatch.setattr(
+        runtime_resources.MemoryLease,
+        "close",
+        close_with_failure,
+    )
+    primary = RuntimeError("comparison_identity_primary")
+    try:
+        with runtime_resource_policy_scope(policy):
+            monkeypatch.setattr(
+                dataset_comparison,
+                "_session_identity_token",
+                lambda *_args: (_ for _ in ()).throw(primary),
+            )
+            with pytest.raises(RuntimeError) as raised:
+                dataset_comparison.compare_datasets(
+                    root,
+                    root,
+                    resource_policy=policy,
+                )
+            assert raised.value is primary
+            assert any(
+                "OSError" in note and "identity_lease_close_failure" not in note
+                for note in primary.__notes__
+            )
+            monkeypatch.setattr(
+                runtime_resources.MemoryLease,
+                "close",
+                original_close,
+            )
+            for lease in failed_leases:
+                if lease.active:
+                    lease.close()
+    finally:
+        monkeypatch.setattr(runtime_resources.MemoryLease, "close", original_close)
+        for lease in failed_leases:
+            if lease.active:
+                lease.close()
+        if policy.state == "POISONED":
+            policy._lock.close()  # noqa: SLF001
+
+
+def test_compare_result_cleanup_handles_primary_before_payload_allocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left = make_dataset_artifact_root(tmp_path, "compare_result_primary_left")
+    right = make_dataset_artifact_root(tmp_path, "compare_result_primary_right")
+    frame = make_default_dataset_frame()
+    write_dataset(
+        left,
+        frame,
+        spec=make_processed_dataset_spec("compare_result_primary_left"),
+    )
+    write_dataset(
+        right,
+        frame,
+        spec=make_processed_dataset_spec("compare_result_primary_right"),
+    )
+    policy = _issued_test_policy()
+    primary = RuntimeError("comparison_result_primary")
+
+    def raising_partitions():
+        raise primary
+        yield {}
+
+    def fake_owned(*_args: object, resource_policy: RuntimeResourcePolicy):
+        fingerprint = SimpleNamespace(
+            schema_hash="schema",
+            row_count=1,
+            key_columns=("key",),
+            content_hash="content",
+            partition_fingerprints=raising_partitions(),
+            file_count=1,
+            column_names=("key",),
+        )
+        lease = resource_policy.lease(
+            "test.comparison.fingerprint",
+            128,
+        )
+        return runtime_resources._OwnedValue(fingerprint, lease)
+
+    monkeypatch.setattr(
+        dataset_comparison,
+        "_fingerprint_dataset_session_owned",
+        fake_owned,
+    )
+    monkeypatch.setattr(
+        dataset_comparison,
+        "_comparison_result_bound",
+        lambda *_args: 128,
+    )
+    monkeypatch.setattr(
+        dataset_comparison,
+        "_session_identity_token",
+        lambda *_args: b"identity",
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        dataset_comparison.compare_datasets(
+            left,
+            right,
+            resource_policy=policy,
+        )
+
+    assert raised.value is primary
+    assert policy.reserved_memory_bytes == 0
 
 
 def test_compare_propagates_programmer_errors(
@@ -5637,10 +5876,15 @@ def test_fingerprint_normalizes_bounded_slices_without_full_frame_copy(
     context.inventory.retained_memory_bytes = retained
     context.retained_memory_bytes = retained
 
-    fingerprint = dataset_fingerprinting.fingerprint_dataset_session(
-        context,
-        resource_policy=policy,
-    )
+    with runtime_resource_policy_scope(policy):
+        retained_lease = policy.lease("test.fingerprint.retained", retained)
+        try:
+            fingerprint = dataset_fingerprinting.fingerprint_dataset_session(
+                context,
+                resource_policy=policy,
+            )
+        finally:
+            retained_lease.close()
 
     assert fingerprint.row_count == row_count
 
@@ -6007,7 +6251,10 @@ def test_open_dataset_session_admits_metadata_before_decode(
             policy.available_memory_bytes,
         )
         try:
-            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            with pytest.raises(
+                MemoryError,
+                match="runtime_memory_budget_exceeded",
+            ):
                 with dataset_reading.open_dataset_session(
                     root,
                     columns=None,
@@ -6059,7 +6306,10 @@ def test_session_from_inventory_admits_lease_before_metadata_decode(
                 policy.available_memory_bytes,
             )
             try:
-                with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                with pytest.raises(
+                    MemoryError,
+                    match="runtime_memory_budget_exceeded",
+                ):
                     dataset_reading.dataset_session_from_inventory(
                         root,
                         inventory=source.inventory,
@@ -9846,17 +10096,14 @@ def test_inspection_window_file_count_counts_consecutive_file_batches_once(
     runtime = dataset_inspection._inspection_runtime_metadata(
         context,
         target_chunk_bytes=1024,
-        retained_payload_bytes=0,
     )
 
     assert runtime["file_count"] == 1
     assert runtime["row_count"] == 2
-    observer_bytes = 2 * len(b"timestamp") + 24
     assert observed_headroom == [
         context.resource_policy.task_memory_budget_bytes
-        - dataset_inspection.EXACT_KEY_SQLITE_PAGE_BYTES
-        - dataset_reading.dataset_partition_state_reserve_bytes(context)
-        - observer_bytes
+        - context.resource_policy.reserved_memory_bytes
+        + context.retained_memory_bytes
     ]
 
 
@@ -9908,21 +10155,203 @@ def test_inspection_rejects_output_overlap_after_partition_traversal(
         + len(b"key")
         + 24
     )
-    retained_payload_bytes = policy.task_memory_budget_bytes - (
-        dataset_inspection.EXACT_KEY_SQLITE_PAGE_BYTES + accumulated_state_bytes + 256
+    with runtime_resource_policy_scope(policy):
+        retained_lease = policy.lease(
+            "test.inspection.retained",
+            policy.task_memory_budget_bytes
+            - dataset_inspection.EXACT_KEY_SQLITE_PAGE_BYTES
+            - accumulated_state_bytes
+            - 256,
+        )
+        try:
+            with pytest.raises(
+                ValueError,
+                match="dataset_working_set_exceeds_task_memory_budget",
+            ):
+                dataset_inspection.inspect_dataset_session(
+                    context,
+                    resource_policy=policy,
+                )
+        finally:
+            retained_lease.close()
+
+    assert traversals == 0
+
+
+def test_inspection_admits_result_before_result_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "inspection_result_admission")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("inspection_result_admission"),
+    )
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    before_runtime: list[int] = []
+    after_runtime: list[int] = []
+    at_construction: list[int] = []
+    original_runtime = dataset_inspection._inspection_runtime_metadata
+    original_type = dataset_inspection.DatasetInspection
+
+    def observe_runtime(*args: object, **kwargs: object) -> dict[str, object]:
+        runtime = original_runtime(*args, **kwargs)
+        after_runtime.append(policy.reserved_memory_bytes)
+        return runtime
+
+    def observe_construction(*args: object, **kwargs: object):  # noqa: ANN202
+        at_construction.append(policy.reserved_memory_bytes)
+        return original_type(*args, **kwargs)
+
+    monkeypatch.setattr(
+        dataset_inspection,
+        "_inspection_runtime_metadata",
+        observe_runtime,
+    )
+    monkeypatch.setattr(dataset_inspection, "DatasetInspection", observe_construction)
+
+    with runtime_resource_policy_scope(policy):
+        before_runtime.append(policy.reserved_memory_bytes)
+        result = dataset_inspection.inspect_dataset(root, resource_policy=policy)
+
+    assert result.row_count == len(make_default_dataset_frame())
+    assert len(after_runtime) == len(at_construction) == 1
+    assert after_runtime[0] > before_runtime[0]
+    assert (
+        after_runtime[0] - before_runtime[0]
+        >= dataset_inspection.EXACT_KEY_SQLITE_PAGE_BYTES
+    )
+    assert at_construction[0] == after_runtime[0]
+    assert policy.reserved_memory_bytes == 0
+
+
+def test_fingerprint_admits_result_before_result_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "fingerprint_result_admission")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("fingerprint_result_admission"),
+    )
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    before_bound: list[int] = []
+    after_bound: list[int] = []
+    at_construction: list[int] = []
+    original_bound = dataset_fingerprinting._fingerprint_retained_memory_bytes
+    original_type = dataset_fingerprinting.DatasetFingerprint
+    calls = 0
+
+    def observe_bound(**kwargs: object) -> int:
+        nonlocal calls
+        calls += 1
+        bound = original_bound(**kwargs)  # type: ignore[arg-type]
+        if calls == 1:
+            after_bound.append(policy.reserved_memory_bytes)
+        return bound
+
+    def observe_construction(*args: object, **kwargs: object):  # noqa: ANN202
+        at_construction.append(policy.reserved_memory_bytes)
+        return original_type(*args, **kwargs)
+
+    monkeypatch.setattr(
+        dataset_fingerprinting,
+        "_fingerprint_retained_memory_bytes",
+        observe_bound,
+    )
+    monkeypatch.setattr(
+        dataset_fingerprinting,
+        "DatasetFingerprint",
+        observe_construction,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="dataset_working_set_exceeds_task_memory_budget",
-    ):
-        dataset_inspection.inspect_dataset_session(
-            context,
+    with runtime_resource_policy_scope(policy):
+        before_bound.append(policy.reserved_memory_bytes)
+        result = dataset_fingerprinting.fingerprint_dataset(
+            root,
             resource_policy=policy,
-            retained_payload_bytes=retained_payload_bytes,
         )
 
-    assert traversals == len(paths)
+    assert result.row_count == len(make_default_dataset_frame())
+    assert len(after_bound) == len(at_construction) == 1
+    assert after_bound[0] > before_bound[0]
+    assert at_construction[0] == after_bound[0]
+    assert policy.reserved_memory_bytes == 0
+
+
+def test_private_writer_owned_result_retains_one_lease(
+    tmp_path: Path,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "writer_owned_result")
+    policy = _writer_test_policy()
+
+    with runtime_resource_policy_scope(policy):
+        owned = dataset_writing._write_dataset_owned(
+            root,
+            _bound_first_frames((make_default_dataset_frame(),)),
+            spec=make_processed_dataset_spec("writer_owned_result"),
+            resource_policy=policy,
+        )
+        assert isinstance(owned, runtime_resources._OwnedValue)
+        assert owned.lease.active
+        assert owned.value.root == root
+        assert policy.reserved_memory_bytes >= owned.lease.reserved_bytes
+        owned.value = None
+        owned.lease.close()
+
+    assert policy.reserved_memory_bytes == 0
+
+
+def test_compare_uses_one_fingerprint_lease_per_side(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left = make_dataset_artifact_root(tmp_path, "compare_lease_left")
+    right = make_dataset_artifact_root(tmp_path, "compare_lease_right")
+    frame = make_default_dataset_frame()
+    write_dataset(left, frame, spec=make_processed_dataset_spec("compare_lease_left"))
+    write_dataset(
+        right,
+        frame,
+        spec=make_processed_dataset_spec("compare_lease_right"),
+    )
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    observed: list[int] = []
+    identity_reserved: list[int] = []
+    original_exact = dataset_comparison._exact_comparison_counts
+    original_identity = dataset_comparison._session_identity_token
+
+    def observe_exact(*args: object, **kwargs: object) -> dict[str, int]:
+        assert "retained_payload_bytes" not in kwargs
+        observed.append(policy.reserved_memory_bytes)
+        return original_exact(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(dataset_comparison, "_exact_comparison_counts", observe_exact)
+
+    def observe_identity(context: object) -> bytes:
+        identity_reserved.append(policy.reserved_memory_bytes)
+        return original_identity(context)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        dataset_comparison,
+        "_session_identity_token",
+        observe_identity,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        comparison = dataset_comparison.compare_datasets(
+            left,
+            right,
+            resource_policy=policy,
+        )
+
+    assert comparison.status == "MATCH"
+    assert observed and observed[0] > 0
+    assert len(identity_reserved) >= 4
+    assert all(value > 0 for value in identity_reserved)
+    assert policy.reserved_memory_bytes == 0
 
 
 def test_bounded_metadata_reader_rejects_hardlink_before_open(
@@ -9962,14 +10391,25 @@ def test_private_writer_baseline_rejects_before_input_generation(
         generated = True
         yield make_default_dataset_frame()
 
-    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-        dataset_writing.write_dataset(
-            make_dataset_artifact_root(tmp_path, "retained_baseline"),
-            chunks(),
-            spec=make_processed_dataset_spec("retained_baseline"),
-            resource_policy=policy,
-            retained_payload_bytes=policy.task_memory_budget_bytes,
+    with runtime_resource_policy_scope(policy):
+        retained_lease = policy.lease(
+            "test.writer.retained",
+            policy.task_memory_budget_bytes
+            - dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES,
         )
+        try:
+            with pytest.raises(
+                ValueError,
+                match="dataset_working_set_exceeds_task_memory_budget",
+            ):
+                dataset_writing.write_dataset(
+                    make_dataset_artifact_root(tmp_path, "retained_baseline"),
+                    chunks(),
+                    spec=make_processed_dataset_spec("retained_baseline"),
+                    resource_policy=policy,
+                )
+        finally:
+            retained_lease.close()
 
     assert not generated
 

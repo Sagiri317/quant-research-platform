@@ -29,8 +29,9 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
+    _inspect_dataset_session_owned,
+    _release_owned_value,
     dataset_inspection_retained_memory_bytes,
-    inspect_dataset_session,
 )
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
@@ -222,11 +223,21 @@ def _inspect_existing_dependency(
                 resource_policy=resource_policy,
             ),
         )
-        inspection = inspect_dataset_session(
+        owned = _inspect_dataset_session_owned(
             panel_session,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_input_bytes + retained_payload_bytes,
         )
+        inspection = owned.value
+
+        def release_inspection() -> None:
+            nonlocal inspection
+            inspection = None
+            _release_owned_value(
+                owned,
+                owner="crypto.materializer.inspection.result",
+            )
+
+        session_stack.callback(release_inspection)
         materialization_validation.validate_existing_panel_materialization(
             panel_session,
             bar_session=input_sessions[bar_data_id],

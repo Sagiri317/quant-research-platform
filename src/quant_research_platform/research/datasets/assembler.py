@@ -138,9 +138,6 @@ def _assemble_research_dataset_from_sessions(
         instance_metadata={"input_dataset_identities": input_identities},
         staged_validator=verify_input_sessions,
         resource_policy=policy,
-        retained_payload_bytes=sum(
-            session.retained_memory_bytes for session in input_sessions.values()
-        ),
     )
     return artifact_root
 

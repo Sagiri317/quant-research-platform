@@ -2611,7 +2611,7 @@ def test_panel_writer_keeps_all_input_sessions_live_through_publication(
         available_memory_bytes=1024**3,
     )
     real_open = materialize_panel.open_dataset_session
-    real_write = materialize_panel.write_dataset
+    real_write = materialize_panel._write_dataset_owned
     live_sessions: list[object] = []
     opened_sessions = 0
     publication_rows: list[int] = []
@@ -2639,7 +2639,7 @@ def test_panel_writer_keeps_all_input_sessions_live_through_publication(
         return real_write(root, _bound_first_frames(publications()), **kwargs)
 
     monkeypatch.setattr(materialize_panel, "open_dataset_session", record_open)
-    monkeypatch.setattr(materialize_panel, "write_dataset", record_write)
+    monkeypatch.setattr(materialize_panel, "_write_dataset_owned", record_write)
     materialize_panel.write_panel(
         processed_catalog().get("market_panel_1m"),
         layout=layout,
@@ -2757,7 +2757,7 @@ def test_panel_dependent_publication_carries_live_panel_session_bytes(
     _write_existing_panel_dependency(layout, source_id, _panel_frame(minutes=3))
     panel_spec = processed_catalog().get("market_panel_1m")
     publications: list[pd.DataFrame] = []
-    write_baselines: list[int] = []
+    write_baselines: list[bool] = []
     monkeypatch.setattr(
         module,
         iterator_name,
@@ -2765,11 +2765,13 @@ def test_panel_dependent_publication_carries_live_panel_session_bytes(
     )
 
     def record_write(_root, data, **kwargs):  # noqa: ANN001, ANN202
-        write_baselines.append(kwargs["retained_payload_bytes"])
+        assert "retained_payload_bytes" not in kwargs
+        write_baselines.append(True)
         publications.extend(data)
-        return SimpleNamespace()
+        lease = kwargs["resource_policy"].lease("test.crypto.writer.result", 0)
+        return _OwnedValue(SimpleNamespace(), lease)
 
-    monkeypatch.setattr(module, "write_dataset", record_write)
+    monkeypatch.setattr(module, "_write_dataset_owned", record_write)
     with open_dataset_session(
         layout.processed_data_root(
             panel_spec.market_id,
@@ -2788,7 +2790,7 @@ def test_panel_dependent_publication_carries_live_panel_session_bytes(
             retained_payload_bytes=123,
         )
 
-        assert write_baselines == [panel_session.retained_memory_bytes + 123]
+        assert write_baselines == [True]
         assert publications
         assert all(
             isinstance(publication, pd.DataFrame) for publication in publications
@@ -3347,7 +3349,7 @@ def test_panel_dependent_writer_rejects_replacement_during_staged_validation(
         real_validation = (
             materialization_validation.validate_panel_dependent_materialization
         )
-        real_write = module.write_dataset
+        real_write = module._write_dataset_owned
         real_verify = type(panel_session).verify
         replaced = False
         write_returned = False
@@ -3377,7 +3379,7 @@ def test_panel_dependent_writer_rejects_replacement_during_staged_validation(
             "validate_panel_dependent_materialization",
             replace_after_staged_validation,
         )
-        monkeypatch.setattr(module, "write_dataset", record_write)
+        monkeypatch.setattr(module, "_write_dataset_owned", record_write)
         monkeypatch.setattr(type(panel_session), "verify", record_verify)
         final_root = layout.processed_data_root("crypto", kind, data_id)
 

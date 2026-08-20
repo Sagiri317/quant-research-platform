@@ -18,17 +18,14 @@ from quant_research_platform.policy.share_safety import (
 from quant_research_platform.runtime.resources import (
     MIB,
     RuntimeResourcePolicy,
-    current_runtime_resource_policy,
+    _OwnedValue,
 )
 from quant_research_platform.storage import manifests
-from quant_research_platform.storage._dataset_inspection import (
-    dataset_inspection_retained_memory_bytes,
-)
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
     dataset_file_identity,
 )
-from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows.diagnostics import validation_summary
 from quant_research_platform.workflows.diagnostics.validation_summary import (
@@ -149,6 +146,36 @@ def test_validation_summary_reserves_complete_graph_before_build(
         )
 
 
+def test_validation_summary_admits_both_inspection_container_graphs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_root = _valid_dataset(tmp_path, "summary_container_graph")
+    observed_slots: list[int] = []
+    original_reserve = RuntimeResourcePolicy.reserve
+
+    @contextmanager
+    def observe_reserve(self, owner: str, reserve_bytes: int):  # noqa: ANN001
+        if owner == "workflow.validation.inspection_slots":
+            observed_slots.append(reserve_bytes)
+        with original_reserve(self, owner, reserve_bytes):
+            yield
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "reserve", observe_reserve)
+    build_validation_summary(
+        run_id="demo_run",
+        dataset_roots=(dataset_root,),
+        layer_summaries=(_layer_summary(dataset_root),),
+        **_safe_output_bundle_contract(tmp_path),
+    )
+
+    graph_bound = 2 * sys.getsizeof([])
+    graph_bound += 2 * sys.getsizeof(None)
+    graph_bound += sys.getsizeof((None, None, None))
+    graph_bound += sys.getsizeof((None, None))
+    assert observed_slots and observed_slots[0] >= graph_bound
+
+
 def test_validation_summary_final_reinspection_keeps_complete_summary_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -157,27 +184,31 @@ def test_validation_summary_final_reinspection_keeps_complete_summary_budget(
         _valid_dataset(tmp_path, "retained_reinspection_a"),
         _valid_dataset(tmp_path, "retained_reinspection_b"),
     )
-    inspect_dataset = validation_summary.inspect_dataset
-    observed_retained_bytes: list[int] = []
     observed_reserved_bytes: list[int] = []
     initial_inspections: list[object] = []
     final_references: list[weakref.ReferenceType[object]] = []
+    final_reserved_bytes: list[int] = []
 
-    def record_inspection(root: Path, **kwargs):  # noqa: ANN003, ANN202
-        observed_retained_bytes.append(kwargs["retained_payload_bytes"])
-        policy = current_runtime_resource_policy()
-        assert policy is not None
-        observed_reserved_bytes.append(policy.reserved_memory_bytes)
-        result = inspect_dataset(root, **kwargs)
-        if len(observed_retained_bytes) <= len(dataset_roots):
-            initial_inspections.append(result)
+    real_owned_inspection = validation_summary._inspect_dataset_session_owned
+    call_count = 0
+
+    def record_owned(context, *, resource_policy):  # noqa: ANN001, ANN202
+        nonlocal call_count
+        observed_reserved_bytes.append(resource_policy.reserved_memory_bytes)
+        owned = real_owned_inspection(context, resource_policy=resource_policy)
+        if call_count < len(dataset_roots):
+            initial_inspections.append(owned.value)
         else:
-            if final_references:
-                assert final_references[-1]() is None
-            final_references.append(weakref.ref(result))
-        return result
+            final_reserved_bytes.append(resource_policy.reserved_memory_bytes)
+            final_references.append(weakref.ref(owned.value))
+        call_count += 1
+        return owned
 
-    monkeypatch.setattr(validation_summary, "inspect_dataset", record_inspection)
+    monkeypatch.setattr(
+        validation_summary,
+        "_inspect_dataset_session_owned",
+        record_owned,
+    )
 
     summary = build_validation_summary(
         run_id="demo_run",
@@ -193,17 +224,11 @@ def test_validation_summary_final_reinspection_keeps_complete_summary_budget(
     )
 
     retained_summary_bytes = len(render_qrp_json_object(summary).encode("utf-8"))
-    inspection_slot_bytes = sys.getsizeof([None] * len(dataset_roots))
-    inspection_slot_bytes += len(dataset_roots) * sys.getsizeof((None, None, None))
-    assert observed_retained_bytes == [
-        inspection_slot_bytes,
-        inspection_slot_bytes
-        + dataset_inspection_retained_memory_bytes(initial_inspections[0]),
-        0,
-        0,
-    ]
-    assert observed_reserved_bytes[:2] == [0, 0]
-    assert all(value >= retained_summary_bytes for value in observed_reserved_bytes[2:])
+    assert len(initial_inspections) == len(dataset_roots)
+    assert observed_reserved_bytes[0] > 0
+    assert observed_reserved_bytes[1] > observed_reserved_bytes[0]
+    assert final_reserved_bytes
+    assert all(value >= retained_summary_bytes for value in final_reserved_bytes)
     assert all(reference() is None for reference in final_references)
 
 
@@ -826,7 +851,7 @@ def test_build_validation_summary_does_not_misclassify_physical_inspection_failu
         raise ValueError("physical_inspection_failed")
 
     monkeypatch.setattr(
-        "quant_research_platform.workflows.diagnostics.validation_summary.inspect_dataset",
+        "quant_research_platform.workflows.diagnostics.validation_summary._inspect_dataset_session_owned",
         fail_inspection,
     )
 
@@ -875,7 +900,7 @@ def test_validation_summary_does_not_hide_physical_failure_behind_manifest(
     manifest["duplicate_primary_key_count"] = 1
 
     monkeypatch.setattr(
-        "quant_research_platform.workflows.diagnostics.validation_summary.inspect_dataset",
+        "quant_research_platform.workflows.diagnostics.validation_summary._inspect_dataset_session_owned",
         lambda _root, **_kwargs: (_ for _ in ()).throw(
             OSError("physical_inspection_failed")
         ),
@@ -1067,12 +1092,8 @@ def test_validation_summary_reports_all_observed_dataset_failure_classes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dataset_root = _valid_dataset(tmp_path, "observed_failures")
-    policy = capture_test_policy(
-        available_memory_bytes=64 * MIB,
-    )
-    inspection = validation_summary.inspect_dataset(
+    inspection = inspect_dataset(
         dataset_root,
-        resource_policy=policy,
     )
     manifest = deepcopy(inspection.manifest)
     manifest["validation_status"] = "FAIL"
@@ -1081,10 +1102,17 @@ def test_validation_summary_reports_all_observed_dataset_failure_classes(
     manifest["non_finite_count_summary"]["value"] = 1
     manifest["source_asset_id"] = "local-only"
     observed = replace(inspection, manifest=manifest)
+
+    def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
+        return _OwnedValue(
+            observed,
+            resource_policy.lease("test.validation.inspection", 0),
+        )
+
     monkeypatch.setattr(
         validation_summary,
-        "inspect_dataset",
-        lambda *_args, **_kwargs: observed,
+        "_inspect_dataset_session_owned",
+        owned_inspection,
     )
     layer = deepcopy(_layer_summary(dataset_root))
     layer["datasets"][0]["manifest_summary"]["duplicate_primary_key_count"] = 1

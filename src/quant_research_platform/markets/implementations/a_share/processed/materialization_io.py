@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack
 from pathlib import Path
@@ -22,8 +23,8 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
-    dataset_inspection_retained_memory_bytes,
-    inspect_dataset,
+    _inspect_dataset_owned,
+    _release_owned_value,
 )
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
@@ -54,10 +55,6 @@ def write_and_inspect(
     written: dict[str, DatasetInspection],
     resource_policy: RuntimeResourcePolicy,
 ) -> DatasetInspection:
-    retained_written_bytes = sum(
-        dataset_inspection_retained_memory_bytes(inspection)
-        for inspection in written.values()
-    )
     root = processed_root(layout, spec)
     if root.exists():
         raise ValueError("dataset_exists")
@@ -72,14 +69,24 @@ def write_and_inspect(
             output,
             spec=spec,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_written_bytes,
         )
-        inspection = inspect_dataset(
+        owned = _inspect_dataset_owned(
             root,
             time_window=time_window,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_written_bytes,
         )
+        inspection = owned.value
+
+        def release_inspection() -> None:
+            nonlocal inspection
+            if sys.exception() is not None:
+                inspection = None
+            _release_owned_value(
+                owned,
+                owner="a_share.materialization.inspection.result",
+            )
+
+        resource_policy.register_cleanup(release_inspection)
     written[spec.data_id] = inspection
     return inspection
 

@@ -19,14 +19,19 @@ from quant_research_platform.contracts._json import (
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
+)
+from quant_research_platform.storage._dataset_inspection import (
+    _close_lease_preserving_primary,
+    _release_owned_value,
 )
 from quant_research_platform.storage._dataset_paths import relative_partition_label
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
-    dataset_partition_state_reserve_bytes,
     iter_dataset_file_batches,
     open_dataset_session,
     read_columns_for_time_window,
@@ -58,156 +63,157 @@ def fingerprint_dataset_session(
     context: DatasetSession,
     *,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int = 0,
 ) -> DatasetFingerprint:
     if context.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
-            raise ValueError("invalid_dataset_fingerprint_retained_payload_bytes")
-        payload_target_bytes = resource_policy.remaining_memory_bytes
-        if (
-            retained_payload_bytes + context.retained_memory_bytes
-            >= resource_policy.task_memory_budget_bytes
-        ):
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        partition_state_bytes = dataset_partition_state_reserve_bytes(context)
-        operation_headroom_bytes = resource_policy.task_memory_budget_bytes
-        operation_headroom_bytes -= retained_payload_bytes
-        operation_headroom_bytes -= context.retained_memory_bytes
-        operation_headroom_bytes -= partition_state_bytes
-        if operation_headroom_bytes <= 0:
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        key_columns = tuple(str(column) for column in context.spec["primary_key"])
-        hash_columns = tuple(dict.fromkeys((*key_columns, *context.logical_columns)))
-        hash_physical_columns = read_columns_for_time_window(
-            hash_columns,
-            spec=context.spec,
-            time_window=context.time_window,
-        )
-        output_columns = tuple(context.logical_columns)
-        local_state_bytes = struct.calcsize("P") * (
-            len(key_columns) + len(hash_columns) + len(hash_physical_columns)
-        )
-        local_state_bytes += sum(
-            len(column.encode("utf-8"))
-            for column in (*key_columns, *hash_columns, *hash_physical_columns)
-        )
-        operation_headroom_bytes -= local_state_bytes
-        if operation_headroom_bytes <= 0:
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        reader_upstream_headroom_bytes = (
-            operation_headroom_bytes + context.retained_memory_bytes
-        )
-        projected_schema_hash = canonical_json_hash(
-            physical_schema_from_schema(
-                pa.schema(
-                    [context.arrow_schema.field(column) for column in hash_columns]
-                )
-            )
-        )
-        row_count = 0
-        row_hash_sum = 0
-        row_hash_xor = 0
-        partition_rows: dict[str, int] = {}
-        partition_hash_sum: dict[str, int] = {}
-        partition_hash_xor: dict[str, int] = {}
-        file_count = 0
-        last_observed_path: Path | None = None
-        accepted_arrow_bytes: int | None = None
-        accepted_arrow_schema: pa.Schema | None = None
-
-        def observe_batch(batch: Any, _frame: pd.DataFrame) -> None:
-            nonlocal accepted_arrow_bytes, accepted_arrow_schema
-            if accepted_arrow_bytes is not None:
-                raise RuntimeError("dataset_fingerprint_batch_observer_out_of_sequence")
-            accepted_arrow_bytes = batch.get_total_buffer_size()
-            accepted_arrow_schema = batch.schema
-
-        for path, chunk in iter_dataset_file_batches(
+        owned = _fingerprint_dataset_session_owned(
             context,
-            columns=hash_physical_columns,
-            target_chunk_bytes=payload_target_bytes,
-            operation_headroom_bytes=reader_upstream_headroom_bytes,
-            batch_observer=observe_batch,
-        ):
-            if accepted_arrow_bytes is None or accepted_arrow_schema is None:
-                raise RuntimeError("dataset_fingerprint_batch_observer_missing")
-            hash_target_bytes = operation_headroom_bytes - accepted_arrow_bytes
-            accepted_arrow_bytes = None
-            arrow_schema = accepted_arrow_schema
-            accepted_arrow_schema = None
-            chunk = chunk.loc[:, list(hash_columns)]
-            if chunk.empty:
-                continue
-            if path != last_observed_path:
-                file_count += 1
-                last_observed_path = path
-            chunk_sum = 0
-            chunk_xor = 0
-            for hashes in _iter_fingerprint_hashes(
-                chunk,
-                target_bytes=hash_target_bytes,
-                arrow_schema=arrow_schema,
-                primary_key=key_columns,
-            ):
-                chunk_sum = (chunk_sum + int(hashes.sum(dtype=np.uint64))) % 2**64
-                chunk_xor ^= int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0)))
-                del hashes
-            partition = relative_partition_label(context.data_root, path)
-            row_count += int(len(chunk))
-            row_hash_sum = (row_hash_sum + chunk_sum) % 2**64
-            row_hash_xor ^= chunk_xor
-            partition_rows[partition] = partition_rows.get(partition, 0) + len(chunk)
-            partition_hash_sum[partition] = (
-                partition_hash_sum.get(partition, 0) + chunk_sum
-            ) % 2**64
-            partition_hash_xor[partition] = (
-                partition_hash_xor.get(partition, 0) ^ chunk_xor
-            )
+            resource_policy=resource_policy,
+        )
+        result = owned.value
+        _release_owned_value(owned, owner="storage.dataset.fingerprint.result")
+        return result
 
-        content_hash = canonical_json_hash(
-            {
-                "row_hash_sum": row_hash_sum,
-                "row_hash_xor": row_hash_xor,
-                "row_count": row_count,
-                "columns": list(output_columns),
-                "hash_columns": list(hash_columns),
-            }
+
+def _fingerprint_dataset_session_owned(
+    context: DatasetSession,
+    *,
+    resource_policy: RuntimeResourcePolicy,
+) -> _OwnedValue[DatasetFingerprint]:
+    try:
+        result_lease = resource_policy.lease(
+            "storage.dataset.fingerprint.result",
+            _fingerprint_operation_bound(context),
         )
-        projected_result_bytes = _fingerprint_retained_memory_bytes(
-            schema_hash=projected_schema_hash,
-            content_hash=content_hash,
-            key_columns=key_columns,
-            column_names=output_columns,
-            partition_hashes=(
-                (partition, content_hash) for partition in sorted(partition_rows)
-            ),
+    except MemoryError:
+        raise ValueError("dataset_working_set_exceeds_task_memory_budget") from None
+    try:
+        return _fingerprint_dataset_session_owned_with_lease(
+            context,
+            resource_policy=resource_policy,
+            result_lease=result_lease,
         )
-        if (
-            retained_payload_bytes
-            + context.retained_memory_bytes
-            + partition_state_bytes
-            + local_state_bytes
-            + projected_result_bytes
-            > resource_policy.task_memory_budget_bytes
+    except BaseException:
+        _close_lease_preserving_primary(
+            result_lease,
+            owner="storage.dataset.fingerprint.result",
+        )
+        raise
+
+
+def _fingerprint_dataset_session_owned_with_lease(
+    context: DatasetSession,
+    *,
+    resource_policy: RuntimeResourcePolicy,
+    result_lease: MemoryLease,
+) -> _OwnedValue[DatasetFingerprint]:
+    payload_target_bytes = resource_policy.remaining_memory_bytes
+    operation_headroom_bytes = resource_policy.task_memory_budget_bytes
+    operation_headroom_bytes -= resource_policy.reserved_memory_bytes
+    if operation_headroom_bytes <= 0:
+        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+    key_columns = tuple(str(column) for column in context.spec["primary_key"])
+    hash_columns = tuple(dict.fromkeys((*key_columns, *context.logical_columns)))
+    hash_physical_columns = read_columns_for_time_window(
+        hash_columns,
+        spec=context.spec,
+        time_window=context.time_window,
+    )
+    output_columns = tuple(context.logical_columns)
+    reader_upstream_headroom_bytes = (
+        operation_headroom_bytes + context.retained_memory_bytes
+    )
+    projected_schema_hash = canonical_json_hash(
+        physical_schema_from_schema(
+            pa.schema([context.arrow_schema.field(column) for column in hash_columns])
+        )
+    )
+    row_count = 0
+    row_hash_sum = 0
+    row_hash_xor = 0
+    partition_rows: dict[str, int] = {}
+    partition_hash_sum: dict[str, int] = {}
+    partition_hash_xor: dict[str, int] = {}
+    file_count = 0
+    last_observed_path: Path | None = None
+    accepted_arrow_bytes: int | None = None
+    accepted_arrow_schema: pa.Schema | None = None
+
+    def observe_batch(batch: Any, _frame: pd.DataFrame) -> None:
+        nonlocal accepted_arrow_bytes, accepted_arrow_schema
+        if accepted_arrow_bytes is not None:
+            raise RuntimeError("dataset_fingerprint_batch_observer_out_of_sequence")
+        accepted_arrow_bytes = batch.get_total_buffer_size()
+        accepted_arrow_schema = batch.schema
+
+    for path, chunk in iter_dataset_file_batches(
+        context,
+        columns=hash_physical_columns,
+        target_chunk_bytes=payload_target_bytes,
+        operation_headroom_bytes=reader_upstream_headroom_bytes,
+        batch_observer=observe_batch,
+    ):
+        if accepted_arrow_bytes is None or accepted_arrow_schema is None:
+            raise RuntimeError("dataset_fingerprint_batch_observer_missing")
+        hash_target_bytes = operation_headroom_bytes - accepted_arrow_bytes
+        accepted_arrow_bytes = None
+        arrow_schema = accepted_arrow_schema
+        accepted_arrow_schema = None
+        chunk = chunk.loc[:, list(hash_columns)]
+        if chunk.empty:
+            continue
+        if path != last_observed_path:
+            file_count += 1
+            last_observed_path = path
+        chunk_sum = 0
+        chunk_xor = 0
+        for hashes in _iter_fingerprint_hashes(
+            chunk,
+            target_bytes=hash_target_bytes,
+            arrow_schema=arrow_schema,
+            primary_key=key_columns,
         ):
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        partition_fingerprints = tuple(
-            {
-                "partition": partition,
-                "row_count": int(partition_rows[partition]),
-                "content_hash": canonical_json_hash(
-                    {
-                        "row_hash_sum": int(partition_hash_sum[partition]),
-                        "row_hash_xor": int(partition_hash_xor[partition]),
-                        "row_count": int(partition_rows[partition]),
-                        "hash_columns": list(hash_columns),
-                    }
-                ),
-            }
-            for partition in sorted(partition_rows)
+            chunk_sum = (chunk_sum + int(hashes.sum(dtype=np.uint64))) % 2**64
+            chunk_xor ^= int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0)))
+            del hashes
+        partition = relative_partition_label(context.data_root, path)
+        row_count += int(len(chunk))
+        row_hash_sum = (row_hash_sum + chunk_sum) % 2**64
+        row_hash_xor ^= chunk_xor
+        partition_rows[partition] = partition_rows.get(partition, 0) + len(chunk)
+        partition_hash_sum[partition] = (
+            partition_hash_sum.get(partition, 0) + chunk_sum
+        ) % 2**64
+        partition_hash_xor[partition] = (
+            partition_hash_xor.get(partition, 0) ^ chunk_xor
         )
+
+    content_hash = canonical_json_hash(
+        {
+            "row_hash_sum": row_hash_sum,
+            "row_hash_xor": row_hash_xor,
+            "row_count": row_count,
+            "columns": list(output_columns),
+            "hash_columns": list(hash_columns),
+        }
+    )
+    partition_fingerprints = tuple(
+        {
+            "partition": partition,
+            "row_count": int(partition_rows[partition]),
+            "content_hash": canonical_json_hash(
+                {
+                    "row_hash_sum": int(partition_hash_sum[partition]),
+                    "row_hash_xor": int(partition_hash_xor[partition]),
+                    "row_count": int(partition_rows[partition]),
+                    "hash_columns": list(hash_columns),
+                }
+            ),
+        }
+        for partition in sorted(partition_rows)
+    )
+    try:
         result = DatasetFingerprint(
             schema_hash=projected_schema_hash,
             row_count=row_count,
@@ -217,14 +223,34 @@ def fingerprint_dataset_session(
             file_count=file_count,
             column_names=output_columns,
         )
-        if (
-            retained_payload_bytes
-            + context.retained_memory_bytes
-            + dataset_fingerprint_retained_memory_bytes(result)
-            > resource_policy.task_memory_budget_bytes
-        ):
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        return result
+        result_bytes = dataset_fingerprint_retained_memory_bytes(result)
+        if result_bytes > result_lease.reserved_bytes:
+            raise ValueError("dataset_fingerprint_result_bound_invalid")
+        result_lease.shrink_to(result_bytes)
+        return _OwnedValue(result, result_lease)
+    except BaseException:
+        result = None
+        raise
+
+
+def _fingerprint_operation_bound(context: DatasetSession) -> int:
+    pointer_bytes = struct.calcsize("P")
+    paths = getattr(context, "read_paths", ())
+    path_count = len(paths)
+    columns = tuple(getattr(context, "logical_columns", ())) + tuple(
+        getattr(context, "physical_columns", ())
+    )
+    text_bytes = sum(len(str(column).encode("utf-8")) for column in columns)
+    metadata_bytes = len(getattr(context, "spec_bytes", b"")) + len(
+        getattr(context, "manifest_bytes", b"")
+    )
+    return (
+        metadata_bytes
+        + text_bytes * 4
+        + pointer_bytes * (4 * len(columns) + 8 * path_count)
+        + path_count * 96
+        + 1024
+    )
 
 
 def dataset_fingerprint_retained_memory_bytes(value: DatasetFingerprint) -> int:

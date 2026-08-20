@@ -43,7 +43,10 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inspection import inspect_dataset
+from quant_research_platform.storage._dataset_inspection import (
+    _inspect_dataset_owned,
+    _release_owned_value,
+)
 from quant_research_platform.storage._dataset_key_tracking import (
     ExactPrimaryKeyIndex,
 )
@@ -160,14 +163,18 @@ def _mark_dataset_session_coverage(
     retained_state_bytes: int,
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
-    inspection = inspect_dataset(
+    owned_inspection = _inspect_dataset_owned(
         root,
         resource_policy=resource_policy,
-        retained_payload_bytes=retained_state_bytes,
     )
-    if "timestamp" not in inspection.columns:
-        raise ValueError("time_window_not_supported")
-    del inspection
+    try:
+        if "timestamp" not in owned_inspection.value.columns:
+            raise ValueError("time_window_not_supported")
+    finally:
+        _release_owned_value(
+            owned_inspection,
+            owner="a_share.planning.calendar.inspection",
+        )
     reader_headroom_bytes = (
         resource_policy.task_memory_budget_bytes - retained_state_bytes
     )
@@ -921,15 +928,20 @@ def available_trading_sessions(
         lookahead_sessions, error="invalid_a_share_session_offset"
     )
     calendar_root = layout.interim_data_root(source_id, "trading_calendar")
-    calendar_inspection = inspect_dataset(
+    owned_inspection = _inspect_dataset_owned(
         calendar_root,
         resource_policy=resource_policy,
     )
-    calendar_row_count = int(calendar_inspection.row_count)
-    persisted_payload_bytes = int(
-        calendar_inspection.manifest.get("file_size_bytes", 0) or 0
-    )
-    del calendar_inspection
+    try:
+        calendar_row_count = int(owned_inspection.value.row_count)
+        persisted_payload_bytes = int(
+            owned_inspection.value.manifest.get("file_size_bytes", 0) or 0
+        )
+    finally:
+        _release_owned_value(
+            owned_inspection,
+            owner="a_share.planning.coverage.inspection",
+        )
     maximum_session_state_bytes = calendar_row_count * np.dtype(np.int64).itemsize
     boolean_state_bytes = calendar_row_count * np.dtype(np.bool_).itemsize
     position_state_bytes = calendar_row_count * np.dtype(np.intp).itemsize

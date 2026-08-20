@@ -31,6 +31,10 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
+    _close_lease_preserving_primary,
+    _inspection_result_bound,
+    _release_owned_value,
+    dataset_inspection_retained_memory_bytes,
     inspection_from_persisted_session,
 )
 from quant_research_platform.storage._dataset_inventory import (
@@ -125,7 +129,6 @@ class _WriteStats:
     schema_hash: str | None = None
     logical_dtypes: dict[str, Any] | None = None
     logical_dtype_hash: str | None = None
-    retained_payload_bytes: int = 0
     _schema: list[dict[str, Any]] | None = None
     _arrow_schema: pa.Schema | None = None
     _logical_dtype_plan: dict[str, Any] | None = None
@@ -389,33 +392,49 @@ def write_dataset(
     instance_metadata: Mapping[str, Any] | None = None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
     resource_policy: RuntimeResourcePolicy | None,
-    retained_payload_bytes: int = 0,
     borrowed_input: bool = False,
 ) -> DatasetInspection:
+    issued_policy = resource_policy or active_runtime_resource_policy()
+    with runtime_resource_policy_scope(issued_policy):
+        owned = _write_dataset_owned(
+            dataset_root,
+            data,
+            spec=spec,
+            instance_metadata=instance_metadata,
+            staged_validator=staged_validator,
+            resource_policy=issued_policy,
+            borrowed_input=borrowed_input,
+        )
+        result = owned.value
+        _release_owned_value(owned, owner="storage.dataset.write.result")
+        return result
+
+
+def _write_dataset_owned(
+    dataset_root: Path,
+    data: pd.DataFrame | Iterable[object],
+    *,
+    spec: DataSpec,
+    instance_metadata: Mapping[str, Any] | None = None,
+    staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
+    resource_policy: RuntimeResourcePolicy,
+    borrowed_input: bool = False,
+) -> _OwnedValue[DatasetInspection]:
     final_root = Path(dataset_root)
     validate_dataset_spec(spec)
     validate_dataset_artifact_root(final_root, spec)
     final_root = require_artifact_root(final_root)
-    issued_policy = resource_policy or active_runtime_resource_policy()
-    if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
-        raise ValueError("invalid_dataset_retained_payload_bytes")
-    owner_reserve_bytes = (
-        _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES + retained_payload_bytes
-    )
-    if owner_reserve_bytes >= issued_policy.task_memory_budget_bytes:
+    owner_reserve_bytes = _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+    if owner_reserve_bytes >= resource_policy.task_memory_budget_bytes:
         raise MemoryError("runtime_memory_budget_exceeded")
-    with (
-        runtime_resource_policy_scope(issued_policy),
-        issued_policy.reserve("storage.dataset.write", owner_reserve_bytes),
-    ):
+    with resource_policy.reserve("storage.dataset.write", owner_reserve_bytes):
         return _write_dataset_under_policy(
             final_root,
             data,
             spec=spec,
             instance_metadata=instance_metadata,
             staged_validator=staged_validator,
-            resource_policy=issued_policy,
-            retained_payload_bytes=retained_payload_bytes,
+            resource_policy=resource_policy,
             borrowed_input=borrowed_input,
         )
 
@@ -428,9 +447,8 @@ def _write_dataset_under_policy(
     instance_metadata: Mapping[str, Any] | None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
     borrowed_input: bool,
-) -> DatasetInspection:
+) -> _OwnedValue[DatasetInspection]:
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     close = getattr(input_chunks, "close", None)
     input_closed = close is None
@@ -485,7 +503,7 @@ def _write_dataset_under_policy(
 
     resource_policy.register_cleanup(close_input_and_active_leases)
 
-    def _writer(temp_root: Path) -> DatasetInspection:
+    def _writer(temp_root: Path) -> _OwnedValue[DatasetInspection]:
         try:
             if (
                 resource_policy.task_memory_budget_bytes
@@ -519,7 +537,6 @@ def _write_dataset_under_policy(
                     resource_policy=resource_policy,
                     key_tracker=key_tracker,
                     inventory=inventory,
-                    minimum_retained_payload_bytes=retained_payload_bytes,
                     borrowed_input=borrowed_input,
                     active_producer_leases=active_producer_leases,
                     active_producer_values=active_producer_values,
@@ -560,10 +577,33 @@ def _write_dataset_under_policy(
                         )
                     )
                 session.verify()
-                return inspection_from_persisted_session(
-                    session,
-                    published_root=final_root,
-                )
+                result_bound = _inspection_result_bound(session)
+                try:
+                    result_lease = resource_policy.lease(
+                        "storage.dataset.write.result",
+                        result_bound,
+                    )
+                except MemoryError:
+                    raise ValueError(
+                        "dataset_working_set_exceeds_task_memory_budget"
+                    ) from None
+                try:
+                    result = inspection_from_persisted_session(
+                        session,
+                        published_root=final_root,
+                    )
+                    result_bytes = dataset_inspection_retained_memory_bytes(result)
+                    if result_bytes > result_lease.reserved_bytes:
+                        raise ValueError("dataset_write_result_bound_invalid")
+                    result_lease.shrink_to(result_bytes)
+                    return _OwnedValue(result, result_lease)
+                except BaseException:
+                    result = None
+                    _close_lease_preserving_primary(
+                        result_lease,
+                        owner="storage.dataset.write.result",
+                    )
+                    raise
         finally:
             close_input_and_active_leases()
 
@@ -585,7 +625,6 @@ def _write_contents(
     resource_policy: RuntimeResourcePolicy,
     key_tracker: ExactPrimaryKeyIndex,
     inventory: DatasetSessionInventory,
-    minimum_retained_payload_bytes: int,
     borrowed_input: bool,
     active_producer_leases: list[MemoryLease],
     active_producer_values: list[_OwnedValue[pd.DataFrame]],
@@ -601,7 +640,6 @@ def _write_contents(
         key_tracker=key_tracker,
         inventory=inventory,
     )
-    accumulator.retained_payload_bytes = minimum_retained_payload_bytes
     part_indices: dict[str, int] = {}
     saw_empty_schema = False
     producer_bound: int | None = None
@@ -674,7 +712,6 @@ def _write_contents(
             active_producer_values.append(owned)
             del owned
             producer_bound = None
-        accumulator.retained_payload_bytes = minimum_retained_payload_bytes
         if type(chunk) is not pd.DataFrame:
             raise TypeError("invalid_dataset_chunk")
         chunk_bytes = pandas_frame_payload_bytes(chunk)

@@ -28,6 +28,9 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._dataset_inspection import (
+    _release_owned_value,
+)
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
@@ -36,7 +39,7 @@ from quant_research_platform.storage._dataset_reading import (
 )
 from quant_research_platform.storage._dataset_writing import (
     DatasetWriteReceipt,
-    write_dataset,
+    _write_dataset_owned,
 )
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
@@ -86,17 +89,26 @@ def write_factors(
             )
             panel_session.verify()
 
-        return write_dataset(
+        owned = _write_dataset_owned(
             root,
             chunks,
             spec=spec,
             instance_metadata={"input_dataset_identities": input_identities},
             staged_validator=validate_staged_dataset,
             resource_policy=resource_policy,
-            retained_payload_bytes=(
-                retained_payload_bytes + panel_session.retained_memory_bytes
-            ),
         )
+        result = owned.value
+
+        def release_result() -> None:
+            nonlocal result
+            result = None
+            _release_owned_value(
+                owned,
+                owner="crypto.factors.write.result",
+            )
+
+        resource_policy.register_cleanup(release_result)
+        return result
 
 
 def _iter_factor_chunks(

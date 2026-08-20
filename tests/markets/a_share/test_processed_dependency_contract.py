@@ -835,6 +835,16 @@ def test_write_paths_read_processed_inputs_via_helper(
             columns=("asset_id", "timestamp", "adj_close", "adj_open"),
         )
 
+    def fake_owned_inspection(
+        *_args: object,
+        resource_policy,
+        **_kwargs: object,
+    ):
+        return _OwnedValue(
+            fake_inspect_dataset(),
+            resource_policy.lease("test.a_share.inspection", 0),
+        )
+
     def fake_write_and_inspect(spec: ProcessedDataSpec, frame, **kwargs: object):
         del spec
         policy = kwargs["resource_policy"]
@@ -933,8 +943,8 @@ def test_write_paths_read_processed_inputs_via_helper(
 
     monkeypatch.setattr(
         materialization_planning,
-        "inspect_dataset",
-        fake_inspect_dataset,
+        "_inspect_dataset_owned",
+        fake_owned_inspection,
     )
     monkeypatch.setattr(materialization_io, "write_and_inspect", fake_write_and_inspect)
     monkeypatch.setattr(
@@ -1161,8 +1171,11 @@ def test_write_paths_reserve_registered_output_before_transform(
     )
     monkeypatch.setattr(
         materialize_panel,
-        "inspect_dataset",
-        lambda *_args, **_kwargs: inspection,
+        "_inspect_dataset_owned",
+        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+            inspection,
+            resource_policy.lease("test.a_share.inspection", 0),
+        ),
     )
     monkeypatch.setattr(
         materialize_factors.factor_calculations,
@@ -1198,45 +1211,46 @@ def test_write_paths_reserve_registered_output_before_transform(
     monkeypatch.setattr(transform_owner, transform_name, reject_transform)
     layout = StorageLayout(project_root=tmp_path)
 
-    with pytest.raises(TransformObserved):
-        if writer_kind == "panel":
-            materialize_panel.write_panel(
-                spec,
-                layout=layout,
-                source_id=SourceId("synthetic_vendor_a"),
-                market_bars_data_id=MARKET_BARS_DATA_ID,
-                time_window=window,
-                policy=policy,
-                sessions=sessions,
-                written={},
-            )
-        elif writer_kind == "factor":
-            materialize_factors.write_factors(
-                spec,
-                layout=layout,
-                time_window=window,
-                policy=policy,
-                sessions=sessions,
-                written={},
-            )
-        elif writer_kind == "label":
-            materialize_labels.write_labels(
-                spec,
-                layout=layout,
-                time_window=window,
-                policy=policy,
-                sessions=sessions,
-                written={},
-            )
-        else:
-            materialize_annotations.write_annotations(
-                spec,
-                layout=layout,
-                time_window=window,
-                policy=policy,
-                sessions=sessions,
-                written={},
-            )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(TransformObserved):
+            if writer_kind == "panel":
+                materialize_panel.write_panel(
+                    spec,
+                    layout=layout,
+                    source_id=SourceId("synthetic_vendor_a"),
+                    market_bars_data_id=MARKET_BARS_DATA_ID,
+                    time_window=window,
+                    policy=policy,
+                    sessions=sessions,
+                    written={},
+                )
+            elif writer_kind == "factor":
+                materialize_factors.write_factors(
+                    spec,
+                    layout=layout,
+                    time_window=window,
+                    policy=policy,
+                    sessions=sessions,
+                    written={},
+                )
+            elif writer_kind == "label":
+                materialize_labels.write_labels(
+                    spec,
+                    layout=layout,
+                    time_window=window,
+                    policy=policy,
+                    sessions=sessions,
+                    written={},
+                )
+            else:
+                materialize_annotations.write_annotations(
+                    spec,
+                    layout=layout,
+                    time_window=window,
+                    policy=policy,
+                    sessions=sessions,
+                    written={},
+                )
 
 
 def test_materialized_dataset_asset_filter_is_forwarded_outside_projection(
@@ -1310,13 +1324,20 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
     )
     chunks = iter(tuple(reversed(frames)) if reverse_chunks else frames)
     observed: list[dict[str, object]] = []
+
+    def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
+        return _OwnedValue(
+            SimpleNamespace(
+                row_count=6,
+                manifest={"file_size_bytes": 10**9},
+            ),
+            resource_policy.lease("test.a_share.inspection", 0),
+        )
+
     monkeypatch.setattr(
         materialization_planning,
-        "inspect_dataset",
-        lambda _root, **_kwargs: SimpleNamespace(
-            row_count=6,
-            manifest={"file_size_bytes": 10**9},
-        ),
+        "_inspect_dataset_owned",
+        owned_inspection,
     )
     monkeypatch.setattr(
         materialization_io,
@@ -1327,14 +1348,15 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=5 * 1024 * 1024,
     )
-    result = materialization_planning.available_trading_sessions(
-        SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
-        "source",  # type: ignore[arg-type]
-        time_window=TimeWindow("2024-01-02", "2024-01-04"),
-        lookback_sessions=1,
-        lookahead_sessions=1,
-        resource_policy=policy,
-    )
+    with runtime_resource_policy_scope(policy):
+        result = materialization_planning.available_trading_sessions(
+            SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
+            "source",  # type: ignore[arg-type]
+            time_window=TimeWindow("2024-01-02", "2024-01-04"),
+            lookback_sessions=1,
+            lookahead_sessions=1,
+            resource_policy=policy,
+        )
 
     assert result.equals(
         pd.DatetimeIndex(pd.Timestamp(f"2024-01-0{day}") for day in range(1, 6))
@@ -1392,19 +1414,21 @@ def test_available_trading_sessions_small_fit_reaches_exact_working_set_check(
 
     monkeypatch.setattr(
         materialization_planning,
-        "inspect_dataset",
-        lambda _root, **_kwargs: SimpleNamespace(
-            row_count=1, manifest={"file_size_bytes": 1}
+        "_inspect_dataset_owned",
+        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+            SimpleNamespace(row_count=1, manifest={"file_size_bytes": 1}),
+            resource_policy.lease("test.a_share.inspection", 0),
         ),
     )
-    result = materialization_planning.available_trading_sessions(
-        SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
-        "source",  # type: ignore[arg-type]
-        time_window=TimeWindow("2024-01-02", "2024-01-02"),
-        lookback_sessions=0,
-        lookahead_sessions=0,
-        resource_policy=policy,
-    )
+    with runtime_resource_policy_scope(policy):
+        result = materialization_planning.available_trading_sessions(
+            SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
+            "source",  # type: ignore[arg-type]
+            time_window=TimeWindow("2024-01-02", "2024-01-02"),
+            lookback_sessions=0,
+            lookahead_sessions=0,
+            resource_policy=policy,
+        )
 
     assert tuple(result) == (pd.Timestamp("2024-01-02"),)
     assert reads == 1
@@ -1431,10 +1455,10 @@ def test_available_trading_sessions_retains_only_selected_boundary_state(
 
     monkeypatch.setattr(
         materialization_planning,
-        "inspect_dataset",
-        lambda _root, **_kwargs: SimpleNamespace(
-            row_count=len(dates),
-            manifest={"file_size_bytes": 10**9},
+        "_inspect_dataset_owned",
+        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+            SimpleNamespace(row_count=len(dates), manifest={"file_size_bytes": 10**9}),
+            resource_policy.lease("test.a_share.inspection", 0),
         ),
     )
     monkeypatch.setattr(
@@ -1446,14 +1470,15 @@ def test_available_trading_sessions_retains_only_selected_boundary_state(
         available_memory_bytes=1024**3,
     )
 
-    result = materialization_planning.available_trading_sessions(
-        SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
-        "source",  # type: ignore[arg-type]
-        time_window=TimeWindow("2024-06-03", "2024-06-04"),
-        lookback_sessions=2,
-        lookahead_sessions=2,
-        resource_policy=policy,
-    )
+    with runtime_resource_policy_scope(policy):
+        result = materialization_planning.available_trading_sessions(
+            SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
+            "source",  # type: ignore[arg-type]
+            time_window=TimeWindow("2024-06-03", "2024-06-04"),
+            lookback_sessions=2,
+            lookahead_sessions=2,
+            resource_policy=policy,
+        )
 
     assert result.equals(pd.DatetimeIndex((*before[-2:], *core, *after[:2])))
     assert result.nbytes == len(result) * np.dtype(np.int64).itemsize
@@ -1472,8 +1497,11 @@ def test_dataset_coverage_reader_accounts_compact_retained_state(
     observed: list[dict[str, object]] = []
     monkeypatch.setattr(
         materialization_planning,
-        "inspect_dataset",
-        lambda _root, **_kwargs: SimpleNamespace(columns=("timestamp",)),
+        "_inspect_dataset_owned",
+        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+            SimpleNamespace(columns=("timestamp",)),
+            resource_policy.lease("test.a_share.inspection", 0),
+        ),
     )
 
     def read(*_args, **kwargs):  # noqa: ANN001, ANN202
@@ -1482,12 +1510,13 @@ def test_dataset_coverage_reader_accounts_compact_retained_state(
 
     monkeypatch.setattr(materialization_io, "iter_dataset_chunks_with_policy", read)
 
-    materialization_planning.require_dataset_coverage(
-        Path("panel"),
-        TimeWindow("2024-01-01", "2024-01-03"),
-        sessions=sessions,
-        resource_policy=policy,
-    )
+    with runtime_resource_policy_scope(policy):
+        materialization_planning.require_dataset_coverage(
+            Path("panel"),
+            TimeWindow("2024-01-01", "2024-01-03"),
+            sessions=sessions,
+            resource_policy=policy,
+        )
 
     retained_bytes = sessions.nbytes + len(sessions) * np.dtype(np.bool_).itemsize
     assert observed == [
@@ -1516,8 +1545,11 @@ def test_dataset_coverage_preflights_int64_normalization_before_transform(
     observed: list[int] = []
     monkeypatch.setattr(
         materialization_planning,
-        "inspect_dataset",
-        lambda _root, **_kwargs: SimpleNamespace(columns=("timestamp",)),
+        "_inspect_dataset_owned",
+        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+            SimpleNamespace(columns=("timestamp",)),
+            resource_policy.lease("test.a_share.inspection", 0),
+        ),
     )
     monkeypatch.setattr(
         materialization_io,
@@ -1544,18 +1576,19 @@ def test_dataset_coverage_preflights_int64_normalization_before_transform(
         ),
     )
 
-    with pytest.raises(
-        materialization_io.MaterializationCapacityExceeded,
-        match="a_share_known_payloads_exceed_task_memory_budget",
-    ):
-        materialization_planning._mark_dataset_session_coverage(
-            Path("dataset"),
-            TimeWindow("2024-01-02", "2024-01-03"),
-            expected_sessions=pd.DatetimeIndex(chunk["timestamp"]),
-            covered=np.zeros(2, dtype=np.bool_),
-            retained_state_bytes=retained_state_bytes,
-            resource_policy=policy,
-        )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            materialization_io.MaterializationCapacityExceeded,
+            match="a_share_known_payloads_exceed_task_memory_budget",
+        ):
+            materialization_planning._mark_dataset_session_coverage(
+                Path("dataset"),
+                TimeWindow("2024-01-02", "2024-01-03"),
+                expected_sessions=pd.DatetimeIndex(chunk["timestamp"]),
+                covered=np.zeros(2, dtype=np.bool_),
+                retained_state_bytes=retained_state_bytes,
+                resource_policy=policy,
+            )
     assert observed == [retained_state_bytes + 2 * np.dtype(np.int64).itemsize]
 
 
@@ -2869,8 +2902,11 @@ def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(
 
     monkeypatch.setattr(
         materialization_planning,
-        "inspect_dataset",
-        lambda _root, **_kwargs: SimpleNamespace(columns=("asset_id", "timestamp")),
+        "_inspect_dataset_owned",
+        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+            SimpleNamespace(columns=("asset_id", "timestamp")),
+            resource_policy.lease("test.a_share.inspection", 0),
+        ),
     )
     monkeypatch.setattr(
         materialization_io,
@@ -2881,52 +2917,53 @@ def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(
     )
     expected_sessions = pd.DatetimeIndex(("2024-01-02",))
     covered = np.zeros(1, dtype=np.bool_)
-    materialization_planning._mark_dataset_session_coverage(
-        Path("panel"),
-        TimeWindow("2024-01-02", "2024-01-02"),
-        expected_sessions=expected_sessions,
-        covered=covered,
-        retained_state_bytes=expected_sessions.nbytes + covered.nbytes,
-        resource_policy=policy,
-    )
-    assert covered.all()
+    with runtime_resource_policy_scope(policy):
+        materialization_planning._mark_dataset_session_coverage(
+            Path("panel"),
+            TimeWindow("2024-01-02", "2024-01-02"),
+            expected_sessions=expected_sessions,
+            covered=covered,
+            retained_state_bytes=expected_sessions.nbytes + covered.nbytes,
+            resource_policy=policy,
+        )
+        assert covered.all()
 
-    market_type = next(iter(materialization_planning.CURRENT_MARKET_TYPES))
-    monkeypatch.setattr(
-        materialization_planning,
-        "inspect_dataset",
-        lambda _root, **_kwargs: SimpleNamespace(
-            row_count=2,
-            manifest={"file_size_bytes": 10**9},
-        ),
-    )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *args, **kwargs: iterator(
-            "early",
-            (
-                pd.DataFrame(
-                    {
-                        "source_market_type": [market_type, market_type],
-                        "is_trading_day": [True, True],
-                        "timestamp": pd.Series(
-                            ["2024-01-02", "2024-01-03"],
-                            dtype="datetime64[ns]",
-                        ),
-                    }
+        market_type = next(iter(materialization_planning.CURRENT_MARKET_TYPES))
+        monkeypatch.setattr(
+            materialization_planning,
+            "_inspect_dataset_owned",
+            lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+                SimpleNamespace(row_count=2, manifest={"file_size_bytes": 10**9}),
+                resource_policy.lease("test.a_share.inspection", 0),
+            ),
+        )
+        monkeypatch.setattr(
+            materialization_io,
+            "iter_dataset_chunks_with_policy",
+            lambda *args, **kwargs: iterator(
+                "early",
+                (
+                    pd.DataFrame(
+                        {
+                            "source_market_type": [market_type, market_type],
+                            "is_trading_day": [True, True],
+                            "timestamp": pd.Series(
+                                ["2024-01-02", "2024-01-03"],
+                                dtype="datetime64[ns]",
+                            ),
+                        }
+                    ),
                 ),
             ),
-        ),
-    )
-    result = materialization_planning.available_trading_sessions(
-        SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
-        "source",  # type: ignore[arg-type]
-        time_window=TimeWindow("2024-01-02", "2024-01-02"),
-        lookback_sessions=0,
-        lookahead_sessions=0,
-        resource_policy=policy,
-    )
+        )
+        result = materialization_planning.available_trading_sessions(
+            SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
+            "source",  # type: ignore[arg-type]
+            time_window=TimeWindow("2024-01-02", "2024-01-02"),
+            lookback_sessions=0,
+            lookahead_sessions=0,
+            resource_policy=policy,
+        )
     assert not result.empty
     assert closed == ["normal", "early"]
 
@@ -3457,7 +3494,7 @@ def test_a_share_session_offset_entrants_require_exact_non_negative_int_before_i
     elif entrant == "available_sessions":
         monkeypatch.setattr(
             materialization_planning,
-            "inspect_dataset",
+            "_inspect_dataset_owned",
             lambda *_args, **_kwargs: (
                 io_hits.append("inspect")
                 or pytest.fail("dataset_inspection_before_offset_gate")

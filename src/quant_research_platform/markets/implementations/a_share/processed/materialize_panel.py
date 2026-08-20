@@ -27,8 +27,9 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
 )
 from quant_research_platform.storage._dataset_inspection import (
+    _inspect_dataset_owned,
+    _release_owned_value,
     dataset_inspection_retained_memory_bytes,
-    inspect_dataset,
 )
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
@@ -52,17 +53,21 @@ def write_panel(
         for inspection in written.values()
     )
     market_bars_root = layout.interim_data_root(source_id, market_bars_data_id)
-    market_bars_inspection = inspect_dataset(
+    owned_inspection = _inspect_dataset_owned(
         market_bars_root,
         resource_policy=policy,
-        retained_payload_bytes=retained_written_bytes,
     )
-    materialization_validation.require_source_input_columns_from_schema(
-        market_bars_data_id,
-        market_bars_inspection.columns,
-        columns=("open", "high", "low", "close", "volume", "amount"),
-    )
-    del market_bars_inspection
+    try:
+        materialization_validation.require_source_input_columns_from_schema(
+            market_bars_data_id,
+            owned_inspection.value.columns,
+            columns=("open", "high", "low", "close", "volume", "amount"),
+        )
+    finally:
+        _release_owned_value(
+            owned_inspection,
+            owner="a_share.panel.source.inspection",
+        )
     market_bars_row_buffer = (
         materialization_planning.registered_output_buffer_bytes(
             spec,
