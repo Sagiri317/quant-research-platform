@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+import quant_research_platform.runtime.resources as runtime_resources
 import quant_research_platform.storage._dataset_comparison as comparison
 import quant_research_platform.storage._dataset_fingerprinting as fingerprinting
 import quant_research_platform.storage._dataset_inspection as inspection
@@ -1553,12 +1554,8 @@ def test_scratch_creator_is_cleanup_owned_before_instance_assignment(
             timestamp_columns=(),
             scratch_parent=scratch,
         ).__enter__(),
-        lambda scratch: _open_inventory_for_failure(
-            scratch.parent / "data",
-            scratch,
-        ),
     ),
-    ids=("exact-primary-key-index", "dataset-session-inventory"),
+    ids=("exact-primary-key-index",),
 )
 def test_scratch_owner_does_not_delete_post_claim_replacement(
     tmp_path: Path,
@@ -1581,6 +1578,38 @@ def test_scratch_owner_does_not_delete_post_claim_replacement(
     with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
         owner.close()
 
+    assert (scratch_path / "foreign.txt").read_text(encoding="utf-8") == "foreign"
+
+
+def test_dataset_inventory_does_not_delete_post_claim_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    scratch_path: Path
+
+    with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
+        with runtime_resource_policy_scope(policy):
+            owner = inventory_owner.DatasetSessionInventory(
+                data_root=tmp_path / "data",
+                scratch_parent=tmp_path / "scratch",
+                resource_policy=policy,
+            )
+            scratch_path = owner.scratch_path
+            connection = owner._connection
+            assert connection is not None
+            connection.close()
+            owner._connection = None
+            shutil.rmtree(scratch_path)
+            scratch_path.mkdir()
+            (scratch_path / "foreign.txt").write_text("foreign", encoding="utf-8")
+
+            with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
+                owner.close()
+
+    assert policy.state == "POISONED"
+    assert policy.used_memory_bytes > 0
     assert (scratch_path / "foreign.txt").read_text(encoding="utf-8") == "foreign"
 
 
@@ -1753,6 +1782,8 @@ def test_directory_callers_stop_before_foreign_file_side_effect(
     monkeypatch: pytest.MonkeyPatch,
     caller: str,
 ) -> None:
+    if caller == "inventory":
+        monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
     scratch_parent = tmp_path / "scratch"
     scratch_parent.mkdir()
     final_root = scratch_parent / "result"
@@ -2214,13 +2245,18 @@ def _inventory_with_failing_connection(
             scratch_parent=tmp_path / "scratch",
             resource_policy=policy,
         ) as inventory:
-            assert inventory._connection is not None
-            inventory._connection.close()
+            connection = inventory._connection
+            assert connection is not None
+            connection.close()
             inventory._connection = FailingConnection()  # type: ignore[assignment]
             yield inventory
 
 
-def test_inventory_exit_preserves_generator_exit_primary(tmp_path: Path) -> None:
+def test_inventory_exit_preserves_generator_exit_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
     with pytest.raises(GeneratorExit):
         with _inventory_with_failing_connection(tmp_path):
             raise GeneratorExit()
@@ -2228,10 +2264,46 @@ def test_inventory_exit_preserves_generator_exit_primary(tmp_path: Path) -> None
 
 def test_inventory_exit_propagates_cleanup_failure_without_primary(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
     with pytest.raises(RuntimeError, match="close_failed"):
         with _inventory_with_failing_connection(tmp_path):
             pass
+
+
+def test_inventory_root_cleanup_failure_preserves_primary_and_poison(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingConnection:
+        def close(self) -> None:
+            raise RuntimeError("sqlite_close_failed")
+
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    primary = GeneratorExit("body_primary")
+    inventory = None
+
+    with pytest.raises(GeneratorExit) as raised:
+        with runtime_resource_policy_scope(policy):
+            inventory = inventory_owner.DatasetSessionInventory(
+                data_root=tmp_path / "data",
+                scratch_parent=tmp_path / "scratch",
+                resource_policy=policy,
+            )
+            connection = inventory._connection
+            assert connection is not None
+            connection.close()
+            inventory._connection = FailingConnection()  # type: ignore[assignment]
+            raise primary
+
+    assert raised.value is primary
+    assert policy.state == "POISONED"
+    assert policy.used_memory_bytes > 0
+    assert inventory is not None
+    assert inventory._connection is not None
+    assert any("sqlite_close_failed" in note for note in primary.__notes__)
 
 
 def _patch_open_session_metadata_preflight(
@@ -2286,6 +2358,7 @@ def _patch_open_session_metadata_preflight(
 def test_open_session_construction_cleanup_preserves_primary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
@@ -2314,6 +2387,98 @@ def test_open_session_construction_cleanup_preserves_primary(
             resource_policy=policy,
         ):
             pass
+
+
+def test_open_session_build_rejection_closes_lease_inside_same_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    )
+    candidate = Path("dataset/data/part-000.parquet")
+
+    class Inventory:
+        retained_memory_bytes = 1024
+
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        def discover(self, _spec: object) -> None:
+            return None
+
+        def path_count(self, *, selected: bool) -> int:
+            assert selected is False
+            return 1
+
+        def iter_candidate_paths(self):  # noqa: ANN202
+            yield candidate
+
+        def observe(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    _patch_open_session_metadata_preflight(monkeypatch)
+    monkeypatch.setattr(dataset_reading, "DatasetSessionInventory", Inventory)
+    monkeypatch.setattr(
+        dataset_reading,
+        "inspect_dataset_part",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        dataset_reading,
+        "prune_paths_for_time_window",
+        lambda *_args, **_kwargs: (candidate,),
+    )
+    monkeypatch.setattr(
+        dataset_reading,
+        "_build_dataset_session",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("session_build_failed")),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="session_build_failed"):
+            with dataset_reading.open_dataset_session(
+                Path("dataset"),
+                columns=None,
+                time_window=None,
+                resource_policy=policy,
+            ):
+                pass
+        assert policy.used_memory_bytes == 0
+
+
+def test_session_from_inventory_build_rejection_closes_lease_inside_same_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    )
+
+    class Inventory:
+        def verify_filesystem(self, _spec: object) -> None:
+            return None
+
+    _patch_open_session_metadata_preflight(monkeypatch)
+    monkeypatch.setattr(
+        dataset_reading,
+        "_build_dataset_session",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("session_build_failed")),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="session_build_failed"):
+            dataset_reading.dataset_session_from_inventory(
+                Path("dataset"),
+                inventory=Inventory(),  # type: ignore[arg-type]
+                columns=None,
+                time_window=None,
+                resource_policy=policy,
+            )
+        assert policy.used_memory_bytes == 0
 
 
 def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
@@ -2357,8 +2522,10 @@ def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
             record("inventory-close")
 
     class Session:
-        def __init__(self, inventory: Inventory) -> None:
+        def __init__(self, inventory: Inventory, lease) -> None:  # noqa: ANN001
             self.inventory = inventory
+            self.lease = lease
+            self.closed = False
 
         def __enter__(self) -> Session:
             record("session-enter")
@@ -2366,7 +2533,14 @@ def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
 
         def __exit__(self, *_args: object) -> None:
             record("session-exit")
+            self.close()
+
+        def close(self) -> None:
+            if self.closed:
+                return
+            self.closed = True
             self.inventory.close()
+            self.lease.close()
 
     def inspect(path: Path) -> object:
         assert path == candidate
@@ -2384,7 +2558,7 @@ def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
 
     def build(**kwargs: object) -> Session:
         record("build")
-        return Session(kwargs["inventory"])  # type: ignore[arg-type]
+        return Session(kwargs["inventory"], kwargs["session_lease"])  # type: ignore[arg-type]
 
     _patch_open_session_metadata_preflight(monkeypatch)
     monkeypatch.setattr(dataset_reading, "DatasetSessionInventory", Inventory)

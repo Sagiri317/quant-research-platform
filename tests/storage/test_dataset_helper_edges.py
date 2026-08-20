@@ -18,6 +18,7 @@ import pytest
 
 import quant_research_platform.storage._dataset_comparison as dataset_comparison
 import quant_research_platform.storage._dataset_fingerprinting as dataset_fingerprinting
+import quant_research_platform.storage._dataset_inventory as inventory_owner
 import quant_research_platform.storage._dataset_key_tracking as key_tracking
 from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.columns import ColumnRole
@@ -115,6 +116,32 @@ def test_dataset_inventory_lease_admits_shrinks_and_closes(tmp_path: Path) -> No
         assert policy.used_memory_bytes == 0
     assert not list(tmp_path.glob(".i-*"))
     assert not hasattr(DatasetSessionInventory, "__del__")
+
+
+def test_dataset_inventory_rejection_releases_same_root_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+
+    def reject_scratch_path(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("invalid_storage_scratch_path")
+
+    monkeypatch.setattr(
+        inventory_owner,
+        "require_unaliased_path",
+        reject_scratch_path,
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="invalid_storage_scratch_path"):
+            DatasetSessionInventory(
+                data_root=data_root,
+                scratch_parent=tmp_path,
+                resource_policy=policy,
+            )
+        assert policy.used_memory_bytes == 0
 
 
 def test_dataset_inventory_failure_and_primary_cleanup_release_lease(

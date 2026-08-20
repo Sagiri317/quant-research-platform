@@ -145,20 +145,18 @@ class DatasetSession:
 
     def close(self) -> None:
         primary = sys.exception()
+        if self.owns_inventory:
+            self.inventory.close()
         try:
-            if self.owns_inventory:
-                self.inventory.close()
-        except BaseException:
-            try:
-                self._lease.close()
-            except BaseException as lease_error:
-                if primary is not None:
-                    primary.add_note(
-                        "dataset session lease release also failed: "
-                        f"{type(lease_error).__name__}"
-                    )
+            self._lease.close()
+        except BaseException as lease_error:
+            if primary is not None:
+                primary.add_note(
+                    "dataset session lease release also failed: "
+                    f"{type(lease_error).__name__}"
+                )
+                return
             raise
-        self._lease.close()
 
     def __enter__(self) -> DatasetSession:
         return self
@@ -752,33 +750,34 @@ def open_dataset_session(
             "storage.dataset.session",
             metadata_bound,
         )
-        issued_policy.register_cleanup(session_lease.close)
-        spec_bytes, spec_payload = read_bounded_qrp_json(
-            spec_path, expected_identity=spec_identity
-        )
-        if len(spec_bytes) != spec_stat_span_bytes:
-            raise ValueError("dataset_metadata_file_identity_changed")
-        if spec_payload.get("schema_id") != "qrp-dataset-spec":
-            raise ValueError("dataset_spec_schema_id_invalid")
-        validate_dataset_spec_payload(spec_payload)
-        manifest_bytes, manifest = read_bounded_qrp_json(
-            manifest_path, expected_identity=manifest_identity
-        )
-        if len(manifest_bytes) != manifest_stat_span_bytes:
-            raise ValueError("dataset_metadata_file_identity_changed")
-        if manifest.get("schema_id") != "qrp-dataset-manifest":
-            raise ValueError("dataset_manifest_schema_id_invalid")
-        validate_dataset_manifest_payload(manifest, spec=spec_payload)
-        if require_consumable:
-            validate_dataset_manifest_consumable(manifest)
-        if not manifest_has_runtime_metadata(manifest):
-            raise ValueError("manifest_runtime_metadata_missing")
-        inventory = DatasetSessionInventory(
-            data_root=data_root,
-            scratch_parent=root.parent,
-            resource_policy=issued_policy,
-        )
+        inventory: DatasetSessionInventory | None = None
+        session: DatasetSession | None = None
         try:
+            spec_bytes, spec_payload = read_bounded_qrp_json(
+                spec_path, expected_identity=spec_identity
+            )
+            if len(spec_bytes) != spec_stat_span_bytes:
+                raise ValueError("dataset_metadata_file_identity_changed")
+            if spec_payload.get("schema_id") != "qrp-dataset-spec":
+                raise ValueError("dataset_spec_schema_id_invalid")
+            validate_dataset_spec_payload(spec_payload)
+            manifest_bytes, manifest = read_bounded_qrp_json(
+                manifest_path, expected_identity=manifest_identity
+            )
+            if len(manifest_bytes) != manifest_stat_span_bytes:
+                raise ValueError("dataset_metadata_file_identity_changed")
+            if manifest.get("schema_id") != "qrp-dataset-manifest":
+                raise ValueError("dataset_manifest_schema_id_invalid")
+            validate_dataset_manifest_payload(manifest, spec=spec_payload)
+            if require_consumable:
+                validate_dataset_manifest_consumable(manifest)
+            if not manifest_has_runtime_metadata(manifest):
+                raise ValueError("manifest_runtime_metadata_missing")
+            inventory = DatasetSessionInventory(
+                data_root=data_root,
+                scratch_parent=root.parent,
+                resource_policy=issued_policy,
+            )
             inventory.discover(spec_payload)
             if inventory.path_count(selected=False) == 0:
                 raise ValueError("dataset_data_dir_missing")
@@ -813,12 +812,37 @@ def open_dataset_session(
                 owns_inventory=True,
                 session_lease=session_lease,
             )
-        except BaseException:
-            try:
-                inventory.close()
-            except BaseException:
-                pass
+            issued_policy.register_cleanup(session.close)
+        except BaseException as primary:
+            cleanup_ok = True
+            if session is not None:
+                try:
+                    session.close()
+                except BaseException as cleanup_error:
+                    cleanup_ok = False
+                    primary.add_note(
+                        "dataset session construction cleanup also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+            elif inventory is not None:
+                try:
+                    inventory.close()
+                except BaseException as cleanup_error:
+                    cleanup_ok = False
+                    primary.add_note(
+                        "dataset inventory construction cleanup also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+            if cleanup_ok:
+                try:
+                    session_lease.close()
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "dataset session lease release also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
             raise
+        assert session is not None
         with session:
             yield session
 
@@ -858,36 +882,58 @@ def dataset_session_from_inventory(
         + manifest_stat_span_bytes
         + metadata_identity_span_bytes,
     )
-    resource_policy.register_cleanup(session_lease.close)
-    spec_bytes, spec_payload = read_bounded_qrp_json(
-        spec_path, expected_identity=spec_identity
-    )
-    if len(spec_bytes) != spec_stat_span_bytes:
-        raise ValueError("dataset_metadata_file_identity_changed")
-    manifest_bytes, manifest = read_bounded_qrp_json(
-        manifest_path, expected_identity=manifest_identity
-    )
-    if len(manifest_bytes) != manifest_stat_span_bytes:
-        raise ValueError("dataset_metadata_file_identity_changed")
-    inventory.verify_filesystem(spec_payload)
-    return _build_dataset_session(
-        root=root,
-        data_root=data_root,
-        spec_bytes=spec_bytes,
-        spec_identity_bytes=spec_identity_bytes,
-        spec_payload=spec_payload,
-        manifest_bytes=manifest_bytes,
-        manifest_identity_bytes=manifest_identity_bytes,
-        manifest=manifest,
-        inventory=inventory,
-        columns=columns,
-        time_window=time_window,
-        row_filters=(),
-        require_consumable=True,
-        resource_policy=resource_policy,
-        owns_inventory=False,
-        session_lease=session_lease,
-    )
+    session: DatasetSession | None = None
+    try:
+        spec_bytes, spec_payload = read_bounded_qrp_json(
+            spec_path, expected_identity=spec_identity
+        )
+        if len(spec_bytes) != spec_stat_span_bytes:
+            raise ValueError("dataset_metadata_file_identity_changed")
+        manifest_bytes, manifest = read_bounded_qrp_json(
+            manifest_path, expected_identity=manifest_identity
+        )
+        if len(manifest_bytes) != manifest_stat_span_bytes:
+            raise ValueError("dataset_metadata_file_identity_changed")
+        inventory.verify_filesystem(spec_payload)
+        session = _build_dataset_session(
+            root=root,
+            data_root=data_root,
+            spec_bytes=spec_bytes,
+            spec_identity_bytes=spec_identity_bytes,
+            spec_payload=spec_payload,
+            manifest_bytes=manifest_bytes,
+            manifest_identity_bytes=manifest_identity_bytes,
+            manifest=manifest,
+            inventory=inventory,
+            columns=columns,
+            time_window=time_window,
+            row_filters=(),
+            require_consumable=True,
+            resource_policy=resource_policy,
+            owns_inventory=False,
+            session_lease=session_lease,
+        )
+        resource_policy.register_cleanup(session.close)
+    except BaseException as primary:
+        if session is not None:
+            try:
+                session.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "dataset session construction cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+        else:
+            try:
+                session_lease.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "dataset session lease release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+        raise
+    assert session is not None
+    return session
 
 
 def _build_dataset_session(

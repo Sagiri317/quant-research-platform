@@ -88,53 +88,55 @@ class DatasetSessionInventory:
         scratch_parent: Path,
         resource_policy: RuntimeResourcePolicy,
     ) -> None:
+        self.data_root = Path(data_root)
+        self._scratch_parent = Path(scratch_parent)
+        self._temporary_directory: Path | None = None
+        self._temporary_identity: os.stat_result | None = None
+        self._connection: sqlite3.Connection | None = None
+        self._next_selection_id = 0
         self._lease = resource_policy.lease(
             "storage.dataset.inventory",
             _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
         )
-        resource_policy.register_cleanup(self._lease.close)
-        self.data_root = Path(data_root)
-        self._scratch_parent = Path(scratch_parent)
-        require_unaliased_path(
-            self._scratch_parent, error="invalid_storage_scratch_path"
-        )
-        self._scratch_parent.mkdir(parents=True, exist_ok=True)
-        require_unaliased_path(
-            self._scratch_parent, error="invalid_storage_scratch_path"
-        )
-        require_free_disk_headroom(
-            self._scratch_parent,
-            reserve_bytes=_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
-        )
-        parent_identity = self._scratch_parent.lstat()
-        cleanup_stale_owned_scratch(
-            self._scratch_parent,
-            parent_identity=parent_identity,
-            prefix=_PREFIX,
-            directory=True,
-        )
-        require_unaliased_path(
-            self._scratch_parent, error="invalid_storage_scratch_path"
-        )
-        temporary_directory = self._scratch_parent / owned_scratch_name(
-            _PREFIX, uuid4().hex[:8]
-        )
+        temporary_directory: Path | None = None
         temporary_identity: os.stat_result | None = None
-        self._temporary_directory: Path | None = None
-        self._temporary_identity: os.stat_result | None = None
-        self._connection: sqlite3.Connection | None = None
-        connection: sqlite3.Connection | None = None
         try:
+            resource_policy.register_cleanup(self.close)
+            require_unaliased_path(
+                self._scratch_parent, error="invalid_storage_scratch_path"
+            )
+            self._scratch_parent.mkdir(parents=True, exist_ok=True)
+            require_unaliased_path(
+                self._scratch_parent, error="invalid_storage_scratch_path"
+            )
+            require_free_disk_headroom(
+                self._scratch_parent,
+                reserve_bytes=_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
+            )
+            parent_identity = self._scratch_parent.lstat()
+            cleanup_stale_owned_scratch(
+                self._scratch_parent,
+                parent_identity=parent_identity,
+                prefix=_PREFIX,
+                directory=True,
+            )
+            require_unaliased_path(
+                self._scratch_parent, error="invalid_storage_scratch_path"
+            )
+            temporary_directory = self._scratch_parent / owned_scratch_name(
+                _PREFIX, uuid4().hex[:8]
+            )
             temporary_identity = create_owned_scratch(temporary_directory)
-            require_owned_scratch(self._scratch_parent, parent_identity)
             self._temporary_directory = temporary_directory
             self._temporary_identity = temporary_identity
+            require_owned_scratch(self._scratch_parent, parent_identity)
             require_unaliased_path(
                 temporary_directory,
                 error="invalid_storage_scratch_path",
             )
             require_owned_scratch(temporary_directory, temporary_identity)
-            connection = sqlite3.connect(temporary_directory / "i.db")
+            self._connection = sqlite3.connect(temporary_directory / "i.db")
+            connection = self._connection
             connection.execute(f"PRAGMA page_size={DATASET_INVENTORY_RESERVE_BYTES}")
             sqlite_page_limit = (
                 _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES
@@ -166,24 +168,29 @@ class DatasetSessionInventory:
                 "selection_id INTEGER NOT NULL, relative_path TEXT NOT NULL, "
                 "PRIMARY KEY(selection_id, relative_path))"
             )
-            self._connection = connection
-            self._next_selection_id = 0
-        except BaseException:
-            self._lease.close()
-            if connection is not None:
-                try:
-                    connection.close()
-                except BaseException:
-                    pass
-            if temporary_identity is not None:
-                try:
-                    remove_owned_scratch(temporary_directory, temporary_identity)
-                except BaseException:
-                    pass
-            self._temporary_directory = None
-            self._temporary_identity = None
+            self._lease.shrink_to(DATASET_INVENTORY_RESERVE_BYTES)
+        except BaseException as primary:
+            if temporary_directory is not None and temporary_identity is not None:
+                if self._temporary_directory is None:
+                    object.__setattr__(
+                        self,
+                        "_temporary_directory",
+                        temporary_directory,
+                    )
+                if self._temporary_identity is None:
+                    object.__setattr__(
+                        self,
+                        "_temporary_identity",
+                        temporary_identity,
+                    )
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "dataset inventory construction cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
             raise
-        self._lease.shrink_to(DATASET_INVENTORY_RESERVE_BYTES)
 
     def __enter__(self) -> DatasetSessionInventory:
         return self
@@ -205,38 +212,29 @@ class DatasetSessionInventory:
             )
 
     def close(self) -> None:
-        connection = getattr(self, "_connection", None)
-        temporary = getattr(self, "_temporary_directory", None)
-        temporary_identity = getattr(self, "_temporary_identity", None)
-        self._connection = None
-        self._temporary_directory = None
-        self._temporary_identity = None
         primary = sys.exception()
+        connection = self._connection
+        if connection is not None:
+            connection.close()
+            self._connection = None
+
+        temporary = self._temporary_directory
+        temporary_identity = self._temporary_identity
+        if temporary is not None and temporary_identity is not None:
+            remove_owned_scratch(temporary, temporary_identity)
+            self._temporary_directory = None
+            self._temporary_identity = None
+
         try:
-            try:
-                if connection is not None:
-                    connection.close()
-            except BaseException:
-                if temporary is not None and temporary_identity is not None:
-                    try:
-                        remove_owned_scratch(temporary, temporary_identity)
-                    except BaseException:
-                        pass
-                raise
-            else:
-                if temporary is not None and temporary_identity is not None:
-                    remove_owned_scratch(temporary, temporary_identity)
-        except BaseException:
-            try:
-                self._lease.close()
-            except BaseException as lease_error:
-                if primary is not None:
-                    primary.add_note(
-                        "dataset inventory lease release also failed: "
-                        f"{type(lease_error).__name__}"
-                    )
+            self._lease.close()
+        except BaseException as lease_error:
+            if primary is not None:
+                primary.add_note(
+                    "dataset inventory lease release also failed: "
+                    f"{type(lease_error).__name__}"
+                )
+                return
             raise
-        self._lease.close()
 
     @property
     def scratch_path(self) -> Path:

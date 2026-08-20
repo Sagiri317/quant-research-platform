@@ -26,6 +26,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import quant_research_platform.runtime.resources as runtime_resources
 import quant_research_platform.storage._dataset_comparison as dataset_comparison
 import quant_research_platform.storage._dataset_fingerprinting as dataset_fingerprinting
 import quant_research_platform.storage._dataset_inspection as dataset_inspection
@@ -4736,6 +4737,7 @@ def test_dataset_session_close_preserves_active_primary(
     monkeypatch: pytest.MonkeyPatch,
     primary_type: type[BaseException],
 ) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
     root = make_dataset_artifact_root(tmp_path, "session_primary")
     write_dataset(
         root,
@@ -4754,19 +4756,26 @@ def test_dataset_session_close_preserves_active_primary(
         close_then_fail,
     )
 
-    with pytest.raises(primary_type, match="primary_failure"):
-        with dataset_reading.open_dataset_session(
-            root,
-            columns=None,
-            time_window=None,
-        ):
-            raise primary_type("primary_failure")
+    policy: RuntimeResourcePolicy | None = None
+    try:
+        with pytest.raises(primary_type, match="primary_failure"):
+            with dataset_reading.open_dataset_session(
+                root,
+                columns=None,
+                time_window=None,
+            ) as session:
+                policy = session.resource_policy
+                raise primary_type("primary_failure")
+    finally:
+        if policy is not None and policy.state == "POISONED":
+            policy._lock.close()  # noqa: SLF001
 
 
 def test_dataset_session_normal_close_failure_propagates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
     root = make_dataset_artifact_root(tmp_path, "session_normal_close")
     write_dataset(
         root,
@@ -4785,13 +4794,18 @@ def test_dataset_session_normal_close_failure_propagates(
         close_then_fail,
     )
 
-    with pytest.raises(OSError, match="cleanup_failure"):
-        with dataset_reading.open_dataset_session(
-            root,
-            columns=None,
-            time_window=None,
-        ):
-            pass
+    policy: RuntimeResourcePolicy | None = None
+    try:
+        with pytest.raises(OSError, match="cleanup_failure"):
+            with dataset_reading.open_dataset_session(
+                root,
+                columns=None,
+                time_window=None,
+            ) as session:
+                policy = session.resource_policy
+    finally:
+        if policy is not None and policy.state == "POISONED":
+            policy._lock.close()  # noqa: SLF001
 
 
 @pytest.mark.parametrize("stage", ("fingerprint", "exact"))
@@ -4800,6 +4814,7 @@ def test_compare_cleanup_does_not_replace_programmer_primary(
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
 ) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
     root = make_dataset_artifact_root(tmp_path, f"compare_primary_{stage}")
     write_dataset(
         root,
@@ -4818,6 +4833,17 @@ def test_compare_cleanup_does_not_replace_programmer_primary(
         "close",
         close_with_active_failure,
     )
+    policy: RuntimeResourcePolicy | None = None
+    real_open = dataset_comparison.open_dataset_session
+
+    def record_open(*args: object, **kwargs: object):  # noqa: ANN202
+        nonlocal policy
+        current = kwargs.get("resource_policy")
+        assert isinstance(current, RuntimeResourcePolicy)
+        policy = current
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(dataset_comparison, "open_dataset_session", record_open)
     if stage == "fingerprint":
         monkeypatch.setattr(
             dataset_comparison,
@@ -4835,8 +4861,12 @@ def test_compare_cleanup_does_not_replace_programmer_primary(
             ),
         )
 
-    with pytest.raises(RuntimeError, match="programmer_primary"):
-        dataset_comparison.compare_datasets(root, root, resource_policy=None)
+    try:
+        with pytest.raises(RuntimeError, match="programmer_primary"):
+            dataset_comparison.compare_datasets(root, root, resource_policy=None)
+    finally:
+        if policy is not None and policy.state == "POISONED":
+            policy._lock.close()  # noqa: SLF001
 
 
 def test_compare_propagates_programmer_errors(
