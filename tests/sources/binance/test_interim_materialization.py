@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import weakref
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
+    _OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -15,6 +18,35 @@ from quant_research_platform.sources.binance.interim import materialize_interim_
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+def _bound_first_frames(frames):  # noqa: ANN001, ANN202
+    for frame in frames:
+        lease = yield 256 * 1024
+        yield _OwnedValue(frame, lease)
+
+
+def _collect_bound_first(data, policy):  # noqa: ANN001, ANN202
+    frames = []
+    bound = next(data)
+    while True:
+        lease = policy.lease("test.binance.consumer", bound)
+        while True:
+            try:
+                owned = data.send(lease)
+            except StopIteration:
+                lease.close()
+                return frames
+            if not isinstance(owned, _OwnedValue):
+                raise AssertionError("invalid_bound_first_output")
+            break
+        frames.append(owned.value)
+        try:
+            bound = data.send(None)
+        except StopIteration:
+            lease.close()
+            return frames
+        lease.close()
 
 
 def test_binance_interim_materializer_writes_source_datasets(tmp_path: Path) -> None:
@@ -143,13 +175,13 @@ def test_binance_interim_materializer_writes_multiple_batches(
         instance_metadata=None,
         resource_policy,
     ):
-        chunks = tuple(data)
+        chunks = _collect_bound_first(data, resource_policy)
         chunk_lengths.extend(len(chunk) for chunk in chunks)
         from quant_research_platform.storage._dataset_writing import write_dataset
 
         return write_dataset(
             dataset_root,
-            chunks,
+            _bound_first_frames(chunks),
             spec=spec,
             instance_metadata=instance_metadata,
             resource_policy=resource_policy,
@@ -169,6 +201,317 @@ def test_binance_interim_materializer_writes_multiple_batches(
 
     assert chunk_lengths == [2, 2, 1]
     assert len(market_bars) == 5
+
+
+def test_binance_private_owner_state_is_bounded_after_many_batches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    for offset in range(3):
+        _append_jsonl(first, _kline_envelope(offset))
+    for offset in range(3, 5):
+        _append_jsonl(second, _kline_envelope(offset))
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    closed: list[MemoryLease] = []
+    original_close = MemoryLease.close
+
+    def observed_close(lease: MemoryLease) -> None:
+        closed.append(lease)
+        original_close(lease)
+
+    monkeypatch.setattr(MemoryLease, "close", observed_close)
+    with runtime_resource_policy_scope(policy):
+        frames = _collect_bound_first(
+            interim._iter_owned_interim_frames(
+                data_id="market_bars_1m",
+                input_files=(first, second),
+                row_batch_size=1,
+                start_date=None,
+                end_date=None,
+                resource_policy=policy,
+            ),
+            policy,
+        )
+        assert len(frames) == 5
+        assert policy.used_memory_bytes == 0
+    consumer_ids = [
+        id(lease) for lease in closed if lease.owner == "test.binance.consumer"
+    ]
+    assert len(consumer_ids) >= 5
+    assert len(consumer_ids) == len(set(consumer_ids))
+
+
+def test_binance_filtered_first_file_reuses_admitted_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    calls = 0
+
+    def raw_batches(path, **_kwargs):  # noqa: ANN001, ANN003
+        offset = 0 if Path(path).name == "first.jsonl" else 1
+        return _bound_first_frames(((_kline_envelope(offset),),))
+
+    monkeypatch.setattr(interim, "_iter_raw_envelope_batches", raw_batches)
+    real_filter = interim._filter_time_window
+
+    def filter_first(batch, **kwargs):  # noqa: ANN001, ANN003
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return batch.iloc[:0].copy()
+        return real_filter(batch, **kwargs)
+
+    monkeypatch.setattr(interim, "_filter_time_window", filter_first)
+    with runtime_resource_policy_scope(policy):
+        output = _collect_bound_first(
+            interim._iter_owned_interim_frames(
+                data_id="market_bars_1m",
+                input_files=(first, second),
+                row_batch_size=1,
+                start_date=None,
+                end_date=None,
+                resource_policy=policy,
+            ),
+            policy,
+        )
+
+    assert len(output) == 1
+    assert calls == 2
+    assert policy.used_memory_bytes == 0
+
+
+def test_binance_raw_iterator_closes_without_closing_consumer_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    closed: list[bool] = []
+
+    def raw_batches(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        try:
+            lease = yield 256 * 1024
+            yield _OwnedValue((_kline_envelope(0),), lease)
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(interim, "_iter_raw_envelope_batches", raw_batches)
+    iterator = interim._iter_owned_interim_frames(
+        data_id="market_bars_1m",
+        input_files=(tmp_path / "unused.jsonl",),
+        row_batch_size=1,
+        start_date=None,
+        end_date=None,
+        resource_policy=policy,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(iterator)
+        lease = policy.lease("test.binance.consumer", bound)
+        owned = iterator.send(lease)
+        assert isinstance(owned, _OwnedValue)
+        assert lease.active
+        with pytest.raises(KeyboardInterrupt, match="primary"):
+            iterator.throw(KeyboardInterrupt("primary"))
+        assert closed == [True]
+        assert lease.active
+        lease.close()
+
+    assert policy.used_memory_bytes == 0
+
+
+def test_binance_raw_bound_pull_admits_scan_before_record_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "raw.jsonl"
+    _append_jsonl(path, _kline_envelope(0))
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    pulls: list[bool] = []
+    real_next_length = raw_exports._next_record_length
+
+    def observe_next_length(handle, buffer):  # noqa: ANN001
+        pulls.append(True)
+        return real_next_length(handle, buffer)
+
+    monkeypatch.setattr(raw_exports, "_next_record_length", observe_next_length)
+    stream = raw_exports._iter_raw_envelope_batches(
+        path,
+        batch_size=1,
+        resource_policy=policy,
+        validate_depth_payload=False,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(stream)
+        assert pulls == []
+        assert policy.reserved_memory_bytes == 0
+        lease = policy.lease("test.binance.raw", bound)
+        try:
+            owned = stream.send(lease)
+            assert isinstance(owned, _OwnedValue)
+            assert pulls
+        finally:
+            stream.close()
+            lease.close()
+
+    assert policy.used_memory_bytes == 0
+
+
+def test_binance_raw_output_suspension_has_no_scan_record_duplicate(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "raw.jsonl"
+    _append_jsonl(path, _kline_envelope(0))
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    stream = raw_exports._iter_raw_envelope_batches(
+        path,
+        batch_size=1,
+        resource_policy=policy,
+        validate_depth_payload=False,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(stream)
+        lease = policy.lease("test.binance.raw", bound)
+        try:
+            owned = stream.send(lease)
+            assert isinstance(owned, _OwnedValue)
+            assert policy.reserved_memory_bytes == lease.reserved_bytes
+        finally:
+            stream.close()
+            lease.close()
+
+    assert policy.used_memory_bytes == 0
+
+
+def test_binance_raw_oversize_first_record_fails_before_read_or_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "raw.jsonl"
+    _append_jsonl(path, _kline_envelope(0))
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    declared: list[int] = []
+    monkeypatch.setattr(raw_exports, "_next_record_length", lambda *_args: 1)
+    monkeypatch.setattr(
+        raw_exports,
+        "_json_record_working_set_bytes",
+        lambda _record_bytes: declared[0] + 1,
+    )
+    monkeypatch.setattr(
+        raw_exports,
+        "_loads_json",
+        lambda *_args, **_kwargs: pytest.fail("decode reached before bound failure"),
+    )
+    stream = raw_exports._iter_raw_envelope_batches(
+        path,
+        batch_size=1,
+        resource_policy=policy,
+        validate_depth_payload=False,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(stream)
+        lease = policy.lease("test.binance.raw", bound)
+        declared.append(lease.reserved_bytes)
+        try:
+            with pytest.raises(
+                RuntimeError,
+                match="binance_record_envelope_bound_invalid",
+            ):
+                stream.send(lease)
+        finally:
+            stream.close()
+            lease.close()
+
+    assert policy.used_memory_bytes == 0
+
+
+def test_binance_whitespace_only_fails_after_admission(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "whitespace.jsonl"
+    path.write_bytes(b"\n  \n")
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    stream = interim._iter_raw_envelope_batches(
+        path,
+        batch_size=1,
+        resource_policy=policy,
+        validate_depth_payload=False,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(stream)
+        lease = policy.lease("test.binance.whitespace", bound)
+        try:
+            with pytest.raises(ValueError, match="empty_binance_raw_file"):
+                stream.send(lease)
+        finally:
+            stream.close()
+            lease.close()
+
+    assert policy.used_memory_bytes == 0
+
+
+def test_binance_blank_line_and_valid_row_share_one_admission(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "blank-first.jsonl"
+    path.write_bytes(
+        b"\n" + (json.dumps(_kline_envelope(0)) + "\n").encode("utf-8")
+    )
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    stream = interim._iter_raw_envelope_batches(
+        path,
+        batch_size=1,
+        resource_policy=policy,
+        validate_depth_payload=False,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(stream)
+        lease = policy.lease("test.binance.blank", bound)
+        try:
+            owned = stream.send(lease)
+            assert isinstance(owned, _OwnedValue)
+            assert owned.lease is lease
+        finally:
+            stream.close()
+            lease.close()
+
+    assert policy.used_memory_bytes == 0
+
+
+def test_binance_interim_clears_previous_output_before_next_bound(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "two-rows.jsonl"
+    _append_jsonl(path, _kline_envelope(0))
+    _append_jsonl(path, _kline_envelope(1))
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    iterator = interim._iter_owned_interim_frames(
+        data_id="market_bars_1m",
+        input_files=(path,),
+        row_batch_size=1,
+        start_date=None,
+        end_date=None,
+        resource_policy=policy,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(iterator)
+        lease = policy.lease("test.binance.interim", bound)
+        try:
+            owned = iterator.send(lease)
+            assert isinstance(owned, _OwnedValue)
+            output_ref = weakref.ref(owned.value)
+            del owned
+            next_bound = iterator.send(None)
+            assert type(next_bound) is int and next_bound > 0
+            assert output_ref() is None
+        finally:
+            iterator.close()
+            lease.close()
+
+    assert policy.used_memory_bytes == 0
 
 
 def test_binance_depth_interim_parses_and_validates_order_once(
@@ -203,11 +546,13 @@ def test_binance_depth_interim_parses_and_validates_order_once(
     monkeypatch.setattr(interim, "depth_side_levels", count_side)
     monkeypatch.setattr(interim, "_validate_normalized_order", count_order)
 
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     chunks = tuple(
         interim.iter_interim_frames(
             data_id="depth_levels_tick",
             input_files=(path,),
             row_batch_size=1,
+            resource_policy=policy,
         )
     )
 
@@ -245,12 +590,14 @@ def test_binance_interim_rejects_global_order_reversal_independent_of_batch_size
     _append_jsonl(path, envelope_factory(1))
     _append_jsonl(path, envelope_factory(0))
 
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     with pytest.raises(ValueError, match="out_of_order_binance_interim_dependency"):
         tuple(
             interim.iter_interim_frames(
                 data_id=data_id,
                 input_files=(path,),
                 row_batch_size=row_batch_size,
+                resource_policy=policy,
             )
         )
 

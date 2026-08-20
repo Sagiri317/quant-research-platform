@@ -102,6 +102,23 @@ def _writer_test_policy(
     )
 
 
+def _bound_first_frames(frames, *, bound: int = 256 * 1024):  # noqa: ANN001, ANN202
+    iterator = iter(frames)
+    try:
+        while True:
+            lease = yield bound
+            try:
+                frame = next(iterator)
+            except StopIteration:
+                return
+            yield runtime_resources._OwnedValue(frame, lease)
+            del frame
+    finally:
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            close()
+
+
 _ARROW_SCALAR_LOGICAL_DTYPE_CASES = (
     ("boolean", pa.bool_(), "nullable_boolean", "boolean", True),
     ("int8", pa.int8(), "nullable_integer", "Int8", 1),
@@ -537,6 +554,232 @@ def test_writer_reserves_complete_fixed_owner_before_sqlite_or_input(
         )
 
 
+def test_private_writer_admits_producer_bound_before_data_pull(
+    tmp_path: Path,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024**2,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    )
+    pulls = 0
+
+    def producer():
+        nonlocal pulls
+        yield policy.memory_budget_bytes
+        pulls += 1
+        frame = make_default_dataset_frame().iloc[:1].copy()
+        yield runtime_resources._OwnedValue(frame, None)  # type: ignore[arg-type]
+
+    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+        dataset_writing.write_dataset(
+            make_dataset_artifact_root(tmp_path, "producer_bound_admission"),
+            producer(),
+            spec=make_processed_dataset_spec("producer_bound_admission"),
+            resource_policy=policy,
+        )
+
+    assert pulls == 0
+
+
+def test_private_writer_rejects_actual_frame_above_declared_bound(
+    tmp_path: Path,
+) -> None:
+    policy = _writer_test_policy()
+
+    def producer():
+        lease = yield 1
+        frame = make_default_dataset_frame()
+        yield runtime_resources._OwnedValue(frame, lease)
+        del frame
+
+    with pytest.raises(ValueError, match="dataset_producer_bound_invalid"):
+        dataset_writing.write_dataset(
+            make_dataset_artifact_root(tmp_path, "producer_bound_invalid"),
+            producer(),
+            spec=make_processed_dataset_spec("producer_bound_invalid"),
+            resource_policy=policy,
+        )
+    assert policy.used_memory_bytes == 0
+
+
+def test_private_writer_transfers_one_lease_and_clears_before_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    events: list[tuple[str, bool]] = []
+    lease_holder: dict[str, object] = {}
+    frame_reference: weakref.ReferenceType[pd.DataFrame] | None = None
+    producer_totals: list[int] = []
+    original_close = runtime_resources.MemoryLease.close
+
+    def observed_close(lease) -> None:  # noqa: ANN001
+        if lease is lease_holder.get("lease"):
+            events.append(
+                (
+                    "close",
+                    frame_reference is not None and frame_reference() is None,
+                )
+            )
+        original_close(lease)
+
+    monkeypatch.setattr(runtime_resources.MemoryLease, "close", observed_close)
+
+    def producer():
+        nonlocal frame_reference
+        lease = yield 128 * 1024
+        lease_holder["lease"] = lease
+        producer_totals.append(policy.used_memory_bytes)
+        frame = make_default_dataset_frame().iloc[:1].copy()
+        frame_reference = weakref.ref(frame)
+        owned = runtime_resources._OwnedValue(frame, lease)
+        producer_totals.append(policy.used_memory_bytes)
+        yield owned
+        del owned, frame
+        events.append(("cleared", frame_reference() is None))
+
+    dataset_writing.write_dataset(
+        make_dataset_artifact_root(tmp_path, "producer_lease_transfer"),
+        producer(),
+        spec=make_processed_dataset_spec("producer_lease_transfer"),
+        resource_policy=policy,
+    )
+
+    assert producer_totals[0] == producer_totals[1]
+    assert lease_holder["lease"].owner == "storage.dataset.input"
+    assert events == [("cleared", True), ("close", True)]
+
+
+def test_private_writer_cleanup_restores_outer_root_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    monkeypatch.setattr(
+        dataset_writing,
+        "write_parquet_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("writer_primary")
+        ),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        baseline = policy.used_memory_bytes
+        with pytest.raises(RuntimeError, match="writer_primary"):
+            dataset_writing.write_dataset(
+                make_dataset_artifact_root(tmp_path, "outer_root_baseline"),
+                _bound_first_frames((make_default_dataset_frame().iloc[:1].copy(),)),
+                spec=make_processed_dataset_spec("outer_root_baseline"),
+                resource_policy=policy,
+            )
+        assert policy.used_memory_bytes == baseline
+    assert policy.state == "CLOSED"
+
+
+def test_private_writer_close_failure_preserves_primary_and_poisoned_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    primary = RuntimeError("writer_primary")
+    monkeypatch.setattr(
+        dataset_writing,
+        "write_parquet_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(primary),
+    )
+
+    def producer():
+        lease = yield 128 * 1024
+        try:
+            yield runtime_resources._OwnedValue(
+                make_default_dataset_frame().iloc[:1].copy(),
+                lease,
+            )
+        finally:
+            raise OSError("producer_close_failed")
+
+    def run() -> None:
+        with runtime_resource_policy_scope(policy):
+            dataset_writing.write_dataset(
+                make_dataset_artifact_root(tmp_path, "producer_close_failure"),
+                producer(),
+                spec=make_processed_dataset_spec("producer_close_failure"),
+                resource_policy=policy,
+            )
+
+    with pytest.raises(RuntimeError, match="writer_primary") as raised:
+        run()
+    assert raised.value is primary
+    assert any("producer_close_failed" in note for note in primary.__notes__)
+    assert policy.state == "POISONED"
+    assert policy.used_memory_bytes > 0
+    policy._lock.close()  # noqa: SLF001
+
+
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt, SystemExit))
+def test_private_writer_closes_producer_before_releasing_lease_on_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    primary_type: type[BaseException],
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    events: list[tuple[str, bool]] = []
+    lease_holder: dict[str, object] = {}
+    frame_reference: weakref.ReferenceType[pd.DataFrame] | None = None
+    original_close = runtime_resources.MemoryLease.close
+
+    def observed_close(lease) -> None:  # noqa: ANN001
+        if lease is lease_holder.get("lease"):
+            events.append(
+                (
+                    "close",
+                    frame_reference is not None and frame_reference() is None,
+                )
+            )
+        original_close(lease)
+
+    monkeypatch.setattr(runtime_resources.MemoryLease, "close", observed_close)
+    monkeypatch.setattr(
+        dataset_writing,
+        "write_parquet_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            primary_type("producer_primary")
+        ),
+    )
+
+    def producer():
+        nonlocal frame_reference
+        frame: pd.DataFrame | None = None
+        owned = None
+        try:
+            lease = yield 128 * 1024
+            lease_holder["lease"] = lease
+            frame = make_default_dataset_frame().iloc[:1].copy()
+            frame_reference = weakref.ref(frame)
+            owned = runtime_resources._OwnedValue(frame, lease)
+            yield owned
+        finally:
+            owned = None
+            frame = None
+            events.append(
+                ("cleared", frame_reference is not None and frame_reference() is None)
+            )
+
+    with pytest.raises(primary_type, match="producer_primary"):
+        dataset_writing.write_dataset(
+            make_dataset_artifact_root(
+                tmp_path, f"producer_primary_{primary_type.__name__}"
+            ),
+            producer(),
+            spec=make_processed_dataset_spec(f"producer_primary_{primary_type.__name__}"),
+            resource_policy=policy,
+        )
+
+    assert events[0][0] == "cleared"
+    assert events[-1] == ("close", True)
+
+
 @pytest.mark.parametrize(
     "exit_mode",
     (
@@ -585,23 +828,25 @@ def test_writer_closes_actual_input_iterator_on_every_exit_path(
         monkeypatch.setattr(dataset_writing, "write_parquet_file", fail_write)
     root = make_dataset_artifact_root(tmp_path, f"writer_close_{exit_mode}")
     if exit_mode == "target_exists":
+        target_source = _bound_first_frames(source)
+        next(target_source)
         dataset_writing.write_dataset(
             root,
-            frame,
+            _bound_first_frames((frame,)),
             spec=make_processed_dataset_spec(f"writer_close_{exit_mode}"),
             resource_policy=active_runtime_resource_policy(),
         )
         with pytest.raises(ValueError, match="dataset_exists"):
             dataset_writing.write_dataset(
                 root,
-                source,
+                target_source,
                 spec=make_processed_dataset_spec(f"writer_close_{exit_mode}"),
                 resource_policy=active_runtime_resource_policy(),
             )
     elif failure_type is None:
         dataset_writing.write_dataset(
             root,
-            source,
+            _bound_first_frames(source),
             spec=make_processed_dataset_spec(f"writer_close_{exit_mode}"),
             resource_policy=active_runtime_resource_policy(),
         )
@@ -609,7 +854,7 @@ def test_writer_closes_actual_input_iterator_on_every_exit_path(
         with pytest.raises(failure_type, match="writer_exit"):
             dataset_writing.write_dataset(
                 root,
-                source,
+                _bound_first_frames(source),
                 spec=make_processed_dataset_spec(f"writer_close_{exit_mode}"),
                 resource_policy=active_runtime_resource_policy(),
             )
@@ -634,6 +879,7 @@ def test_writer_close_failure_precedes_publish_but_preserves_primary(
     expected_error: type[BaseException],
     expected_message: str,
 ) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
     frame = make_default_dataset_frame().iloc[:1].copy()
 
     class ThrowingCloseIterator:
@@ -678,25 +924,38 @@ def test_writer_close_failure_precedes_publish_but_preserves_primary(
         monkeypatch.setattr(dataset_writing, "write_parquet_file", fail_write)
 
     root = make_dataset_artifact_root(tmp_path, f"writer_close_failure_{exit_mode}")
+    cleanup_policies: list[RuntimeResourcePolicy] = []
     if exit_mode == "target_exists":
+        target_source = _bound_first_frames(facade)
+        next(target_source)
+        first_policy = _writer_test_policy()
         dataset_writing.write_dataset(
             root,
-            frame,
+            _bound_first_frames((frame,)),
             spec=make_processed_dataset_spec(f"writer_close_failure_{exit_mode}"),
-            resource_policy=active_runtime_resource_policy(),
+            resource_policy=first_policy,
         )
+        cleanup_policies.append(first_policy)
+        input_data = target_source
+    else:
+        input_data = _bound_first_frames(facade)
+    issued_policy = _writer_test_policy()
+    cleanup_policies.append(issued_policy)
 
     with pytest.raises(expected_error, match=expected_message):
         dataset_writing.write_dataset(
             root,
-            facade,
+            input_data,
             spec=make_processed_dataset_spec(f"writer_close_failure_{exit_mode}"),
-            resource_policy=active_runtime_resource_policy(),
+            resource_policy=issued_policy,
         )
 
     assert source.close_calls == 1
     assert facade.close_calls == 0
     assert root.exists() is (exit_mode == "target_exists")
+    for policy in cleanup_policies:
+        if policy.state == "POISONED":
+            policy._lock.close()  # noqa: SLF001
 
 
 def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None:
@@ -2691,7 +2950,7 @@ def test_dataset_write_removes_reused_pid_staged_scratch(
 
     dataset_writing.write_dataset(
         root,
-        make_default_dataset_frame(),
+        _bound_first_frames((make_default_dataset_frame(),)),
         spec=make_processed_dataset_spec("reused_pid_stage"),
         resource_policy=policy,
     )
@@ -4404,7 +4663,7 @@ def test_storage_operations_propagate_the_captured_payload_target(
     with runtime_resource_policy_scope(policy):
         dataset_writing.write_dataset(
             root,
-            frame,
+            _bound_first_frames((frame,)),
             spec=make_processed_dataset_spec("policy_propagation"),
             resource_policy=policy,
         )
@@ -5680,7 +5939,7 @@ def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
     )
     dataset_writing.write_dataset(
         root,
-        (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
+        _bound_first_frames((frame.iloc[:1].copy(), frame.iloc[1:].copy())),
         spec=make_processed_dataset_spec("writer_receipt"),
         staged_validator=validate_receipt,
         resource_policy=capture_test_policy(
@@ -5967,7 +6226,9 @@ def test_writer_bounds_raw_pandas_arrow_and_persisted_conversion(
     )
     result = dataset_writing.write_dataset(
         root,
-        frame,
+        _bound_first_frames(
+            (frame,), bound=pandas_frame_payload_bytes(frame) + 128 * 1024
+        ),
         spec=make_processed_dataset_spec("bounded_writer"),
         resource_policy=capture_test_policy(
             available_memory_bytes=16 * 1024**2,
@@ -5995,7 +6256,7 @@ def test_private_writer_returns_final_inspection_and_public_writer_returns_none(
     )
     private_result = dataset_writing.write_dataset(
         private_root,
-        make_default_dataset_frame(),
+        _bound_first_frames((make_default_dataset_frame(),)),
         spec=make_processed_dataset_spec("private_return"),
         resource_policy=policy,
     )
@@ -7829,7 +8090,7 @@ def test_unordered_category_domain_uses_live_exact_index_namespace(
 
     dataset_writing.write_dataset(
         root,
-        frame,
+        _bound_first_frames((frame,)),
         spec=make_processed_dataset_spec("category_spill"),
         staged_validator=validate,
         resource_policy=capture_test_policy(
@@ -7950,7 +8211,7 @@ def test_staged_validator_wrong_keys_rejects_and_cleans_atomic_state(
     with pytest.raises(ValueError, match="staged_dataset_primary_key_mismatch"):
         dataset_writing.write_dataset(
             root,
-            frame,
+            _bound_first_frames((frame,)),
             spec=make_processed_dataset_spec("wrong_staged_keys"),
             staged_validator=reject_wrong_keys,
             resource_policy=capture_test_policy(
@@ -8008,7 +8269,7 @@ def test_writer_rejects_noncanonical_dataframe_column_labels_before_arrow(
     with pytest.raises(ValueError, match="invalid_dataset_column_labels"):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "invalid_labels"),
-            frame,
+            _bound_first_frames((frame,)),
             spec=make_processed_dataset_spec("invalid_labels"),
             resource_policy=active_runtime_resource_policy(),
         )
@@ -8575,7 +8836,7 @@ def test_writer_checks_actual_arrow_headroom_after_conversion(
     ):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "writer_arrow_admission"),
-            make_default_dataset_frame(),
+            _bound_first_frames((make_default_dataset_frame(),)),
             spec=make_processed_dataset_spec("writer_arrow_admission"),
             resource_policy=policy,
         )
@@ -8609,7 +8870,7 @@ def test_writer_deducts_other_live_root_reservations_before_allocation(
             ):
                 dataset_writing.write_dataset(
                     make_dataset_artifact_root(tmp_path, "writer_shared_headroom"),
-                    make_default_dataset_frame(),
+                    _bound_first_frames((make_default_dataset_frame(),)),
                     spec=make_processed_dataset_spec("writer_shared_headroom"),
                     resource_policy=policy,
                 )
@@ -8645,7 +8906,7 @@ def test_writer_rejects_before_pandas_conversion_overlap(
     ):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "writer_conversion_admission"),
-            make_default_dataset_frame(),
+            _bound_first_frames((make_default_dataset_frame(),)),
             spec=make_processed_dataset_spec("writer_conversion_admission"),
             resource_policy=policy,
         )
@@ -8697,7 +8958,9 @@ def test_writer_rejects_timestamp_prepare_before_large_temporary_graph(
                 tmp_path,
                 "writer_timestamp_admission",
             ),
-            frame,
+            _bound_first_frames(
+                (frame,), bound=pandas_frame_payload_bytes(frame) + 128 * 1024
+            ),
             spec=spec,
             resource_policy=policy,
         )
@@ -8742,7 +9005,7 @@ def test_writer_rejects_before_native_parquet_write(
     ):
         dataset_writing.write_dataset(
             make_dataset_artifact_root(tmp_path, "writer_native_admission"),
-            make_default_dataset_frame(),
+            _bound_first_frames((make_default_dataset_frame(),)),
             spec=make_processed_dataset_spec("writer_native_admission"),
             resource_policy=policy,
         )
@@ -8833,7 +9096,9 @@ def test_writer_bounded_completes_under_task_wide_copy_and_arrow_headroom(
     root = make_dataset_artifact_root(tmp_path, "writer_task_headroom")
     result = dataset_writing.write_dataset(
         root,
-        frame,
+        _bound_first_frames(
+            (frame,), bound=pandas_frame_payload_bytes(frame) + 128 * 1024
+        ),
         spec=make_processed_dataset_spec("writer_task_headroom"),
         resource_policy=policy,
     )
@@ -8861,7 +9126,7 @@ def test_writer_persisted_readback_preserves_schema_and_rows(
 
     dataset_writing.write_dataset(
         root,
-        frame,
+        _bound_first_frames((frame,)),
         spec=make_processed_dataset_spec(f"writer_readback_{variant}"),
         resource_policy=policy,
     )
@@ -9765,12 +10030,14 @@ def test_writer_releases_previous_publication_before_requesting_next(
 
     def publications():
         nonlocal first
+        lease = yield 256 * 1024
         current = first
         first = None
-        yield current
+        yield runtime_resources._OwnedValue(current, lease)
         del current
         assert first_reference() is None
-        yield second
+        lease = yield 256 * 1024
+        yield runtime_resources._OwnedValue(second, lease)
 
     name = "publication_liveness"
     dataset_writing.write_dataset(

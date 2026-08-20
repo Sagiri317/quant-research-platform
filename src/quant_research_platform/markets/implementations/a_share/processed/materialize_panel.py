@@ -79,7 +79,7 @@ def write_panel(
         + merge_index_row_buffer
     )
 
-    def chunks() -> Iterable[pd.DataFrame]:
+    def chunks() -> Iterable[object]:
         def materialize(
             asset_ids: tuple[object, ...],
             current_sessions: Sequence[pd.Timestamp],

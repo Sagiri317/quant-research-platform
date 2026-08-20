@@ -5,14 +5,15 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Iterator
-from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     active_runtime_resource_policy,
     bind_runtime_resource_policy,
     runtime_resource_policy_scope,
@@ -62,13 +63,47 @@ def iter_raw_envelopes(
             allow_implicit_active=False,
         ) or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
-            for batch in _iter_raw_envelope_batches(
+            chunks = _iter_raw_envelope_batches(
                 path,
                 batch_size=1,
                 resource_policy=policy,
                 validate_depth_payload=True,
-            ):
-                yield batch[0]
+            )
+            lease: MemoryLease | None = None
+            try:
+                try:
+                    bound = next(chunks)
+                except StopIteration:
+                    return
+                while True:
+                    lease = policy.lease("source.binance.raw", bound)
+                    try:
+                        owned = chunks.send(lease)
+                    except StopIteration:
+                        lease.close()
+                        lease = None
+                        return
+                    if not isinstance(owned, _OwnedValue):
+                        raise TypeError("invalid_binance_owned_frame")
+                    if owned.lease is not lease:
+                        raise RuntimeError("runtime_memory_lease_transfer_mismatch")
+                    lease.transfer("source.binance.raw.consumer")
+                    yield from owned.value
+                    del owned
+                    try:
+                        bound = chunks.send(None)
+                    except StopIteration:
+                        lease.close()
+                        lease = None
+                        return
+                    lease.close()
+                    lease = None
+            finally:
+                close = getattr(chunks, "close", None)
+                if close is not None:
+                    close()
+                if lease is not None:
+                    lease.close()
 
     return activate()
 
@@ -79,7 +114,7 @@ def _iter_raw_envelope_batches(
     batch_size: int,
     resource_policy: RuntimeResourcePolicy,
     validate_depth_payload: bool = True,
-) -> Iterator[tuple[dict[str, Any], ...]]:
+) -> Iterator[object]:
     raw_path = Path(path)
     if not raw_path.is_file():
         raise FileNotFoundError(raw_path)
@@ -89,58 +124,69 @@ def _iter_raw_envelope_batches(
         raise ValueError("unsupported_binance_raw_file_extension")
     if type(batch_size) is not int or batch_size <= 0:
         raise ValueError("invalid_binance_raw_row_batch_size")
-    yielded = False
-    line_number = 0
-    scan_bytes = min(
-        _SCAN_BUFFER_BYTES,
-        max(1, resource_policy.remaining_memory_bytes),
+    raw_file_size = max(1, raw_path.stat().st_size)
+    producer_bound = max(
+        256 * 1024,
+        4 * min(raw_file_size, 8 * 1024 * 1024) + _SCAN_BUFFER_BYTES,
     )
-    with resource_policy.reserve("source.binance.scan", scan_bytes):
-        buffer = bytearray(scan_bytes)
-        with raw_path.open("rb") as handle:
-            while True:
-                batch: list[dict[str, Any]] = []
-                with ExitStack() as retained:
-                    records_in_batch = 0
-                    while records_in_batch < batch_size:
-                        record_length = _next_record_length(handle, buffer)
-                        if record_length == 0:
-                            break
-                        records_in_batch += 1
-                        record_bound = _json_record_working_set_bytes(record_length)
-                        try:
-                            retained.enter_context(
-                                resource_policy.reserve(
-                                    "source.binance.record",
-                                    record_bound,
-                                )
-                            )
-                        except MemoryError:
-                            if batch:
-                                yield tuple(batch)
-                                batch = []
-                                break
-                            raise
-                        raw = handle.read(record_length)
-                        line_number += 1
-                        if raw.isspace():
-                            continue
-                        yielded = True
-                        text = raw.decode("utf-8", errors="strict")
-                        batch.append(
-                            _validate_envelope(
-                                _loads_json(
-                                    text,
-                                    raw_path,
-                                    line_number=line_number,
-                                ),
-                                validate_depth_payload=validate_depth_payload,
-                            )
-                        )
+    line_number = 0
+    yielded = False
+
+    with raw_path.open("rb") as handle:
+        while True:
+            lease = yield producer_bound
+            scan_bytes = min(_SCAN_BUFFER_BYTES, max(1, producer_bound))
+            if scan_bytes + 64 * 1024 > lease.reserved_bytes:
+                raise RuntimeError("binance_record_envelope_bound_invalid")
+            buffer = bytearray(scan_bytes)
+            batch: list[dict[str, Any]] = []
+            batch_working_bytes = 0
+            end_of_file = False
+            records_in_batch = 0
+            while records_in_batch < batch_size:
+                record_length = _next_record_length(handle, buffer)
+                if record_length == 0:
+                    end_of_file = True
+                    break
+                record_bound = _json_record_working_set_bytes(record_length)
+                if (
+                    batch_working_bytes + record_bound + 64 * 1024
+                    > lease.reserved_bytes
+                ):
                     if batch:
-                        yield tuple(batch)
-                    if record_length == 0:
                         break
+                    del buffer
+                    raise RuntimeError("binance_record_envelope_bound_invalid")
+                raw = handle.read(record_length)
+                line_number += 1
+                if raw.isspace():
+                    del raw
+                    continue
+                records_in_batch += 1
+                batch_working_bytes += record_bound
+                yielded = True
+                batch.append(
+                    _validate_envelope(
+                        _loads_json(
+                            raw.decode("utf-8", errors="strict"),
+                            raw_path,
+                            line_number=line_number,
+                        ),
+                        validate_depth_payload=validate_depth_payload,
+                    )
+                )
+                del raw
+            if batch:
+                actual_bound = batch_working_bytes + 64 * 1024
+                del buffer
+                if actual_bound > lease.reserved_bytes:
+                    raise RuntimeError("binance_record_envelope_bound_invalid")
+                yield _OwnedValue(tuple(batch), lease)
+                del batch
+            else:
+                del buffer
+            if end_of_file:
+                break
     if not yielded:
         raise ValueError("empty_binance_raw_file")
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import ExitStack
 
 import pandas as pd
 
@@ -27,7 +28,9 @@ from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -68,14 +71,12 @@ def write_labels(
         input_identities = validation.input_dataset_identities(
             {MARKET_PANEL_DATA_ID: panel_session}
         )
-        chunks = materialization_resources.iter_write_chunks(
-            _iter_label_chunks(
-                spec,
-                panel_session=panel_session,
-                time_window=time_window,
-                resource_policy=resource_policy,
-                retained_payload_bytes=retained_payload_bytes,
-            ),
+        chunks = _iter_label_chunks(
+            spec,
+            panel_session=panel_session,
+            time_window=time_window,
+            resource_policy=resource_policy,
+            retained_payload_bytes=retained_payload_bytes,
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:
@@ -110,15 +111,48 @@ def _iter_label_chunks(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
     retained_payload_bytes: int,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[object]:
     if panel_session.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        chunk_target_bytes = resource_policy.remaining_memory_bytes
+        available_bytes = max(1, resource_policy.remaining_memory_bytes)
+        chunk_target_bytes = max(1, available_bytes // 8)
+        producer_bound = max(1, available_bytes // 2)
         buffer = pd.DataFrame()
+        buffer_lease: MemoryLease | None = None
         active_market_asset: tuple[str, str] | None = None
         order_state = validation.OrderedDependencyState()
-        with validation.crypto_asset_session_views(
+        def close_buffer() -> None:
+            nonlocal buffer, buffer_lease
+            buffer = pd.DataFrame()
+            if buffer_lease is not None:
+                buffer_lease.close()
+                buffer_lease = None
+
+        def replace_buffer(build, lease):  # noqa: ANN001, ANN202
+            nonlocal buffer, buffer_lease
+            bound = min(
+                max(1, lease.reserved_bytes),
+                max(1, resource_policy.remaining_memory_bytes),
+            )
+            next_lease = resource_policy.lease("crypto.label.buffer", bound)
+            try:
+                next_buffer = build()
+                build = None
+                next_bytes = pandas_frame_payload_bytes(next_buffer)
+                next_lease.shrink_to(
+                    next_bytes + min(64 * 1024, max(1, bound // 2))
+                )
+            except BaseException:
+                next_lease.close()
+                raise
+            old_buffer_lease = buffer_lease
+            buffer = next_buffer
+            buffer_lease = next_lease
+            if old_buffer_lease is not None:
+                old_buffer_lease.close()
+
+        with ExitStack() as cleanup, validation.crypto_asset_session_views(
             panel_session,
             columns=("market_id", "asset_id"),
             target_chunk_bytes=chunk_target_bytes,
@@ -127,7 +161,33 @@ def _iter_label_chunks(
                 resource_policy.task_memory_budget_bytes - retained_payload_bytes
             ),
         ) as asset_views:
-            for (_market_id, _asset_id), asset_session in asset_views:
+            cleanup.callback(close_buffer)
+            lease: MemoryLease | None = None
+            for (market_id, asset_id), asset_session in asset_views:
+                market_asset = (str(market_id), str(asset_id))
+                if active_market_asset is None:
+                    active_market_asset = market_asset
+                elif market_asset != active_market_asset:
+                    finalized = _final_label_output(buffer, spec)
+                    close_buffer()
+                    active_market_asset = market_asset
+                    if not finalized.empty:
+                        materialization_resources.require_frame_within_budget(
+                            finalized,
+                            target_bytes=resource_policy.remaining_memory_bytes,
+                            error=(
+                                "crypto_indivisible_reducer_unit_exceeds_payload_target"
+                            ),
+                        )
+                        actual_bound = (
+                            pandas_frame_payload_bytes(finalized) + 128 * 1024
+                        )
+                        if actual_bound > lease.reserved_bytes:
+                            raise ValueError("crypto_label_bound_invalid")
+                        lease.shrink_to(actual_bound)
+                        yield _OwnedValue(finalized, lease)
+                        del finalized
+                        lease = None
                 with closing_dataset_iterator(
                     iter_dataset_chunks(
                         asset_session,
@@ -138,9 +198,25 @@ def _iter_label_chunks(
                         ),
                     )
                 ) as panels:
-                    for panel in panels:
-                        if panel.empty:
-                            continue
+                    while True:
+                        if lease is None:
+                            lease = yield producer_bound
+                        while True:
+                            try:
+                                panel = next(panels)
+                            except StopIteration:
+                                panel = None
+                                break
+                            if not panel.empty:
+                                break
+                            del panel
+                        if panel is None:
+                            break
+                        if (
+                            pandas_frame_payload_bytes(panel) + 128 * 1024
+                            > lease.reserved_bytes
+                        ):
+                            raise ValueError("crypto_label_bound_invalid")
                         panel = validation.validated_ordered_dependency_chunk(
                             panel,
                             state=order_state,
@@ -151,68 +227,63 @@ def _iter_label_chunks(
                             panel,
                             time_window,
                         )
-                        for (
-                            segment_market_id,
-                            segment_asset_id,
-                        ), asset_rows in panel.groupby(
-                            ["market_id", "asset_id"],
-                            sort=False,
-                            dropna=False,
-                        ):
-                            market_asset = (
-                                str(segment_market_id),
-                                str(segment_asset_id),
-                            )
-                            if active_market_asset is None:
-                                active_market_asset = market_asset
-                            elif market_asset != active_market_asset:
-                                finalized = _final_label_output(buffer, spec)
-                                if not finalized.empty:
-                                    materialization_resources.require_frame_within_budget(
-                                        finalized,
-                                        target_bytes=resource_policy.remaining_memory_bytes,
-                                        error=(
-                                            "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                                        ),
-                                    )
-                                    yield finalized
-                                buffer = pd.DataFrame()
-                                active_market_asset = market_asset
-                            buffer = (
-                                asset_rows.copy().reset_index(drop=True)
-                                if buffer.empty
-                                else pd.concat((buffer, asset_rows), ignore_index=True)
-                            )
-                            positions = buffer.groupby(
-                                "asset_id", sort=False
-                            ).cumcount()
-                            group_sizes = buffer.groupby("asset_id", sort=False)[
-                                "asset_id"
-                            ].transform("size")
-                            emit_mask = positions.lt(
-                                group_sizes - LABEL_LOOKAHEAD_BARS
-                            ) & buffer[_CORE_ROW].astype("boolean")
-                            if emit_mask.any():
-                                labeled = _label_frame(buffer)
-                                output = labeled.loc[emit_mask].loc[
-                                    :, spec.required_columns
-                                ]
-                                materialization_resources.require_frame_within_budget(
-                                    output,
-                                    target_bytes=resource_policy.remaining_memory_bytes,
-                                    error=(
-                                        "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                                    ),
-                                )
-                                yield output
-                                buffer = buffer.loc[~emit_mask].copy()
-                            if (
-                                pandas_frame_payload_bytes(buffer)
-                                > resource_policy.remaining_memory_bytes
-                            ):
-                                raise ValueError(
+                        replace_buffer(
+                            lambda rows=panel, current=buffer: (
+                                rows.copy().reset_index(drop=True)
+                                if current.empty
+                                else pd.concat((current, rows), ignore_index=True)
+                            ),
+                            lease,
+                        )
+                        positions = buffer.groupby("asset_id", sort=False).cumcount()
+                        group_sizes = buffer.groupby("asset_id", sort=False)[
+                            "asset_id"
+                        ].transform("size")
+                        emit_mask = positions.lt(
+                            group_sizes - LABEL_LOOKAHEAD_BARS
+                        ) & buffer[_CORE_ROW].astype("boolean")
+                        if emit_mask.any():
+                            labeled = _label_frame(buffer)
+                            output = labeled.loc[emit_mask].loc[
+                                :, spec.required_columns
+                            ]
+                            materialization_resources.require_frame_within_budget(
+                                output,
+                                target_bytes=resource_policy.remaining_memory_bytes,
+                                error=(
                                     "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                                )
+                                ),
+                            )
+                            producer_payload_bytes = pandas_frame_payload_bytes(panel)
+                            actual_bound = (
+                                pandas_frame_payload_bytes(output)
+                                + producer_payload_bytes
+                                + 128 * 1024
+                            )
+                            if actual_bound > lease.reserved_bytes:
+                                raise ValueError("crypto_label_bound_invalid")
+                            replace_buffer(
+                                lambda mask=emit_mask, current=buffer: current.loc[
+                                    ~mask
+                                ].copy(),
+                                lease,
+                            )
+                            del positions, group_sizes, emit_mask
+                            del labeled
+                            lease.shrink_to(actual_bound)
+                            yield _OwnedValue(output, lease)
+                            del output
+                            lease = None
+                        else:
+                            del positions, group_sizes, emit_mask
+                        if (
+                            pandas_frame_payload_bytes(buffer)
+                            > resource_policy.remaining_memory_bytes
+                        ):
+                            raise ValueError(
+                                "crypto_indivisible_reducer_unit_exceeds_payload_target"
+                            )
+                        panel = None
             if not buffer.empty:
                 finalized = _final_label_output(buffer, spec)
                 if not finalized.empty:
@@ -221,7 +292,16 @@ def _iter_label_chunks(
                         target_bytes=resource_policy.remaining_memory_bytes,
                         error="crypto_indivisible_reducer_unit_exceeds_payload_target",
                     )
-                    yield finalized
+                    actual_bound = (
+                        pandas_frame_payload_bytes(finalized)
+                        + 128 * 1024
+                    )
+                    if actual_bound > lease.reserved_bytes:
+                        raise ValueError("crypto_label_bound_invalid")
+                    lease.shrink_to(actual_bound)
+                    close_buffer()
+                    yield _OwnedValue(finalized, lease)
+                    del finalized
         panel_session.verify()
 
 

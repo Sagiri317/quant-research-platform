@@ -21,7 +21,9 @@ import pytest
 
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     active_runtime_resource_policy,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
@@ -42,6 +44,42 @@ from quant_research_platform.storage.datasets import inspect_dataset, read_datas
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+def _bound_first_test_frames(frames, *, bound: int = 256 * 1024):  # noqa: ANN001, ANN202
+    for frame in frames:
+        lease = yield bound
+        yield _OwnedValue(frame, lease)
+
+
+def _collect_bound_first_frames(data, policy):  # noqa: ANN001, ANN202
+    frames = []
+    with runtime_resource_policy_scope(policy):
+        try:
+            bound = next(data)
+            while True:
+                lease = policy.lease("test.csmar.consumer", bound)
+                try:
+                    while True:
+                        try:
+                            owned = data.send(lease)
+                        except StopIteration:
+                            return frames
+                        if isinstance(owned, _OwnedValue):
+                            break
+                        raise AssertionError("invalid_bound_first_output")
+                    lease.transfer("test.csmar.output")
+                    frames.append(owned.value)
+                    try:
+                        bound = data.send(None)
+                    except StopIteration:
+                        return frames
+                finally:
+                    lease.close()
+        finally:
+            close = getattr(data, "close", None)
+            if close is not None:
+                close()
 
 
 def test_csmar_spool_owners_reject_aliased_parent_before_disk_access(
@@ -158,7 +196,7 @@ def test_csv_owner_bounds_total_logical_record_and_restores_limit_before_yield(
     path.write_text(",".join(["x" * 100] * 11_000) + "\n", encoding="utf-8")
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024 * 1024,
     )
     previous_limit = csv.field_size_limit()
 
@@ -768,11 +806,16 @@ def test_private_export_flushes_publishable_batch_before_next_record(
             resource_policy=policy,
         )
 
-        first = next(chunks)
-
-        assert first["value"].tolist() == [0]
-        assert pulls == [0]
-        chunks.close()
+        bound = next(chunks)
+        lease = policy.lease("test.csmar.raw", bound)
+        try:
+            owned = chunks.send(lease)
+            assert isinstance(owned, _OwnedValue)
+            assert owned.value["value"].tolist() == [0]
+            assert pulls == [0]
+        finally:
+            chunks.close()
+            lease.close()
 
 
 @pytest.mark.parametrize("wide_position", ("first", "later"))
@@ -847,7 +890,7 @@ def test_private_export_parent_reservation_blocks_downstream_overlap(
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024 * 1024,
     )
 
     def records(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
@@ -859,7 +902,7 @@ def test_private_export_parent_reservation_blocks_downstream_overlap(
                 "2",
                 "O",
             ],
-            10 * 1024**2,
+            1 * 1024**2,
         )
         yield (
             ["Markettype", "Clddt", "Daywk", "State"],
@@ -869,14 +912,14 @@ def test_private_export_parent_reservation_blocks_downstream_overlap(
                 "3",
                 "O",
             ],
-            10 * 1024**2,
+            1 * 1024**2,
         )
 
     monkeypatch.setattr(raw_exports, "_iter_csv_records", records)
     monkeypatch.setattr(
         raw_exports,
         "pandas_frame_payload_bytes",
-        lambda _frame: 24 * 1024**2,
+        lambda _frame: 8 * 1024**2,
     )
     with runtime_resource_policy_scope(policy):
         chunks = raw_exports.iter_private_export_chunks_with_policy(
@@ -885,14 +928,165 @@ def test_private_export_parent_reservation_blocks_downstream_overlap(
             chunksize=1,
             resource_policy=policy,
         )
-        previous = next(chunks)
-        assert policy.reserved_memory_bytes == 24 * 1024**2
+        bound = next(chunks)
+        lease = policy.lease("test.csmar.raw", bound)
+        previous = chunks.send(lease)
+        assert isinstance(previous, _OwnedValue)
+        assert policy.reserved_memory_bytes == lease.reserved_bytes
 
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            with policy.reserve("storage.dataset.arrow", 10 * 1024**2):
+            with policy.reserve("storage.dataset.arrow", 50 * 1024**2):
                 pytest.fail("downstream overlap admitted")
-        assert len(previous) == 1
+        assert len(previous.value) == 1
         chunks.close()
+        lease.close()
+
+
+def test_private_export_overflow_carry_transfers_to_next_writer_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=4 * 1024 * 1024,
+    )
+
+    class Row(list[str]):
+        pass
+
+    def make_records():
+        carry_row = Row(["4", "2024-01-03", "3", "O"])
+        carry_ref = weakref.ref(carry_row)
+
+        def records(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+            nonlocal carry_row
+            yield ["Markettype", "Clddt", "Daywk", "State"], [
+                "4",
+                "2024-01-02",
+                "2",
+                "O",
+            ], 4
+            yield ["Markettype", "Clddt", "Daywk", "State"], carry_row, 4
+            carry_row = None
+
+        return records(), carry_ref
+
+    records, carry_ref = make_records()
+    monkeypatch.setattr(
+        raw_exports,
+        "_iter_csv_records",
+        lambda *_args, **_kwargs: records,
+    )
+    monkeypatch.setattr(
+        raw_exports,
+        "_raw_frame_owner_known_bytes",
+        lambda rows, _header: 0 if len(rows) <= 1 else policy.memory_budget_bytes,
+    )
+    monkeypatch.setattr(raw_exports, "pandas_frame_payload_bytes", lambda _frame: 1)
+    carry_close_info: list[tuple[bool, bool]] = []
+    real_close = MemoryLease.close
+    consumer_leases: list[MemoryLease] = []
+
+    def record_close(lease: MemoryLease) -> None:
+        if lease.owner == "source.csmar.raw.carry":
+            carry_close_info.append(
+                (carry_ref() is not None, consumer_leases[-1].active)
+            )
+        real_close(lease)
+
+    monkeypatch.setattr(MemoryLease, "close", record_close)
+    stream = raw_exports.iter_private_export_chunks_with_policy(
+        Path("unused.csv"),
+        dataset="trading_calendar",
+        chunksize=2,
+        resource_policy=policy,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(stream)
+        first_lease = policy.lease("test.csmar.raw.first", bound)
+        consumer_leases.append(first_lease)
+        first_owned = stream.send(first_lease)
+        assert isinstance(first_owned, _OwnedValue)
+        assert policy.used_memory_bytes > first_lease.reserved_bytes
+        next_bound = stream.send(None)
+        first_lease.close()
+        second_lease = policy.lease("test.csmar.raw.second", next_bound)
+        consumer_leases.append(second_lease)
+        second_owned = stream.send(second_lease)
+        assert isinstance(second_owned, _OwnedValue)
+        stream.close()
+        second_lease.close()
+
+    assert carry_close_info == [(True, True)]
+    assert carry_ref() is None
+    assert policy.used_memory_bytes == 0
+
+
+def test_private_export_overflow_carry_preserves_primary_on_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=4 * 1024 * 1024,
+    )
+
+    class Row(list[str]):
+        pass
+
+    carry_row = Row(["4", "2024-01-03", "3", "O"])
+    carry_ref = weakref.ref(carry_row)
+
+    def records(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal carry_row
+        yield ["Markettype", "Clddt", "Daywk", "State"], [
+            "4",
+            "2024-01-02",
+            "2",
+            "O",
+        ], 4
+        yield ["Markettype", "Clddt", "Daywk", "State"], carry_row, 4
+        carry_row = None
+
+    monkeypatch.setattr(raw_exports, "_iter_csv_records", records)
+    monkeypatch.setattr(
+        raw_exports,
+        "_raw_frame_owner_known_bytes",
+        lambda rows, _header: 0 if len(rows) <= 1 else policy.memory_budget_bytes,
+    )
+    monkeypatch.setattr(raw_exports, "pandas_frame_payload_bytes", lambda _frame: 1)
+    real_close = MemoryLease.close
+    failed_carry_leases: list[MemoryLease] = []
+
+    def fail_carry_close(lease: MemoryLease) -> None:
+        if lease.owner == "source.csmar.raw.carry":
+            failed_carry_leases.append(lease)
+            raise OSError("carry close failure")
+        real_close(lease)
+
+    monkeypatch.setattr(MemoryLease, "close", fail_carry_close)
+    stream = raw_exports.iter_private_export_chunks_with_policy(
+        Path("unused.csv"),
+        dataset="trading_calendar",
+        chunksize=2,
+        resource_policy=policy,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(stream)
+        consumer_lease = policy.lease("test.csmar.raw.primary", bound)
+        first_owned = stream.send(consumer_lease)
+        assert isinstance(first_owned, _OwnedValue)
+        stream.send(None)
+        carry_row = None
+        primary = KeyboardInterrupt("primary")
+        with pytest.raises(KeyboardInterrupt) as raised:
+            stream.throw(primary)
+        assert raised.value is primary
+        assert consumer_lease.active
+        assert failed_carry_leases
+        assert carry_ref() is None
+        real_close(failed_carry_leases[0])
+        real_close(consumer_lease)
+
+    assert policy.used_memory_bytes == 0
 
 
 def test_private_export_reserves_downstream_retained_before_dataframe(
@@ -925,19 +1119,24 @@ def test_private_export_reserves_downstream_retained_before_dataframe(
     )
     retained_payload_bytes = [policy.task_memory_budget_bytes]
 
-    with pytest.raises(
+    with runtime_resource_policy_scope(policy), pytest.raises(
         storage_errors.DatasetReadCapacityExceeded,
         match="csmar_raw_working_set_exceeds_task_memory_budget",
     ):
-        next(
-            raw_exports.iter_private_export_chunks_with_policy(
-                Path("unused.csv"),
-                dataset="trading_calendar",
-                chunksize=1,
-                resource_policy=policy,
-                retained_payload_bytes=retained_payload_bytes,
-            )
+        chunks = raw_exports.iter_private_export_chunks_with_policy(
+            Path("unused.csv"),
+            dataset="trading_calendar",
+            chunksize=1,
+            resource_policy=policy,
+            retained_payload_bytes=retained_payload_bytes,
         )
+        bound = next(chunks)
+        lease = policy.lease("test.csmar.raw", bound)
+        try:
+            chunks.send(lease)
+        finally:
+            chunks.close()
+            lease.close()
 
 
 def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
@@ -959,7 +1158,7 @@ def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
     monkeypatch.setattr(
         interim,
         "iter_private_export_chunks_with_policy",
-        lambda *_args, **_kwargs: iter((raw,)),
+        lambda *_args, **_kwargs: _bound_first_test_frames((raw,)),
     )
     monkeypatch.setattr(
         interim,
@@ -986,7 +1185,12 @@ def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
             storage_errors.DatasetReadCapacityExceeded,
             match="csmar_interim_working_set_exceeds_task_memory_budget",
         ):
-            next(frames)
+            bound = next(frames)
+            lease = policy.lease("test.csmar.transform", bound)
+            try:
+                frames.send(lease)
+            finally:
+                lease.close()
 
 
 def test_private_export_chunks_keep_normal_wide_record_with_default_payload(
@@ -1441,9 +1645,11 @@ def test_interim_operation_validates_and_snapshots_overrides_once(
 
     def frames(**kwargs):  # noqa: ANN003, ANN202
         observed.append(kwargs["overrides"])
-        yield pd.DataFrame({"value": [1]})
+        lease = yield 256 * 1024
+        yield _OwnedValue(pd.DataFrame({"value": [1]}), lease)
         observed.append(kwargs["overrides"])
-        yield pd.DataFrame({"value": [2]})
+        lease = yield 256 * 1024
+        yield _OwnedValue(pd.DataFrame({"value": [2]}), lease)
 
     mutable_overrides = {
         "trading_calendar": {"keep": ["source_day_of_week"], "drop": []}
@@ -1491,6 +1697,10 @@ def test_loaded_column_overrides_compose_with_public_apply(
 
 
 def _collect_interim_frames(**kwargs: object) -> pd.DataFrame:
+    kwargs.setdefault(
+        "resource_policy",
+        capture_test_policy(available_memory_bytes=64 * 1024**2),
+    )
     frames = list(interim.iter_interim_frames(**kwargs))
     if not frames:
         return pd.DataFrame()
@@ -1814,8 +2024,13 @@ def test_csmar_txt_field_description_is_not_raw_export_table(
     exports = list(raw_exports.iter_raw_export_files(tmp_path))
 
     assert exports == [csv_export]
-    with pytest.raises(ValueError, match="Cannot infer CSMAR dataset"):
-        raw_schemas.inspect_raw_export_file(txt_description)
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="Cannot infer CSMAR dataset"):
+            raw_schemas.inspect_raw_export_file(
+                txt_description,
+                resource_policy=policy,
+            )
 
 
 def test_csmar_raw_export_contract_is_csv_only(tmp_path: Path) -> None:
@@ -2944,14 +3159,17 @@ def test_csmar_reference_dedup_is_typed_bounded_exact_across_chunks() -> None:
             ),
         )
     )
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
 
-    result = list(
+    result = _collect_bound_first_frames(
         interim._iter_deduped_reference_frames(
-            exact_frames,
+            _bound_first_test_frames(exact_frames),
             data_id="stock_master",
             pruning_reports=reports,
             scratch_parent=Path("."),
-        )
+            resource_policy=policy,
+        ),
+        policy,
     )
 
     assert sum(len(frame) for frame in result) == 1
@@ -2962,18 +3180,131 @@ def test_csmar_reference_dedup_is_typed_bounded_exact_across_chunks() -> None:
             result[0].assign(nonfinite=float("-inf")),
         )
     )
+    conflict_policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     with pytest.raises(
         ValueError,
         match="conflicting_reference_primary_key_duplicates: stock_master",
     ):
-        list(
+        _collect_bound_first_frames(
             interim._iter_deduped_reference_frames(
-                conflict,
+                _bound_first_test_frames(conflict),
                 data_id="stock_master",
                 pruning_reports=[],
                 scratch_parent=Path("."),
-            )
+                resource_policy=conflict_policy,
+            ),
+            conflict_policy,
         )
+
+
+def test_csmar_reference_dedup_splits_one_source_frame_with_one_lease_per_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=4 * 1024 * 1024,
+    )
+    frame = pd.DataFrame(
+        {
+            "source_asset_id": [f"{index:06d}" for index in range(5_000)],
+            "timestamp": pd.date_range("2020-01-01", periods=5_000),
+            "stock_name": ["demo"] * 5_000,
+        }
+    )
+    pending_references: list[weakref.ReferenceType[pd.DataFrame]] = []
+    close_results: list[bool] = []
+    real_copy = pd.DataFrame.copy
+    real_close = MemoryLease.close
+
+    def record_copy(current, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        copied = real_copy(current, *args, **kwargs)
+        if len(current) and current.index[0] != 0:
+            pending_references.append(weakref.ref(copied))
+        return copied
+
+    def record_close(lease: MemoryLease) -> None:
+        if lease.owner == "source.csmar.reference.pending":
+            close_results.append(
+                all(reference() is None for reference in pending_references[:-1])
+            )
+        real_close(lease)
+
+    monkeypatch.setattr(pd.DataFrame, "copy", record_copy)
+    monkeypatch.setattr(MemoryLease, "close", record_close)
+
+    class RecordingIndex:
+        retained_memory_bytes = policy.memory_budget_bytes // 4
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingIndex:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def classify_comparison_table(self, table, **_kwargs):  # noqa: ANN001
+            positions = array("Q", range(table.num_rows))
+            return SimpleNamespace(
+                view=memoryview(positions).toreadonly(),
+                retained_memory_bytes=0,
+            ), 0
+
+    class Table:
+        def __init__(self, rows: int) -> None:
+            self.num_rows = rows
+            self.nbytes = 1
+
+    monkeypatch.setattr(interim, "ExactPrimaryKeyIndex", RecordingIndex)
+    monkeypatch.setattr(
+        interim.pa,
+        "Table",
+        SimpleNamespace(from_pandas=lambda frame, **_kwargs: Table(len(frame))),
+    )
+    monkeypatch.setattr(
+        interim,
+        "array",
+        lambda *_args, **_kwargs: SimpleNamespace(itemsize=1024),
+    )
+    monkeypatch.setattr(interim, "pandas_frame_payload_bytes", lambda _frame: 1)
+
+    outputs: list[pd.DataFrame] = []
+    with runtime_resource_policy_scope(policy):
+        stream = interim._iter_deduped_reference_frames(
+                _bound_first_test_frames(
+                    (frame,), bound=policy.memory_budget_bytes // 2
+                ),
+            data_id="stock_master",
+            pruning_reports=[],
+            scratch_parent=Path("."),
+            resource_policy=policy,
+        )
+        try:
+            bound = next(stream)
+            while True:
+                lease = policy.lease("test.csmar.consumer", bound)
+                try:
+                    owned = stream.send(lease)
+                    assert isinstance(owned, _OwnedValue)
+                    assert owned.lease is lease
+                    assert lease.active
+                    outputs.append(owned.value)
+                    try:
+                        bound = stream.send(None)
+                    except StopIteration:
+                        break
+                    assert type(bound) is int and bound > 0
+                finally:
+                    lease.close()
+        finally:
+            stream.close()
+
+    observed = pd.concat(outputs, ignore_index=True)
+    assert len(observed) == len(frame)
+    assert set(observed["source_asset_id"]) == set(frame["source_asset_id"])
+    assert close_results and all(close_results)
+    assert policy.used_memory_bytes == 0
 
 
 def test_csmar_reference_dedup_delegates_typed_classification_to_storage(
@@ -3011,16 +3342,19 @@ def test_csmar_reference_dedup_delegates_typed_classification_to_storage(
             ),
         )
     )
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
 
     assert (
         len(
-            list(
+            _collect_bound_first_frames(
                 interim._iter_deduped_reference_frames(
-                    frames,
+                    _bound_first_test_frames(frames),
                     data_id="stock_master",
                     pruning_reports=[],
                     scratch_parent=Path("."),
-                )
+                    resource_policy=policy,
+                ),
+                policy,
             )
         )
         == 1
@@ -3081,14 +3415,16 @@ def test_csmar_reference_opaque_arrow_overrun_fails_before_index_mutation(
             ValueError,
             match="csmar_reference_working_set_exceeds_task_memory_budget",
         ):
-            list(
-                interim._iter_deduped_reference_frames(
-                    iter((frame,)),
-                    data_id="stock_master",
-                    pruning_reports=[],
-                    scratch_parent=Path("."),
+                _collect_bound_first_frames(
+                    interim._iter_deduped_reference_frames(
+                        _bound_first_test_frames((frame,)),
+                        data_id="stock_master",
+                        pruning_reports=[],
+                        scratch_parent=Path("."),
+                        resource_policy=policy,
+                    ),
+                    policy,
                 )
-            )
 
     assert classified_sizes == []
 
@@ -3111,7 +3447,10 @@ def test_csmar_interim_uses_one_observed_downshift_then_fixed_batches(
     monkeypatch.setattr(
         interim,
         "iter_private_export_chunks_with_policy",
-        lambda *_args, **_kwargs: iter((frame,)),
+        lambda *_args, **_kwargs: _bound_first_test_frames(
+            (frame,),
+            bound=policy.memory_budget_bytes // 2,
+        ),
     )
     monkeypatch.setattr(interim, "pandas_frame_payload_bytes", lambda _frame: 10)
 
@@ -3124,7 +3463,7 @@ def test_csmar_interim_uses_one_observed_downshift_then_fixed_batches(
     monkeypatch.setattr(interim, "_transform_interim_chunk", transform)
 
     with runtime_resource_policy_scope(policy):
-        output = tuple(
+        output = _collect_bound_first_frames(
             interim._iter_pruned_interim_frames(
                 data_id="stock_master",
                 raw_dataset="stock_master",
@@ -3134,11 +3473,239 @@ def test_csmar_interim_uses_one_observed_downshift_then_fixed_batches(
                 overrides={},
                 chunksize=8,
                 pruning_reports=None,
-            )
+                resource_policy=policy,
+            ),
+            policy,
         )
 
     assert calls == [8, 3, 3, 2]
     assert sum(map(len, output)) == len(frame)
+
+
+def test_csmar_pruned_empty_first_reuses_admitted_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    frame = pd.DataFrame(
+        {
+            "source_asset_id": ["000001"],
+            "timestamp": [pd.Timestamp("2020-01-01")],
+        }
+    )
+    empty = frame.iloc[:0].copy()
+    monkeypatch.setattr(
+        interim,
+        "iter_private_export_chunks_with_policy",
+        lambda *_args, **_kwargs: _bound_first_test_frames(
+            (empty, frame),
+            bound=policy.memory_budget_bytes // 2,
+        ),
+    )
+    monkeypatch.setattr(
+        interim,
+        "_transform_interim_chunk",
+        lambda candidate, **_kwargs: (candidate.copy(), {}),
+    )
+
+    output = _collect_bound_first_frames(
+        interim._iter_pruned_interim_frames(
+            data_id="stock_master",
+            raw_dataset="stock_master",
+            input_files=(Path("unused.csv"),),
+            start_date=None,
+            end_date=None,
+            overrides={},
+            chunksize=1,
+            pruning_reports=None,
+            resource_policy=policy,
+        ),
+        policy,
+    )
+
+    assert sum(len(chunk) for chunk in output) == 1
+    assert policy.used_memory_bytes == 0
+
+
+def test_csmar_pruned_pending_payload_clears_before_lease_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024 + 94,
+    )
+    frame = pd.DataFrame(
+        {
+            "source_asset_id": [f"{index:06d}" for index in range(8)],
+            "timestamp": pd.date_range("2020-01-01", periods=8),
+        }
+    )
+    pending_references: list[weakref.ReferenceType[pd.DataFrame]] = []
+    close_results: list[bool] = []
+    real_copy = pd.DataFrame.copy
+    real_close = MemoryLease.close
+
+    def record_copy(current, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        copied = real_copy(current, *args, **kwargs)
+        pending_references.append(weakref.ref(copied))
+        return copied
+
+    def record_close(lease: MemoryLease) -> None:
+        if lease.owner == "source.csmar.interim.pending":
+            close_results.append(
+                all(reference() is None for reference in pending_references[:-1])
+            )
+        real_close(lease)
+
+    monkeypatch.setattr(pd.DataFrame, "copy", record_copy)
+    monkeypatch.setattr(MemoryLease, "close", record_close)
+    monkeypatch.setattr(
+        interim,
+        "iter_private_export_chunks_with_policy",
+        lambda *_args, **_kwargs: _bound_first_test_frames(
+            (frame,),
+            bound=policy.memory_budget_bytes // 2,
+        ),
+    )
+    calls: list[int] = []
+
+    def transform(candidate, **_kwargs):  # noqa: ANN001, ANN003
+        calls.append(len(candidate))
+        if len(candidate) == len(frame):
+            raise interim._InterimCapacityExceeded(200, 100)  # noqa: SLF001
+        return candidate, {}
+
+    monkeypatch.setattr(interim, "_transform_interim_chunk", transform)
+    monkeypatch.setattr(interim, "pandas_frame_payload_bytes", lambda _frame: 10)
+    output = _collect_bound_first_frames(
+        interim._iter_pruned_interim_frames(
+            data_id="stock_master",
+            raw_dataset="stock_master",
+            input_files=(Path("unused.csv"),),
+            start_date=None,
+            end_date=None,
+            overrides={},
+            chunksize=8,
+            pruning_reports=None,
+            resource_policy=policy,
+        ),
+        policy,
+    )
+
+    assert calls == [8, 3, 3, 2]
+    assert sum(len(chunk) for chunk in output) == len(frame)
+    assert close_results and all(close_results)
+    assert policy.used_memory_bytes == 0
+
+
+def test_csmar_pruned_file_transition_reuses_admitted_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    frame = pd.DataFrame(
+        {
+            "source_asset_id": ["000001"],
+            "timestamp": [pd.Timestamp("2020-01-01")],
+        }
+    )
+    empty = frame.iloc[:0].copy()
+
+    def raw_chunks(path, **_kwargs):  # noqa: ANN001, ANN003
+        return _bound_first_test_frames(
+            (empty,) if Path(path).name == "first.csv" else (frame,),
+            bound=policy.memory_budget_bytes // 2,
+        )
+
+    monkeypatch.setattr(interim, "iter_private_export_chunks_with_policy", raw_chunks)
+    monkeypatch.setattr(
+        interim,
+        "_transform_interim_chunk",
+        lambda candidate, **_kwargs: (candidate.copy(), {}),
+    )
+
+    output = _collect_bound_first_frames(
+        interim._iter_pruned_interim_frames(
+            data_id="stock_master",
+            raw_dataset="stock_master",
+            input_files=(Path("first.csv"), Path("second.csv")),
+            start_date=None,
+            end_date=None,
+            overrides={},
+            chunksize=1,
+            pruning_reports=None,
+            resource_policy=policy,
+        ),
+        policy,
+    )
+
+    assert sum(len(chunk) for chunk in output) == 1
+    assert policy.used_memory_bytes == 0
+
+
+def test_csmar_reference_duplicate_only_first_reuses_admitted_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    frames = (
+        pd.DataFrame(
+            {
+                "source_asset_id": ["000001"],
+                "timestamp": [pd.Timestamp("2020-01-01")],
+                "stock_name": ["duplicate"],
+            }
+        ),
+        pd.DataFrame(
+            {
+                "source_asset_id": ["000002"],
+                "timestamp": [pd.Timestamp("2020-01-02")],
+                "stock_name": ["kept"],
+            }
+        ),
+    )
+
+    class PositionState:
+        retained_memory_bytes = 0
+
+        def __init__(self, positions):
+            self.view = memoryview(array("Q", positions)).toreadonly()
+
+        def __bool__(self) -> bool:
+            return bool(len(self.view))
+
+    class DuplicateOnlyFirstIndex:
+        retained_memory_bytes = 0
+        calls = 0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def classify_comparison_table(self, table, **_kwargs):  # noqa: ANN001
+            self.calls += 1
+            return PositionState(()) if self.calls == 1 else PositionState((0,)), 0
+
+    monkeypatch.setattr(interim, "ExactPrimaryKeyIndex", DuplicateOnlyFirstIndex)
+    output = _collect_bound_first_frames(
+        interim._iter_deduped_reference_frames(
+            _bound_first_test_frames(
+                frames,
+                bound=policy.memory_budget_bytes // 2,
+            ),
+            data_id="stock_master",
+            pruning_reports=[],
+            scratch_parent=Path("."),
+            resource_policy=policy,
+        ),
+        policy,
+    )
+
+    assert sum(len(chunk) for chunk in output) == 1
+    assert output[0]["source_asset_id"].tolist() == ["000002"]
+    assert policy.used_memory_bytes == 0
 
 
 def test_csmar_direct_lazy_iteration_captures_policy_before_first_raw_decode(
@@ -3156,7 +3723,11 @@ def test_csmar_direct_lazy_iteration_captures_policy_before_first_raw_decode(
 
     def raw_frames(**_kwargs: object):
         events.append("raw")
-        yield pd.DataFrame({"source_asset_id": ["000001"]})
+        lease = yield 256 * 1024
+        yield _OwnedValue(
+            pd.DataFrame({"source_asset_id": ["000001"]}),
+            lease,
+        )
 
     monkeypatch.setattr(interim, "active_runtime_resource_policy", active_policy)
     monkeypatch.setattr(interim, "_iter_pruned_interim_frames", raw_frames)
@@ -3197,7 +3768,7 @@ def test_csmar_pruning_reports_merge_repeated_chunk_facts_by_data_id(
     monkeypatch.setattr(
         interim,
         "iter_private_export_chunks_with_policy",
-        lambda *_args, **_kwargs: iter(chunks),
+        lambda *_args, **_kwargs: _bound_first_test_frames(chunks),
     )
     monkeypatch.setattr(interim, "normalize_raw_frame", lambda frame, _data_id: frame)
     monkeypatch.setattr(
@@ -3211,10 +3782,11 @@ def test_csmar_pruning_reports_merge_repeated_chunk_facts_by_data_id(
         lambda frame, _data_id, **_kwargs: (frame.copy(), dict(report)),
     )
     reports: list[dict[str, object]] = []
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
 
     assert (
         len(
-            list(
+            _collect_bound_first_frames(
                 interim._iter_pruned_interim_frames(
                     data_id=frequency_ids.MARKET_BARS_DATA_ID,
                     raw_dataset=frequency_ids.MARKET_BARS_DATA_ID,
@@ -3224,7 +3796,9 @@ def test_csmar_pruning_reports_merge_repeated_chunk_facts_by_data_id(
                     overrides=interim._validated_column_overrides({}),
                     chunksize=100,
                     pruning_reports=reports,
-                )
+                    resource_policy=policy,
+                ),
+                policy,
             )
         )
         == 100
@@ -3245,16 +3819,19 @@ def test_interim_releases_previous_frame_before_requesting_next_raw_chunk(
             }
         )
         first_ref = weakref.ref(first)
-        yield first
+        lease = yield 256 * 1024
+        yield _OwnedValue(first, lease)
         del first
         gc.collect()
         released_before_next.append(first_ref() is None)
-        yield pd.DataFrame(
+        second = pd.DataFrame(
             {
                 "source_asset_id": ["000001"],
                 "timestamp": [pd.Timestamp("2024-01-02")],
             }
         )
+        lease = yield 256 * 1024
+        yield _OwnedValue(second, lease)
 
     report = {
         "data_id": frequency_ids.MARKET_BARS_DATA_ID,
@@ -3310,7 +3887,9 @@ def test_csmar_source_order_validation_honors_inventory_order(
     monkeypatch.setattr(
         interim,
         "iter_private_export_chunks_with_policy",
-        lambda path, **_kwargs: iter((frames[Path(path)].copy(),)),
+        lambda path, **_kwargs: _bound_first_test_frames(
+            (frames[Path(path)].copy(),)
+        ),
     )
     monkeypatch.setattr(interim, "normalize_raw_frame", lambda frame, _data_id: frame)
     monkeypatch.setattr(
@@ -3326,7 +3905,8 @@ def test_csmar_source_order_validation_honors_inventory_order(
     )
 
     def collect(paths: list[Path]) -> list[pd.DataFrame]:
-        return list(
+        policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+        return _collect_bound_first_frames(
             interim._iter_pruned_interim_frames(
                 data_id="trading_calendar",
                 raw_dataset="trading_calendar",
@@ -3336,7 +3916,9 @@ def test_csmar_source_order_validation_honors_inventory_order(
                 overrides=interim._validated_column_overrides({}),
                 chunksize=1,
                 pruning_reports=[],
-            )
+                resource_policy=policy,
+            ),
+            policy,
         )
 
     with pytest.raises(ValueError, match="csmar_source_order_regression"):
@@ -3380,7 +3962,9 @@ def test_csmar_source_order_rejects_inverse_boundaries_for_every_data_id(
     monkeypatch.setattr(
         interim,
         "iter_private_export_chunks_with_policy",
-        lambda path, **_kwargs: iter(frames_by_path[Path(path)]),
+        lambda path, **_kwargs: _bound_first_test_frames(
+            frames_by_path[Path(path)]
+        ),
     )
     monkeypatch.setattr(interim, "normalize_raw_frame", lambda frame, _data_id: frame)
     monkeypatch.setattr(
@@ -3395,8 +3979,9 @@ def test_csmar_source_order_rejects_inverse_boundaries_for_every_data_id(
         ),
     )
 
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     with pytest.raises(ValueError, match="csmar_source_order_regression"):
-        list(
+        _collect_bound_first_frames(
             interim._iter_pruned_interim_frames(
                 data_id=data_id,
                 raw_dataset=data_id,
@@ -3406,7 +3991,9 @@ def test_csmar_source_order_rejects_inverse_boundaries_for_every_data_id(
                 overrides=interim._validated_column_overrides({}),
                 chunksize=1,
                 pruning_reports=[],
-            )
+                resource_policy=policy,
+            ),
+            policy,
         )
 
 
@@ -3434,7 +4021,9 @@ def test_csmar_source_order_accepts_equal_and_empty_boundaries_for_every_data_id
     monkeypatch.setattr(
         interim,
         "iter_private_export_chunks_with_policy",
-        lambda path, **_kwargs: iter(frames_by_path[Path(path)]),
+        lambda path, **_kwargs: _bound_first_test_frames(
+            frames_by_path[Path(path)]
+        ),
     )
     monkeypatch.setattr(interim, "normalize_raw_frame", lambda frame, _data_id: frame)
     monkeypatch.setattr(
@@ -3449,7 +4038,8 @@ def test_csmar_source_order_accepts_equal_and_empty_boundaries_for_every_data_id
         ),
     )
 
-    result = list(
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    result = _collect_bound_first_frames(
         interim._iter_pruned_interim_frames(
             data_id=data_id,
             raw_dataset=data_id,
@@ -3459,7 +4049,9 @@ def test_csmar_source_order_accepts_equal_and_empty_boundaries_for_every_data_id
             overrides=interim._validated_column_overrides({}),
             chunksize=1,
             pruning_reports=[],
-        )
+            resource_policy=policy,
+        ),
+        policy,
     )
     assert sum(map(len, result)) == 2
 
@@ -3473,11 +4065,15 @@ def test_csmar_failed_iteration_publishes_no_pruning_summary(
         _kwargs["pruning_reports"].append(
             {"data_id": frequency_ids.MARKET_BARS_DATA_ID}
         )
-        yield pd.DataFrame(
-            {
-                "source_asset_id": ["000001"],
-                "timestamp": [pd.Timestamp("2024-01-01")],
-            }
+        lease = yield 256 * 1024
+        yield _OwnedValue(
+            pd.DataFrame(
+                {
+                    "source_asset_id": ["000001"],
+                    "timestamp": [pd.Timestamp("2024-01-01")],
+                }
+            ),
+            lease,
         )
         raise RuntimeError("source_primary")
 
@@ -3518,19 +4114,23 @@ def test_csmar_raw_close_failure_does_not_replace_primary(
         "iter_private_export_chunks_with_policy",
         lambda *_args, **_kwargs: PrimaryThenCloseFailure(),
     )
-    output = interim._iter_pruned_interim_frames(
-        data_id=frequency_ids.MARKET_BARS_DATA_ID,
-        raw_dataset=frequency_ids.MARKET_BARS_DATA_ID,
-        input_files=[Path("private.csv")],
-        start_date=None,
-        end_date=None,
-        overrides=interim._validated_column_overrides({}),
-        chunksize=1,
-        pruning_reports=[],
-    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
 
-    with pytest.raises(primary_type, match="body_primary"):
-        next(output)
+    with runtime_resource_policy_scope(policy):
+        output = interim._iter_pruned_interim_frames(
+            data_id=frequency_ids.MARKET_BARS_DATA_ID,
+            raw_dataset=frequency_ids.MARKET_BARS_DATA_ID,
+            input_files=[Path("private.csv")],
+            start_date=None,
+            end_date=None,
+            overrides=interim._validated_column_overrides({}),
+            chunksize=1,
+            pruning_reports=[],
+            resource_policy=policy,
+        )
+
+        with pytest.raises(primary_type, match="body_primary"):
+            next(output)
 
 
 @pytest.mark.parametrize(
@@ -3751,7 +4351,7 @@ def test_csmar_direct_reference_iteration_uses_active_policy_target(
     monkeypatch.setattr(
         interim,
         "_iter_pruned_interim_frames",
-        lambda **_kwargs: iter((frame,)),
+        lambda **_kwargs: _bound_first_test_frames((frame,)),
     )
 
     with runtime_resource_policy_scope(policy):
@@ -3831,12 +4431,12 @@ def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
     monkeypatch.setattr(
         interim,
         "_iter_pruned_interim_frames",
-        lambda **_kwargs: iter((frame,)),
+        lambda **_kwargs: _bound_first_test_frames((frame,)),
     )
 
-    def write_dataset(_root, frames, **_kwargs):  # noqa: ANN001, ANN202
+    def write_dataset(_root, frames, **kwargs):  # noqa: ANN001, ANN202
         write_policies.append(active_runtime_resource_policy())
-        list(frames)
+        _collect_bound_first_frames(frames, kwargs["resource_policy"])
 
     monkeypatch.setattr(interim, "write_dataset", write_dataset)
     layout = type(
@@ -3864,26 +4464,34 @@ def test_csmar_reference_dedup_closes_upstream_on_early_close() -> None:
 
     def frames():
         try:
-            yield pd.DataFrame(
-                {
-                    "source_asset_id": ["000001"],
-                    "timestamp": [pd.Timestamp("2020-01-01")],
-                    "stock_name": ["demo"],
-                }
+            lease = yield 256 * 1024
+            yield _OwnedValue(
+                pd.DataFrame(
+                    {
+                        "source_asset_id": ["000001"],
+                        "timestamp": [pd.Timestamp("2020-01-01")],
+                        "stock_name": ["demo"],
+                    }
+                ),
+                lease,
             )
-            yield pd.DataFrame()
+            lease = yield 256 * 1024
+            yield _OwnedValue(pd.DataFrame(), lease)
         finally:
             closed.append(True)
 
     upstream = frames()
-    output = interim._iter_deduped_reference_frames(
-        upstream,
-        data_id="stock_master",
-        pruning_reports=None,
-        scratch_parent=Path("."),
-    )
-    next(output)
-    output.close()
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        output = interim._iter_deduped_reference_frames(
+            upstream,
+            data_id="stock_master",
+            pruning_reports=None,
+            scratch_parent=Path("."),
+            resource_policy=policy,
+        )
+        next(output)
+        output.close()
 
     assert closed == [True]
 
@@ -3896,8 +4504,16 @@ def test_csmar_materializer_closes_prefetched_frames_when_writer_fails(
 
     def frames(**_kwargs: object):
         try:
-            yield pd.DataFrame({"source_asset_id": ["000001"]})
-            yield pd.DataFrame({"source_asset_id": ["000002"]})
+            lease = yield 256 * 1024
+            yield _OwnedValue(
+                pd.DataFrame({"source_asset_id": ["000001"]}),
+                lease,
+            )
+            lease = yield 256 * 1024
+            yield _OwnedValue(
+                pd.DataFrame({"source_asset_id": ["000002"]}),
+                lease,
+            )
         finally:
             closed.append(True)
 
@@ -3910,15 +4526,22 @@ def test_csmar_materializer_closes_prefetched_frames_when_writer_fails(
     )
     monkeypatch.setattr(interim, "_iter_interim_frames", frames)
 
-    def failing_writer(*_args: object, **_kwargs: object) -> None:
+    def failing_writer(*_args: object, **kwargs: object) -> None:
+        data = _args[1]
+        bound = next(data)
+        lease = kwargs["resource_policy"].lease("test.csmar.writer", bound)
+        data.close()
+        lease.close()
         raise RuntimeError("writer_failed")
 
     monkeypatch.setattr(interim, "write_dataset", failing_writer)
 
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     with pytest.raises(RuntimeError, match="writer_failed"):
         interim.materialize_interim_data(
             layout=StorageLayout(project_root=tmp_path),
             data_ids=("stock_master",),
+            resource_policy=policy,
         )
 
     assert closed == [True]
@@ -3947,10 +4570,12 @@ def test_csmar_materializer_requires_artifact_root_before_frame_pull(
         lambda **_kwargs: pytest.fail("frame_pull_before_artifact_root_gate"),
     )
 
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
         interim.materialize_interim_data(
             layout=StorageLayout(project_root=tmp_path),
             data_ids=("stock_master",),
+            resource_policy=policy,
         )
 
 
@@ -3971,20 +4596,25 @@ def test_csmar_materializer_consumes_spill_order_without_prefetch(
 
     def frames(*, input_files, **_kwargs):  # noqa: ANN001, ANN003, ANN202
         for path, _identity in input_files:
+            lease = yield 256 * 1024
             events.append(f"frame:{path.stem}")
-            yield pd.DataFrame({"source_asset_id": [path.stem]})
+            yield _OwnedValue(
+                pd.DataFrame({"source_asset_id": [path.stem]}),
+                lease,
+            )
 
     monkeypatch.setattr(interim, "dataset_files_with_identity_by_id", indexed_files)
     monkeypatch.setattr(interim, "_iter_interim_frames", frames)
-    monkeypatch.setattr(
-        interim,
-        "write_dataset",
-        lambda _root, data, **_kwargs: list(data),
-    )
+    def write_dataset(_root, data, **kwargs):  # noqa: ANN001, ANN202
+        _collect_bound_first_frames(data, kwargs["resource_policy"])
 
+    monkeypatch.setattr(interim, "write_dataset", write_dataset)
+
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     interim.materialize_interim_data(
         layout=StorageLayout(project_root=tmp_path),
         data_ids=("stock_master",),
+        resource_policy=policy,
     )
 
     assert events == [
@@ -4005,18 +4635,32 @@ def test_materializer_releases_prefetched_frame_before_next_writer_chunk(
     def frames(**_kwargs: object):
         first = pd.DataFrame({"source_asset_id": ["000001"]})
         first_refs.append(weakref.ref(first))
-        yield first
+        lease = yield 256 * 1024
+        yield _OwnedValue(first, lease)
         del first
-        yield pd.DataFrame({"source_asset_id": ["000002"]})
+        second = pd.DataFrame({"source_asset_id": ["000002"]})
+        lease = yield 256 * 1024
+        yield _OwnedValue(second, lease)
 
-    def write_dataset(_root: Path, data, **_kwargs: object) -> None:  # noqa: ANN001
-        writer_frames = iter(data)
-        first = next(writer_frames)
+    def write_dataset(_root: Path, data, **kwargs: object) -> None:  # noqa: ANN001
+        policy = kwargs["resource_policy"]
+        bound = next(data)
+        lease = policy.lease("test.csmar.writer", bound)
+        owned = data.send(lease)
+        lease.transfer("test.csmar.output")
+        first = owned.value
         del first
-        second = next(writer_frames)
+        bound = data.send(None)
+        lease.close()
+        lease = policy.lease("test.csmar.writer", bound)
+        owned = data.send(lease)
+        lease.transfer("test.csmar.output")
+        second = owned.value
         gc.collect()
         released_before_second.append(first_refs[0]() is None)
         del second
+        data.close()
+        lease.close()
 
     monkeypatch.setattr(
         interim,
@@ -4028,9 +4672,11 @@ def test_materializer_releases_prefetched_frame_before_next_writer_chunk(
     monkeypatch.setattr(interim, "_iter_interim_frames", frames)
     monkeypatch.setattr(interim, "write_dataset", write_dataset)
 
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     interim.materialize_interim_data(
         layout=StorageLayout(project_root=tmp_path),
         data_ids=("stock_master",),
+        resource_policy=policy,
     )
 
     assert released_before_second == [True]
@@ -4132,7 +4778,9 @@ def test_csmar_market_bars_daily_materializer_streams_chunks_to_storage(
     def fake_iter_interim_frames(**kwargs: object):
         data_id = kwargs["data_id"]
         if data_id == frequency_ids.MARKET_BARS_DATA_ID:
-            yield pd.DataFrame(
+            yield from _bound_first_test_frames(
+                (
+                    pd.DataFrame(
                 {
                     "source_asset_id": ["000001"],
                     "timestamp": [pd.Timestamp("2024-01-02")],
@@ -4154,27 +4802,34 @@ def test_csmar_market_bars_daily_materializer_streams_chunks_to_storage(
                     "float_market_cap": [100.0],
                     "total_market_cap": [200.0],
                     "turnover": [0.01],
-                }
+                        }
+                    ),
+                )
             )
             return
         if data_id == "market_cap":
-            yield pd.DataFrame(
+            yield from _bound_first_test_frames(
+                (
+                    pd.DataFrame(
                 {
                     "source_asset_id": ["000001"],
                     "timestamp": [pd.Timestamp("2024-01-02")],
                     "share_change_date": [pd.Timestamp("2024-01-02")],
                     "total_shares": [200.0],
                     "a_float_shares": [100.0],
-                }
+                        }
+                    ),
+                )
             )
             return
         raise AssertionError(f"unexpected data_id: {data_id}")
 
-    def fake_write_dataset(root: Path, data, *, spec, **_kwargs) -> None:  # noqa: ANN003
+    def fake_write_dataset(root: Path, data, *, spec, **kwargs) -> None:  # noqa: ANN003
         assert not isinstance(data, pd.DataFrame)
+        chunks = _collect_bound_first_frames(data, kwargs["resource_policy"])
         captured[spec.data_id] = {
             "root": root,
-            "chunks": list(data),
+            "chunks": chunks,
         }
 
     raw_index_calls = 0
@@ -4213,12 +4868,14 @@ def test_csmar_market_bars_daily_materializer_streams_chunks_to_storage(
     )
     monkeypatch.setattr(interim, "write_dataset", fake_write_dataset)
 
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     result = interim.materialize_interim_data(
         layout=StorageLayout(project_root=tmp_path),
         data_ids=(frequency_ids.MARKET_BARS_DATA_ID, "market_cap"),
         start_date="2024-01-01",
         end_date="2024-12-31",
         chunksize=1,
+        resource_policy=policy,
     )
 
     assert set(captured) == {frequency_ids.MARKET_BARS_DATA_ID, "market_cap"}
@@ -4241,12 +4898,14 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     raw["Opnprc"] = pd.Series(["10", "20.5"], dtype="object")
     raw.to_csv(export, index=False)
 
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     result = interim.materialize_interim_data(
         layout=StorageLayout(project_root=tmp_path),
         data_ids=(frequency_ids.MARKET_BARS_DATA_ID,),
         start_date="2024-01-01",
         end_date="2024-12-31",
         chunksize=1,
+        resource_policy=policy,
     )
 
     artifact_root = result.artifact_roots[frequency_ids.MARKET_BARS_DATA_ID]
@@ -4463,18 +5122,23 @@ def test_private_export_first_frame_reserves_owner_known_decode_buffers(
         ),
     )
 
-    with pytest.raises(
+    with runtime_resource_policy_scope(policy), pytest.raises(
         storage_errors.DatasetReadCapacityExceeded,
         match="csmar_raw_working_set_exceeds_task_memory_budget",
     ):
-        next(
-            raw_exports.iter_private_export_chunks_with_policy(
-                Path("unused.csv"),
-                dataset="trading_calendar",
-                chunksize=1,
-                resource_policy=policy,
-            )
+        chunks = raw_exports.iter_private_export_chunks_with_policy(
+            Path("unused.csv"),
+            dataset="trading_calendar",
+            chunksize=1,
+            resource_policy=policy,
         )
+        bound = next(chunks)
+        lease = policy.lease("test.csmar.raw", bound)
+        try:
+            chunks.send(lease)
+        finally:
+            chunks.close()
+            lease.close()
 
 
 @pytest.mark.parametrize("dataset", ("trading_calendar", "index_info"))
@@ -4519,15 +5183,11 @@ def test_private_export_retains_pending_decoded_owner_state_before_next_pull(
                 resource_policy=policy,
             )
         )
-
-        first = next(chunks)
-        second = next(chunks)
-        chunks.close()
+        output = _collect_bound_first_frames(chunks, policy)
 
     pointer_bytes = struct.calcsize("P")
     assert observed[2] - observed[1] == row_bytes + (1 + len(header)) * pointer_bytes
-    assert len(first) == 1
-    assert len(second) == 2
+    assert sum(len(frame) for frame in output) == 3
 
 
 @pytest.mark.parametrize("require_exact_width", (True, False))
@@ -4983,7 +5643,9 @@ def test_non_reference_publication_keeps_upstream_alive_until_next_pull(
     monkeypatch.setattr(
         interim,
         "iter_private_export_chunks_with_policy",
-        lambda *_args, **_kwargs: iter((raw,)),
+        lambda *_args, **_kwargs: _bound_first_test_frames(
+            (raw,), bound=policy.memory_budget_bytes
+        ),
     )
     monkeypatch.setattr(
         interim,
@@ -5005,11 +5667,17 @@ def test_non_reference_publication_keeps_upstream_alive_until_next_pull(
             overrides={},
             chunksize=1,
             pruning_reports=None,
+            resource_policy=policy,
         )
-        publication = next(publications)
-
-    assert publication is pruned
-    assert raw_reference() is not None
+        bound = next(publications)
+        lease = policy.lease("test.csmar.consumer", bound)
+        owned = publications.send(lease)
+        lease.transfer("test.csmar.output")
+        publication = owned.value
+        assert publication is pruned
+        assert raw_reference() is not None
+        publications.close()
+        lease.close()
 
 
 @pytest.mark.parametrize(
@@ -5213,19 +5881,11 @@ def test_csmar_nonreference_frames_close_preserves_consumer_generator_exit(
     )
     closed_under: list[RuntimeResourcePolicy | None] = []
 
-    class Frames:
-        yielded = False
-
-        def __iter__(self) -> Frames:
-            return self
-
-        def __next__(self) -> pd.DataFrame:
-            if self.yielded:
-                raise StopIteration
-            self.yielded = True
-            return pd.DataFrame({"value": ["x"]})
-
-        def close(self) -> None:
+    def frames():
+        try:
+            lease = yield 256 * 1024
+            yield _OwnedValue(pd.DataFrame({"value": ["x"]}), lease)
+        finally:
             closed_under.append(current_runtime_resource_policy())
             raise OSError("frames_close_secondary")
 
@@ -5233,7 +5893,7 @@ def test_csmar_nonreference_frames_close_preserves_consumer_generator_exit(
     monkeypatch.setattr(
         interim,
         "_iter_pruned_interim_frames",
-        lambda **_kwargs: Frames(),
+        lambda **_kwargs: frames(),
     )
 
     with runtime_resource_policy_scope(policy):
@@ -5252,6 +5912,7 @@ def test_csmar_nonreference_frames_close_preserves_consumer_generator_exit(
 
 def test_csmar_index_info_iterator_close_preserves_consumer_generator_exit(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024 * 1024,
@@ -5284,11 +5945,13 @@ def test_csmar_index_info_iterator_close_preserves_consumer_generator_exit(
     monkeypatch.setattr(
         raw_exports, "iter_index_info_rows", lambda _path, **_kwargs: Rows()
     )
+    export = tmp_path / "index.csv"
+    export.write_bytes(b"index")
 
     with runtime_resource_policy_scope(policy):
         chunks = iter(
             raw_exports.iter_private_export_chunks(
-                Path("index.csv"),
+                export,
                 dataset="index_info",
                 chunksize=1,
                 resource_policy=policy,

@@ -26,7 +26,9 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_validation as validation,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -83,14 +85,12 @@ def write_panel(
         retained_input_bytes = sum(
             session.retained_memory_bytes for session in input_sessions.values()
         )
-        chunks = materialization_resources.iter_write_chunks(
-            _iter_panel_chunks(
-                spec,
-                input_sessions=input_sessions,
-                time_window=time_window,
-                resource_policy=resource_policy,
-                retained_payload_bytes=retained_payload_bytes,
-            ),
+        chunks = _iter_panel_chunks(
+            spec,
+            input_sessions=input_sessions,
+            time_window=time_window,
+            resource_policy=resource_policy,
+            retained_payload_bytes=retained_payload_bytes,
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:
@@ -127,14 +127,16 @@ def _iter_panel_chunks(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
     retained_payload_bytes: int,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[object]:
     if any(
         session.resource_policy is not resource_policy
         for session in input_sessions.values()
     ):
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        chunk_target_bytes = resource_policy.remaining_memory_bytes
+        available_bytes = max(1, resource_policy.remaining_memory_bytes)
+        chunk_target_bytes = max(1, available_bytes // 8)
+        producer_bound = max(1, available_bytes // 2)
         bar_session = input_sessions[source_ids.market_bars_source_data_id(spec)]
         trade_session = input_sessions[source_ids.aggregate_trades_source_data_id(spec)]
         depth_session = input_sessions[source_ids.depth_levels_source_data_id(spec)]
@@ -159,6 +161,7 @@ def _iter_panel_chunks(
             )
             view_by_source_asset = {key[0]: view for key, view in source_asset_views}
             order_state = validation.OrderedDependencyState()
+            lease: MemoryLease | None = None
             for source_asset_id in source_assets:
                 trade_continuity_state = (
                     panel_input_reducers.AggregateTradeContinuityState()
@@ -176,11 +179,23 @@ def _iter_panel_chunks(
                         ),
                     )
                 ) as bar_chunks:
-                    for bars in bar_chunks:
-                        if bars.empty:
-                            continue
+                    while True:
+                        if lease is None:
+                            lease = yield producer_bound
+                        while True:
+                            try:
+                                bars = next(bar_chunks)
+                            except StopIteration:
+                                bars = None
+                                break
+                            if not bars.empty:
+                                break
+                            del bars
+                        if bars is None:
+                            break
                         _validate_matching_bar_keys(bars)
                         prepared_bars = panels.prepare_panel_bars(bars)
+                        del bars
                         prepared_bars = validation.validated_ordered_dependency_chunk(
                             prepared_bars,
                             state=order_state,
@@ -192,6 +207,8 @@ def _iter_panel_chunks(
                             error="crypto_indivisible_reducer_unit_exceeds_payload_target",
                         )
                         prepared_bar_bytes = pandas_frame_payload_bytes(prepared_bars)
+                        if prepared_bar_bytes + 256 * 1024 > lease.reserved_bytes:
+                            raise ValueError("crypto_panel_bound_invalid")
                         with (
                             closing_dataset_iterator(
                                 _iter_matching_trade_chunks(
@@ -239,7 +256,17 @@ def _iter_panel_chunks(
                                     "crypto_indivisible_reducer_unit_exceeds_payload_target"
                                 ),
                             )
-                            yield output
+                            output_bytes = pandas_frame_payload_bytes(output)
+                            actual_bound = (
+                                output_bytes + prepared_bar_bytes + 256 * 1024
+                            )
+                            if actual_bound > lease.reserved_bytes:
+                                raise ValueError("crypto_panel_bound_invalid")
+                            lease.shrink_to(actual_bound)
+                            del prepared_bars
+                            yield _OwnedValue(output, lease)
+                            del output
+                            lease = None
         for session in input_sessions.values():
             session.verify()
 

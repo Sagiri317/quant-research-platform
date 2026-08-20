@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import weakref
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +22,9 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
     processed_catalog,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     active_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -36,6 +39,34 @@ from tests.helpers.runtime_resources import capture_test_policy
 RESOURCE_POLICY = capture_test_policy(
     available_memory_bytes=1024**3,
 )
+
+
+def _collect_bound_first(data, policy):  # noqa: ANN001, ANN202
+    frames = []
+    with runtime_resource_policy_scope(policy):
+        bound = next(data)
+        while True:
+            lease = policy.lease("test.crypto.consumer", bound)
+            try:
+                while True:
+                    try:
+                        owned = data.send(lease)
+                    except StopIteration:
+                        lease.close()
+                        return frames
+                    if not isinstance(owned, _OwnedValue):
+                        raise AssertionError("invalid_bound_first_output")
+                    break
+                frames.append(owned.value)
+                try:
+                    bound = data.send(None)
+                except StopIteration:
+                    lease.close()
+                    return frames
+            except BaseException:
+                lease.close()
+                raise
+            lease.close()
 
 
 @pytest.mark.parametrize("owner", ("core", "matching"))
@@ -223,13 +254,18 @@ def test_write_chunk_owner_closes_source_chunks_on_early_close() -> None:
 
     def source_chunks():
         try:
-            yield pd.DataFrame({"value": [1]})
+            lease = yield 128 * 1024
+            yield _OwnedValue(pd.DataFrame({"value": [1]}), lease)
         finally:
             closed.append(True)
 
-    iterator = materialization_resources.iter_write_chunks(source_chunks())
-    assert next(iterator).to_dict("list") == {"value": [1]}
-    iterator.close()
+    with runtime_resource_policy_scope(RESOURCE_POLICY):
+        iterator = source_chunks()
+        bound = next(iterator)
+        lease = RESOURCE_POLICY.lease("test.crypto.consumer", bound)
+        assert iterator.send(lease).value.to_dict("list") == {"value": [1]}
+        iterator.close()
+        lease.close()
     assert closed == [True]
 
 
@@ -247,6 +283,7 @@ def test_panel_iterator_closes_bar_traversal_on_early_close(
     )
     sessions = {data_id: _dataset_session_stub(policy) for data_id in data_ids}
     closed: list[bool] = []
+    pulled: list[bool] = []
 
     @contextmanager
     def asset_views(current, **_kwargs):  # noqa: ANN001
@@ -254,6 +291,7 @@ def test_panel_iterator_closes_bar_traversal_on_early_close(
 
     def bar_chunks(*_args, **_kwargs):
         try:
+            pulled.append(True)
             yield pd.DataFrame({"placeholder": [1]})
         finally:
             closed.append(True)
@@ -309,9 +347,499 @@ def test_panel_iterator_closes_bar_traversal_on_early_close(
         resource_policy=policy,
         retained_payload_bytes=0,
     )
-    next(iterator)
-    iterator.close()
+    with runtime_resource_policy_scope(policy):
+        bound = next(iterator)
+        assert pulled == []
+        lease = policy.lease("test.crypto.panel", bound)
+        iterator.send(lease)
+        iterator.close()
+        lease.close()
     assert closed == [True]
+
+
+def test_panel_empty_asset_transition_reuses_admitted_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=1024**3)
+    spec = processed_catalog().get("market_panel_1m")
+    data_ids = (
+        materialize_panel.source_ids.market_bars_source_data_id(spec),
+        materialize_panel.source_ids.aggregate_trades_source_data_id(spec),
+        materialize_panel.source_ids.depth_levels_source_data_id(spec),
+    )
+    first_session = _dataset_session_stub(policy)
+    second_session = _dataset_session_stub(policy)
+    sessions = {data_id: _dataset_session_stub(policy) for data_id in data_ids}
+    closed: list[str] = []
+
+    @contextmanager
+    def asset_views(_current, **_kwargs):  # noqa: ANN001
+        yield (
+            (("BTCUSDT",), first_session),
+            (("ETHUSDT",), second_session),
+        )
+
+    def bar_chunks(session, **_kwargs):  # noqa: ANN001, ANN003
+        name = "first" if session is first_session else "second"
+        try:
+            yield (
+                pd.DataFrame()
+                if session is first_session
+                else pd.DataFrame({"placeholder": [1]})
+            )
+        finally:
+            closed.append(name)
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "crypto_asset_session_views",
+        asset_views,
+    )
+    monkeypatch.setattr(materialize_panel, "iter_dataset_chunks", bar_chunks)
+    monkeypatch.setattr(
+        materialize_panel,
+        "_validate_matching_bar_keys",
+        lambda _frame: None,
+    )
+    monkeypatch.setattr(
+        materialize_panel.panels,
+        "prepare_panel_bars",
+        lambda frame: frame,
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "validated_ordered_dependency_chunk",
+        lambda frame, **_kwargs: frame,
+    )
+    monkeypatch.setattr(
+        materialization_resources,
+        "require_frame_within_budget",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "_iter_matching_trade_chunks",
+        lambda *_args, **_kwargs: iter(()),
+    )
+    monkeypatch.setattr(
+        materialize_panel,
+        "_iter_matching_depth_chunks",
+        lambda *_args, **_kwargs: iter(()),
+    )
+    monkeypatch.setattr(
+        materialize_panel.panels,
+        "calculate_market_panel_from_chunks",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            {column: [0] for column in spec.required_columns}
+        ),
+    )
+
+    iterator = materialize_panel._iter_panel_chunks(
+        spec,
+        input_sessions=sessions,
+        time_window=TimeWindow("2026-07-06", "2026-07-06"),
+        resource_policy=policy,
+        retained_payload_bytes=0,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(iterator)
+        lease = policy.lease("test.crypto.panel.transition", bound)
+        try:
+            owned = iterator.send(lease)
+            assert isinstance(owned, _OwnedValue)
+            iterator.close()
+        finally:
+            lease.close()
+
+    assert closed == ["first", "second"]
+    assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("owner", ("panel", "factor", "label"))
+def test_crypto_producer_admits_before_panel_pull(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
+    pulled: list[bool] = []
+    frame = pd.DataFrame({"placeholder": [1]})
+
+    @contextmanager
+    def asset_views(current, **_kwargs):  # noqa: ANN001
+        yield ((
+            ("BTCUSDT",) if owner == "panel" else ("crypto", "btc_usdt"),
+            current,
+        ),)
+
+    def panels(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        pulled.append(True)
+        yield frame
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "crypto_asset_session_views",
+        asset_views,
+    )
+    module = {
+        "panel": materialize_panel,
+        "factor": materialize_factors,
+        "label": materialize_labels,
+    }[owner]
+    monkeypatch.setattr(module, "iter_dataset_chunks", panels)
+    if owner == "panel":
+        spec = processed_catalog().get("market_panel_1m")
+        data_ids = (
+            materialize_panel.source_ids.market_bars_source_data_id(spec),
+            materialize_panel.source_ids.aggregate_trades_source_data_id(spec),
+            materialize_panel.source_ids.depth_levels_source_data_id(spec),
+        )
+        sessions = {data_id: _dataset_session_stub(policy) for data_id in data_ids}
+        iterator = materialize_panel._iter_panel_chunks(
+            spec,
+            input_sessions=sessions,
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            resource_policy=policy,
+            retained_payload_bytes=0,
+        )
+    else:
+        data_id = "microstructure" if owner == "factor" else "forward_returns"
+        spec = processed_catalog().get(data_id)
+        iterator = (
+            materialize_factors._iter_factor_chunks(
+                spec,
+                panel_session=_dataset_session_stub(policy),
+                time_window=TimeWindow("2026-07-06", "2026-07-06"),
+                resource_policy=policy,
+                retained_payload_bytes=0,
+            )
+            if owner == "factor"
+            else materialize_labels._iter_label_chunks(
+                spec,
+                panel_session=_dataset_session_stub(policy),
+                time_window=TimeWindow("2026-07-06", "2026-07-06"),
+                resource_policy=policy,
+                retained_payload_bytes=0,
+            )
+        )
+
+    with runtime_resource_policy_scope(policy):
+        blocker = policy.lease("test.crypto.blocker", policy.memory_budget_bytes)
+        try:
+            bound = next(iterator)
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                policy.lease("test.crypto.consumer", bound)
+            assert pulled == []
+        finally:
+            blocker.close()
+
+
+def test_crypto_factor_admits_each_segment_before_carry_append(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=1024**3)
+    spec = processed_catalog().get("microstructure")
+    first = _panel_frame(start=0, minutes=5)
+    second = first.copy()
+    second["timestamp"] = second["timestamp"] + pd.Timedelta(minutes=5)
+    frames = (first, second)
+    bounds_seen = 0
+    append_bounds: list[int] = []
+    carry_seen = False
+    carry_references: list[weakref.ReferenceType[pd.DataFrame]] = []
+    carry_close_results: list[bool] = []
+    panel_reference: list[weakref.ReferenceType[pd.DataFrame]] = []
+    first_resume = True
+
+    @contextmanager
+    def asset_views(current, **_kwargs):  # noqa: ANN001
+        yield ((
+            ("crypto", "btc_usdt"),
+            current,
+        ),)
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "crypto_asset_session_views",
+        asset_views,
+    )
+    monkeypatch.setattr(
+        materialize_factors,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter(frames),
+    )
+    real_close = MemoryLease.close
+
+    def record_close(lease: MemoryLease) -> None:
+        if lease.owner == "crypto.factor.carry" and carry_references:
+            carry_close_results.append(carry_references.pop(0)() is None)
+        real_close(lease)
+
+    monkeypatch.setattr(MemoryLease, "close", record_close)
+    def capture_core_mask(current, *_args, **_kwargs):  # noqa: ANN001, ANN003
+        panel_reference.append(weakref.ref(current))
+        return pd.Series(True, index=current.index)
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "core_time_window_mask",
+        capture_core_mask,
+    )
+
+    def record_append(segment, carry):  # noqa: ANN001, ANN202
+        append_bounds.append(bounds_seen)
+        if carry is not None:
+            carry_references.append(weakref.ref(carry))
+        return (
+            segment
+            if carry is None
+            else pd.concat(
+                (
+                    carry.assign(**{materialize_factors._CORE_ROW: False}),
+                    segment,
+                ),
+                ignore_index=True,
+            )
+        )
+
+    monkeypatch.setattr(
+        materialize_factors,
+        "_append_active_factor_carry",
+        record_append,
+    )
+    monkeypatch.setattr(
+        materialize_factors,
+        "calculate_microstructure_factors",
+        lambda current, **_kwargs: current.assign(
+            **{column: 0.0 for column in spec.required_columns if column not in current}
+        ),
+    )
+    iterator = materialize_factors._iter_factor_chunks(
+        spec,
+        panel_session=_dataset_session_stub(policy),
+        time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:10"),
+        resource_policy=policy,
+        retained_payload_bytes=0,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        bound = next(iterator)
+        while True:
+            bounds_seen += 1
+            lease = policy.lease("test.crypto.factor", bound)
+            try:
+                owned = iterator.send(lease)
+            except StopIteration:
+                lease.close()
+                break
+            if not isinstance(owned, _OwnedValue):
+                raise AssertionError("invalid_bound_first_output")
+            carry_seen = carry_seen or policy.used_memory_bytes > lease.reserved_bytes
+            try:
+                bound = iterator.send(None)
+            except StopIteration:
+                lease.close()
+                break
+            if first_resume:
+                assert panel_reference and panel_reference[0]() is None
+                first_resume = False
+            lease.close()
+
+    assert len(append_bounds) >= 2
+    assert append_bounds[1] > append_bounds[0]
+    assert carry_seen
+    assert carry_close_results and all(carry_close_results)
+    assert policy.used_memory_bytes == 0
+
+
+def test_crypto_label_buffer_lease_survives_output_and_closes_on_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=1024**3)
+    spec = processed_catalog().get("forward_returns")
+    first = _panel_frame(start=0, minutes=70)
+    second = first.copy()
+    second["timestamp"] = second["timestamp"] + pd.Timedelta(minutes=70)
+    panel_references: list[weakref.ReferenceType[pd.DataFrame]] = []
+    monkeypatch.setattr(
+        materialization_validation,
+        "crypto_asset_session_views",
+        lambda session, **_kwargs: _asset_views_context(
+            ((("crypto", "btc_usdt"), session),)
+        ),
+    )
+    monkeypatch.setattr(
+        materialize_labels,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter((first, second)),
+    )
+    def capture_core_mask(current, *_args, **_kwargs):  # noqa: ANN001, ANN003
+        panel_references.append(weakref.ref(current))
+        return pd.Series(True, index=current.index)
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "core_time_window_mask",
+        capture_core_mask,
+    )
+    iterator = materialize_labels._iter_label_chunks(
+        spec,
+        panel_session=_dataset_session_stub(policy),
+        time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 02:19"),
+        resource_policy=policy,
+        retained_payload_bytes=0,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        bound = next(iterator)
+        saw_buffer_owner = False
+        while True:
+            lease = policy.lease("test.crypto.label", bound)
+            try:
+                owned = iterator.send(lease)
+                assert isinstance(owned, _OwnedValue)
+                if not saw_buffer_owner:
+                    assert policy.used_memory_bytes > lease.reserved_bytes
+                    saw_buffer_owner = True
+                try:
+                    bound = iterator.send(None)
+                except StopIteration:
+                    break
+                assert panel_references and panel_references[-1]() is None
+            finally:
+                lease.close()
+        iterator.close()
+
+    assert len(panel_references) >= 2
+    assert all(reference() is None for reference in panel_references)
+    assert saw_buffer_owner
+    assert policy.used_memory_bytes == 0
+
+
+def test_crypto_label_finalizes_asset_before_pulling_next_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=1024**3)
+    spec = processed_catalog().get("forward_returns")
+    btc_session = _dataset_session_stub(policy)
+    eth_session = _dataset_session_stub(policy)
+    btc = _panel_frame(start=0, minutes=70)
+    eth = btc.copy()
+    eth["asset_id"] = "eth_usdt"
+    eth["timestamp"] = eth["timestamp"] + pd.Timedelta(minutes=70)
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "crypto_asset_session_views",
+        lambda *_args, **_kwargs: _asset_views_context(
+            (
+                (("crypto", "btc_usdt"), btc_session),
+                (("crypto", "eth_usdt"), eth_session),
+            )
+        ),
+    )
+
+    def chunks(session, **_kwargs):  # noqa: ANN001, ANN003
+        if session is btc_session:
+            events.append("pull:btc")
+            yield btc
+        else:
+            events.append("pull:eth")
+            yield eth
+
+    monkeypatch.setattr(materialize_labels, "iter_dataset_chunks", chunks)
+    real_finalize = materialize_labels._final_label_output
+
+    def record_finalize(buffer, current_spec):  # noqa: ANN001
+        events.append("finalize")
+        return real_finalize(buffer, current_spec)
+
+    monkeypatch.setattr(
+        materialize_labels,
+        "_final_label_output",
+        record_finalize,
+    )
+    iterator = materialize_labels._iter_label_chunks(
+        spec,
+        panel_session=_dataset_session_stub(policy),
+        time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 02:19"),
+        resource_policy=policy,
+        retained_payload_bytes=0,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        bound = next(iterator)
+        outputs = []
+        while True:
+            lease = policy.lease("test.crypto.label.boundary", bound)
+            try:
+                owned = iterator.send(lease)
+                assert isinstance(owned, _OwnedValue)
+                outputs.append(owned.value)
+                try:
+                    bound = iterator.send(None)
+                except StopIteration:
+                    break
+            finally:
+                lease.close()
+        iterator.close()
+
+    assert outputs
+    assert events.index("finalize") < events.index("pull:eth")
+    assert policy.used_memory_bytes == 0
+
+
+def test_crypto_label_buffer_replacement_clears_old_payload_before_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=1024**3)
+    spec = processed_catalog().get("forward_returns")
+    first = _panel_frame(start=0, minutes=70)
+    second = first.copy()
+    second["timestamp"] = second["timestamp"] + pd.Timedelta(minutes=70)
+    old_buffer_references: list[weakref.ReferenceType[pd.DataFrame]] = []
+    close_results: list[bool] = []
+    real_concat = materialize_labels.pd.concat
+    real_close = MemoryLease.close
+
+    def record_concat(objects, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        old_buffer_references.append(weakref.ref(objects[0]))
+        return real_concat(objects, *args, **kwargs)
+
+    def record_close(lease: MemoryLease) -> None:
+        if lease.owner == "crypto.label.buffer" and old_buffer_references:
+            close_results.append(old_buffer_references.pop(0)() is None)
+        real_close(lease)
+
+    monkeypatch.setattr(materialize_labels.pd, "concat", record_concat)
+    monkeypatch.setattr(MemoryLease, "close", record_close)
+    monkeypatch.setattr(
+        materialization_validation,
+        "crypto_asset_session_views",
+        lambda session, **_kwargs: _asset_views_context(
+            ((("crypto", "btc_usdt"), session),)
+        ),
+    )
+    monkeypatch.setattr(
+        materialize_labels,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter((first, second)),
+    )
+
+    output = _collect_bound_first(
+        materialize_labels._iter_label_chunks(
+            spec,
+            panel_session=_dataset_session_stub(policy),
+            time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 02:19"),
+            resource_policy=policy,
+            retained_payload_bytes=0,
+        ),
+        policy,
+    )
+
+    assert output
+    assert close_results and all(close_results)
+    assert policy.used_memory_bytes == 0
 
 
 def _dataset_session_stub(
@@ -800,14 +1328,15 @@ def test_factor_carry_processing_is_linear_in_asset_count(
         available_memory_bytes=1024**3,
     )
 
-    list(
+    _collect_bound_first(
         materialize_factors._iter_factor_chunks(
             spec,
             panel_session=_dataset_session_stub(policy),
             time_window=TimeWindow("2026-07-06 00:00", "2026-07-06 00:05"),
             resource_policy=policy,
             retained_payload_bytes=0,
-        )
+        ),
+        policy,
     )
 
     assert processed_rows <= asset_count * (
@@ -940,7 +1469,7 @@ def test_panel_dependencies_remain_asset_major_across_year_partitions(
         ) as panel_session,
         runtime_resource_policy_scope(panel_session.resource_policy),
     ):
-        outputs = list(
+        outputs = _collect_bound_first(
             getattr(module, iterator_name)(
                 processed_catalog().get(data_id),
                 panel_session=panel_session,
@@ -950,7 +1479,8 @@ def test_panel_dependencies_remain_asset_major_across_year_partitions(
                 ),
                 resource_policy=panel_session.resource_policy,
                 retained_payload_bytes=0,
-            )
+            ),
+            panel_session.resource_policy,
         )
 
     assert outputs
@@ -1263,7 +1793,7 @@ def test_factor_and_label_materializers_reject_non_monotonic_chunks(
     )
 
     with pytest.raises(ValueError, match=error):
-        list(iterator)
+        _collect_bound_first(iterator, policy)
 
 
 def _inspection(

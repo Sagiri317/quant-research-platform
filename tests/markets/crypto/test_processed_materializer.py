@@ -52,11 +52,15 @@ from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
 from quant_research_platform.runtime.resources import (
+    _OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.interim import materialize_interim_data
-from quant_research_platform.storage._dataset_reading import open_dataset_session
+from quant_research_platform.storage._dataset_reading import (
+    closing_dataset_iterator,
+    open_dataset_session,
+)
 from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
@@ -86,6 +90,37 @@ class SimpleNamespace(_SimpleNamespace):
         close = getattr(self, "close", None)
         if close is not None:
             close()
+
+
+def _collect_bound_first(data, policy):  # noqa: ANN001, ANN202
+    frames = []
+    with closing_dataset_iterator(data):
+        bound = next(data)
+        while True:
+            lease = policy.lease("test.crypto.consumer", bound)
+            try:
+                while True:
+                    try:
+                        owned = data.send(lease)
+                    except StopIteration:
+                        return frames
+                    if isinstance(owned, _OwnedValue):
+                        break
+                    raise AssertionError("invalid_bound_first_output")
+                lease.transfer("test.crypto.output")
+                frames.append(owned.value)
+                try:
+                    bound = data.send(None)
+                except StopIteration:
+                    return frames
+            finally:
+                lease.close()
+
+
+def _bound_first_frames(frames):  # noqa: ANN001, ANN202
+    for frame in frames:
+        lease = yield 256 * 1024
+        yield _OwnedValue(frame, lease)
 
 
 @pytest.mark.parametrize(
@@ -1565,28 +1600,34 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
 
     with runtime_resource_policy_scope(policy):
         factors = pd.concat(
-            materialize_factors._iter_factor_chunks(
-                processed_catalog().get("microstructure"),
-                panel_session=SimpleNamespace(
+            _collect_bound_first(
+                materialize_factors._iter_factor_chunks(
+                    processed_catalog().get("microstructure"),
+                    panel_session=SimpleNamespace(
+                        resource_policy=policy,
+                        verify=lambda: None,
+                    ),
+                    time_window=core,
                     resource_policy=policy,
-                    verify=lambda: None,
+                    retained_payload_bytes=0,
                 ),
-                time_window=core,
-                resource_policy=policy,
-                retained_payload_bytes=0,
+                policy,
             ),
             ignore_index=True,
         )
         labels = pd.concat(
-            materialize_labels._iter_label_chunks(
-                processed_catalog().get("forward_returns"),
-                panel_session=SimpleNamespace(
+            _collect_bound_first(
+                materialize_labels._iter_label_chunks(
+                    processed_catalog().get("forward_returns"),
+                    panel_session=SimpleNamespace(
+                        resource_policy=policy,
+                        verify=lambda: None,
+                    ),
+                    time_window=core,
                     resource_policy=policy,
-                    verify=lambda: None,
+                    retained_payload_bytes=0,
                 ),
-                time_window=core,
-                resource_policy=policy,
-                retained_payload_bytes=0,
+                policy,
             ),
             ignore_index=True,
         )
@@ -2337,23 +2378,24 @@ def _panel_test_sessions(
     policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
-    with ExitStack() as stack:
-        sessions = {
-            data_id: stack.enter_context(
-                materialize_panel.open_dataset_session(
-                    layout.interim_data_root(source_id, data_id),
-                    columns=None,
-                    time_window=time_window,
-                    resource_policy=policy,
+    with runtime_resource_policy_scope(policy):
+        with ExitStack() as stack:
+            sessions = {
+                data_id: stack.enter_context(
+                    materialize_panel.open_dataset_session(
+                        layout.interim_data_root(source_id, data_id),
+                        columns=None,
+                        time_window=time_window,
+                        resource_policy=policy,
+                    )
                 )
-            )
-            for data_id in (
-                source_ids.market_bars_source_data_id(spec),
-                source_ids.aggregate_trades_source_data_id(spec),
-                source_ids.depth_levels_source_data_id(spec),
-            )
-        }
-        yield sessions, policy
+                for data_id in (
+                    source_ids.market_bars_source_data_id(spec),
+                    source_ids.aggregate_trades_source_data_id(spec),
+                    source_ids.depth_levels_source_data_id(spec),
+                )
+            }
+            yield sessions, policy
 
 
 def _patch_panel_lifecycle_validation(monkeypatch) -> None:
@@ -2587,12 +2629,14 @@ def test_panel_writer_keeps_all_input_sessions_live_through_publication(
 
     def record_write(root, data, **kwargs):  # noqa: ANN001, ANN202
         assert len(live_sessions) == 3
+        frames = _collect_bound_first(data, kwargs["resource_policy"])
+
         def publications():  # noqa: ANN202
-            for publication in data:
+            for publication in frames:
                 publication_rows.append(len(publication))
                 yield publication
 
-        return real_write(root, publications(), **kwargs)
+        return real_write(root, _bound_first_frames(publications()), **kwargs)
 
     monkeypatch.setattr(materialize_panel, "open_dataset_session", record_open)
     monkeypatch.setattr(materialize_panel, "write_dataset", record_write)
@@ -2630,9 +2674,13 @@ def test_panel_chunk_keeps_output_admitted_through_consumer_yield(
             resource_policy=policy,
             retained_payload_bytes=0,
         )
-        output = next(chunks)
+        bound = next(chunks)
+        lease = policy.lease("test.crypto.panel", bound)
+        owned = chunks.send(lease)
+        output = owned.value
         used_before_close = policy.used_memory_bytes
         chunks.close()
+        lease.close()
         assert (
             used_before_close - policy.used_memory_bytes
             >= materialize_panel.pandas_frame_payload_bytes(output)
@@ -2933,14 +2981,15 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
         spec,
         TimeWindow("2026-07-06", "2026-07-06"),
     ) as (input_sessions, policy):
-        chunks = list(
+        chunks = _collect_bound_first(
             materialize_panel._iter_panel_chunks(
                 spec,
                 input_sessions=input_sessions,
                 time_window=TimeWindow("2026-07-06", "2026-07-06"),
                 resource_policy=policy,
                 retained_payload_bytes=0,
-            )
+            ),
+            policy,
         )
     keys = pd.concat(chunks, ignore_index=True).loc[
         :, ["market_id", "asset_id", "timestamp"]
@@ -3030,14 +3079,15 @@ def test_panel_chunks_reject_same_asset_cross_chunk_time_reversal(
         TimeWindow("2026-07-06", "2026-07-06"),
     ) as (input_sessions, policy):
         with pytest.raises(ValueError, match="out_of_order_crypto_panel_dependency"):
-            list(
+            _collect_bound_first(
                 materialize_panel._iter_panel_chunks(
                     spec,
                     input_sessions=input_sessions,
                     time_window=TimeWindow("2026-07-06", "2026-07-06"),
                     resource_policy=policy,
                     retained_payload_bytes=0,
-                )
+                ),
+                policy,
             )
 
 

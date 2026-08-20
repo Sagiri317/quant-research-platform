@@ -36,6 +36,7 @@ from quant_research_platform.markets.session_windows import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _OwnedValue,
     active_runtime_resource_policy,
     bind_runtime_resource_policy,
     current_runtime_resource_policy,
@@ -217,7 +218,7 @@ def iter_active_materialization_batches(
     output_row_bound_bytes: int | None = None,
     retained_payload_bytes: int = 0,
     materialize: Callable[..., pd.DataFrame],
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[object]:
     bound_policy = bind_runtime_resource_policy(resource_policy)
     if current_runtime_resource_policy() is not bound_policy:
         raise RuntimeError("a_share_materialization_policy_scope_required")
@@ -265,7 +266,7 @@ def iter_active_materialization_batches(
     )
     retained_session_bytes += target_slice_bytes
 
-    def produce_under_policy() -> Iterator[pd.DataFrame]:
+    def produce_under_policy() -> Iterator[object]:
         assert bound_policy is not None
         require_artifact_root(root)
         pointer_bytes = np.dtype(object).itemsize
@@ -345,7 +346,7 @@ def iter_active_materialization_batches(
 
             def emit_asset_batch(
                 output: tuple[str, ...],
-            ) -> Iterator[pd.DataFrame]:
+            ) -> Iterator[object]:
                 if valid_bar_offsets is None:
                     yield from _iter_adaptive_materialization_batches(
                         asset_ids=output,
@@ -447,7 +448,7 @@ def iter_active_materialization_batches(
             finally:
                 asset_reservations.close()
 
-    def activate_under_policy() -> Iterator[pd.DataFrame]:
+    def activate_under_policy() -> Iterator[object]:
         assert bound_policy is not None
         if (
             bound_policy.reserved_memory_bytes
@@ -464,7 +465,7 @@ def iter_active_materialization_batches(
         ):
             yield from produce_under_policy()
 
-    def activate() -> Iterator[pd.DataFrame]:
+    def activate() -> Iterator[object]:
         assert bound_policy is not None
         with runtime_resource_policy_scope(bound_policy):
             yield from activate_under_policy()
@@ -526,7 +527,7 @@ def _iter_adaptive_materialization_batches(
     valid_bar_offsets: tuple[int, int] | None = None,
     output_row_bound_bytes: int | None = None,
     materialize: Callable[..., pd.DataFrame],
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[object]:
     """Pack assets then sessions from one immutable soft throughput target."""
     policy = active_runtime_resource_policy()
     pointer_bytes = np.dtype(object).itemsize
@@ -539,12 +540,24 @@ def _iter_adaptive_materialization_batches(
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
         )
+    producer_headroom_bytes = 128 * 1024
+    producer_workspace_row_bound = (
+        None
+        if output_row_bound_bytes is None
+        else 3 * output_row_bound_bytes
+    )
+    producer_output_row_bound = (
+        None
+        if output_row_bound_bytes is None
+        else 4 * output_row_bound_bytes
+    )
     cell_limit = (
         len(asset_ids) * len(sessions)
         if output_row_bound_bytes is None
         else max(
             1,
-            remaining // output_row_bound_bytes,
+            max(0, remaining - producer_headroom_bytes)
+            // (producer_output_row_bound + producer_workspace_row_bound),
         )
     )
     asset_start = 0
@@ -582,6 +595,12 @@ def _iter_adaptive_materialization_batches(
                 raise materialization_io.MaterializationCapacityExceeded(
                     "a_share_known_payloads_exceed_task_memory_budget"
                 )
+            planned_output_bound = (
+                max(1, producer_output_row_bound or 1)
+                * max(1, (asset_stop - asset_start) * (session_stop - session_start))
+                + producer_headroom_bytes
+            )
+            lease = yield planned_output_bound
             with policy.reserve("a_share.batch.slice", planned_slice_bytes):
                 current_assets = (
                     asset_ids
@@ -629,7 +648,11 @@ def _iter_adaptive_materialization_batches(
                     ) from None
                 finally:
                     del current_assets, current_sessions, current_keys
-            yield frame
+            actual_output_bound = pandas_frame_payload_bytes(frame) + 64 * 1024
+            if actual_output_bound > lease.reserved_bytes:
+                raise ValueError("a_share_producer_bound_invalid")
+            lease.shrink_to(actual_output_bound)
+            yield _OwnedValue(frame, lease)
             del frame
             session_start = session_stop
         asset_start = asset_stop

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -49,6 +50,7 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _OwnedValue,
     active_runtime_resource_policy,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
@@ -81,6 +83,59 @@ def _publication_policy() -> RuntimeResourcePolicy:
     )
 
 
+def _bound_first_source(source, *, bound: int = 256 * 1024):  # noqa: ANN001, ANN202
+    iterator = iter(source)
+    try:
+        while True:
+            lease = yield bound
+            try:
+                frame = next(iterator)
+            except StopIteration:
+                return
+            yield _OwnedValue(frame, lease)
+            del frame
+    finally:
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            primary = sys.exception()
+            try:
+                close()
+            except BaseException:
+                if primary is None:
+                    raise
+
+
+def _collect_bound_first(data, policy, *, sink=None):  # noqa: ANN001, ANN202
+    with runtime_resource_policy_scope(policy):
+        frames = []
+        bound = next(data)
+        while True:
+            lease = policy.lease("test.a_share.consumer", bound)
+            try:
+                while True:
+                    try:
+                        owned = data.send(lease)
+                    except StopIteration:
+                        lease.close()
+                        return frames
+                    if isinstance(owned, _OwnedValue):
+                        break
+                    raise AssertionError("invalid_bound_first_output")
+            except BaseException:
+                if sink is not None:
+                    sink.extend(frames)
+                lease.close()
+                raise
+            try:
+                frames.append(owned.value)
+                bound = data.send(None)
+            except StopIteration:
+                lease.close()
+                return frames
+            finally:
+                lease.close()
+
+
 def test_a_share_output_publication_rejects_unordered_chunks_and_boundaries() -> None:
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
 
@@ -98,21 +153,58 @@ def test_a_share_output_publication_rejects_unordered_chunks_and_boundaries() ->
         )
 
     with pytest.raises(ValueError, match="a_share_output_primary_key_order_regression"):
-        list(
+        policy = _publication_policy()
+        _collect_bound_first(
             materialization_io.iter_sorted_output_chunks(
-                frame(["2014-01-03", "2014-01-02"]),
+                _bound_first_source((frame(["2014-01-03", "2014-01-02"]),)),
                 spec,
-                resource_policy=_publication_policy(),
-            )
+                resource_policy=policy,
+            ),
+            policy,
         )
     with pytest.raises(ValueError, match="a_share_output_primary_key_order_regression"):
-        list(
+        policy = _publication_policy()
+        _collect_bound_first(
             materialization_io.iter_sorted_output_chunks(
-                (frame(["2014-01-03"]), frame(["2014-01-02"])),
+                _bound_first_source(
+                    (frame(["2014-01-03"]), frame(["2014-01-02"]))
+                ),
                 spec,
-                resource_policy=_publication_policy(),
-            )
+                resource_policy=policy,
+            ),
+            policy,
         )
+
+
+def test_a_share_empty_source_chunk_reuses_admitted_lease() -> None:
+    spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
+
+    def frame(timestamps: list[str]) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                column: (
+                    pd.to_datetime(timestamps)
+                    if column == "timestamp"
+                    else ["a_share" if column == "market_id" else "value"]
+                    * len(timestamps)
+                )
+                for column in spec.required_columns
+            }
+        )
+
+    policy = _publication_policy()
+    output = _collect_bound_first(
+        materialization_io.iter_sorted_output_chunks(
+            _bound_first_source((frame([]), frame(["2014-01-02"]))),
+            spec,
+            resource_policy=policy,
+        ),
+        policy,
+    )
+
+    assert len(output) == 1
+    assert output[0]["timestamp"].tolist() == [pd.Timestamp("2014-01-02")]
+    assert policy.used_memory_bytes == 0
 
 
 def test_a_share_output_publication_rejects_near_headroom_before_sort(
@@ -149,12 +241,13 @@ def test_a_share_output_publication_rejects_near_headroom_before_sort(
         materialization_io.MaterializationCapacityExceeded,
         match="a_share_known_payloads_exceed_task_memory_budget",
     ):
-        list(
+        _collect_bound_first(
             materialization_io.iter_sorted_output_chunks(
-                frame,
+                _bound_first_source((frame,)),
                 spec,
                 resource_policy=policy,
-            )
+            ),
+            policy,
         )
 
 
@@ -195,13 +288,13 @@ def test_sorted_output_chunks_bind_creation_policy_and_activate_before_source_pu
 
     source = Source()
     wrapped = materialization_io.iter_sorted_output_chunks(
-        source,
+        _bound_first_source(source),
         spec,
         resource_policy=policy,
     )
 
     assert observed == []
-    assert list(wrapped) == [frame]
+    assert _collect_bound_first(wrapped, policy) == [frame]
     assert observed and all(item is policy for item in observed)
     assert current_runtime_resource_policy() is None
 
@@ -262,10 +355,10 @@ def test_sorted_output_chunks_closes_source_inside_bound_policy_on_failure(
             closed_under.append(current_runtime_resource_policy())
 
     wrapped = materialization_io.iter_sorted_output_chunks(
-        Source(), spec, resource_policy=policy
+        _bound_first_source(Source()), spec, resource_policy=policy
     )
     with pytest.raises(failure, match="source_failure"):
-        next(iter(wrapped))
+        _collect_bound_first(wrapped, policy)
 
     assert closed_under == [policy]
     assert current_runtime_resource_policy() is None
@@ -331,8 +424,9 @@ def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
 
     source = Source()
     if wrapper_name == "sorted":
+        policy = _publication_policy()
         wrapped = materialization_io.iter_sorted_output_chunks(
-            source, spec, resource_policy=_publication_policy()
+            _bound_first_source(source), spec, resource_policy=policy
         )
     else:
         policy = capture_test_policy(
@@ -382,9 +476,11 @@ def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
 
     observed: BaseException | None = None
     try:
-        if failure_after_yield:
+        if wrapper_name == "sorted":
+            _collect_bound_first(wrapped, policy)
+        else:
             next(wrapped)
-        next(wrapped)
+            next(wrapped)
     except BaseException as raised:
         observed = raised
 
@@ -451,8 +547,9 @@ def test_a_share_io_wrapper_cleanup_lifecycle(
 
     source = Source()
     if wrapper_name == "sorted":
+        policy = _publication_policy()
         wrapped = materialization_io.iter_sorted_output_chunks(
-            source, spec, resource_policy=_publication_policy()
+            _bound_first_source(source), spec, resource_policy=policy
         )
     else:
         policy = capture_test_policy(
@@ -504,7 +601,16 @@ def test_a_share_io_wrapper_cleanup_lifecycle(
     observed: BaseException | None = None
     outputs: list[pd.DataFrame] = []
     try:
-        if early_close:
+        if wrapper_name == "sorted" and not early_close:
+            outputs.extend(_collect_bound_first(wrapped, policy, sink=outputs))
+        elif wrapper_name == "sorted" and early_close:
+            with runtime_resource_policy_scope(policy):
+                bound = next(wrapped)
+                lease = policy.lease("test.a_share.consumer", bound)
+                outputs.append(wrapped.send(lease).value)
+                wrapped.close()
+                lease.close()
+        elif early_close:
             outputs.append(next(wrapped))
             wrapped.close()
         else:

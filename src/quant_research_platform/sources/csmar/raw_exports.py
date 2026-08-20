@@ -11,7 +11,7 @@ import struct
 import sys
 import tempfile
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -19,7 +19,9 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     active_runtime_resource_policy,
     bind_runtime_resource_policy,
     pandas_frame_payload_bytes,
@@ -956,12 +958,48 @@ def iter_private_export_chunks(
             allow_implicit_active=False,
         ) or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
-            yield from iter_private_export_chunks_with_policy(
+            chunks = iter_private_export_chunks_with_policy(
                 path,
                 dataset=dataset,
                 chunksize=chunksize,
                 resource_policy=policy,
             )
+            active_lease: MemoryLease | None = None
+            try:
+                try:
+                    bound = next(chunks)
+                except StopIteration:
+                    return
+                while True:
+                    active_lease = policy.lease("source.csmar.raw", bound)
+                    try:
+                        owned = chunks.send(active_lease)
+                    except StopIteration:
+                        active_lease.close()
+                        active_lease = None
+                        return
+                    if not isinstance(owned, _OwnedValue):
+                        raise TypeError("invalid_csmar_owned_frame")
+                    if owned.lease is not active_lease:
+                        raise RuntimeError("runtime_memory_lease_transfer_mismatch")
+                    active_lease.transfer("source.csmar.raw.consumer")
+                    yield owned.value
+                    del owned
+                    try:
+                        bound = chunks.send(None)
+                    except StopIteration:
+                        bound = None
+                    active_lease.close()
+                    active_lease = None
+                    if bound is None:
+                        break
+            finally:
+                owned = None
+                close = getattr(chunks, "close", None)
+                if close is not None:
+                    close()
+                if active_lease is not None:
+                    active_lease.close()
 
     return activate()
 
@@ -974,200 +1012,165 @@ def iter_private_export_chunks_with_policy(
     resource_policy: RuntimeResourcePolicy,
     expected_identity: DatasetFileIdentity | None = None,
     retained_payload_bytes: list[int] | None = None,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[object]:
     require_raw_resource_policy(resource_policy)
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError("unknown_csmar_dataset")
     export_path = Path(path)
+    producer_bound = max(1, resource_policy.memory_budget_bytes // 2)
     downstream_retained_bytes = (
         retained_payload_bytes if retained_payload_bytes is not None else [0]
     )
+    base_retained_bytes = downstream_retained_bytes[0]
+
     if dataset == "index_info":
-        pending: list[list[str]] = []
-        pending_bytes = 0
-        pending_cell_count = 0
-        batch_target_bytes = 0
-        header: list[str] | None = None
-        source_retained_bytes = [0]
         rows = iter(
             iter_index_info_rows(
                 export_path,
                 resource_policy=resource_policy,
                 expected_identity=expected_identity,
-                retained_payload_bytes=source_retained_bytes,
+                retained_payload_bytes=downstream_retained_bytes,
             )
         )
-        with closing_dataset_iterator(rows):
-            while True:
-                source_retained_bytes[0] = (
-                    downstream_retained_bytes[0]
-                    + _pending_decoded_owner_known_bytes(
-                        payload_bytes=pending_bytes,
-                        row_count=len(pending),
-                        cell_count=pending_cell_count,
-                    )
-                )
-                try:
-                    header, row, row_bytes = next(rows)
-                except StopIteration:
-                    break
-                next_pending_bytes = pending_bytes + row_bytes
-                next_pending_cell_count = pending_cell_count + len(row)
-                _require_raw_conversion_headroom(
-                    logical_bytes=_pending_decoded_owner_known_bytes(
-                        payload_bytes=next_pending_bytes,
-                        row_count=len(pending) + 1,
-                        cell_count=next_pending_cell_count,
-                    ),
-                    retained_previous_bytes=(
-                        downstream_retained_bytes[0]
-                    ),
-                    resource_policy=resource_policy,
-                )
-                pending.append(row)
-                pending_bytes = next_pending_bytes
-                pending_cell_count = next_pending_cell_count
-                if len(pending) == chunksize or pending_bytes >= max(
-                    1, batch_target_bytes
-                ):
-                    logical_bytes = pending_bytes
-                    _require_raw_conversion_headroom(
-                        logical_bytes=logical_bytes
-                        + _raw_frame_owner_known_bytes(pending, header),
-                        retained_previous_bytes=(
-                            downstream_retained_bytes[0]
-                        ),
-                        resource_policy=resource_policy,
-                    )
-                    frame = _raw_frame(pending, header)
-                    pending.clear()
-                    pending_bytes = 0
-                    pending_cell_count = 0
-                    frame_payload_bytes = pandas_frame_payload_bytes(frame)
-                    yield from _yield_bounded_export_frame(
-                        _clean_index_info_source_codes(frame),
-                        resource_policy=resource_policy,
-                    )
-                    batch_target_bytes = _next_batch_target_bytes(
-                        logical_bytes=logical_bytes,
-                        frame_payload_bytes=frame_payload_bytes,
-                        resource_policy=resource_policy,
-                        retained_payload_bytes=(
-                            downstream_retained_bytes[0]
-                        ),
-                    )
-                    del frame
-        if pending:
-            _require_raw_conversion_headroom(
-                logical_bytes=pending_bytes
-                + _raw_frame_owner_known_bytes(pending, header),
-                retained_previous_bytes=(
-                    downstream_retained_bytes[0]
-                ),
+    else:
+        rows = iter(
+            _iter_csv_records(
+                export_path,
+                dataset=dataset,
                 resource_policy=resource_policy,
+                require_exact_width=True,
+                expected_identity=expected_identity,
+                retained_payload_bytes=downstream_retained_bytes,
             )
-            frame = _raw_frame(pending, header)
-            pending.clear()
-            pending_cell_count = 0
-            yield from _yield_bounded_export_frame(
-                _clean_index_info_source_codes(frame),
-                resource_policy=resource_policy,
-            )
-            del frame
-        return
-
-    pending = []
-    pending_bytes = 0
-    pending_cell_count = 0
-    batch_target_bytes = 0
-    header = None
-    source_retained_bytes = [0]
-    rows = iter(
-        _iter_csv_records(
-            export_path,
-            dataset=dataset,
-            resource_policy=resource_policy,
-            require_exact_width=True,
-            expected_identity=expected_identity,
-            retained_payload_bytes=source_retained_bytes,
         )
-    )
     with closing_dataset_iterator(rows):
-        while True:
-            source_retained_bytes[0] = (
-                downstream_retained_bytes[0]
-                + _pending_decoded_owner_known_bytes(
-                    payload_bytes=pending_bytes,
-                    row_count=len(pending),
-                    cell_count=pending_cell_count,
-                )
-            )
-            try:
-                header, row, row_bytes = next(rows)
-            except StopIteration:
-                break
-            next_pending_bytes = pending_bytes + row_bytes
-            next_pending_cell_count = pending_cell_count + len(row)
-            _require_raw_conversion_headroom(
-                logical_bytes=_pending_decoded_owner_known_bytes(
-                    payload_bytes=next_pending_bytes,
-                    row_count=len(pending) + 1,
-                    cell_count=next_pending_cell_count,
-                ),
-                retained_previous_bytes=(
-                    downstream_retained_bytes[0]
-                ),
-                resource_policy=resource_policy,
-            )
-            pending.append(row)
-            pending_bytes = next_pending_bytes
-            pending_cell_count = next_pending_cell_count
-            if len(pending) == chunksize or pending_bytes >= max(1, batch_target_bytes):
-                logical_bytes = pending_bytes
-                _require_raw_conversion_headroom(
-                    logical_bytes=logical_bytes
-                    + _raw_frame_owner_known_bytes(pending, header),
-                    retained_previous_bytes=(
-                        downstream_retained_bytes[0]
-                    ),
-                    resource_policy=resource_policy,
-                )
-                frame = _raw_frame(pending, header)
-                pending.clear()
+        carry: tuple[list[str], object, int] | None = None
+        carry_lease: MemoryLease | None = None
+
+        def close_carry() -> None:
+            nonlocal carry, carry_lease
+            primary = sys.exception()
+            carry = None
+            if carry_lease is not None:
+                lease = carry_lease
+                try:
+                    lease.close()
+                except BaseException as close_error:
+                    if primary is None:
+                        raise
+                    primary.add_note(
+                        "csmar carry lease close also failed: "
+                        f"{type(close_error).__name__}: {close_error}"
+                    )
+                    return
+                carry_lease = None
+
+        with ExitStack() as cleanup:
+            cleanup.callback(close_carry)
+            while True:
+                lease = yield producer_bound
+                pending: list[object] = []
                 pending_bytes = 0
                 pending_cell_count = 0
-                frame_payload_bytes = pandas_frame_payload_bytes(frame)
-                yield from _yield_bounded_export_frame(
-                    frame,
+                header: list[str] | None = None
+                while len(pending) < chunksize:
+                    downstream_retained_bytes[0] = (
+                        base_retained_bytes
+                        + _pending_decoded_owner_known_bytes(
+                            payload_bytes=pending_bytes,
+                            row_count=len(pending),
+                            cell_count=pending_cell_count,
+                        )
+                    )
+                    if carry is None:
+                        try:
+                            next_header, row, row_bytes = next(rows)
+                        except StopIteration:
+                            break
+                    else:
+                        next_header, row, row_bytes = carry
+                        carry = None
+                        old_carry_lease = carry_lease
+                        carry_lease = None
+                        if old_carry_lease is not None:
+                            old_carry_lease.close()
+                    if header is None:
+                        header = next_header
+                    pending.append(row)
+                    pending_bytes += row_bytes
+                    pending_cell_count += len(row)
+                    downstream_retained_bytes[0] = (
+                        base_retained_bytes
+                        + _pending_decoded_owner_known_bytes(
+                            payload_bytes=pending_bytes,
+                            row_count=len(pending),
+                            cell_count=pending_cell_count,
+                        )
+                    )
+                    if (
+                        pending_bytes
+                        + _raw_frame_owner_known_bytes(pending, header)
+                        + 64 * 1024
+                        > producer_bound
+                    ):
+                        if len(pending) == 1:
+                            raise DatasetReadCapacityExceeded(
+                                "csmar_raw_working_set_exceeds_task_memory_budget"
+                            )
+                        pending.pop()
+                        pending_bytes -= row_bytes
+                        pending_cell_count -= len(row)
+                        downstream_retained_bytes[0] = (
+                            base_retained_bytes
+                            + _pending_decoded_owner_known_bytes(
+                                payload_bytes=pending_bytes,
+                                row_count=len(pending),
+                                cell_count=pending_cell_count,
+                            )
+                        )
+                        carry_bound = (
+                            _pending_decoded_owner_known_bytes(
+                                payload_bytes=row_bytes,
+                                row_count=1,
+                                cell_count=len(row),
+                            )
+                            + _raw_frame_owner_known_bytes([row], next_header)
+                            + 64 * 1024
+                        )
+                        carry_lease = resource_policy.lease(
+                            "source.csmar.raw.carry",
+                            carry_bound,
+                        )
+                        carry = (next_header, row, row_bytes)
+                        break
+                if not pending or header is None:
+                    return
+                if pending_bytes > producer_bound:
+                    raise DatasetReadCapacityExceeded(
+                        "csmar_raw_working_set_exceeds_task_memory_budget"
+                    )
+                _require_raw_conversion_headroom(
+                    logical_bytes=pending_bytes
+                    + _raw_frame_owner_known_bytes(pending, header),
+                    retained_previous_bytes=downstream_retained_bytes[0],
                     resource_policy=resource_policy,
                 )
-                batch_target_bytes = _next_batch_target_bytes(
-                    logical_bytes=logical_bytes,
-                    frame_payload_bytes=frame_payload_bytes,
-                    resource_policy=resource_policy,
-                    retained_payload_bytes=(
-                        downstream_retained_bytes[0]
-                    ),
-                )
-                del frame
-    if pending:
-        _require_raw_conversion_headroom(
-            logical_bytes=pending_bytes + _raw_frame_owner_known_bytes(pending, header),
-            retained_previous_bytes=(
-                downstream_retained_bytes[0]
-            ),
-            resource_policy=resource_policy,
-        )
-        frame = _raw_frame(pending, header)
-        pending.clear()
-        pending_cell_count = 0
-        yield from _yield_bounded_export_frame(
-            frame,
-            resource_policy=resource_policy,
-        )
-        del frame
-
-
+                if dataset == "index_info":
+                    frame = _clean_index_info_source_codes(_raw_frame(pending, header))
+                else:
+                    frame = _raw_frame(pending, header)
+                frame_bytes = pandas_frame_payload_bytes(frame)
+                actual_bound = pending_bytes + 2 * frame_bytes + 128 * 1024
+                if actual_bound > lease.reserved_bytes:
+                    raise DatasetReadCapacityExceeded(
+                        "csmar_raw_working_set_exceeds_task_memory_budget"
+                    )
+                lease.shrink_to(actual_bound)
+                row = None
+                next_header = None
+                header = None
+                yield _OwnedValue(frame, lease)
+                del frame, pending
 def _iter_csv_records(
     path: Path,
     *,

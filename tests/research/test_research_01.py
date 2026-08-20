@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -331,6 +332,72 @@ def test_research_dataset_assembles_from_processed_inputs(
         dataset_catalog.get("demo"),
         input_columns=("mom_20d",),
     )
+
+
+def test_research_join_bound_admission_precedes_join_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024,
+        explicit_cap_bytes=32 * 1024,
+    )
+    time_key_pulls: list[bool] = []
+    pulled: list[bool] = []
+    monkeypatch.setattr(
+        assembler_module,
+        "_research_session_view",
+        lambda current, **_kwargs: current,
+    )
+    def fake_iter_dataset_chunks(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        time_key_pulls.append(True)
+        yield pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")]})
+
+    monkeypatch.setattr(
+        assembler_module,
+        "iter_dataset_chunks",
+        fake_iter_dataset_chunks,
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "_research_chunk_windows",
+        lambda *_args, **_kwargs: (object(),),
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "_join_processed_inputs",
+        lambda **_kwargs: (pulled.append(True), pd.DataFrame({"id": [1]}))[1],
+    )
+    dataset_spec = SimpleNamespace(
+        primary_key=("id",),
+        feature_transforms=(),
+        input_data_ids=("base",),
+        base_input_data_id="base",
+    )
+    sessions = {
+        "base": SimpleNamespace(
+            retained_memory_bytes=0,
+            path_selection=None,
+            close=lambda: None,
+        )
+    }
+    chunks = assembler_module._iter_joined_processed_chunks(
+        dataset_spec=dataset_spec,
+        processed_catalog=SimpleNamespace(get=lambda _key: object()),
+        sessions=sessions,
+        time_window=object(),
+        resource_policy=policy,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        blocker = policy.lease("test.research.blocker", policy.memory_budget_bytes)
+        try:
+            bound = next(chunks)
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                policy.lease("test.research.consumer", bound)
+            assert time_key_pulls == []
+            assert pulled == []
+        finally:
+            blocker.close()
 
 
 def test_research_time_key_scan_uses_payload_target(
@@ -778,10 +845,71 @@ def test_research_join_preflights_final_projection_allocation(
             - (2 * assembler_module._frame_bytes(frame) + 1),
         )
         try:
+            bound = next(chunks)
+            lease = policy.lease("test.research.consumer", bound)
             with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-                next(chunks)
+                chunks.send(lease)
+            lease.close()
         finally:
             blocking_lease.close()
+
+
+def test_research_join_clears_transient_chunk_before_next_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
+    holder = {
+        "frame": pd.DataFrame({"id": [1], "value": [1.0]}),
+    }
+    frame_ref = weakref.ref(holder["frame"])
+    monkeypatch.setattr(
+        assembler_module,
+        "_base_input_data_id",
+        lambda *_args, **_kwargs: "one",
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "_time_keys_from_base_input",
+        lambda *_args, **_kwargs: (
+            pd.Timestamp("2024-01-01"),
+            pd.Timestamp("2024-01-02"),
+        ),
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "_research_chunk_windows",
+        lambda *_args, **_kwargs: (object(), object()),
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "_join_processed_inputs",
+        lambda **_kwargs: holder["frame"],
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "validate_research_dataset",
+        lambda *_args, **_kwargs: None,
+    )
+
+    chunks = assembler_module._iter_joined_processed_chunks(
+        dataset_spec=SimpleNamespace(primary_key=("id",)),
+        processed_catalog=SimpleNamespace(get=lambda _key: object()),
+        sessions={"one": SimpleNamespace(retained_memory_bytes=0)},
+        time_window=object(),
+        resource_policy=policy,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(chunks)
+        lease = policy.lease("test.research.consumer", bound)
+        owned = chunks.send(lease)
+        assert policy.reserved_memory_bytes == lease.reserved_bytes
+        holder["frame"] = None
+        del owned
+        next_bound = chunks.send(None)
+        assert type(next_bound) is int and next_bound > 0
+        assert frame_ref() is None
+        lease.close()
+        chunks.close()
 
 
 def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:

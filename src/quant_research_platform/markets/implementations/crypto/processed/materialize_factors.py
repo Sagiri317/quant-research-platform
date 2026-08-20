@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import ExitStack
 
 import pandas as pd
 
@@ -21,7 +22,9 @@ from quant_research_platform.research.factors.microstructure.calculations import
     calculate_microstructure_factors,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -63,14 +66,12 @@ def write_factors(
         input_identities = validation.input_dataset_identities(
             {MARKET_PANEL_DATA_ID: panel_session}
         )
-        chunks = materialization_resources.iter_write_chunks(
-            _iter_factor_chunks(
-                spec,
-                panel_session=panel_session,
-                time_window=time_window,
-                resource_policy=resource_policy,
-                retained_payload_bytes=retained_payload_bytes,
-            ),
+        chunks = _iter_factor_chunks(
+            spec,
+            panel_session=panel_session,
+            time_window=time_window,
+            resource_policy=resource_policy,
+            retained_payload_bytes=retained_payload_bytes,
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:
@@ -105,24 +106,40 @@ def _iter_factor_chunks(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
     retained_payload_bytes: int,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[object]:
     if panel_session.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        chunk_target_bytes = resource_policy.remaining_memory_bytes
+        available_bytes = max(1, resource_policy.remaining_memory_bytes)
+        chunk_target_bytes = max(1, available_bytes // 8)
+        producer_bound = max(1, available_bytes // 2)
         active_key: tuple[str, str] | None = None
         active_carry: pd.DataFrame | None = None
+        carry_lease: MemoryLease | None = None
         order_state = validation.OrderedDependencyState()
-        with validation.crypto_asset_session_views(
+        def close_carry() -> None:
+            nonlocal active_carry, carry_lease
+            active_carry = None
+            if carry_lease is not None:
+                carry_lease.close()
+                carry_lease = None
+
+        with ExitStack() as cleanup, validation.crypto_asset_session_views(
             panel_session,
             columns=("market_id", "asset_id"),
             target_chunk_bytes=chunk_target_bytes,
             error="invalid_crypto_panel_physical_asset_grouping",
             operation_headroom_bytes=(
-                resource_policy.task_memory_budget_bytes - retained_payload_bytes
+            resource_policy.task_memory_budget_bytes - retained_payload_bytes
             ),
         ) as asset_views:
-            for (_market_id, _asset_id), asset_session in asset_views:
+            cleanup.callback(close_carry)
+            lease: MemoryLease | None = None
+            for (market_id, asset_id), asset_session in asset_views:
+                key = (str(market_id), str(asset_id))
+                if active_key != key:
+                    active_key = key
+                    close_carry()
                 with closing_dataset_iterator(
                     iter_dataset_chunks(
                         asset_session,
@@ -133,9 +150,25 @@ def _iter_factor_chunks(
                         ),
                     )
                 ) as panels:
-                    for panel in panels:
-                        if panel.empty:
-                            continue
+                    while True:
+                        if lease is None:
+                            lease = yield producer_bound
+                        while True:
+                            try:
+                                panel = next(panels)
+                            except StopIteration:
+                                panel = None
+                                break
+                            if not panel.empty:
+                                break
+                            del panel
+                        if panel is None:
+                            break
+                        if (
+                            pandas_frame_payload_bytes(panel) + 128 * 1024
+                            > lease.reserved_bytes
+                        ):
+                            raise ValueError("crypto_factor_bound_invalid")
                         panel = validation.validated_ordered_dependency_chunk(
                             panel,
                             state=order_state,
@@ -146,51 +179,84 @@ def _iter_factor_chunks(
                             panel,
                             time_window,
                         )
-                        for (
-                            segment_market_id,
-                            segment_asset_id,
-                        ), segment in panel.groupby(
-                            ["market_id", "asset_id"],
-                            sort=False,
-                            dropna=False,
+                        combined = _append_active_factor_carry(
+                            panel,
+                            active_carry,
+                        )
+                        if (
+                            pandas_frame_payload_bytes(combined) + 128 * 1024
+                            > lease.reserved_bytes
                         ):
-                            key = (str(segment_market_id), str(segment_asset_id))
-                            if active_key != key:
-                                active_key = key
-                                active_carry = None
-                            combined = _append_active_factor_carry(
-                                segment,
-                                active_carry,
-                            )
-                            factors = calculate_microstructure_factors(
-                                combined,
-                                expected_interval=pd.Timedelta(minutes=1),
-                                min_periods=MICROSTRUCTURE_ROLLING_WINDOW_MINUTES,
-                                trade_flow_observed_column="trade_flow_observed",
-                            )
-                            output = factors.loc[factors[_CORE_ROW]].copy()
-                            active_carry = (
+                            raise ValueError("crypto_factor_bound_invalid")
+                        factors = calculate_microstructure_factors(
+                            combined,
+                            expected_interval=pd.Timedelta(minutes=1),
+                            min_periods=MICROSTRUCTURE_ROLLING_WINDOW_MINUTES,
+                            trade_flow_observed_column="trade_flow_observed",
+                        )
+                        output = factors.loc[factors[_CORE_ROW]].copy()
+                        carry_bound = min(
+                            max(1, lease.reserved_bytes),
+                            max(1, resource_policy.remaining_memory_bytes),
+                        )
+                        next_carry_lease = resource_policy.lease(
+                            "crypto.factor.carry",
+                            carry_bound,
+                        )
+                        try:
+                            next_carry = (
                                 combined.drop(columns=[_CORE_ROW])
                                 .tail(MICROSTRUCTURE_ROLLING_CARRY_BARS)
                                 .copy()
                             )
-                            if (
-                                pandas_frame_payload_bytes(active_carry)
-                                > resource_policy.remaining_memory_bytes
-                            ):
-                                raise ValueError(
+                            next_carry_bytes = pandas_frame_payload_bytes(next_carry)
+                            next_carry_lease.shrink_to(
+                                next_carry_bytes
+                                + min(64 * 1024, max(1, carry_bound // 2))
+                            )
+                        except BaseException:
+                            next_carry_lease.close()
+                            raise
+                        old_carry_lease = carry_lease
+                        active_carry = next_carry
+                        carry_lease = next_carry_lease
+                        next_carry = None
+                        next_carry_lease = None
+                        if old_carry_lease is not None:
+                            old_carry_lease.close()
+                        if (
+                            pandas_frame_payload_bytes(active_carry)
+                            > resource_policy.remaining_memory_bytes
+                        ):
+                            raise ValueError(
+                                "crypto_indivisible_reducer_unit_exceeds_payload_target"
+                            )
+                        if not output.empty:
+                            result = output.loc[:, spec.required_columns]
+                            materialization_resources.require_frame_within_budget(
+                                result,
+                                target_bytes=resource_policy.remaining_memory_bytes,
+                                error=(
                                     "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                                )
-                            if not output.empty:
-                                result = output.loc[:, spec.required_columns]
-                                materialization_resources.require_frame_within_budget(
-                                    result,
-                                    target_bytes=resource_policy.remaining_memory_bytes,
-                                    error=(
-                                        "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                                    ),
-                                )
-                                yield result
+                                ),
+                            )
+                            result_bytes = pandas_frame_payload_bytes(result)
+                            producer_payload_bytes = pandas_frame_payload_bytes(panel)
+                            actual_bound = (
+                                result_bytes
+                                + producer_payload_bytes
+                                + 128 * 1024
+                            )
+                            if actual_bound > lease.reserved_bytes:
+                                raise ValueError("crypto_factor_bound_invalid")
+                            del factors, output, combined
+                            lease.shrink_to(actual_bound)
+                            yield _OwnedValue(result, lease)
+                            del result
+                            lease = None
+                        else:
+                            del factors, output, combined
+                        panel = None
         panel_session.verify()
 
 

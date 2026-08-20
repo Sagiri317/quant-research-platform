@@ -83,11 +83,13 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.csmar import ids as csmar_ids
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.runtime_resources import capture_test_policy
@@ -97,6 +99,34 @@ MARKET_PANEL_DATA_ID = market_panel_data_id()
 MARKET_CONTEXT_DATA_ID = market_context_data_id()
 MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 FORWARD_RETURN_20D_COLUMN = forward_return_label_column(20)
+
+
+def _consume_bound_first(data, policy):  # noqa: ANN001, ANN202
+    frames = []
+    with closing_dataset_iterator(data):
+        try:
+            bound = next(data)
+        except StopIteration:
+            return frames
+        while True:
+            lease = policy.lease("test.a_share.consumer", bound)
+            try:
+                while True:
+                    try:
+                        owned = data.send(lease)
+                    except StopIteration:
+                        return frames
+                    if isinstance(owned, _OwnedValue):
+                        break
+                    raise AssertionError("invalid_bound_first_output")
+                lease.transfer("test.a_share.output")
+                frames.append(owned.value)
+                try:
+                    bound = data.send(None)
+                except StopIteration:
+                    return frames
+            finally:
+                lease.close()
 
 
 def _scoped_active_materialization_batches(
@@ -118,20 +148,14 @@ def _scoped_active_materialization_batches(
 
     def consume() -> Iterator[pd.DataFrame]:
         try:
-            yield from batches
+            yield from _consume_bound_first(batches, policy)
         finally:
             primary = sys.exception()
             try:
-                batches.close()
+                policy_scope.__exit__(None, None, None)
             except BaseException:
                 if primary is None:
                     raise
-            finally:
-                try:
-                    policy_scope.__exit__(None, None, None)
-                except BaseException:
-                    if primary is None:
-                        raise
 
     return consume()
 
@@ -250,10 +274,9 @@ def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
         available_memory_bytes=10 * 1024**2,
     )
     observed: list[tuple[int, int]] = []
-    opened_retained: list[int] = []
 
     def open_session(root, **kwargs):  # noqa: ANN001, ANN202
-        opened_retained.append(kwargs["retained_payload_bytes"])
+        assert "retained_payload_bytes" not in kwargs
         return nullcontext(root)
 
     monkeypatch.setattr(
@@ -286,7 +309,6 @@ def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
 
     available = policy.task_memory_budget_bytes - retained_payload_bytes
     assert observed == [(policy.remaining_memory_bytes, available)]
-    assert opened_retained == [retained_payload_bytes]
 
 
 @pytest.mark.parametrize("operation", ("materialized", "chunked"))
@@ -451,11 +473,11 @@ def test_chunk_reader_passes_caller_retained_state_to_session_acquisition(
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
-    observed: list[int] = []
+    observed: list[bool] = []
 
     @contextmanager
     def open_session(*_args, **kwargs):  # noqa: ANN001, ANN202
-        observed.append(kwargs["retained_payload_bytes"])
+        observed.append("retained_payload_bytes" in kwargs)
         yield SimpleNamespace(resource_policy=policy)
 
     monkeypatch.setattr(materialization_io, "open_dataset_session", open_session)
@@ -472,7 +494,7 @@ def test_chunk_reader_passes_caller_retained_state_to_session_acquisition(
         )
     )
 
-    assert observed == [retained]
+    assert observed == [False]
 
 
 @pytest.mark.parametrize("operation", ("chunks", "assets"))
@@ -594,7 +616,7 @@ def test_a_share_indivisible_output_rejects_hard_budget() -> None:
         available_memory_bytes=128 * 1024,
         explicit_cap_bytes=64 * 1024 + 75,
     )
-    output = pd.DataFrame({"value": ["x" * 256]})
+    output = pd.DataFrame({"value": ["x" * (128 * 1024)]})
 
     with pytest.raises(
         ValueError,
@@ -814,7 +836,23 @@ def test_write_paths_read_processed_inputs_via_helper(
         )
 
     def fake_write_and_inspect(spec: ProcessedDataSpec, frame, **kwargs: object):
-        list(frame)
+        del spec
+        policy = kwargs["resource_policy"]
+        bound = next(frame)
+        while True:
+            lease = policy.lease("test.a_share.writer", bound)
+            try:
+                owned = frame.send(lease)
+                if not isinstance(owned, _OwnedValue):
+                    raise AssertionError("invalid_bound_first_output")
+                lease.transfer("test.a_share.output")
+                del owned
+                try:
+                    bound = frame.send(None)
+                except StopIteration:
+                    return fake_inspect_dataset()
+            finally:
+                lease.close()
         return fake_inspect_dataset()
 
     def fake_read_processed_inputs(
@@ -1543,15 +1581,20 @@ def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
             match="a_share_known_payloads_exceed_task_memory_budget",
         ),
     ):
-        next(
-            materialization_planning._iter_adaptive_materialization_batches(
-                asset_ids=SliceRejectingTuple(("a", "b")),
-                sessions=(pd.Timestamp("2024-01-02"),),
-                session_context=(pd.Timestamp("2024-01-02"),),
-                retained_payload_bytes=policy.task_memory_budget_bytes - 1,
-                materialize=materialize,
-            )
+        batches = materialization_planning._iter_adaptive_materialization_batches(
+            asset_ids=SliceRejectingTuple(("a", "b")),
+            sessions=(pd.Timestamp("2024-01-02"),),
+            session_context=(pd.Timestamp("2024-01-02"),),
+            retained_payload_bytes=policy.task_memory_budget_bytes - 1,
+            materialize=materialize,
         )
+        bound = next(batches)
+        lease = policy.lease("test.a_share.consumer", bound)
+        try:
+            batches.send(lease)
+        finally:
+            lease.close()
+            batches.close()
 
 
 def test_active_materialization_rejects_missing_outer_policy_before_bounds(
@@ -1629,8 +1672,12 @@ def test_active_materialization_outer_scope_owns_factory_snapshot_and_primary(
             materialize=materialize,
         )
         sessions._data._ndarray[0] = pd.Timestamp("2099-01-01").to_datetime64()  # noqa: SLF001
+        bound = next(batches)
+        lease = policy.lease("test.a_share.consumer", bound)
         with pytest.raises(primary_type) as caught:
-            next(batches)
+            batches.send(lease)
+        lease.close()
+        batches.close()
 
     assert {
         "caught_is_primary": caught.value is primary,
@@ -1682,7 +1729,7 @@ def test_active_materialization_callback_receives_full_owned_session_context(
         sessions._data._ndarray[-1] = pd.Timestamp(  # noqa: SLF001
             "2099-01-01"
         ).to_datetime64()
-        list(batches)
+        _consume_bound_first(batches, policy)
 
     assert observed == [(original[1:3], original)]
 
@@ -1757,7 +1804,7 @@ def test_active_materialization_owner_deduplicates_planned_batches_and_closes(
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
         sessions=sessions,
         resource_policy=policy,
-        output_row_bound_bytes=policy.task_memory_budget_bytes // 2,
+        output_row_bound_bytes=policy.task_memory_budget_bytes // 8,
         materialize=materialize,
     )
     result = pd.concat(
@@ -1930,7 +1977,7 @@ def test_active_materialization_owns_stable_target_sessions_across_capacity_spli
         time_window=window,
         sessions=sessions,
         resource_policy=policy,
-        output_row_bound_bytes=policy.task_memory_budget_bytes // 2,
+        output_row_bound_bytes=policy.task_memory_budget_bytes // 8,
         materialize=materialize,
     )
     first = next(output)["timestamp"].iloc[0]
@@ -2625,7 +2672,7 @@ def test_valid_bar_index_builds_once_across_adaptive_asset_splits(
         sessions=pd.date_range("2024-01-01", "2024-01-03"),
         resource_policy=policy,
         valid_bar_offsets=(1, 1),
-        output_row_bound_bytes=policy.task_memory_budget_bytes // 2,
+        output_row_bound_bytes=policy.task_memory_budget_bytes // 8,
         materialize=materialize,
     )
 
@@ -2969,7 +3016,7 @@ def test_source_input_root_keeps_one_policy_active_for_all_children(
 
     assert list(inputs) == ["left", "right"]
     assert observed == ["left", "right"]
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         with runtime_resource_policy_scope(policy):
             pass
 
@@ -3007,7 +3054,7 @@ def test_source_input_root_retires_policy_after_every_primary(
             resource_policy=policy,
         )
     assert raised.value is primary
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         with runtime_resource_policy_scope(policy):
             pass
 
@@ -3066,7 +3113,7 @@ def test_dependency_root_keeps_one_policy_active_for_all_children(
     )
 
     assert len(observed) == 2
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         with runtime_resource_policy_scope(policy):
             pass
 
@@ -3109,7 +3156,7 @@ def test_dependency_root_retires_policy_after_every_primary(
             materialize_one=fail_child,
         )
     assert raised.value is primary
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         with runtime_resource_policy_scope(policy):
             pass
 
@@ -3213,12 +3260,14 @@ def test_sorted_output_releases_previous_publication_before_upstream_next() -> N
 
     def source():
         nonlocal first
+        lease = yield 256 * 1024
         current = first
         first = None
-        yield current
+        yield _OwnedValue(current, lease)
         del current
         assert first_reference() is None
-        yield second
+        lease = yield 256 * 1024
+        yield _OwnedValue(second, lease)
 
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
@@ -3229,9 +3278,15 @@ def test_sorted_output_releases_previous_publication_before_upstream_next() -> N
             source(), spec, resource_policy=policy
         )
     )
-    first_output = next(output)
+    bound = next(output)
+    lease = policy.lease("test.a_share.consumer", bound)
+    first_output = output.send(lease).value
     del first_output
-    next(output)
+    next_bound = output.send(None)
+    lease.close()
+    lease = policy.lease("test.a_share.consumer", next_bound)
+    output.send(lease)
+    lease.close()
 
 
 def test_output_session_filter_admits_range_index_copy_growth() -> None:
@@ -3288,7 +3343,13 @@ def test_adaptive_materialization_does_not_retry_after_capacity_failure() -> Non
             materialization_io.MaterializationCapacityExceeded,
             match="a_share_known_payloads_exceed_task_memory_budget",
         ):
-            next(output)
+            bound = next(output)
+            lease = policy.lease("test.a_share.consumer", bound)
+            try:
+                output.send(lease)
+            finally:
+                lease.close()
+                output.close()
     assert calls == 1
     assert retained[0] == base
 

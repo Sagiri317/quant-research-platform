@@ -21,7 +21,9 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     active_runtime_resource_policy,
     bind_runtime_resource_policy,
     pandas_frame_payload_bytes,
@@ -47,6 +49,7 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_integer,
     strict_symbol,
 )
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage._dataset_writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -128,6 +131,71 @@ def iter_interim_frames(
     end_date: str | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
+    policy = bind_runtime_resource_policy(
+        resource_policy,
+        allow_implicit_active=False,
+    ) or active_runtime_resource_policy()
+    producer = _iter_owned_interim_frames(
+        data_id=data_id,
+        input_files=input_files,
+        row_batch_size=row_batch_size,
+        start_date=start_date,
+        end_date=end_date,
+        resource_policy=policy,
+    )
+
+    def activate() -> Iterator[pd.DataFrame]:
+        with runtime_resource_policy_scope(policy):
+            lease: MemoryLease | None = None
+            owned: object | None = None
+            try:
+                try:
+                    bound = next(producer)
+                except StopIteration:
+                    return
+                while True:
+                    lease = policy.lease("source.binance.interim", bound)
+                    try:
+                        owned = producer.send(lease)
+                    except StopIteration:
+                        lease.close()
+                        lease = None
+                        return
+                    if not isinstance(owned, _OwnedValue):
+                        raise TypeError("invalid_binance_owned_frame")
+                    if owned.lease is not lease:
+                        raise RuntimeError("runtime_memory_lease_transfer_mismatch")
+                    lease.transfer("source.binance.interim.consumer")
+                    yield owned.value
+                    del owned
+                    try:
+                        bound = producer.send(None)
+                    except StopIteration:
+                        lease.close()
+                        lease = None
+                        return
+                    lease.close()
+                    lease = None
+            finally:
+                owned = None
+                close = getattr(producer, "close", None)
+                if close is not None:
+                    close()
+                if lease is not None:
+                    lease.close()
+
+    return activate()
+
+
+def _iter_owned_interim_frames(
+    *,
+    data_id: str,
+    input_files: tuple[Path, ...],
+    row_batch_size: int = RAW_ROW_BATCH_SIZE,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> Iterator[object]:
     _strict_data_ids((data_id,))
     strict_positive_integer(
         row_batch_size,
@@ -141,37 +209,104 @@ def iter_interim_frames(
     )
     policy = bound_policy or active_runtime_resource_policy()
 
-    def activate() -> Iterator[pd.DataFrame]:
+    def activate() -> Iterator[object]:
         with runtime_resource_policy_scope(policy):
-            owner_baseline = policy.reserved_memory_bytes
             yielded = False
             empty_schema_frame: pd.DataFrame | None = None
             last_key: tuple[object, ...] | None = None
-            for input_file in sorted(input_files):
-                for batch in _iter_raw_envelope_batches(
-                    input_file,
-                    batch_size=row_batch_size,
-                    resource_policy=policy,
-                    validate_depth_payload=False,
-                ):
-                    normalized = normalize_raw_envelopes(batch, data_id=data_id)
-                    last_key = _validate_normalized_boundary(
-                        normalized,
-                        data_id=data_id,
-                        previous_key=last_key,
+            lease: MemoryLease | None = None
+            ordered_input_files = tuple(sorted(input_files))
+            for input_file in ordered_input_files:
+                with closing_dataset_iterator(
+                    _iter_raw_envelope_batches(
+                        input_file,
+                        batch_size=row_batch_size,
+                        resource_policy=policy,
+                        validate_depth_payload=False,
                     )
-                    empty_schema_frame = normalized.iloc[:0].copy()
-                    filtered = _filter_time_window(
-                        normalized,
-                        start_date=start_date,
-                        end_date=end_date,
-                    )
-                    if not filtered.empty:
-                        yielded = True
-                        retained_bytes = policy.reserved_memory_bytes - owner_baseline
-                        if pandas_frame_payload_bytes(filtered) > retained_bytes:
-                            raise RuntimeError("binance_record_envelope_bound_invalid")
-                        yield filtered
+                ) as raw_batches:
+                    try:
+                        bound = next(raw_batches)
+                    except StopIteration:
+                        continue
+                    bound = max(256 * 1024, 6 * bound)
+                    if lease is not None and bound > lease.reserved_bytes:
+                        raise RuntimeError("binance_record_envelope_bound_invalid")
+                    while True:
+                        if lease is None:
+                            lease = yield bound
+                        while True:
+                            try:
+                                owned = raw_batches.send(lease)
+                            except StopIteration:
+                                bound = None
+                                break
+                            if not isinstance(owned, _OwnedValue):
+                                raise TypeError("invalid_binance_owned_frame")
+                            if owned.lease is not lease:
+                                raise RuntimeError(
+                                    "runtime_memory_lease_transfer_mismatch"
+                                )
+                            batch = owned.value
+                            normalized = normalize_raw_envelopes(
+                                batch,
+                                data_id=data_id,
+                            )
+                            last_key = _validate_normalized_boundary(
+                                normalized,
+                                data_id=data_id,
+                                previous_key=last_key,
+                            )
+                            empty_schema_frame = normalized.iloc[:0].copy()
+                            filtered = _filter_time_window(
+                                normalized,
+                                start_date=start_date,
+                                end_date=end_date,
+                            )
+                            if filtered.empty:
+                                del batch, normalized, filtered
+                                try:
+                                    bound = raw_batches.send(None)
+                                except StopIteration:
+                                    bound = None
+                                    break
+                                bound = max(256 * 1024, 6 * bound)
+                                if bound > lease.reserved_bytes:
+                                    raise RuntimeError(
+                                        "binance_record_envelope_bound_invalid"
+                                    )
+                                continue
+                            yielded = True
+                            batch_bytes = sum(
+                                max(1, len(str(item)))
+                                for item in batch
+                            ) * 64
+                            normalized_bytes = pandas_frame_payload_bytes(normalized)
+                            filtered_bytes = pandas_frame_payload_bytes(filtered)
+                            actual_bound = (
+                                batch_bytes
+                                + normalized_bytes
+                                + filtered_bytes
+                                + 64 * 1024
+                            )
+                            if actual_bound > lease.reserved_bytes:
+                                raise RuntimeError(
+                                    "binance_record_envelope_bound_invalid"
+                                )
+                            lease.shrink_to(actual_bound)
+                            del batch, normalized
+                            yield _OwnedValue(filtered, lease)
+                            del filtered, owned
+                            try:
+                                bound = raw_batches.send(None)
+                            except StopIteration:
+                                bound = None
+                            else:
+                                bound = max(256 * 1024, 6 * bound)
+                            lease = None
+                            break
+                        if bound is None:
+                            break
             if input_files and not yielded:
                 empty = (
                     empty_schema_frame
@@ -179,8 +314,13 @@ def iter_interim_frames(
                     else _empty_interim_frame(data_id)
                 )
                 empty_bytes = pandas_frame_payload_bytes(empty)
-                with policy.reserve("source.binance.empty", empty_bytes):
-                    yield empty
+                if lease is None:
+                    lease = yield empty_bytes + 64 * 1024
+                if empty_bytes + 64 * 1024 > lease.reserved_bytes:
+                    raise RuntimeError("binance_record_envelope_bound_invalid")
+                lease.shrink_to(empty_bytes + 64 * 1024)
+                yield _OwnedValue(empty, lease)
+                lease = None
 
     return activate()
 
@@ -233,7 +373,7 @@ def materialize_interim_data(
             artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
             write_dataset(
                 artifact_root,
-                iter_interim_frames(
+                _iter_owned_interim_frames(
                     data_id=data_id,
                     input_files=input_files,
                     row_batch_size=row_batch_size,

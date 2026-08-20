@@ -70,7 +70,7 @@ def write_annotations(
         input_row_buffer + output_row_buffer + annotation_row_vectors
     )
 
-    def chunks() -> Iterable[pd.DataFrame]:
+    def chunks() -> Iterable[object]:
         def materialize(
             asset_ids: tuple[object, ...],
             current_sessions: Sequence[pd.Timestamp],

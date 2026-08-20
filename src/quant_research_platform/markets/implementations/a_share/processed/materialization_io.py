@@ -14,7 +14,9 @@ from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedD
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     bind_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -45,7 +47,7 @@ class MaterializationCapacityExceeded(ValueError):
 
 def write_and_inspect(
     spec: ProcessedDataSpec,
-    frame: pd.DataFrame | Iterable[pd.DataFrame],
+    frame: Iterable[object],
     *,
     layout: StorageLayout,
     time_window: TimeWindow,
@@ -128,29 +130,55 @@ def read_processed_inputs_for_spec(
 
 
 def iter_sorted_output_chunks(
-    frame: pd.DataFrame | Iterable[pd.DataFrame],
+    frame: Iterable[object],
     spec: ProcessedDataSpec,
     *,
     resource_policy: RuntimeResourcePolicy,
-) -> Iterable[pd.DataFrame]:
+) -> Iterable[object]:
     bound_policy = bind_runtime_resource_policy(resource_policy)
 
-    def activate() -> Iterator[pd.DataFrame]:
+    def activate() -> Iterator[object]:
         assert bound_policy is not None
         with runtime_resource_policy_scope(bound_policy):
-            frames = iter((frame,)) if isinstance(frame, pd.DataFrame) else iter(frame)
+            frames = iter(frame)
             previous_last_key: tuple[object, ...] | None = None
             with closing_dataset_iterator(frames):
+                try:
+                    bound = next(frames)
+                except StopIteration:
+                    return
+                lease: MemoryLease | None = None
                 while True:
+                    if lease is None:
+                        lease = yield bound
                     try:
-                        chunk = next(frames)
+                        owned = frames.send(lease)
                     except StopIteration:
                         break
+                    if not isinstance(owned, _OwnedValue):
+                        raise TypeError("invalid_a_share_owned_frame")
+                    if owned.lease is not lease:
+                        raise RuntimeError("runtime_memory_lease_transfer_mismatch")
+                    chunk = owned.value
+                    if type(chunk) is not pd.DataFrame:
+                        raise TypeError("invalid_dataset_chunk")
                     if tuple(chunk.columns) != spec.required_columns:
                         raise ValueError("a_share_output_columns_mismatch")
                     output = chunk
                     if output.empty:
-                        del output, chunk
+                        del output, chunk, owned
+                        try:
+                            bound = frames.send(None)
+                        except StopIteration:
+                            bound = None
+                        if bound is None:
+                            break
+                        if (
+                            type(bound) is not int
+                            or bound <= 0
+                            or bound > lease.reserved_bytes
+                        ):
+                            raise ValueError("a_share_output_bound_invalid")
                         continue
                     output_bytes = pandas_frame_payload_bytes(output)
                     key_temporary_bytes = len(output) * (
@@ -201,9 +229,20 @@ def iter_sorted_output_chunks(
                             array[-1] for array in reversed(key_arrays)
                         )
                         del expected, key_arrays, order
-                    del chunk
-                    yield output
+                        del chunk, owned
+                    actual_bound = output_bytes + 64 * 1024
+                    if actual_bound > lease.reserved_bytes:
+                        raise ValueError("a_share_output_bound_invalid")
+                    lease.shrink_to(actual_bound)
+                    yield _OwnedValue(output, lease)
                     del output
+                    try:
+                        bound = frames.send(None)
+                    except StopIteration:
+                        bound = None
+                    lease = None
+                    if bound is None:
+                        break
 
     return activate()
 

@@ -22,7 +22,9 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     active_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
@@ -381,7 +383,7 @@ class _WriteStats:
 
 def write_dataset(
     dataset_root: Path,
-    data: pd.DataFrame | Iterable[pd.DataFrame],
+    data: pd.DataFrame | Iterable[object],
     *,
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
@@ -420,7 +422,7 @@ def write_dataset(
 
 def _write_dataset_under_policy(
     final_root: Path,
-    data: pd.DataFrame | Iterable[pd.DataFrame],
+    data: pd.DataFrame | Iterable[object],
     *,
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None,
@@ -432,19 +434,56 @@ def _write_dataset_under_policy(
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     close = getattr(input_chunks, "close", None)
     input_closed = close is None
+    input_cleanup_failed = False
+    lease_cleanup_failed = False
+    active_producer_leases: list[MemoryLease] = []
+    active_producer_values: list[_OwnedValue[pd.DataFrame]] = []
 
     def close_input_once() -> None:
-        nonlocal input_closed
-        if input_closed:
-            return
-        input_closed = True
-        if sys.exception() is None:
-            close()
+        nonlocal input_cleanup_failed, input_closed
+        if input_closed or input_cleanup_failed:
             return
         try:
             close()
         except BaseException:
-            pass
+            input_cleanup_failed = True
+            raise
+        input_closed = True
+
+    def close_input_and_active_leases() -> None:
+        nonlocal lease_cleanup_failed
+        primary = sys.exception()
+        try:
+            close_input_once()
+        except BaseException as cleanup_error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "dataset producer close also failed: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
+            return
+        if input_cleanup_failed:
+            return
+        active_producer_values.clear()
+        if lease_cleanup_failed:
+            return
+        while active_producer_leases:
+            lease = active_producer_leases[-1]
+            try:
+                lease.close()
+            except BaseException as cleanup_error:
+                lease_cleanup_failed = True
+                if primary is None:
+                    raise
+                primary.add_note(
+                    "dataset producer lease close also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+                return
+            active_producer_leases.pop()
+
+    resource_policy.register_cleanup(close_input_and_active_leases)
 
     def _writer(temp_root: Path) -> DatasetInspection:
         try:
@@ -482,6 +521,8 @@ def _write_dataset_under_policy(
                     inventory=inventory,
                     minimum_retained_payload_bytes=retained_payload_bytes,
                     borrowed_input=borrowed_input,
+                    active_producer_leases=active_producer_leases,
+                    active_producer_values=active_producer_values,
                 )
                 write_internal_artifact_manifest(
                     temp_root / "spec.json",
@@ -524,7 +565,7 @@ def _write_dataset_under_policy(
                     published_root=final_root,
                 )
         finally:
-            close_input_once()
+            close_input_and_active_leases()
 
     try:
         try:
@@ -532,11 +573,11 @@ def _write_dataset_under_policy(
         except OutputAlreadyExistsError as exc:
             raise ValueError("dataset_exists") from exc
     finally:
-        close_input_once()
+        close_input_and_active_leases()
 
 
 def _write_contents(
-    chunks: Iterator[pd.DataFrame],
+    chunks: Iterator[Any],
     root: Path,
     *,
     spec: DataSpec,
@@ -546,6 +587,8 @@ def _write_contents(
     inventory: DatasetSessionInventory,
     minimum_retained_payload_bytes: int,
     borrowed_input: bool,
+    active_producer_leases: list[MemoryLease],
+    active_producer_values: list[_OwnedValue[pd.DataFrame]],
 ) -> _WriteStats:
     timestamp_column = validate_dataset_spec(spec)
     timestamp_key_count = sum(
@@ -561,23 +604,84 @@ def _write_contents(
     accumulator.retained_payload_bytes = minimum_retained_payload_bytes
     part_indices: dict[str, int] = {}
     saw_empty_schema = False
+    producer_bound: int | None = None
+    chunk: pd.DataFrame | None = None
+    declared: pd.DataFrame | None = None
+    frame: pd.DataFrame | None = None
+    bounded_frame: pd.DataFrame | None = None
+    prepared_frame: pd.DataFrame | None = None
+    partition_frame: pd.DataFrame | None = None
+    bounded_partition: pd.DataFrame | None = None
+    table: pa.Table | None = None
+    persisted_table: pa.Table | None = None
+
+    def clear_current_chunk() -> None:
+        nonlocal bounded_frame, bounded_partition, chunk, declared, frame
+        nonlocal partition_frame, persisted_table, prepared_frame, table
+        chunk = None
+        declared = None
+        frame = None
+        bounded_frame = None
+        prepared_frame = None
+        partition_frame = None
+        bounded_partition = None
+        table = None
+        persisted_table = None
+
     while True:
-        try:
-            chunk = next(chunks)
-        except StopIteration:
-            break
+        producer_lease: MemoryLease | None = None
+        if borrowed_input:
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                break
+        else:
+            if producer_bound is None:
+                try:
+                    producer_bound = next(chunks)
+                except StopIteration:
+                    break
+            if (
+                isinstance(producer_bound, bool)
+                or type(producer_bound) is not int
+                or producer_bound <= 0
+            ):
+                raise ValueError("invalid_dataset_producer_bound")
+            producer_lease = resource_policy.lease(
+                "storage.dataset.producer",
+                producer_bound,
+            )
+            active_producer_leases.append(producer_lease)
+            send = getattr(chunks, "send", None)
+            if not callable(send):
+                raise TypeError("invalid_dataset_producer")
+            try:
+                owned = send(producer_lease)
+            except StopIteration:
+                producer_lease.close()
+                active_producer_leases.pop()
+                producer_lease = None
+            if producer_lease is None:
+                break
+            if not isinstance(owned, _OwnedValue):
+                raise TypeError("invalid_dataset_owned_frame")
+            if owned.lease is not producer_lease:
+                raise RuntimeError("runtime_memory_lease_transfer_mismatch")
+            if type(owned.value) is not pd.DataFrame:
+                raise TypeError("invalid_dataset_chunk")
+            producer_lease.transfer("storage.dataset.input")
+            chunk = owned.value
+            active_producer_values.append(owned)
+            del owned
+            producer_bound = None
         accumulator.retained_payload_bytes = minimum_retained_payload_bytes
         if type(chunk) is not pd.DataFrame:
             raise TypeError("invalid_dataset_chunk")
         chunk_bytes = pandas_frame_payload_bytes(chunk)
+        if producer_lease is not None and chunk_bytes > producer_lease.reserved_bytes:
+            raise ValueError("dataset_producer_bound_invalid")
         with ExitStack() as publication_state:
-            if not borrowed_input:
-                publication_state.enter_context(
-                    resource_policy.reserve(
-                        "storage.dataset.input",
-                        chunk_bytes,
-                    )
-                )
+            publication_state.callback(clear_current_chunk)
             metadata_budget = (
                 resource_policy.task_memory_budget_bytes
                 - resource_policy.reserved_memory_bytes
@@ -629,6 +733,20 @@ def _write_contents(
                     )
                 saw_empty_schema = True
                 del frame, logical_dtypes, declared, chunk
+                if producer_lease is not None:
+                    active_producer_values.pop()
+                    try:
+                        producer_bound = send(None)
+                    except StopIteration:
+                        producer_bound = None
+                        producer_finished = True
+                    else:
+                        producer_finished = False
+                    producer_lease.close()
+                    active_producer_leases.pop()
+                    producer_lease = None
+                    if producer_finished:
+                        break
                 continue
             for bounded_frame in iter_bounded_frame_chunks(
                 declared,
@@ -744,6 +862,20 @@ def _write_contents(
                             del partition, partition_frame
                     del prepared_frame, bounded_logical_dtypes, bounded_frame
             del declared, chunk
+        if producer_lease is not None:
+            active_producer_values.pop()
+            try:
+                producer_bound = send(None)
+            except StopIteration:
+                producer_bound = None
+                producer_finished = True
+            else:
+                producer_finished = False
+            producer_lease.close()
+            active_producer_leases.pop()
+            producer_lease = None
+            if producer_finished:
+                break
     if accumulator.row_count == 0 and not saw_empty_schema:
         raise ValueError("empty_dataset_schema_missing")
     if saw_empty_schema:

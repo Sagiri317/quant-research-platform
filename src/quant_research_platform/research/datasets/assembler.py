@@ -28,6 +28,7 @@ from quant_research_platform.research.features.transforms import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _OwnedValue,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -151,9 +152,17 @@ def _iter_joined_processed_chunks(
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[object]:
     policy = resource_policy
     base_data_id = _base_input_data_id(dataset_spec)
+    producer_bound = max(
+        1,
+        min(
+            max(1, policy.remaining_memory_bytes // 2),
+            max(1, policy.memory_budget_bytes // 2),
+        ),
+    )
+    lease = yield producer_bound
     time_keys = _time_keys_from_base_input(
         sessions[base_data_id],
         primary_key=dataset_spec.primary_key,
@@ -172,8 +181,11 @@ def _iter_joined_processed_chunks(
         target_core_count=1,
         reason="research_assembly",
     )
+    del time_keys
 
-    for chunk_window in chunk_windows:
+    for window_index, chunk_window in enumerate(chunk_windows):
+        if window_index:
+            lease = yield producer_bound
         chunk = _join_processed_inputs(
             dataset_spec=dataset_spec,
             processed_catalog=processed_catalog,
@@ -183,23 +195,31 @@ def _iter_joined_processed_chunks(
             resource_policy=policy,
         )
         chunk_bytes = _frame_bytes(chunk)
-        with policy.reserve("research.assembly.joined", chunk_bytes):
-            validate_research_dataset(chunk, dataset_spec)
-            sort_index_bytes = len(chunk) * np.dtype(np.intp).itemsize
-            with policy.reserve("research.assembly.output", chunk_bytes):
-                with policy.reserve(
-                    "research.assembly.sort",
-                    sort_index_bytes + sort_index_bytes,
-                ):
-                    output = chunk.sort_values(
-                        list(dataset_spec.primary_key),
-                        ignore_index=True,
-                    )
-                if _frame_bytes(output) > chunk_bytes:
-                    raise ValueError(
-                        "research_known_join_payloads_exceed_task_memory_budget"
-                    )
-                yield output
+        if chunk_bytes + 256 * 1024 > lease.reserved_bytes:
+            raise ValueError("research_joined_bound_invalid")
+        validate_research_dataset(chunk, dataset_spec)
+        sort_index_bytes = len(chunk) * np.dtype(np.intp).itemsize
+        with policy.reserve(
+            "research.assembly.sort",
+            sort_index_bytes + sort_index_bytes,
+        ):
+            output = chunk.sort_values(
+                list(dataset_spec.primary_key),
+                ignore_index=True,
+            )
+        if _frame_bytes(output) > chunk_bytes:
+            raise ValueError(
+                "research_known_join_payloads_exceed_task_memory_budget"
+            )
+        output_bytes = _frame_bytes(output)
+        actual_bound = chunk_bytes + output_bytes + 256 * 1024
+        if actual_bound > lease.reserved_bytes:
+            raise ValueError("research_joined_bound_invalid")
+        lease.shrink_to(actual_bound)
+        del chunk
+        yield _OwnedValue(output, lease)
+        del output
+        lease = None
 
 
 def _join_processed_inputs(
