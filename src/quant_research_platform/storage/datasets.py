@@ -60,6 +60,7 @@ def write_dataset(
         spec=spec,
         instance_metadata=instance_metadata,
         resource_policy=None,
+        borrowed_input=True,
     )
 
 

@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage._dataset_schema import (
     logical_dtype_metadata_bytes,
     logical_dtype_payload_from_frame,
@@ -139,6 +140,39 @@ def test_public_dataset_writer_accepts_exact_frame_sequences(
     assert (
         fingerprint_dataset(roots[0]).content_hash
         == fingerprint_dataset(roots[1]).content_hash
+    )
+
+
+def test_public_dataset_writer_does_not_recharge_borrowed_frame_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "borrowed_input")
+    frame = make_default_dataset_frame()
+    reservation_owners: list[str] = []
+    original_reserve = RuntimeResourcePolicy.reserve
+
+    def record_reserve(
+        policy: RuntimeResourcePolicy,
+        owner: str,
+        reserve_bytes: int,
+    ):
+        reservation_owners.append(owner)
+        return original_reserve(policy, owner, reserve_bytes)
+
+    monkeypatch.setattr(
+        RuntimeResourcePolicy,
+        "reserve",
+        record_reserve,
+    )
+
+    write_dataset(root, frame, spec=make_processed_dataset_spec("borrowed_input"))
+
+    assert "storage.dataset.input" not in reservation_owners
+    assert any(
+        owner.startswith("storage.dataset.")
+        for owner in reservation_owners
+        if owner != "storage.dataset.write"
     )
 
 

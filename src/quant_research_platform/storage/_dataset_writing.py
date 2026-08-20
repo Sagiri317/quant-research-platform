@@ -388,6 +388,7 @@ def write_dataset(
     staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
     resource_policy: RuntimeResourcePolicy | None,
     retained_payload_bytes: int = 0,
+    borrowed_input: bool = False,
 ) -> DatasetInspection:
     final_root = Path(dataset_root)
     validate_dataset_spec(spec)
@@ -413,6 +414,7 @@ def write_dataset(
             staged_validator=staged_validator,
             resource_policy=issued_policy,
             retained_payload_bytes=retained_payload_bytes,
+            borrowed_input=borrowed_input,
         )
 
 
@@ -425,6 +427,7 @@ def _write_dataset_under_policy(
     staged_validator: Callable[[DatasetWriteReceipt], None] | None,
     resource_policy: RuntimeResourcePolicy,
     retained_payload_bytes: int,
+    borrowed_input: bool,
 ) -> DatasetInspection:
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     close = getattr(input_chunks, "close", None)
@@ -478,6 +481,7 @@ def _write_dataset_under_policy(
                     key_tracker=key_tracker,
                     inventory=inventory,
                     minimum_retained_payload_bytes=retained_payload_bytes,
+                    borrowed_input=borrowed_input,
                 )
                 write_internal_artifact_manifest(
                     temp_root / "spec.json",
@@ -541,6 +545,7 @@ def _write_contents(
     key_tracker: ExactPrimaryKeyIndex,
     inventory: DatasetSessionInventory,
     minimum_retained_payload_bytes: int,
+    borrowed_input: bool,
 ) -> _WriteStats:
     timestamp_column = validate_dataset_spec(spec)
     timestamp_key_count = sum(
@@ -566,12 +571,13 @@ def _write_contents(
             raise TypeError("invalid_dataset_chunk")
         chunk_bytes = pandas_frame_payload_bytes(chunk)
         with ExitStack() as publication_state:
-            publication_state.enter_context(
-                resource_policy.reserve(
-                    "storage.dataset.input",
-                    chunk_bytes,
+            if not borrowed_input:
+                publication_state.enter_context(
+                    resource_policy.reserve(
+                        "storage.dataset.input",
+                        chunk_bytes,
+                    )
                 )
-            )
             metadata_budget = (
                 resource_policy.task_memory_budget_bytes
                 - resource_policy.reserved_memory_bytes
