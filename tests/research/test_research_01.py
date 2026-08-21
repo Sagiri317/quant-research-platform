@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import weakref
 from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,9 @@ import quant_research_platform.research.evaluations.runner as evaluation_runner_
 import quant_research_platform.research.models.fitting as model_fitting
 import quant_research_platform.research.predictions.runner as prediction_runner_module
 import quant_research_platform.storage._dataset_reading as dataset_reading
+from quant_research_platform.artifacts._evaluation_outputs import (
+    _write_evaluation_outputs_from_chunks,
+)
 from quant_research_platform.artifacts._prediction_outputs import (
     write_prediction_outputs,
 )
@@ -54,9 +58,12 @@ from quant_research_platform.research.datasets.validation import (
     validate_prediction_input,
 )
 from quant_research_platform.research.evaluations.engine import (
+    _iter_evaluation_output_chunks,
+    _iter_evaluation_work_frames,
     evaluate_signal_frame_chunks,
 )
 from quant_research_platform.research.evaluations.runner import (
+    _write_evaluation_outputs_from_research_dataset,
     build_evaluation_result_from_research_dataset,
 )
 from quant_research_platform.research.models.supervised import (
@@ -86,6 +93,7 @@ from tests.helpers.runtime_resources import (
     capture_storage_test_policy,
     capture_test_policy,
 )
+from tests.research.filter_mode_fixtures import make_filter_mode_frame
 from tests.research.prediction_output_helpers import (
     write_prediction_output_and_read,
 )
@@ -2158,3 +2166,369 @@ def test_evaluation_runner_streams_research_chunks(
 
     assert (output_bundle / "metrics.parquet").is_file()
     assert read_chunk_rows == [len(frame)]
+
+
+def test_evaluation_input_lease_spans_normalization_and_closes_on_stop() -> None:
+    frame = make_filter_mode_frame().assign(normalized_factor=999.0)
+    spec = EvaluationSpec(
+        run_id="eval_input_lease",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_signal_spec("factor", signal_id="normalized_factor"),),
+        label_columns=("label",),
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=32 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+    with runtime_resource_policy_scope(policy):
+        chunks = _iter_evaluation_work_frames(
+            (frame,),
+            spec=spec,
+            signal_columns=("normalized_factor",),
+            label_columns=spec.label_columns,
+            asset_column="asset_id",
+            resource_policy=policy,
+        )
+        normalized = next(chunks)
+        assert "normalized_factor" in normalized.columns
+        assert policy.used_memory_bytes > 0
+        chunks.close()
+    assert policy.used_memory_bytes == 0
+
+
+def test_managed_evaluation_runner_persists_without_full_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _research_rows_for_dates(
+        ["2014-01-02", "2014-01-03", "2014-01-06"]
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    processed_catalog = make_demo_processed_catalog()
+    write_demo_processed_inputs(layout, processed_catalog, frame=frame)
+    assembly_policy = capture_storage_test_policy(
+        working_headroom_bytes=4 * 1024**2,
+    )
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-06"),
+        resource_policy=assembly_policy,
+    )
+    evaluation_catalog = EvaluationCatalog()
+    spec = EvaluationSpec(
+        run_id="eval_managed",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(make_signal_spec("mom_20d"),),
+        label_columns=("forward_return_20d",),
+    )
+    evaluation_catalog.register(spec)
+    canonical = evaluate_signal_frame_chunks((frame,), spec)
+    monkeypatch.setattr(
+        evaluation_runner_module,
+        "build_evaluation_result_from_research_dataset",
+        lambda **_kwargs: pytest.fail("managed_workflow_built_full_result"),
+    )
+    evaluation_policy = capture_test_policy(
+        available_memory_bytes=32 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+
+    with runtime_resource_policy_scope(evaluation_policy):
+        output_bundle = _write_evaluation_outputs_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            evaluation_catalog=evaluation_catalog,
+            run_id=spec.run_id,
+            output_spec=_output_spec(
+                output_definition_id="evaluation_outputs",
+                run_id=spec.run_id,
+                market_id=spec.market_id,
+                run_type=spec.run_type,
+            ),
+            time_window=TimeWindow("2014-01-02", "2014-01-06"),
+            resource_policy=evaluation_policy,
+        )
+
+    assert evaluation_policy.used_memory_bytes == 0
+    pd.testing.assert_frame_equal(
+        pd.read_parquet(output_bundle / "metrics.parquet"),
+        canonical.metrics,
+        check_exact=False,
+        check_dtype=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    pd.testing.assert_frame_equal(
+        pd.read_parquet(output_bundle / "grouped_label_values.parquet"),
+        canonical.grouped_label_values,
+        check_exact=False,
+        check_dtype=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    pd.testing.assert_frame_equal(
+        pd.read_parquet(output_bundle / "ic_summary.parquet"),
+        canonical.ic_summary,
+        check_exact=False,
+        check_dtype=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    pd.testing.assert_frame_equal(
+        pd.read_parquet(output_bundle / "group_spread_summary.parquet"),
+        canonical.group_spread_summary,
+        check_exact=False,
+        check_dtype=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+@pytest.mark.parametrize(
+    ("filter_mode", "case"),
+    (
+        ("eligible", "normal"),
+        ("tradable", "normal"),
+        ("unfiltered", "ties"),
+        ("unfiltered", "all_nan"),
+    ),
+)
+def test_managed_evaluation_parity_covers_filters_ties_and_all_nan(
+    tmp_path: Path,
+    filter_mode: str,
+    case: str,
+) -> None:
+    frame = make_filter_mode_frame()
+    if case == "ties":
+        frame["factor"] = [1.0, 1.0, 2.0, 2.0, 3.0, 3.0]
+        frame["label"] = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06]
+    elif case == "all_nan":
+        frame["factor"] = float("nan")
+        frame["label"] = float("nan")
+    spec = EvaluationSpec(
+        run_id=f"eval_managed_{filter_mode}_{case}",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_signal_spec("factor"),),
+        label_columns=("label",),
+        filter_mode=filter_mode,
+    )
+    canonical = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
+    policy = capture_test_policy(
+        available_memory_bytes=32 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+    output_spec = _output_spec(
+        output_definition_id="evaluation_outputs",
+        run_id=spec.run_id,
+        market_id=spec.market_id,
+        run_type=spec.run_type,
+    )
+    with runtime_resource_policy_scope(policy):
+        chunks = _iter_evaluation_output_chunks(
+            (frame,),
+            spec=spec,
+            signal_columns=("factor",),
+            label_columns=spec.label_columns,
+            n_groups=2,
+            asset_column="asset_id",
+            resource_policy=policy,
+        )
+        output_bundle = _write_evaluation_outputs_from_chunks(
+            chunks,
+            spec=spec,
+            output_spec=output_spec,
+            layout=StorageLayout(project_root=tmp_path),
+            n_groups=2,
+        )
+
+    def sorted_frame(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        return frame.sort_values(columns, kind="mergesort").reset_index(drop=True)
+
+    pd.testing.assert_frame_equal(
+        sorted_frame(
+            pd.read_parquet(output_bundle / "metrics.parquet"),
+            ["timestamp", "signal", "label"],
+        ),
+        sorted_frame(canonical.metrics, ["timestamp", "signal", "label"]),
+        check_exact=False,
+        check_dtype=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    pd.testing.assert_frame_equal(
+        sorted_frame(
+            pd.read_parquet(output_bundle / "grouped_label_values.parquet"),
+            ["timestamp", "signal", "label", "group"],
+        ),
+        sorted_frame(
+            canonical.grouped_label_values,
+            ["timestamp", "signal", "label", "group"],
+        ),
+        check_exact=False,
+        check_dtype=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    pd.testing.assert_frame_equal(
+        sorted_frame(
+            pd.read_parquet(output_bundle / "ic_summary.parquet"),
+            ["signal", "label"],
+        ),
+        sorted_frame(canonical.ic_summary, ["signal", "label"]),
+        check_exact=False,
+        check_dtype=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    pd.testing.assert_frame_equal(
+        sorted_frame(
+            pd.read_parquet(output_bundle / "group_spread_summary.parquet"),
+            ["signal", "label"],
+        ),
+        sorted_frame(canonical.group_spread_summary, ["signal", "label"]),
+        check_exact=False,
+        check_dtype=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    manifest = json.loads((output_bundle / "manifest.json").read_text())
+    diagnostics = manifest["metadata"]["evaluation_diagnostics"]
+    expected_diagnostics = asdict(canonical.diagnostics)
+    expected_diagnostics.pop("contract_version")
+    expected_diagnostics["filter_columns_used"] = list(
+        expected_diagnostics["filter_columns_used"]
+    )
+    assert diagnostics == expected_diagnostics
+    assert policy.used_memory_bytes == 0
+
+
+def test_managed_evaluation_two_label_order_and_shared_skip_parity(
+    tmp_path: Path,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-02")] * 4
+            + [pd.Timestamp("2024-01-03")] * 4
+            + [pd.Timestamp("2024-01-04")] * 4,
+            "asset_id": [f"asset_{index}" for index in range(4)] * 3,
+            "factor": [1.0, 2.0, 3.0, 4.0] * 3,
+            "label_a": [0.1, 0.2, float("nan"), float("nan")] * 2
+            + [0.1, float("nan"), float("nan"), float("nan")],
+            "label_b": [0.2, 0.4, float("nan"), float("nan")] * 2
+            + [0.2, float("nan"), float("nan"), float("nan")],
+            "eligible": [True] * 12,
+        }
+    )
+    spec = EvaluationSpec(
+        run_id="eval_managed_two_labels",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_signal_spec("factor"),),
+        label_columns=("label_a", "label_b"),
+        n_groups=2,
+    )
+    canonical = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
+    def persist(
+        frames: tuple[pd.DataFrame, ...],
+        output_id: str,
+    ) -> tuple[Path, RuntimeResourcePolicy]:
+        policy = capture_test_policy(
+            available_memory_bytes=32 * 1024**2,
+            explicit_cap_bytes=16 * 1024**2,
+        )
+        output_spec = _output_spec(
+            output_definition_id="evaluation_outputs",
+            run_id=output_id,
+            market_id=spec.market_id,
+            run_type=spec.run_type,
+        )
+        with runtime_resource_policy_scope(policy):
+            output_bundle = _write_evaluation_outputs_from_chunks(
+                _iter_evaluation_output_chunks(
+                    frames,
+                    spec=spec,
+                    signal_columns=("factor",),
+                    label_columns=spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=policy,
+                ),
+                spec=spec,
+                output_spec=output_spec,
+                layout=StorageLayout(project_root=tmp_path),
+                n_groups=2,
+            )
+        return output_bundle, policy
+
+    output_bundle, policy = persist((frame,), "eval_managed_two_labels_full")
+    split_bundle, split_policy = persist(
+        tuple(frame.iloc[index : index + 1].copy() for index in range(len(frame))),
+        "eval_managed_two_labels_split",
+    )
+
+    persisted_metrics = pd.read_parquet(output_bundle / "metrics.parquet")
+    pd.testing.assert_frame_equal(
+        persisted_metrics,
+        canonical.metrics,
+        check_exact=False,
+        check_dtype=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert persisted_metrics["label"].tolist() == [
+        "label_a",
+        "label_b",
+        "label_a",
+        "label_b",
+        "label_a",
+        "label_b",
+    ]
+    manifest = json.loads((output_bundle / "manifest.json").read_text())
+    diagnostics = manifest["metadata"]["evaluation_diagnostics"]
+    expected_diagnostics = asdict(canonical.diagnostics)
+    expected_diagnostics.pop("contract_version")
+    expected_diagnostics["filter_columns_used"] = list(
+        expected_diagnostics["filter_columns_used"]
+    )
+    assert diagnostics == expected_diagnostics
+    assert diagnostics["skipped_timestamp_count"] == 1
+    split_manifest = json.loads(
+        (split_bundle / "manifest.json").read_text()
+    )
+    assert split_manifest["metadata"]["evaluation_diagnostics"] == diagnostics
+    expected_frames = {
+        "metrics.parquet": canonical.metrics,
+        "grouped_label_values.parquet": canonical.grouped_label_values,
+        "ic_summary.parquet": canonical.ic_summary,
+        "group_spread_summary.parquet": canonical.group_spread_summary,
+    }
+    for name, expected in expected_frames.items():
+        full_frame = pd.read_parquet(output_bundle / name)
+        split_frame = pd.read_parquet(split_bundle / name)
+        pd.testing.assert_frame_equal(
+            full_frame,
+            split_frame,
+            check_exact=False,
+            check_dtype=False,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        pd.testing.assert_frame_equal(
+            full_frame,
+            expected,
+            check_exact=False,
+            check_dtype=False,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+    assert policy.used_memory_bytes == 0
+    assert split_policy.used_memory_bytes == 0

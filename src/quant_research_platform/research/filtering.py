@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_integer_dtype
@@ -23,8 +25,24 @@ def apply_filter_mode(
     mode: str,
     metadata_key: str,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
+    with _filter_mode_scope(
+        frame,
+        mode=mode,
+        metadata_key=metadata_key,
+    ) as result:
+        return result
+
+
+@contextmanager
+def _filter_mode_scope(
+    frame: pd.DataFrame,
+    *,
+    mode: str,
+    metadata_key: str,
+) -> Iterator[tuple[pd.DataFrame, dict[str, object]]]:
     columns = required_filter_columns(mode)
     policy = current_runtime_resource_policy()
+    lease = None
     if mode == "unfiltered":
         filtered = frame
     else:
@@ -39,12 +57,9 @@ def apply_filter_mode(
             > policy.memory_budget_bytes
         ):
             raise ValueError("research_filter_working_set_exceeds_task_memory_budget")
-        reservation = (
-            policy.reserve("research.filter", working_bytes)
-            if policy is not None
-            else nullcontext()
-        )
-        with reservation:
+        if policy is not None:
+            lease = policy.lease("research.filter", working_bytes)
+        try:
             keep = _validated_bool_mask(frame, columns[0])
             for column in columns[1:]:
                 mask = _validated_bool_mask(frame, column)
@@ -52,14 +67,42 @@ def apply_filter_mode(
             if len(columns) > 1:
                 del mask
             filtered = frame.loc[keep]
-    metadata = {
-        metadata_key: mode,
-        "filter_columns_used": list(columns),
-        "filter_definition": filter_definition(mode),
-        "rows_input": int(len(frame)),
-        "rows_after_filter_mode": int(len(filtered)),
-    }
-    return filtered, metadata
+            del keep
+            if lease is not None:
+                lease.shrink_to(pandas_frame_payload_bytes(filtered))
+                lease.transfer("research.filter.output")
+        except BaseException as exc:
+            if lease is not None:
+                try:
+                    lease.close()
+                except BaseException as close_error:
+                    exc.add_note(
+                        "research filter lease release also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+                lease = None
+            raise
+    try:
+        metadata = {
+            metadata_key: mode,
+            "filter_columns_used": list(columns),
+            "filter_definition": filter_definition(mode),
+            "rows_input": int(len(frame)),
+            "rows_after_filter_mode": int(len(filtered)),
+        }
+        yield filtered, metadata
+    finally:
+        primary = sys.exception()
+        if lease is not None:
+            try:
+                lease.close()
+            except BaseException as close_error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    "research filter lease release also failed: "
+                    f"{type(close_error).__name__}"
+                )
 
 
 def _validated_bool_mask(frame: pd.DataFrame, column: str) -> pd.Series:

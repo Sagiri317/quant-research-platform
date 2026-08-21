@@ -11,9 +11,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from quant_research_platform.artifacts._evaluation_outputs import (
-    write_evaluation_outputs,
-)
 from quant_research_platform.artifacts._output_bundle_validation import (
     _read_prediction_output_bundle,
     validate_output_bundle,
@@ -53,7 +50,7 @@ from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
 )
 from quant_research_platform.research.evaluations.runner import (
-    build_evaluation_result_from_research_dataset,
+    _write_evaluation_outputs_from_research_dataset,
 )
 from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.research.portfolios.runner import (
@@ -70,7 +67,6 @@ from quant_research_platform.runtime.logical_paths import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
@@ -285,42 +281,21 @@ def _run_local_verification_with_policy(
             resource_policy=resource_policy,
         )
     with recorder.record("evaluation_generation"):
-        evaluation_result = build_evaluation_result_from_research_dataset(
+        evaluation_root = _write_evaluation_outputs_from_research_dataset(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             evaluation_catalog=catalogs.evaluations,
             run_id=evaluation_run_id,
+            output_spec=_output_spec(
+                output_id=evaluation_run_id,
+                output_definition_id="evaluation_outputs",
+                run_id=run_id,
+                market_id=catalogs.evaluations.get(evaluation_run_id).market_id,
+                run_type=catalogs.evaluations.get(evaluation_run_id).run_type,
+            ),
             time_window=evaluation_time_window,
             resource_policy=resource_policy,
         )
-        evaluation_frames = (
-            evaluation_result.metrics,
-            evaluation_result.grouped_label_values,
-            evaluation_result.ic_summary,
-            evaluation_result.group_spread_summary,
-        )
-        with resource_policy.reserve(
-            "workflow.evaluation.result",
-            sum(pandas_frame_payload_bytes(frame) for frame in evaluation_frames),
-        ):
-            evaluation_root = write_evaluation_outputs(
-                evaluation_result.metrics,
-                evaluation_result.grouped_label_values,
-                ic_summary=evaluation_result.ic_summary,
-                group_spread_summary=evaluation_result.group_spread_summary,
-                evaluation_diagnostics=evaluation_result.diagnostics,
-                spec=evaluation_result.spec,
-                output_spec=_output_spec(
-                    output_id=evaluation_result.spec.run_id,
-                    output_definition_id="evaluation_outputs",
-                    run_id=run_id,
-                    market_id=evaluation_result.spec.market_id,
-                    run_type=evaluation_result.spec.run_type,
-                ),
-                layout=storage_layout,
-            )
-        del evaluation_frames
-        del evaluation_result
     with recorder.record("prediction_generation"):
         prediction_roots_by_id: dict[str, Path] = {}
         for prediction_spec in prediction_specs:

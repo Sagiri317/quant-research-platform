@@ -221,17 +221,6 @@ def profile_with_empty_prediction_and_portfolio_builders(profile=None):
     )
 
 
-def fake_evaluation_result(kwargs):
-    return SimpleNamespace(
-        spec=kwargs["evaluation_catalog"].get(kwargs["run_id"]),
-        metrics=pd.DataFrame(),
-        grouped_label_values=pd.DataFrame(),
-        ic_summary=pd.DataFrame(),
-        group_spread_summary=pd.DataFrame(),
-        diagnostics={},
-    )
-
-
 def fake_prediction_result(kwargs):
     return PredictionResult(
         spec=kwargs["prediction_catalog"].get(kwargs["prediction_id"]),
@@ -249,7 +238,7 @@ def fake_portfolio_result(kwargs):
     )
 
 
-def stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
+def stub_output_writers(monkeypatch: pytest.MonkeyPatch):
     def write_stub(*args, **kwargs):
         del args
         output_spec = kwargs["output_spec"]
@@ -276,10 +265,18 @@ def stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         return root
 
+    def write_evaluation_stub(*args, **kwargs):
+        del args
+        stub_kwargs = dict(kwargs)
+        stub_kwargs["spec"] = stub_kwargs["evaluation_catalog"].get(
+            stub_kwargs["run_id"]
+        )
+        return write_stub(**stub_kwargs)
+
     monkeypatch.setattr(
         module,
-        "write_evaluation_outputs",
-        write_stub,
+        "_write_evaluation_outputs_from_research_dataset",
+        write_evaluation_stub,
     )
     monkeypatch.setattr(
         module,
@@ -296,6 +293,7 @@ def stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
         "_read_prediction_output_bundle",
         lambda *_args, **_kwargs: nullcontext(({"metadata": {}}, pd.DataFrame())),
     )
+    return write_evaluation_stub
 
 
 def _stub_output_metadata(

@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.artifacts import (
@@ -30,6 +31,10 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.policy.share_safety import (
     MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS,
 )
+from quant_research_platform.research.evaluations.engine import (
+    _iter_evaluation_output_chunks,
+)
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.layout import StorageLayout
 from tests.artifacts.output_edge_fixtures import (
     make_output_edge_evaluation_diagnostics,
@@ -42,6 +47,7 @@ from tests.helpers.report_output_frames import (
     make_artifact_evaluation_metrics_frame,
     make_artifact_signal_spec,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 @pytest.mark.parametrize(
@@ -802,3 +808,318 @@ def test_summary_markdown_escapes_pipe_characters(tmp_path: Path) -> None:
     assert "| lab|el |" not in summary
     assert "source_asset_id" not in summary
     assert "data/raw" not in summary
+
+
+def test_managed_evaluation_admits_summary_before_first_pull(
+    tmp_path: Path,
+) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_admission",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    report_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+    pulled: list[bool] = []
+
+    def chunks():
+        pulled.append(True)
+        yield (
+            make_artifact_evaluation_metrics_frame(),
+            make_artifact_evaluation_grouped_label_values_frame(),
+            {
+                "rows_input": 2,
+                "rows_after_filter_mode": 2,
+                "filter_columns_used": ["eligible"],
+                "filter_definition": "eligible == True",
+                "timestamp_count": 1,
+                "min_timestamp": "2024-01-02",
+                "max_timestamp": "2024-01-02",
+                "skipped_timestamp_count": 0,
+            },
+        )
+
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=64 * 1024,
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+                chunks(),
+                spec=spec,
+                output_spec=report_spec,
+                layout=StorageLayout(project_root=tmp_path),
+                n_groups=2,
+            )
+
+    assert pulled == []
+    assert policy.used_memory_bytes == 0
+
+
+def test_managed_evaluation_failure_closes_partial_writer_and_preserves_primary(
+    tmp_path: Path,
+) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_failure",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    report_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+    primary = RuntimeError("managed_evaluation_primary")
+    closed: list[bool] = []
+
+    def chunks():
+        try:
+            yield (
+                make_artifact_evaluation_metrics_frame(),
+                make_artifact_evaluation_grouped_label_values_frame(),
+                {
+                    "rows_input": 2,
+                    "rows_after_filter_mode": 2,
+                    "filter_columns_used": ["eligible"],
+                    "filter_definition": "eligible == True",
+                    "timestamp_count": 1,
+                    "min_timestamp": "2024-01-02",
+                    "max_timestamp": "2024-01-02",
+                    "skipped_timestamp_count": 0,
+                },
+            )
+            raise primary
+        finally:
+            closed.append(True)
+
+    policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(RuntimeError) as raised:
+            evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+                chunks(),
+                spec=spec,
+                output_spec=report_spec,
+                layout=StorageLayout(project_root=tmp_path),
+                n_groups=2,
+            )
+
+    assert raised.value is primary
+    assert closed == [True]
+    assert policy.used_memory_bytes == 0
+    assert not (tmp_path / "outputs" / report_spec.output_id).exists()
+
+
+def test_managed_evaluation_empty_output_failure_closes_summary_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_empty_failure",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    report_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+    primary = OSError("empty_output_write_failed")
+    monkeypatch.setattr(
+        evaluation_outputs_owner,
+        "write_parquet",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(primary),
+    )
+    policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(OSError) as raised:
+            evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+                iter(()),
+                spec=spec,
+                output_spec=report_spec,
+                layout=StorageLayout(project_root=tmp_path),
+                n_groups=2,
+            )
+    assert raised.value is primary
+    assert policy.used_memory_bytes == 0
+
+
+def test_managed_evaluation_pre_writer_failure_releases_table_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_pre_writer_failure",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    report_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+    primary = OSError("pre_writer_failure")
+    monkeypatch.setattr(
+        evaluation_outputs_owner.pq,
+        "ParquetWriter",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(primary),
+    )
+    metrics = make_artifact_evaluation_metrics_frame()
+    grouped = make_artifact_evaluation_grouped_label_values_frame()
+    policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(OSError) as raised:
+            evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+                iter(
+                    (
+                        (
+                            metrics,
+                            grouped,
+                            {
+                                "rows_input": 2,
+                                "rows_after_filter_mode": 2,
+                                "filter_columns_used": ["eligible"],
+                                "filter_definition": "eligible == True",
+                                "timestamp_count": 1,
+                                "min_timestamp": "2024-01-02",
+                                "max_timestamp": "2024-01-02",
+                                "skipped_timestamp_count": 0,
+                            },
+                        ),
+                    )
+                ),
+                spec=spec,
+                output_spec=report_spec,
+                layout=StorageLayout(project_root=tmp_path),
+                n_groups=2,
+            )
+    assert raised.value is primary
+    assert policy.used_memory_bytes == 0
+
+
+def test_managed_evaluation_persists_aggregate_beyond_ram_budget(
+    tmp_path: Path,
+) -> None:
+    signals = tuple(
+        replace(
+            make_artifact_signal_spec(),
+            signal_id=f"signal_{index}",
+            source_column=f"signal_{index}",
+        )
+        for index in range(100)
+    )
+    labels = ("label_a", "label_b")
+    spec = EvaluationSpec(
+        run_id="eval_spill",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=signals,
+        label_columns=labels,
+        n_groups=2,
+    )
+    report_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+    total_timestamps = 1_600
+    timestamps: list[pd.Timestamp] = []
+    asset_ids: list[str] = []
+    eligible: list[bool] = []
+    labels_by_column = {label: [] for label in labels}
+    signals_by_column = {signal.source_column: [] for signal in signals}
+    for offset in range(total_timestamps):
+        timestamp = pd.Timestamp("2000-01-01") + pd.Timedelta(days=offset)
+        for asset_index in range(2):
+            timestamps.append(timestamp)
+            asset_ids.append(f"asset_{asset_index}")
+            eligible.append(True)
+            labels_by_column["label_a"].append(offset * 0.001 + asset_index)
+            labels_by_column["label_b"].append(offset * 0.002 - asset_index)
+            for signal_index, signal in enumerate(signals):
+                signals_by_column[signal.source_column].append(
+                    (signal_index + 1) * 0.1 + offset * 0.001 + asset_index
+                )
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "asset_id": asset_ids,
+            "eligible": eligible,
+            **labels_by_column,
+            **signals_by_column,
+        }
+    )
+
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=32 * 1024**2,
+    )
+    with runtime_resource_policy_scope(policy):
+        chunks = _iter_evaluation_output_chunks(
+            (frame,),
+            spec=spec,
+            signal_columns=tuple(signal.signal_id for signal in signals),
+            label_columns=labels,
+            n_groups=2,
+            asset_column="asset_id",
+            resource_policy=policy,
+        )
+        output_bundle = evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+            chunks,
+            spec=spec,
+            output_spec=report_spec,
+            layout=StorageLayout(project_root=tmp_path),
+            n_groups=2,
+        )
+
+    logical_persisted_bytes = sum(
+        parquet_file.metadata.row_group(index).total_byte_size
+        for path in (
+            output_bundle / "metrics.parquet",
+            output_bundle / "grouped_label_values.parquet",
+        )
+        for parquet_file in (pq.ParquetFile(path),)
+        for index in range(parquet_file.metadata.num_row_groups)
+    )
+    assert logical_persisted_bytes > policy.memory_budget_bytes
+    persisted_metrics = pd.read_parquet(output_bundle / "metrics.parquet")
+    persisted_grouped = pd.read_parquet(
+        output_bundle / "grouped_label_values.parquet"
+    )
+    assert len(persisted_metrics) == total_timestamps * len(signals) * len(labels)
+    assert (
+        len(persisted_grouped)
+        == total_timestamps * len(signals) * len(labels) * 2
+    )
+    assert not persisted_metrics.duplicated(
+        ["timestamp", "signal", "label"]
+    ).any()
+    assert not persisted_grouped.duplicated(
+        ["timestamp", "signal", "label", "group"]
+    ).any()
+    first_metric = persisted_metrics.sort_values(
+        ["timestamp", "signal", "label"]
+    ).iloc[0]
+    assert first_metric["signal"] == "signal_0"
+    assert first_metric["label"] == "label_a"
+    assert first_metric["ic"] == 1.0
+    manifest = json.loads((output_bundle / "manifest.json").read_text())
+    diagnostics = manifest["metadata"]["evaluation_diagnostics"]
+    assert diagnostics["rows_input"] == total_timestamps * 2
+    assert diagnostics["metric_rows"] == len(persisted_metrics)
+    assert diagnostics["grouped_label_value_rows"] == len(persisted_grouped)
+    assert diagnostics["timestamp_count"] == total_timestamps
+    assert diagnostics["min_timestamp"] == "2000-01-01"
+    assert diagnostics["max_timestamp"] == "2004-05-18"
+    assert policy.used_memory_bytes == 0

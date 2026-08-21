@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from contextlib import contextmanager
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -16,7 +17,9 @@ from quant_research_platform.research.evaluations.diagnostics import (
     summarize_period_ic,
     summarize_signal_label_coverage,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from tests.helpers.report_output_frames import make_artifact_signal_spec
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_summarize_signal_label_coverage_handles_empty_metrics() -> None:
@@ -119,6 +122,174 @@ def test_summarize_group_spread_is_deterministically_sorted() -> None:
     assert summary.loc[0, "top_bottom_label_value_spread_mean"] == pytest.approx(0.2)
 
 
+def test_evaluation_chunk_producer_does_not_terminal_concat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_stream",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+        n_groups=2,
+    )
+    monkeypatch.setattr(
+        pd,
+        "concat",
+        lambda *_args, **_kwargs: pytest.fail(
+            "single_label_managed_evaluation_must_not_concat"
+        ),
+    )
+    policy = capture_test_policy(available_memory_bytes=256 * 1024)
+    with runtime_resource_policy_scope(policy):
+        chunks = evaluation_engine._iter_evaluation_output_chunks(
+            (_evaluation_frame(),),
+            spec=spec,
+            signal_columns=("signal",),
+            label_columns=("label",),
+            n_groups=2,
+            asset_column="asset_id",
+            resource_policy=policy,
+        )
+        metrics, grouped, metadata = next(chunks)
+        chunks.close()
+
+    assert list(metrics.columns) == [
+        "timestamp",
+        "signal",
+        "label",
+        "ic",
+        "rankic",
+        "n_obs",
+    ]
+    assert list(grouped.columns) == [
+        "timestamp",
+        "signal",
+        "label",
+        "group",
+        "mean_label_value",
+        "n_obs",
+    ]
+
+
+@pytest.mark.parametrize("epsilon", (1e-7, 1e-8))
+def test_streaming_ic_summary_matches_stable_canonical_values(
+    epsilon: float,
+) -> None:
+    values = (1.0 - epsilon, 1.0, 1.0 + epsilon)
+    metrics = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-02", periods=3),
+            "signal": ["signal"] * 3,
+            "label": ["label"] * 3,
+            "ic": values,
+            "rankic": values,
+            "n_obs": [2, 2, 2],
+        }
+    )
+    spec = EvaluationSpec(
+        run_id="stable_ic_summary",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    canonical = summarize_period_ic(metrics).iloc[0]
+    state = evaluation_engine._EvaluationStreamingState(
+        spec=spec,
+        n_groups=2,
+    )
+    try:
+        state.consume(
+            metrics,
+            pd.DataFrame(),
+            {
+                "rows_input": 6,
+                "rows_after_filter_mode": 6,
+                "filter_columns_used": ["eligible"],
+                "filter_definition": "eligible == True",
+                "timestamp_count": 3,
+                "min_timestamp": "2024-01-02",
+                "max_timestamp": "2024-01-04",
+                "skipped_timestamp_count": 0,
+            },
+        )
+        streaming = state.ic_summary().iloc[0]
+    finally:
+        state.close()
+
+    for column in ("mean_ic", "std_ic", "mean_rankic", "std_rankic"):
+        assert streaming[column] == pytest.approx(
+            canonical[column],
+            rel=0.0,
+            abs=1e-12,
+        )
+    for column in ("icir", "rankicir"):
+        if pd.isna(canonical[column]):
+            assert pd.isna(streaming[column])
+        else:
+            assert streaming[column] == pytest.approx(
+                canonical[column],
+                rel=1e-9,
+                abs=1e-12,
+            )
+
+
+def test_streaming_group_spread_reducer_avoids_chunk_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    grouped = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
+            ),
+            "signal": ["signal"] * 4,
+            "label": ["label"] * 4,
+            "group": [1, 2, 1, 2],
+            "mean_label_value": [0.1, 0.3, 0.2, 0.1],
+            "n_obs": [2, 2, 2, 2],
+        }
+    )
+    expected = summarize_group_spread(grouped)
+    monkeypatch.setattr(
+        evaluation_engine,
+        "summarize_group_spread",
+        lambda *_args, **_kwargs: pytest.fail(
+            "streaming_group_spread_must_not_materialize_summary_frame"
+        ),
+    )
+    spec = EvaluationSpec(
+        run_id="streaming_group_spread",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    state = evaluation_engine._EvaluationStreamingState(
+        spec=spec,
+        n_groups=2,
+    )
+    try:
+        state.consume(
+            pd.DataFrame(),
+            grouped,
+            {
+                "rows_input": 4,
+                "rows_after_filter_mode": 4,
+                "filter_columns_used": ["eligible"],
+                "filter_definition": "eligible == True",
+                "timestamp_count": 2,
+                "min_timestamp": "2024-01-02",
+                "max_timestamp": "2024-01-03",
+                "skipped_timestamp_count": 0,
+            },
+        )
+        actual = state.group_spread_summary()
+    finally:
+        state.close()
+    pd.testing.assert_frame_equal(actual, expected, check_exact=False)
+
+
 def test_evaluation_diagnostics_reports_fail_closed_on_bad_inputs() -> None:
     with pytest.raises(ValueError, match="missing_evaluation_metric_columns"):
         summarize_signal_label_coverage(pd.DataFrame({"timestamp": ["2024-01-02"]}))
@@ -205,12 +376,13 @@ def test_evaluation_engine_rejects_invalid_filter_metadata_counts(
     }
     metadata[field] = value
 
-    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
-        return frame, metadata
+    @contextmanager
+    def fake_filter_mode_scope(frame: pd.DataFrame, **_: object):
+        yield frame, metadata
 
     monkeypatch.setattr(
-        "quant_research_platform.research.filtering.apply_filter_mode",
-        fake_apply_filter_mode,
+        "quant_research_platform.research.filtering._filter_mode_scope",
+        fake_filter_mode_scope,
     )
 
     with pytest.raises(ValueError, match="invalid_evaluation_diagnostics_count"):
@@ -231,8 +403,9 @@ def test_evaluation_engine_rejects_invalid_filter_metadata_counts(
 def test_evaluation_engine_accepts_valid_filter_metadata_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
-        return frame, {
+    @contextmanager
+    def fake_filter_mode_scope(frame: pd.DataFrame, **_: object):
+        yield frame, {
             "filter_columns_used": ["eligible"],
             "filter_definition": "eligible == True",
             "rows_input": 2,
@@ -240,8 +413,8 @@ def test_evaluation_engine_accepts_valid_filter_metadata_counts(
         }
 
     monkeypatch.setattr(
-        "quant_research_platform.research.filtering.apply_filter_mode",
-        fake_apply_filter_mode,
+        "quant_research_platform.research.filtering._filter_mode_scope",
+        fake_filter_mode_scope,
     )
 
     result = evaluation_engine.evaluate_signal_frame_chunks(

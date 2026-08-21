@@ -21,7 +21,6 @@ from quant_research_platform.workflows.local_verification import run_local_verif
 from tests.helpers import frequency_ids
 from tests.workflows.local_verification_fixtures import (
     empty_processed_inputs,
-    fake_evaluation_result,
     fake_portfolio_result,
     fake_prediction_result,
     make_local_verification_config,
@@ -48,11 +47,6 @@ def test_local_verification_workflow_preserves_dataset_manifests(
         persist_fake_research_root,
     )
     stub_output_writers(monkeypatch)
-    monkeypatch.setattr(
-        module,
-        "build_evaluation_result_from_research_dataset",
-        lambda **kwargs: fake_evaluation_result(kwargs),
-    )
     monkeypatch.setattr(
         module,
         "build_prediction_result_from_research_dataset",
@@ -122,11 +116,6 @@ def test_local_verification_workflow_fails_when_dataset_manifest_is_missing(
     stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
-        "build_evaluation_result_from_research_dataset",
-        lambda **kwargs: fake_evaluation_result(kwargs),
-    )
-    monkeypatch.setattr(
-        module,
         "build_prediction_result_from_research_dataset",
         lambda **kwargs: fake_prediction_result(kwargs),
     )
@@ -179,11 +168,6 @@ def test_local_verification_rejects_persisted_primary_key_null_summary_mismatch(
         persist_fake_research_root,
     )
     stub_output_writers(monkeypatch)
-    monkeypatch.setattr(
-        module,
-        "build_evaluation_result_from_research_dataset",
-        lambda **kwargs: fake_evaluation_result(kwargs),
-    )
     monkeypatch.setattr(
         module,
         "build_prediction_result_from_research_dataset",

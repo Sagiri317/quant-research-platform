@@ -9,7 +9,6 @@ from quant_research_platform.workflows.local_verification import run_local_verif
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.workflows.local_verification_fixtures import (
     GIB,
-    fake_evaluation_result,
     fake_portfolio_result,
     fake_prediction_result,
     make_local_verification_config,
@@ -61,11 +60,11 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
         return real_publish(*args, **kwargs)
 
     monkeypatch.setattr(module, "_publish_staged_run_root", publish)
-    stub_output_writers(monkeypatch)
+    evaluation_writer = stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
-        "build_evaluation_result_from_research_dataset",
-        lambda **kwargs: capture_policy() or fake_evaluation_result(kwargs),
+        "_write_evaluation_outputs_from_research_dataset",
+        lambda **kwargs: capture_policy() or evaluation_writer(**kwargs),
     )
     monkeypatch.setattr(
         module,

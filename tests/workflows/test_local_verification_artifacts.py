@@ -12,7 +12,6 @@ from quant_research_platform.workflows.local_verification_layout import (
 )
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.workflows.local_verification_fixtures import (
-    fake_evaluation_result,
     fake_portfolio_result,
     fake_prediction_result,
     make_local_verification_config,
@@ -74,15 +73,15 @@ def test_local_verification_publishes_completed_run_only_after_summary(
         return artifact_root
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
-    stub_output_writers(monkeypatch)
+    evaluation_writer = stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
-        "build_evaluation_result_from_research_dataset",
+        "_write_evaluation_outputs_from_research_dataset",
         lambda **kwargs: (
             calls.append("evaluation")
             or run_years.append((kwargs["time_window"].start.year,))
             or evaluation_run_ids.append(kwargs["run_id"])
-            or fake_evaluation_result(kwargs)
+            or evaluation_writer(**kwargs)
         ),
     )
     monkeypatch.setattr(
@@ -366,11 +365,11 @@ def test_local_verification_skips_empty_prediction_and_portfolio_catalogs(
         return artifact_root
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
-    stub_output_writers(monkeypatch)
+    evaluation_writer = stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
-        "build_evaluation_result_from_research_dataset",
-        lambda **kwargs: calls.append("evaluation") or fake_evaluation_result(kwargs),
+        "_write_evaluation_outputs_from_research_dataset",
+        lambda **kwargs: calls.append("evaluation") or evaluation_writer(**kwargs),
     )
     monkeypatch.setattr(
         module,

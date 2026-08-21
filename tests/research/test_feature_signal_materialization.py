@@ -112,8 +112,13 @@ def test_feature_transform_admits_before_result_copy(
     )
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            apply_feature_transform(frame, spec)
+        with policy.reserve("test.feature.blocker", policy.memory_budget_bytes):
+            with pytest.raises(
+                MemoryError,
+                match="runtime_memory_budget_exceeded",
+            ):
+                apply_feature_transform(frame, spec)
+    assert policy.used_memory_bytes == 0
 
 
 def test_signal_materialization_normalizes_direction_and_transform() -> None:
@@ -166,8 +171,13 @@ def test_signal_materialization_admits_before_result_copy(
     )
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            normalize_signal_frame(frame, (signal,))
+        with policy.reserve("test.signal.blocker", policy.memory_budget_bytes):
+            with pytest.raises(
+                MemoryError,
+                match="runtime_memory_budget_exceeded",
+            ):
+                normalize_signal_frame(frame, (signal,))
+    assert policy.used_memory_bytes == 0
 
 
 def test_signal_materialization_enforces_source_kind_column_ownership() -> None:

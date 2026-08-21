@@ -20,7 +20,6 @@ from tests.workflows.local_verification_fixtures import (
     SMOKE_PORTFOLIO_FREQUENCY,
     SMOKE_PREDICTION_TEST_START,
     SMOKE_PREDICTION_TRAIN_END,
-    fake_evaluation_result,
     fake_portfolio_result,
     fake_prediction_result,
     make_local_verification_config,
@@ -369,10 +368,10 @@ def test_local_verification_workflow_resolves_independent_windows(
         return persist_fake_research_root(**kwargs)
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
-    stub_output_writers(monkeypatch)
+    evaluation_writer = stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
-        "build_evaluation_result_from_research_dataset",
+        "_write_evaluation_outputs_from_research_dataset",
         lambda **kwargs: (
             calls.append("evaluation")
             or captured_evaluation_windows.append(
@@ -381,7 +380,7 @@ def test_local_verification_workflow_resolves_independent_windows(
                     kwargs["time_window"].end.isoformat(),
                 )
             )
-            or fake_evaluation_result(kwargs)
+            or evaluation_writer(**kwargs)
         ),
     )
     monkeypatch.setattr(
