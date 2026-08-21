@@ -246,14 +246,21 @@ def write_output_edge_portfolio_chunks(
     output_spec: OutputSpec,
     layout: StorageLayout,
 ) -> Path:
-    row_artifacts = output_edge_portfolio_row_artifact_names()
+    row_artifacts = tuple(
+        name
+        for name in output_edge_portfolio_row_artifact_names()
+        if name != "cumulative_returns"
+    )
     return portfolio_outputs._write_portfolio_output_chunks(
         ({artifact_name: artifacts[artifact_name] for artifact_name in row_artifacts},),
         summary_factory=lambda: {
             artifact_name: artifacts[artifact_name]
             for artifact_name in artifacts
-            if artifact_name not in row_artifacts
+            if artifact_name not in (*row_artifacts, "cumulative_returns")
         },
+        cumulative_returns_factory=lambda: iter(
+            (artifacts["cumulative_returns"],)
+        ),
         spec=spec,
         output_spec=output_spec,
         layout=layout,
@@ -266,6 +273,7 @@ def output_edge_portfolio_row_artifact_names() -> tuple[str, ...]:
         "turnover",
         "cost_breakdown",
         "portfolio_returns",
+        "cumulative_returns",
         "diagnostics",
         "capacity_diagnostics",
         "numeric_exposure_diagnostics",

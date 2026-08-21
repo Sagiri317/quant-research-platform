@@ -458,6 +458,8 @@ def _write_portfolio_result(layout: StorageLayout, result) -> Path:
         return write_portfolio_outputs(
             output_chunks=result.output_chunks,
             summary_factory=result.summary_factory,
+            cumulative_returns_factory=result.cumulative_returns_factory,
+            summary_pre_reserved=True,
             spec=result.spec,
             output_spec=OutputSpec(
                 output_id=result.spec.portfolio_id,

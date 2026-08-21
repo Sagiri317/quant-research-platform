@@ -24,12 +24,15 @@ from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
 
 def _write_in_resource_root(writer: Callable[[], Path]) -> Path:
+    if current_runtime_resource_policy() is not None:
+        raise RuntimeError("runtime_resource_policy_competing_root")
     with runtime_resource_policy_scope(None):
         return writer()
 
@@ -86,6 +89,7 @@ def write_portfolio_outputs(
     *,
     output_chunks: Iterable[Mapping[str, pd.DataFrame]],
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
+    cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]],
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
@@ -94,6 +98,7 @@ def write_portfolio_outputs(
         lambda: _write_portfolio_outputs(
             output_chunks=output_chunks,
             summary_factory=summary_factory,
+            cumulative_returns_factory=cumulative_returns_factory,
             spec=spec,
             output_spec=output_spec,
             layout=layout,

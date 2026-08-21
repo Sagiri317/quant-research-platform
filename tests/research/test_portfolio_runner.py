@@ -21,6 +21,13 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.research.portfolios.engine import (
+    compute_cumulative_returns,
+    compute_exposure_summary,
+    compute_performance_summary,
+    summarize_concentration,
+    summarize_period_breakdown,
+)
 from quant_research_platform.research.portfolios.runner import (
     build_portfolio_result_from_research_dataset,
 )
@@ -70,6 +77,217 @@ def test_portfolio_read_columns_include_diagnostics_config_columns() -> None:
         "beta",
         "industry",
     )
+
+
+def test_portfolio_streaming_diagnostics_match_canonical_two_signal_chunks() -> None:
+    timestamps = pd.date_range("2024-01-01", periods=6, freq="D")
+    net_returns = {
+        "a": (0.10, -0.05, 0.05, -0.20, 0.01, 0.01),
+        "b": (0.02, -0.01, 0.03, -0.02, 0.04, -0.01),
+    }
+    return_rows: list[dict[str, object]] = []
+    position_rows: list[dict[str, object]] = []
+    for index, timestamp in enumerate(timestamps):
+        for signal, values in net_returns.items():
+            net = values[index]
+            return_rows.append(
+                {
+                    "timestamp": timestamp,
+                    "signal": signal,
+                    "return_source_column": "label",
+                    "portfolio_mode": "long_short",
+                    "long_return": net,
+                    "short_return": 0.0,
+                    "gross_portfolio_return": net,
+                    "turnover": 1.0,
+                    "cost": 0.0,
+                    "net_portfolio_return": net,
+                    "long_count": 1,
+                    "short_count": 1,
+                }
+            )
+            position_rows.extend(
+                (
+                    {
+                        "timestamp": timestamp,
+                        "asset": f"{signal}-long",
+                        "signal": signal,
+                        "position": 0.6,
+                    },
+                    {
+                        "timestamp": timestamp,
+                        "asset": f"{signal}-short",
+                        "signal": signal,
+                        "position": -0.4,
+                    },
+                )
+            )
+    returns = pd.DataFrame(return_rows)
+    positions = pd.DataFrame(position_rows)
+    chunks = tuple(
+        (
+            returns.loc[returns["timestamp"].isin(timestamps[start : start + 2])]
+            .reset_index(drop=True),
+            positions.loc[
+                positions["timestamp"].isin(timestamps[start : start + 2])
+            ].reset_index(drop=True),
+        )
+        for start in range(0, len(timestamps), 2)
+    )
+
+    expected_cumulative = compute_cumulative_returns(returns)
+    expected = {
+        "cumulative_returns": expected_cumulative,
+        "performance_summary": compute_performance_summary(
+            returns,
+            expected_cumulative,
+        ),
+        "exposure_summary": compute_exposure_summary(positions, returns),
+        "concentration": summarize_concentration(positions),
+        "period_breakdown": summarize_period_breakdown(returns),
+    }
+
+    summary_state = portfolio_runner._PortfolioSummaryState()
+    for return_chunk, position_chunk in chunks:
+        portfolio_runner._update_portfolio_summary_state(
+            summary_state,
+            positions=position_chunk,
+            portfolio_returns=return_chunk,
+        )
+    summary_state.returns_complete = True
+    actual_cumulative = pd.concat(
+        list(portfolio_runner._iter_portfolio_cumulative_chunks(summary_state)),
+        ignore_index=True,
+    )
+    try:
+        actual = {
+            "cumulative_returns": actual_cumulative,
+            **portfolio_runner._portfolio_summary_outputs(summary_state),
+        }
+
+        mismatches: list[str] = []
+        for name, expected_frame in expected.items():
+            try:
+                pd.testing.assert_frame_equal(
+                    actual[name].reset_index(drop=True),
+                    expected_frame.reset_index(drop=True),
+                    check_dtype=False,
+                    check_exact=False,
+                    rtol=0.0,
+                    atol=1e-12,
+                )
+            except AssertionError as exc:
+                mismatches.append(f"{name}: {exc}")
+        assert not mismatches, "\n\n".join(mismatches)
+    finally:
+        portfolio_runner._close_portfolio_summary_state(summary_state)
+
+
+def test_portfolio_summary_admits_before_frame_build_and_holds_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024 * 1024,
+        explicit_cap_bytes=512 * 1024,
+    )
+    summary_state = portfolio_runner._PortfolioSummaryState(
+        resource_policy=policy,
+        position_stats={"signal": {}},
+    )
+    observed_used: list[int] = []
+
+    def build_summary(_state) -> pd.DataFrame:  # noqa: ANN001
+        observed_used.append(policy.used_memory_bytes)
+        return pd.DataFrame({"value": [1]})
+
+    for name in (
+        "_portfolio_performance_summary",
+        "_portfolio_exposure_summary",
+        "_portfolio_concentration_summary",
+        "_portfolio_period_breakdown",
+    ):
+        monkeypatch.setattr(portfolio_runner, name, build_summary)
+
+    with runtime_resource_policy_scope(policy):
+        outputs = portfolio_runner._portfolio_summary_outputs(summary_state)
+        assert outputs
+        assert observed_used
+        assert observed_used[0] == policy.used_memory_bytes
+        assert policy.used_memory_bytes > 0
+        portfolio_runner._close_portfolio_summary_state(summary_state)
+        assert policy.used_memory_bytes == 0
+
+
+def test_portfolio_summary_insufficient_headroom_fails_before_build_and_reopens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024 * 1024,
+        explicit_cap_bytes=32 * 1024,
+    )
+    summary_state = portfolio_runner._PortfolioSummaryState(
+        resource_policy=policy,
+        position_stats={"signal": {}},
+    )
+    built = False
+
+    def fail_if_built(_state) -> pd.DataFrame:  # noqa: ANN001
+        nonlocal built
+        built = True
+        return pd.DataFrame({"value": [1]})
+
+    monkeypatch.setattr(
+        portfolio_runner,
+        "_portfolio_performance_summary",
+        fail_if_built,
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            portfolio_runner._portfolio_summary_outputs(summary_state)
+        assert not built
+        assert policy.used_memory_bytes == 0
+
+    reopened = capture_test_policy(available_memory_bytes=4 * 1024 * 1024)
+    with runtime_resource_policy_scope(reopened):
+        assert portfolio_runner.current_runtime_resource_policy() is reopened
+
+
+def test_portfolio_state_admission_precedes_source_pull_and_reopens(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout, dataset_catalog, portfolio_catalog, prediction, manifest, _root = (
+        _prediction_portfolio_inputs(tmp_path)
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024,
+    )
+    source_pulls: list[bool] = []
+
+    def source_chunks(**_kwargs):  # noqa: ANN003
+        source_pulls.append(True)
+        return iter(())
+
+    monkeypatch.setattr(portfolio_runner, "_portfolio_input_chunks", source_chunks)
+    with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+        build_portfolio_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            portfolio_catalog=portfolio_catalog,
+            portfolio_id="demo_prediction_portfolio",
+            time_window=TimeWindow("2024-01-01", "2024-01-02"),
+            prediction_frame=prediction,
+            prediction_metadata=manifest["metadata"],
+            resource_policy=policy,
+        )
+
+    assert source_pulls == []
+    assert policy.used_memory_bytes == 0
+    assert portfolio_runner.current_runtime_resource_policy() is None
+    reopened = capture_test_policy(available_memory_bytes=4 * 1024 * 1024)
+    with runtime_resource_policy_scope(reopened):
+        assert portfolio_runner.current_runtime_resource_policy() is reopened
 
 
 def test_portfolio_runner_accepts_equivalent_timezone_representations() -> None:
@@ -160,7 +378,7 @@ def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_g
     result.close()
 
 
-def test_portfolio_prediction_join_keeps_its_creation_policy(
+def test_portfolio_prediction_join_preflights_index_allocation(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -173,19 +391,6 @@ def test_portfolio_prediction_join_keeps_its_creation_policy(
     )
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(
-            RuntimeError,
-            match="runtime_resource_policy_competing_root",
-        ):
-            build_portfolio_result_from_research_dataset(
-                layout=layout,
-                dataset_catalog=dataset_catalog,
-                portfolio_catalog=portfolio_catalog,
-                portfolio_id="demo_prediction_portfolio",
-                time_window=TimeWindow("2024-01-01", "2024-01-02"),
-                prediction_frame=prediction,
-                prediction_metadata=manifest["metadata"],
-            )
         result = build_portfolio_result_from_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
@@ -311,6 +516,11 @@ def test_portfolio_runner_rejects_invalid_persisted_prediction_coverage(
             prediction_metadata=manifest["metadata"],
         )
         list(result.output_chunks)
+
+    assert portfolio_runner.current_runtime_resource_policy() is None
+    reopened = capture_test_policy(available_memory_bytes=64 * 1024 * 1024)
+    with runtime_resource_policy_scope(reopened):
+        assert portfolio_runner.current_runtime_resource_policy() is reopened
 
 
 def test_persisted_prediction_portfolio_uses_bounded_disk_lookup(

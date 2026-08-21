@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 from pathlib import Path
 
 import pandas as pd
@@ -34,7 +35,6 @@ from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
 )
 from quant_research_platform.storage._dataset_physical import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
@@ -45,11 +45,15 @@ from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 
+_PORTFOLIO_SUMMARY_FIXED_WORKING_BYTES = 64 * 1024
+
 
 def write_portfolio_outputs(
     *,
     output_chunks: Iterable[Mapping[str, pd.DataFrame]],
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
+    cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]] | None = None,
+    summary_pre_reserved: bool = False,
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
@@ -59,6 +63,8 @@ def write_portfolio_outputs(
     return _write_portfolio_output_chunks(
         output_chunks,
         summary_factory=summary_factory,
+        cumulative_returns_factory=cumulative_returns_factory,
+        summary_pre_reserved=summary_pre_reserved,
         spec=spec,
         output_spec=output_spec,
         layout=layout,
@@ -69,11 +75,16 @@ def _write_portfolio_output_chunks(
     output_chunks: Iterable[Mapping[str, pd.DataFrame]],
     *,
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
+    cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]] | None = None,
+    summary_pre_reserved: bool = False,
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
 ) -> Path:
     """Write local portfolio row outputs from bounded chunks."""
+
+    if cumulative_returns_factory is None:
+        raise ValueError("portfolio_cumulative_returns_factory_required")
 
     output_bundle = derive_output_bundle_root(
         output_spec=output_spec,
@@ -92,7 +103,9 @@ def _write_portfolio_output_chunks(
         "categorical_exposure_diagnostics",
     )
     summary_names = tuple(
-        name for name in PORTFOLIO_ARTIFACTS if name not in row_artifacts
+        name
+        for name in PORTFOLIO_ARTIFACTS
+        if name not in (*row_artifacts, "cumulative_returns")
     )
 
     def _write(temp_root: Path) -> None:
@@ -102,22 +115,22 @@ def _write_portfolio_output_chunks(
             row_artifacts=row_artifacts,
             required_columns=required_columns,
             spec=spec,
-        )
-        summary_outputs = summary_factory()
-        summary_outputs = validate_portfolio_artifact_mapping_keys(
-            summary_outputs,
-            expected_names=summary_names,
-            error="portfolio_summary_artifacts_invalid",
+            cumulative_returns_factory=cumulative_returns_factory,
         )
         policy = current_runtime_resource_policy()
-        summary_bytes = sum(
-            pandas_frame_payload_bytes(summary_outputs[name]) for name in summary_names
-        )
-        with (
-            policy.reserve("artifacts.portfolio.summaries", summary_bytes)
-            if policy is not None
-            else nullcontext()
-        ):
+        summary_lease = None
+        try:
+            if policy is not None and not summary_pre_reserved:
+                summary_lease = policy.lease(
+                    "artifacts.portfolio.summaries",
+                    _PORTFOLIO_SUMMARY_FIXED_WORKING_BYTES,
+                )
+            summary_outputs = summary_factory()
+            summary_outputs = validate_portfolio_artifact_mapping_keys(
+                summary_outputs,
+                expected_names=summary_names,
+                error="portfolio_summary_artifacts_invalid",
+            )
             for artifact_name in summary_names:
                 validate_output_frame(
                     summary_outputs[artifact_name],
@@ -132,11 +145,24 @@ def _write_portfolio_output_chunks(
                 write_parquet(
                     summary_outputs[artifact_name],
                     temp_root / PORTFOLIO_ARTIFACTS[artifact_name],
+                    pre_reserved=True,
                     engine="pyarrow",
                     compression="zstd",
                     index=False,
                 )
                 row_counts[artifact_name] = len(summary_outputs[artifact_name])
+        finally:
+            if summary_lease is not None:
+                primary = sys.exception()
+                try:
+                    summary_lease.close()
+                except BaseException as cleanup_error:
+                    if primary is None:
+                        raise
+                    primary.add_note(
+                        "portfolio summary lease close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
         write_manifest(
             temp_root / "manifest.json",
             output_manifest_payload(
@@ -160,13 +186,20 @@ def _write_portfolio_row_artifact_chunks(
     row_artifacts: tuple[str, ...],
     required_columns: Mapping[str, tuple[str, ...]],
     spec: PortfolioSpec,
+    cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]] | None = None,
 ) -> dict[str, int]:
+    all_row_artifacts = (
+        row_artifacts
+        if cumulative_returns_factory is None
+        or "cumulative_returns" in row_artifacts
+        else (*row_artifacts, "cumulative_returns")
+    )
     writers: dict[str, pq.ParquetWriter] = {}
     writer_states: dict[str, ExitStack] = {}
     writer_memory = (
         {
             artifact_name: (_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES, 0)
-            for artifact_name in row_artifacts
+            for artifact_name in all_row_artifacts
         }
         if current_runtime_resource_policy() is not None
         else {}
@@ -174,13 +207,76 @@ def _write_portfolio_row_artifact_chunks(
     decoded_metadata: dict[str, dict[bytes, bytes]] = {}
     temp_paths = {
         artifact_name: temp_root / PORTFOLIO_ARTIFACTS[artifact_name]
-        for artifact_name in row_artifacts
+        for artifact_name in all_row_artifacts
     }
     row_counts = {artifact_name: 0 for artifact_name in PORTFOLIO_ARTIFACTS}
     fixed_state = _artifact_writer_fixed_reservation(
-        writer_count=len(row_artifacts),
+        writer_count=len(all_row_artifacts),
         index_bytes=0,
     )
+
+    def write_frame(
+        artifact_name: str,
+        frame: pd.DataFrame,
+    ) -> None:
+        frame_scope = _artifact_frame_reservation(
+            frame,
+            payload_already_reserved=True,
+        )
+        with frame_scope:
+            selected = _portfolio_output_chunk_frame(
+                frame,
+                artifact_name=artifact_name,
+                required=required_columns[artifact_name],
+                spec=spec,
+            )
+            if selected.empty:
+                return
+            table = pa.Table.from_pandas(selected, preserve_index=False)
+            (
+                persisted,
+                table_state,
+                batch_rows,
+                next_writer_memory,
+            ) = _artifact_table_write_state(
+                table,
+                previous_metadata=decoded_metadata.get(artifact_name),
+                retained_memory=writer_memory.get(artifact_name, (0, 0)),
+            )
+            writer_memory[artifact_name] = next_writer_memory
+            writer_state = writer_states.setdefault(
+                artifact_name,
+                ExitStack(),
+            )
+            writer_state.enter_context(table_state)
+            decoded_metadata[artifact_name] = dict(
+                persisted.schema.metadata or {}
+            )
+            writer = writers.get(artifact_name)
+            if writer is None:
+                try:
+                    writer = pq.ParquetWriter(
+                        temp_paths[artifact_name],
+                        persisted.schema,
+                        compression="zstd",
+                        write_batch_size=batch_rows,
+                        max_rows_per_page=batch_rows,
+                        use_dictionary=False,
+                        write_statistics=False,
+                        write_page_index=False,
+                        write_page_checksum=False,
+                    )
+                except BaseException:
+                    writer_states.pop(artifact_name).close()
+                    writer_memory.pop(artifact_name)
+                    raise
+                writers[artifact_name] = writer
+            writer.write_table(
+                persisted,
+                row_group_size=_parquet_row_group_size(persisted.num_rows),
+            )
+            row_counts[artifact_name] += len(selected)
+
     try:
         with closing_dataset_iterator(iter(artifact_chunks)) as active_chunks:
             for artifact_chunk in active_chunks:
@@ -190,68 +286,20 @@ def _write_portfolio_row_artifact_chunks(
                     error="portfolio_row_artifacts_invalid",
                 )
                 for artifact_name in row_artifacts:
-                    frame = artifact_chunk[artifact_name]
-                    with _artifact_frame_reservation(frame):
-                        selected = _portfolio_output_chunk_frame(
-                            frame,
-                            artifact_name=artifact_name,
-                            required=required_columns[artifact_name],
-                            spec=spec,
-                        )
-                        if selected.empty:
-                            continue
-                        table = pa.Table.from_pandas(selected, preserve_index=False)
-                        (
-                            persisted,
-                            table_state,
-                            batch_rows,
-                            next_writer_memory,
-                        ) = (
-                            _artifact_table_write_state(
-                                table,
-                                previous_metadata=decoded_metadata.get(artifact_name),
-                                retained_memory=writer_memory.get(
-                                    artifact_name,
-                                    (0, 0),
-                                ),
-                            )
-                        )
-                        writer_memory[artifact_name] = next_writer_memory
-                        writer_state = writer_states.setdefault(
-                            artifact_name,
-                            ExitStack(),
-                        )
-                        writer_state.enter_context(table_state)
-                        decoded_metadata[artifact_name] = dict(
-                            persisted.schema.metadata or {}
-                        )
-                        writer = writers.get(artifact_name)
-                        if writer is None:
-                            try:
-                                writer = pq.ParquetWriter(
-                                    temp_paths[artifact_name],
-                                    persisted.schema,
-                                    compression="zstd",
-                                    write_batch_size=batch_rows,
-                                    max_rows_per_page=batch_rows,
-                                    use_dictionary=False,
-                                    write_statistics=False,
-                                    write_page_index=False,
-                                    write_page_checksum=False,
-                                )
-                            except BaseException:
-                                writer_states.pop(artifact_name).close()
-                                writer_memory.pop(artifact_name)
-                                raise
-                            writers[artifact_name] = writer
-                        writer.write_table(
-                            persisted,
-                            row_group_size=_parquet_row_group_size(
-                                persisted.num_rows
-                            ),
-                        )
-                        row_counts[artifact_name] += len(selected)
-            for artifact_name in tuple(writers):
+                    write_frame(artifact_name, artifact_chunk[artifact_name])
+        if (
+            cumulative_returns_factory is not None
+            and "cumulative_returns" not in row_artifacts
+        ):
+            with closing_dataset_iterator(
+                iter(cumulative_returns_factory())
+            ) as cumulative_chunks:
+                for frame in cumulative_chunks:
+                    write_frame(
+                        "cumulative_returns",
+                        frame,
+                    )
+        for artifact_name in tuple(writers):
                 writer = writers[artifact_name]
                 writer.add_key_value_metadata(decoded_metadata[artifact_name])
                 active_writer = writers.pop(artifact_name)
@@ -270,7 +318,7 @@ def _write_portfolio_row_artifact_chunks(
         raise
     finally:
         fixed_state.close()
-    for artifact_name in row_artifacts:
+    for artifact_name in all_row_artifacts:
         if row_counts[artifact_name] == 0:
             write_parquet(
                 pd.DataFrame(columns=list(required_columns[artifact_name])),

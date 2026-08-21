@@ -68,6 +68,7 @@ from quant_research_platform.research.predictions.runner import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     _OwnedValue,
+    current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage import atomic as storage_atomic
@@ -360,8 +361,8 @@ def test_research_join_bound_admission_precedes_join_pull(
     )
     monkeypatch.setattr(
         assembler_module,
-        "_research_chunk_windows",
-        lambda *_args, **_kwargs: (object(),),
+        "_iter_research_chunk_windows_from_base_input",
+        lambda *_args, **_kwargs: iter((object(),)),
     )
     monkeypatch.setattr(
         assembler_module,
@@ -400,7 +401,7 @@ def test_research_join_bound_admission_precedes_join_pull(
             blocker.close()
 
 
-def test_research_time_key_scan_uses_payload_target(
+def test_research_time_window_driver_uses_one_window_per_physical_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed_targets: list[int] = []
@@ -428,20 +429,26 @@ def test_research_time_key_scan_uses_payload_target(
     )
 
     with runtime_resource_policy_scope(policy):
-        result = assembler_module._time_keys_from_base_input(
+        result = list(
+            assembler_module._iter_research_chunk_windows_from_base_input(
             session,
-            primary_key=platform_entity_time_key(),
             time_window=TimeWindow(
                 "2026-01-01T00:00:00",
                 "2026-01-01T00:19:00",
             ),
+            )
         )
 
-    assert len(result) == 20
+    assert result == [
+        TimeWindow(
+            "2026-01-01T00:00:00",
+            "2026-01-01T00:19:00",
+        )
+    ]
     assert observed_targets == [policy.available_memory_bytes]
 
 
-def test_research_time_key_scan_preserves_single_timestamp(
+def test_research_time_window_driver_preserves_single_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
@@ -464,17 +471,126 @@ def test_research_time_key_scan_preserves_single_timestamp(
     )
 
     with runtime_resource_policy_scope(policy):
-        assert assembler_module._time_keys_from_base_input(
-            session,
-            primary_key=platform_entity_time_key(),
-            time_window=TimeWindow(
-                "2026-01-01T00:00:00",
-                "2026-01-01T00:00:00",
-            ),
-        ) == (pd.Timestamp("2026-01-01"),)
+        assert list(
+            assembler_module._iter_research_chunk_windows_from_base_input(
+                session,
+                time_window=TimeWindow(
+                    "2026-01-01T00:00:00",
+                    "2026-01-01T00:00:00",
+                ),
+            )
+        ) == [TimeWindow("2026-01-01T00:00:00", "2026-01-01T00:00:00")]
 
 
-def test_research_time_key_scan_closes_iterator_before_view_cleanup(
+def test_research_time_window_driver_normalizes_and_deduplicates_dates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=128 * 1024)
+    session = SimpleNamespace(path_selection=None, close=lambda: None)
+    monkeypatch.setattr(
+        assembler_module,
+        "_research_session_view",
+        lambda current, **_kwargs: current,
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter(
+            (
+                pd.DataFrame(
+                    {
+                        "timestamp": [
+                            pd.Timestamp("2026-01-02 15:00"),
+                            pd.Timestamp("2026-01-01 09:00"),
+                        ]
+                    }
+                ),
+                pd.DataFrame(
+                    {
+                        "timestamp": [
+                            pd.Timestamp("2026-01-02 09:00"),
+                            pd.Timestamp("2026-01-03 09:00"),
+                        ]
+                    }
+                ),
+            )
+        ),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        result = list(
+            assembler_module._iter_research_chunk_windows_from_base_input(
+                session,
+                time_window=TimeWindow("2026-01-01", "2026-01-02"),
+            )
+        )
+
+    assert result == [
+        TimeWindow("2026-01-01", "2026-01-02"),
+        TimeWindow("2026-01-03", "2026-01-03"),
+    ]
+
+
+def test_research_time_window_driver_rejects_empty_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=128 * 1024)
+    session = SimpleNamespace(path_selection=None, close=lambda: None)
+    monkeypatch.setattr(
+        assembler_module,
+        "_research_session_view",
+        lambda current, **_kwargs: current,
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter(
+            (pd.DataFrame({"timestamp": pd.Series(dtype="datetime64[ns]")}),)
+        ),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="no_research_dataset_sessions"):
+            list(
+                assembler_module._iter_research_chunk_windows_from_base_input(
+                    session,
+                    time_window=TimeWindow("2026-01-01", "2026-01-01"),
+                )
+            )
+
+
+def test_research_time_window_driver_rejects_non_monotonic_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=128 * 1024)
+    session = SimpleNamespace(path_selection=None, close=lambda: None)
+    monkeypatch.setattr(
+        assembler_module,
+        "_research_session_view",
+        lambda current, **_kwargs: current,
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "iter_dataset_chunks",
+        lambda *_args, **_kwargs: iter(
+            (
+                pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-02")] }),
+                pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")] }),
+            )
+        ),
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="non_monotonic_research_time_keys"):
+            list(
+                assembler_module._iter_research_chunk_windows_from_base_input(
+                    session,
+                    time_window=TimeWindow("2026-01-01", "2026-01-02"),
+                )
+            )
+
+
+def test_research_time_window_driver_closes_iterator_before_view_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -518,15 +634,16 @@ def test_research_time_key_scan_closes_iterator_before_view_cleanup(
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(KeyError, match="timestamp"):
-            assembler_module._time_keys_from_base_input(
-                base_session,
-                primary_key=platform_entity_time_key(),
-                time_window=TimeWindow("2026-01-01", "2026-01-01"),
+            list(
+                assembler_module._iter_research_chunk_windows_from_base_input(
+                    base_session,
+                    time_window=TimeWindow("2026-01-01", "2026-01-01"),
+                )
             )
     assert events == ["iterator_close", "selection_release", "view_close"]
 
 
-@pytest.mark.parametrize("site", ("time_keys", "materialize", "view_construction"))
+@pytest.mark.parametrize("site", ("time_windows", "materialize", "view_construction"))
 @pytest.mark.parametrize(
     "primary_type",
     (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit),
@@ -561,7 +678,7 @@ def test_research_view_cleanup_preserves_active_primary(
         close=lambda: (_ for _ in ()).throw(OSError("close_secondary")),
     )
 
-    if site == "time_keys":
+    if site == "time_windows":
 
         def chunks():
             raise primary
@@ -579,10 +696,11 @@ def test_research_view_cleanup_preserves_active_primary(
         )
 
         def invoke() -> object:
-            return assembler_module._time_keys_from_base_input(
-                base,
-                primary_key=("timestamp",),
-                time_window=window,
+            return list(
+                assembler_module._iter_research_chunk_windows_from_base_input(
+                    base,
+                    time_window=window,
+                )
             )
     elif site == "materialize":
         session = SimpleNamespace(
@@ -792,16 +910,8 @@ def test_research_join_clears_transient_chunk_before_next_bound(
     )
     monkeypatch.setattr(
         assembler_module,
-        "_time_keys_from_base_input",
-        lambda *_args, **_kwargs: (
-            pd.Timestamp("2024-01-01"),
-            pd.Timestamp("2024-01-02"),
-        ),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_research_chunk_windows",
-        lambda *_args, **_kwargs: (object(), object()),
+        "_iter_research_chunk_windows_from_base_input",
+        lambda *_args, **_kwargs: iter((object(), object())),
     )
     monkeypatch.setattr(
         assembler_module,
@@ -1266,6 +1376,10 @@ def test_research_assembly_rejects_dependency_replacement_after_identity_capture
     assert replaced
     assert len(opened_roots) == len(processed_catalog.list())
     assert len(opened_roots) == len(set(opened_roots))
+
+    reopened_policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
+    with runtime_resource_policy_scope(reopened_policy):
+        assert current_runtime_resource_policy() is reopened_policy
 
 
 def test_research_assembly_verifies_every_input_inside_staged_boundary(
@@ -1914,12 +2028,10 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
             output_bundle = _write_prediction_result(layout, result)
 
     assert (output_bundle / "prediction.parquet").is_file()
-    assert len([rows for rows in read_chunk_rows if rows]) > 1
-    assert max(read_chunk_rows) < len(frame)
+    assert read_chunk_rows == [len(frame), len(frame)]
     assert fit_chunk_rows
     assert max(fit_chunk_rows) < len(frame)
-    assert len(prediction_chunk_rows) > 1
-    assert max(prediction_chunk_rows) < len(frame)
+    assert prediction_chunk_rows == [len(frame)]
     assert any("forward_return_20d" in columns for columns in read_columns_seen)
     assert any("forward_return_20d" not in columns for columns in read_columns_seen)
 
@@ -2045,5 +2157,4 @@ def test_evaluation_runner_streams_research_chunks(
     output_bundle = _write_evaluation_result(layout, result)
 
     assert (output_bundle / "metrics.parquet").is_file()
-    assert len([rows for rows in read_chunk_rows if rows]) > 1
-    assert max(read_chunk_rows) < len(frame)
+    assert read_chunk_rows == [len(frame)]

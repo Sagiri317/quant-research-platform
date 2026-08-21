@@ -277,6 +277,8 @@ def _prediction_output_chunk_frame(
 def write_parquet(
     frame: pd.DataFrame,
     path: Path,
+    *,
+    pre_reserved: bool = False,
     **kwargs: object,
 ) -> Path:
     final_path = Path(path)
@@ -297,7 +299,10 @@ def write_parquet(
     require_unaliased_path(temp_path, error="invalid_output_write_path")
     claimed_temp: os.stat_result | None = None
     try:
-        with _artifact_frame_reservation(frame):
+        with _artifact_frame_reservation(
+            frame,
+            payload_already_reserved=pre_reserved,
+        ):
             handle, claimed_temp = scratch_owner.open_owned_scratch_file(temp_path)
             with scratch_owner.handle_preserving_primary(handle):
                 require_owned_scratch(final_path.parent, parent_identity)
@@ -360,6 +365,9 @@ def _artifact_writer_fixed_reservation(
                 + writer_count * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
             )
         )
+        if policy.available_memory_bytes <= 0:
+            stack.close()
+            raise MemoryError("runtime_memory_budget_exceeded")
     return stack
 
 
@@ -367,17 +375,19 @@ def _artifact_frame_reservation(
     frame: pd.DataFrame | None,
     *,
     key_columns: tuple[str, ...] = (),
+    payload_already_reserved: bool = False,
 ) -> ExitStack:
     stack = ExitStack()
     policy = current_runtime_resource_policy()
     if policy is not None:
-        frame_bytes = 0 if frame is None else pandas_frame_payload_bytes(frame)
+        payload_bytes = 0 if frame is None else pandas_frame_payload_bytes(frame)
+        input_charge = 0 if payload_already_reserved else payload_bytes
         row_count = 0 if frame is None else len(frame)
         column_count = 0 if frame is None else len(frame.columns)
         index_bytes = (
             0 if frame is None else int(frame.index.memory_usage(deep=True))
         )
-        arrow_bytes = frame_bytes + row_count * 9 * column_count
+        arrow_bytes = payload_bytes + row_count * 9 * column_count
         timestamp_bytes = (
             index_bytes + 9 * row_count if "timestamp" in key_columns else 0
         )
@@ -385,7 +395,7 @@ def _artifact_frame_reservation(
         stack.enter_context(
             policy.reserve(
                 "artifacts.parquet.frame",
-                frame_bytes + arrow_bytes + timestamp_bytes + key_mask_bytes,
+                input_charge + arrow_bytes + timestamp_bytes + key_mask_bytes,
             )
         )
     return stack

@@ -16,6 +16,9 @@ from quant_research_platform.artifacts._output_manifest import (
 from quant_research_platform.artifacts._portfolio_output_validation import (
     validate_portfolio_artifact_membership_columns,
 )
+from quant_research_platform.artifacts.outputs import (
+    write_portfolio_outputs as public_write_portfolio_outputs,
+)
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.layout import StorageLayout
 from tests.artifacts.output_edge_fixtures import (
@@ -81,6 +84,128 @@ def test_portfolio_outputs_write_manifest_and_local_scope(
     ]
 
 
+def test_public_portfolio_writer_forwards_cumulative_factory(
+    tmp_path: Path,
+) -> None:
+    spec = make_output_edge_portfolio_spec()
+    artifacts = make_output_edge_portfolio_artifacts()
+    row_artifacts = tuple(
+        name
+        for name in output_edge_portfolio_row_artifact_names()
+        if name != "cumulative_returns"
+    )
+    output_bundle = public_write_portfolio_outputs(
+        output_chunks=(
+            {name: artifacts[name] for name in row_artifacts},
+        ),
+        summary_factory=lambda: {
+            name: artifacts[name]
+            for name in artifacts
+            if name not in (*row_artifacts, "cumulative_returns")
+        },
+        cumulative_returns_factory=lambda: iter(
+            (artifacts["cumulative_returns"],)
+        ),
+        spec=spec,
+        output_spec=make_output_edge_report_spec(
+            "portfolio_outputs", spec.portfolio_id, "portfolio"
+        ),
+        layout=StorageLayout(project_root=tmp_path),
+    )
+
+    persisted = pd.read_parquet(output_bundle / "cumulative_returns.parquet")
+    pd.testing.assert_frame_equal(
+        persisted,
+        artifacts["cumulative_returns"],
+        check_dtype=False,
+    )
+
+
+def test_portfolio_aggregate_rows_exceed_budget_without_full_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    spec = make_output_edge_portfolio_spec()
+    artifacts = make_output_edge_portfolio_artifacts()
+    row_artifacts = tuple(
+        name
+        for name in output_edge_portfolio_row_artifact_names()
+        if name != "cumulative_returns"
+    )
+    monkeypatch.setattr(parquet_writers, "_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES", 1)
+    monkeypatch.setattr(portfolio_outputs, "_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES", 1)
+    monkeypatch.setattr(
+        portfolio_outputs,
+        "_PORTFOLIO_SUMMARY_FIXED_WORKING_BYTES",
+        1,
+    )
+    monkeypatch.setattr(
+        parquet_writers,
+        "_table_parquet_page_working_set_bytes",
+        lambda _table, *, rows: 1,
+    )
+    monkeypatch.setattr(
+        parquet_writers,
+        "_parquet_row_group_footer_upper_bound",
+        lambda _schema, *, rows: 0,
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024,
+        explicit_cap_bytes=64 * 1024,
+    )
+
+    def row_chunks():
+        for _ in range(256):
+            yield {name: artifacts[name] for name in row_artifacts}
+
+    def cumulative_chunks():
+        for _ in range(256):
+            yield artifacts["cumulative_returns"]
+
+    with runtime_resource_policy_scope(policy):
+        output_bundle = portfolio_outputs._write_portfolio_output_chunks(
+            row_chunks(),
+            summary_factory=lambda: {
+                name: artifacts[name]
+                for name in artifacts
+                if name not in (*row_artifacts, "cumulative_returns")
+            },
+            cumulative_returns_factory=cumulative_chunks,
+            spec=spec,
+            output_spec=make_output_edge_report_spec(
+                "portfolio_outputs", spec.portfolio_id, "portfolio"
+            ),
+            layout=StorageLayout(project_root=tmp_path),
+        )
+        assert policy.used_memory_bytes == 0
+
+    cumulative_path = output_bundle / "cumulative_returns.parquet"
+    persisted_cumulative = pd.read_parquet(cumulative_path)
+    expected_cumulative = pd.concat(
+        [artifacts["cumulative_returns"]] * 256,
+        ignore_index=True,
+    )
+    pd.testing.assert_frame_equal(
+        persisted_cumulative,
+        expected_cumulative,
+        check_dtype=False,
+    )
+    manifest = json.loads((output_bundle / "manifest.json").read_text())
+    row_counts = manifest["metadata"]["row_counts"]
+    for artifact_name in validation.PORTFOLIO_ARTIFACTS:
+        expected_count = len(artifacts[artifact_name])
+        if artifact_name in row_artifacts or artifact_name == "cumulative_returns":
+            expected_count *= 256
+        assert row_counts[artifact_name] == expected_count
+    persisted_bytes = sum(
+        path.stat().st_size
+        for path in output_bundle.iterdir()
+        if path.suffix == ".parquet"
+    )
+    assert persisted_bytes > policy.memory_budget_bytes
+    assert policy.used_memory_bytes == 0
+
+
 def test_portfolio_outputs_write_row_artifacts_from_chunks(
     tmp_path: Path,
 ) -> None:
@@ -111,8 +236,11 @@ def test_portfolio_outputs_write_row_artifacts_from_chunks(
         summary_factory=lambda: {
             artifact_name: artifacts[artifact_name]
             for artifact_name in artifacts
-            if artifact_name not in row_artifacts
+            if artifact_name not in (*row_artifacts, "cumulative_returns")
         },
+        cumulative_returns_factory=lambda: iter(
+            (artifacts["cumulative_returns"],)
+        ),
         spec=spec,
         output_spec=make_output_edge_report_spec(
             "portfolio_outputs",
@@ -172,7 +300,7 @@ def test_portfolio_row_writer_fixed_reservation_covers_close_without_double_char
     fixed_one = parquet_writers._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
     fixed_bytes = len(row_artifacts) * fixed_one
     policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
+        available_memory_bytes=128 * 1024**2,
         explicit_cap_bytes=fixed_bytes + 2 * 64 * 1024,
     )
     frame = pd.DataFrame({"value": [1.0]})
@@ -247,7 +375,7 @@ def test_portfolio_row_writer_fixed_reservation_covers_close_without_double_char
         fixed_bytes + remaining for remaining in range(len(row_artifacts), 0, -1)
     ]
     assert close_reservations == metadata_reservations
-    assert input_close_reservations == [fixed_bytes]
+    assert input_close_reservations == [fixed_bytes + len(row_artifacts)]
 
 
 def test_portfolio_outputs_reject_bad_frames(tmp_path: Path) -> None:
@@ -440,10 +568,16 @@ def test_portfolio_outputs_reject_exact_mapping_mutations_and_clean_scratch(
 ) -> None:
     spec = make_output_edge_portfolio_spec()
     artifacts = make_output_edge_portfolio_artifacts()
-    row_names = output_edge_portfolio_row_artifact_names()
+    row_names = tuple(
+        name
+        for name in output_edge_portfolio_row_artifact_names()
+        if name != "cumulative_returns"
+    )
     row_mapping = {name: artifacts[name] for name in row_names}
     summary_mapping = {
-        name: artifacts[name] for name in artifacts if name not in row_names
+        name: artifacts[name]
+        for name in artifacts
+        if name not in (*row_names, "cumulative_returns")
     }
     target = row_mapping if mapping_name == "rows" else summary_mapping
     if mutation == "missing":
@@ -459,6 +593,9 @@ def test_portfolio_outputs_reject_exact_mapping_mutations_and_clean_scratch(
         portfolio_outputs._write_portfolio_output_chunks(
             (row_mapping,),
             summary_factory=lambda: summary_mapping,
+            cumulative_returns_factory=lambda: iter(
+                (artifacts["cumulative_returns"],)
+            ),
             spec=spec,
             output_spec=make_output_edge_report_spec(
                 "portfolio_outputs", spec.portfolio_id, "portfolio"

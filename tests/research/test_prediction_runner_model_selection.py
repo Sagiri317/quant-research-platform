@@ -144,17 +144,17 @@ def test_prediction_runner_preloads_selected_models_before_root_capture(
         lambda specs: events.extend(spec.model_id for spec in specs),
     )
 
-    def reject_capture(cls, **_kwargs):  # noqa: ANN001
+    def reject_operation_scope(_policy):  # noqa: ANN001
         assert events == ["base_model"]
-        raise RuntimeError("capture_after_model_preload")
+        raise RuntimeError("operation_scope_after_model_preload")
 
     monkeypatch.setattr(
-        prediction_runner.RuntimeResourcePolicy,
-        "capture",
-        classmethod(reject_capture),
+        prediction_runner,
+        "runtime_resource_policy_scope",
+        reject_operation_scope,
     )
 
-    with pytest.raises(RuntimeError, match="capture_after_model_preload"):
+    with pytest.raises(RuntimeError, match="operation_scope_after_model_preload"):
         build_prediction_result_from_research_dataset(
             layout=StorageLayout(project_root=tmp_path),
             dataset_catalog=ResearchDatasetCatalog(),

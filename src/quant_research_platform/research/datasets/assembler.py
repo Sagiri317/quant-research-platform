@@ -17,9 +17,6 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow, is_intraday_time_window
-from quant_research_platform.markets.session_windows import (
-    SessionWindowPlanner,
-)
 from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
 )
@@ -161,57 +158,43 @@ def _iter_joined_processed_chunks(
         ),
     )
     lease = yield producer_bound
-    time_keys = _time_keys_from_base_input(
+    chunk_windows = _iter_research_chunk_windows_from_base_input(
         sessions[base_data_id],
-        primary_key=dataset_spec.primary_key,
         time_window=time_window,
     )
-    if not time_keys:
-        raise ValueError("no_research_dataset_sessions")
-    chunk_windows = _research_chunk_windows(
-        time_keys,
-        time_window=time_window,
-        target_core_count=1,
-        reason="research_assembly",
-    )
-    del time_keys
-
-    for window_index, chunk_window in enumerate(chunk_windows):
-        if window_index:
-            lease = yield producer_bound
-        chunk = _join_processed_inputs(
-            dataset_spec=dataset_spec,
-            processed_catalog=processed_catalog,
-            sessions=sessions,
-            time_window=chunk_window,
-            base_data_id=base_data_id,
-        )
-        chunk_bytes = _frame_bytes(chunk)
-        if chunk_bytes + 256 * 1024 > lease.reserved_bytes:
-            raise ValueError("research_joined_bound_invalid")
-        validate_research_dataset(chunk, dataset_spec)
-        sort_index_bytes = len(chunk) * np.dtype(np.intp).itemsize
-        with policy.reserve(
-            "research.assembly.sort",
-            sort_index_bytes + sort_index_bytes,
-        ):
-            output = chunk.sort_values(
-                list(dataset_spec.primary_key),
-                ignore_index=True,
+    with closing_dataset_iterator(iter(chunk_windows)) as active_chunk_windows:
+        for window_index, chunk_window in enumerate(active_chunk_windows):
+            if window_index:
+                lease = yield producer_bound
+            chunk = _join_processed_inputs(
+                dataset_spec=dataset_spec,
+                processed_catalog=processed_catalog,
+                sessions=sessions,
+                time_window=chunk_window,
+                base_data_id=base_data_id,
             )
-        if _frame_bytes(output) > chunk_bytes:
-            raise ValueError(
-                "research_known_join_payloads_exceed_task_memory_budget"
-            )
-        output_bytes = _frame_bytes(output)
-        actual_bound = chunk_bytes + output_bytes + 256 * 1024
-        if actual_bound > lease.reserved_bytes:
-            raise ValueError("research_joined_bound_invalid")
-        lease.shrink_to(actual_bound)
-        del chunk
-        yield _OwnedValue(output, lease)
-        del output
-        lease = None
+            chunk_bytes = _frame_bytes(chunk)
+            if chunk_bytes + 256 * 1024 > lease.reserved_bytes:
+                raise ValueError("research_joined_bound_invalid")
+            validate_research_dataset(chunk, dataset_spec)
+            sort_index_bytes = len(chunk) * np.dtype(np.intp).itemsize
+            with policy.reserve(
+                "research.assembly.sort",
+                sort_index_bytes + sort_index_bytes,
+            ):
+                output = chunk.sort_values(
+                    list(dataset_spec.primary_key),
+                    ignore_index=True,
+                )
+            output_bytes = _frame_bytes(output)
+            actual_bound = chunk_bytes + output_bytes + 256 * 1024
+            if actual_bound > lease.reserved_bytes:
+                raise ValueError("research_joined_bound_invalid")
+            lease.shrink_to(actual_bound)
+            del chunk
+            yield _OwnedValue(output, lease)
+            del output
+            lease = None
 
 
 def _join_processed_inputs(
@@ -380,12 +363,13 @@ def _frame_bytes(frame: pd.DataFrame) -> int:
     return pandas_frame_payload_bytes(frame)
 
 
-def _time_keys_from_base_input(
+def _iter_research_chunk_windows_from_base_input(
     base_session: DatasetSession,
     *,
-    primary_key: tuple[str, ...],
     time_window: TimeWindow,
-) -> tuple[pd.Timestamp, ...]:
+) -> Iterator[TimeWindow]:
+    """Drive one bounded assembly window at a time from ordered base chunks."""
+
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
@@ -393,9 +377,10 @@ def _time_keys_from_base_input(
         base_session,
         time_window=time_window,
     )
+    intraday = is_intraday_time_window(time_window)
+    last_timestamp: pd.Timestamp | None = None
+    saw_timestamp = False
     try:
-        timestamps: set[pd.Timestamp] = set()
-        intraday = is_intraday_time_window(time_window)
         with closing_dataset_iterator(
             iter_dataset_chunks(
                 session,
@@ -403,38 +388,46 @@ def _time_keys_from_base_input(
             )
         ) as chunks:
             for chunk in chunks:
-                for value in chunk["timestamp"].dropna().unique():
-                    timestamp = pd.Timestamp(value)
+                timestamps = chunk["timestamp"]
+                timestamp_bytes = int(
+                    timestamps.memory_usage(index=True, deep=True)
+                )
+                with policy.reserve(
+                    "research.assembler.timestamp.windows",
+                    max(1, timestamp_bytes + len(timestamps) * 32),
+                ):
+                    values = timestamps.dropna().unique()
+                    chunk_timestamps = pd.DatetimeIndex(values).sort_values()
                     if not intraday:
-                        timestamp = timestamp.normalize()
-                    if timestamp in timestamps:
+                        chunk_timestamps = chunk_timestamps.normalize()
+                    chunk_timestamps = chunk_timestamps.drop_duplicates()
+                    if chunk_timestamps.empty:
                         continue
-                    timestamps.add(timestamp)
+                    if last_timestamp is not None:
+                        current = pd.Timestamp(chunk_timestamps[0])
+                        if current < last_timestamp:
+                            raise ValueError("non_monotonic_research_time_keys")
+                        chunk_timestamps = chunk_timestamps[
+                            chunk_timestamps > last_timestamp
+                        ]
+                    if chunk_timestamps.empty:
+                        continue
+                    start = pd.Timestamp(chunk_timestamps[0])
+                    end = pd.Timestamp(chunk_timestamps[-1])
+                    last_timestamp = end
+                    saw_timestamp = True
+                    if intraday:
+                        window = TimeWindow(
+                            start.to_pydatetime(),
+                            end.to_pydatetime(),
+                        )
+                    else:
+                        window = TimeWindow(start.date(), end.date())
+                yield window
     finally:
         _close_research_view_preserving_primary(session, base_session)
-    return tuple(sorted(timestamps))
-
-
-def _research_chunk_windows(
-    time_keys: tuple[pd.Timestamp, ...],
-    *,
-    time_window: TimeWindow,
-    target_core_count: int,
-    reason: str,
-) -> tuple[TimeWindow, ...]:
-    if not is_intraday_time_window(time_window):
-        return tuple(
-            window.core
-            for window in SessionWindowPlanner.from_sessions(
-                time_keys,
-                target_core_session_count=target_core_count,
-            ).windows(time_window, reason=reason)
-        )
-    return tuple(
-        TimeWindow(chunk[0].to_pydatetime(), chunk[-1].to_pydatetime())
-        for start_index in range(0, len(time_keys), target_core_count)
-        if (chunk := time_keys[start_index : start_index + target_core_count])
-    )
+    if not saw_timestamp:
+        raise ValueError("no_research_dataset_sessions")
 
 
 def _base_input_data_id(dataset_spec: ResearchDatasetSpec) -> str:

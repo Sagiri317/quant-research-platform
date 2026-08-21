@@ -36,6 +36,7 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 
 
 @dataclass(frozen=True)
@@ -253,67 +254,68 @@ def _iter_prediction_output_frames(
     build_state: _PredictionBuildState,
 ) -> Iterable[pd.DataFrame]:
     usable_columns = tuple(dict.fromkeys((*spec.primary_key, *input_columns)))
-    for chunk in frames:
-        filtered, metadata = apply_filter_mode(
-            chunk,
-            mode=spec.sample_filter_mode,
-            metadata_key="sample_filter_mode",
-        )
-        build_state.record_filter_metadata(metadata)
-        policy = current_runtime_resource_policy()
-        row_count = len(filtered)
-        index_bytes = int(filtered.index.memory_usage(deep=True))
-        mask_bytes = index_bytes + row_count * (len(input_columns) + 2)
-        test_frame_bytes = _selected_frame_payload_bytes(filtered, usable_columns)
-        output_bytes = _selected_frame_payload_bytes(filtered, spec.primary_key) + (
-            8 * row_count
-        )
-        model_matrix_bytes = 8 * row_count * (len(input_columns) + 1)
-        working_bytes = (
-            pandas_frame_payload_bytes(filtered)
-            + mask_bytes
-            + test_frame_bytes
-            + output_bytes
-            + model_matrix_bytes
-        )
-        if policy is not None and (
-            policy.used_memory_bytes + working_bytes
-            > policy.memory_budget_bytes
-        ):
-            raise ValueError("prediction_working_set_exceeds_task_memory_budget")
-        with ExitStack() as working:
-            if policy is not None:
-                working.enter_context(
-                    policy.reserve("research.prediction.output", working_bytes)
-                )
-            usable_mask = filtered.loc[:, list(input_columns)].notna().all(axis=1)
-            build_state.record_input_dropna_rows(int(usable_mask.sum()))
-            usable_mask &= filtered["timestamp"] >= pd.Timestamp(spec.test_start)
-            if spec.test_end is not None:
-                usable_mask &= filtered["timestamp"] <= pd.Timestamp(spec.test_end)
-            test_frame = filtered.loc[usable_mask, list(usable_columns)]
-            if test_frame.empty:
-                continue
-            output = test_frame.loc[:, list(spec.primary_key)].copy()
-            output[spec.prediction_column] = predictor(test_frame)
-            _validate_prediction_output_values(
-                output,
-                primary_key=spec.primary_key,
-                prediction_column=spec.prediction_column,
+    with closing_dataset_iterator(iter(frames)) as active_frames:
+        for chunk in active_frames:
+            filtered, metadata = apply_filter_mode(
+                chunk,
+                mode=spec.sample_filter_mode,
+                metadata_key="sample_filter_mode",
             )
-        retained_bytes = pandas_frame_payload_bytes(output)
-        if policy is not None and (
-            policy.used_memory_bytes + retained_bytes
-            > policy.memory_budget_bytes
-        ):
-            raise ValueError("prediction_working_set_exceeds_task_memory_budget")
-        build_state.record_prediction_output(output)
-        with ExitStack() as retained:
-            if policy is not None:
-                retained.enter_context(
-                    policy.reserve("research.prediction.result", retained_bytes)
+            build_state.record_filter_metadata(metadata)
+            policy = current_runtime_resource_policy()
+            row_count = len(filtered)
+            index_bytes = int(filtered.index.memory_usage(deep=True))
+            mask_bytes = index_bytes + row_count * (len(input_columns) + 2)
+            test_frame_bytes = _selected_frame_payload_bytes(filtered, usable_columns)
+            output_bytes = _selected_frame_payload_bytes(filtered, spec.primary_key) + (
+                8 * row_count
+            )
+            model_matrix_bytes = 8 * row_count * (len(input_columns) + 1)
+            working_bytes = (
+                pandas_frame_payload_bytes(filtered)
+                + mask_bytes
+                + test_frame_bytes
+                + output_bytes
+                + model_matrix_bytes
+            )
+            if policy is not None and (
+                policy.used_memory_bytes + working_bytes
+                > policy.memory_budget_bytes
+            ):
+                raise ValueError("prediction_working_set_exceeds_task_memory_budget")
+            with ExitStack() as working:
+                if policy is not None:
+                    working.enter_context(
+                        policy.reserve("research.prediction.output", working_bytes)
+                    )
+                usable_mask = filtered.loc[:, list(input_columns)].notna().all(axis=1)
+                build_state.record_input_dropna_rows(int(usable_mask.sum()))
+                usable_mask &= filtered["timestamp"] >= pd.Timestamp(spec.test_start)
+                if spec.test_end is not None:
+                    usable_mask &= filtered["timestamp"] <= pd.Timestamp(spec.test_end)
+                test_frame = filtered.loc[usable_mask, list(usable_columns)]
+                if test_frame.empty:
+                    continue
+                output = test_frame.loc[:, list(spec.primary_key)].copy()
+                output[spec.prediction_column] = predictor(test_frame)
+                _validate_prediction_output_values(
+                    output,
+                    primary_key=spec.primary_key,
+                    prediction_column=spec.prediction_column,
                 )
-            yield output
+            retained_bytes = pandas_frame_payload_bytes(output)
+            if policy is not None and (
+                policy.used_memory_bytes + retained_bytes
+                > policy.memory_budget_bytes
+            ):
+                raise ValueError("prediction_working_set_exceeds_task_memory_budget")
+            build_state.record_prediction_output(output)
+            with ExitStack() as retained:
+                if policy is not None:
+                    retained.enter_context(
+                        policy.reserve("research.prediction.result", retained_bytes)
+                    )
+                yield output
 
 
 def prediction_callable(
@@ -361,28 +363,30 @@ def _iter_prediction_work_frames(
     required: set[str],
     work_columns: tuple[str, ...],
 ) -> Iterable[pd.DataFrame]:
-    for frame in iter_complete_time_sized_frames(
+    complete_frames = iter_complete_time_sized_frames(
         iter(frames),
         timestamp_column="timestamp",
         resource_policy=current_runtime_resource_policy(),
-    ):
-        missing = sorted(required.difference(frame.columns))
-        if missing:
-            raise ValueError(f"missing_prediction_columns: {', '.join(missing)}")
-        selected = [column for column in work_columns if column in frame.columns]
-        selected_bytes = _selected_frame_payload_bytes(frame, selected)
-        policy = current_runtime_resource_policy()
-        if policy is not None and (
-            policy.used_memory_bytes + selected_bytes
-            > policy.memory_budget_bytes
-        ):
-            raise ValueError("prediction_working_set_exceeds_task_memory_budget")
-        with ExitStack() as reservation:
-            if policy is not None:
-                reservation.enter_context(
-                    policy.reserve("research.prediction.projection", selected_bytes)
-                )
-            yield frame.loc[:, selected]
+    )
+    with closing_dataset_iterator(complete_frames) as active_frames:
+        for frame in active_frames:
+            missing = sorted(required.difference(frame.columns))
+            if missing:
+                raise ValueError(f"missing_prediction_columns: {', '.join(missing)}")
+            selected = [column for column in work_columns if column in frame.columns]
+            selected_bytes = _selected_frame_payload_bytes(frame, selected)
+            policy = current_runtime_resource_policy()
+            if policy is not None and (
+                policy.used_memory_bytes + selected_bytes
+                > policy.memory_budget_bytes
+            ):
+                raise ValueError("prediction_working_set_exceeds_task_memory_budget")
+            with ExitStack() as reservation:
+                if policy is not None:
+                    reservation.enter_context(
+                        policy.reserve("research.prediction.projection", selected_bytes)
+                    )
+                yield frame.loc[:, selected]
 
 
 def _strict_non_negative_prediction_count(value: object) -> int:

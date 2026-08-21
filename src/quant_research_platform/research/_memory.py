@@ -495,4 +495,4 @@ def _time_chunk_operation_bytes(
 def _time_sort_working_set_bytes(frame: pd.DataFrame) -> int:
     row_count = len(frame)
     index_bytes = row_count * np.dtype(np.intp).itemsize
-    return _frame_bytes(frame) + 2 * index_bytes
+    return 2 * _frame_bytes(frame) + 2 * index_bytes

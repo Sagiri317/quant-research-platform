@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import weakref
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import replace
@@ -179,7 +178,6 @@ def build_prediction_result_from_research_dataset(
         prediction_metadata_factory=prediction_metadata,
         _close=close_result,
     )
-    weakref.finalize(owned_result, close_operation, suppress_errors=True)
     return owned_result
 
 

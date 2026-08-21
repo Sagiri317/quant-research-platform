@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
-import weakref
+import math
+import sqlite3
+import sys
+import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
+from quant_research_platform.compute.dataframe.performance import (
+    CUMULATIVE_RETURN_COLUMNS,
+    PERFORMANCE_SUMMARY_COLUMNS,
+)
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     EXPOSURE_SUMMARY_COLUMNS,
     POSITION_COLUMNS,
@@ -22,20 +30,16 @@ from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research._memory import (
-    _ResearchFrameAccumulator,
     _selected_frame_payload_bytes,
-    _time_sort_working_set_bytes,
     iter_complete_session_frames,
 )
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.portfolios.engine import (
-    compute_cumulative_returns,
-    compute_performance_summary,
     construct_portfolio_positions,
-    summarize_period_breakdown,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
@@ -46,6 +50,8 @@ from quant_research_platform.storage.layout import StorageLayout
 
 _PORTFOLIO_ROW_WORKING_BYTES = 2048
 _PORTFOLIO_PERIOD_WORKING_BYTES = 4096
+_PORTFOLIO_STATE_FIXED_WORKING_BYTES = 64 * 1024
+_PORTFOLIO_STATE_PER_SIGNAL_BYTES = 16 * 1024
 
 
 @dataclass(frozen=True)
@@ -53,6 +59,11 @@ class PortfolioResult:
     spec: PortfolioSpec
     output_chunks: Iterable[Mapping[str, pd.DataFrame]]
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]]
+    cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     _close: Callable[[], None] = field(
         default=lambda: None,
         repr=False,
@@ -86,7 +97,14 @@ class PortfolioResult:
 class _PortfolioSummaryState:
     position_stats: dict[str, dict[str, float | int]] = field(default_factory=dict)
     resource_policy: RuntimeResourcePolicy | None = None
-    return_accumulator: _ResearchFrameAccumulator | None = field(
+    returns_complete: bool = False
+    state_lease: MemoryLease | None = field(default=None, repr=False)
+    summary_lease: MemoryLease | None = field(default=None, repr=False)
+    return_database: sqlite3.Connection | None = field(
+        default=None,
+        repr=False,
+    )
+    return_scratch: tempfile.TemporaryDirectory[str] | None = field(
         default=None,
         repr=False,
     )
@@ -125,6 +143,7 @@ def build_portfolio_result_from_research_dataset(
                 f"{type(cleanup_error).__name__}"
             )
         raise
+    operation.callback(result.close)
     source_chunks = operation.enter_context(
         closing_dataset_iterator(iter(result.output_chunks))
     )
@@ -145,7 +164,7 @@ def build_portfolio_result_from_research_dataset(
 
     def close_result() -> None:
         nonlocal terminal_error
-        if terminal_error is not None or not operation_open:
+        if not operation_open:
             return
         closed = RuntimeError("portfolio_result_closed")
         try:
@@ -153,7 +172,8 @@ def build_portfolio_result_from_research_dataset(
         except BaseException as primary:
             terminal_error = primary
             raise
-        terminal_error = closed
+        if terminal_error is None:
+            terminal_error = closed
 
     def output_chunks() -> Iterable[Mapping[str, pd.DataFrame]]:
         nonlocal chunks_complete, terminal_error
@@ -164,12 +184,20 @@ def build_portfolio_result_from_research_dataset(
         except BaseException as primary:
             terminal_error = primary
             try:
-                close_operation()
+                source_chunks.close()
             except BaseException as cleanup_error:
                 primary.add_note(
-                    "portfolio operation cleanup also failed: "
+                    "portfolio output cleanup also failed: "
                     f"{type(cleanup_error).__name__}"
                 )
+            if operation_open and policy.used_memory_bytes == 0:
+                try:
+                    close_operation()
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "portfolio operation cleanup also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
             raise
         chunks_complete = True
 
@@ -200,9 +228,9 @@ def build_portfolio_result_from_research_dataset(
         spec=result.spec,
         output_chunks=output_chunks(),
         summary_factory=summary,
+        cumulative_returns_factory=result.cumulative_returns_factory,
         _close=close_result,
     )
-    weakref.finalize(owned_result, close_operation, suppress_errors=True)
     return owned_result
 
 
@@ -254,38 +282,57 @@ def _build_portfolio_result_from_research_dataset(
     summary_state = _PortfolioSummaryState(
         resource_policy=resource_policy
     )
-    input_chunks = _portfolio_input_chunks(
-        layout=layout,
-        market_id=dataset_spec.market_id,
-        dataset_id=dataset_spec.data_id,
-        time_window=time_window,
-        columns=read_columns,
-    )
-    if prediction_input is not None:
-        input_chunks = _iter_prediction_joined_chunks(
-            input_chunks,
-            prediction_frame=prediction_input[0],
-            primary_key=prediction_input[1],
-            input_columns=prediction_input[2],
-            sample_filter_mode=prediction_input[3],
-            test_start=prediction_input[4],
-            test_end=prediction_input[5],
-            resource_policy=summary_state.resource_policy,
+    try:
+        summary_state.state_lease = resource_policy.lease(
+            "research.portfolio.state",
+            _PORTFOLIO_STATE_FIXED_WORKING_BYTES
+            + max(1, len(spec.signals)) * _PORTFOLIO_STATE_PER_SIGNAL_BYTES,
         )
-    output_chunks = _observe_portfolio_summary_chunks(
-        _iter_portfolio_output_chunks(
-            input_chunks,
-            spec,
-            source_columns_by_kind=source_columns_by_kind,
-            resource_policy=summary_state.resource_policy,
-        ),
-        summary_state,
-    )
-    return PortfolioResult(
-        spec=spec,
-        output_chunks=output_chunks,
-        summary_factory=lambda: _portfolio_summary_outputs(summary_state),
-    )
+        input_chunks = _portfolio_input_chunks(
+            layout=layout,
+            market_id=dataset_spec.market_id,
+            dataset_id=dataset_spec.data_id,
+            time_window=time_window,
+            columns=read_columns,
+        )
+        if prediction_input is not None:
+            input_chunks = _iter_prediction_joined_chunks(
+                input_chunks,
+                prediction_frame=prediction_input[0],
+                primary_key=prediction_input[1],
+                input_columns=prediction_input[2],
+                sample_filter_mode=prediction_input[3],
+                test_start=prediction_input[4],
+                test_end=prediction_input[5],
+                resource_policy=summary_state.resource_policy,
+            )
+        output_chunks = _observe_portfolio_summary_chunks(
+            _iter_portfolio_output_chunks(
+                input_chunks,
+                spec,
+                source_columns_by_kind=source_columns_by_kind,
+                resource_policy=summary_state.resource_policy,
+            ),
+            summary_state,
+        )
+
+        def cumulative_returns_factory() -> Iterable[pd.DataFrame]:
+            if not summary_state.returns_complete:
+                raise RuntimeError(
+                    "portfolio_cumulative_returns_before_output_complete"
+                )
+            return _iter_portfolio_cumulative_chunks(summary_state)
+
+        return PortfolioResult(
+            spec=spec,
+            output_chunks=output_chunks,
+            summary_factory=lambda: _portfolio_summary_outputs(summary_state),
+            cumulative_returns_factory=cumulative_returns_factory,
+            _close=lambda: _close_portfolio_summary_state(summary_state),
+        )
+    except BaseException:
+        _close_portfolio_summary_state(summary_state)
+        raise
 
 
 def _portfolio_read_columns(
@@ -499,65 +546,69 @@ def _iter_prediction_joined_chunks(
         )
         matched = np.zeros(prediction_rows, dtype=bool)
         missing_required = False
-        for chunk in chunks:
-            chunk_rows = len(chunk)
-            chunk_bytes = pandas_frame_payload_bytes(chunk)
-            chunk_index_bytes = int(chunk.index.memory_usage(deep=True))
-            timestamp_bytes = chunk_index_bytes + 8 * chunk_rows
-            required_mask_bytes = chunk_index_bytes + chunk_rows
-            required_key_bytes = _selected_frame_payload_bytes(
-                chunk,
-                list(primary_key),
-            )
-            required_index_bytes = required_key_bytes + chunk_rows * (
-                8 * len(primary_key)
-            )
-            positions_bytes = chunk_rows * np.dtype(np.intp).itemsize
-            join_hash_bytes = chunk_rows * (32 + 16 * len(primary_key))
-            joined_output_bytes = chunk_bytes + chunk_index_bytes + 8 * chunk_rows
-            chunk_working_bytes = (
-                timestamp_bytes
-                + required_mask_bytes
-                + required_index_bytes
-                + positions_bytes
-                + join_hash_bytes
-                + joined_output_bytes
-            )
-            with ExitStack() as chunk_state:
-                if resource_policy is not None:
-                    chunk_state.enter_context(
-                        resource_policy.reserve(
-                            "research.portfolio.prediction.join",
-                            chunk_working_bytes,
-                        )
-                    )
-                eligible, _metadata = apply_filter_mode(
+        with closing_dataset_iterator(iter(chunks)) as active_chunks:
+            for chunk in active_chunks:
+                chunk_rows = len(chunk)
+                chunk_bytes = pandas_frame_payload_bytes(chunk)
+                chunk_index_bytes = int(chunk.index.memory_usage(deep=True))
+                timestamp_bytes = chunk_index_bytes + 8 * chunk_rows
+                required_mask_bytes = chunk_index_bytes + chunk_rows
+                required_key_bytes = _selected_frame_payload_bytes(
                     chunk,
-                    mode=sample_filter_mode,
-                    metadata_key="sample_filter_mode",
+                    list(primary_key),
                 )
-                eligible = eligible.dropna(subset=list(input_columns))
-                timestamps = strict_timestamp_series(
-                    eligible["timestamp"], error="invalid_portfolio_timestamp_values"
+                required_index_bytes = required_key_bytes + chunk_rows * (
+                    8 * len(primary_key)
                 )
-                required_mask = timestamps >= pd.Timestamp(test_start)
-                if test_end is not None:
-                    required_mask &= timestamps <= pd.Timestamp(test_end)
-                required_index = pd.MultiIndex.from_frame(
-                    eligible.loc[required_mask, list(primary_key)]
+                positions_bytes = chunk_rows * np.dtype(np.intp).itemsize
+                join_hash_bytes = chunk_rows * (32 + 16 * len(primary_key))
+                joined_output_bytes = chunk_bytes + chunk_index_bytes + 8 * chunk_rows
+                chunk_working_bytes = (
+                    timestamp_bytes
+                    + required_mask_bytes
+                    + required_index_bytes
+                    + positions_bytes
+                    + join_hash_bytes
+                    + joined_output_bytes
                 )
-                positions = prediction_index.get_indexer(required_index)
-                missing_required |= bool((positions < 0).any())
-                matched[positions[positions >= 0]] = True
-                try:
-                    yield chunk.merge(
-                        prediction_frame,
-                        on=list(primary_key),
-                        how="left",
-                        validate="one_to_one",
+                with ExitStack() as chunk_state:
+                    if resource_policy is not None:
+                        chunk_state.enter_context(
+                            resource_policy.reserve(
+                                "research.portfolio.prediction.join",
+                                chunk_working_bytes,
+                            )
+                        )
+                    eligible, _metadata = apply_filter_mode(
+                        chunk,
+                        mode=sample_filter_mode,
+                        metadata_key="sample_filter_mode",
                     )
-                except pd.errors.MergeError as exc:
-                    raise ValueError("persisted_prediction_join_key_invalid") from exc
+                    eligible = eligible.dropna(subset=list(input_columns))
+                    timestamps = strict_timestamp_series(
+                        eligible["timestamp"],
+                        error="invalid_portfolio_timestamp_values",
+                    )
+                    required_mask = timestamps >= pd.Timestamp(test_start)
+                    if test_end is not None:
+                        required_mask &= timestamps <= pd.Timestamp(test_end)
+                    required_index = pd.MultiIndex.from_frame(
+                        eligible.loc[required_mask, list(primary_key)]
+                    )
+                    positions = prediction_index.get_indexer(required_index)
+                    missing_required |= bool((positions < 0).any())
+                    matched[positions[positions >= 0]] = True
+                    try:
+                        yield chunk.merge(
+                            prediction_frame,
+                            on=list(primary_key),
+                            how="left",
+                            validate="one_to_one",
+                        )
+                    except pd.errors.MergeError as exc:
+                        raise ValueError(
+                            "persisted_prediction_join_key_invalid"
+                        ) from exc
         unexpected = bool((~matched).any())
         if missing_required and unexpected:
             raise ValueError("misaligned_persisted_prediction_keys")
@@ -578,56 +629,57 @@ def _iter_prediction_lookup_joined_chunks(
     test_end: str | None,
 ):
     missing_required = False
-    for chunk in chunks:
-        row_count = len(chunk)
-        frame_bytes = pandas_frame_payload_bytes(chunk)
-        index_bytes = int(chunk.index.memory_usage(deep=True))
-        timestamp_bytes = index_bytes + 8 * row_count
-        required_mask_bytes = index_bytes + row_count
-        required_output_bytes = frame_bytes
-        output_frame_bytes = frame_bytes + index_bytes + 8 * row_count
-        policy = current_runtime_resource_policy()
-        with ExitStack() as chunk_state:
-            if policy is not None:
-                chunk_state.enter_context(
-                    policy.reserve(
-                        "research.portfolio.prediction.output",
-                        timestamp_bytes
-                        + required_mask_bytes
-                        + required_output_bytes
-                        + output_frame_bytes,
+    with closing_dataset_iterator(iter(chunks)) as active_chunks:
+        for chunk in active_chunks:
+            row_count = len(chunk)
+            frame_bytes = pandas_frame_payload_bytes(chunk)
+            index_bytes = int(chunk.index.memory_usage(deep=True))
+            timestamp_bytes = index_bytes + 8 * row_count
+            required_mask_bytes = index_bytes + row_count
+            required_output_bytes = frame_bytes
+            output_frame_bytes = frame_bytes + index_bytes + 8 * row_count
+            policy = current_runtime_resource_policy()
+            with ExitStack() as chunk_state:
+                if policy is not None:
+                    chunk_state.enter_context(
+                        policy.reserve(
+                            "research.portfolio.prediction.output",
+                            timestamp_bytes
+                            + required_mask_bytes
+                            + required_output_bytes
+                            + output_frame_bytes,
+                        )
                     )
-                )
-            values, _found = chunk_state.enter_context(
-                prediction_lookup.values_for_frame(
-                    chunk,
-                    mark_matched=False,
-                )
-            )
-            eligible, _metadata = apply_filter_mode(
-                chunk,
-                mode=sample_filter_mode,
-                metadata_key="sample_filter_mode",
-            )
-            eligible = eligible.dropna(subset=list(input_columns))
-            timestamps = strict_timestamp_series(
-                eligible["timestamp"], error="invalid_portfolio_timestamp_values"
-            )
-            required_mask = timestamps >= pd.Timestamp(test_start)
-            if test_end is not None:
-                required_mask &= timestamps <= pd.Timestamp(test_end)
-            required = eligible.loc[required_mask]
-            if not required.empty:
-                _required_values, required_found = chunk_state.enter_context(
+                values, _found = chunk_state.enter_context(
                     prediction_lookup.values_for_frame(
-                        required,
-                        mark_matched=True,
+                        chunk,
+                        mark_matched=False,
                     )
                 )
-                missing_required |= 0 in required_found
-            output = chunk.copy()
-            output[prediction_lookup.prediction_column] = values
-            yield output
+                eligible, _metadata = apply_filter_mode(
+                    chunk,
+                    mode=sample_filter_mode,
+                    metadata_key="sample_filter_mode",
+                )
+                eligible = eligible.dropna(subset=list(input_columns))
+                timestamps = strict_timestamp_series(
+                    eligible["timestamp"], error="invalid_portfolio_timestamp_values"
+                )
+                required_mask = timestamps >= pd.Timestamp(test_start)
+                if test_end is not None:
+                    required_mask &= timestamps <= pd.Timestamp(test_end)
+                required = eligible.loc[required_mask]
+                if not required.empty:
+                    _required_values, required_found = chunk_state.enter_context(
+                        prediction_lookup.values_for_frame(
+                            required,
+                            mark_matched=True,
+                        )
+                    )
+                    missing_required |= 0 in required_found
+                output = chunk.copy()
+                output[prediction_lookup.prediction_column] = values
+                yield output
     unexpected, extra = prediction_lookup.coverage_counts()
     if extra:
         raise RuntimeError("persisted_prediction_match_state_invalid")
@@ -671,9 +723,13 @@ def _iter_portfolio_output_chunks(
     context_reservation = ExitStack()
     context_periods = max(1, int(spec.execution_lag_steps) + 1)
     saw_rows = False
+    input_cleanup = ExitStack()
+    active_chunks = input_cleanup.enter_context(
+        closing_dataset_iterator(iter(chunks))
+    )
 
     try:
-        for chunk in chunks:
+        for chunk in active_chunks:
             if chunk.empty:
                 continue
             context_reservation.close()
@@ -787,6 +843,7 @@ def _iter_portfolio_output_chunks(
                 del output, next_context
     finally:
         context_reservation.close()
+        input_cleanup.close()
 
     if not saw_rows:
         raise ValueError("empty_portfolio_input")
@@ -798,17 +855,19 @@ def _observe_portfolio_summary_chunks(
 ) -> Iterable[dict[str, pd.DataFrame]]:
     completed = False
     try:
-        for output_chunk in output_chunks:
-            _update_portfolio_summary_state(
-                summary_state,
-                positions=output_chunk["positions"],
-                portfolio_returns=output_chunk["portfolio_returns"],
-            )
-            yield output_chunk
+        with closing_dataset_iterator(iter(output_chunks)) as active_chunks:
+            for output_chunk in active_chunks:
+                _update_portfolio_summary_state(
+                    summary_state,
+                    positions=output_chunk["positions"],
+                    portfolio_returns=output_chunk["portfolio_returns"],
+                )
+                yield output_chunk
         completed = True
+        summary_state.returns_complete = True
     finally:
         if not completed:
-            _close_portfolio_summary_accumulator(summary_state)
+            _close_portfolio_summary_state(summary_state)
 
 
 def _update_portfolio_summary_state(
@@ -852,14 +911,256 @@ def _update_portfolio_summary_state(
             )
         return_frame = _portfolio_return_summary_frame(portfolio_returns)
         if not return_frame.empty:
-            if summary_state.return_accumulator is None:
-                summary_state.return_accumulator = _ResearchFrameAccumulator(
-                    "research.portfolio.summary",
-                    resource_policy=policy,
-                )
-            summary_state.return_accumulator.append(return_frame)
+            _append_portfolio_return_summary(summary_state, return_frame)
         _update_position_period_summary(summary_state.position_stats, positions)
         del return_frame
+
+
+def _append_portfolio_return_summary(
+    summary_state: _PortfolioSummaryState,
+    frame: pd.DataFrame,
+) -> None:
+    if summary_state.return_database is None:
+        scratch = tempfile.TemporaryDirectory(prefix="qrp-portfolio-summary-")
+        try:
+            database = sqlite3.connect(
+                str(Path(scratch.name) / "returns.sqlite"),
+            )
+            database.execute(
+                """
+                CREATE TABLE returns (
+                    timestamp TEXT NOT NULL,
+                    timestamp_ns INTEGER NOT NULL,
+                    signal TEXT NOT NULL,
+                    gross_return REAL,
+                    net_return REAL,
+                    cost REAL,
+                    turnover REAL,
+                    long_count REAL,
+                    short_count REAL
+                )
+                """
+            )
+            database.execute(
+                "CREATE INDEX returns_signal_time ON returns(signal, timestamp_ns)"
+            )
+            database.commit()
+        except BaseException:
+            scratch.cleanup()
+            raise
+        summary_state.return_scratch = scratch
+        summary_state.return_database = database
+
+    database = summary_state.return_database
+    assert database is not None
+    def database_rows() -> Iterable[tuple[object, ...]]:
+        for row in frame.itertuples(index=False, name=None):
+            (
+                timestamp,
+                signal,
+                _source,
+                _mode,
+                _long,
+                _short,
+                gross,
+                turnover,
+                cost,
+                net,
+                long_count,
+                short_count,
+            ) = row
+            timestamp_value = pd.Timestamp(timestamp)
+            yield (
+                timestamp_value.isoformat(),
+                timestamp_value.value,
+                str(signal),
+                _finite_float(gross),
+                _finite_float(net),
+                _finite_float(cost),
+                _finite_float(turnover),
+                _finite_float(long_count),
+                _finite_float(short_count),
+            )
+    database.executemany(
+        """
+        INSERT INTO returns(
+            timestamp, timestamp_ns, signal, gross_return, net_return,
+            cost, turnover, long_count, short_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        database_rows(),
+    )
+    database.commit()
+
+
+def _finite_float(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _new_portfolio_return_stats() -> dict[str, object]:
+    return {
+        "periods": 0,
+        "gross_sum": 0.0,
+        "net_sum": 0.0,
+        "net_square_sum": 0.0,
+        "downside_sum": 0.0,
+        "downside_square_sum": 0.0,
+        "wins": 0,
+        "losses": 0,
+        "win_sum": 0.0,
+        "loss_sum": 0.0,
+        "best": None,
+        "worst": None,
+        "turnover_sum": 0.0,
+        "turnover_max": None,
+        "cost_sum": 0.0,
+        "cumulative_gross": 0.0,
+        "cumulative_net": 0.0,
+        "cumulative_cost": 0.0,
+        "high_water_mark": None,
+        "max_drawdown": 0.0,
+        "drawdown_peak_value": None,
+        "drawdown_start": "",
+        "drawdown_valley": "",
+        "drawdown_recovery": "",
+        "drawdown_start_index": 0,
+        "drawdown_recovery_index": None,
+        "peak_timestamp": "",
+        "peak_index": 0,
+        "max_drawdown_index": None,
+        "current_win_streak": 0,
+        "current_loss_streak": 0,
+        "max_consecutive_wins": 0,
+        "max_consecutive_losses": 0,
+        "net_sum_cubes": 0.0,
+        "net_sum_quads": 0.0,
+    }
+
+
+def _update_performance_stats(
+    stats: dict[str, object],
+    *,
+    timestamp: pd.Timestamp,
+    gross_return: object,
+    net_return: object,
+    cost: object,
+    turnover: object,
+) -> None:
+    index = int(stats["periods"])
+    stats["periods"] = index + 1
+    gross = _finite_float(gross_return)
+    net = _finite_float(net_return)
+    cost_value = _finite_float(cost)
+    turnover_value = _finite_float(turnover)
+    if gross is not None:
+        stats["gross_sum"] = float(stats["gross_sum"]) + gross
+    if net is not None:
+        stats["net_sum"] = float(stats["net_sum"]) + net
+        stats["net_square_sum"] = float(stats["net_square_sum"]) + net * net
+        stats["net_sum_cubes"] = float(stats["net_sum_cubes"]) + net**3
+        stats["net_sum_quads"] = float(stats["net_sum_quads"]) + net**4
+        downside = min(net, 0.0)
+        stats["downside_sum"] = float(stats["downside_sum"]) + downside
+        stats["downside_square_sum"] = (
+            float(stats["downside_square_sum"]) + downside * downside
+        )
+        if stats["best"] is None or net > float(stats["best"]):
+            stats["best"] = net
+        if stats["worst"] is None or net < float(stats["worst"]):
+            stats["worst"] = net
+        if net > 0:
+            stats["wins"] = int(stats["wins"]) + 1
+            stats["win_sum"] = float(stats["win_sum"]) + net
+            stats["current_win_streak"] = int(stats["current_win_streak"]) + 1
+            stats["current_loss_streak"] = 0
+            stats["max_consecutive_wins"] = max(
+                int(stats["max_consecutive_wins"]),
+                int(stats["current_win_streak"]),
+            )
+        elif net < 0:
+            stats["losses"] = int(stats["losses"]) + 1
+            stats["loss_sum"] = float(stats["loss_sum"]) + net
+            stats["current_loss_streak"] = int(stats["current_loss_streak"]) + 1
+            stats["current_win_streak"] = 0
+            stats["max_consecutive_losses"] = max(
+                int(stats["max_consecutive_losses"]),
+                int(stats["current_loss_streak"]),
+            )
+        else:
+            stats["current_win_streak"] = 0
+            stats["current_loss_streak"] = 0
+        stats["cumulative_net"] = float(stats["cumulative_net"]) + net
+        high_water = stats["high_water_mark"]
+        if high_water is None or float(stats["cumulative_net"]) >= float(high_water):
+            stats["high_water_mark"] = float(stats["cumulative_net"])
+            stats["peak_timestamp"] = timestamp.isoformat()
+            stats["peak_index"] = index
+        drawdown = float(stats["cumulative_net"]) - float(stats["high_water_mark"])
+        if drawdown < float(stats["max_drawdown"]):
+            stats["max_drawdown"] = drawdown
+            stats["drawdown_peak_value"] = float(stats["high_water_mark"])
+            stats["drawdown_start"] = str(stats["peak_timestamp"])
+            stats["drawdown_valley"] = timestamp.isoformat()
+            stats["drawdown_recovery"] = ""
+            stats["drawdown_start_index"] = int(stats["peak_index"])
+            stats["drawdown_recovery_index"] = None
+            stats["max_drawdown_index"] = index
+        elif (
+            float(stats["max_drawdown"]) < 0
+            and stats["drawdown_recovery_index"] is None
+            and stats["drawdown_peak_value"] is not None
+            and float(stats["cumulative_net"])
+            >= float(stats["drawdown_peak_value"])
+        ):
+            stats["drawdown_recovery"] = timestamp.isoformat()
+            stats["drawdown_recovery_index"] = index
+    if cost_value is not None:
+        stats["cost_sum"] = float(stats["cost_sum"]) + cost_value
+    if turnover_value is not None:
+        stats["turnover_sum"] = float(stats["turnover_sum"]) + turnover_value
+        if (
+            stats["turnover_max"] is None
+            or turnover_value > float(stats["turnover_max"])
+        ):
+            stats["turnover_max"] = turnover_value
+
+
+def _ordered_performance_stats(
+    summary_state: _PortfolioSummaryState,
+) -> dict[str, dict[str, object]]:
+    database = summary_state.return_database
+    if database is None:
+        return {}
+    stats_by_signal: dict[str, dict[str, object]] = {}
+    cursor = database.execute(
+        """
+        SELECT signal, timestamp, gross_return, net_return, cost, turnover
+        FROM returns
+        ORDER BY signal, timestamp_ns, rowid
+        """
+    )
+    try:
+        for signal, timestamp, gross, net, cost, turnover in cursor:
+            signal_id = str(signal)
+            stats = stats_by_signal.setdefault(
+                signal_id,
+                _new_portfolio_return_stats(),
+            )
+            _update_performance_stats(
+                stats,
+                timestamp=pd.Timestamp(timestamp),
+                gross_return=gross,
+                net_return=net,
+                cost=cost,
+                turnover=turnover,
+            )
+    finally:
+        cursor.close()
+    return stats_by_signal
 
 
 def _portfolio_return_summary_frame(
@@ -874,6 +1175,115 @@ def _portfolio_return_summary_frame(
     return selected.sort_values(["signal", "timestamp"], kind="mergesort").reset_index(
         drop=True
     )
+
+
+def _iter_portfolio_cumulative_chunks(
+    summary_state: _PortfolioSummaryState,
+) -> Iterable[pd.DataFrame]:
+    database = summary_state.return_database
+    if database is None:
+        raise RuntimeError("portfolio_cumulative_returns_unavailable")
+    policy = summary_state.resource_policy
+    if policy is None:
+        batch_rows = 1024
+        batch_bound = 0
+    else:
+        fixed_bound = _PORTFOLIO_PERIOD_WORKING_BYTES
+        per_row_bound = _PORTFOLIO_ROW_WORKING_BYTES
+        available = policy.available_memory_bytes
+        batch_rows = max(
+            1,
+            min(1024, max(1, (available - fixed_bound) // per_row_bound)),
+        )
+        batch_bound = fixed_bound + batch_rows * per_row_bound
+    cursor = database.execute(
+        """
+        SELECT timestamp, signal, gross_return, net_return, cost
+        FROM returns
+        ORDER BY signal, timestamp_ns, rowid
+        """
+    )
+    running: dict[str, dict[str, float]] = {}
+    try:
+        while True:
+            lease = None
+            try:
+                if policy is not None:
+                    lease = policy.lease(
+                        "research.portfolio.cumulative",
+                        batch_bound,
+                    )
+                rows = cursor.fetchmany(batch_rows)
+                if not rows:
+                    return
+                records: list[dict[str, object]] = []
+                for timestamp, signal, gross, net, cost in rows:
+                    signal_id = str(signal)
+                    state = running.setdefault(
+                        signal_id,
+                        {
+                            "gross": 0.0,
+                            "net": 0.0,
+                            "cost": 0.0,
+                            "high_water": float("nan"),
+                        },
+                    )
+                    gross_value = 0.0 if gross is None else float(gross)
+                    net_value = 0.0 if net is None else float(net)
+                    cost_value = 0.0 if cost is None else float(cost)
+                    state["gross"] += gross_value
+                    state["net"] += net_value
+                    state["cost"] += cost_value
+                    high_water = state["high_water"]
+                    if math.isnan(high_water):
+                        high_water = state["net"]
+                    else:
+                        high_water = max(high_water, state["net"])
+                    state["high_water"] = high_water
+                    records.append(
+                        {
+                            "timestamp": pd.Timestamp(timestamp),
+                            "signal": signal_id,
+                            "gross_portfolio_return": gross_value,
+                            "net_portfolio_return": net_value,
+                            "cost": cost_value,
+                            "cumulative_gross_return": state["gross"],
+                            "cumulative_net_return": state["net"],
+                            "cumulative_cost": state["cost"],
+                            "high_water_mark": high_water,
+                            "drawdown": state["net"] - high_water,
+                        }
+                    )
+                frame = pd.DataFrame.from_records(
+                    records,
+                    columns=CUMULATIVE_RETURN_COLUMNS,
+                )
+                if lease is not None:
+                    lease.shrink_to(max(1, pandas_frame_payload_bytes(frame)))
+                yield frame
+            finally:
+                if lease is not None:
+                    primary = sys.exception()
+                    try:
+                        lease.close()
+                    except BaseException as cleanup_error:
+                        if primary is None:
+                            raise
+                        primary.add_note(
+                            "portfolio cumulative lease close also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+    finally:
+        primary = sys.exception()
+        try:
+            cursor.close()
+        except BaseException as cleanup_error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "portfolio cumulative cursor close also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
 
 
 def _update_position_period_summary(
@@ -931,108 +1341,444 @@ def _update_position_period_summary(
         stats["max_top_weight"] = max(float(stats["max_top_weight"]), top_weight)
 
 
+def _portfolio_summary_memory_bound(
+    summary_state: _PortfolioSummaryState,
+) -> int:
+    database = summary_state.return_database
+    signal_rows = 0
+    period_rows = 0
+    if database is not None:
+        signal_rows = int(
+            database.execute(
+                "SELECT COUNT(DISTINCT signal) FROM returns"
+            ).fetchone()[0]
+        )
+        period_rows = int(
+            database.execute(
+                """
+                SELECT COUNT(*)
+                FROM (
+                    SELECT signal, substr(timestamp, 1, 7) AS period
+                    FROM returns
+                    GROUP BY signal, period
+                )
+                """
+            ).fetchone()[0]
+        )
+    summary_rows = (
+        max(1, signal_rows)
+        + 2 * max(1, len(summary_state.position_stats))
+        + period_rows
+    )
+    return 64 * 1024 + summary_rows * 16 * 1024
+
+
 def _portfolio_summary_outputs(
     summary_state: _PortfolioSummaryState,
 ) -> dict[str, pd.DataFrame]:
     try:
-        portfolio_returns = _portfolio_returns_summary_frame(summary_state)
         policy = summary_state.resource_policy
-        returns_bytes = pandas_frame_payload_bytes(portfolio_returns)
-        aggregation_state_bytes = len(portfolio_returns) * 8 * 8
-        summary_output_bound = returns_bytes + 64 * 1024
-        with ExitStack() as summary_reservation:
-            if policy is not None:
-                summary_reservation.enter_context(
-                    policy.reserve(
-                        "research.portfolio.summary.outputs",
-                        returns_bytes + aggregation_state_bytes + summary_output_bound,
-                    )
-                )
-            cumulative_returns = compute_cumulative_returns(portfolio_returns)
-            performance_summary = compute_performance_summary(
-                portfolio_returns,
-                cumulative_returns,
+        if policy is not None:
+            summary_state.summary_lease = policy.lease(
+                "research.portfolio.summary.outputs",
+                _portfolio_summary_memory_bound(summary_state),
             )
-            exposure_summary = _portfolio_exposure_summary(
-                summary_state,
-                portfolio_returns,
-            )
-            concentration = _portfolio_concentration_summary(summary_state)
-            period_breakdown = summarize_period_breakdown(portfolio_returns)
-            if (
-                sum(
-                    pandas_frame_payload_bytes(frame)
-                    for frame in (
-                        cumulative_returns,
-                        performance_summary,
-                        exposure_summary,
-                        concentration,
-                        period_breakdown,
-                    )
-                )
-                > summary_output_bound
-            ):
-                raise ValueError(
-                    "portfolio_summary_working_set_exceeds_task_memory_budget"
-                )
-        return {
-            "cumulative_returns": cumulative_returns,
+        performance_summary = _portfolio_performance_summary(summary_state)
+        exposure_summary = _portfolio_exposure_summary(summary_state)
+        concentration = _portfolio_concentration_summary(summary_state)
+        period_breakdown = _portfolio_period_breakdown(summary_state)
+        result = {
             "performance_summary": performance_summary,
             "exposure_summary": exposure_summary,
             "concentration": concentration,
             "period_breakdown": period_breakdown,
         }
-    finally:
-        _close_portfolio_summary_accumulator(summary_state)
+    except BaseException:
+        _close_portfolio_summary_state(summary_state)
+        raise
+    return result
 
 
-def _portfolio_returns_summary_frame(
+def _portfolio_performance_summary(
     summary_state: _PortfolioSummaryState,
 ) -> pd.DataFrame:
-    accumulator = summary_state.return_accumulator
-    if accumulator is None or accumulator.row_count == 0:
-        return _empty_summary_frame(RETURNS_COLUMNS)
-    frame = accumulator.materialize()
-    policy = summary_state.resource_policy
-    input_bytes = pandas_frame_payload_bytes(frame)
-    sorted_output_bound = _time_sort_working_set_bytes(frame)
-    with ExitStack() as sort_reservation:
-        if policy is not None:
-            sort_reservation.enter_context(
-                policy.reserve(
-                    "research.portfolio.summary.sort",
-                    input_bytes + sorted_output_bound,
-                )
-            )
-        output = frame.sort_values(
-            ["signal", "timestamp"],
-            kind="mergesort",
-        ).reset_index(drop=True)
-        if pandas_frame_payload_bytes(output) > sorted_output_bound:
-            raise ValueError("portfolio_summary_working_set_exceeds_task_memory_budget")
-        return output
+    records: list[dict[str, object]] = []
+    database = summary_state.return_database
+    ordered_stats = _ordered_performance_stats(summary_state)
+    for signal in sorted(ordered_stats):
+        stats = ordered_stats[signal]
+        periods = int(stats["periods"])
+        if periods == 0:
+            continue
+        mean_net = float(stats["net_sum"]) / periods
+        volatility = _population_std(
+            float(stats["net_square_sum"]),
+            mean_net,
+            periods,
+        )
+        downside_mean = float(stats["downside_sum"]) / periods
+        downside_volatility = _population_std(
+            float(stats["downside_square_sum"]),
+            downside_mean,
+            periods,
+        )
+        var_95 = _spilled_quantile(database, signal, periods, 0.05)
+        q95 = _spilled_quantile(database, signal, periods, 0.95)
+        cvar_values = _spilled_cvar(database, signal, var_95)
+        max_drawdown = float(stats["max_drawdown"])
+        drawdown_recovery_index = stats["drawdown_recovery_index"]
+        end_index = (
+            int(drawdown_recovery_index)
+            if drawdown_recovery_index is not None
+            else periods - 1
+        )
+        drawdown_duration = (
+            end_index - int(stats["drawdown_start_index"])
+            if max_drawdown < 0
+            else 0
+        )
+        records.append(
+            {
+                "signal": signal,
+                "periods": periods,
+                "final_cumulative_gross_return": float(stats["gross_sum"]),
+                "final_cumulative_net_return": float(stats["net_sum"]),
+                "mean_net_portfolio_return": mean_net,
+                "volatility_net_portfolio_return": volatility,
+                "downside_volatility": downside_volatility,
+                "sharpe_like": _summary_safe_ratio(mean_net, volatility),
+                "sortino_like": _summary_safe_ratio(mean_net, downside_volatility),
+                "calmar_like": _summary_safe_ratio(
+                    float(stats["net_sum"]),
+                    abs(max_drawdown),
+                ),
+                "best_period_return": (
+                    float(stats["best"]) if stats["best"] is not None else 0.0
+                ),
+                "worst_period_return": (
+                    float(stats["worst"]) if stats["worst"] is not None else 0.0
+                ),
+                "skew": _summary_skew(stats),
+                "kurtosis": _summary_kurtosis(stats),
+                "var_95": var_95,
+                "cvar_95": cvar_values,
+                "tail_ratio": _summary_safe_ratio(abs(q95), abs(var_95)),
+                "positive_return_rate": int(stats["wins"]) / periods,
+                "negative_return_rate": int(stats["losses"]) / periods,
+                "win_rate": int(stats["wins"]) / periods,
+                "loss_rate": int(stats["losses"]) / periods,
+                "profit_factor": _summary_safe_ratio(
+                    float(stats["win_sum"]),
+                    abs(float(stats["loss_sum"])),
+                ),
+                "payoff_ratio": _summary_safe_ratio(
+                    float(stats["win_sum"]) / int(stats["wins"])
+                    if stats["wins"]
+                    else 0.0,
+                    abs(float(stats["loss_sum"]) / int(stats["losses"]))
+                    if stats["losses"]
+                    else 0.0,
+                ),
+                "average_win": (
+                    float(stats["win_sum"]) / int(stats["wins"])
+                    if stats["wins"]
+                    else 0.0
+                ),
+                "average_loss": (
+                    float(stats["loss_sum"]) / int(stats["losses"])
+                    if stats["losses"]
+                    else 0.0
+                ),
+                "max_consecutive_wins": int(stats["max_consecutive_wins"]),
+                "max_consecutive_losses": int(stats["max_consecutive_losses"]),
+                "max_drawdown": max_drawdown,
+                "drawdown_duration": drawdown_duration,
+                "max_drawdown_start": (
+                    str(stats["drawdown_start"]) if max_drawdown < 0 else ""
+                ),
+                "max_drawdown_valley": (
+                    str(stats["drawdown_valley"]) if max_drawdown < 0 else ""
+                ),
+                "max_drawdown_recovery": (
+                    str(stats["drawdown_recovery"]) if max_drawdown < 0 else ""
+                ),
+                "mean_turnover": float(stats["turnover_sum"]) / periods,
+                "max_turnover": (
+                    float(stats["turnover_max"])
+                    if stats["turnover_max"] is not None
+                    else 0.0
+                ),
+                "total_cost": float(stats["cost_sum"]),
+                "mean_cost": float(stats["cost_sum"]) / periods,
+                "cost_to_gross_return": _summary_safe_ratio(
+                    float(stats["cost_sum"]),
+                    abs(float(stats["gross_sum"])),
+                ),
+                "cost_to_net_return": _summary_safe_ratio(
+                    float(stats["cost_sum"]),
+                    abs(float(stats["net_sum"])),
+                ),
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=PERFORMANCE_SUMMARY_COLUMNS)
 
 
-def _close_portfolio_summary_accumulator(
+def _population_std(square_sum: float, mean: float, count: int) -> float:
+    variance = max(0.0, square_sum / count - mean * mean)
+    return math.sqrt(variance)
+
+
+def _summary_safe_ratio(numerator: float, denominator: float) -> float:
+    if denominator == 0 or not math.isfinite(denominator):
+        return 0.0
+    return numerator / denominator
+
+
+def _summary_skew(stats: dict[str, object]) -> float:
+    count = int(stats["periods"])
+    if count < 3:
+        return 0.0
+    mean = float(stats["net_sum"]) / count
+    m2 = _central_moment(stats, mean, 2)
+    if m2 <= 0:
+        return 0.0
+    m3 = _central_moment(stats, mean, 3)
+    return math.sqrt(count * (count - 1)) / (count - 2) * m3 / m2**1.5
+
+
+def _summary_kurtosis(stats: dict[str, object]) -> float:
+    count = int(stats["periods"])
+    if count < 4:
+        return 0.0
+    mean = float(stats["net_sum"]) / count
+    m2 = _central_moment(stats, mean, 2)
+    if m2 <= 0:
+        return 0.0
+    m4 = _central_moment(stats, mean, 4)
+    g2 = m4 / m2**2 - 3.0
+    return ((count - 1) / ((count - 2) * (count - 3))) * ((count + 1) * g2 + 6.0)
+
+
+def _central_moment(stats: dict[str, object], mean: float, order: int) -> float:
+    count = int(stats["periods"])
+    if order == 2:
+        raw = float(stats["net_square_sum"]) / count
+        return raw - 2 * mean * float(stats["net_sum"]) / count + mean**2
+    if order == 3:
+        return (
+            float(stats["net_sum_cubes"]) / count
+            - 3 * mean * float(stats["net_square_sum"]) / count
+            + 3 * mean**2 * float(stats["net_sum"]) / count
+            - mean**3
+        )
+    return (
+        float(stats["net_sum_quads"]) / count
+        - 4 * mean * float(stats["net_sum_cubes"]) / count
+        + 6 * mean**2 * float(stats["net_square_sum"]) / count
+        - 4 * mean**3 * float(stats["net_sum"]) / count
+        + mean**4
+    )
+
+
+def _spilled_quantile(
+    database: sqlite3.Connection | None,
+    signal: str,
+    count: int,
+    quantile: float,
+) -> float:
+    if database is None or count == 0:
+        return 0.0
+    position = (count - 1) * quantile
+    lower_index = int(math.floor(position))
+    values = database.execute(
+        """
+        SELECT net_return FROM returns
+        WHERE signal = ? AND net_return IS NOT NULL
+        ORDER BY net_return
+        LIMIT 2 OFFSET ?
+        """,
+        (signal, lower_index),
+    ).fetchall()
+    if not values:
+        return 0.0
+    lower = float(values[0][0])
+    upper = float(values[-1][0])
+    return lower + (upper - lower) * (position - lower_index)
+
+
+def _spilled_cvar(
+    database: sqlite3.Connection | None,
+    signal: str,
+    threshold: float,
+) -> float:
+    if database is None:
+        return 0.0
+    value = database.execute(
+        """
+        SELECT AVG(net_return) FROM returns
+        WHERE signal = ? AND net_return IS NOT NULL AND net_return <= ?
+        """,
+        (signal, threshold),
+    ).fetchone()[0]
+    return float(value) if value is not None else 0.0
+
+
+def _portfolio_period_breakdown(
     summary_state: _PortfolioSummaryState,
-) -> None:
-    if summary_state.return_accumulator is not None:
-        summary_state.return_accumulator.close()
-        summary_state.return_accumulator = None
+) -> pd.DataFrame:
+    columns = [
+        "signal",
+        "year",
+        "month",
+        "periods",
+        "gross_portfolio_return",
+        "net_portfolio_return",
+        "cost",
+        "turnover",
+        "hit_rate",
+    ]
+    database = summary_state.return_database
+    if database is None:
+        return _empty_summary_frame(columns)
+    records = []
+    period_rows = database.execute(
+        """
+        SELECT
+            signal,
+            CAST(substr(timestamp, 1, 4) AS INTEGER) AS year,
+            CAST(substr(timestamp, 6, 2) AS INTEGER) AS month,
+            COUNT(*) AS periods,
+            SUM(COALESCE(gross_return, 0.0)),
+            SUM(COALESCE(net_return, 0.0)),
+            SUM(COALESCE(cost, 0.0)),
+            SUM(COALESCE(turnover, 0.0)),
+            SUM(CASE WHEN net_return > 0 THEN 1 ELSE 0 END)
+        FROM returns
+        GROUP BY signal, year, month
+        ORDER BY signal, year, month
+        """
+    )
+    for (
+        signal,
+        year,
+        month,
+        periods,
+        gross,
+        net,
+        cost,
+        turnover,
+        positive,
+    ) in period_rows:
+        records.append(
+            {
+                "signal": str(signal),
+                "year": int(year),
+                "month": int(month),
+                "periods": int(periods),
+                "gross_portfolio_return": float(gross),
+                "net_portfolio_return": float(net),
+                "cost": float(cost),
+                "turnover": float(turnover) / int(periods),
+                "hit_rate": int(positive) / int(periods),
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=columns)
+
+
+def _close_portfolio_summary_state(summary_state: _PortfolioSummaryState) -> None:
+    primary = sys.exception()
+    cleanup_error: BaseException | None = None
+    summary_lease = summary_state.summary_lease
+    summary_state.summary_lease = None
+    if summary_lease is not None:
+        try:
+            summary_lease.close()
+        except BaseException as exc:
+            if primary is None:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            else:
+                primary.add_note(
+                    "portfolio summary lease close also failed: "
+                    f"{type(exc).__name__}"
+                )
+    database = summary_state.return_database
+    summary_state.return_database = None
+    if database is not None:
+        try:
+            database.close()
+        except BaseException as exc:
+            if primary is None:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            else:
+                primary.add_note(
+                    "portfolio return database close also failed: "
+                    f"{type(exc).__name__}"
+                )
+    scratch = summary_state.return_scratch
+    summary_state.return_scratch = None
+    if scratch is not None:
+        try:
+            scratch.cleanup()
+        except BaseException as exc:
+            if primary is None:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            else:
+                primary.add_note(
+                    "portfolio return scratch cleanup also failed: "
+                    f"{type(exc).__name__}"
+                )
+    state_lease = summary_state.state_lease
+    summary_state.state_lease = None
+    if state_lease is not None:
+        try:
+            state_lease.close()
+        except BaseException as exc:
+            if primary is None:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            else:
+                primary.add_note(
+                    "portfolio state lease close also failed: "
+                    f"{type(exc).__name__}"
+                )
+    if cleanup_error is not None:
+        raise cleanup_error
 
 
 def _portfolio_exposure_summary(
     summary_state: _PortfolioSummaryState,
-    portfolio_returns: pd.DataFrame,
 ) -> pd.DataFrame:
     if not summary_state.position_stats:
         return _empty_summary_frame(EXPOSURE_SUMMARY_COLUMNS)
-    count_summary = _return_count_summary(portfolio_returns)
+    count_stats: dict[str, tuple[int, float, float]] = {}
+    database = summary_state.return_database
+    if database is not None:
+        count_stats = {
+            str(signal): (
+                int(rows),
+                float(long_sum),
+                float(short_sum),
+            )
+            for signal, rows, long_sum, short_sum in database.execute(
+                """
+                SELECT
+                    signal,
+                    COUNT(*),
+                    SUM(COALESCE(long_count, 0.0)),
+                    SUM(COALESCE(short_count, 0.0))
+                FROM returns
+                GROUP BY signal
+                """
+            )
+        }
     records: list[dict[str, object]] = []
     for signal_id in sorted(summary_state.position_stats):
         stats = summary_state.position_stats[signal_id]
         periods = int(stats["periods"])
-        count_values = count_summary.get(signal_id, {})
+        count_rows, long_sum, short_sum = count_stats.get(signal_id, (0, 0.0, 0.0))
         records.append(
             {
                 "signal": signal_id,
@@ -1040,8 +1786,16 @@ def _portfolio_exposure_summary(
                 "mean_net_exposure": float(stats["net_sum"]) / periods,
                 "max_gross_exposure": float(stats["max_gross"]),
                 "max_abs_net_exposure": float(stats["max_abs_net"]),
-                "mean_long_count": float(count_values.get("mean_long_count", 0.0)),
-                "mean_short_count": float(count_values.get("mean_short_count", 0.0)),
+                "mean_long_count": (
+                    long_sum / count_rows
+                    if count_rows
+                    else 0.0
+                ),
+                "mean_short_count": (
+                    short_sum / count_rows
+                    if count_rows
+                    else 0.0
+                ),
                 "mean_position_count": (float(stats["position_count_sum"]) / periods),
             }
         )
@@ -1078,23 +1832,6 @@ def _portfolio_concentration_summary(
             }
         )
     return pd.DataFrame.from_records(records, columns=columns)
-
-
-def _return_count_summary(
-    portfolio_returns: pd.DataFrame,
-) -> dict[str, dict[str, float]]:
-    if portfolio_returns.empty:
-        return {}
-    frame = portfolio_returns.loc[:, ["signal", "long_count", "short_count"]].copy()
-    frame["long_count"] = pd.to_numeric(frame["long_count"], errors="coerce")
-    frame["short_count"] = pd.to_numeric(frame["short_count"], errors="coerce")
-    result: dict[str, dict[str, float]] = {}
-    for signal_id, group in frame.groupby("signal", sort=True, dropna=False):
-        result[str(signal_id)] = {
-            "mean_long_count": float(group["long_count"].mean()),
-            "mean_short_count": float(group["short_count"].mean()),
-        }
-    return result
 
 
 def _combine_context_and_chunk(
