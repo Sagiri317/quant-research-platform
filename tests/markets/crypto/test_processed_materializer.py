@@ -151,7 +151,6 @@ def test_crypto_writer_requires_artifact_root_before_scratch_or_source(
         "layout": StorageLayout(project_root=tmp_path),
         "time_window": TimeWindow("2024-01-01", "2024-01-02"),
         "resource_policy": policy,
-        "retained_payload_bytes": 0,
     }
     if writer_name == "write_panel":
         kwargs["source_id"] = SourceId("binance")
@@ -183,13 +182,10 @@ def test_existing_panel_validation_keeps_policy_active_across_both_iterators(
         session: SimpleNamespace,
         *,
         target_chunk_bytes: int,
-        operation_headroom_bytes: int,
+        **_kwargs,
     ):
         assert target_chunk_bytes == policy.available_memory_bytes
-        expected_external_bytes = 200 if session.name == "bar" else 100
-        assert operation_headroom_bytes == (
-            policy.memory_budget_bytes - expected_external_bytes
-        )
+        assert current_runtime_resource_policy() is policy
         count = 1 if session.name == "bar" else 2
         with runtime_resource_policy_scope(session.resource_policy):
             for index in range(count):
@@ -234,7 +230,6 @@ def test_existing_panel_validation_keeps_policy_active_across_both_iterators(
         spec=SimpleNamespace(primary_key=("value",)),
         expected_input_identities={},
         resource_policy=policy,
-        retained_payload_bytes=0,
     )
 
     assert observed == [
@@ -296,7 +291,6 @@ def test_existing_panel_validation_retires_policy_after_every_primary(
             spec=SimpleNamespace(primary_key=("value",)),
             expected_input_identities={},
             resource_policy=policy,
-            retained_payload_bytes=0,
         )
     assert raised.value is primary
     with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
@@ -403,12 +397,6 @@ def test_crypto_factor_only_panel_dependency_window_uses_factor_warmup(
     monkeypatch,
 ) -> None:
     calls: list[tuple[str, TimeWindow]] = []
-    monkeypatch.setattr(
-        materializer,
-        "dataset_inspection_retained_memory_bytes",
-        lambda _inspection: 1,
-    )
-
     def record(name: str):
         def wrapped(*_: Any, time_window: TimeWindow, **__: Any) -> object:
             calls.append((name, time_window))
@@ -467,12 +455,6 @@ def test_crypto_label_only_panel_dependency_window_uses_label_lookahead(
     monkeypatch,
 ) -> None:
     calls: list[tuple[str, TimeWindow]] = []
-    monkeypatch.setattr(
-        materializer,
-        "dataset_inspection_retained_memory_bytes",
-        lambda _inspection: 1,
-    )
-
     def record(name: str):
         def wrapped(*_: Any, time_window: TimeWindow, **__: Any) -> object:
             calls.append((name, time_window))
@@ -527,11 +509,6 @@ def test_crypto_materializer_materializes_panel_dependency_window_for_factor_lab
     monkeypatch,
 ) -> None:
     calls: list[tuple[str, TimeWindow]] = []
-    monkeypatch.setattr(
-        materializer,
-        "dataset_inspection_retained_memory_bytes",
-        lambda _inspection: 1,
-    )
     shared_panel_session = SimpleNamespace(verify=lambda: None)
     panel_opens = 0
 
@@ -888,11 +865,6 @@ def test_crypto_materializer_materializes_missing_panel_dependency(
     monkeypatch,
 ) -> None:
     calls: list[tuple[str, TimeWindow]] = []
-    monkeypatch.setattr(
-        materializer,
-        "dataset_inspection_retained_memory_bytes",
-        lambda _inspection: 1,
-    )
     shared_panel_session = SimpleNamespace(verify=lambda: None)
 
     def record_panel(*_: Any, time_window: TimeWindow, **__: Any) -> object:
@@ -957,7 +929,6 @@ def test_crypto_factor_label_emit_only_core_window(tmp_path: Path) -> None:
             panel_session=panel_session,
             time_window=core,
             resource_policy=panel_session.resource_policy,
-            retained_payload_bytes=0,
         )
         materialize_labels.write_labels(
             label_spec,
@@ -965,7 +936,6 @@ def test_crypto_factor_label_emit_only_core_window(tmp_path: Path) -> None:
             panel_session=panel_session,
             time_window=core,
             resource_policy=panel_session.resource_policy,
-            retained_payload_bytes=0,
         )
 
     factors = read_dataset(
@@ -1082,7 +1052,6 @@ def test_crypto_panel_source_parts_require_one_asset_per_physical_part(
                     input_sessions=input_sessions,
                     time_window=TimeWindow("2026-07-06", "2026-07-06"),
                     resource_policy=policy,
-                    retained_payload_bytes=0,
                 )
             )
 
@@ -1117,7 +1086,6 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
             columns=("asset_id",),
             target_chunk_bytes=session.resource_policy.available_memory_bytes,
             error="invalid_crypto_test_asset_grouping",
-            operation_headroom_bytes=session.resource_policy.memory_budget_bytes,
         ) as views:
             normal_selections = tuple(view.path_selection for _key, view in views)
             assert {key[0]: len(view.read_paths) for key, view in views} == {
@@ -1141,7 +1109,6 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
                 columns=("asset_id",),
                 target_chunk_bytes=session.resource_policy.available_memory_bytes,
                 error="invalid_crypto_test_asset_grouping",
-                operation_headroom_bytes=session.resource_policy.memory_budget_bytes,
             ) as views:
                 consumer_selections = tuple(view.path_selection for _key, view in views)
                 raise RuntimeError("crypto_view_consumer_failed")
@@ -1182,7 +1149,6 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
                 columns=("asset_id",),
                 target_chunk_bytes=session.resource_policy.available_memory_bytes,
                 error="invalid_crypto_test_asset_grouping",
-                operation_headroom_bytes=session.resource_policy.memory_budget_bytes,
             ):
                 raise AssertionError("unreachable")
         assert allocated
@@ -1297,9 +1263,6 @@ def test_matching_chunk_caller_releases_selection_on_all_exit_paths(
             "source_asset_error": "invalid_test_source_asset_id",
             "timestamp_error": "invalid_test_timestamp",
             "target_chunk_bytes": session.resource_policy.available_memory_bytes,
-            "operation_headroom_bytes": (
-                session.resource_policy.memory_budget_bytes
-            ),
         }
 
         def empty_chunks(*_args, **_kwargs):
@@ -1416,7 +1379,6 @@ def test_asset_views_preserve_primary_and_attempt_all_selection_release(
             columns=("asset_id",),
             target_chunk_bytes=policy.available_memory_bytes,
             error="invalid_test_asset_grouping",
-            operation_headroom_bytes=session.resource_policy.memory_budget_bytes,
         ):
             if failure_site == "body":
                 raise primary
@@ -1482,7 +1444,6 @@ def test_asset_views_propagate_first_release_failure_after_attempting_all(
             columns=("asset_id",),
             target_chunk_bytes=policy.available_memory_bytes,
             error="invalid_test_asset_grouping",
-            operation_headroom_bytes=session.resource_policy.memory_budget_bytes,
         ):
             pass
     assert raised.value is first_failure
@@ -1567,7 +1528,6 @@ def test_matching_chunks_preserve_body_primary_over_release_failure(
                 source_asset_error="invalid_test_source_asset_id",
                 timestamp_error="invalid_test_timestamp",
                 target_chunk_bytes=1024,
-                operation_headroom_bytes=1024,
             )
         )
     assert raised.value is primary
@@ -1609,7 +1569,6 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
                     ),
                     time_window=core,
                     resource_policy=policy,
-                    retained_payload_bytes=0,
                 ),
                 policy,
             ),
@@ -1625,7 +1584,6 @@ def test_crypto_factor_label_materialization_core_selection_uses_positions(
                     ),
                     time_window=core,
                     resource_policy=policy,
-                    retained_payload_bytes=0,
                 ),
                 policy,
             ),
@@ -1676,7 +1634,6 @@ def test_crypto_panel_matching_rejects_invalid_timestamps(
                 resource_policy=capture_test_policy(
                     available_memory_bytes=1024**3,
                 ),
-                retained_payload_bytes=0,
             )
 
 
@@ -1717,7 +1674,6 @@ def test_crypto_panel_matching_rejects_invalid_source_asset_id(
             resource_policy=capture_test_policy(
                 available_memory_bytes=1024**3,
             ),
-            retained_payload_bytes=0,
         )
 
 
@@ -1749,7 +1705,6 @@ def test_crypto_panel_matching_rejects_missing_source_asset_id_column(
             resource_policy=capture_test_policy(
                 available_memory_bytes=1024**3,
             ),
-            retained_payload_bytes=0,
         )
 
 
@@ -1768,7 +1723,6 @@ def test_crypto_panel_matching_accepts_valid_source_asset_id(
         resource_policy=capture_test_policy(
             available_memory_bytes=1024**3,
         ),
-        retained_payload_bytes=0,
     )
 
     final_root = layout.processed_data_root(
@@ -1822,7 +1776,6 @@ def test_crypto_panel_validation_failure_never_publishes_final_dataset(
             resource_policy=capture_test_policy(
                 available_memory_bytes=1024**3,
             ),
-            retained_payload_bytes=0,
         )
 
     assert len(observed_roots) == 1
@@ -1872,14 +1825,14 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
     real_iterator = materialize_panel.iter_dataset_chunks
     real_asset_discovery = materialization_validation.crypto_asset_session_views
 
-    def wrapped_iterator(context, *, target_chunk_bytes, operation_headroom_bytes):
+    def wrapped_iterator(context, *, target_chunk_bytes, **kwargs):
         root_name = context.root.name
         if root_name in call_counts:
             call_counts[root_name] += 1
         result = real_iterator(
             context,
             target_chunk_bytes=target_chunk_bytes,
-            operation_headroom_bytes=operation_headroom_bytes,
+            **kwargs,
         )
         if root_name == "market_bars_1m":
             if context.logical_columns == ("source_asset_id",):
@@ -1909,7 +1862,6 @@ def test_crypto_panel_reads_auxiliary_data_once_per_core_window(
         resource_policy=capture_storage_test_policy(
             working_headroom_bytes=12 * 1024**2,
         ),
-        retained_payload_bytes=0,
     )
 
     assert call_counts["market_bars_1m"] == 2
@@ -1965,7 +1917,6 @@ def test_crypto_panel_materializer_validates_complete_trades_across_chunks(
         resource_policy=capture_test_policy(
             available_memory_bytes=1024**3,
         ),
-        retained_payload_bytes=0,
     )
 
     panel = read_dataset(
@@ -2012,7 +1963,6 @@ def test_crypto_panel_materializer_rejects_incomplete_trade_range_across_chunks(
             resource_policy=capture_test_policy(
                 available_memory_bytes=1024**3,
             ),
-            retained_payload_bytes=0,
         )
 
 
@@ -2054,7 +2004,6 @@ def test_crypto_panel_materializer_merges_depth_snapshot_across_storage_chunks(
         resource_policy=capture_test_policy(
             available_memory_bytes=1024**3,
         ),
-        retained_payload_bytes=0,
     )
 
     panel = read_dataset(
@@ -2072,9 +2021,8 @@ def test_crypto_panel_bar_contract_fails_before_auxiliary_reads(
     frames["bars"].loc[0, "interval"] = "5m"
     auxiliary_reads: list[str] = []
 
-    def fake_iterator(context, *, target_chunk_bytes, operation_headroom_bytes):
+    def fake_iterator(context, *, target_chunk_bytes, **_kwargs):
         assert target_chunk_bytes > 0
-        assert operation_headroom_bytes > 0
         root_name = context.root.name
         if root_name == "market_bars_1m":
             return iter((frames["bars"],))
@@ -2108,7 +2056,6 @@ def test_crypto_panel_bar_contract_fails_before_auxiliary_reads(
             resource_policy=capture_test_policy(
                 available_memory_bytes=1024**3,
             ),
-            retained_payload_bytes=0,
         )
 
     assert auxiliary_reads == []
@@ -2140,7 +2087,6 @@ def test_crypto_panel_small_and_large_resource_windows_match(tmp_path: Path) -> 
             source_id=SourceId("binance"),
             time_window=TimeWindow("2026-07-06", "2026-07-06"),
             resource_policy=policy,
-            retained_payload_bytes=0,
         )
         frames.append(
             read_dataset(
@@ -2342,9 +2288,8 @@ def _patch_panel_physical_chunks(
         matching_session_view,
     )
 
-    def fake_iterator(context, *, target_chunk_bytes, operation_headroom_bytes):
+    def fake_iterator(context, *, target_chunk_bytes, **_kwargs):
         assert target_chunk_bytes > 0
-        assert operation_headroom_bytes > 0
         root_name = context.root.name
         filters = dict(
             (column, value)
@@ -2648,7 +2593,6 @@ def test_panel_writer_keeps_all_input_sessions_live_through_publication(
         source_id=source_id,
         time_window=TimeWindow("2026-07-06", "2026-07-06"),
         resource_policy=policy,
-        retained_payload_bytes=0,
     )
 
     assert opened_sessions == 3
@@ -2674,7 +2618,6 @@ def test_panel_chunk_keeps_output_admitted_through_consumer_yield(
             input_sessions=input_sessions,
             time_window=TimeWindow("2026-07-06", "2026-07-06"),
             resource_policy=policy,
-            retained_payload_bytes=0,
         )
         bound = next(chunks)
         lease = policy.lease("test.crypto.panel", bound)
@@ -2722,9 +2665,8 @@ def test_existing_panel_dependency_acquires_panel_after_all_live_inputs(
             time_window=TimeWindow("2026-07-06", "2026-07-06"),
             resource_policy=policy,
             session_stack=stack,
-            retained_payload_bytes=0,
         )
-        assert panel_session.retained_memory_bytes > 0
+        assert policy.used_memory_bytes > 0
 
     assert acquisitions == [0, 1, 2, 3]
 
@@ -2792,7 +2734,6 @@ def test_panel_dependent_publication_carries_live_panel_session_bytes(
             panel_session=panel_session,
             time_window=TimeWindow("2026-07-06", "2026-07-06"),
             resource_policy=panel_session.resource_policy,
-            retained_payload_bytes=123,
         )
 
         assert write_baselines == [True]
@@ -2994,7 +2935,6 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
                 input_sessions=input_sessions,
                 time_window=TimeWindow("2026-07-06", "2026-07-06"),
                 resource_policy=policy,
-                retained_payload_bytes=0,
             ),
             policy,
         )
@@ -3092,7 +3032,6 @@ def test_panel_chunks_reject_same_asset_cross_chunk_time_reversal(
                     input_sessions=input_sessions,
                     time_window=TimeWindow("2026-07-06", "2026-07-06"),
                     resource_policy=policy,
-                    retained_payload_bytes=0,
                 ),
                 policy,
             )
@@ -3148,7 +3087,6 @@ def test_panel_writer_rejects_source_replacement_after_identity_capture(
             resource_policy=capture_test_policy(
                 available_memory_bytes=1024**3,
             ),
-            retained_payload_bytes=0,
         )
 
     assert replaced
@@ -3211,7 +3149,6 @@ def test_panel_writer_rejects_auxiliary_replacement_during_staged_validation(
             resource_policy=capture_test_policy(
                 available_memory_bytes=1024**3,
             ),
-            retained_payload_bytes=0,
         )
 
     assert replaced
@@ -3289,7 +3226,6 @@ def test_panel_dependent_writer_rejects_replacement_after_identity_capture(
                 panel_session=panel_session,
                 time_window=TimeWindow("2026-07-06", "2026-07-06"),
                 resource_policy=panel_session.resource_policy,
-                retained_payload_bytes=0,
             )
 
     assert replaced
@@ -3398,7 +3334,6 @@ def test_panel_dependent_writer_rejects_replacement_during_staged_validation(
                 panel_session=panel_session,
                 time_window=TimeWindow("2026-07-06", "2026-07-06"),
                 resource_policy=panel_session.resource_policy,
-                retained_payload_bytes=0,
             )
 
     assert replaced

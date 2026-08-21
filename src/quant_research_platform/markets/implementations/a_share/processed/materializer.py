@@ -46,7 +46,6 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage._dataset_inspection import (
     _inspect_dataset_owned,
     _release_owned_value,
-    dataset_inspection_retained_memory_bytes,
 )
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
@@ -105,7 +104,7 @@ def _materialize_processed_data_with_policy(
         materialization_dependencies.required_session_offsets(targets)
     )
     with runtime_resource_policy_scope(policy), ExitStack() as cleanup_stack:
-        sessions = materialization_planning.available_trading_sessions(
+        owned_sessions = materialization_planning.available_trading_sessions(
             layout,
             source_id,
             time_window=time_window,
@@ -113,6 +112,15 @@ def _materialize_processed_data_with_policy(
             lookahead_sessions=lookahead_sessions,
             resource_policy=policy,
         )
+        sessions = owned_sessions.value
+
+        def release_sessions() -> None:
+            _release_owned_value(
+                owned_sessions,
+                owner="a_share.materializer.sessions",
+            )
+
+        cleanup_stack.callback(release_sessions)
         materialization_planning.require_target_sessions(sessions, time_window)
         dependency_windows = (
             materialization_dependencies.planned_processed_dependency_windows(
@@ -160,10 +168,6 @@ def _materialize_one(
     root = materialization_io.processed_root(layout, spec)
     if spec.data_id in written:
         return written[spec.data_id]
-    retained_written_bytes = sum(
-        dataset_inspection_retained_memory_bytes(inspection)
-        for inspection in written.values()
-    )
     if root.exists():
         if requested:
             raise ValueError("dataset_exists")
@@ -172,7 +176,6 @@ def _materialize_one(
             time_window,
             sessions=sessions,
             resource_policy=policy,
-            retained_payload_bytes=retained_written_bytes,
         )
         owned = _inspect_dataset_owned(
             root,

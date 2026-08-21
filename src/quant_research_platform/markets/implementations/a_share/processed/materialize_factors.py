@@ -33,9 +33,6 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
 )
-from quant_research_platform.storage._dataset_inspection import (
-    dataset_inspection_retained_memory_bytes,
-)
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -68,10 +65,6 @@ def write_factors(
     written: dict[str, DatasetInspection],
     cleanup_stack: ExitStack | None = None,
 ) -> DatasetInspection:
-    retained_written_bytes = sum(
-        dataset_inspection_retained_memory_bytes(inspection)
-        for inspection in written.values()
-    )
     catalog = processed_catalog()
     factor_catalog = factor_definitions.factor_catalog()
     definitions = select_factor_definitions_for_spec(spec, factor_catalog)
@@ -103,17 +96,10 @@ def write_factors(
             asset_ids: tuple[object, ...],
             current_sessions: Sequence[pd.Timestamp],
             session_context: Sequence[pd.Timestamp],
-            retained_payload_bytes: int,
             current_keys: pd.DataFrame,
         ) -> pd.DataFrame:
             del session_context
             with ExitStack() as live:
-                live.enter_context(
-                    policy.reserve(
-                        "a_share.factor.keys",
-                        pandas_frame_payload_bytes(current_keys),
-                    )
-                )
                 read_window = factor_calculations.factor_read_window_for_panel(
                     current_keys,
                     definitions=definitions,
@@ -133,7 +119,7 @@ def write_factors(
                         },
                         resource_policy=policy,
                         asset_ids=asset_ids,
-                        retained_payload_bytes=retained_payload_bytes,
+                        cleanup_stack=live,
                     )
                 )
                 materialization_validation.validate_processed_input_contract(
@@ -144,9 +130,6 @@ def write_factors(
                 )
                 panel = processed_inputs[contract.primary_input_data_id]
                 panel_bytes = pandas_frame_payload_bytes(panel)
-                live.enter_context(
-                    policy.reserve("a_share.factor.input", panel_bytes)
-                )
                 output_buffer = (
                     materialization_planning.registered_output_buffer_bytes(
                         spec,
@@ -173,8 +156,6 @@ def write_factors(
                     factors,
                     current_sessions,
                     columns=spec.required_columns,
-                    retained_frames=(panel, current_keys),
-                    retained_payload_bytes=retained_payload_bytes,
                     resource_policy=policy,
                 )
                 return selected
@@ -186,7 +167,6 @@ def write_factors(
             resource_policy=policy,
             valid_bar_offsets=(lookback_days, 0),
             output_row_bound_bytes=operation_row_bound,
-            retained_payload_bytes=retained_written_bytes,
             materialize=materialize,
         )
 

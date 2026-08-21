@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime
 from inspect import signature
@@ -124,6 +125,7 @@ from quant_research_platform.sources.csmar.interim import (
 from quant_research_platform.sources.csmar.interim import (
     materialize_interim_data as _materialize_csmar_interim_data,
 )
+from quant_research_platform.storage._dataset_inspection import _release_owned_value
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -316,49 +318,58 @@ def _materialize_a_share_csmar_interim_data(
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> InterimImportResult:
     with runtime_resource_policy_scope(resource_policy) as policy:
-        calendar = _materialize_csmar_interim_data(
-            layout=layout,
-            raw_root=raw_root,
-            data_ids=("trading_calendar",),
-            start_date=None,
-            end_date=None,
-            resource_policy=policy,
-        )
-        targets = tuple(processed_catalog_module.processed_catalog().list())
-        lookback_sessions, lookahead_sessions = (
-            a_share_materialization_dependencies.required_session_offsets(targets)
-        )
-        sessions = a_share_materialization_planning.available_trading_sessions(
-            layout,
-            SourceId(csmar_ids.SOURCE_ID),
-            time_window=TimeWindow(start_date, end_date),
-            lookback_sessions=lookback_sessions,
-            lookahead_sessions=lookahead_sessions,
-            resource_policy=policy,
-        )
-        first = int(sessions.searchsorted(pd.Timestamp(start_date)))
-        stop = int(sessions.searchsorted(pd.Timestamp(end_date), side="right"))
-        if first < lookback_sessions or len(sessions) - stop < lookahead_sessions:
-            raise ValueError("a_share_source_dependency_window_incomplete")
-        source = _materialize_csmar_interim_data(
-            layout=layout,
-            raw_root=raw_root,
-            data_ids=tuple(
-                data_id
-                for data_id in CSMAR_INTERIM_DATA_IDS
-                if data_id != "trading_calendar"
-            ),
-            start_date=sessions[0].date().isoformat(),
-            end_date=sessions[-1].date().isoformat(),
-            resource_policy=policy,
-        )
-        return InterimImportResult(
-            artifact_roots={**calendar.artifact_roots, **source.artifact_roots},
-            skipped=(*calendar.skipped, *source.skipped),
-            pruning_report_text=(
-                calendar.pruning_report_text + source.pruning_report_text
-            ),
-        )
+        with ExitStack() as cleanup_stack:
+            calendar = _materialize_csmar_interim_data(
+                layout=layout,
+                raw_root=raw_root,
+                data_ids=("trading_calendar",),
+                start_date=None,
+                end_date=None,
+                resource_policy=policy,
+            )
+            targets = tuple(processed_catalog_module.processed_catalog().list())
+            lookback_sessions, lookahead_sessions = (
+                a_share_materialization_dependencies.required_session_offsets(targets)
+            )
+            owned_sessions = (
+                a_share_materialization_planning.available_trading_sessions(
+                    layout,
+                    SourceId(csmar_ids.SOURCE_ID),
+                    time_window=TimeWindow(start_date, end_date),
+                    lookback_sessions=lookback_sessions,
+                    lookahead_sessions=lookahead_sessions,
+                    resource_policy=policy,
+                )
+            )
+            cleanup_stack.callback(
+                _release_owned_value,
+                owned_sessions,
+                owner="a_share.profile.sessions",
+            )
+            sessions = owned_sessions.value
+            first = int(sessions.searchsorted(pd.Timestamp(start_date)))
+            stop = int(sessions.searchsorted(pd.Timestamp(end_date), side="right"))
+            if first < lookback_sessions or len(sessions) - stop < lookahead_sessions:
+                raise ValueError("a_share_source_dependency_window_incomplete")
+            source = _materialize_csmar_interim_data(
+                layout=layout,
+                raw_root=raw_root,
+                data_ids=tuple(
+                    data_id
+                    for data_id in CSMAR_INTERIM_DATA_IDS
+                    if data_id != "trading_calendar"
+                ),
+                start_date=sessions[0].date().isoformat(),
+                end_date=sessions[-1].date().isoformat(),
+                resource_policy=policy,
+            )
+            return InterimImportResult(
+                artifact_roots={**calendar.artifact_roots, **source.artifact_roots},
+                skipped=(*calendar.skipped, *source.skipped),
+                pruning_report_text=(
+                    calendar.pruning_report_text + source.pruning_report_text
+                ),
+            )
 
 
 def _time_bound_to_iso(value: date | datetime) -> str:

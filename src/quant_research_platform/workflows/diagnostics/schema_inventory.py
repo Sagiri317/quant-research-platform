@@ -567,9 +567,6 @@ def _aggregate_dataset_stats(
     chunks = iter_dataset_chunks(
         session,
         target_chunk_bytes=resource_policy.available_memory_bytes,
-        operation_headroom_bytes=(
-            resource_policy.available_memory_bytes + session.retained_memory_bytes
-        ),
     )
     with closing_dataset_iterator(chunks):
         for frame in chunks:

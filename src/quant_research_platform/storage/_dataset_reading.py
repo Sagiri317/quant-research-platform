@@ -31,6 +31,7 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
+    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -105,10 +106,6 @@ class DatasetSession:
     plan_base_retained_bytes: int
     prepared_filter_bytes: int = 0
     path_selection: int | None = None
-
-    @property
-    def retained_memory_bytes(self) -> int:
-        return self._lease.reserved_bytes + self.inventory.retained_memory_bytes
 
     @property
     def all_paths(self) -> DatasetInventoryPaths:
@@ -280,11 +277,32 @@ def materialize_dataset_session(
     """Materialize one validated context under its captured policy."""
 
     with runtime_resource_policy_scope(context.resource_policy):
-        return _materialize_dataset_session(
+        owned = materialize_dataset_session_owned(
             context,
             target_chunk_bytes=target_chunk_bytes,
             materialized_budget_bytes=materialized_budget_bytes,
         )
+        try:
+            return owned.value
+        finally:
+            owned.lease.close()
+
+
+def materialize_dataset_session_owned(
+    context: DatasetSession,
+    *,
+    target_chunk_bytes: int,
+    materialized_budget_bytes: int | None = None,
+) -> _OwnedValue[pd.DataFrame]:
+    """Materialize one context while transferring its output lease to the caller."""
+
+    if current_runtime_resource_policy() is not context.resource_policy:
+        raise RuntimeError("runtime_resource_policy_not_active")
+    return _materialize_dataset_session(
+        context,
+        target_chunk_bytes=target_chunk_bytes,
+        materialized_budget_bytes=materialized_budget_bytes,
+    )
 
 
 def _materialize_dataset_session(
@@ -292,21 +310,24 @@ def _materialize_dataset_session(
     *,
     target_chunk_bytes: int,
     materialized_budget_bytes: int | None = None,
-) -> pd.DataFrame:
+) -> _OwnedValue[pd.DataFrame]:
     """Materialize one validated context through the unique physical iterator."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    materialized_budget = _validated_target_chunk_bytes(
+    configured_budget = _validated_target_chunk_bytes(
         context.resource_policy.memory_budget_bytes
         if materialized_budget_bytes is None
         else materialized_budget_bytes
     )
-    operation_headroom = materialized_budget
-    materialized_budget -= context.retained_memory_bytes
+    materialized_budget = min(
+        configured_budget,
+        context.resource_policy.available_memory_bytes,
+    )
     if materialized_budget <= 0:
         raise DatasetReadCapacityExceeded(
             "dataset_materialized_result_exceeds_target_bytes"
         )
+    operation_headroom = materialized_budget
     dtype_plan = _materialized_dtype_plan(context)
     scan_target_bytes = min(target_bytes, materialized_budget)
     row_count, string_bytes, object_bytes = _scan_materialized_shape(
@@ -338,10 +359,11 @@ def _materialize_dataset_session(
             "dataset_materialized_result_exceeds_target_bytes"
         )
     second_pass_target_bytes = min(target_bytes, remaining_headroom)
-    with context.resource_policy.reserve(
+    output_lease = context.resource_policy.lease(
         "storage.materialized.output",
         required_payload_bytes,
-    ):
+    )
+    try:
         buffers = _allocate_materialized_buffers(
             dtype_plan,
             row_count=row_count,
@@ -354,7 +376,21 @@ def _materialize_dataset_session(
             target_chunk_bytes=second_pass_target_bytes,
             operation_headroom_bytes=operation_headroom - required_payload_bytes,
         )
-        return _materialized_frame(buffers)
+        output = _materialized_frame(buffers)
+        output_bytes = pandas_frame_payload_bytes(output)
+        if output_bytes > output_lease.reserved_bytes:
+            raise ValueError("dataset_materialized_output_bound_invalid")
+        output_lease.shrink_to(output_bytes)
+    except BaseException as primary:
+        try:
+            output_lease.close()
+        except BaseException as cleanup_error:
+            primary.add_note(
+                "materialized output lease release also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
+        raise
+    return _OwnedValue(output, output_lease)
 
 
 @dataclass(slots=True)
@@ -449,6 +485,8 @@ def _materialized_buffer_payload_bytes(
             result += (row_count + 7) // 8
         elif isinstance(dtype, pd.DatetimeTZDtype):
             result += row_count * 8
+        elif kind == "object":
+            result += row_count * _PANDAS_OBJECT_CELL_BYTES
         else:
             result += row_count * np.dtype(dtype).itemsize
     return result
@@ -1393,24 +1431,18 @@ def _iter_dataset_file_batches(
     """Yield deterministic file batches after Arrow-level bounded conversion."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    upstream_headroom = (
-        context.resource_policy.memory_budget_bytes
-        if operation_headroom_bytes is None
-        else _validated_target_chunk_bytes(operation_headroom_bytes)
-    )
-    operation_headroom = upstream_headroom - context.retained_memory_bytes
+    policy_available = context.resource_policy.available_memory_bytes
+    if operation_headroom_bytes is None:
+        operation_headroom = policy_available
+    else:
+        upstream_headroom = _validated_target_chunk_bytes(operation_headroom_bytes)
+        operation_headroom = min(
+            policy_available,
+            upstream_headroom,
+        )
     if operation_headroom <= 0:
         raise DatasetReadCapacityExceeded(
             "dataset_working_set_exceeds_task_memory_budget"
-        )
-    credited_reservation_bytes = 0
-    if operation_headroom_bytes is not None:
-        accounted_reservation_bytes = (
-            context.resource_policy.memory_budget_bytes - operation_headroom
-        )
-        credited_reservation_bytes = min(
-            context.resource_policy.used_memory_bytes,
-            accounted_reservation_bytes,
         )
     dtype_overrides = pandas_dtype_overrides_from_logical_payload(
         context.logical_dtypes,
@@ -1420,13 +1452,10 @@ def _iter_dataset_file_batches(
     previous_output_bytes = [0]
 
     def current_operation_headroom() -> int:
-        unaccounted_reserved_bytes = max(
-            0,
-            context.resource_policy.used_memory_bytes
-            - credited_reservation_bytes
-            - previous_output_bytes[0],
-        )
-        current = operation_headroom - unaccounted_reserved_bytes
+        current = min(
+            operation_headroom,
+            context.resource_policy.available_memory_bytes,
+        ) - previous_output_bytes[0]
         if current <= 0:
             raise DatasetReadCapacityExceeded(
                 "dataset_working_set_exceeds_task_memory_budget"

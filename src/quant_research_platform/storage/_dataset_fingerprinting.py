@@ -121,9 +121,7 @@ def _fingerprint_dataset_session_owned_with_lease(
         time_window=context.time_window,
     )
     output_columns = tuple(context.logical_columns)
-    reader_upstream_headroom_bytes = (
-        operation_headroom_bytes + context.retained_memory_bytes
-    )
+    reader_upstream_headroom_bytes = operation_headroom_bytes
     projected_schema_hash = canonical_json_hash(
         physical_schema_from_schema(
             pa.schema([context.arrow_schema.field(column) for column in hash_columns])

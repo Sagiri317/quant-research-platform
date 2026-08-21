@@ -369,7 +369,6 @@ def _index_dataset_rows(
         comparison_columns = (*index.primary_key, *value_columns)
         headroom = resource_policy.memory_budget_bytes
         headroom -= resource_policy.used_memory_bytes
-        headroom += context.retained_memory_bytes
         if headroom <= 0:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         exact_payload_target = headroom

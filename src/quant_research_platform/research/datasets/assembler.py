@@ -33,12 +33,13 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._dataset_inspection import _release_owned_value
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
     closing_dataset_iterator,
     iter_dataset_chunks,
-    materialize_dataset_session,
+    materialize_dataset_session_owned,
     open_dataset_session,
     parquet_filters_for_time_window,
     prune_paths_for_time_window,
@@ -164,10 +165,6 @@ def _iter_joined_processed_chunks(
         sessions[base_data_id],
         primary_key=dataset_spec.primary_key,
         time_window=time_window,
-        retained_payload_bytes=max(
-            0,
-            policy.used_memory_bytes - sessions[base_data_id].retained_memory_bytes,
-        ),
     )
     if not time_keys:
         raise ValueError("no_research_dataset_sessions")
@@ -240,7 +237,7 @@ def _join_processed_inputs(
         for input_data_id in ordered_input_ids:
             processed_spec = processed_catalog.get(input_data_id)
             session = sessions[input_data_id]
-            input_frame = _read_processed_input(
+            owned_input = _read_processed_input(
                 dataset_spec=dataset_spec,
                 processed_spec=processed_spec,
                 session=session,
@@ -248,18 +245,16 @@ def _join_processed_inputs(
                     tuple(assembled.columns) if assembled is not None else ()
                 ),
                 time_window=time_window,
-                retained_payload_bytes=max(
-                    0,
-                    policy.used_memory_bytes
-                    - session.retained_memory_bytes,
-                ),
             )
+            input_frame = owned_input.value
             input_bytes = _frame_bytes(input_frame)
             input_state = ExitStack()
+            input_state.callback(
+                _release_owned_value,
+                owned_input,
+                owner="research.assembly.input",
+            )
             try:
-                input_state.enter_context(
-                    policy.reserve("research.assembly.input", input_bytes)
-                )
                 if assembled is None:
                     next_base_state = ExitStack()
                     try:
@@ -390,7 +385,6 @@ def _time_keys_from_base_input(
     *,
     primary_key: tuple[str, ...],
     time_window: TimeWindow,
-    retained_payload_bytes: int,
 ) -> tuple[pd.Timestamp, ...]:
     policy = current_runtime_resource_policy()
     if policy is None:
@@ -406,9 +400,6 @@ def _time_keys_from_base_input(
             iter_dataset_chunks(
                 session,
                 target_chunk_bytes=policy.available_memory_bytes,
-                operation_headroom_bytes=(
-                    policy.memory_budget_bytes - retained_payload_bytes
-                ),
             )
         ) as chunks:
             for chunk in chunks:
@@ -511,8 +502,7 @@ def _read_processed_input(
     session: DatasetSession,
     existing_columns: tuple[str, ...],
     time_window: TimeWindow,
-    retained_payload_bytes: int,
-) -> pd.DataFrame:
+) -> _OwnedValue[pd.DataFrame]:
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
@@ -528,12 +518,9 @@ def _read_processed_input(
         time_window=time_window,
     )
     try:
-        return materialize_dataset_session(
+        return materialize_dataset_session_owned(
             view,
             target_chunk_bytes=policy.available_memory_bytes,
-            materialized_budget_bytes=(
-                policy.memory_budget_bytes - retained_payload_bytes
-            ),
         )
     finally:
         _close_research_view_preserving_primary(view, session)
@@ -820,12 +807,6 @@ def _open_input_dataset_sessions(
                     ) from exc
             raise
         sessions[data_id] = session
-        stack.enter_context(
-            policy.reserve(
-                f"research.assembly.session.{data_id}",
-                session.retained_memory_bytes,
-            )
-        )
         existing_columns = tuple(dict.fromkeys((*existing_columns, *columns)))
     return sessions
 

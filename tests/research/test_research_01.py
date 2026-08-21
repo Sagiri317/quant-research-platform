@@ -67,6 +67,7 @@ from quant_research_platform.research.predictions.runner import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _OwnedValue,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage import atomic as storage_atomic
@@ -415,11 +416,8 @@ def test_research_time_key_scan_uses_payload_target(
         lambda current, **_kwargs: current,
     )
 
-    def fake_iter_dataset_chunks(  # noqa: ANN001
-        context, *, target_chunk_bytes, operation_headroom_bytes
-    ):
+    def fake_iter_dataset_chunks(context, *, target_chunk_bytes):  # noqa: ANN001
         observed_targets.append(target_chunk_bytes)
-        assert operation_headroom_bytes == policy.memory_budget_bytes
         yield pd.DataFrame({"timestamp": timestamps})
 
     monkeypatch.setattr(
@@ -437,7 +435,6 @@ def test_research_time_key_scan_uses_payload_target(
                 "2026-01-01T00:00:00",
                 "2026-01-01T00:19:00",
             ),
-            retained_payload_bytes=0,
         )
 
     assert len(result) == 20
@@ -474,7 +471,6 @@ def test_research_time_key_scan_preserves_single_timestamp(
                 "2026-01-01T00:00:00",
                 "2026-01-01T00:00:00",
             ),
-            retained_payload_bytes=0,
         ) == (pd.Timestamp("2026-01-01"),)
 
 
@@ -526,7 +522,6 @@ def test_research_time_key_scan_closes_iterator_before_view_cleanup(
                 base_session,
                 primary_key=platform_entity_time_key(),
                 time_window=TimeWindow("2026-01-01", "2026-01-01"),
-                retained_payload_bytes=0,
             )
     assert events == ["iterator_close", "selection_release", "view_close"]
 
@@ -588,7 +583,6 @@ def test_research_view_cleanup_preserves_active_primary(
                 base,
                 primary_key=("timestamp",),
                 time_window=window,
-                retained_payload_bytes=0,
             )
     elif site == "materialize":
         session = SimpleNamespace(
@@ -608,7 +602,7 @@ def test_research_view_cleanup_preserves_active_primary(
         )
         monkeypatch.setattr(
             assembler_module,
-            "materialize_dataset_session",
+            "materialize_dataset_session_owned",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(primary),
         )
 
@@ -619,7 +613,6 @@ def test_research_view_cleanup_preserves_active_primary(
                 session=session,
                 existing_columns=(),
                 time_window=window,
-                retained_payload_bytes=0,
             )
     else:
         session = SimpleNamespace(
@@ -674,7 +667,7 @@ def test_research_view_cleanup_attempts_close_and_raises_first_failure() -> None
     assert events == ["release", "close"]
 
 
-def test_research_processed_input_uses_task_budget_for_materialization(
+def test_research_processed_input_uses_live_budget_for_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     processed_catalog = make_demo_processed_catalog()
@@ -704,24 +697,30 @@ def test_research_processed_input_uses_task_budget_for_materialization(
     def materialize(context, **kwargs):  # noqa: ANN001
         observed["context"] = context
         observed.update(kwargs)
-        return pd.DataFrame()
+        return _OwnedValue(
+            pd.DataFrame(),
+            policy.lease("test.research.input", 0),
+        )
 
-    monkeypatch.setattr(assembler_module, "materialize_dataset_session", materialize)
+    monkeypatch.setattr(
+        assembler_module,
+        "materialize_dataset_session_owned",
+        materialize,
+    )
 
     with runtime_resource_policy_scope(policy):
-        assembler_module._read_processed_input(
+        owned = assembler_module._read_processed_input(
             dataset_spec=dataset_spec,
             processed_spec=processed_spec,
             session=context,
             existing_columns=(),
             time_window=TimeWindow("2014-01-02", "2014-01-08"),
-            retained_payload_bytes=123,
         )
+        owned.lease.close()
 
     assert observed == {
         "context": context,
         "target_chunk_bytes": policy.available_memory_bytes,
-        "materialized_budget_bytes": policy.memory_budget_bytes - 123,
     }
 
 
@@ -743,7 +742,10 @@ def test_research_join_preflights_merged_output_allocation(
     monkeypatch.setattr(
         assembler_module,
         "_read_processed_input",
-        lambda **_kwargs: next(frames),
+        lambda **_kwargs: _OwnedValue(
+            next(frames),
+            policy.lease("test.research.input", 0),
+        ),
     )
     monkeypatch.setattr(
         assembler_module,
@@ -766,85 +768,11 @@ def test_research_join_preflights_merged_output_allocation(
                     dataset_spec=SimpleNamespace(primary_key=("id",)),
                     processed_catalog=SimpleNamespace(get=lambda _key: object()),
                     sessions={
-                        "left": SimpleNamespace(retained_memory_bytes=0),
-                        "right": SimpleNamespace(retained_memory_bytes=0),
+                        "left": SimpleNamespace(),
+                        "right": SimpleNamespace(),
                     },
                     time_window=object(),
                 )
-        finally:
-            blocking_lease.close()
-
-
-def test_research_join_preflights_final_projection_allocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=256 * 1024,
-        explicit_cap_bytes=64 * 1024 + 37_500,
-    )
-    frame = pd.DataFrame({"id": range(1_000), "value": [1.0] * 1_000})
-    monkeypatch.setattr(
-        assembler_module,
-        "_ordered_input_data_ids",
-        lambda *_args, **_kwargs: ("one",),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_base_input_data_id",
-        lambda *_args, **_kwargs: "one",
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_time_keys_from_base_input",
-        lambda *_args, **_kwargs: (pd.Timestamp("2024-01-01"),),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_research_chunk_windows",
-        lambda *_args, **_kwargs: (object(),),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_read_processed_input",
-        lambda **_kwargs: frame,
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_ordered_output_columns",
-        lambda _spec: ("id", "value"),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "validate_research_dataset",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        pd.DataFrame,
-        "sort_values",
-        lambda *_args, **_kwargs: pytest.fail("sort allocation reached"),
-    )
-
-    dataset_spec = SimpleNamespace(primary_key=("id",), feature_transforms=())
-    sessions = {"one": SimpleNamespace(retained_memory_bytes=0)}
-    chunks = assembler_module._iter_joined_processed_chunks(
-        dataset_spec=dataset_spec,
-        processed_catalog=SimpleNamespace(get=lambda _key: object()),
-        sessions=sessions,
-        time_window=object(),
-    )
-
-    with runtime_resource_policy_scope(policy):
-        blocking_lease = policy.lease(
-            "test.research.projection.capacity",
-            policy.memory_budget_bytes
-            - (2 * assembler_module._frame_bytes(frame) + 1),
-        )
-        try:
-            bound = next(chunks)
-            lease = policy.lease("test.research.consumer", bound)
-            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-                chunks.send(lease)
-            lease.close()
         finally:
             blocking_lease.close()
 
@@ -1210,22 +1138,25 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
             assert len(current.read_paths) == 1
             assert current.path_selection is not None
             observed_selections.append(current.path_selection)
-            return pd.DataFrame()
+            return _OwnedValue(
+                pd.DataFrame(),
+                policy.lease("test.research.input", 0),
+            )
 
         monkeypatch.setattr(
             assembler_module,
-            "materialize_dataset_session",
+            "materialize_dataset_session_owned",
             materialize,
         )
         with runtime_resource_policy_scope(policy):
-            assembler_module._read_processed_input(
+            owned = assembler_module._read_processed_input(
                 dataset_spec=dataset_spec,
                 processed_spec=processed_spec,
                 session=session,
                 existing_columns=(),
                 time_window=TimeWindow("2014-12-31", "2014-12-31"),
-                retained_payload_bytes=0,
             )
+            owned.lease.close()
         normal_selection = observed_selections.pop()
         assert (
             session.inventory.path_count(
@@ -1242,7 +1173,7 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
 
         monkeypatch.setattr(
             assembler_module,
-            "materialize_dataset_session",
+            "materialize_dataset_session_owned",
             fail_materialization,
         )
         with runtime_resource_policy_scope(policy):
@@ -1256,7 +1187,6 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
                     session=session,
                     existing_columns=(),
                     time_window=TimeWindow("2015-01-02", "2015-01-02"),
-                    retained_payload_bytes=0,
                 )
         error_selection = observed_selections.pop()
         assert (

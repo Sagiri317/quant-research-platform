@@ -5,8 +5,7 @@ import sys
 import tempfile
 import weakref
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager, nullcontext
-from math import ceil
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -99,6 +98,42 @@ MARKET_PANEL_DATA_ID = market_panel_data_id()
 MARKET_CONTEXT_DATA_ID = market_context_data_id()
 MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 FORWARD_RETURN_20D_COLUMN = forward_return_label_column(20)
+
+
+def _patch_planning_reader(monkeypatch: pytest.MonkeyPatch, reader) -> None:  # noqa: ANN001, ANN202
+    @contextmanager
+    def open_reader(
+        root: Path,
+        *,
+        columns=None,  # noqa: ANN001
+        time_window=None,  # noqa: ANN001
+        resource_policy,
+        row_filters=(),
+    ):
+        asset_ids = None
+        for _column, operator, values in row_filters:
+            if operator == "in":
+                asset_ids = tuple(values)
+        yield SimpleNamespace(
+            root=root,
+            columns=columns,
+            time_window=time_window,
+            resource_policy=resource_policy,
+            asset_ids=asset_ids,
+        )
+
+    def iter_reader(session, *, target_chunk_bytes):  # noqa: ANN001, ANN202
+        return reader(
+            session.root,
+            columns=session.columns,
+            time_window=session.time_window,
+            resource_policy=session.resource_policy,
+            target_chunk_bytes=target_chunk_bytes,
+            asset_ids=session.asset_ids,
+        )
+
+    monkeypatch.setattr(materialization_planning, "open_dataset_session", open_reader)
+    monkeypatch.setattr(materialization_planning, "iter_dataset_chunks", iter_reader)
 
 
 def _consume_bound_first(data, policy):  # noqa: ANN001, ANN202
@@ -200,15 +235,17 @@ def test_panel_materializer_skips_market_bars_source_preload(
     _write_interim_frame(layout, source_id, MARKET_BARS_DATA_ID)
     _write_interim_frame(layout, source_id, "trading_calendar")
 
-    inputs = materialization_io.read_source_inputs_for_spec(
-        spec,
-        layout=layout,
-        source_id=source_id,
-        market_bars_data_id=source_ids.market_bars_source_data_id(spec),
-        resource_policy=capture_test_policy(
-            available_memory_bytes=1024**3,
-        ),
-    )
+    policy = capture_test_policy(available_memory_bytes=1024**3)
+    with runtime_resource_policy_scope(policy):
+        with ExitStack() as cleanup_stack:
+            inputs = materialization_io.read_source_inputs_for_spec(
+                spec,
+                layout=layout,
+                source_id=source_id,
+                market_bars_data_id=source_ids.market_bars_source_data_id(spec),
+                resource_policy=policy,
+                cleanup_stack=cleanup_stack,
+            )
 
     assert set(inputs) == {"trading_calendar"}
     assert all(isinstance(frame, pd.DataFrame) for frame in inputs.values())
@@ -238,7 +275,7 @@ def test_source_input_physical_reads_use_owner_resource_policy(
         raising=False,
     )
 
-    def fake_materialize_dataset_session(  # noqa: ANN001
+    def fake_materialize_dataset_session_owned(  # noqa: ANN001
         context,
         *,
         target_chunk_bytes,
@@ -246,28 +283,38 @@ def test_source_input_physical_reads_use_owner_resource_policy(
     ):
         assert materialized_budget_bytes == policy.memory_budget_bytes
         observed_targets.append(target_chunk_bytes)
-        return _key_frame()
+        frame = _key_frame()
+        return _OwnedValue(
+            frame,
+            policy.lease(
+                "test.source_input",
+                pandas_frame_payload_bytes(frame),
+            ),
+        )
 
     monkeypatch.setattr(
         materialization_io,
-        "materialize_dataset_session",
-        fake_materialize_dataset_session,
+        "materialize_dataset_session_owned",
+        fake_materialize_dataset_session_owned,
         raising=False,
     )
 
-    inputs = materialization_io.read_source_inputs_for_spec(
-        spec,
-        layout=layout,
-        source_id=source_id,
-        market_bars_data_id=source_ids.market_bars_source_data_id(spec),
-        resource_policy=policy,
-    )
+    with runtime_resource_policy_scope(policy):
+        with ExitStack() as cleanup_stack:
+            inputs = materialization_io.read_source_inputs_for_spec(
+                spec,
+                layout=layout,
+                source_id=source_id,
+                market_bars_data_id=source_ids.market_bars_source_data_id(spec),
+                resource_policy=policy,
+                cleanup_stack=cleanup_stack,
+            )
 
     assert set(inputs) == {"trading_calendar"}
     assert observed_targets == [policy.available_memory_bytes]
 
 
-def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
+def test_materialized_read_transfers_output_lease_to_caller_stack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
@@ -276,7 +323,6 @@ def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
     observed: list[tuple[int, int]] = []
 
     def open_session(root, **kwargs):  # noqa: ANN001, ANN202
-        assert "retained_payload_bytes" not in kwargs
         return nullcontext(root)
 
     monkeypatch.setattr(
@@ -285,33 +331,45 @@ def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
         open_session,
     )
 
-    def fake_materialize_dataset_session(  # noqa: ANN001
+    def fake_materialize_dataset_session_owned(  # noqa: ANN001
         _context,
         *,
         target_chunk_bytes,
         materialized_budget_bytes,
     ):
         observed.append((target_chunk_bytes, materialized_budget_bytes))
-        return _key_frame()
+        frame = _key_frame()
+        return _OwnedValue(
+            frame,
+            policy.lease(
+                "test.materialized.output",
+                pandas_frame_payload_bytes(frame),
+            ),
+        )
 
     monkeypatch.setattr(
         materialization_io,
-        "materialize_dataset_session",
-        fake_materialize_dataset_session,
+        "materialize_dataset_session_owned",
+        fake_materialize_dataset_session_owned,
     )
 
-    retained_payload_bytes = 2 * 1024**2
-    materialization_io.read_materialized_dataset(
-        Path("dataset"),
-        resource_policy=policy,
-        retained_payload_bytes=retained_payload_bytes,
-    )
+    with runtime_resource_policy_scope(policy):
+        with ExitStack() as cleanup_stack:
+            result = materialization_io.read_materialized_dataset(
+                Path("dataset"),
+                resource_policy=policy,
+                cleanup_stack=cleanup_stack,
+            )
+            assert isinstance(result, pd.DataFrame)
+            assert policy.used_memory_bytes == pandas_frame_payload_bytes(result)
 
-    available = policy.memory_budget_bytes - retained_payload_bytes
-    assert observed == [(policy.available_memory_bytes, available)]
+    assert policy.used_memory_bytes == 0
+    assert observed == [
+        (policy.available_memory_bytes, policy.memory_budget_bytes),
+    ]
 
 
-@pytest.mark.parametrize("operation", ("materialized", "chunked"))
+@pytest.mark.parametrize("operation", ("materialized",))
 def test_dataset_read_scope_remains_active_through_session_exit(
     operation: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -346,30 +404,22 @@ def test_dataset_read_scope_remains_active_through_session_exit(
     monkeypatch.setattr(materialization_io, "open_dataset_session", open_session)
     monkeypatch.setattr(
         materialization_io,
-        "materialize_dataset_session",
-        lambda *_args, **_kwargs: pd.DataFrame(),
+        "materialize_dataset_session_owned",
+        lambda *_args, **_kwargs: _OwnedValue(
+            pd.DataFrame(),
+            SimpleNamespace(close=lambda: None),
+        ),
     )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks",
-        lambda *_args, **_kwargs: iter(()),
-    )
-
     if operation == "materialized":
-        materialization_io.read_materialized_dataset(
-            Path("dataset"),
-            resource_policy=policy,
-        )
-    else:
-        list(
-            materialization_io.iter_dataset_chunks_with_policy(
+        with ExitStack() as cleanup_stack:
+            materialization_io.read_materialized_dataset(
                 Path("dataset"),
                 resource_policy=policy,
+                cleanup_stack=cleanup_stack,
             )
-        )
 
 
-@pytest.mark.parametrize("operation", ("materialized", "chunked"))
+@pytest.mark.parametrize("operation", ("materialized",))
 def test_dataset_read_does_not_construct_session_when_policy_entry_fails(
     operation: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -395,109 +445,17 @@ def test_dataset_read_does_not_construct_session_when_policy_entry_fails(
 
     with pytest.raises(RuntimeError) as raised:
         if operation == "materialized":
-            materialization_io.read_materialized_dataset(
-                Path("dataset"),
-                resource_policy=policy,
-            )
-        else:
-            list(
-                materialization_io.iter_dataset_chunks_with_policy(
+            with ExitStack() as cleanup_stack:
+                materialization_io.read_materialized_dataset(
                     Path("dataset"),
                     resource_policy=policy,
+                    cleanup_stack=cleanup_stack,
                 )
-            )
 
     assert raised.value is primary
 
 
-def test_materialized_read_rejects_exhausted_retained_state_before_decoder() -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=10 * 1024**2,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="a_share_known_payloads_exceed_task_memory_budget",
-    ):
-        materialization_io.read_materialized_dataset(
-            Path("dataset"),
-            resource_policy=policy,
-            retained_payload_bytes=policy.memory_budget_bytes,
-        )
-
-
-def test_materialized_read_rejects_negative_retained_state() -> None:
-    with pytest.raises(ValueError, match="invalid_a_share_retained_payload_bytes"):
-        materialization_io.read_materialized_dataset(
-            Path("dataset"),
-            resource_policy=capture_test_policy(
-                available_memory_bytes=1024**3,
-            ),
-            retained_payload_bytes=-1,
-        )
-
-
-def test_chunk_reader_rejects_exhausted_retained_state_before_session_open(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    opened = False
-
-    def forbidden_open(*_args: object, **_kwargs: object) -> object:
-        nonlocal opened
-        opened = True
-        raise AssertionError("dataset_session_opened_after_retained_exhaustion")
-
-    monkeypatch.setattr(materialization_io, "open_dataset_session", forbidden_open)
-    chunks = materialization_io.iter_dataset_chunks_with_policy(
-        Path("dataset"),
-        resource_policy=policy,
-        retained_payload_bytes=policy.memory_budget_bytes,
-    )
-
-    with pytest.raises(
-        materialization_io.MaterializationCapacityExceeded,
-        match="a_share_known_payloads_exceed_task_memory_budget",
-    ):
-        next(chunks)
-
-    assert opened is False
-
-
-def test_chunk_reader_passes_caller_retained_state_to_session_acquisition(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-    )
-    observed: list[bool] = []
-
-    @contextmanager
-    def open_session(*_args, **kwargs):  # noqa: ANN001, ANN202
-        observed.append("retained_payload_bytes" in kwargs)
-        yield SimpleNamespace(resource_policy=policy)
-
-    monkeypatch.setattr(materialization_io, "open_dataset_session", open_session)
-    monkeypatch.setattr(
-        materialization_io, "iter_dataset_chunks", lambda *_args, **_kwargs: iter(())
-    )
-
-    retained = 321
-    list(
-        materialization_io.iter_dataset_chunks_with_policy(
-            Path("dataset"),
-            resource_policy=policy,
-            retained_payload_bytes=retained,
-        )
-    )
-
-    assert observed == [False]
-
-
-@pytest.mark.parametrize("operation", ("chunks", "assets"))
+@pytest.mark.parametrize("operation", ("assets",))
 def test_a_share_factories_defer_policy_use_until_consumption(
     operation: str,
 ) -> None:
@@ -511,24 +469,17 @@ def test_a_share_factories_defer_policy_use_until_consumption(
     )
 
     with runtime_resource_policy_scope(active):
-        if operation == "chunks":
-            chunks = materialization_io.iter_dataset_chunks_with_policy(
+        with pytest.raises(
+            RuntimeError,
+            match="a_share_materialization_policy_scope_required",
+        ):
+            materialization_planning.iter_active_materialization_batches(
                 Path("dataset"),
+                time_window=TimeWindow("2024-01-01", "2024-01-01"),
+                sessions=(pd.Timestamp("2024-01-01"),),
                 resource_policy=explicit,
+                materialize=lambda *_args: pd.DataFrame(),
             )
-            chunks.close()
-        else:
-            with pytest.raises(
-                RuntimeError,
-                match="a_share_materialization_policy_scope_required",
-            ):
-                materialization_planning.iter_active_materialization_batches(
-                    Path("dataset"),
-                    time_window=TimeWindow("2024-01-01", "2024-01-01"),
-                    sessions=(pd.Timestamp("2024-01-01"),),
-                    resource_policy=explicit,
-                    materialize=lambda *_args: pd.DataFrame(),
-                )
 
 
 def test_session_batch_window_uses_indexed_bounds_without_full_session_scan() -> None:
@@ -587,52 +538,6 @@ def test_dependency_window_uses_sorted_indexed_sessions_without_selection_state(
     }
 
 
-@pytest.mark.parametrize("target_chunk_bytes", (0, -1, False))
-def test_invalid_chunk_target_rejection_happens_before_dataset_session_acquisition(
-    monkeypatch: pytest.MonkeyPatch,
-    target_chunk_bytes: object,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1024**3,
-    )
-    acquisitions = 0
-
-    def forbidden_open(*_args: object, **_kwargs: object) -> object:
-        nonlocal acquisitions
-        acquisitions += 1
-        raise AssertionError("dataset_session_acquired_before_target_validation")
-
-    monkeypatch.setattr(materialization_io, "open_dataset_session", forbidden_open)
-    chunks = materialization_io.iter_dataset_chunks_with_policy(
-        Path("dataset"),
-        resource_policy=policy,
-        target_chunk_bytes=target_chunk_bytes,  # type: ignore[arg-type]
-    )
-
-    with pytest.raises(ValueError, match="invalid_target_chunk_bytes"):
-        next(chunks)
-
-    assert acquisitions == 0
-
-
-def test_a_share_indivisible_output_rejects_hard_budget() -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 75,
-    )
-    output = pd.DataFrame({"value": ["x" * (128 * 1024)]})
-
-    with pytest.raises(
-        ValueError,
-        match="a_share_known_payloads_exceed_task_memory_budget",
-    ):
-        materialization_planning.require_known_materialization_payload_bound(
-            frames=(),
-            output=output,
-            resource_policy=policy,
-        )
-
-
 def test_panel_materializer_rejects_unapproved_market_bars_source_variant() -> None:
     spec = _processed_spec(
         MARKET_PANEL_DATA_ID,
@@ -664,14 +569,16 @@ def test_materializer_reads_processed_inputs_from_spec_processed_input_data_ids(
         spec=panel_spec,
     )
 
-    inputs = materialization_io.read_processed_inputs_for_spec(
-        target,
-        layout=layout,
-        processed_catalog=_catalog(panel_spec, target),
-        resource_policy=capture_test_policy(
-            available_memory_bytes=1024**3,
-        ),
-    )
+    policy = capture_test_policy(available_memory_bytes=1024**3)
+    with runtime_resource_policy_scope(policy):
+        with ExitStack() as cleanup_stack:
+            inputs = materialization_io.read_processed_inputs_for_spec(
+                target,
+                layout=layout,
+                processed_catalog=_catalog(panel_spec, target),
+                resource_policy=policy,
+                cleanup_stack=cleanup_stack,
+            )
 
     assert set(inputs) == {MARKET_PANEL_DATA_ID}
     assert inputs[MARKET_PANEL_DATA_ID]["asset_id"].tolist() == ["asset_a"]
@@ -938,7 +845,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         calls["label_key_batch"] += 1
         return read_window
 
-    def iter_dataset_chunks_with_policy(*args: object, **kwargs: object):
+    def reader(*args: object, **kwargs: object):
         del args
         if kwargs.get("columns") == ("asset_id", "timestamp"):
             key_asset_filters.append(kwargs.get("asset_ids"))
@@ -961,11 +868,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         "read_materialized_dataset",
         lambda *_args, **_kwargs: _key_frame().loc[:, ["asset_id", "timestamp"]],
     )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        iter_dataset_chunks_with_policy,
-    )
+    _patch_planning_reader(monkeypatch, reader)
     monkeypatch.setattr(
         materialize_annotations.annotations,
         "derive_annotations",
@@ -1099,7 +1002,6 @@ def test_write_paths_reserve_registered_output_before_transform(
         live_frames = (panel, current_keys)
     else:
         live_frames = (panel,)
-    retained_bytes = 0
     live_frame_bytes = sum(pandas_frame_payload_bytes(frame) for frame in live_frames)
 
     monkeypatch.setattr(
@@ -1115,12 +1017,11 @@ def test_write_paths_reserve_registered_output_before_transform(
 
     def invoke_materialize(*_args: object, **kwargs: object):
         materialize = kwargs["materialize"]
-        arguments = (("asset_a",), tuple(sessions), tuple(sessions), retained_bytes)
-        with policy.reserve("test.upstream.retained", retained_bytes):
-            if kwargs.get("valid_bar_offsets") is not None:
-                yield materialize(*arguments, current_keys)
-            else:
-                yield materialize(*arguments)
+        arguments = (("asset_a",), tuple(sessions), tuple(sessions))
+        if kwargs.get("valid_bar_offsets") is not None:
+            yield materialize(*arguments, current_keys)
+        else:
+            yield materialize(*arguments)
 
     monkeypatch.setattr(
         materialization_planning,
@@ -1281,17 +1182,20 @@ def test_materialized_dataset_asset_filter_is_forwarded_outside_projection(
     )
     monkeypatch.setattr(
         materialization_io,
-        "materialize_dataset_session",
-        lambda *_args, **_kwargs: pd.DataFrame(
-            {"timestamp": pd.Series(dtype="datetime64[ns]")}
+        "materialize_dataset_session_owned",
+        lambda *_args, **_kwargs: _OwnedValue(
+            pd.DataFrame({"timestamp": pd.Series(dtype="datetime64[ns]")}),
+            SimpleNamespace(close=lambda: None),
         ),
     )
-    result = materialization_io.read_materialized_dataset(
-        Path("panel"),
-        resource_policy=policy,
-        columns=("timestamp",),
-        asset_ids=("a", "b"),
-    )
+    with ExitStack() as cleanup_stack:
+        result = materialization_io.read_materialized_dataset(
+            Path("panel"),
+            resource_policy=policy,
+            columns=("timestamp",),
+            asset_ids=("a", "b"),
+            cleanup_stack=cleanup_stack,
+        )
 
     assert result.empty
     assert observed[0]["columns"] == ("timestamp",)
@@ -1343,9 +1247,8 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
         "_inspect_dataset_owned",
         owned_inspection,
     )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
+    _patch_planning_reader(
+        monkeypatch,
         lambda *args, **kwargs: observed.append(kwargs) or chunks,
     )
     policy = capture_test_policy(
@@ -1353,7 +1256,7 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
         explicit_cap_bytes=5 * 1024 * 1024,
     )
     with runtime_resource_policy_scope(policy):
-        result = materialization_planning.available_trading_sessions(
+        owned = materialization_planning.available_trading_sessions(
             SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
             "source",  # type: ignore[arg-type]
             time_window=TimeWindow("2024-01-02", "2024-01-04"),
@@ -1361,11 +1264,15 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
             lookahead_sessions=1,
             resource_policy=policy,
         )
+        try:
+            result = owned.value.copy()
+        finally:
+            owned.lease.close()
 
     assert result.equals(
         pd.DatetimeIndex(pd.Timestamp(f"2024-01-0{day}") for day in range(1, 6))
     )
-    retained_bytes = 6 * np.dtype(np.int64).itemsize
+    session_state_bytes = 6 * np.dtype(np.int64).itemsize
     fixed_row_bytes = (
         np.dtype(np.int64).itemsize
         + np.dtype(np.bool_).itemsize
@@ -1374,15 +1281,13 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
     transform_row_bytes = 2 * np.dtype(np.bool_).itemsize + np.dtype(np.int64).itemsize
     target_bytes = min(
         policy.available_memory_bytes,
-        retained_bytes + (10**9 + 5) // 6,
-        (policy.memory_budget_bytes - retained_bytes)
+        session_state_bytes + (10**9 + 5) // 6,
+        (policy.memory_budget_bytes - session_state_bytes)
         * fixed_row_bytes
         // (fixed_row_bytes + transform_row_bytes),
     )
     assert observed[0]["target_chunk_bytes"] == target_bytes
-    assert observed[0]["retained_payload_bytes"] == (
-        retained_bytes + ceil(target_bytes / fixed_row_bytes) * transform_row_bytes
-    )
+    assert "operation_headroom_bytes" not in observed[0]
 
 
 def test_available_trading_sessions_small_fit_reaches_exact_working_set_check(
@@ -1410,7 +1315,7 @@ def test_available_trading_sessions_small_fit_reaches_exact_working_set_check(
             )
         )
 
-    monkeypatch.setattr(materialization_io, "iter_dataset_chunks_with_policy", read)
+    _patch_planning_reader(monkeypatch, read)
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
@@ -1425,7 +1330,7 @@ def test_available_trading_sessions_small_fit_reaches_exact_working_set_check(
         ),
     )
     with runtime_resource_policy_scope(policy):
-        result = materialization_planning.available_trading_sessions(
+        owned = materialization_planning.available_trading_sessions(
             SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
             "source",  # type: ignore[arg-type]
             time_window=TimeWindow("2024-01-02", "2024-01-02"),
@@ -1433,6 +1338,10 @@ def test_available_trading_sessions_small_fit_reaches_exact_working_set_check(
             lookahead_sessions=0,
             resource_policy=policy,
         )
+        try:
+            result = owned.value.copy()
+        finally:
+            owned.lease.close()
 
     assert tuple(result) == (pd.Timestamp("2024-01-02"),)
     assert reads == 1
@@ -1465,17 +1374,13 @@ def test_available_trading_sessions_retains_only_selected_boundary_state(
             resource_policy.lease("test.a_share.inspection", 0),
         ),
     )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: chunks(),
-    )
+    _patch_planning_reader(monkeypatch, lambda *_args, **_kwargs: chunks())
     policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
 
     with runtime_resource_policy_scope(policy):
-        result = materialization_planning.available_trading_sessions(
+        owned = materialization_planning.available_trading_sessions(
             SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
             "source",  # type: ignore[arg-type]
             time_window=TimeWindow("2024-06-03", "2024-06-04"),
@@ -1483,6 +1388,10 @@ def test_available_trading_sessions_retains_only_selected_boundary_state(
             lookahead_sessions=2,
             resource_policy=policy,
         )
+        try:
+            result = owned.value.copy()
+        finally:
+            owned.lease.close()
 
     assert result.equals(pd.DatetimeIndex((*before[-2:], *core, *after[:2])))
     assert result.nbytes == len(result) * np.dtype(np.int64).itemsize
@@ -1490,7 +1399,7 @@ def test_available_trading_sessions_retains_only_selected_boundary_state(
     assert result.asi8.base.nbytes == result.nbytes
 
 
-def test_dataset_coverage_reader_accounts_compact_retained_state(
+def test_dataset_coverage_reader_bounds_session_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions = pd.date_range("2024-01-01", periods=3, freq="D")
@@ -1512,7 +1421,7 @@ def test_dataset_coverage_reader_accounts_compact_retained_state(
         observed.append(kwargs)
         return iter((pd.DataFrame({"timestamp": sessions}),))
 
-    monkeypatch.setattr(materialization_io, "iter_dataset_chunks_with_policy", read)
+    _patch_planning_reader(monkeypatch, read)
 
     with runtime_resource_policy_scope(policy):
         materialization_planning.require_dataset_coverage(
@@ -1522,31 +1431,27 @@ def test_dataset_coverage_reader_accounts_compact_retained_state(
             resource_policy=policy,
         )
 
-    retained_bytes = sessions.nbytes + len(sessions) * np.dtype(np.bool_).itemsize
-    assert observed == [
-        {
-            "columns": ["timestamp"],
-            "time_window": TimeWindow("2024-01-01", "2024-01-03"),
-            "resource_policy": policy,
-            "target_chunk_bytes": min(
-                policy.available_memory_bytes,
-                policy.memory_budget_bytes - retained_bytes,
-            ),
-            "retained_payload_bytes": retained_bytes,
-        }
-    ]
+    assert len(observed) == 1
+    assert observed[0]["columns"] == ("timestamp",)
+    assert observed[0]["time_window"] == TimeWindow("2024-01-01", "2024-01-03")
+    assert observed[0]["target_chunk_bytes"] == (
+        policy.memory_budget_bytes - len(sessions) * np.dtype(np.bool_).itemsize
+    )
+    assert "operation_headroom_bytes" not in observed[0]
 
 
-def test_dataset_coverage_preflights_int64_normalization_before_transform(
+def test_dataset_coverage_checks_timestamps_without_series_transform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from quant_research_platform.markets.implementations.a_share.validation import (
+        strict_values,
+    )
+
+    sessions = pd.date_range("2024-01-01", periods=2, freq="D")
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=4 * 1024 * 1024,
     )
-    chunk = pd.DataFrame({"timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"])})
-    retained_state_bytes = 17
-    observed: list[int] = []
     monkeypatch.setattr(
         materialization_planning,
         "_inspect_dataset_owned",
@@ -1555,45 +1460,25 @@ def test_dataset_coverage_preflights_int64_normalization_before_transform(
             resource_policy.lease("test.a_share.inspection", 0),
         ),
     )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: iter((chunk,)),
-    )
-
-    def reject_bound(*, retained_payload_bytes, **_kwargs):  # noqa: ANN001, ANN202
-        observed.append(retained_payload_bytes)
-        raise materialization_io.MaterializationCapacityExceeded(
-            "a_share_known_payloads_exceed_task_memory_budget"
-        )
-
-    monkeypatch.setattr(
-        materialization_planning,
-        "require_known_materialization_payload_bound",
-        reject_bound,
-    )
-    monkeypatch.setattr(
-        materialization_planning.strict_values,
-        "strict_timestamp_value_series",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("timestamp_normalized_before_capacity_preflight")
+    _patch_planning_reader(
+        monkeypatch,
+        lambda *_args, **_kwargs: iter(
+            (pd.DataFrame({"timestamp": sessions}),)
         ),
+    )
+    monkeypatch.setattr(
+        strict_values,
+        "strict_timestamp_value_series",
+        lambda *_args, **_kwargs: pytest.fail("timestamp_series_transform"),
     )
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(
-            materialization_io.MaterializationCapacityExceeded,
-            match="a_share_known_payloads_exceed_task_memory_budget",
-        ):
-            materialization_planning._mark_dataset_session_coverage(
-                Path("dataset"),
-                TimeWindow("2024-01-02", "2024-01-03"),
-                expected_sessions=pd.DatetimeIndex(chunk["timestamp"]),
-                covered=np.zeros(2, dtype=np.bool_),
-                retained_state_bytes=retained_state_bytes,
-                resource_policy=policy,
-            )
-    assert observed == [retained_state_bytes + 2 * np.dtype(np.int64).itemsize]
+        materialization_planning.require_dataset_coverage(
+            Path("panel"),
+            TimeWindow("2024-01-01", "2024-01-02"),
+            sessions=sessions,
+            resource_policy=policy,
+        )
 
 
 def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
@@ -1611,26 +1496,27 @@ def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
     def materialize(*_args):  # noqa: ANN002, ANN202
         raise materialization_io.MaterializationCapacityExceeded("split")
 
-    with (
-        runtime_resource_policy_scope(policy),
-        pytest.raises(
-            materialization_io.MaterializationCapacityExceeded,
-            match="a_share_known_payloads_exceed_task_memory_budget",
-        ),
-    ):
-        batches = materialization_planning._iter_adaptive_materialization_batches(
-            asset_ids=SliceRejectingTuple(("a", "b")),
-            sessions=(pd.Timestamp("2024-01-02"),),
-            session_context=(pd.Timestamp("2024-01-02"),),
-            retained_payload_bytes=policy.memory_budget_bytes - 1,
-            materialize=materialize,
-        )
-        bound = next(batches)
-        lease = policy.lease("test.a_share.consumer", bound)
-        try:
-            batches.send(lease)
-        finally:
-            lease.close()
+    with runtime_resource_policy_scope(policy):
+        with policy.reserve(
+            "test.a_share.preexisting",
+            policy.memory_budget_bytes - 1,
+        ):
+            batches = materialization_planning._iter_adaptive_materialization_batches(
+                asset_ids=SliceRejectingTuple(("a", "b")),
+                sessions=(pd.Timestamp("2024-01-02"),),
+                session_context=(pd.Timestamp("2024-01-02"),),
+                materialize=materialize,
+            )
+            bound = next(batches)
+            lease = SimpleNamespace(
+                reserved_bytes=bound,
+                shrink_to=lambda _bytes: None,
+            )
+            with pytest.raises(
+                materialization_io.MaterializationCapacityExceeded,
+                match="a_share_known_payloads_exceed_task_memory_budget",
+            ):
+                batches.send(lease)
             batches.close()
 
 
@@ -1687,18 +1573,12 @@ def test_active_materialization_outer_scope_owns_factory_snapshot_and_primary(
 
     materialized_sessions: list[tuple[pd.Timestamp, ...]] = []
 
-    def materialize(  # noqa: ANN001, ANN202
-        _assets, current_sessions, _session_context, _retained
-    ):
+    def materialize(_assets, current_sessions, _session_context):  # noqa: ANN001, ANN202
         observed.append(("materialize", current_runtime_resource_policy()))
         materialized_sessions.append(tuple(current_sessions))
         raise primary
 
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: source(),
-    )
+    _patch_planning_reader(monkeypatch, lambda *_args, **_kwargs: source())
 
     with runtime_resource_policy_scope(policy):
         batches = materialization_planning.iter_active_materialization_batches(
@@ -1708,7 +1588,6 @@ def test_active_materialization_outer_scope_owns_factory_snapshot_and_primary(
             resource_policy=policy,
             materialize=materialize,
         )
-        sessions._data._ndarray[0] = pd.Timestamp("2099-01-01").to_datetime64()  # noqa: SLF001
         bound = next(batches)
         lease = policy.lease("test.a_share.consumer", bound)
         with pytest.raises(primary_type) as caught:
@@ -1738,9 +1617,8 @@ def test_active_materialization_callback_receives_full_owned_session_context(
     original = tuple(sessions)
     observed: list[tuple[tuple[pd.Timestamp, ...], tuple[pd.Timestamp, ...]]] = []
 
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
+    _patch_planning_reader(
+        monkeypatch,
         lambda *_args, **_kwargs: iter((pd.DataFrame({"asset_id": ["asset_a"]}),)),
     )
 
@@ -1748,7 +1626,6 @@ def test_active_materialization_callback_receives_full_owned_session_context(
         asset_ids,
         current_sessions,
         session_context,
-        _retained,  # noqa: ANN001
     ):  # noqa: ANN202
         observed.append((tuple(current_sessions), tuple(session_context)))
         return pd.DataFrame(
@@ -1763,9 +1640,6 @@ def test_active_materialization_callback_receives_full_owned_session_context(
             resource_policy=policy,
             materialize=materialize,
         )
-        sessions._data._ndarray[-1] = pd.Timestamp(  # noqa: SLF001
-            "2099-01-01"
-        ).to_datetime64()
         _consume_bound_first(batches, policy)
 
     assert observed == [(original[1:3], original)]
@@ -1779,9 +1653,8 @@ def test_active_materialization_never_consumed_factory_abandons_without_resource
         available_memory_bytes=1024**3,
     )
     source_hits: list[str] = []
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
+    _patch_planning_reader(
+        monkeypatch,
         lambda *_args, **_kwargs: source_hits.append("source") or iter(()),
     )
 
@@ -1807,7 +1680,7 @@ def test_active_materialization_owner_deduplicates_planned_batches_and_closes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     closed: list[bool] = []
-    attempts: list[tuple[tuple[object, ...], int, int]] = []
+    attempts: list[tuple[tuple[object, ...], int]] = []
     sessions = tuple(pd.to_datetime(["2024-01-02", "2024-01-03"]))
     policy = capture_test_policy(
         available_memory_bytes=1024**3,
@@ -1819,23 +1692,16 @@ def test_active_materialization_owner_deduplicates_planned_batches_and_closes(
         finally:
             closed.append(True)
 
-    def materialize(  # noqa: ANN001, ANN202
-        asset_ids, current_sessions, _session_context, retained_payload_bytes
-    ):
+    def materialize(asset_ids, current_sessions, _session_context):  # noqa: ANN001, ANN202
         attempts.append(
             (
                 tuple(asset_ids),
-                retained_payload_bytes,
                 policy.used_memory_bytes,
             )
         )
         return pd.DataFrame({"asset_id": asset_ids, "timestamp": current_sessions})
 
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: source(),
-    )
+    _patch_planning_reader(monkeypatch, lambda *_args, **_kwargs: source())
     publications = _scoped_active_materialization_batches(
         Path("panel"),
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
@@ -1855,14 +1721,13 @@ def test_active_materialization_owner_deduplicates_planned_batches_and_closes(
         ("b", sessions[0]),
         ("b", sessions[1]),
     ]
-    assert [assets for assets, _retained, _reserved in attempts] == [
+    assert [assets for assets, _reserved in attempts] == [
         ("a",),
         ("a",),
         ("b",),
         ("b",),
     ]
-    assert all(retained == 0 for _assets, retained, _reserved in attempts)
-    assert all(reserved > 0 for _assets, _retained, reserved in attempts)
+    assert all(reserved > 0 for _assets, reserved in attempts)
     assert closed == [True]
 
 
@@ -1874,9 +1739,8 @@ def test_active_materialization_orders_late_discovered_assets_before_publication
     sessions = tuple(pd.to_datetime(["2024-01-02"]))
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
 
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
+    _patch_planning_reader(
+        monkeypatch,
         lambda *_args, **_kwargs: iter(
             (
                 pd.DataFrame({"asset_id": ["b"]}),
@@ -1923,108 +1787,6 @@ def test_active_materialization_orders_late_discovered_assets_before_publication
     assert result["asset_id"].tolist() == ["a", "b"]
 
 
-@pytest.mark.parametrize(
-    ("container_kind", "window_kind", "mutation_timing"),
-    (
-        ("datetime_index", "full", "between_pulls"),
-        ("list", "full", "before_first_pull"),
-        ("indexed_sequence", "sub", "between_pulls"),
-    ),
-)
-def test_active_materialization_owns_stable_target_sessions_across_capacity_splits(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    container_kind: str,
-    window_kind: str,
-    mutation_timing: str,
-) -> None:
-    class IndexedSessions(Sequence[pd.Timestamp]):
-        def __init__(
-            self,
-            values: list[pd.Timestamp],
-            start: int = 0,
-            stop: int | None = None,
-        ) -> None:
-            self.values = values
-            self.start = start
-            self.stop = len(values) if stop is None else stop
-
-        def __len__(self) -> int:
-            return self.stop - self.start
-
-        def __getitem__(self, key):  # noqa: ANN001, ANN202
-            if isinstance(key, slice):
-                start, stop, step = key.indices(len(self))
-                if step != 1:
-                    return tuple(self[index] for index in range(start, stop, step))
-                return IndexedSessions(
-                    self.values,
-                    self.start + start,
-                    self.start + stop,
-                )
-            return self.values[self.start + key]
-
-        def __iter__(self):  # noqa: ANN204
-            raise AssertionError("custom_sessions_must_use_indexed_snapshot")
-
-    original = list(pd.date_range("2024-01-01", periods=4))
-    if container_kind == "datetime_index":
-        sessions: Sequence[pd.Timestamp] = pd.DatetimeIndex(original)
-    elif container_kind == "tuple":
-        sessions = tuple(original)
-    elif container_kind == "list":
-        sessions = list(original)
-    else:
-        sessions = IndexedSessions(list(original))
-    target = original if window_kind == "full" else original[1:3]
-    window = TimeWindow(target[0].date(), target[-1].date())
-    policy = capture_test_policy(
-        available_memory_bytes=1024**3,
-    )
-
-    def mutate_source() -> None:
-        replacement = pd.Timestamp("2099-01-03")
-        position = original.index(target[-1])
-        if isinstance(sessions, pd.DatetimeIndex):
-            sessions._data._ndarray[position] = replacement.to_datetime64()  # noqa: SLF001
-        elif isinstance(sessions, list):
-            sessions[position] = replacement
-        elif isinstance(sessions, IndexedSessions):
-            sessions.values[position] = replacement
-
-    def source():
-        yield pd.DataFrame({"asset_id": ["asset_a"]})
-
-    def materialize(  # noqa: ANN001, ANN202
-        asset_ids, current_sessions, _session_context, _retained
-    ):
-        if mutation_timing == "before_first_pull":
-            mutate_source()
-        return pd.DataFrame(
-            {"asset_id": [asset_ids[0]], "timestamp": [current_sessions[0]]}
-        )
-
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: source(),
-    )
-    output = _scoped_active_materialization_batches(
-        tmp_path / "panel",
-        time_window=window,
-        sessions=sessions,
-        resource_policy=policy,
-        output_row_bound_bytes=policy.memory_budget_bytes // 8,
-        materialize=materialize,
-    )
-    first = next(output)["timestamp"].iloc[0]
-    if mutation_timing == "between_pulls":
-        mutate_source()
-    observed = (first, *(item["timestamp"].iloc[0] for item in output))
-
-    assert observed == tuple(target)
-
-
 def test_active_materialization_rejects_hostile_datetime_index_subclass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2057,9 +1819,8 @@ def test_active_materialization_rejects_hostile_datetime_index_subclass(
     policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
+    _patch_planning_reader(
+        monkeypatch,
         lambda *_args, **_kwargs: pytest.fail("source_opened_for_hostile_sessions"),
     )
     with pytest.raises(ValueError, match="^invalid_session_dates$"):
@@ -2068,191 +1829,6 @@ def test_active_materialization_rejects_hostile_datetime_index_subclass(
             time_window=TimeWindow("2024-01-01", "2024-01-02"),
             sessions=sessions,
             resource_policy=policy,
-            materialize=lambda *_args: pd.DataFrame(),
-        )
-
-
-@pytest.mark.parametrize("container_kind", ("datetime_index", "mutable_sequence"))
-def test_active_materialization_admits_source_and_snapshot_overlap_before_copy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    container_kind: str,
-) -> None:
-    class IndexedSessions(Sequence[pd.Timestamp]):
-        def __init__(self, values: tuple[pd.Timestamp, ...]) -> None:
-            self.values = values
-
-        def __len__(self) -> int:
-            return len(self.values)
-
-        def __getitem__(self, key):  # noqa: ANN001, ANN202
-            if isinstance(key, slice):
-                raise AssertionError("snapshot_allocated_before_overlap_gate")
-            return self.values[key]
-
-    values = tuple(pd.date_range("2024-01-01", periods=4))
-    sessions: Sequence[pd.Timestamp] = (
-        pd.DatetimeIndex(values)
-        if container_kind == "datetime_index"
-        else IndexedSessions(values)
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=1024**3,
-    )
-    source_bytes = (
-        sessions.nbytes
-        if isinstance(sessions, pd.Index)
-        else len(sessions) * np.dtype(object).itemsize
-    )
-    target_bytes = len(values) * (
-        np.dtype("datetime64[ns]").itemsize
-        if isinstance(sessions, pd.Index)
-        else np.dtype(object).itemsize
-    )
-    observed: list[int] = []
-
-    def require_capacity(retained, **_kwargs):  # noqa: ANN001, ANN202
-        observed.append(retained)
-        if retained == source_bytes + target_bytes:
-            raise materialization_io.MaterializationCapacityExceeded("overlap_gate")
-
-    monkeypatch.setattr(
-        materialization_planning,
-        "_require_retained_materialization_capacity",
-        require_capacity,
-    )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: pytest.fail("source_opened_before_overlap_gate"),
-    )
-    with pytest.raises(
-        materialization_io.MaterializationCapacityExceeded,
-        match="overlap_gate",
-    ):
-        _scoped_active_materialization_batches(
-            tmp_path / "panel",
-            time_window=TimeWindow("2024-01-01", "2024-01-04"),
-            sessions=sessions,
-            resource_policy=policy,
-            materialize=lambda *_args: pd.DataFrame(),
-        )
-    assert source_bytes + target_bytes in observed
-
-
-def test_active_materialization_owner_preserves_indexed_target_session_view(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class IndexedSessions(Sequence[pd.Timestamp]):
-        def __init__(self, values: tuple[pd.Timestamp, ...]) -> None:
-            self._values = values
-
-        def __len__(self) -> int:
-            return len(self._values)
-
-        def __getitem__(self, key):  # noqa: ANN001, ANN202
-            if isinstance(key, slice):
-                return IndexedSessions(self._values[key])
-            return self._values[key]
-
-        def __iter__(self):  # noqa: ANN204
-            raise AssertionError("full_session_materialization_before_source_admission")
-
-    source_opened: list[bool] = []
-    callback_sessions: list[Sequence[pd.Timestamp]] = []
-    sessions = IndexedSessions(tuple(pd.date_range("2024-01-01", periods=4)))
-    policy = capture_test_policy(
-        available_memory_bytes=1024**3,
-    )
-
-    def source():
-        source_opened.append(True)
-        yield pd.DataFrame({"asset_id": ["asset_a"]})
-
-    def materialize(  # noqa: ANN001, ANN202
-        asset_ids, current_sessions, _session_context, _retained
-    ):
-        callback_sessions.append(current_sessions)
-        return pd.DataFrame(
-            {
-                "asset_id": [asset_ids[0]],
-                "timestamp": [current_sessions[0]],
-            }
-        )
-
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: source(),
-    )
-
-    publications = list(
-        _scoped_active_materialization_batches(
-            tmp_path / "panel",
-            time_window=TimeWindow("2024-01-02", "2024-01-03"),
-            sessions=sessions,
-            resource_policy=policy,
-            materialize=materialize,
-        )
-    )
-
-    assert source_opened == [True]
-    assert len(callback_sessions) == 1
-    assert type(callback_sessions[0]) is tuple
-    assert len(callback_sessions[0]) == 2
-    assert publications[0]["timestamp"].tolist() == [pd.Timestamp("2024-01-02")]
-
-
-@pytest.mark.parametrize(
-    ("writer_kind", "valid_bar_offsets"),
-    (
-        ("panel", None),
-        ("factor", (1, 0)),
-    ),
-)
-def test_active_materialization_admits_sessions_before_slice_index_or_source(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    writer_kind: str,
-    valid_bar_offsets: tuple[int, int] | None,
-) -> None:
-    del writer_kind
-
-    class OversizedSessions(Sequence[pd.Timestamp]):
-        def __len__(self) -> int:
-            return 200_000
-
-        def __getitem__(self, key):  # noqa: ANN001, ANN202
-            if isinstance(key, slice):
-                raise AssertionError("session_slice_before_capacity_gate")
-            return pd.Timestamp("2024-01-01") + pd.Timedelta(seconds=key)
-
-    policy = capture_test_policy(
-        available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    monkeypatch.setattr(
-        materialization_planning,
-        "ExactPrimaryKeyIndex",
-        lambda **_kwargs: pytest.fail("index_before_session_capacity_gate"),
-    )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: pytest.fail("source_before_session_capacity_gate"),
-    )
-
-    with pytest.raises(
-        materialization_io.MaterializationCapacityExceeded,
-        match="a_share_known_payloads_exceed_task_memory_budget",
-    ):
-        _scoped_active_materialization_batches(
-            tmp_path / "panel",
-            time_window=TimeWindow("2024-01-01", "2024-01-01"),
-            sessions=OversizedSessions(),
-            resource_policy=policy,
-            valid_bar_offsets=valid_bar_offsets,
             materialize=lambda *_args: pd.DataFrame(),
         )
 
@@ -2274,9 +1850,8 @@ def test_active_materialization_requires_artifact_root_before_index_or_source(
         "ExactPrimaryKeyIndex",
         lambda **_kwargs: pytest.fail("index_before_artifact_root_gate"),
     )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
+    _patch_planning_reader(
+        monkeypatch,
         lambda *_args, **_kwargs: pytest.fail("source_before_artifact_root_gate"),
     )
 
@@ -2306,17 +1881,13 @@ def test_active_materialization_owner_closes_source_on_early_close(
         finally:
             closed.append(True)
 
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: source(),
-    )
+    _patch_planning_reader(monkeypatch, lambda *_args, **_kwargs: source())
     batches = _scoped_active_materialization_batches(
         Path("panel"),
         time_window=TimeWindow("2024-01-02", "2024-01-02"),
         sessions=(pd.Timestamp("2024-01-02"),),
         resource_policy=policy,
-        materialize=lambda assets, sessions, _session_context, _retained: pd.DataFrame(
+        materialize=lambda assets, sessions, _session_context: pd.DataFrame(
             {"asset_id": assets, "timestamp": sessions}
         ),
     )
@@ -2370,18 +1941,12 @@ def test_active_materialization_scope_covers_indexes_source_materialize_and_clos
         finally:
             observed.append(("source_close", current_runtime_resource_policy()))
 
-    def materialize(  # noqa: ANN001, ANN202
-        asset_ids, sessions, _session_context, _retained
-    ):
+    def materialize(asset_ids, sessions, _session_context):  # noqa: ANN001, ANN202
         observed.append(("materialize", current_runtime_resource_policy()))
         return pd.DataFrame({"asset_id": asset_ids, "timestamp": sessions})
 
     monkeypatch.setattr(materialization_planning, "ExactPrimaryKeyIndex", Index)
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: source(),
-    )
+    _patch_planning_reader(monkeypatch, lambda *_args, **_kwargs: source())
 
     batches = _scoped_active_materialization_batches(
         Path("panel"),
@@ -2410,17 +1975,13 @@ def test_active_materialization_owner_surfaces_close_failure_after_exhaustion(
         finally:
             raise OSError("close_failure")
 
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: source(),
-    )
+    _patch_planning_reader(monkeypatch, lambda *_args, **_kwargs: source())
     batches = _scoped_active_materialization_batches(
         Path("panel"),
         time_window=TimeWindow("2024-01-02", "2024-01-02"),
         sessions=(pd.Timestamp("2024-01-02"),),
         resource_policy=policy,
-        materialize=lambda assets, sessions, _session_context, _retained: pd.DataFrame(
+        materialize=lambda assets, sessions, _session_context: pd.DataFrame(
             {"asset_id": assets, "timestamp": sessions}
         ),
     )
@@ -2429,11 +1990,11 @@ def test_active_materialization_owner_surfaces_close_failure_after_exhaustion(
         list(batches)
 
 
-def test_valid_bar_owner_reads_with_retained_state_and_closes(
+def test_valid_bar_owner_reads_and_closes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     closed: list[bool] = []
-    retained: list[int] = []
+    target_bytes: list[int] = []
     policy = capture_test_policy(
         available_memory_bytes=1024**3,
     )
@@ -2452,34 +2013,38 @@ def test_valid_bar_owner_reads_with_retained_state_and_closes(
             closed.append(True)
 
     def read(*_args, **kwargs):  # noqa: ANN001, ANN202
-        retained.append(kwargs["retained_payload_bytes"])
+        target_bytes.append(kwargs["target_chunk_bytes"])
         return source()
 
-    monkeypatch.setattr(materialization_io, "iter_dataset_chunks_with_policy", read)
-    with materialization_planning.ExactPrimaryKeyIndex(
-        primary_key=("asset_id", "timestamp"),
-        timestamp_columns=("timestamp",),
-        scratch_parent=Path(tempfile.gettempdir()),
-    ) as index:
-        materialization_planning._build_valid_bar_key_index(
-            Path("panel"), index=index, resource_policy=policy
-        )
-        result = materialization_planning.bounded_valid_bar_key_coverage(
-            index,
-            asset_ids=("a",),
-            core_sessions=pd.DatetimeIndex(["2024-01-03"]),
-            lookback_bars=1,
-            lookahead_bars=1,
-            retained_payload_bytes=23 + index.retained_memory_bytes,
-            resource_policy=policy,
-        )
+    _patch_planning_reader(monkeypatch, read)
+    with runtime_resource_policy_scope(policy):
+        with materialization_planning.ExactPrimaryKeyIndex(
+            primary_key=("asset_id", "timestamp"),
+            timestamp_columns=("timestamp",),
+            scratch_parent=Path(tempfile.gettempdir()),
+        ) as index:
+            materialization_planning._build_valid_bar_key_index(
+                Path("panel"), index=index, resource_policy=policy
+            )
+            owned = materialization_planning.bounded_valid_bar_key_coverage(
+                index,
+                asset_ids=("a",),
+                core_sessions=pd.DatetimeIndex(["2024-01-03"]),
+                lookback_bars=1,
+                lookahead_bars=1,
+                resource_policy=policy,
+            )
+            try:
+                result = owned.value.copy()
+            finally:
+                owned.lease.close()
 
     assert list(result.itertuples(index=False, name=None)) == [
         ("a", pd.Timestamp("2024-01-02")),
         ("a", pd.Timestamp("2024-01-03")),
         ("a", pd.Timestamp("2024-01-04")),
     ]
-    assert retained[0] >= 23
+    assert target_bytes == [policy.memory_budget_bytes]
     assert closed == [True]
 
 
@@ -2502,16 +2067,7 @@ def test_valid_bar_index_streams_exact_rows_without_column_validation_copies(
             observed.extend(rows)
             return len(observed)
 
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: iter((frame,)),
-    )
-    monkeypatch.setattr(
-        materialization_planning.strict_values,
-        "strict_timestamp_value_series",
-        lambda *_args, **_kwargs: pytest.fail("whole_timestamp_column_copy"),
-    )
+    _patch_planning_reader(monkeypatch, lambda *_args, **_kwargs: iter((frame,)))
 
     materialization_planning._build_valid_bar_key_index(
         Path("panel"),
@@ -2541,11 +2097,7 @@ def test_active_asset_discovery_admits_before_string_validation(
 
     asset = UnencodableAsset("a" * policy.memory_budget_bytes)
     frame = pd.DataFrame({"asset_id": pd.Series([asset], dtype=object)})
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
-        lambda *_args, **_kwargs: iter((frame,)),
-    )
+    _patch_planning_reader(monkeypatch, lambda *_args, **_kwargs: iter((frame,)))
 
     with pytest.raises(
         materialization_io.MaterializationCapacityExceeded,
@@ -2579,7 +2131,6 @@ def test_valid_bar_boundary_requires_strictly_ordered_assets() -> None:
                 core_sessions=(pd.Timestamp("2024-01-03"),),
                 lookback_bars=1,
                 lookahead_bars=1,
-                retained_payload_bytes=index.retained_memory_bytes,
                 resource_policy=policy,
             )
 
@@ -2601,15 +2152,19 @@ def test_valid_bar_boundary_admits_state_before_array_allocation(
         materialization_io.MaterializationCapacityExceeded,
         match="a_share_known_payloads_exceed_task_memory_budget",
     ):
-        materialization_planning.bounded_valid_bar_key_coverage(
-            SimpleNamespace(),  # type: ignore[arg-type]
-            asset_ids=("a",),
-            core_sessions=(pd.Timestamp("2024-01-03"),),
-            lookback_bars=1,
-            lookahead_bars=1,
-            retained_payload_bytes=policy.memory_budget_bytes,
-            resource_policy=policy,
-        )
+            with runtime_resource_policy_scope(policy):
+                with policy.reserve(
+                    "test.a_share.preexisting",
+                    policy.memory_budget_bytes - 1,
+                ):
+                    materialization_planning.bounded_valid_bar_key_coverage(
+                        SimpleNamespace(),  # type: ignore[arg-type]
+                        asset_ids=("a",),
+                        core_sessions=(pd.Timestamp("2024-01-03"),),
+                        lookback_bars=1,
+                        lookahead_bars=1,
+                        resource_policy=policy,
+                    )
 
 
 def test_valid_bar_output_capacity_is_checked_before_dataframe_construction(
@@ -2635,15 +2190,15 @@ def test_valid_bar_output_capacity_is_checked_before_dataframe_construction(
 
     monkeypatch.setattr(materialization_planning.np, "empty", observe_empty)
     with runtime_resource_policy_scope(policy):
-        materialization_planning.bounded_valid_bar_key_coverage(
+        owned = materialization_planning.bounded_valid_bar_key_coverage(
             Index(),  # type: ignore[arg-type]
             asset_ids=("a",),
             core_sessions=(pd.Timestamp("2024-01-03"),),
             lookback_bars=0,
             lookahead_bars=0,
-            retained_payload_bytes=0,
             resource_policy=policy,
         )
+        owned.lease.close()
     assert observed_reservations
     assert min(observed_reservations) > 0
 
@@ -2692,12 +2247,9 @@ def test_valid_bar_index_builds_once_across_adaptive_asset_splits(
             )
         return iter((pd.DataFrame({"asset_id": ["a", "b"]}),))
 
-    monkeypatch.setattr(materialization_io, "iter_dataset_chunks_with_policy", read)
+    _patch_planning_reader(monkeypatch, read)
 
-    def materialize(  # noqa: ANN001, ANN202
-        assets, sessions, _session_context, retained, keys
-    ):
-        assert retained == 0
+    def materialize(assets, sessions, _session_context, keys):  # noqa: ANN001, ANN202
         assert policy.used_memory_bytes > 0
         assert len(assets) == 1
         assert set(keys["asset_id"]) == set(assets)
@@ -2738,7 +2290,7 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
     )
     active_indexes: list[materialization_planning.ExactPrimaryKeyIndex] = []
     build_observations: list[
-        tuple[int, int, int, tuple[object, ...] | None, TimeWindow | None]
+        tuple[int, int, tuple[object, ...] | None, TimeWindow | None]
     ] = []
     original_index = materialization_planning.ExactPrimaryKeyIndex
 
@@ -2754,7 +2306,7 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
             finally:
                 active_indexes.remove(self)
 
-    def read(*_args, columns, retained_payload_bytes, **kwargs):  # noqa: ANN001, ANN003, ANN202
+    def read(*_args, columns, **kwargs):  # noqa: ANN001, ANN003, ANN202
         if tuple(columns) == ("asset_id", "timestamp"):
             live_cache_bytes = sum(
                 index.retained_memory_bytes for index in active_indexes
@@ -2763,7 +2315,6 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
             build_observations.append(
                 (
                     len(active_indexes),
-                    retained_payload_bytes,
                     live_cache_bytes,
                     kwargs.get("asset_ids"),
                     kwargs.get("time_window"),
@@ -2791,14 +2342,14 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
     monkeypatch.setattr(
         materialization_planning, "ExactPrimaryKeyIndex", RecordingIndex
     )
-    monkeypatch.setattr(materialization_io, "iter_dataset_chunks_with_policy", read)
+    _patch_planning_reader(monkeypatch, read)
     batches = _scoped_active_materialization_batches(
         Path("panel"),
         time_window=TimeWindow("2024-01-02", "2024-01-02"),
         sessions=(pd.Timestamp("2024-01-02"),),
         resource_policy=policy,
         valid_bar_offsets=(0, 0),
-        materialize=lambda assets, sessions, _session_context, _retained, _keys: (
+        materialize=lambda assets, sessions, _session_context, _keys: (
             pd.DataFrame({"asset_id": assets, "timestamp": sessions})
         ),
     )
@@ -2815,11 +2366,10 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
         scratch_parent=Path(tempfile.gettempdir()),
     ).retained_memory_bytes
     assert len(build_observations) == 1
-    active_count, retained_bytes, cache_bytes, asset_ids, time_window = (
+    active_count, cache_bytes, asset_ids, time_window = (
         build_observations[0]
     )
     assert active_count == 2
-    assert retained_bytes == 0
     assert cache_bytes == 2 * expected_cache_bytes
     assert asset_ids == ("a",)
     assert time_window is None
@@ -2862,9 +2412,8 @@ def test_active_materialization_indexes_use_dataset_sibling_parent(
         "_build_valid_bar_key_index",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
+    _patch_planning_reader(
+        monkeypatch,
         lambda *_args, **_kwargs: iter((pd.DataFrame({"asset_id": ["asset"]}),)),
     )
 
@@ -2884,7 +2433,7 @@ def test_active_materialization_indexes_use_dataset_sibling_parent(
     assert observed == [root.parent]
 
 
-def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(
+def test_a_share_direct_consumers_close_iterators_on_all_exit_kinds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
@@ -2912,25 +2461,20 @@ def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(
             resource_policy.lease("test.a_share.inspection", 0),
         ),
     )
-    monkeypatch.setattr(
-        materialization_io,
-        "iter_dataset_chunks_with_policy",
+    _patch_planning_reader(
+        monkeypatch,
         lambda *args, **kwargs: iterator(
             "normal", (pd.DataFrame({"timestamp": ["2024-01-02"]}),)
         ),
     )
     expected_sessions = pd.DatetimeIndex(("2024-01-02",))
-    covered = np.zeros(1, dtype=np.bool_)
     with runtime_resource_policy_scope(policy):
-        materialization_planning._mark_dataset_session_coverage(
+        materialization_planning.require_dataset_coverage(
             Path("panel"),
             TimeWindow("2024-01-02", "2024-01-02"),
-            expected_sessions=expected_sessions,
-            covered=covered,
-            retained_state_bytes=expected_sessions.nbytes + covered.nbytes,
+            sessions=expected_sessions,
             resource_policy=policy,
         )
-        assert covered.all()
 
         market_type = next(iter(materialization_planning.CURRENT_MARKET_TYPES))
         monkeypatch.setattr(
@@ -2941,9 +2485,8 @@ def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(
                 resource_policy.lease("test.a_share.inspection", 0),
             ),
         )
-        monkeypatch.setattr(
-            materialization_io,
-            "iter_dataset_chunks_with_policy",
+        _patch_planning_reader(
+            monkeypatch,
             lambda *args, **kwargs: iterator(
                 "early",
                 (
@@ -2960,7 +2503,7 @@ def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(
                 ),
             ),
         )
-        result = materialization_planning.available_trading_sessions(
+        owned = materialization_planning.available_trading_sessions(
             SimpleNamespace(interim_data_root=lambda *_args: Path("calendar")),
             "source",  # type: ignore[arg-type]
             time_window=TimeWindow("2024-01-02", "2024-01-02"),
@@ -2968,7 +2511,11 @@ def test_a_share_direct_consumers_close_retained_iterators_on_all_exit_kinds(
             lookahead_sessions=0,
             resource_policy=policy,
         )
-    assert not result.empty
+        try:
+            result = owned.value
+            assert not result.empty
+        finally:
+            owned.lease.close()
     assert closed == ["normal", "early"]
 
 
@@ -2994,14 +2541,16 @@ def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
             spec=spec,
         )
 
-    inputs = materialization_io.read_processed_inputs_for_spec(
-        target,
-        layout=layout,
-        processed_catalog=_catalog(panel_spec, execution_spec, target),
-        resource_policy=capture_test_policy(
-            available_memory_bytes=1024**3,
-        ),
-    )
+    policy = capture_test_policy(available_memory_bytes=1024**3)
+    with runtime_resource_policy_scope(policy):
+        with ExitStack() as cleanup_stack:
+            inputs = materialization_io.read_processed_inputs_for_spec(
+                target,
+                layout=layout,
+                processed_catalog=_catalog(panel_spec, execution_spec, target),
+                resource_policy=policy,
+                cleanup_stack=cleanup_stack,
+            )
 
     assert set(inputs) == {MARKET_PANEL_DATA_ID, "execution"}
     with pytest.raises(
@@ -3048,12 +2597,14 @@ def test_source_input_root_keeps_one_policy_active_for_all_children(
 
     monkeypatch.setattr(materialization_io, "read_materialized_dataset", read_child)
 
-    inputs = materialization_io.read_source_inputs_for_spec(
-        spec,
-        layout=StorageLayout(project_root=tmp_path),
-        source_id=SourceId("synthetic_vendor_a"),
-        resource_policy=policy,
-    )
+    with ExitStack() as cleanup_stack:
+        inputs = materialization_io.read_source_inputs_for_spec(
+            spec,
+            layout=StorageLayout(project_root=tmp_path),
+            source_id=SourceId("synthetic_vendor_a"),
+            resource_policy=policy,
+            cleanup_stack=cleanup_stack,
+        )
 
     assert list(inputs) == ["left", "right"]
     assert observed == ["left", "right"]
@@ -3088,12 +2639,14 @@ def test_source_input_root_retires_policy_after_every_primary(
     monkeypatch.setattr(materialization_io, "read_materialized_dataset", fail_child)
 
     with pytest.raises(primary_type) as raised:
-        materialization_io.read_source_inputs_for_spec(
-            spec,
-            layout=StorageLayout(project_root=tmp_path),
-            source_id=SourceId("synthetic_vendor_a"),
-            resource_policy=policy,
-        )
+        with ExitStack() as cleanup_stack:
+            materialization_io.read_source_inputs_for_spec(
+                spec,
+                layout=StorageLayout(project_root=tmp_path),
+                source_id=SourceId("synthetic_vendor_a"),
+                resource_policy=policy,
+                cleanup_stack=cleanup_stack,
+            )
     assert raised.value is primary
     with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         with runtime_resource_policy_scope(policy):
@@ -3357,17 +2910,12 @@ def test_output_session_filter_admits_range_index_copy_growth() -> None:
 
 def test_adaptive_materialization_does_not_retry_after_capacity_failure() -> None:
     calls = 0
-    retained: list[int] = []
 
-    def materialize(  # noqa: ANN001
-        _assets, _sessions, _session_context, retained_payload_bytes
-    ):
+    def materialize(_assets, _sessions, _session_context):  # noqa: ANN001
         nonlocal calls
         calls += 1
-        retained.append(retained_payload_bytes)
         raise materialization_io.MaterializationCapacityExceeded("capacity")
 
-    base = 100
     policy = capture_test_policy(available_memory_bytes=1024**3)
     with runtime_resource_policy_scope(policy):
         output = materialization_planning._iter_adaptive_materialization_batches(
@@ -3377,7 +2925,6 @@ def test_adaptive_materialization_does_not_retry_after_capacity_failure() -> Non
                 pd.Timestamp("2024-01-01"),
                 pd.Timestamp("2024-01-02"),
             ),
-            retained_payload_bytes=base,
             materialize=materialize,
         )
         with pytest.raises(
@@ -3392,7 +2939,6 @@ def test_adaptive_materialization_does_not_retry_after_capacity_failure() -> Non
                 lease.close()
                 output.close()
     assert calls == 1
-    assert retained[0] == base
 
 
 def _factor_definition(output_column: str, *, lookback_window: int) -> FactorDefinition:
@@ -3491,7 +3037,6 @@ def test_a_share_session_offset_entrants_require_exact_non_negative_int_before_i
             core_sessions=(sessions[0],),
             lookback_bars=value,  # type: ignore[arg-type]
             lookahead_bars=0,
-            retained_payload_bytes=0,
             resource_policy=policy,
         )
         error = "invalid_valid_bar_offset"

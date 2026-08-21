@@ -61,7 +61,6 @@ def write_panel(
     source_id: SourceId,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
     cleanup_stack: ExitStack | None = None,
 ) -> DatasetInspection:
     root = require_artifact_root(
@@ -86,15 +85,11 @@ def write_panel(
                 )
             )
         input_identities = validation.input_dataset_identities(input_sessions)
-        retained_input_bytes = sum(
-            session.retained_memory_bytes for session in input_sessions.values()
-        )
         chunks = _iter_panel_chunks(
             spec,
             input_sessions=input_sessions,
             time_window=time_window,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_payload_bytes,
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:
@@ -104,11 +99,6 @@ def write_panel(
                 spec=spec,
                 expected_input_identities=input_identities,
                 resource_policy=resource_policy,
-                retained_payload_bytes=(
-                    retained_payload_bytes
-                    + retained_input_bytes
-                    - input_sessions[bar_data_id].retained_memory_bytes
-                ),
             )
             for session in input_sessions.values():
                 session.verify()
@@ -143,7 +133,6 @@ def _iter_panel_chunks(
     input_sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
 ) -> Iterator[object]:
     if any(
         session.resource_policy is not resource_policy
@@ -157,21 +146,12 @@ def _iter_panel_chunks(
         bar_session = input_sessions[source_ids.market_bars_source_data_id(spec)]
         trade_session = input_sessions[source_ids.aggregate_trades_source_data_id(spec)]
         depth_session = input_sessions[source_ids.depth_levels_source_data_id(spec)]
-        retained_input_bytes = sum(
-            session.retained_memory_bytes for session in input_sessions.values()
-        )
         with validation.crypto_asset_session_views(
             bar_session,
             columns=("source_asset_id",),
             target_chunk_bytes=chunk_target_bytes,
             error="invalid_crypto_panel_source_physical_asset_grouping",
             key_error="invalid_crypto_matching_bar_source_asset_id",
-            operation_headroom_bytes=(
-                resource_policy.memory_budget_bytes
-                - retained_input_bytes
-                - retained_payload_bytes
-                + bar_session.retained_memory_bytes
-            ),
         ) as source_asset_views:
             source_assets = _canonical_source_assets(
                 tuple(key for key, _view in source_asset_views)
@@ -188,12 +168,6 @@ def _iter_panel_chunks(
                     iter_dataset_chunks(
                         asset_session,
                         target_chunk_bytes=chunk_target_bytes,
-                        operation_headroom_bytes=(
-                            resource_policy.memory_budget_bytes
-                            - trade_session.retained_memory_bytes
-                            - depth_session.retained_memory_bytes
-                            - retained_payload_bytes
-                        ),
                     )
                 ) as bar_chunks:
                     while True:
@@ -232,13 +206,6 @@ def _iter_panel_chunks(
                                     trade_session,
                                     prepared_bars,
                                     target_chunk_bytes=chunk_target_bytes,
-                                    operation_headroom_bytes=(
-                                        resource_policy.memory_budget_bytes
-                                        - bar_session.retained_memory_bytes
-                                        - depth_session.retained_memory_bytes
-                                        - prepared_bar_bytes
-                                        - retained_payload_bytes
-                                    ),
                                 )
                             ) as trade_chunks,
                             closing_dataset_iterator(
@@ -246,13 +213,6 @@ def _iter_panel_chunks(
                                     depth_session,
                                     prepared_bars,
                                     target_chunk_bytes=chunk_target_bytes,
-                                    operation_headroom_bytes=(
-                                        resource_policy.memory_budget_bytes
-                                        - bar_session.retained_memory_bytes
-                                        - trade_session.retained_memory_bytes
-                                        - prepared_bar_bytes
-                                        - retained_payload_bytes
-                                    ),
                                 )
                             ) as depth_chunks,
                             ExitStack() as output_stack,
@@ -313,7 +273,6 @@ def _iter_matching_trade_chunks(
     bars: pd.DataFrame,
     *,
     target_chunk_bytes: int,
-    operation_headroom_bytes: int,
 ) -> Iterator[pd.DataFrame]:
     asset_ids, read_window = _matching_read_scope(
         bars,
@@ -326,7 +285,6 @@ def _iter_matching_trade_chunks(
         source_asset_error="invalid_crypto_matching_trade_source_asset_id",
         timestamp_error="invalid_crypto_matching_trade_timestamp",
         target_chunk_bytes=target_chunk_bytes,
-        operation_headroom_bytes=operation_headroom_bytes,
     )
 
 
@@ -335,7 +293,6 @@ def _iter_matching_depth_chunks(
     bars: pd.DataFrame,
     *,
     target_chunk_bytes: int,
-    operation_headroom_bytes: int,
 ) -> Iterator[pd.DataFrame]:
     max_quote_age = panels.DEFAULT_MAX_QUOTE_AGE
     asset_ids, read_window = _matching_read_scope(
@@ -349,7 +306,6 @@ def _iter_matching_depth_chunks(
         source_asset_error="invalid_crypto_matching_depth_source_asset_id",
         timestamp_error="invalid_crypto_matching_depth_timestamp",
         target_chunk_bytes=target_chunk_bytes,
-        operation_headroom_bytes=operation_headroom_bytes,
     )
 
 
@@ -406,7 +362,6 @@ def _iter_matching_chunks(
     source_asset_error: str,
     timestamp_error: str,
     target_chunk_bytes: int,
-    operation_headroom_bytes: int,
 ) -> Iterator[pd.DataFrame]:
     view = _matching_session_view(
         session,
@@ -418,7 +373,6 @@ def _iter_matching_chunks(
             iter_dataset_chunks(
                 view,
                 target_chunk_bytes=target_chunk_bytes,
-                operation_headroom_bytes=operation_headroom_bytes,
             )
         ) as chunks:
             for chunk in chunks:

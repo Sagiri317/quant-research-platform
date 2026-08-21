@@ -105,14 +105,6 @@ class DatasetWriteReceipt:
     session: DatasetSession
     exact_primary_key_index: ExactPrimaryKeyIndex
 
-    @property
-    def retained_memory_bytes(self) -> int:
-        return (
-            self.session.retained_memory_bytes
-            + self.exact_primary_key_index.retained_memory_bytes
-        )
-
-
 @dataclass
 class _WriteStats:
     spec: DataSpec

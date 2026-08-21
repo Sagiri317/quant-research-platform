@@ -58,7 +58,6 @@ def write_factors(
     panel_session: DatasetSession,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
     cleanup_stack: ExitStack | None = None,
 ) -> DatasetInspection:
     if panel_session.resource_policy is not resource_policy:
@@ -75,7 +74,6 @@ def write_factors(
             panel_session=panel_session,
             time_window=time_window,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_payload_bytes,
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:
@@ -86,7 +84,6 @@ def write_factors(
                 time_window=time_window,
                 expected_input_identities=input_identities,
                 resource_policy=resource_policy,
-                retained_payload_bytes=retained_payload_bytes,
             )
             panel_session.verify()
 
@@ -120,7 +117,6 @@ def _iter_factor_chunks(
     panel_session: DatasetSession,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
 ) -> Iterator[object]:
     if panel_session.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
@@ -144,9 +140,6 @@ def _iter_factor_chunks(
             columns=("market_id", "asset_id"),
             target_chunk_bytes=chunk_target_bytes,
             error="invalid_crypto_panel_physical_asset_grouping",
-            operation_headroom_bytes=(
-            resource_policy.memory_budget_bytes - retained_payload_bytes
-            ),
         ) as asset_views:
             cleanup.callback(close_carry)
             lease: MemoryLease | None = None
@@ -159,10 +152,6 @@ def _iter_factor_chunks(
                     iter_dataset_chunks(
                         asset_session,
                         target_chunk_bytes=chunk_target_bytes,
-                        operation_headroom_bytes=(
-                            resource_policy.memory_budget_bytes
-                            - retained_payload_bytes
-                        ),
                     )
                 ) as panels:
                     while True:

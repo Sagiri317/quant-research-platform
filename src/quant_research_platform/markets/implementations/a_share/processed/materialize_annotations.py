@@ -28,9 +28,6 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
 )
-from quant_research_platform.storage._dataset_inspection import (
-    dataset_inspection_retained_memory_bytes,
-)
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -45,10 +42,6 @@ def write_annotations(
     written: dict[str, DatasetInspection],
     cleanup_stack: ExitStack | None = None,
 ) -> DatasetInspection:
-    retained_written_bytes = sum(
-        dataset_inspection_retained_memory_bytes(inspection)
-        for inspection in written.values()
-    )
     catalog = processed_catalog()
     contract = materialization_validation.annotation_input_contract(spec)
     materialization_validation.validate_processed_input_contract(
@@ -76,7 +69,6 @@ def write_annotations(
             asset_ids: tuple[object, ...],
             current_sessions: Sequence[pd.Timestamp],
             session_context: Sequence[pd.Timestamp],
-            retained_payload_bytes: int,
         ) -> pd.DataFrame:
             with ExitStack() as live:
                 read_window = materialization_planning.session_batch_window(
@@ -92,7 +84,7 @@ def write_annotations(
                         time_window=read_window,
                         resource_policy=policy,
                         asset_ids=asset_ids,
-                        retained_payload_bytes=retained_payload_bytes,
+                        cleanup_stack=live,
                     )
                 )
                 materialization_validation.validate_processed_input_contract(
@@ -103,9 +95,6 @@ def write_annotations(
                 )
                 panel = processed_inputs[contract.primary_input_data_id]
                 panel_bytes = pandas_frame_payload_bytes(panel)
-                live.enter_context(
-                    policy.reserve("a_share.annotation.input", panel_bytes)
-                )
                 output_buffer = (
                     materialization_planning.registered_output_buffer_bytes(
                         spec,
@@ -132,8 +121,6 @@ def write_annotations(
                     derived,
                     current_sessions,
                     columns=spec.required_columns,
-                    retained_frames=(panel, *outputs.values()),
-                    retained_payload_bytes=retained_payload_bytes,
                     resource_policy=policy,
                 )
                 return output
@@ -144,7 +131,6 @@ def write_annotations(
             sessions=sessions,
             resource_policy=policy,
             output_row_bound_bytes=operation_row_bound,
-            retained_payload_bytes=retained_written_bytes,
             materialize=materialize,
         )
 

@@ -34,9 +34,7 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inspection import (
-    _release_owned_value,
-)
+from quant_research_platform.storage._dataset_inspection import _release_owned_value
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
@@ -63,7 +61,6 @@ def write_labels(
     panel_session: DatasetSession,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
     cleanup_stack: ExitStack | None = None,
 ) -> DatasetInspection:
     if panel_session.resource_policy is not resource_policy:
@@ -80,7 +77,6 @@ def write_labels(
             panel_session=panel_session,
             time_window=time_window,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_payload_bytes,
         )
 
         def validate_staged_dataset(receipt: DatasetWriteReceipt) -> None:
@@ -91,7 +87,6 @@ def write_labels(
                 time_window=time_window,
                 expected_input_identities=input_identities,
                 resource_policy=resource_policy,
-                retained_payload_bytes=retained_payload_bytes,
             )
             panel_session.verify()
 
@@ -125,7 +120,6 @@ def _iter_label_chunks(
     panel_session: DatasetSession,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
 ) -> Iterator[object]:
     if panel_session.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
@@ -172,9 +166,6 @@ def _iter_label_chunks(
             columns=("market_id", "asset_id"),
             target_chunk_bytes=chunk_target_bytes,
             error="invalid_crypto_panel_physical_asset_grouping",
-            operation_headroom_bytes=(
-                resource_policy.memory_budget_bytes - retained_payload_bytes
-            ),
         ) as asset_views:
             cleanup.callback(close_buffer)
             lease: MemoryLease | None = None
@@ -183,6 +174,8 @@ def _iter_label_chunks(
                 if active_market_asset is None:
                     active_market_asset = market_asset
                 elif market_asset != active_market_asset:
+                    if lease is None:
+                        lease = yield producer_bound
                     finalized = _final_label_output(buffer, spec)
                     close_buffer()
                     active_market_asset = market_asset
@@ -203,14 +196,13 @@ def _iter_label_chunks(
                         yield _OwnedValue(finalized, lease)
                         del finalized
                         lease = None
+                    else:
+                        lease.close()
+                        lease = None
                 with closing_dataset_iterator(
                     iter_dataset_chunks(
                         asset_session,
                         target_chunk_bytes=chunk_target_bytes,
-                        operation_headroom_bytes=(
-                            resource_policy.memory_budget_bytes
-                            - retained_payload_bytes
-                        ),
                     )
                 ) as panels:
                     while True:
@@ -300,6 +292,8 @@ def _iter_label_chunks(
                             )
                         panel = None
             if not buffer.empty:
+                if lease is None:
+                    lease = yield producer_bound
                 finalized = _final_label_output(buffer, spec)
                 if not finalized.empty:
                     materialization_resources.require_frame_within_budget(
@@ -317,6 +311,13 @@ def _iter_label_chunks(
                     close_buffer()
                     yield _OwnedValue(finalized, lease)
                     del finalized
+                    lease = None
+                else:
+                    lease.close()
+                    lease = None
+            elif lease is not None:
+                lease.close()
+                lease = None
         panel_session.verify()
 
 

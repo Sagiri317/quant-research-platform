@@ -29,7 +29,6 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage._dataset_inspection import (
     _inspect_dataset_owned,
     _release_owned_value,
-    dataset_inspection_retained_memory_bytes,
 )
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
@@ -49,10 +48,6 @@ def write_panel(
     written: dict[str, DatasetInspection],
     cleanup_stack: ExitStack | None = None,
 ) -> DatasetInspection:
-    retained_written_bytes = sum(
-        dataset_inspection_retained_memory_bytes(inspection)
-        for inspection in written.values()
-    )
     market_bars_root = layout.interim_data_root(source_id, market_bars_data_id)
     owned_inspection = _inspect_dataset_owned(
         market_bars_root,
@@ -90,7 +85,6 @@ def write_panel(
             asset_ids: tuple[object, ...],
             current_sessions: Sequence[pd.Timestamp],
             session_context: Sequence[pd.Timestamp],
-            upstream_retained_bytes: int,
         ) -> pd.DataFrame:
             with ExitStack() as live:
                 read_window = materialization_planning.session_batch_window(
@@ -118,8 +112,8 @@ def write_panel(
                         "stock_master": "source_asset_id",
                         "market_cap": "source_asset_id",
                     },
-                    retained_payload_bytes=upstream_retained_bytes,
                     resource_policy=policy,
+                    cleanup_stack=live,
                 )
                 materialization_validation.require_source_inputs_for_spec(
                     spec, source_inputs
@@ -128,9 +122,6 @@ def write_panel(
                     pandas_frame_payload_bytes(frame)
                     for frame in source_inputs.values()
                 )
-                live.enter_context(
-                    policy.reserve("a_share.panel.source_inputs", source_bytes)
-                )
                 stock_master = source_inputs["stock_master"]
                 market_cap = source_inputs["market_cap"]
                 trading_calendar = source_inputs["trading_calendar"]
@@ -138,9 +129,9 @@ def write_panel(
                     market_bars_root,
                     time_window=read_window,
                     resource_policy=policy,
-                    retained_payload_bytes=upstream_retained_bytes,
                     asset_ids=asset_ids,
                     asset_column="source_asset_id",
+                    cleanup_stack=live,
                 )
                 materialization_validation.require_source_input_columns(
                     market_bars_data_id,
@@ -155,17 +146,15 @@ def write_panel(
                     ),
                 )
                 market_bars_bytes = pandas_frame_payload_bytes(market_bars)
-                live.enter_context(
-                    policy.reserve("a_share.panel.market_bars", market_bars_bytes)
-                )
                 output_buffer = (
                     materialization_planning.registered_output_buffer_bytes(
                         spec,
                         row_count=len(market_bars),
                     )
                 )
-                merge_state = source_bytes + market_bars_bytes
-                panel_bound = output_buffer + merge_state
+                panel_bound = (
+                    output_buffer + source_bytes + market_bars_bytes
+                )
                 live.enter_context(
                     policy.reserve("a_share.panel.calculate", panel_bound)
                 )
@@ -183,8 +172,6 @@ def write_panel(
                     panel,
                     current_sessions,
                     columns=spec.required_columns,
-                    retained_frames=(*source_inputs.values(), market_bars),
-                    retained_payload_bytes=upstream_retained_bytes,
                     resource_policy=policy,
                 )
                 return selected
@@ -196,7 +183,6 @@ def write_panel(
             sessions=sessions,
             resource_policy=policy,
             output_row_bound_bytes=operation_row_bound,
-            retained_payload_bytes=retained_written_bytes,
             materialize=materialize,
         )
 

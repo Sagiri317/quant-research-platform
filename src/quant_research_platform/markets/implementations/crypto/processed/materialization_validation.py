@@ -23,6 +23,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -55,13 +56,12 @@ def crypto_asset_session_views(
     target_chunk_bytes: int,
     error: str,
     key_error: str | None = None,
-    operation_headroom_bytes: int,
 ) -> Iterator[tuple[tuple[tuple[str, ...], DatasetSession], ...]]:
     if not columns:
         raise ValueError(error)
     with runtime_resource_policy_scope(session.resource_policy):
         selections: dict[tuple[str, ...], int] = {}
-        if operation_headroom_bytes <= 0:
+        if session.resource_policy.available_memory_bytes <= 0:
             raise ValueError("crypto_asset_session_views_exceed_task_memory_budget")
         current_path: Path | None = None
         current_key: tuple[str, ...] | None = None
@@ -92,14 +92,11 @@ def crypto_asset_session_views(
                     session,
                     columns=discovery_columns,
                     target_chunk_bytes=target_chunk_bytes,
-                    operation_headroom_bytes=operation_headroom_bytes,
                 )
             ) as file_batches:
                 for path, frame in file_batches:
-                    for row in frame.loc[:, list(columns)].itertuples(
-                        index=False,
-                        name=None,
-                    ):
+                    values = tuple(frame[column] for column in columns)
+                    for row in zip(*values, strict=True):
                         if any(
                             not isinstance(value, str) or not value for value in row
                         ):
@@ -198,7 +195,6 @@ def validate_panel_materialization(
     spec: ProcessedDataSpec,
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
 ) -> None:
     if (
         receipt.session.resource_policy is not resource_policy
@@ -212,16 +208,11 @@ def validate_panel_materialization(
             error="crypto_panel_input_dataset_identity_mismatch",
         )
         chunk_target_bytes = resource_policy.available_memory_bytes
-        retained_receipt_bytes = receipt.retained_memory_bytes + retained_payload_bytes
         with (
             closing_dataset_iterator(
                 iter_dataset_chunks(
                     bar_session,
                     target_chunk_bytes=chunk_target_bytes,
-                    operation_headroom_bytes=(
-                        resource_policy.memory_budget_bytes
-                        - retained_receipt_bytes
-                    ),
                 )
             ) as bar_chunks,
             closing_dataset_iterator(
@@ -248,7 +239,6 @@ def validate_panel_dependent_materialization(
     time_window: TimeWindow,
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
 ) -> None:
     if (
         receipt.session.resource_policy is not resource_policy
@@ -262,15 +252,11 @@ def validate_panel_dependent_materialization(
             error="crypto_processed_input_dataset_identity_mismatch",
         )
         chunk_target_bytes = resource_policy.available_memory_bytes
-        retained_receipt_bytes = receipt.retained_memory_bytes + retained_payload_bytes
         with closing_dataset_iterator(
             _iter_core_window_chunks(
                 panel_session,
                 time_window=time_window,
                 target_chunk_bytes=chunk_target_bytes,
-                operation_headroom_bytes=(
-                    resource_policy.memory_budget_bytes - retained_receipt_bytes
-                ),
             )
         ) as expected_chunks:
             _validate_receipt_key_coverage(
@@ -298,15 +284,24 @@ def _validate_receipt_key_coverage(
     for frame in expected:
         if not isinstance(frame, pd.DataFrame):
             raise ValueError(error)
-        keys = _normalized_primary_keys(frame, primary_key, error=error)
-        if pandas_frame_payload_bytes(keys) > chunk_target_bytes:
-            raise ValueError(error)
-        try:
-            duplicates = index.add_frame(keys, namespace=_EXPECTED_KEY_NAMESPACE)
-        except ValueError as exc:
-            raise ValueError(error) from exc
-        if duplicates:
-            raise ValueError(error)
+        active_policy = current_runtime_resource_policy()
+        if active_policy is None:
+            raise RuntimeError("runtime_resource_policy_not_active")
+        if active_policy is not resource_policy:
+            raise RuntimeError("runtime_resource_policy_conflict")
+        with resource_policy.reserve(
+            "crypto.validation.keys",
+            max(1, pandas_frame_payload_bytes(frame)),
+        ):
+            keys = _normalized_primary_keys(frame, primary_key, error=error)
+            if pandas_frame_payload_bytes(keys) > chunk_target_bytes:
+                raise ValueError(error)
+            try:
+                duplicates = index.add_frame(keys, namespace=_EXPECTED_KEY_NAMESPACE)
+            except ValueError as exc:
+                raise ValueError(error) from exc
+            if duplicates:
+                raise ValueError(error)
     missing_count, extra_count = index.difference_counts(
         expected_namespace=_EXPECTED_KEY_NAMESPACE,
         actual_namespace="dataset",
@@ -322,7 +317,6 @@ def validate_existing_panel_materialization(
     spec: ProcessedDataSpec,
     expected_input_identities: Mapping[str, Mapping[str, str]],
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
 ) -> None:
     if (
         panel_session.resource_policy is not resource_policy
@@ -336,22 +330,11 @@ def validate_existing_panel_materialization(
             error="crypto_panel_input_dataset_identity_mismatch",
         )
         chunk_target_bytes = resource_policy.available_memory_bytes
-        bar_upstream_headroom = (
-            resource_policy.memory_budget_bytes
-            - panel_session.retained_memory_bytes
-            - retained_payload_bytes
-        )
-        panel_upstream_headroom = (
-            resource_policy.memory_budget_bytes
-            - bar_session.retained_memory_bytes
-            - retained_payload_bytes
-        )
         with (
             closing_dataset_iterator(
                 iter_dataset_chunks(
                     bar_session,
                     target_chunk_bytes=chunk_target_bytes,
-                    operation_headroom_bytes=bar_upstream_headroom,
                 )
             ) as bar_chunks,
             closing_dataset_iterator(
@@ -364,7 +347,6 @@ def validate_existing_panel_materialization(
                 iter_dataset_chunks(
                     panel_session,
                     target_chunk_bytes=chunk_target_bytes,
-                    operation_headroom_bytes=panel_upstream_headroom,
                 )
             ) as actual_chunks,
         ):
@@ -381,7 +363,6 @@ def _iter_core_window_chunks(
     *,
     time_window: TimeWindow,
     target_chunk_bytes: int,
-    operation_headroom_bytes: int,
 ) -> Iterator[pd.DataFrame]:
     filters = tuple(
         item
@@ -405,7 +386,6 @@ def _iter_core_window_chunks(
         iter_dataset_chunks(
             view,
             target_chunk_bytes=target_chunk_bytes,
-            operation_headroom_bytes=operation_headroom_bytes,
         )
     ) as frames:
         for frame in frames:
@@ -431,13 +411,17 @@ def _validate_ordered_key_stream_coverage(
         primary_key=primary_key,
         error=error,
     )
-    for expected_row, actual_row in zip_longest(
-        expected_rows,
-        actual_rows,
-        fillvalue=sentinel,
+    with (
+        closing_dataset_iterator(expected_rows),
+        closing_dataset_iterator(actual_rows),
     ):
-        if expected_row != actual_row:
-            raise ValueError(error)
+        for expected_row, actual_row in zip_longest(
+            expected_rows,
+            actual_rows,
+            fillvalue=sentinel,
+        ):
+            if expected_row != actual_row:
+                raise ValueError(error)
 
 
 def _iter_normalized_primary_key_rows(
@@ -448,13 +432,20 @@ def _iter_normalized_primary_key_rows(
 ) -> Iterator[tuple[object, ...]]:
     previous: tuple[object, ...] | None = None
     for frame in frames:
-        keys = _normalized_primary_keys(frame, primary_key, error=error)
-        for row in keys.itertuples(index=False, name=None):
-            normalized = tuple(row)
-            if previous is not None and normalized <= previous:
-                raise ValueError(error)
-            previous = normalized
-            yield normalized
+        policy = current_runtime_resource_policy()
+        if policy is None:
+            raise RuntimeError("runtime_resource_policy_not_active")
+        with policy.reserve(
+            "crypto.validation.keys",
+            max(1, pandas_frame_payload_bytes(frame)),
+        ):
+            keys = _normalized_primary_keys(frame, primary_key, error=error)
+            for row in keys.itertuples(index=False, name=None):
+                normalized = tuple(row)
+                if previous is not None and normalized <= previous:
+                    raise ValueError(error)
+                previous = normalized
+                yield normalized
 
 
 def validated_ordered_dependency_chunk(
@@ -536,7 +527,14 @@ def _iter_panel_primary_key_chunks(
     for chunk in bars:
         if chunk.empty:
             continue
-        yield _panel_primary_keys(chunk, primary_key=primary_key)
+        policy = current_runtime_resource_policy()
+        if policy is None:
+            raise RuntimeError("runtime_resource_policy_not_active")
+        with policy.reserve(
+            "crypto.validation.panel-keys",
+            max(1, pandas_frame_payload_bytes(chunk)),
+        ):
+            yield _panel_primary_keys(chunk, primary_key=primary_key)
 
 
 __all__ = [

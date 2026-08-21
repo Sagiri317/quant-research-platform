@@ -281,7 +281,7 @@ def _inspection_runtime_metadata(
     if remaining_headroom <= 0:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget")
     target_chunk_bytes = min(target_chunk_bytes, remaining_headroom)
-    reader_upstream_headroom = remaining_headroom + context.retained_memory_bytes
+    reader_upstream_headroom = remaining_headroom
     timestamp_column = context.timestamp_column
     if context.time_window is not None and timestamp_column is None:
         raise ValueError("time_window_not_supported")

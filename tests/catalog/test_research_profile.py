@@ -29,6 +29,8 @@ from quant_research_platform.research.portfolios.engine import (
     construct_portfolio_positions,
 )
 from quant_research_platform.runtime.resources import (
+    _OwnedValue,
+    current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.csmar.interim import InterimImportResult
@@ -101,13 +103,19 @@ def test_a_share_profile_materializes_exact_processed_dependency_source_window(
     def sessions(*_args, **kwargs):  # noqa: ANN002, ANN003
         assert kwargs["lookback_sessions"] == 252
         assert kwargs["lookahead_sessions"] == 121
-        return pd.DatetimeIndex(
+        index = pd.DatetimeIndex(
             [
                 *pd.bdate_range(end="2014-01-01", periods=252),
                 pd.Timestamp("2014-01-02"),
                 pd.Timestamp("2014-01-03"),
                 *pd.bdate_range(start="2014-01-06", periods=121),
             ]
+        )
+        policy = current_runtime_resource_policy()
+        assert policy is not None
+        return _OwnedValue(
+            index,
+            policy.lease("test.profile.sessions", index.nbytes),
         )
 
     monkeypatch.setattr(profiles, "_materialize_csmar_interim_data", materialize)
@@ -174,13 +182,19 @@ def test_profile_interim_call_reuses_ambient_root(
         def sessions(*_args, **kwargs):  # noqa: ANN002, ANN003
             assert kwargs["lookback_sessions"] == 252
             assert kwargs["lookahead_sessions"] == 121
-            return pd.DatetimeIndex(
+            index = pd.DatetimeIndex(
                 [
                     *pd.bdate_range(end="2014-01-01", periods=252),
                     pd.Timestamp("2014-01-02"),
                     pd.Timestamp("2014-01-03"),
                     *pd.bdate_range(start="2014-01-06", periods=121),
                 ]
+            )
+            policy = current_runtime_resource_policy()
+            assert policy is not None
+            return _OwnedValue(
+                index,
+                policy.lease("test.profile.sessions", index.nbytes),
             )
 
         monkeypatch.setattr(profiles, "_materialize_csmar_interim_data", materialize)

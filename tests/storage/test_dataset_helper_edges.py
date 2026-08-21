@@ -110,7 +110,6 @@ def test_dataset_inventory_lease_admits_shrinks_and_closes(tmp_path: Path) -> No
             scratch_parent=tmp_path,
             resource_policy=policy,
         )
-        assert inventory.retained_memory_bytes == 1024
         assert policy.used_memory_bytes == 1024
         inventory.close()
         assert policy.used_memory_bytes == 0

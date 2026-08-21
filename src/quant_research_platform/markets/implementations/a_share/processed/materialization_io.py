@@ -28,8 +28,7 @@ from quant_research_platform.storage._dataset_inspection import (
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     closing_dataset_iterator,
-    iter_dataset_chunks,
-    materialize_dataset_session,
+    materialize_dataset_session_owned,
     open_dataset_session,
 )
 from quant_research_platform.storage._dataset_writing import (
@@ -110,15 +109,12 @@ def read_processed_inputs_for_spec(
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow | None = None,
     columns_by_data_id: dict[str, Sequence[str]] | None = None,
-    retained_payload_bytes: int = 0,
     asset_ids: tuple[object, ...] | None = None,
     resource_policy: RuntimeResourcePolicy,
+    cleanup_stack: ExitStack,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
-    with (
-        runtime_resource_policy_scope(resource_policy),
-        ExitStack() as retained_inputs,
-    ):
+    with runtime_resource_policy_scope(resource_policy):
         for data_id in spec.processed_input_data_ids:
             dependency = processed_catalog.get(data_id)
             inputs[data_id] = read_materialized_dataset(
@@ -130,14 +126,8 @@ def read_processed_inputs_for_spec(
                     if columns_by_data_id is None
                     else columns_by_data_id.get(data_id)
                 ),
-                retained_payload_bytes=retained_payload_bytes,
                 asset_ids=asset_ids,
-            )
-            retained_inputs.enter_context(
-                resource_policy.reserve(
-                    "a_share.processed_input",
-                    _frame_bytes(inputs[data_id]),
-                )
+                cleanup_stack=cleanup_stack,
             )
     return inputs
 
@@ -269,14 +259,11 @@ def read_source_inputs_for_spec(
     columns_by_data_id: dict[str, Sequence[str]] | None = None,
     asset_ids_by_data_id: dict[str, tuple[object, ...]] | None = None,
     asset_columns_by_data_id: dict[str, str] | None = None,
-    retained_payload_bytes: int = 0,
     resource_policy: RuntimeResourcePolicy,
+    cleanup_stack: ExitStack,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
-    with (
-        runtime_resource_policy_scope(resource_policy),
-        ExitStack() as retained_inputs,
-    ):
+    with runtime_resource_policy_scope(resource_policy):
         for data_id in spec.source_input_data_ids:
             if spec.kind is ProcessedDataKind.PANEL and data_id == market_bars_data_id:
                 continue
@@ -289,7 +276,6 @@ def read_source_inputs_for_spec(
                     if columns_by_data_id is None
                     else columns_by_data_id.get(data_id)
                 ),
-                retained_payload_bytes=retained_payload_bytes,
                 asset_ids=(
                     None
                     if asset_ids_by_data_id is None
@@ -300,12 +286,7 @@ def read_source_inputs_for_spec(
                     if asset_columns_by_data_id is None
                     else asset_columns_by_data_id.get(data_id, "asset_id")
                 ),
-            )
-            retained_inputs.enter_context(
-                resource_policy.reserve(
-                    "a_share.source_input",
-                    _frame_bytes(inputs[data_id]),
-                )
+                cleanup_stack=cleanup_stack,
             )
     return inputs
 
@@ -316,21 +297,10 @@ def read_materialized_dataset(
     resource_policy: RuntimeResourcePolicy,
     time_window: TimeWindow | None = None,
     columns: Sequence[str] | None = None,
-    retained_payload_bytes: int = 0,
     asset_ids: tuple[object, ...] | None = None,
     asset_column: str = "asset_id",
+    cleanup_stack: ExitStack,
 ) -> pd.DataFrame:
-    if retained_payload_bytes < 0:
-        raise ValueError("invalid_a_share_retained_payload_bytes")
-    available_bytes = (
-        resource_policy.memory_budget_bytes
-        - resource_policy.used_memory_bytes
-        - retained_payload_bytes
-    )
-    if available_bytes <= 0:
-        raise MaterializationCapacityExceeded(
-            "a_share_known_payloads_exceed_task_memory_budget"
-        )
     with open_dataset_session(
         root,
         columns=None if columns is None else tuple(columns),
@@ -338,75 +308,17 @@ def read_materialized_dataset(
         resource_policy=resource_policy,
         row_filters=(() if asset_ids is None else ((asset_column, "in", asset_ids),)),
     ) as session:
-        return materialize_dataset_session(
+        owned = materialize_dataset_session_owned(
             session,
             target_chunk_bytes=resource_policy.available_memory_bytes,
-            materialized_budget_bytes=available_bytes,
+            materialized_budget_bytes=resource_policy.memory_budget_bytes,
         )
-
-
-def iter_dataset_chunks_with_policy(
-    root: Path,
-    *,
-    resource_policy: RuntimeResourcePolicy,
-    time_window: TimeWindow | None = None,
-    columns: Sequence[str] | None = None,
-    target_chunk_bytes: int | None = None,
-    asset_ids: tuple[object, ...] | None = None,
-    asset_column: str = "asset_id",
-    retained_payload_bytes: int = 0,
-    _retained_payload_bytes: list[int] | None = None,
-) -> Iterator[pd.DataFrame]:
-    bound_policy = resource_policy
-    if retained_payload_bytes < 0:
-        raise ValueError("invalid_a_share_retained_payload_bytes")
-    retained_batch_bytes = _retained_payload_bytes
-
-    def observe_batch(batch, _frame: pd.DataFrame) -> None:  # noqa: ANN001
-        assert retained_batch_bytes is not None
-        retained_batch_bytes[0] = batch.get_total_buffer_size()
-
-    def activate() -> Iterator[pd.DataFrame]:
-        assert bound_policy is not None
-        target_bytes = (
-            bound_policy.available_memory_bytes
-            if target_chunk_bytes is None
-            else target_chunk_bytes
+        cleanup_stack.callback(
+            _release_owned_value,
+            owned,
+            owner="a_share.materialized.input",
         )
-        if type(target_bytes) is not int or target_bytes <= 0:
-            raise ValueError("invalid_target_chunk_bytes")
-        operation_headroom_bytes = (
-            bound_policy.memory_budget_bytes
-            - bound_policy.used_memory_bytes
-            - retained_payload_bytes
-        )
-        if operation_headroom_bytes <= 0:
-            raise MaterializationCapacityExceeded(
-                "a_share_known_payloads_exceed_task_memory_budget"
-            )
-        with open_dataset_session(
-            root,
-            columns=None if columns is None else tuple(columns),
-            time_window=time_window,
-            resource_policy=bound_policy,
-            row_filters=(
-                () if asset_ids is None else ((asset_column, "in", asset_ids),)
-            ),
-        ) as session:
-            yield from iter_dataset_chunks(
-                session,
-                target_chunk_bytes=target_bytes,
-                operation_headroom_bytes=operation_headroom_bytes,
-                batch_observer=(
-                    observe_batch if retained_batch_bytes is not None else None
-                ),
-            )
-
-    return activate()
-
-
-def _frame_bytes(frame: pd.DataFrame) -> int:
-    return pandas_frame_payload_bytes(frame)
+        return owned.value
 
 
 __all__ = [

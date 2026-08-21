@@ -1458,50 +1458,6 @@ def test_dataset_file_batches_do_not_credit_implicit_live_reservations(
                 )
 
 
-def test_dataset_file_batches_do_not_double_count_reserved_previous_output(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = tmp_path / "part.parquet"
-    batches = tuple(
-        pa.record_batch([pa.array([index])], names=["value"]) for index in range(2)
-    )
-    expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
-    output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
-    policy = _issued_test_policy()
-    monkeypatch.setattr(
-        dataset_reading,
-        "iter_dataset_part_batches",
-        lambda *_args, **_kwargs: iter(batches),
-    )
-    context = SimpleNamespace(
-        resource_policy=policy,
-        retained_memory_bytes=0,
-        logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
-        parquet_filters=None,
-        read_paths=(path,),
-        metadata_for=lambda _path: SimpleNamespace(identity=SimpleNamespace()),
-        verify=lambda: None,
-    )
-    converted = dataset_reading.iter_dataset_file_batches(
-        context,
-        columns=("value",),
-        target_chunk_bytes=max(output_bytes),
-        operation_headroom_bytes=64 * 1024,
-    )
-
-    with dataset_reading.closing_dataset_iterator(converted):
-        first_path, first = next(converted)
-        with runtime_resource_policy_scope(policy):
-            with policy.reserve("research.time.pending", output_bytes[0]):
-                second_path, second = next(converted)
-
-    assert first_path == path
-    assert second_path == path
-    pd.testing.assert_frame_equal(first, expected[0])
-    pd.testing.assert_frame_equal(second, expected[1])
-
-
 def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1565,6 +1521,50 @@ def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
                     next(converted)
 
     assert conversion_count == 1
+
+
+def test_dataset_file_batches_do_not_double_count_reserved_previous_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "part.parquet"
+    batches = tuple(
+        pa.record_batch([pa.array([index])], names=["value"]) for index in range(2)
+    )
+    expected = tuple(batch.to_pandas(use_threads=False) for batch in batches)
+    output_bytes = tuple(pandas_frame_payload_bytes(frame) for frame in expected)
+    policy = _issued_test_policy()
+    monkeypatch.setattr(
+        dataset_reading,
+        "iter_dataset_part_batches",
+        lambda *_args, **_kwargs: iter(batches),
+    )
+    context = SimpleNamespace(
+        resource_policy=policy,
+        retained_memory_bytes=0,
+        logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
+        parquet_filters=None,
+        read_paths=(path,),
+        metadata_for=lambda _path: SimpleNamespace(identity=SimpleNamespace()),
+        verify=lambda: None,
+    )
+    converted = dataset_reading.iter_dataset_file_batches(
+        context,
+        columns=("value",),
+        target_chunk_bytes=max(output_bytes),
+        operation_headroom_bytes=64 * 1024,
+    )
+
+    with dataset_reading.closing_dataset_iterator(converted):
+        first_path, first = next(converted)
+        with runtime_resource_policy_scope(policy):
+            with policy.reserve("research.time.pending", output_bytes[0]):
+                second_path, second = next(converted)
+
+    assert first_path == path
+    assert second_path == path
+    pd.testing.assert_frame_equal(first, expected[0])
+    pd.testing.assert_frame_equal(second, expected[1])
 
 
 def test_declared_variable_width_member_decodes_multirow_batches(
@@ -2174,77 +2174,6 @@ def test_materialized_passes_existing_headroom_to_each_conversion_pass(
 
     assert result["value"].tolist() == [1]
     assert observed_headroom == [4096, 3072]
-
-
-def test_materialized_budget_deducts_inventory_before_decoder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        dataset_reading,
-        "iter_dataset_chunks",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("decoder_activated_without_inventory_headroom")
-        ),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="dataset_materialized_result_exceeds_target_bytes",
-    ):
-        dataset_reading.materialize_dataset_session(
-            SimpleNamespace(
-                resource_policy=_issued_test_policy(),
-                inventory=SimpleNamespace(retained_memory_bytes=1024),
-                retained_memory_bytes=1024,
-            ),
-            target_chunk_bytes=1024,
-            materialized_budget_bytes=1024,
-        )
-
-
-def test_materialized_zero_transition_headroom_skips_second_pass(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    frame = pd.DataFrame({"value": pd.Series([1], dtype="int64")})
-    calls = 0
-
-    def chunks(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        yield frame
-
-    context = SimpleNamespace(
-        resource_policy=_issued_test_policy(),
-        logical_columns=("value",),
-        logical_dtypes=logical_dtype_payload_from_frame(frame),
-        inventory=SimpleNamespace(retained_memory_bytes=1024),
-        retained_memory_bytes=1024,
-    )
-    monkeypatch.setattr(dataset_reading, "iter_dataset_chunks", chunks)
-    monkeypatch.setattr(
-        dataset_reading,
-        "_materialized_buffer_payload_bytes",
-        lambda *_args, **_kwargs: 3072,
-    )
-    monkeypatch.setattr(
-        dataset_reading,
-        "_allocate_materialized_buffers",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("buffers_allocated_without_transition_headroom")
-        ),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="dataset_materialized_result_exceeds_target_bytes",
-    ):
-        dataset_reading.materialize_dataset_session(
-            context,
-            target_chunk_bytes=4096,
-            materialized_budget_bytes=4096,
-        )
-
-    assert calls == 1
 
 
 def test_chunked_and_materialized_reads_share_nullable_numeric_dtype(
@@ -4115,22 +4044,18 @@ def test_fingerprint_accounts_for_live_arrow_and_nested_pandas_payloads(
         data_root=tmp_path / "data",
         schema_hash="schema",
         read_paths=(path,),
-        inventory=SimpleNamespace(retained_memory_bytes=0),
-        retained_memory_bytes=0,
     )
     operation_headroom = aggregate_bytes + headroom_delta
     result_bound = dataset_fingerprinting._fingerprint_operation_bound(context)
-    retained_memory_bytes = policy.memory_budget_bytes - (
+    preexisting_bytes = policy.memory_budget_bytes - (
         operation_headroom + result_bound
     )
-    assert retained_memory_bytes > 0
-    context.inventory.retained_memory_bytes = retained_memory_bytes
-    context.retained_memory_bytes = retained_memory_bytes
+    assert preexisting_bytes > 0
 
     with runtime_resource_policy_scope(policy):
         retained_lease = policy.lease(
             "test.fingerprint.context",
-            retained_memory_bytes,
+            preexisting_bytes,
         )
         try:
             if should_fail:
@@ -4181,7 +4106,7 @@ def test_fingerprint_accounts_for_live_arrow_and_nested_pandas_payloads(
         finally:
             retained_lease.close()
 
-    assert observed_headroom == [operation_headroom + retained_memory_bytes]
+    assert observed_headroom == [operation_headroom]
     assert observer_calls == 1
 
 
@@ -4295,10 +4220,7 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
         for observed in dataset_reading._arrow_batch_to_bounded_pandas(
             arrow_batch,
             target_chunk_bytes=kwargs["target_chunk_bytes"],
-            operation_headroom_bytes=(
-                kwargs["operation_headroom_bytes"]
-                - _args[0].retained_memory_bytes
-            ),
+            operation_headroom_bytes=kwargs["operation_headroom_bytes"],
             batch_observer=observe_batch,
         ):
             yield path, observed
@@ -4319,21 +4241,19 @@ def test_fingerprint_accounts_for_multislice_parent_arrow_buffers(
             data_root=tmp_path / "data",
             schema_hash="schema",
             read_paths=(path,),
-            inventory=SimpleNamespace(retained_memory_bytes=0),
-            retained_memory_bytes=0,
         )
         reserve = dataset_reading.dataset_partition_state_reserve_bytes(context)
         reserve += 3 * (struct.calcsize("P") + len(b"nested"))
-        retained = policy.memory_budget_bytes - headroom_bytes - reserve
-        context.inventory.retained_memory_bytes = retained
-        context.retained_memory_bytes = retained
+        context.preexisting_bytes = (
+            policy.memory_budget_bytes - headroom_bytes - reserve
+        )
         return context
 
     context = context_for(12 * 1024 * 1024)
     with runtime_resource_policy_scope(policy):
         retained_lease = policy.lease(
             "test.fingerprint.context",
-            context.retained_memory_bytes,
+            context.preexisting_bytes,
         )
         try:
             fingerprint = dataset_fingerprinting.fingerprint_dataset_session(
@@ -4466,7 +4386,6 @@ def test_fingerprint_rejects_many_partition_output_overlap_after_traversal(
     monkeypatch.setattr(dataset_fingerprinting, "iter_dataset_file_batches", batches)
     context = SimpleNamespace(
         resource_policy=policy,
-        retained_memory_bytes=0,
         data_root=data_root,
         read_paths=paths,
         spec={"primary_key": ["id"]},
@@ -4479,14 +4398,14 @@ def test_fingerprint_rejects_many_partition_output_overlap_after_traversal(
         context
     )
     local_state_bytes = 3 * (struct.calcsize("P") + len(b"id"))
-    context.retained_memory_bytes = policy.memory_budget_bytes - (
+    retained_bytes = policy.memory_budget_bytes - (
         partition_state_bytes + local_state_bytes + 1024
     )
 
     with runtime_resource_policy_scope(policy):
         retained_lease = policy.lease(
             "test.fingerprint.retained",
-            context.retained_memory_bytes,
+            retained_bytes,
         )
         try:
             with pytest.raises(
@@ -4749,7 +4668,7 @@ def test_storage_operations_propagate_the_captured_payload_target(
     )
 
 
-def test_file_batch_default_derives_converter_headroom_from_session_owner_state(
+def test_file_batch_default_uses_live_policy_headroom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = pd.DataFrame({"value": [1]})
@@ -4787,9 +4706,7 @@ def test_file_batch_default_derives_converter_headroom_from_session_owner_state(
     assert len(batches) == 1
     assert batches[0][0] == path
     pd.testing.assert_frame_equal(batches[0][1], frame)
-    assert observed_headroom == [
-        context.resource_policy.memory_budget_bytes - context.retained_memory_bytes
-    ]
+    assert observed_headroom == [context.resource_policy.memory_budget_bytes]
 
 
 def test_compare_reuses_one_policy_for_both_fingerprints(
@@ -5859,8 +5776,6 @@ def test_fingerprint_normalizes_bounded_slices_without_full_frame_copy(
         time_window=None,
         data_root=data_root,
         read_paths=(path,),
-        inventory=SimpleNamespace(retained_memory_bytes=0),
-        retained_memory_bytes=0,
     )
     partition_reserve = dataset_reading.dataset_partition_state_reserve_bytes(context)
     local_reserve = struct.calcsize("P") * (1 + 2 * len(logical_columns))
@@ -5872,9 +5787,6 @@ def test_fingerprint_normalizes_bounded_slices_without_full_frame_copy(
         - partition_reserve
         - local_reserve
     )
-    context.inventory.retained_memory_bytes = retained
-    context.retained_memory_bytes = retained
-
     with runtime_resource_policy_scope(policy):
         retained_lease = policy.lease("test.fingerprint.retained", retained)
         try:
@@ -5930,13 +5842,6 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
         observed_add,
     )
 
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-    ) as session:
-        session_retained_bytes = session.retained_memory_bytes
-
     comparison = dataset_comparison.compare_datasets(
         root,
         root,
@@ -5957,7 +5862,7 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
             strict=True,
         )
     )
-    assert all(reader > session_retained_bytes for reader in reader_headrooms)
+    assert all(reader > 0 for reader in reader_headrooms)
     assert value_columns and set(value_columns) == {("value",)}
 
 
@@ -7139,42 +7044,6 @@ def test_session_filter_reuses_prepared_values(
     assert sum(map(len, chunks)) == 2
 
 
-def test_dataset_session_retained_memory_includes_inventory_and_prepared_filters(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "session_retained_filter")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("session_retained_filter"),
-    )
-
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=("timestamp",),
-        time_window=None,
-        row_filters=(("asset_id", "in", ("A", "B")),),
-    ) as session:
-        assert session.prepared_filter_bytes > 0
-        metadata_bytes = (
-            session.inventory.retained_memory_bytes
-            + len(session.spec_bytes)
-            + len(session.spec_identity_bytes)
-            + len(session.manifest_bytes)
-            + len(session.manifest_identity_bytes)
-            + len(session.logical_dtype_bytes)
-            + session.prepared_filter_bytes
-        )
-        assert session.plan_base_retained_bytes >= (
-            len(session.arrow_schema.serialize())
-            + sum(len(column.encode("utf-8")) for column in session.logical_columns)
-            + sum(len(column.encode("utf-8")) for column in session.physical_columns)
-        )
-        assert session.retained_memory_bytes > (
-            metadata_bytes + session.plan_base_retained_bytes
-        )
-
-
 def test_dataset_session_plan_retained_memory_scales_with_wide_columns(
     tmp_path: Path,
 ) -> None:
@@ -7552,44 +7421,6 @@ def test_dataset_binary_filter_preflight_rejects_before_arrow(
             values,
             resource_policy=policy,
         )
-
-
-def test_dataset_filter_capacity_includes_inventory_during_preparation(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "filter_inventory_overlap")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("filter_inventory_overlap"),
-    )
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=("timestamp",),
-        time_window=None,
-    ) as session:
-        inventory_bytes = session.inventory.retained_memory_bytes
-    policy = capture_test_policy(
-        available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    value = "x" * (policy.memory_budget_bytes - inventory_bytes - 3)
-    acquired = pa.array((value,), type=pa.string())
-    assert acquired.nbytes <= policy.memory_budget_bytes
-    assert inventory_bytes + acquired.nbytes > policy.memory_budget_bytes
-
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="dataset_filter_values_exceed_task_memory_budget",
-    ):
-        with dataset_reading.open_dataset_session(
-            root,
-            columns=("timestamp",),
-            time_window=None,
-            row_filters=(("asset_id", "in", (value,)),),
-            resource_policy=policy,
-        ):
-            pass
 
 
 @pytest.mark.parametrize(
@@ -9133,10 +8964,10 @@ def test_session_metadata_reader_rejects_oversize_before_buffering(
             pass
 
 
-@pytest.mark.parametrize("materialized_budget_bytes", (1025, 1026))
+@pytest.mark.parametrize("budget_slack", (0, 1))
 def test_materialize_rejects_exact_buffers_before_allocation(
     monkeypatch: pytest.MonkeyPatch,
-    materialized_budget_bytes: int,
+    budget_slack: int,
 ) -> None:
     frames = (
         pd.DataFrame({"value": pd.Series(["a" * 128], dtype="string")}),
@@ -9161,12 +8992,22 @@ def test_materialize_rejects_exact_buffers_before_allocation(
             AssertionError("buffers_allocated_before_headroom_check")
         ),
     )
+    required_payload_bound = (
+        sum(pandas_frame_payload_bytes(frame) for frame in frames) + 1
+    )
+    monkeypatch.setattr(
+        dataset_reading,
+        "_materialized_buffer_payload_bytes",
+        lambda *_args, **_kwargs: required_payload_bound,
+    )
+    materialized_budget_bytes = max(
+        1,
+        required_payload_bound - budget_slack,
+    )
     context = SimpleNamespace(
         resource_policy=_issued_test_policy(),
         logical_columns=("value",),
         logical_dtypes=logical_dtype_payload_from_frame(frames[0]),
-        inventory=SimpleNamespace(retained_memory_bytes=1024),
-        retained_memory_bytes=1024,
     )
     with pytest.raises(
         ValueError,
@@ -9732,7 +9573,6 @@ def test_dataset_inventory_cleanup_removes_sqlite_sidecars(tmp_path: Path) -> No
         )
         scratch = inventory.scratch_path
         assert (scratch / "i.db").is_file()
-        assert inventory.retained_memory_bytes == 1024
         assert inventory._connection is not None
         assert inventory._connection.execute("PRAGMA cache_size").fetchone() == (-1,)
         inventory.close()
@@ -10207,8 +10047,6 @@ def test_inspection_window_file_count_counts_consecutive_file_batches_once(
         ),
         all_paths=(),
         manifest={},
-        inventory=SimpleNamespace(retained_memory_bytes=1024),
-        retained_memory_bytes=1024,
         resource_policy=capture_test_policy(
             available_memory_bytes=16 * 1024**2,
         ),
@@ -10225,7 +10063,6 @@ def test_inspection_window_file_count_counts_consecutive_file_batches_once(
     assert observed_headroom == [
         context.resource_policy.memory_budget_bytes
         - context.resource_policy.used_memory_bytes
-        + context.retained_memory_bytes
     ]
 
 
@@ -10258,7 +10095,6 @@ def test_inspection_rejects_output_overlap_after_partition_traversal(
     monkeypatch.setattr(dataset_inspection, "iter_dataset_file_batches", batches)
     context = SimpleNamespace(
         resource_policy=policy,
-        retained_memory_bytes=0,
         root=tmp_path,
         data_root=data_root,
         read_paths=paths,

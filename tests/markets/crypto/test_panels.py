@@ -515,8 +515,8 @@ def test_trade_reducer_admits_target_and_output_before_constructor_allocation(
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(
-            ValueError,
-            match="crypto_indivisible_reducer_unit_exceeds_payload_target",
+            MemoryError,
+            match="runtime_memory_budget_exceeded",
         ):
             module.AggregateTradeReducer(
                 bars=bars,

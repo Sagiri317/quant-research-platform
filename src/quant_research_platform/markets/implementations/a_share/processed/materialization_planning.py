@@ -28,9 +28,6 @@ from quant_research_platform.markets.implementations.a_share.fields import (
 from quant_research_platform.markets.implementations.a_share.processed import (
     materialization_io as materialization_io,
 )
-from quant_research_platform.markets.implementations.a_share.validation import (
-    strict_values,
-)
 from quant_research_platform.markets.session_windows import (
     require_non_negative_session_offset,
 )
@@ -51,6 +48,8 @@ from quant_research_platform.storage._dataset_key_tracking import (
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     closing_dataset_iterator,
+    iter_dataset_chunks,
+    open_dataset_session,
 )
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.layout import StorageLayout
@@ -61,30 +60,20 @@ def filter_output_sessions(
     sessions: Sequence[pd.Timestamp],
     *,
     columns: Sequence[str] | None = None,
-    retained_frames: Sequence[pd.DataFrame] = (),
-    retained_payload_bytes: int = 0,
     resource_policy: RuntimeResourcePolicy,
 ) -> pd.DataFrame:
     selected_columns = tuple(frame.columns) if columns is None else tuple(columns)
-    filter_state_bytes = len(frame) * np.dtype(np.bool_).itemsize
+    filter_state_bytes = len(frame) * (
+        np.dtype(np.bool_).itemsize + np.dtype(np.intp).itemsize
+    )
     output_bound = (
         pandas_frame_payload_bytes(frame) + len(frame) * np.dtype(np.intp).itemsize
-    )
-    require_known_materialization_payload_bound(
-        frames=(*retained_frames, frame),
-        output=None,
-        retained_payload_bytes=(
-            retained_payload_bytes
-            + pandas_frame_payload_bytes(frame)
-            + filter_state_bytes
-        ),
-        resource_policy=resource_policy,
     )
     with (
         runtime_resource_policy_scope(resource_policy),
         resource_policy.reserve(
             "a_share.output_filter",
-            filter_state_bytes + output_bound,
+            filter_state_bytes,
         ),
     ):
         if any(
@@ -111,105 +100,70 @@ def require_dataset_coverage(
     *,
     sessions: pd.DatetimeIndex,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int = 0,
 ) -> None:
     require_date_window(time_window, context="a_share_dataset_coverage")
     first, stop = _target_session_bounds(sessions, time_window)
     coverage_window = TimeWindow(sessions[first].date(), sessions[stop - 1].date())
     expected_sessions = sessions[first:stop]
-    retained_state_bytes = retained_payload_bytes + (
-        sessions.nbytes + len(expected_sessions) * np.dtype(np.bool_).itemsize
-    )
-    reader_headroom_bytes = (
-        resource_policy.memory_budget_bytes - retained_state_bytes
-    )
-    if reader_headroom_bytes <= 0:
-        raise materialization_io.MaterializationCapacityExceeded(
-            "a_share_known_payloads_exceed_task_memory_budget"
+    coverage_state_bytes = len(expected_sessions) * np.dtype(np.bool_).itemsize
+    with resource_policy.reserve("a_share.planning.coverage", coverage_state_bytes):
+        covered = np.zeros(len(expected_sessions), dtype=np.bool_)
+        owned_inspection = _inspect_dataset_owned(
+            root,
+            resource_policy=resource_policy,
         )
-    covered = np.zeros(len(expected_sessions), dtype=np.bool_)
-    _mark_dataset_session_coverage(
-        root,
-        coverage_window,
-        expected_sessions=expected_sessions,
-        covered=covered,
-        retained_state_bytes=retained_state_bytes,
-        resource_policy=resource_policy,
-    )
-    missing_count = 0
-    first_missing = None
-    for position, is_covered in enumerate(covered):
-        if is_covered:
-            continue
-        missing_count += 1
-        if first_missing is None:
-            first_missing = expected_sessions[position].date()
-    if missing_count:
-        raise ValueError(
-            "insufficient_dataset_coverage: "
-            f"missing_sessions={missing_count} "
-            f"first_missing_session={first_missing}"
-        )
-
-
-def _mark_dataset_session_coverage(
-    root: Path,
-    time_window: TimeWindow,
-    *,
-    expected_sessions: pd.DatetimeIndex,
-    covered: np.ndarray,
-    retained_state_bytes: int,
-    resource_policy: RuntimeResourcePolicy,
-) -> None:
-    owned_inspection = _inspect_dataset_owned(
-        root,
-        resource_policy=resource_policy,
-    )
-    try:
-        if "timestamp" not in owned_inspection.value.columns:
-            raise ValueError("time_window_not_supported")
-    finally:
-        _release_owned_value(
-            owned_inspection,
-            owner="a_share.planning.calendar.inspection",
-        )
-    reader_headroom_bytes = (
-        resource_policy.memory_budget_bytes - retained_state_bytes
-    )
-    if reader_headroom_bytes <= 0:
-        raise materialization_io.MaterializationCapacityExceeded(
-            "a_share_known_payloads_exceed_task_memory_budget"
-        )
-    chunks = materialization_io.iter_dataset_chunks_with_policy(
-        root,
-        columns=["timestamp"],
-        time_window=time_window,
-        resource_policy=resource_policy,
-        target_chunk_bytes=min(
-            resource_policy.available_memory_bytes,
-            reader_headroom_bytes,
-        ),
-        retained_payload_bytes=retained_state_bytes,
-    )
-    with closing_dataset_iterator(chunks):
-        for chunk in chunks:
-            require_known_materialization_payload_bound(
-                frames=(chunk,),
-                output=None,
-                retained_payload_bytes=retained_state_bytes
-                + len(chunk) * np.dtype(np.int64).itemsize,
-                resource_policy=resource_policy,
+        try:
+            if "timestamp" not in owned_inspection.value.columns:
+                raise ValueError("time_window_not_supported")
+        finally:
+            _release_owned_value(
+                owned_inspection,
+                owner="a_share.planning.calendar.inspection",
             )
-            timestamps = strict_values.strict_timestamp_value_series(
-                chunk["timestamp"], error="invalid_dataset_session_timestamp"
-            ).dt.normalize()
-            for timestamp in timestamps:
-                position = int(expected_sessions.searchsorted(timestamp))
-                if (
-                    position < len(expected_sessions)
-                    and expected_sessions[position] == timestamp
-                ):
-                    covered[position] = True
+        with open_dataset_session(
+            root,
+            columns=("timestamp",),
+            time_window=coverage_window,
+            resource_policy=resource_policy,
+        ) as session:
+            chunks = iter_dataset_chunks(
+                session,
+                target_chunk_bytes=resource_policy.available_memory_bytes,
+            )
+            with closing_dataset_iterator(chunks):
+                for chunk in chunks:
+                    for raw_timestamp in chunk["timestamp"]:
+                        try:
+                            timestamp = pd.Timestamp(raw_timestamp)
+                        except (TypeError, ValueError, OverflowError) as exc:
+                            raise ValueError(
+                                "invalid_dataset_session_timestamp"
+                            ) from exc
+                        if pd.isna(timestamp):
+                            raise ValueError("invalid_dataset_session_timestamp")
+                        if timestamp.tz is not None:
+                            timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+                        timestamp = timestamp.normalize()
+                        position = int(expected_sessions.searchsorted(timestamp))
+                        if (
+                            position < len(expected_sessions)
+                            and expected_sessions[position] == timestamp
+                        ):
+                            covered[position] = True
+        missing_count = 0
+        first_missing = None
+        for position, is_covered in enumerate(covered):
+            if is_covered:
+                continue
+            missing_count += 1
+            if first_missing is None:
+                first_missing = expected_sessions[position].date()
+        if missing_count:
+            raise ValueError(
+                "insufficient_dataset_coverage: "
+                f"missing_sessions={missing_count} "
+                f"first_missing_session={first_missing}"
+            )
 
 
 def iter_active_materialization_batches(
@@ -221,7 +175,6 @@ def iter_active_materialization_batches(
     resource_policy: RuntimeResourcePolicy,
     valid_bar_offsets: tuple[int, int] | None = None,
     output_row_bound_bytes: int | None = None,
-    retained_payload_bytes: int = 0,
     materialize: Callable[..., pd.DataFrame],
 ) -> Iterator[object]:
     bound_policy = resource_policy
@@ -239,17 +192,12 @@ def iter_active_materialization_batches(
         and type(sessions) is not pd.DatetimeIndex
     ):
         raise ValueError("invalid_session_dates")
-    if type(retained_payload_bytes) is not int or retained_payload_bytes < 0:
-        raise ValueError("invalid_a_share_retained_payload_bytes")
     if output_row_bound_bytes is not None and (
         type(output_row_bound_bytes) is not int or output_row_bound_bytes <= 0
     ):
         raise ValueError("invalid_a_share_output_row_bound")
     assert bound_policy is not None
-    session_context, retained_session_bytes = _owned_materialization_sessions(
-        sessions,
-        resource_policy=bound_policy,
-    )
+    session_context = sessions
     first_session, stop_session = _target_session_bounds(
         session_context,
         time_window,
@@ -260,16 +208,11 @@ def iter_active_materialization_batches(
         if first_session == 0 and stop_session == len(session_context)
         else target_count * np.dtype(object).itemsize
     )
-    _require_retained_materialization_capacity(
-        retained_payload_bytes + retained_session_bytes + target_slice_bytes,
-        resource_policy=bound_policy,
-    )
     target_sessions = (
         session_context
         if target_slice_bytes == 0
         else session_context[first_session:stop_session]
     )
-    retained_session_bytes += target_slice_bytes
 
     def produce_under_policy() -> Iterator[object]:
         assert bound_policy is not None
@@ -280,13 +223,6 @@ def iter_active_materialization_batches(
             timestamp_columns=(),
             scratch_parent=root.parent,
         )
-        pre_active_retained_bytes = (
-            retained_payload_bytes + active_index.retained_memory_bytes
-        )
-        _require_retained_materialization_capacity(
-            pre_active_retained_bytes,
-            resource_policy=bound_policy,
-        )
         with (
             bound_policy.reserve(
                 "a_share.active_index",
@@ -294,58 +230,53 @@ def iter_active_materialization_batches(
             ),
             active_index as index,
         ):
-            owner_retained_bytes = retained_payload_bytes
-            _require_retained_materialization_capacity(
-                owner_retained_bytes,
-                resource_policy=bound_policy,
-            )
             discovery_headroom = (
                 bound_policy.memory_budget_bytes
                 - bound_policy.used_memory_bytes
-                - owner_retained_bytes
             )
             if discovery_headroom <= 0:
                 raise materialization_io.MaterializationCapacityExceeded(
                     "a_share_known_payloads_exceed_task_memory_budget"
                 )
             discovery_target = discovery_headroom
-            chunks = materialization_io.iter_dataset_chunks_with_policy(
+            with open_dataset_session(
                 root,
                 columns=(asset_column,),
                 time_window=time_window,
                 resource_policy=bound_policy,
-                target_chunk_bytes=discovery_target,
-                retained_payload_bytes=owner_retained_bytes,
-            )
-            with closing_dataset_iterator(chunks):
-                for chunk in chunks:
-                    if asset_column not in chunk:
-                        raise ValueError("missing_processed_panel_asset_id")
-                    source_values = chunk[asset_column]
+            ) as session:
+                chunks = iter_dataset_chunks(
+                    session,
+                    target_chunk_bytes=discovery_target,
+                )
+                with closing_dataset_iterator(chunks):
+                    for chunk in chunks:
+                        if asset_column not in chunk:
+                            raise ValueError("missing_processed_panel_asset_id")
+                        source_values = chunk[asset_column]
 
-                    def active_asset_rows(
-                        values: pd.Series = source_values,
-                    ) -> Iterator[tuple[str, bytes, bytes]]:
-                        for value in values:
-                            if not isinstance(value, str) or not value:
-                                raise ValueError("invalid_processed_panel_asset_id")
-                            encoded_bound = sys.getsizeof(b"") + 4 * len(value)
-                            available_bytes = (
-                                bound_policy.memory_budget_bytes
-                                - bound_policy.used_memory_bytes
-                                - owner_retained_bytes
-                            )
-                            if encoded_bound > available_bytes:
-                                raise (
-                                    materialization_io.MaterializationCapacityExceeded(
-                                        "a_share_known_payloads_exceed_task_memory_budget"
-                                    )
+                        def active_asset_rows(
+                            values: pd.Series = source_values,
+                        ) -> Iterator[tuple[str, bytes, bytes]]:
+                            for value in values:
+                                if not isinstance(value, str) or not value:
+                                    raise ValueError("invalid_processed_panel_asset_id")
+                                encoded_bound = sys.getsizeof(b"") + 4 * len(value)
+                                available_bytes = (
+                                    bound_policy.memory_budget_bytes
+                                    - bound_policy.used_memory_bytes
                                 )
-                            encoded = value.encode("utf-8")
-                            yield "active-assets", encoded, encoded
+                                if encoded_bound > available_bytes:
+                                    raise (
+                                        materialization_io.MaterializationCapacityExceeded(
+                                            "a_share_known_payloads_exceed_task_memory_budget"
+                                        )
+                                    )
+                                encoded = value.encode("utf-8")
+                                yield "active-assets", encoded, encoded
 
-                    index.add_identity_payload_rows(rows=active_asset_rows())
-                    del source_values, chunk
+                        index.add_identity_payload_rows(rows=active_asset_rows())
+                        del source_values, chunk
 
             batch_state_bytes = sys.getsizeof([]) + sys.getsizeof(())
 
@@ -357,7 +288,6 @@ def iter_active_materialization_batches(
                         asset_ids=output,
                         sessions=target_sessions,
                         session_context=session_context,
-                        retained_payload_bytes=owner_retained_bytes,
                         output_row_bound_bytes=output_row_bound_bytes,
                         materialize=materialize,
                     )
@@ -366,11 +296,6 @@ def iter_active_materialization_batches(
                     primary_key=("asset_id", "timestamp"),
                     timestamp_columns=("timestamp",),
                     scratch_parent=root.parent,
-                )
-                valid_retained_bytes = owner_retained_bytes
-                _require_retained_materialization_capacity(
-                    valid_retained_bytes + valid_bar_index.retained_memory_bytes,
-                    resource_policy=bound_policy,
                 )
                 with (
                     bound_policy.reserve(
@@ -383,7 +308,6 @@ def iter_active_materialization_batches(
                         root,
                         index=valid_bar_index,
                         resource_policy=bound_policy,
-                        retained_payload_bytes=valid_retained_bytes,
                         asset_ids=output,
                         time_window=None,
                     )
@@ -391,7 +315,6 @@ def iter_active_materialization_batches(
                         asset_ids=output,
                         sessions=target_sessions,
                         session_context=session_context,
-                        retained_payload_bytes=valid_retained_bytes,
                         valid_bar_index=valid_bar_index,
                         valid_bar_offsets=valid_bar_offsets,
                         output_row_bound_bytes=output_row_bound_bytes,
@@ -401,7 +324,6 @@ def iter_active_materialization_batches(
             batch_available = (
                 bound_policy.memory_budget_bytes
                 - bound_policy.used_memory_bytes
-                - owner_retained_bytes
                 - batch_state_bytes
             )
             if batch_available <= 0:
@@ -455,20 +377,7 @@ def iter_active_materialization_batches(
 
     def activate_under_policy() -> Iterator[object]:
         assert bound_policy is not None
-        if (
-            bound_policy.used_memory_bytes
-            + retained_payload_bytes
-            + retained_session_bytes
-            > bound_policy.memory_budget_bytes
-        ):
-            raise materialization_io.MaterializationCapacityExceeded(
-                "a_share_known_payloads_exceed_task_memory_budget"
-            )
-        with bound_policy.reserve(
-            "a_share.sessions",
-            retained_session_bytes,
-        ):
-            yield from produce_under_policy()
+        yield from produce_under_policy()
 
     def activate() -> Iterator[object]:
         assert bound_policy is not None
@@ -478,56 +387,11 @@ def iter_active_materialization_batches(
     return activate()
 
 
-def _owned_materialization_sessions(
-    sessions: Sequence[pd.Timestamp],
-    *,
-    resource_policy: RuntimeResourcePolicy,
-) -> tuple[Sequence[pd.Timestamp], int]:
-    source_bytes = (
-        sessions.nbytes
-        if isinstance(sessions, pd.Index)
-        else len(sessions) * np.dtype(object).itemsize
-    )
-    if type(sessions) is tuple:
-        _require_retained_materialization_capacity(
-            source_bytes,
-            resource_policy=resource_policy,
-        )
-        return sessions, source_bytes
-    if isinstance(sessions, pd.DatetimeIndex):
-        prospective_bytes = len(sessions) * np.dtype(np.int64).itemsize
-        _require_retained_materialization_capacity(
-            source_bytes + prospective_bytes,
-            resource_policy=resource_policy,
-        )
-        owned = sessions.copy(deep=True)
-        return owned, owned.nbytes
-    prospective_bytes = len(sessions) * np.dtype(object).itemsize
-    _require_retained_materialization_capacity(
-        source_bytes + prospective_bytes,
-        resource_policy=resource_policy,
-    )
-    owned = tuple(sessions[position] for position in range(len(sessions)))
-    return owned, len(owned) * np.dtype(object).itemsize
-
-
-def _require_retained_materialization_capacity(
-    retained_payload_bytes: int,
-    *,
-    resource_policy: RuntimeResourcePolicy,
-) -> None:
-    if retained_payload_bytes > resource_policy.memory_budget_bytes:
-        raise materialization_io.MaterializationCapacityExceeded(
-            "a_share_known_payloads_exceed_task_memory_budget"
-        )
-
-
 def _iter_adaptive_materialization_batches(
     *,
     asset_ids: tuple[object, ...],
     sessions: Sequence[pd.Timestamp],
     session_context: Sequence[pd.Timestamp],
-    retained_payload_bytes: int,
     valid_bar_index: ExactPrimaryKeyIndex | None = None,
     valid_bar_offsets: tuple[int, int] | None = None,
     output_row_bound_bytes: int | None = None,
@@ -536,11 +400,7 @@ def _iter_adaptive_materialization_batches(
     """Pack assets then sessions from one immutable soft throughput target."""
     policy = current_runtime_resource_policy()
     pointer_bytes = np.dtype(object).itemsize
-    remaining = (
-        policy.memory_budget_bytes
-        - policy.used_memory_bytes
-        - retained_payload_bytes
-    )
+    remaining = policy.memory_budget_bytes - policy.used_memory_bytes
     if remaining <= 0:
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
@@ -593,7 +453,6 @@ def _iter_adaptive_materialization_batches(
             )
             if (
                 policy.used_memory_bytes
-                + retained_payload_bytes
                 + planned_slice_bytes
                 > policy.memory_budget_bytes
             ):
@@ -618,30 +477,30 @@ def _iter_adaptive_materialization_batches(
                     else sessions[session_start:session_stop]
                 )
                 current_keys: pd.DataFrame | None = None
+                owned_keys: _OwnedValue[pd.DataFrame] | None = None
                 try:
                     if valid_bar_index is None:
                         frame = materialize(
                             current_assets,
                             current_sessions,
                             session_context,
-                            retained_payload_bytes,
                         )
                     else:
                         assert valid_bar_offsets is not None
-                        current_keys = bounded_valid_bar_key_coverage(
+                        owned_keys = bounded_valid_bar_key_coverage(
                             valid_bar_index,
                             asset_ids=current_assets,
                             core_sessions=current_sessions,
                             lookback_bars=valid_bar_offsets[0],
                             lookahead_bars=valid_bar_offsets[1],
-                            retained_payload_bytes=retained_payload_bytes,
                             resource_policy=policy,
                         )
+                        owned_keys.lease.transfer("a_share.materialization.keys")
+                        current_keys = owned_keys.value
                         frame = materialize(
                             current_assets,
                             current_sessions,
                             session_context,
-                            retained_payload_bytes,
                             current_keys,
                         )
                 except (
@@ -652,6 +511,11 @@ def _iter_adaptive_materialization_batches(
                         "a_share_known_payloads_exceed_task_memory_budget"
                     ) from None
                 finally:
+                    if owned_keys is not None:
+                        _release_owned_value(
+                            owned_keys,
+                            owner="a_share.materialization.keys",
+                        )
                     del current_assets, current_sessions, current_keys
             actual_output_bound = pandas_frame_payload_bytes(frame) + 64 * 1024
             if actual_output_bound > lease.reserved_bytes:
@@ -710,41 +574,35 @@ def _build_valid_bar_key_index(
     *,
     index: ExactPrimaryKeyIndex,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int | None = None,
     asset_ids: tuple[object, ...] | None = None,
     time_window: TimeWindow | None = None,
 ) -> None:
-    owner_retained_bytes = (
-        index.retained_memory_bytes
-        if retained_payload_bytes is None
-        else retained_payload_bytes
-    )
-    frames = materialization_io.iter_dataset_chunks_with_policy(
+    with open_dataset_session(
         root,
         columns=("asset_id", "timestamp"),
         time_window=time_window,
         resource_policy=resource_policy,
-        target_chunk_bytes=resource_policy.available_memory_bytes,
-        asset_ids=asset_ids,
-        retained_payload_bytes=owner_retained_bytes,
-    )
-    with closing_dataset_iterator(frames):
-        for frame in frames:
-            missing = {"asset_id", "timestamp"}.difference(frame.columns)
-            if missing:
-                raise ValueError("panel_key_columns_missing")
-            require_known_materialization_payload_bound(
-                frames=(frame,),
-                output=None,
-                retained_payload_bytes=owner_retained_bytes,
-                resource_policy=resource_policy,
-            )
-            inserted = index.add_identity_payload_rows(
-                rows=_iter_valid_bar_identity_rows(frame)
-            )
-            if inserted != len(frame):
-                raise ValueError("duplicate_panel_keys")
-            del frame
+        row_filters=(
+            ()
+            if asset_ids is None
+            else (("asset_id", "in", tuple(asset_ids)),)
+        ),
+    ) as session:
+        frames = iter_dataset_chunks(
+            session,
+            target_chunk_bytes=resource_policy.available_memory_bytes,
+        )
+        with closing_dataset_iterator(frames):
+            for frame in frames:
+                missing = {"asset_id", "timestamp"}.difference(frame.columns)
+                if missing:
+                    raise ValueError("panel_key_columns_missing")
+                inserted = index.add_identity_payload_rows(
+                    rows=_iter_valid_bar_identity_rows(frame)
+                )
+                if inserted != len(frame):
+                    raise ValueError("duplicate_panel_keys")
+                del frame
 
 
 def _require_valid_bar_timestamp(timestamp: object) -> None:
@@ -773,9 +631,8 @@ def bounded_valid_bar_key_coverage(
     core_sessions: Sequence[pd.Timestamp],
     lookback_bars: int,
     lookahead_bars: int,
-    retained_payload_bytes: int,
     resource_policy: RuntimeResourcePolicy,
-) -> pd.DataFrame:
+) -> _OwnedValue[pd.DataFrame]:
     """Query current assets' exact sparse boundary from one built disk index."""
 
     require_non_negative_session_offset(lookback_bars, error="invalid_valid_bar_offset")
@@ -812,7 +669,6 @@ def bounded_valid_bar_key_coverage(
     boundary_state_bytes = int(len(asset_ids) * slot_count * np.dtype("int64").itemsize)
     if (
         resource_policy.used_memory_bytes
-        + retained_payload_bytes
         + boundary_state_bytes
         > resource_policy.memory_budget_bytes
     ):
@@ -878,35 +734,49 @@ def bounded_valid_bar_key_coverage(
         )
         if (
             resource_policy.used_memory_bytes
-            + retained_payload_bytes
             + output_state_bytes
             > resource_policy.memory_budget_bytes
         ):
             raise materialization_io.MaterializationCapacityExceeded(
                 "a_share_known_payloads_exceed_task_memory_budget"
             )
-        state.enter_context(
-            resource_policy.reserve(
-                "a_share.valid_bar.output",
-                output_state_bytes,
+        output_lease = resource_policy.lease(
+            "a_share.valid_bar.keys",
+            max(1, output_state_bytes + 128 * 1024),
+        )
+        try:
+            selected_asset_values = np.empty(output_count, dtype=object)
+            timestamp_values = np.empty(output_count, dtype=np.int64)
+            output_position = 0
+            for position, value in enumerate(flat_boundaries):
+                if value == missing_value:
+                    continue
+                selected_asset_values[output_position] = asset_ids[
+                    position // slot_count
+                ]
+                timestamp_values[output_position] = value
+                output_position += 1
+            output = pd.DataFrame(
+                {
+                    "asset_id": selected_asset_values,
+                    "timestamp": timestamp_values.view("datetime64[ns]"),
+                },
+                copy=False,
             )
-        )
-        selected_asset_values = np.empty(output_count, dtype=object)
-        timestamp_values = np.empty(output_count, dtype=np.int64)
-        output_position = 0
-        for position, value in enumerate(flat_boundaries):
-            if value == missing_value:
-                continue
-            selected_asset_values[output_position] = asset_ids[position // slot_count]
-            timestamp_values[output_position] = value
-            output_position += 1
-        return pd.DataFrame(
-            {
-                "asset_id": selected_asset_values,
-                "timestamp": timestamp_values.view("datetime64[ns]"),
-            },
-            copy=False,
-        )
+            actual_output_bound = (
+                int(output.memory_usage(index=True, deep=False).sum()) + 64 * 1024
+            )
+            output_lease.shrink_to(actual_output_bound)
+        except BaseException as primary:
+            try:
+                output_lease.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "a_share valid-bar key lease close also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+            raise
+        return _OwnedValue(output, output_lease)
 
 
 def available_trading_sessions(
@@ -917,7 +787,7 @@ def available_trading_sessions(
     lookback_sessions: int,
     lookahead_sessions: int,
     resource_policy: RuntimeResourcePolicy,
-) -> pd.DatetimeIndex:
+) -> _OwnedValue[pd.DatetimeIndex]:
     require_date_window(time_window, context="a_share_trading_sessions")
     require_non_negative_session_offset(
         lookback_sessions, error="invalid_a_share_session_offset"
@@ -950,127 +820,153 @@ def available_trading_sessions(
         + position_state_bytes
         + maximum_selected_output_bytes
     )
-    if compact_peak_bytes > resource_policy.memory_budget_bytes:
+    if compact_peak_bytes > resource_policy.available_memory_bytes:
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
         )
-    fixed_calendar_row_bytes = (
-        np.dtype(np.int64).itemsize
-        + np.dtype(np.bool_).itemsize
-        + np.dtype("datetime64[ns]").itemsize
+    session_lease = resource_policy.lease(
+        "a_share.trading_sessions",
+        max(1, maximum_session_state_bytes),
     )
-    transform_row_bytes = 2 * np.dtype(np.bool_).itemsize + np.dtype(np.int64).itemsize
-    reader_headroom_bytes = resource_policy.memory_budget_bytes - (
-        maximum_session_state_bytes
-    )
-    if reader_headroom_bytes <= 0:
-        raise materialization_io.MaterializationCapacityExceeded(
-            "a_share_known_payloads_exceed_task_memory_budget"
+    try:
+        fixed_calendar_row_bytes = (
+            np.dtype(np.int64).itemsize
+            + np.dtype(np.bool_).itemsize
+            + np.dtype("datetime64[ns]").itemsize
         )
-    initial_read_target_bytes = max(
-        1,
-        maximum_session_state_bytes
-        + ceil(persisted_payload_bytes / max(1, calendar_row_count)),
-    )
-    read_target_bytes = min(
-        resource_policy.available_memory_bytes,
-        initial_read_target_bytes,
-        max(
+        transform_row_bytes = (
+            2 * np.dtype(np.bool_).itemsize + np.dtype(np.int64).itemsize
+        )
+        reader_headroom_bytes = resource_policy.available_memory_bytes
+        if reader_headroom_bytes <= 0:
+            raise materialization_io.MaterializationCapacityExceeded(
+                "a_share_known_payloads_exceed_task_memory_budget"
+            )
+        initial_read_target_bytes = max(
             1,
-            reader_headroom_bytes
-            * fixed_calendar_row_bytes
-            // (fixed_calendar_row_bytes + transform_row_bytes),
-        ),
-    )
-    maximum_chunk_rows = ceil(read_target_bytes / fixed_calendar_row_bytes)
-    transform_scratch_bytes = maximum_chunk_rows * transform_row_bytes
-    retained_reader_bytes = maximum_session_state_bytes + transform_scratch_bytes
-    chunks = materialization_io.iter_dataset_chunks_with_policy(
-        calendar_root,
-        resource_policy=resource_policy,
-        columns=("source_market_type", "is_trading_day", "timestamp"),
-        target_chunk_bytes=read_target_bytes,
-        retained_payload_bytes=retained_reader_bytes,
-    )
-    session_values = np.empty(calendar_row_count, dtype=np.int64)
-    session_position = 0
-    with closing_dataset_iterator(chunks):
-        for calendar in chunks:
-            source_market_type = calendar["source_market_type"]
-            trading = calendar["is_trading_day"]
-            timestamps = calendar["timestamp"]
-            if source_market_type.dtype != np.dtype(np.int64):
-                raise ValueError("invalid_source_market_type")
-            if trading.dtype != np.dtype(np.bool_):
-                raise ValueError("invalid_is_trading_day")
-            if timestamps.dtype != np.dtype("datetime64[ns]"):
-                raise ValueError("invalid_trading_calendar_timestamp")
-            chunk_rows = len(calendar)
-            actual_transform_scratch_bytes = chunk_rows * transform_row_bytes
-            if (
-                maximum_session_state_bytes
-                + pandas_frame_payload_bytes(calendar)
-                + actual_transform_scratch_bytes
-                > resource_policy.memory_budget_bytes
-            ):
-                raise materialization_io.MaterializationCapacityExceeded(
-                    "a_share_known_payloads_exceed_task_memory_budget"
-                )
-            market_values = source_market_type.to_numpy(copy=False)
-            selected = np.zeros(chunk_rows, dtype=np.bool_)
-            for market_type in CURRENT_MARKET_TYPES:
-                np.logical_or(selected, market_values == market_type, out=selected)
-            np.logical_and(selected, trading.to_numpy(copy=False), out=selected)
-            selected_count = int(np.count_nonzero(selected))
-            if session_position + selected_count > calendar_row_count:
-                raise materialization_io.MaterializationCapacityExceeded(
-                    "a_share_known_payloads_exceed_task_memory_budget"
-                )
-            selected_timestamps = timestamps.to_numpy(copy=False).view(np.int64)[
-                selected
-            ]
-            day_ns = pd.Timedelta(days=1).value
-            np.floor_divide(selected_timestamps, day_ns, out=selected_timestamps)
-            np.multiply(selected_timestamps, day_ns, out=selected_timestamps)
-            session_values[session_position : session_position + selected_count] = (
-                selected_timestamps
-            )
-            session_position += selected_count
-            del (
-                calendar,
-                source_market_type,
-                trading,
-                timestamps,
-                selected,
-                selected_timestamps,
-            )
-
-    values = session_values[:session_position]
-    values.sort(kind="heapsort")
-    keep = np.empty(len(values), dtype=np.bool_)
-    if len(values):
-        keep[0] = True
-        keep[1:] = values[1:] != values[:-1]
-    positions = np.flatnonzero(keep)
-    unique_count = len(positions)
-    start_ns = pd.Timestamp(time_window.start).value
-    end_ns = pd.Timestamp(time_window.end).value
-    raw_first = int(values.searchsorted(start_ns))
-    raw_stop = int(values.searchsorted(end_ns, side="right"))
-    first = max(0, int(positions.searchsorted(raw_first)) - lookback_sessions)
-    stop = min(
-        unique_count,
-        int(positions.searchsorted(raw_stop)) + lookahead_sessions,
-    )
-    selected_bytes = (stop - first) * np.dtype(np.int64).itemsize
-    if session_values.nbytes + keep.nbytes + positions.nbytes + selected_bytes > (
-        resource_policy.memory_budget_bytes
-    ):
-        raise materialization_io.MaterializationCapacityExceeded(
-            "a_share_known_payloads_exceed_task_memory_budget"
+            maximum_session_state_bytes
+            + ceil(persisted_payload_bytes / max(1, calendar_row_count)),
         )
-    compact_values = values[positions[first:stop]]
-    return pd.DatetimeIndex(compact_values, copy=False)
+        read_target_bytes = min(
+            reader_headroom_bytes,
+            initial_read_target_bytes,
+            max(
+                1,
+                reader_headroom_bytes
+                * fixed_calendar_row_bytes
+                // (fixed_calendar_row_bytes + transform_row_bytes),
+            ),
+        )
+        with open_dataset_session(
+            calendar_root,
+            resource_policy=resource_policy,
+            columns=("source_market_type", "is_trading_day", "timestamp"),
+            time_window=None,
+        ) as session:
+            chunks = iter_dataset_chunks(
+                session,
+                target_chunk_bytes=read_target_bytes,
+            )
+            session_values = np.empty(calendar_row_count, dtype=np.int64)
+            session_position = 0
+            with closing_dataset_iterator(chunks):
+                for calendar in chunks:
+                    source_market_type = calendar["source_market_type"]
+                    trading = calendar["is_trading_day"]
+                    timestamps = calendar["timestamp"]
+                    if source_market_type.dtype != np.dtype(np.int64):
+                        raise ValueError("invalid_source_market_type")
+                    if trading.dtype != np.dtype(np.bool_):
+                        raise ValueError("invalid_is_trading_day")
+                    if timestamps.dtype != np.dtype("datetime64[ns]"):
+                        raise ValueError("invalid_trading_calendar_timestamp")
+                    chunk_rows = len(calendar)
+                    actual_transform_scratch_bytes = chunk_rows * transform_row_bytes
+                    market_values = source_market_type.to_numpy(copy=False)
+                    with resource_policy.reserve(
+                        "a_share.calendar.transform",
+                        actual_transform_scratch_bytes,
+                    ):
+                        selected = np.zeros(chunk_rows, dtype=np.bool_)
+                        for market_type in CURRENT_MARKET_TYPES:
+                            np.logical_or(
+                                selected,
+                                market_values == market_type,
+                                out=selected,
+                            )
+                        np.logical_and(
+                            selected,
+                            trading.to_numpy(copy=False),
+                            out=selected,
+                        )
+                        selected_count = int(np.count_nonzero(selected))
+                        if session_position + selected_count > calendar_row_count:
+                            raise materialization_io.MaterializationCapacityExceeded(
+                                "a_share_known_payloads_exceed_task_memory_budget"
+                            )
+                        selected_timestamps = timestamps.to_numpy(copy=False).view(
+                            np.int64
+                        )[selected]
+                        day_ns = pd.Timedelta(days=1).value
+                        np.floor_divide(
+                            selected_timestamps,
+                            day_ns,
+                            out=selected_timestamps,
+                        )
+                        np.multiply(
+                            selected_timestamps,
+                            day_ns,
+                            out=selected_timestamps,
+                        )
+                        session_values[
+                            session_position : session_position + selected_count
+                        ] = selected_timestamps
+                        session_position += selected_count
+                    del (
+                        calendar,
+                        source_market_type,
+                        trading,
+                        timestamps,
+                        selected,
+                        selected_timestamps,
+                    )
+
+        values = session_values[:session_position]
+        values.sort(kind="heapsort")
+        session_lease.grow(
+            boolean_state_bytes
+            + position_state_bytes
+            + maximum_selected_output_bytes
+        )
+        keep = np.empty(len(values), dtype=np.bool_)
+        if len(values):
+            keep[0] = True
+            keep[1:] = values[1:] != values[:-1]
+        positions = np.flatnonzero(keep)
+        unique_count = len(positions)
+        start_ns = pd.Timestamp(time_window.start).value
+        end_ns = pd.Timestamp(time_window.end).value
+        raw_first = int(values.searchsorted(start_ns))
+        raw_stop = int(values.searchsorted(end_ns, side="right"))
+        first = max(0, int(positions.searchsorted(raw_first)) - lookback_sessions)
+        stop = min(
+            unique_count,
+            int(positions.searchsorted(raw_stop)) + lookahead_sessions,
+        )
+        compact_values = values[positions[first:stop]]
+        result = pd.DatetimeIndex(compact_values, copy=False)
+        del session_values, values, keep, positions
+        session_lease.shrink_to(result.nbytes)
+    except BaseException as primary:
+        try:
+            session_lease.close()
+        except BaseException as cleanup_error:
+            primary.add_note(
+                "trading sessions lease release also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
+        raise
+    return _OwnedValue(result, session_lease)
 
 
 def _rotate_left_int64_prefix(
@@ -1111,31 +1007,6 @@ def require_target_sessions(
     time_window: TimeWindow,
 ) -> None:
     _target_session_bounds(sessions, time_window)
-
-
-def require_known_materialization_payload_bound(
-    *,
-    frames: Sequence[pd.DataFrame],
-    output: pd.DataFrame | None,
-    retained_payload_bytes: int = 0,
-    resource_policy: RuntimeResourcePolicy,
-) -> None:
-    unique_frames = tuple(
-        frame
-        for position, frame in enumerate(frames)
-        if not any(frame is previous for previous in frames[:position])
-    )
-    if output is not None:
-        if not any(output is frame for frame in unique_frames):
-            unique_frames = (*unique_frames, output)
-    if (
-        retained_payload_bytes
-        + sum(pandas_frame_payload_bytes(frame) for frame in unique_frames)
-        > resource_policy.memory_budget_bytes
-    ):
-        raise materialization_io.MaterializationCapacityExceeded(
-            "a_share_known_payloads_exceed_task_memory_budget"
-        )
 
 
 def registered_output_buffer_bytes(

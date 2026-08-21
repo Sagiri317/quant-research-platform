@@ -31,7 +31,6 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage._dataset_inspection import (
     _inspect_dataset_session_owned,
     _release_owned_value,
-    dataset_inspection_retained_memory_bytes,
 )
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
@@ -133,10 +132,6 @@ def _materialize_requested_specs(
         spec = specs.get(data_id)
         if spec is None:
             continue
-        retained_written_bytes = sum(
-            dataset_inspection_retained_memory_bytes(inspection)
-            for inspection in written.values()
-        )
         target_time_window = _target_time_window(
             spec,
             specs=specs,
@@ -154,7 +149,6 @@ def _materialize_requested_specs(
                 time_window=target_time_window,
                 resource_policy=resource_policy,
                 session_stack=session_stack,
-                retained_payload_bytes=retained_written_bytes,
             )
             written[data_id] = inspection
             continue
@@ -165,7 +159,6 @@ def _materialize_requested_specs(
             time_window=target_time_window,
             resource_policy=resource_policy,
             panel_session=panel_session,
-            retained_payload_bytes=retained_written_bytes,
             cleanup_stack=session_stack,
         )
         if spec.kind is ProcessedDataKind.PANEL and needs_panel_session:
@@ -194,7 +187,6 @@ def _inspect_existing_dependency(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
     session_stack: ExitStack,
-    retained_payload_bytes: int,
 ) -> tuple[DatasetInspection, DatasetSession]:
     bar_data_id = source_ids.market_bars_source_data_id(spec)
     trade_data_id = source_ids.aggregate_trades_source_data_id(spec)
@@ -212,9 +204,6 @@ def _inspect_existing_dependency(
             )
         expected_input_identities = materialization_validation.input_dataset_identities(
             input_sessions
-        )
-        retained_input_bytes = sum(
-            session.retained_memory_bytes for session in input_sessions.values()
         )
         panel_session = session_stack.enter_context(
             open_dataset_session(
@@ -245,11 +234,6 @@ def _inspect_existing_dependency(
             spec=spec,
             expected_input_identities=expected_input_identities,
             resource_policy=resource_policy,
-            retained_payload_bytes=(
-                retained_payload_bytes
-                + retained_input_bytes
-                - input_sessions[bar_data_id].retained_memory_bytes
-            ),
         )
         panel_session.verify()
         for session in input_sessions.values():
@@ -281,7 +265,6 @@ def _materialize_one(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
     panel_session: DatasetSession | None,
-    retained_payload_bytes: int,
     cleanup_stack: ExitStack,
 ) -> DatasetInspection:
     if spec.kind is ProcessedDataKind.PANEL:
@@ -291,7 +274,6 @@ def _materialize_one(
             source_id=source_id,
             time_window=time_window,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_payload_bytes,
             cleanup_stack=cleanup_stack,
         )
     if spec.kind is ProcessedDataKind.FACTOR:
@@ -303,7 +285,6 @@ def _materialize_one(
             panel_session=panel_session,
             time_window=time_window,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_payload_bytes,
             cleanup_stack=cleanup_stack,
         )
     if spec.kind is ProcessedDataKind.LABEL:
@@ -315,7 +296,6 @@ def _materialize_one(
             panel_session=panel_session,
             time_window=time_window,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_payload_bytes,
             cleanup_stack=cleanup_stack,
         )
     raise ValueError(f"unsupported_crypto_processed_kind: {spec.kind}")

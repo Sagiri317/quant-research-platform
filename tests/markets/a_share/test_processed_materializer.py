@@ -362,18 +362,11 @@ _IO_WRAPPER_FAILURE_TYPES = (
 )
 
 
-@pytest.mark.parametrize(
-    "wrapper_name",
-    ("sorted", "dataset_session"),
-)
 @pytest.mark.parametrize("failure_type", _IO_WRAPPER_FAILURE_TYPES)
 @pytest.mark.parametrize("failure_after_yield", (False, True))
 def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
-    wrapper_name: str,
     failure_type: type[BaseException],
     failure_after_yield: bool,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
     frame = pd.DataFrame(
@@ -405,70 +398,18 @@ def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
 
         def close(self) -> None:
             nonlocal cleanup_calls
-            if wrapper_name == "dataset_session":
-                return
             cleanup_calls += 1
             raise close_failure
 
     source = Source()
-    if wrapper_name == "sorted":
-        policy = _publication_policy()
-        wrapped = materialization_io.iter_sorted_output_chunks(
-            _bound_first_source(source), spec, resource_policy=policy
-        )
-    else:
-        policy = capture_test_policy(
-            available_memory_bytes=16 * 1024 * 1024,
-        )
-
-        class Session:
-            resource_policy = policy
-
-            def __enter__(self):  # noqa: ANN204
-                return self
-
-            def __exit__(
-                self,
-                exc_type: type[BaseException] | None,
-                _exc_value: BaseException | None,
-                _traceback: object,
-            ) -> None:
-                if exc_type is None:
-                    self.close()
-                    return
-                try:
-                    self.close()
-                except BaseException:
-                    pass
-
-            def close(self) -> None:
-                nonlocal cleanup_calls
-                cleanup_calls += 1
-                raise close_failure
-
-        session = Session()
-        monkeypatch.setattr(
-            materialization_io,
-            "open_dataset_session",
-            lambda *_args, **_kwargs: session,
-        )
-        monkeypatch.setattr(
-            materialization_io,
-            "iter_dataset_chunks",
-            lambda *_args, **_kwargs: source,
-        )
-        wrapped = materialization_io.iter_dataset_chunks_with_policy(
-            tmp_path,
-            resource_policy=policy,
-        )
+    policy = _publication_policy()
+    wrapped = materialization_io.iter_sorted_output_chunks(
+        _bound_first_source(source), spec, resource_policy=policy
+    )
 
     observed: BaseException | None = None
     try:
-        if wrapper_name == "sorted":
-            _collect_bound_first(wrapped, policy)
-        else:
-            next(wrapped)
-            next(wrapped)
+        _collect_bound_first(wrapped, policy)
     except BaseException as raised:
         observed = raised
 
@@ -476,10 +417,6 @@ def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
     assert cleanup_calls == 1
 
 
-@pytest.mark.parametrize(
-    "wrapper_name",
-    ("sorted", "dataset_session"),
-)
 @pytest.mark.parametrize(
     ("item_count", "close_fails", "early_close"),
     (
@@ -491,12 +428,9 @@ def test_a_share_io_wrapper_preserves_body_primary_over_close_failure(
     ),
 )
 def test_a_share_io_wrapper_cleanup_lifecycle(
-    wrapper_name: str,
     item_count: int,
     close_fails: bool,
     early_close: bool,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
     frame = pd.DataFrame(
@@ -527,82 +461,28 @@ def test_a_share_io_wrapper_cleanup_lifecycle(
 
         def close(self) -> None:
             nonlocal cleanup_calls
-            if wrapper_name == "dataset_session":
-                return
             cleanup_calls += 1
             if close_fails:
                 raise close_failure
 
     source = Source()
-    if wrapper_name == "sorted":
-        policy = _publication_policy()
-        wrapped = materialization_io.iter_sorted_output_chunks(
-            _bound_first_source(source), spec, resource_policy=policy
-        )
-    else:
-        policy = capture_test_policy(
-            available_memory_bytes=16 * 1024 * 1024,
-        )
-
-        class Session:
-            resource_policy = policy
-
-            def __enter__(self):  # noqa: ANN204
-                return self
-
-            def __exit__(
-                self,
-                exc_type: type[BaseException] | None,
-                _exc_value: BaseException | None,
-                _traceback: object,
-            ) -> None:
-                if exc_type is None:
-                    self.close()
-                    return
-                try:
-                    self.close()
-                except BaseException:
-                    pass
-
-            def close(self) -> None:
-                nonlocal cleanup_calls
-                cleanup_calls += 1
-                if close_fails:
-                    raise close_failure
-
-        session = Session()
-        monkeypatch.setattr(
-            materialization_io,
-            "open_dataset_session",
-            lambda *_args, **_kwargs: session,
-        )
-        monkeypatch.setattr(
-            materialization_io,
-            "iter_dataset_chunks",
-            lambda *_args, **_kwargs: source,
-        )
-        wrapped = materialization_io.iter_dataset_chunks_with_policy(
-            tmp_path,
-            resource_policy=policy,
-        )
+    policy = _publication_policy()
+    wrapped = materialization_io.iter_sorted_output_chunks(
+        _bound_first_source(source), spec, resource_policy=policy
+    )
 
     observed: BaseException | None = None
     outputs: list[pd.DataFrame] = []
     try:
-        if wrapper_name == "sorted" and not early_close:
+        if not early_close:
             outputs.extend(_collect_bound_first(wrapped, policy, sink=outputs))
-        elif wrapper_name == "sorted" and early_close:
+        else:
             with runtime_resource_policy_scope(policy):
                 bound = next(wrapped)
                 lease = policy.lease("test.a_share.consumer", bound)
                 outputs.append(wrapped.send(lease).value)
                 wrapped.close()
                 lease.close()
-        elif early_close:
-            outputs.append(next(wrapped))
-            wrapped.close()
-        else:
-            outputs.extend(wrapped)
     except BaseException as raised:
         observed = raised
 

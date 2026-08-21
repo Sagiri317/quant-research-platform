@@ -241,12 +241,6 @@ class DatasetSessionInventory:
             raise RuntimeError("dataset_inventory_closed")
         return self._temporary_directory
 
-    @property
-    def retained_memory_bytes(self) -> int:
-        """Return the live root lease for the SQLite cache."""
-
-        return self._lease.reserved_bytes
-
     def discover(self, spec: Mapping[str, Any]) -> None:
         """Stream the physical tree into the sole exact inventory owner."""
 

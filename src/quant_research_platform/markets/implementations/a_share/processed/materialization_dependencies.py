@@ -45,9 +45,6 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inspection import (
-    dataset_inspection_retained_memory_bytes,
-)
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -89,10 +86,6 @@ def ensure_processed_dependencies(
                     required_window,
                     sessions=sessions,
                     resource_policy=policy,
-                    retained_payload_bytes=sum(
-                        dataset_inspection_retained_memory_bytes(inspection)
-                        for inspection in written.values()
-                    ),
                 )
                 continue
             materialize_one(
