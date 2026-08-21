@@ -131,6 +131,22 @@ def test_binance_interim_iterator_rejects_competing_root_at_creation() -> None:
             )
 
 
+def test_binance_interim_iterator_rejects_unrelated_root_at_delayed_consumption(
+) -> None:
+    iterator = interim.iter_interim_frames(
+        data_id="market_bars_1m",
+        input_files=(),
+    )
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            RuntimeError,
+            match="runtime_resource_policy_competing_root",
+        ):
+            tuple(iterator)
+
+
 def test_binance_interim_iterator_keeps_explicit_root_during_delayed_consumption(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

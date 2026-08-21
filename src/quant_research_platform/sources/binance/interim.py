@@ -131,21 +131,25 @@ def iter_interim_frames(
     end_date: str | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
-    policy = bind_runtime_resource_policy(
+    bound_policy = bind_runtime_resource_policy(
         resource_policy,
         allow_implicit_active=False,
-    ) or active_runtime_resource_policy()
-    producer = _iter_owned_interim_frames(
-        data_id=data_id,
-        input_files=input_files,
-        row_batch_size=row_batch_size,
-        start_date=start_date,
-        end_date=end_date,
-        resource_policy=policy,
     )
 
     def activate() -> Iterator[pd.DataFrame]:
+        policy = bind_runtime_resource_policy(
+            bound_policy,
+            allow_implicit_active=False,
+        ) or active_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
+            producer = _iter_owned_interim_frames(
+                data_id=data_id,
+                input_files=input_files,
+                row_batch_size=row_batch_size,
+                start_date=start_date,
+                end_date=end_date,
+                resource_policy=policy,
+            )
             lease: MemoryLease | None = None
             owned: object | None = None
             try:
