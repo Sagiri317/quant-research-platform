@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import stat
+import sys
 from array import array
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -1122,258 +1123,187 @@ def _iter_deduped_reference_frames(
     data_id: str,
     pruning_reports: list[dict[str, object]] | None,
     scratch_parent: Path,
-    resource_policy: RuntimeResourcePolicy | None = None,
+    resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[object]:
     spec = interim_catalog().get(data_id)
     primary_key = tuple(spec.primary_key)
     exact_duplicate_count = 0
     completed = False
-    policy = resource_policy or active_runtime_resource_policy()
-    comparison_target = policy.remaining_memory_bytes
-    task_budget = policy.task_memory_budget_bytes
-    with (
-        runtime_resource_policy_scope(policy),
-        closing_dataset_iterator(frames),
-        ExactPrimaryKeyIndex(
-            primary_key=primary_key,
-            timestamp_columns=tuple(
-                column for column in primary_key if column == "timestamp"
-            ),
-                scratch_parent=scratch_parent,
-            ) as index,
-    ):
+    index = ExactPrimaryKeyIndex(
+        primary_key=primary_key,
+        timestamp_columns=tuple(
+            column for column in primary_key if column == "timestamp"
+        ),
+        scratch_parent=scratch_parent,
+    )
+    with runtime_resource_policy_scope(resource_policy):
+        index_lease = resource_policy.lease(
+            "source.csmar.reference.index",
+            index.retained_memory_bytes,
+        )
         try:
-            source_bound = next(frames)
-        except StopIteration:
-            source_bound = None
-        pending_frame: pd.DataFrame | None = None
-        pending_lease: MemoryLease | None = None
-        pending_bound: int | None = None
-        lease: MemoryLease | None = None
-        try:
-            while source_bound is not None or pending_frame is not None:
-                from_pending = pending_frame is not None
-                if lease is None:
-                    lease = yield pending_bound if from_pending else source_bound
-                owned: object | None = None
-                if from_pending:
-                    source_frame = pending_frame
-                else:
-                    try:
-                        owned = frames.send(lease)
-                    except StopIteration:
-                        completed = True
-                        owned = None
-                    if not isinstance(owned, _OwnedValue):
-                        break
-                    if owned.lease is not lease:
-                        raise RuntimeError("runtime_memory_lease_transfer_mismatch")
-                    source_frame = owned.value
-                if type(source_frame) is not pd.DataFrame:
-                    raise TypeError("invalid_dataset_chunk")
-                upstream_retained_bytes = 0
-                missing = [
-                    column
-                    for column in primary_key
-                    if column not in source_frame.columns
-                ]
-                if missing:
-                    raise ValueError(
-                        "missing_reference_primary_key_columns: " + ", ".join(missing)
-                    )
-                value_columns = tuple(
-                    sorted(
-                        column
-                        for column in source_frame.columns
-                        if column not in primary_key
-                    )
-                )
-                source_frame_bytes = pandas_frame_payload_bytes(source_frame)
-                fixed_bytes = (
-                    upstream_retained_bytes
-                    + source_frame_bytes
-                    + index.retained_memory_bytes
-                )
-                variable_bytes = (
-                    2 * source_frame_bytes + len(source_frame) * array("Q").itemsize
-                )
-                per_row_bytes = (
-                    variable_bytes + max(1, len(source_frame)) - 1
-                ) // max(1, len(source_frame))
-                available_bytes = task_budget - fixed_bytes
-                if source_frame.empty:
-                    span = 1
-                elif available_bytes < per_row_bytes:
-                    raise ValueError(
-                        "csmar_reference_working_set_exceeds_task_memory_budget"
-                    )
-                else:
-                    span = min(len(source_frame), available_bytes // per_row_bytes)
-                emitted = False
-                start = 0
-                while start < len(source_frame):
-                    stop = min(len(source_frame), start + span)
-                    frame = source_frame.iloc[start:stop]
-                    slice_bytes = pandas_frame_payload_bytes(frame)
-                    preflight_bytes = (
-                        upstream_retained_bytes
-                        + source_frame_bytes
-                        + index.retained_memory_bytes
-                        + 2 * slice_bytes
-                        + (stop - start) * array("Q").itemsize
-                    )
-                    if preflight_bytes > task_budget:
-                        del frame
-                        raise ValueError(
-                            "csmar_reference_working_set_exceeds_task_memory_budget"
-                        )
-                    table = pa.Table.from_pandas(frame, preserve_index=False)
-                    retained_with_worst_output = (
-                        upstream_retained_bytes
-                        + source_frame_bytes
-                        + table.nbytes
-                        + index.retained_memory_bytes
-                        + slice_bytes
-                        + (stop - start) * array("Q").itemsize
-                    )
-                    if retained_with_worst_output > task_budget:
-                        del table, frame
-                        raise ValueError(
-                            "csmar_reference_working_set_exceeds_task_memory_budget"
-                        )
-                    try:
-                        keep_positions, duplicate_count = (
-                            index.classify_comparison_table(
-                                table,
-                                namespace=data_id,
-                                value_columns=value_columns,
-                                payload_target_bytes=comparison_target,
-                            )
-                        )
-                    except ValueError as exc:
-                        if str(exc) == "conflicting_exact_primary_key_payload":
+            with closing_dataset_iterator(frames), index:
+                try:
+                    source_bound = next(frames)
+                except StopIteration:
+                    source_bound = None
+                lease: MemoryLease | None = None
+                try:
+                    while source_bound is not None:
+                        if lease is None:
+                            lease = yield source_bound
+                        if lease is None:
+                            raise RuntimeError("invalid_csmar_reference_lease")
+                        owned: object | None = None
+                        try:
+                            owned = frames.send(lease)
+                        except StopIteration:
+                            completed = True
+                            break
+                        if not isinstance(owned, _OwnedValue):
+                            raise TypeError("invalid_csmar_reference_owned_frame")
+                        if owned.lease is not lease:
+                            raise RuntimeError("runtime_memory_lease_transfer_mismatch")
+                        source_frame = owned.value
+                        if type(source_frame) is not pd.DataFrame:
+                            raise TypeError("invalid_dataset_chunk")
+                        missing = [
+                            column
+                            for column in primary_key
+                            if column not in source_frame.columns
+                        ]
+                        if missing:
                             raise ValueError(
-                                "conflicting_reference_primary_key_duplicates: "
-                                f"{data_id}"
-                            ) from exc
-                        raise
-                    finally:
-                        del table
-                    exact_duplicate_count += duplicate_count
-                    if keep_positions:
-                        if (
-                            upstream_retained_bytes
-                            + source_frame_bytes
-                            + index.retained_memory_bytes
-                            + keep_positions.retained_memory_bytes
-                            + slice_bytes
-                            > task_budget
-                        ):
-                            del frame, keep_positions
-                            raise ValueError(
-                                "csmar_reference_working_set_exceeds_task_memory_budget"
+                                "missing_reference_primary_key_columns: "
+                                + ", ".join(missing)
                             )
-                        output = frame.iloc[keep_positions.view].reset_index(drop=True)
-                        output_bytes = pandas_frame_payload_bytes(output)
-                        if (
-                            upstream_retained_bytes
-                            + source_frame_bytes
-                            + output_bytes
-                            + index.retained_memory_bytes
-                            + keep_positions.retained_memory_bytes
-                            > task_budget
-                        ):
-                            del frame, keep_positions, output
-                            raise ValueError(
-                                "csmar_reference_working_set_exceeds_task_memory_budget"
+                        source_frame_bytes = pandas_frame_payload_bytes(source_frame)
+                        if source_frame.empty:
+                            keep_positions = None
+                            duplicate_count = 0
+                        else:
+                            value_columns = tuple(
+                                sorted(
+                                    column
+                                    for column in source_frame.columns
+                                    if column not in primary_key
+                                )
                             )
-                        actual_bound = (
-                            source_frame_bytes
-                            + output_bytes
-                            + index.retained_memory_bytes
-                            + 64 * 1024
-                        )
-                        if actual_bound > lease.reserved_bytes:
-                            del frame, keep_positions, output
-                            raise ValueError("csmar_reference_bound_invalid")
-                        next_pending_frame: pd.DataFrame | None = None
-                        next_pending_lease: MemoryLease | None = None
-                        next_pending_bound: int | None = None
-                        if stop < len(source_frame):
-                            remainder_bound = min(
-                                lease.reserved_bytes,
-                                max(1, policy.remaining_memory_bytes),
+                            position_bytes = len(source_frame) * array("Q").itemsize
+                            conservative_bound = (
+                                3 * source_frame_bytes
+                                + position_bytes
+                                + 64 * 1024
                             )
-                            next_pending_lease = policy.lease(
-                                "source.csmar.reference.pending",
-                                remainder_bound,
+                            if conservative_bound > lease.reserved_bytes:
+                                del source_frame, owned
+                                raise ValueError("csmar_reference_bound_invalid")
+                            table = pa.Table.from_pandas(
+                                source_frame,
+                                preserve_index=False,
                             )
+                            if table.nbytes > 2 * source_frame_bytes + 64 * 1024:
+                                del table, source_frame, owned
+                                raise ValueError("csmar_reference_bound_invalid")
                             try:
-                                next_pending_frame = source_frame.iloc[stop:].copy()
-                                remainder_bytes = pandas_frame_payload_bytes(
-                                    next_pending_frame
+                                keep_positions, duplicate_count = (
+                                    index.classify_comparison_table(
+                                        table,
+                                        namespace=data_id,
+                                        value_columns=value_columns,
+                                        payload_target_bytes=max(
+                                            1,
+                                            lease.reserved_bytes - source_frame_bytes,
+                                        ),
+                                    )
                                 )
-                                next_pending_lease.shrink_to(
-                                    remainder_bytes
-                                    + min(64 * 1024, max(1, remainder_bound // 2))
-                                )
-                                next_pending_bound = remainder_bound
-                            except BaseException:
-                                next_pending_lease.close()
+                            except ValueError as exc:
+                                if str(exc) == "conflicting_exact_primary_key_payload":
+                                    raise ValueError(
+                                        "conflicting_reference_primary_key_duplicates: "
+                                        f"{data_id}"
+                                    ) from exc
                                 raise
-                        lease.shrink_to(actual_bound)
-                        del frame, keep_positions
-                        owned_output = _OwnedValue(output, lease)
-                        del output
-                        del source_frame, owned
-                        pending_frame = None
-                        if pending_lease is not None:
-                            pending_lease.close()
-                            pending_lease = None
-                        pending_frame = next_pending_frame
-                        pending_lease = next_pending_lease
-                        pending_bound = next_pending_bound
-                        if not from_pending:
+                            finally:
+                                del table
+                        exact_duplicate_count += duplicate_count
+                        if keep_positions:
+                            output = source_frame.iloc[
+                                keep_positions.view
+                            ].reset_index(drop=True)
+                            output_bytes = pandas_frame_payload_bytes(output)
+                            actual_bound = (
+                                source_frame_bytes
+                                + output_bytes
+                                + keep_positions.retained_memory_bytes
+                                + 64 * 1024
+                            )
+                            if actual_bound > lease.reserved_bytes:
+                                del (
+                                    output,
+                                    keep_positions,
+                                    source_frame,
+                                    owned,
+                                )
+                                raise ValueError("csmar_reference_bound_invalid")
+                            lease.shrink_to(actual_bound)
+                            del keep_positions, source_frame, owned
+                            owned_output = _OwnedValue(output, lease)
+                            del output
+                            yield owned_output
+                            del owned_output
                             try:
                                 source_bound = frames.send(None)
                             except StopIteration:
                                 source_bound = None
-                        if source_bound is not None and (
-                            type(source_bound) is not int or source_bound <= 0
-                        ):
-                            raise ValueError("invalid_csmar_reference_bound")
-                        lease = None
-                        emitted = True
+                            lease = None
+                            if source_bound is not None and (
+                                type(source_bound) is not int or source_bound <= 0
+                            ):
+                                raise ValueError("invalid_csmar_reference_bound")
+                            continue
+                        empty_output = source_frame.iloc[:0]
+                        empty_output_bytes = pandas_frame_payload_bytes(empty_output)
+                        empty_bound = (
+                            source_frame_bytes
+                            + empty_output_bytes
+                            + keep_positions.retained_memory_bytes
+                            if keep_positions is not None
+                            else source_frame_bytes + empty_output_bytes
+                        )
+                        if empty_bound > lease.reserved_bytes:
+                            del empty_output, keep_positions, source_frame, owned
+                            raise ValueError("csmar_reference_bound_invalid")
+                        lease.shrink_to(empty_bound)
+                        del keep_positions, source_frame, owned
+                        owned_output = _OwnedValue(empty_output, lease)
+                        del empty_output
                         yield owned_output
                         del owned_output
-                        break
-                    del frame, keep_positions
-                    start = stop
-                if not emitted:
-                    del source_frame, owned
-                    pending_frame = None
-                    if pending_lease is not None:
-                        pending_lease.close()
-                        pending_lease = None
-                    pending_bound = None
-                    if not from_pending:
                         try:
                             source_bound = frames.send(None)
                         except StopIteration:
                             source_bound = None
+                        lease = None
                         if source_bound is not None and (
                             type(source_bound) is not int or source_bound <= 0
                         ):
                             raise ValueError("invalid_csmar_reference_bound")
-                        if source_bound is None:
-                            lease = None
+                        continue
+                finally:
+                    lease = None
+                completed = True
         finally:
-            pending_frame = None
-            if pending_lease is not None:
-                pending_lease.close()
-                pending_lease = None
-            pending_bound = None
-        completed = True
+            primary = sys.exception()
+            try:
+                index_lease.close()
+            except BaseException as close_error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    "CSMAR reference index lease close also failed: "
+                    f"{type(close_error).__name__}"
+                )
     if completed and pruning_reports is not None:
         _append_reference_duplicate_summary(
             pruning_reports,

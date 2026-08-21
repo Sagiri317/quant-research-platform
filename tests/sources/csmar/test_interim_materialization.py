@@ -1827,6 +1827,8 @@ def test_raw_inventory_indexes_use_source_sibling_parent(
     observed: list[Path] = []
 
     class Index:
+        retained_memory_bytes = 0
+
         def __init__(self, *, scratch_parent: Path, **_kwargs: object) -> None:
             observed.append(scratch_parent)
 
@@ -1860,6 +1862,8 @@ def test_reference_dedup_uses_selected_sibling_parent(
     observed: list[Path] = []
 
     class Index:
+        retained_memory_bytes = 0
+
         def __init__(self, *, scratch_parent: Path, **_kwargs: object) -> None:
             observed.append(scratch_parent)
 
@@ -1879,6 +1883,7 @@ def test_reference_dedup_uses_selected_sibling_parent(
                     data_id="stock_master",
                     pruning_reports=None,
                     scratch_parent=scratch_parent,
+                    resource_policy=policy,
                 )
             )
             == []
@@ -3134,30 +3139,37 @@ def test_csmar_reference_interim_dedupes_exact_duplicates_and_rejects_conflicts(
 def test_csmar_reference_dedup_summary_is_atomic_on_upstream_failure(
     error_type: type[BaseException],
 ) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     reports: list[dict[str, object]] = []
     closed: list[bool] = []
 
     def failing_frames():
         try:
-            yield pd.DataFrame(
-                {
-                    "source_asset_id": ["000001", "000001"],
-                    "timestamp": [pd.Timestamp("2020-01-01")] * 2,
-                    "stock_name": [pd.NA, pd.NA],
-                }
+            lease = yield 256 * 1024
+            yield _OwnedValue(
+                pd.DataFrame(
+                    {
+                        "source_asset_id": ["000001", "000001"],
+                        "timestamp": [pd.Timestamp("2020-01-01")] * 2,
+                        "stock_name": [pd.NA, pd.NA],
+                    },
+                ),
+                lease,
             )
             raise error_type("upstream_failed")
         finally:
             closed.append(True)
 
     with pytest.raises(error_type, match="upstream_failed"):
-        list(
+        _collect_bound_first_frames(
             interim._iter_deduped_reference_frames(
                 failing_frames(),
                 data_id="stock_master",
                 pruning_reports=reports,
                 scratch_parent=Path("."),
-            )
+                resource_policy=policy,
+            ),
+            policy,
         )
 
     assert not any(
@@ -3168,18 +3180,21 @@ def test_csmar_reference_dedup_summary_is_atomic_on_upstream_failure(
 
 def test_csmar_reference_dedup_empty_success_has_atomic_zero_summary() -> None:
     reports: list[dict[str, object]] = []
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
 
-    assert (
-        list(
-            interim._iter_deduped_reference_frames(
-                iter(()),
-                data_id="stock_master",
-                pruning_reports=reports,
-                scratch_parent=Path("."),
+    with runtime_resource_policy_scope(policy):
+        assert (
+            list(
+                interim._iter_deduped_reference_frames(
+                    iter(()),
+                    data_id="stock_master",
+                    pruning_reports=reports,
+                    scratch_parent=Path("."),
+                    resource_policy=policy,
+                )
             )
+            == []
         )
-        == []
-    )
     assert [
         report["reference_exact_duplicate_count"]
         for report in reports
@@ -3248,7 +3263,7 @@ def test_csmar_reference_dedup_is_typed_bounded_exact_across_chunks() -> None:
         )
 
 
-def test_csmar_reference_dedup_splits_one_source_frame_with_one_lease_per_output(
+def test_csmar_reference_dedup_rejects_unadmitted_remainder_without_second_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
@@ -3259,41 +3274,45 @@ def test_csmar_reference_dedup_splits_one_source_frame_with_one_lease_per_output
         {
             "source_asset_id": [f"{index:06d}" for index in range(5_000)],
             "timestamp": pd.date_range("2020-01-01", periods=5_000),
-            "stock_name": ["demo"] * 5_000,
+            "stock_name": ["x" * 192] * 5_000,
         }
     )
-    pending_references: list[weakref.ReferenceType[pd.DataFrame]] = []
-    close_results: list[bool] = []
-    real_copy = pd.DataFrame.copy
+    lease_owners: list[str] = []
+    close_events: list[str] = []
+    real_lease = RuntimeResourcePolicy.lease
     real_close = MemoryLease.close
 
-    def record_copy(current, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        copied = real_copy(current, *args, **kwargs)
-        if len(current) and current.index[0] != 0:
-            pending_references.append(weakref.ref(copied))
-        return copied
+    def record_lease(
+        current: RuntimeResourcePolicy,
+        owner: str,
+        reserved_bytes: int,
+    ) -> MemoryLease:
+        lease_owners.append(owner)
+        return real_lease(current, owner, reserved_bytes)
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", record_lease)
 
     def record_close(lease: MemoryLease) -> None:
-        if lease.owner == "source.csmar.reference.pending":
-            close_results.append(
-                all(reference() is None for reference in pending_references[:-1])
-            )
+        close_events.append(lease.owner)
         real_close(lease)
 
-    monkeypatch.setattr(pd.DataFrame, "copy", record_copy)
     monkeypatch.setattr(MemoryLease, "close", record_close)
 
     class RecordingIndex:
-        retained_memory_bytes = policy.memory_budget_bytes // 4
+        retained_memory_bytes = 0
 
         def __init__(self, **_kwargs: object) -> None:
             pass
 
         def __enter__(self) -> RecordingIndex:
+            assert any(
+                lease.owner == "source.csmar.reference.index"
+                for lease in policy._leases
+            )
             return self
 
         def __exit__(self, *_args: object) -> None:
-            pass
+            close_events.append("index_exit")
 
         def classify_comparison_table(self, table, **_kwargs):  # noqa: ANN001
             positions = array("Q", range(table.num_rows))
@@ -3302,59 +3321,27 @@ def test_csmar_reference_dedup_splits_one_source_frame_with_one_lease_per_output
                 retained_memory_bytes=0,
             ), 0
 
-    class Table:
-        def __init__(self, rows: int) -> None:
-            self.num_rows = rows
-            self.nbytes = 1
-
     monkeypatch.setattr(interim, "ExactPrimaryKeyIndex", RecordingIndex)
-    monkeypatch.setattr(
-        interim.pa,
-        "Table",
-        SimpleNamespace(from_pandas=lambda frame, **_kwargs: Table(len(frame))),
-    )
-    monkeypatch.setattr(
-        interim,
-        "array",
-        lambda *_args, **_kwargs: SimpleNamespace(itemsize=1024),
-    )
-    monkeypatch.setattr(interim, "pandas_frame_payload_bytes", lambda _frame: 1)
 
-    outputs: list[pd.DataFrame] = []
-    with runtime_resource_policy_scope(policy):
-        stream = interim._iter_deduped_reference_frames(
+    with pytest.raises(ValueError, match="csmar_reference_bound_invalid"):
+        _collect_bound_first_frames(
+            interim._iter_deduped_reference_frames(
                 _bound_first_test_frames(
-                    (frame,), bound=policy.memory_budget_bytes // 2
+                    (frame,),
+                    bound=policy.memory_budget_bytes // 2,
                 ),
-            data_id="stock_master",
-            pruning_reports=[],
-            scratch_parent=Path("."),
-            resource_policy=policy,
+                data_id="stock_master",
+                pruning_reports=[],
+                scratch_parent=Path("."),
+                resource_policy=policy,
+            ),
+            policy,
         )
-        try:
-            bound = next(stream)
-            while True:
-                lease = policy.lease("test.csmar.consumer", bound)
-                try:
-                    owned = stream.send(lease)
-                    assert isinstance(owned, _OwnedValue)
-                    assert owned.lease is lease
-                    assert lease.active
-                    outputs.append(owned.value)
-                    try:
-                        bound = stream.send(None)
-                    except StopIteration:
-                        break
-                    assert type(bound) is int and bound > 0
-                finally:
-                    lease.close()
-        finally:
-            stream.close()
 
-    observed = pd.concat(outputs, ignore_index=True)
-    assert len(observed) == len(frame)
-    assert set(observed["source_asset_id"]) == set(frame["source_asset_id"])
-    assert close_results and all(close_results)
+    assert "source.csmar.reference.pending" not in lease_owners
+    assert close_events.index("index_exit") < close_events.index(
+        "source.csmar.reference.index"
+    )
     assert policy.used_memory_bytes == 0
 
 
@@ -3362,6 +3349,7 @@ def test_csmar_reference_dedup_delegates_typed_classification_to_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    observed_leases: list[tuple[str, ...]] = []
 
     class RecordingIndex:
         retained_memory_bytes = 1024
@@ -3377,6 +3365,9 @@ def test_csmar_reference_dedup_delegates_typed_classification_to_storage(
 
         def classify_comparison_table(self, table, *, value_columns, **_kwargs):
             observed.append((self.primary_key, tuple(value_columns)))
+            observed_leases.append(
+                tuple(sorted(lease.owner for lease in policy._leases))
+            )
             return CompactPositionState(
                 array("Q", range(table.num_rows)), table.num_rows
             ), 0
@@ -3413,12 +3404,16 @@ def test_csmar_reference_dedup_delegates_typed_classification_to_storage(
     assert len(observed) == 1
     assert observed[0][0] == ("source_asset_id", "timestamp")
     assert observed[0][1] == ("stock_name",)
+    assert observed_leases == [
+        ("source.csmar.reference.index", "test.csmar.consumer")
+    ]
 
 
 def test_csmar_reference_opaque_arrow_overrun_fails_before_index_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     classified_sizes: list[int] = []
+    table_calls: list[int] = []
 
     class RecordingIndex:
         retained_memory_bytes = 0
@@ -3444,16 +3439,21 @@ def test_csmar_reference_opaque_arrow_overrun_fails_before_index_mutation(
             self.nbytes = 2 * 1024**2 if rows > 1 else 1
 
     monkeypatch.setattr(interim, "ExactPrimaryKeyIndex", RecordingIndex)
+
+    def from_pandas(frame, **_kwargs):  # noqa: ANN001
+        table_calls.append(len(frame))
+        return Table(len(frame))
+
     monkeypatch.setattr(
         interim.pa,
         "Table",
-        SimpleNamespace(from_pandas=lambda frame, **_kwargs: Table(len(frame))),
+        SimpleNamespace(from_pandas=from_pandas),
     )
     frame = pd.DataFrame(
         {
-            "source_asset_id": [f"{position:06d}" for position in range(4)],
-            "timestamp": [pd.Timestamp("2020-01-01")] * 4,
-            "stock_name": ["name"] * 4,
+            "source_asset_id": [f"{position:06d}" for position in range(1_000)],
+            "timestamp": pd.date_range("2020-01-01", periods=1_000),
+            "stock_name": ["x" * 256] * 1_000,
         }
     )
     policy = capture_test_policy(
@@ -3464,20 +3464,24 @@ def test_csmar_reference_opaque_arrow_overrun_fails_before_index_mutation(
     with runtime_resource_policy_scope(policy):
         with pytest.raises(
             ValueError,
-            match="csmar_reference_working_set_exceeds_task_memory_budget",
+            match="csmar_reference_bound_invalid",
         ):
-                _collect_bound_first_frames(
-                    interim._iter_deduped_reference_frames(
-                        _bound_first_test_frames((frame,)),
-                        data_id="stock_master",
-                        pruning_reports=[],
-                        scratch_parent=Path("."),
-                        resource_policy=policy,
+            _collect_bound_first_frames(
+                interim._iter_deduped_reference_frames(
+                    _bound_first_test_frames(
+                        (frame,),
+                        bound=policy.memory_budget_bytes // 2,
                     ),
-                    policy,
-                )
+                    data_id="stock_master",
+                    pruning_reports=[],
+                    scratch_parent=Path("."),
+                    resource_policy=policy,
+                ),
+                policy,
+            )
 
     assert classified_sizes == []
+    assert table_calls == []
 
 
 def test_csmar_interim_uses_one_observed_downshift_then_fixed_batches(
@@ -3692,37 +3696,67 @@ def test_csmar_pruned_file_transition_reuses_admitted_lease(
     assert policy.used_memory_bytes == 0
 
 
-def test_csmar_reference_duplicate_only_first_reuses_admitted_lease(
+@pytest.mark.parametrize("middle_kind", ("duplicate", "empty"))
+def test_csmar_reference_empty_or_duplicate_returns_lease_before_next_bound(
     monkeypatch: pytest.MonkeyPatch,
+    middle_kind: str,
 ) -> None:
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-    frames = (
-        pd.DataFrame(
-            {
-                "source_asset_id": ["000001"],
-                "timestamp": [pd.Timestamp("2020-01-01")],
-                "stock_name": ["duplicate"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "source_asset_id": ["000002"],
-                "timestamp": [pd.Timestamp("2020-01-02")],
-                "stock_name": ["kept"],
-            }
-        ),
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=1 * 1024 * 1024,
     )
+    first = pd.DataFrame(
+        {
+            "source_asset_id": ["000001"],
+            "timestamp": [pd.Timestamp("2020-01-01")],
+            "stock_name": ["first"],
+        }
+    )
+    middle = first.copy() if middle_kind == "duplicate" else first.iloc[:0]
+    third = pd.DataFrame(
+        {
+            "source_asset_id": ["000002", "000003"],
+            "timestamp": pd.date_range("2020-01-02", periods=2),
+            "stock_name": ["third", "third"],
+        }
+    )
+    frames = (first, middle, third)
+    declared_bound = policy.memory_budget_bytes // 2
+    lease_requests: list[tuple[int, MemoryLease]] = []
+    shrink_calls: list[int] = []
+    real_lease = RuntimeResourcePolicy.lease
+    real_shrink = MemoryLease.shrink_to
+
+    def record_lease(
+        current: RuntimeResourcePolicy,
+        owner: str,
+        reserved_bytes: int,
+    ) -> MemoryLease:
+        lease = real_lease(current, owner, reserved_bytes)
+        if owner == "test.csmar.consumer":
+            lease_requests.append((reserved_bytes, lease))
+        return lease
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", record_lease)
+
+    def record_shrink(lease: MemoryLease, actual_bytes: int) -> None:
+        if lease.owner == "test.csmar.consumer":
+            shrink_calls.append(actual_bytes)
+        real_shrink(lease, actual_bytes)
+
+    monkeypatch.setattr(MemoryLease, "shrink_to", record_shrink)
 
     class PositionState:
-        retained_memory_bytes = 0
-
-        def __init__(self, positions):
-            self.view = memoryview(array("Q", positions)).toreadonly()
+        def __init__(self, positions, keep_count: int | None = None):
+            self._positions = array("Q", positions)
+            count = len(self._positions) if keep_count is None else keep_count
+            self.view = memoryview(self._positions)[:count].toreadonly()
+            self.retained_memory_bytes = len(self._positions) * self._positions.itemsize
 
         def __bool__(self) -> bool:
             return bool(len(self.view))
 
-    class DuplicateOnlyFirstIndex:
+    class RecordingIndex:
         retained_memory_bytes = 0
         calls = 0
 
@@ -3737,14 +3771,16 @@ def test_csmar_reference_duplicate_only_first_reuses_admitted_lease(
 
         def classify_comparison_table(self, table, **_kwargs):  # noqa: ANN001
             self.calls += 1
-            return PositionState(()) if self.calls == 1 else PositionState((0,)), 0
+            if middle_kind == "duplicate" and self.calls == 2:
+                return PositionState(range(25_000), keep_count=0), 0
+            return PositionState(range(table.num_rows)), 0
 
-    monkeypatch.setattr(interim, "ExactPrimaryKeyIndex", DuplicateOnlyFirstIndex)
+    monkeypatch.setattr(interim, "ExactPrimaryKeyIndex", RecordingIndex)
     output = _collect_bound_first_frames(
         interim._iter_deduped_reference_frames(
             _bound_first_test_frames(
                 frames,
-                bound=policy.memory_budget_bytes // 2,
+                bound=declared_bound,
             ),
             data_id="stock_master",
             pruning_reports=[],
@@ -3754,8 +3790,26 @@ def test_csmar_reference_duplicate_only_first_reuses_admitted_lease(
         policy,
     )
 
-    assert sum(len(chunk) for chunk in output) == 1
-    assert output[0]["source_asset_id"].tolist() == ["000002"]
+    observed_rows = [
+        chunk["source_asset_id"].tolist()
+        for chunk in output
+        if not chunk.empty
+    ]
+    output.clear()
+    del output
+    assert observed_rows == [
+        ["000001"],
+        ["000002", "000003"],
+    ]
+    assert len(lease_requests) == 3
+    assert [reserved for reserved, _ in lease_requests] == [
+        declared_bound,
+        declared_bound,
+        declared_bound,
+    ]
+    assert len({id(lease) for _, lease in lease_requests}) == 3
+    if middle_kind == "duplicate":
+        assert shrink_calls[1] >= 25_000 * array("Q").itemsize
     assert policy.used_memory_bytes == 0
 
 
@@ -4417,7 +4471,10 @@ def test_csmar_direct_reference_iteration_uses_active_policy_target(
         )
 
     assert len(result) == 1
-    assert observed_targets == [policy.remaining_memory_bytes]
+    expected_target = 256 * 1024 - int(
+        frame.memory_usage(index=True, deep=True).sum()
+    )
+    assert observed_targets == [expected_target]
 
 
 def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
@@ -4506,7 +4563,10 @@ def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
 
     assert policy_calls == [True]
     assert dataset_policies == [policy]
-    assert observed_targets == [policy.remaining_memory_bytes]
+    expected_target = 256 * 1024 - int(
+        frame.memory_usage(index=True, deep=True).sum()
+    )
+    assert observed_targets == [expected_target]
     assert write_policies == [policy]
 
 
@@ -5116,6 +5176,8 @@ def test_csmar_reference_frames_close_under_policy_and_preserve_primary(
             raise OSError("close_secondary")
 
     class Index:
+        retained_memory_bytes = 0
+
         def __init__(self, **_kwargs: object) -> None:
             pass
 
@@ -5140,6 +5202,7 @@ def test_csmar_reference_frames_close_under_policy_and_preserve_primary(
             data_id="reference",
             pruning_reports=None,
             scratch_parent=Path("."),
+            resource_policy=policy,
         )
         with pytest.raises(primary_type) as raised:
             next(chunks)
